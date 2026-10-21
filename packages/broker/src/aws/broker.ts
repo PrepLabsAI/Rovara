@@ -2368,7 +2368,8 @@ async function membershipMovedSince(dependencies: AwsBrokerDependencies, ownerKe
 
 /**
  * The transaction item for the membership of a workspace's owner, decided from the row as it was read. An absent row is created as a
- * developer, only if still absent. An existing row is never written: the item only requires it to be the role and grantId that were read.
+ * developer, only if still absent. An existing row keeps its role and grantId: the item only requires it to be as it was read (a legacy row with no
+ * grantId also gains one).
  */
 function membershipPreparationItem(
   dependencies: AwsBrokerDependencies,
@@ -2381,12 +2382,25 @@ function membershipPreparationItem(
     const created: MembershipRecord = { ...membershipRecord(ownerKey, projectName, "developer"), ...(grantedBy === undefined ? {} : { grantedBy, grantedAt: new Date().toISOString() }) };
     return { Put: { TableName: dependencies.tableName, Item: created, ConditionExpression: "attribute_not_exists(pk)" } };
   }
+  const key = { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}` };
+  // A row from before grants were versioned has no grantId. It gets one here, in the same transaction, and keeps everything else it has;
+  // the condition lets it happen only to the row that was read, and never replaces a grantId that exists.
+  if (typeof observed.grantId !== "string") {
+    return { Update: {
+      TableName: dependencies.tableName,
+      Key: key,
+      UpdateExpression: "SET grantId = :grantId",
+      ConditionExpression: "#role = :role AND attribute_not_exists(grantId)",
+      ExpressionAttributeNames: { "#role": "role" },
+      ExpressionAttributeValues: { ":role": observed.role, ":grantId": randomUUID() },
+    } };
+  }
   return { ConditionCheck: {
     TableName: dependencies.tableName,
-    Key: { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}` },
-    ConditionExpression: observed.grantId === undefined ? "#role = :role AND attribute_not_exists(grantId)" : "#role = :role AND grantId = :grantId",
+    Key: key,
+    ConditionExpression: "#role = :role AND grantId = :grantId",
     ExpressionAttributeNames: { "#role": "role" },
-    ExpressionAttributeValues: { ":role": observed.role, ...(observed.grantId === undefined ? {} : { ":grantId": observed.grantId }) },
+    ExpressionAttributeValues: { ":role": observed.role, ":grantId": observed.grantId },
   } };
 }
 
@@ -3119,7 +3133,7 @@ async function ensureThreadWorkspace(
   await healSlackMemberSlots(dependencies, slack.requester, effective);
   const { teamId, userId } = slack.requester;
   let preparation: Awaited<ReturnType<typeof newWorkspacePreparation>> | undefined;
-  for (let attempt = 0; preparation === undefined; attempt += 1) {
+  for (let attempt = 0; attempt < MEMBERSHIP_PREPARATION_ATTEMPTS; attempt += 1) {
     const attempted = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
     try {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
@@ -3133,13 +3147,11 @@ async function ensureThreadWorkspace(
         ...threadChargeItems(dependencies, identity, effective, attempted.workspace.id),
       ] }));
       preparation = attempted;
+      break;
     } catch (error) {
       if (!isConditional(error)) throw error;
       // The membership changed since it was read: decide again from the row as it now is, never over it.
-      if (await membershipMovedSince(dependencies, identity.ownerKey, slack.binding.projectName, attempted.membership)) {
-        if (attempt + 1 < MEMBERSHIP_PREPARATION_ATTEMPTS) continue;
-        throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
-      }
+      if (await membershipMovedSince(dependencies, identity.ownerKey, slack.binding.projectName, attempted.membership)) continue;
       const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
       if (concurrent) {
         return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision, input.includeOpenTaskCount === true);
@@ -3147,6 +3159,7 @@ async function ensureThreadWorkspace(
       return threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective, input.includeOpenTaskCount === true);
     }
   }
+  if (preparation === undefined) throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
   await recordThreadRequester(dependencies, identity, preparation.workspace.id, true);
   return {
     outcome: "WORKSPACE",
@@ -3177,7 +3190,7 @@ async function createUnpreparedThreadWorkspace(
 ): Promise<SlackThreadWorkspaceResult> {
   const projectName = project.definition.name;
   let workspace: WorkspaceInstance | undefined;
-  for (let attempt = 0; workspace === undefined; attempt += 1) {
+  for (let attempt = 0; attempt < MEMBERSHIP_PREPARATION_ATTEMPTS; attempt += 1) {
     const attempted = unpreparedWorkspace(project, identity.ownerKey);
     const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName);
     try {
@@ -3205,16 +3218,18 @@ async function createUnpreparedThreadWorkspace(
         } },
       ] }));
       workspace = attempted;
+      break;
     } catch (error) {
       if (!isConditional(error)) throw error;
       // The membership changed since it was read: decide again from the row as it now is, never over it.
-      if (attempt + 1 < MEMBERSHIP_PREPARATION_ATTEMPTS && await membershipMovedSince(dependencies, identity.ownerKey, projectName, existingMembership)) continue;
+      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, existingMembership)) continue;
       // Another first message in this thread created the record.
       const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
       if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
       throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
     }
   }
+  if (workspace === undefined) throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
   // The starter is recorded when compute is prepared, because that member is the one charged.
   await recordThreadRequester(dependencies, identity, workspace.id, false);
   // Each optional field is its own spread, so a later opt-in (phase 14c's action policy) adds one
