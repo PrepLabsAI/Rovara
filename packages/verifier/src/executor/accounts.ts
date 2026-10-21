@@ -3,7 +3,7 @@ import { E2E_EXECUTOR_COMPILED_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2ERuntimeAc
 import type { E2EApplicationOwnedSubject } from "../application-result-adapter.js";
 import type { E2EApiRuntimeResponse } from "../api-runtime.js";
 import type { ExecutorSessionFacts } from "./case-ledger.js";
-import { FormLoginError, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
+import { FormLoginError, isSessionCookieSecret, parseSetCookie, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
 import { resolveE2EExecutorSuite } from "./suite.js";
 
 const MAX_BODY_BYTES = 1_048_576;
@@ -68,6 +68,27 @@ function parseJsonObject(bytes: Uint8Array, label: string): Record<string, unkno
 export type ExecutorSessionStore = ReturnType<typeof createExecutorSessionStore>;
 
 /**
+ * Refuses, before any case runs, a plan whose form-login configuration cannot be run as the approved source declares it: an account whose login form differs from its profile's (or is
+ * missing, or is there although the profile has none), or one that signs in through a form when there is no browser to do it with. Names the profile and nothing the page or the
+ * accounts hold.
+ */
+export function validateFormLogins(plan: E2EExecutorPlan, hasBrowser: boolean): void {
+  const resolved = resolveE2EExecutorSuite(plan);
+  const snapshot = resolved.suite.runtimeAdmissionContext.selectionInput.sourceSnapshot;
+  for (const { applicationId } of resolved.suite.originByApplicationId) {
+    const contract = readE2EApplicationProjectContract(snapshot, applicationId);
+    for (const account of plan.accounts) {
+      const profile = contract?.accountProfiles.find((candidate) => candidate.profileId === account.profileId);
+      if (!profile) continue;
+      if (canonicalJson(profile.login ?? null) !== canonicalJson(account.login ?? null)) {
+        throw new Error(`the login form of account profile ${account.profileId} in the plan differs from the one the approved source declares for it`);
+      }
+      if (account.login !== undefined && !hasBrowser) throw new Error(`account profile ${account.profileId} signs in through a form, and this executor has no browser to sign in with`);
+    }
+  }
+}
+
+/**
  * Owns the per-case synthetic account sessions. Two logins exist. The built-in `orders-auth/v1` profile POSTs the seeded credentials to `/api/login`, keeps the
  * `orders_session` cookie in memory, and sends it on API requests or adds it to the owned browser context. `rovara-form-login/v1` (Task 3.2) signs in through the
  * application's own form in a fresh browser context, keeps that context's storage state for the case, and answers API requests through a request context that carries it.
@@ -81,11 +102,14 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
   /** Called with the profile of an account whose form login did not complete, whatever the cause. */
   onLoginFailed?: (profileId: string) => void }) {
   const resolved = resolveE2EExecutorSuite(input.plan);
+  validateFormLogins(input.plan, input.formLogin !== undefined);
   const fetchImpl = input.fetchImpl ?? fetch;
   // Requests go to the compiled loopback origin, where the executor's forwarder serves the candidate.
   const origin: string = E2E_EXECUTOR_COMPILED_ORIGIN;
   const upstream = origin;
   const sessions = new Map<string, Session>();
+  const registered = new Set<string>();
+  const registerOnce = (value: string): void => { if (!registered.has(value)) { registered.add(value); input.registerSecret?.(value); } };
   const sourceSnapshot = resolved.suite.runtimeAdmissionContext.selectionInput.sourceSnapshot;
 
   const urlFor = (path: string): URL => {
@@ -143,20 +167,19 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
    */
   async function openForm(raw: { applicationId: string; profileId: string; accountRef: E2ERuntimeAccountRef },
     account: E2EExecutorPlan["accounts"][number], profile: { tenantRef: string; roleRef: string; login?: unknown }, signal: AbortSignal) {
-    if (!input.formLogin) throw new Error("this executor has no browser to sign a form login in with");
-    if (profile.login === undefined || account.login === undefined || canonicalJson(profile.login) !== canonicalJson(account.login)) {
-      throw new Error("the plan's login form differs from the one the approved source declares for this account profile");
-    }
+    const formLogin = input.formLogin;
     const login = account.login;
+    // Both were checked when the store was made (`validateFormLogins`); this is only for the types.
+    if (formLogin === undefined || login === undefined) throw new Error("a form-login account needs its login and a browser");
     const fail = (): never => { input.onLoginFailed?.(raw.profileId); throw new FormLoginError(raw.profileId); };
     const operation = bounded(signal);
     let requests: FormRequestContext | null = null;
     try {
-      const signedIn = await input.formLogin.signIn({ origin, login, email: account.email, password: account.password, signal: operation });
-      // Told before anything else is done with them, so a failure further on cannot leave a cookie the executor does not know to scrub.
-      for (const cookie of signedIn.state.cookies) input.registerSecret?.(cookie.value);
-      for (const item of signedIn.state.origins) for (const entry of item.localStorage) if (entry.value.length >= MIN_STORAGE_SECRET_LENGTH) input.registerSecret?.(entry.value);
-      requests = await input.formLogin.requestContext({ origin, state: signedIn.state });
+      const signedIn = await formLogin.signIn({ origin, login, email: account.email, password: account.password, signal: operation });
+      // Told before anything else is done with them, so a failure further on cannot leave a cookie the executor does not know to scrub. Only what looks like a secret: a consent flag is not.
+      for (const cookie of signedIn.state.cookies) if (isSessionCookieSecret(cookie)) registerOnce(cookie.value);
+      for (const item of signedIn.state.origins) for (const entry of item.localStorage) if (entry.value.length >= MIN_STORAGE_SECRET_LENGTH) registerOnce(entry.value);
+      requests = await formLogin.requestContext({ origin, state: signedIn.state });
       const meResponse = await requests.request({ method: "GET", path: "/api/me", signal: operation });
       const me = parseJsonObject(meResponse.body, "identity response");
       if (meResponse.status !== 200 || typeof me.subjectId !== "string" || typeof me.tenantId !== "string" || typeof me.role !== "string"
@@ -196,6 +219,8 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     if (session.form !== null) {
       urlFor(raw.path);
       const answered = await session.form.requests.request({ method: raw.method, path: raw.path, ...(raw.body === undefined ? {} : { body: raw.body }), signal: bounded(signal) });
+      // A value the application issued to replace a cookie is a session secret from then on, like the one it replaced.
+      for (const line of answered.setCookies) { const issued = parseSetCookie(line); if (issued !== null && isSessionCookieSecret(issued)) registerOnce(issued.value); }
       return { requestId: raw.requestId ?? `req-${randomUUID()}`, responseId: `res-${randomUUID()}`, method: raw.method, path: raw.path, status: answered.status,
         body: answered.body, contentType: answered.contentType, origin, observedAt: new Date().toISOString() };
     }

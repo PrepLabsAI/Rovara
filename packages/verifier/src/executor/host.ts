@@ -13,7 +13,7 @@ import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStatePro
 import { isPinnedRovaraHttpEngine } from "../rovara-http-engine-descriptor.js";
 import { createExecutorSessionStore } from "./accounts.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
-import { createPlaywrightFormLoginDriver } from "./form-login.js";
+import { createPlaywrightFormLoginDriver, isSessionCookieSecret, parseSetCookie } from "./form-login.js";
 import { casePlanFor, resolveE2EExecutorSuite } from "./suite.js";
 
 export const E2E_EXECUTOR_CONTEXT_ENV = "ROVARA_E2E_EXECUTOR_CONTEXT" as const;
@@ -119,6 +119,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   let activeCaseId: string | null = null;
   let activeSessionRef: string | null = null;
   let ledger: FileCaseLedger | null = null;
+  const ownedContexts = new Map<string, BrowserContext>();
 
   // Every browser context the executor opens, the form login's included, may reach the application's origin and nothing else.
   const guarded = new WeakSet<BrowserContext>();
@@ -177,6 +178,11 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       return opened;
     },
     closeCaseSession: async (sessionRef: string, signal: AbortSignal) => {
+      // The cookies the case's browser holds at the end, whoever set them (the application's headers, or its scripts): any that look like secrets are registered, so a value the
+      // application replaced after the sign-in is scrubbed from what the parent writes and is caught by the out scan. Best effort: a closed page has nothing to ask.
+      const owned = ownedContexts.get(sessionRef);
+      ownedContexts.delete(sessionRef);
+      if (owned) { try { for (const cookie of await owned.cookies()) if (isSessionCookieSecret(cookie)) registerSecret(cookie.value); } catch { /* the context is gone */ } }
       const result = await store.close(sessionRef, signal);
       if (result.confirmed && activeSessionRef === sessionRef) { activeSessionRef = null; activeCaseId = null; }
       return result;
@@ -226,6 +232,17 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
           }, { origin: item.origin, entries: item.entries.map((entry) => ({ ...entry })) });
         }
         await guard(browserContext);
+        ownedContexts.set(sessionRef, browserContext);
+        // A session cookie the application swaps in while the case runs is registered when its answer arrives.
+        browserContext.on("response", (response) => {
+          void response.headersArray().then((headers) => {
+            for (const header of headers) {
+              if (header.name.toLowerCase() !== "set-cookie") continue;
+              const issued = parseSetCookie(header.value);
+              if (issued !== null && isSessionCookieSecret(issued)) registerSecret(issued.value);
+            }
+          }, () => undefined);
+        });
         const page = browserContext.pages()[0];
         if (!page) throw new Error("the owned browser context has no page to identify");
         const session = await browserContext.newCDPSession(page);

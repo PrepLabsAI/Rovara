@@ -21,7 +21,7 @@ const dirs: string[] = []; const apps: AccountsAppProcess[] = [];
 afterEach(async () => { await Promise.all(apps.splice(0).map((app) => app.stop())); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 type AccountsOptions = NonNullable<Parameters<typeof createAccountsExecutorPlan>[0]>;
-async function runAccounts(options: { defect?: "viewer-access.json" | "echo-session.json" | "echo-email.json"; api?: boolean; web?: AccountsOptions["web"] } = {}) {
+async function runAccounts(options: { defect?: "viewer-access.json" | "echo-session.json" | "echo-email.json" | "rotate-echo.json"; api?: boolean; web?: AccountsOptions["web"] } = {}) {
   const fixture = createAccountsExecutorPlan({ healthTimeoutMs: 20_000, ...(options.api ? { api: true } : {}), ...(options.web ? { web: options.web } : {}) });
   const app = await startAccountsApp(fixture, options.defect ? { defect: options.defect } : {}); apps.push(app);
   const dir = realpathSync(await mkdtemp(join(tmpdir(), "accounts-run-"))); dirs.push(dir);
@@ -97,6 +97,25 @@ describe.runIf(runnable)("the executor against an app that signs in through its 
     expect(caseStatuses(out, fixture)["owner-identity-text"]).not.toBe("passed");
     const everything = allOutputText(out);
     for (const account of fixture.plan.accounts) { expect(everything).not.toContain(account.password); expect(everything).not.toContain(account.email); expect(everything).not.toContain(account.email.slice(0, account.email.indexOf("@"))); }
+  }, 300_000);
+
+  it("keeps a report whole when the application leaves short, word-like cookies after the login (consent=1, ok=true, cookie_consent=accepted, theme=dark), across two shards", async () => {
+    const { fixture, out, result } = await runAccounts({ web: ["viewer", "owner"] });
+    expect(result, executorLog(out)).toEqual({ exitCode: 0, reason: null });
+    // Two accounts are two shards; the merged report is read back whole, with the numbers and booleans a short cookie value would otherwise have replaced.
+    expect(caseStatuses(out, fixture)).toEqual({ "viewer-cannot-export": "passed", "owner-exports-orders": "passed" });
+    const reportText = readFileSync(join(out, "report.json"), "utf8");
+    expect(reportText).not.toContain("<session>");
+    expect(JSON.parse(reportText)).toMatchObject({ schemaVersion: "e2e-executor-multi-report/v1" });
+    for (const shard of readdirSync(join(out, "shards"))) expect(readFileSync(join(out, "shards", shard, "report.json"), "utf8")).not.toContain("<session>");
+    expect(executorLog(out)).not.toContain("<session>");
+  }, 300_000);
+
+  it("registers the session cookie an application swaps in after the login: a page that prints the rotated cookie ends the run credential-leak", async () => {
+    const { out, result } = await runAccounts({ defect: "rotate-echo.json", web: ["ownerIdentity"] });
+    expect(result, executorLog(out)).toEqual({ exitCode: 2, reason: "credential-leak" });
+    expect(executorLog(out)).toMatch(/removed an output file that carried an account credential or a session value: observations\/ev-/);
+    expect(allOutputText(out)).not.toMatch(/\(owner\) [A-Za-z0-9_-]{30,}/);
   }, 300_000);
 
   it("answers API cases of the same accounts through the cookies the form login kept: the viewer is refused (403), the owner is allowed (200)", async () => {

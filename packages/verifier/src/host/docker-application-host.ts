@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, cp, lstat, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_EXECUTOR_APP_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, readE2EApplicationProjectContract, redactText,
+import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_DATA_VOLUME_DEFAULT_MIB, E2E_EXECUTOR_APP_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, readE2EApplicationProjectContract, redactText,
   type E2EApplicationExecutionAdmission, type E2ECollection, type E2EExecutorAccount, type E2EExecutorPlan, type E2EFormLogin, type E2ELease, type E2ERunInput } from "@agentx/contracts";
 import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
@@ -258,6 +258,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const executorName = `rovara-executor-${runId}`;
   const seedName = `rovara-seed-${runId}`;
   const dataVolume = `rovara-data-${runId}`;
+  const keeperName = `rovara-datakeep-${runId}`;
+  const dataMiB = recipe.dataSizeMiB ?? E2E_DATA_VOLUME_DEFAULT_MIB;
   const workspace = join(deps.runRoot, runId);
   // The mock fixtures (read-only to the mocks) and the mock ledgers (written by the mocks alone) sit apart from the executor's out directory, which the executor and the app never see.
   const dirs = { app: join(workspace, "app"), owned: join(workspace, "owned"), out: join(workspace, "out"), plan: join(workspace, "plan.json"),
@@ -487,10 +489,14 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       ...(accountsFileSeed ? ["-e", `ROVARA_ACCOUNTS_FILE=${ACCOUNTS_FILE_PATH}`, "-e", `ROVARA_DATA_DIR=${DATA_DIR}`] : ["-e", "ORDERS_TEST_SEED_FILE=/app/.owned/seed.json"]),
       ...BLANKED_ENV];
     if (accountsFileSeed) {
-      // A fresh volume belongs to root; the seed and the app run as an unprivileged user, so a throwaway container with no network and no capability opens it (its owner needs none for that).
-      const opened = await docker.run(["run", "--rm", "--name", `rovara-datainit-${runId}`, "--pull=never", ...hardening(["--network", "none"]), "--read-only", ...limits("128m", "64", "0.5"),
-        "--user", "0:0", "--entrypoint", "chmod", "-v", `${dataVolume}:${DATA_DIR}`, ...BLANKED_ENV, deps.executorImage, "0777", DATA_DIR], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
-      if (opened.code !== 0) { appendBuildLog(`the data volume could not be opened for the seed: ${opened.stderr}${opened.stdout}\n`); return { kind: "unavailable", reason: signal.aborted ? stopReason() : "seed-failed" }; }
+      // The data volume is a tmpfs, and Docker unmounts a tmpfs volume (its contents with it) when the last container using it stops. A keeper holds it open from before the seed until the
+      // run's resources are removed, so what the seed writes is still there when the app starts. It runs as the unprivileged user, with no network and no capability, and does nothing.
+      const kept = await docker.run(["run", "-d", "--name", keeperName, "--pull=never", ...hardening(["--network", "none"]), "--read-only", ...limits("64m", "16", "0.1"), "--user", "1000:1000",
+        "--entrypoint", "sleep", "-v", `${dataVolume}:${DATA_DIR}`, ...BLANKED_ENV, deps.executorImage, "infinity"], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+      if (kept.code !== 0 || !(await mockRunning(keeperName))) {
+        appendBuildLog(`the data volume could not be held open for the seed: ${kept.stderr}${kept.stdout}\n`);
+        return { kind: "unavailable", reason: signal.aborted ? stopReason() : "seed-failed" };
+      }
       if (recipe.seed !== undefined) {
         const seedTimeoutMs = Math.min(recipe.seed.timeoutMs, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, left());
         const seeded = await docker.run(["run", "--name", seedName, "--pull=never", ...appFlags(recipe.seed, null), deps.buildImage, recipe.seed.program, ...recipe.seed.args],
@@ -628,7 +634,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       const created = await docker.run(["network", "create", "--internal", ...labels, "-o", `com.docker.network.bridge.name=${internalBridge}`, network], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
       if (created.code !== 0) throw new Error(`could not create the run network: ${redact(created.stderr)}`);
       if (accountsFileSeed) {
-        const volume = await docker.run(["volume", "create", ...labels, dataVolume], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+        // A tmpfs of the recipe's size (256 MiB when it states none), owned by the unprivileged user: nothing seeded reaches the runner's disk and nothing can fill it.
+        const volume = await docker.run(["volume", "create", "--driver", "local", "--opt", "type=tmpfs", "--opt", "device=tmpfs", "--opt", `o=size=${dataMiB}m,uid=1000,gid=1000,mode=0700`, ...labels, dataVolume],
+          { signal, timeoutMs: ADMIN_TIMEOUT_MS });
         if (volume.code !== 0) throw new Error(`could not create the run data volume: ${redact(volume.stderr)}`);
       }
     } catch (error) {

@@ -9,7 +9,7 @@ import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkerInvocationSchema, createCandidateManifest, e2eApiSchemaComponentId, readE2EApplicationProjectContract, workflowSendBackOffered,
+  E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkerInvocationSchema, createCandidateManifest, canonicalJson, e2eApiSchemaComponentId, readE2EApplicationProjectContract, workflowSendBackOffered,
   workspaceSessionKey, type E2EScenario, type E2ESourceSnapshot, type WorkerInvocation,
 } from "@agentx/contracts";
 import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
@@ -448,6 +448,14 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     }
     expect(new Set(plannedRefs.map((ref) => ref.definitionDigest)).size).toBe(3);
     expect(new Set(cases1.map((item) => item.accountContextId)).size, "each case has its own account context").toBe(3);
+    // And each is the context of the right account: the registry's ref for (applicationId, accountProfileId) gives the context id the collector must attribute to that account's case.
+    // The failed case is the viewer's (and no one else's), and the three contexts are exactly the three accounts' own, so no two cases were given each other's.
+    const contextIdOf = (ref: { applicationId: string; profileId: string; revision: number; definitionDigest: string }) =>
+      `app-account-${createHash("sha256").update(canonicalJson([ref.applicationId, ref.profileId, ref.revision, ref.definitionDigest])).digest("hex")}`.slice(0, 120);
+    const refOf = (profileId: string) => plannedRefs.find((ref) => ref.profileId === profileId)!;
+    expect(cases1.find((item) => item.status === "failed")!.accountContextId, "the failed case is the viewer's").toBe(contextIdOf(refOf("orders-viewer")));
+    expect(cases1.filter((item) => item.status === "passed").map((item) => item.accountContextId).sort(), "the two passing cases are the two owners'")
+      .toEqual([contextIdOf(refOf("orders-owner")), contextIdOf(refOf("orders-owner-b"))].sort());
 
     // Round 2: send it back, and candidate 2 passes all three.
     const sentBack = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${journey.taskId}/workflow/send-back`, { requestId: randomUUID(), expectedRevision: workflowNow().revision,
@@ -468,6 +476,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const cases2 = casesOf(checks2.operation);
     expect(cases2).toHaveLength(3);
     expect(cases2.every((item) => item.status === "passed" && item.assertionReceipts.every((receipt) => receipt.status === "passed"))).toBe(true);
+    expect(cases2.map((item) => item.accountContextId).sort(), "round 2 attributes the same three accounts").toEqual(plannedRefs.map(contextIdOf).sort());
     expect([...new Set(cases2.map((item) => item.accountContextId))].sort()).toEqual([...new Set(cases1.map((item) => item.accountContextId))].sort());
     expect((await presentation())?.shared.e2e.status).toBe("PASS");
 
@@ -476,10 +485,12 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const stored = [JSON.stringify(harness.db.find(() => true)), ...[...harness.s3.objects.values()].map((value) => (typeof value === "string" ? value : Buffer.from(value as Uint8Array).toString("latin1")))];
     for (const entry of await readdir(evidenceRoot, { recursive: true, withFileTypes: true })) if (entry.isFile()) stored.push((await readFile(join(entry.parentPath, entry.name))).toString("latin1"));
     expect(stored.join("\n").length).toBeGreaterThan(10_000);
+    // Every spelling an encoder could leave: as is, base64 and base64url, percent-encoded, hex (either case), and JSON-escaped.
+    const spellings = (secret: string) => [["as is", secret], ["base64", Buffer.from(secret).toString("base64")], ["base64url", Buffer.from(secret).toString("base64url")],
+      ["percent-encoded", encodeURIComponent(secret)], ["hex", Buffer.from(secret).toString("hex")], ["HEX", Buffer.from(secret).toString("hex").toUpperCase()], ["JSON", JSON.stringify(secret).slice(1, -1)]] as const;
     for (const secret of new Set(secrets)) {
-      for (const text of stored) {
-        expect(text.includes(secret), `a stored byte holds a seeded credential (${secret.length} characters, ${secret.startsWith("rovara-") ? "an email part" : "a password"})`).toBe(false);
-        expect(text.includes(Buffer.from(secret).toString("base64")), "a stored byte holds a seeded credential in base64").toBe(false);
+      for (const [form, spelling] of spellings(secret)) {
+        for (const text of stored) expect(text.includes(spelling), `a stored byte holds a seeded credential (${secret.length} characters, ${secret.startsWith("rovara-") ? "an email part" : "a password"}) as ${form}`).toBe(false);
       }
     }
     await nothingLeftBehind();

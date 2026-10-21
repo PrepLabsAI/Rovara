@@ -1,5 +1,8 @@
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { E2EScenario } from "@agentx/contracts";
+import { canonicalJson, type E2EScenario } from "@agentx/contracts";
 import { createWebApiProbePlan, type WebApiProbePlan } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 
 const repoRoot = join(import.meta.dirname, "../..");
@@ -39,17 +42,33 @@ export const apiAccountScenarios = {
     steps: [{ kind: "request", requestId: "export", path: "/api/orders.csv", method: "GET", body: {} }], assertions: [{ kind: "http-status", path: "/api/orders.csv", method: "GET", equals: 200 }] }) },
 } as const;
 
-export type AccountsPlanOptions = Partial<Pick<Parameters<typeof createWebApiProbePlan>[0], "deadlineMs" | "healthTimeoutMs" | "recipeStart" | "recipeBuild" | "recipeSeed">> & {
+export type AccountsPlanOptions = Partial<Pick<Parameters<typeof createWebApiProbePlan>[0], "deadlineMs" | "healthTimeoutMs" | "recipeStart" | "recipeBuild">> & {
   /** Which web scenarios to plan; all three by default. */
   web?: readonly (keyof typeof webAccountScenarios)[];
   /** Plan the API scenarios (owner and viewer) instead of the web ones. */
   api?: boolean;
+  /** Overrides of the app's recipe, for a plan whose contract differs from the fixture's (the recipe digest is recomputed). Read from a copy of the fixture's `package.json`. */
+  recipe?: { seed?: { program?: string; args?: string[]; timeoutMs?: number; env?: Record<string, string> }; dataSizeMiB?: number };
 };
+
+/** A directory holding only the fixture's `package.json` with the recipe edited and its digest recomputed: all a plan needs of the app's tree. */
+function appRootWithRecipe(edit: NonNullable<AccountsPlanOptions["recipe"]>): string {
+  const manifest = JSON.parse(readFileSync(join(ACCOUNTS_FIXTURE_ROOT, "package.json"), "utf8")) as { agentx: { e2e: { recipe: { recipeDigest: string; seed: Record<string, unknown> } & Record<string, unknown> } } };
+  const recipe = manifest.agentx.e2e.recipe;
+  if (edit.seed) recipe.seed = { ...recipe.seed, ...edit.seed };
+  if (edit.dataSizeMiB !== undefined) recipe.dataSizeMiB = edit.dataSizeMiB;
+  const { recipeDigest: _digest, ...body } = recipe;
+  void _digest;
+  recipe.recipeDigest = createHash("sha256").update(canonicalJson(body)).digest("hex");
+  const directory = mkdtempSync(join(tmpdir(), "accounts-fixture-recipe-"));
+  writeFileSync(join(directory, "package.json"), JSON.stringify(manifest));
+  return directory;
+}
 
 /** A real executor plan for the fixture app: its `package.json` contract through discovery, selection and the compiler, one group, one case per account. */
 export function createAccountsExecutorPlan(options: AccountsPlanOptions = {}): WebApiProbePlan {
-  const { web, api, ...rest } = options;
+  const { web, api, recipe, ...rest } = options;
   const accountScenarios = api ? [apiAccountScenarios.viewer, apiAccountScenarios.owner]
     : (web ?? ["viewer", "owner", "ownerB"]).map((key) => webAccountScenarios[key]);
-  return createWebApiProbePlan({ probe: api ? "api-state-positive-v1" : "web-csv-positive-v1", appRoot: ACCOUNTS_FIXTURE_ROOT, accountScenarios, ...rest });
+  return createWebApiProbePlan({ probe: api ? "api-state-positive-v1" : "web-csv-positive-v1", appRoot: recipe ? appRootWithRecipe(recipe) : ACCOUNTS_FIXTURE_ROOT, accountScenarios, ...rest });
 }

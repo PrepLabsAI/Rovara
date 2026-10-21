@@ -62,6 +62,17 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(cases).toHaveLength(3);
     expect(cases.every((item) => item.status === "passed")).toBe(true);
     expect(new Set(cases.map((item) => item.accountContextId)).size).toBe(3);
+    // Each case carries the account context of its own expected case's account profile, never another's (a permutation of three distinct contexts would pass a count).
+    const profileOfCase = new Map(r.fixture.compiled.expectedCases.map((expected) => [expected.caseId, expected.accountProfileId]));
+    const contextOfProfile = new Map(r.fixture.compiled.expectedCases.map((expected) => [expected.accountProfileId, expected.accountContextId]));
+    expect([...contextOfProfile.keys()].sort()).toEqual(["orders-owner", "orders-owner-b", "orders-viewer"]);
+    for (const item of cases) {
+      const expected = r.fixture.compiled.expectedCases.find((candidate) => candidate.caseId === item.caseId)!;
+      expect(item.accountContextId, profileOfCase.get(item.caseId)).toBe(contextOfProfile.get(profileOfCase.get(item.caseId)!));
+      expect(item.accountContextDigest).toBe(expected.accountContextDigest);
+      const scenarioProfile = { "viewer-cannot-export": "orders-viewer", "owner-exports-orders": "orders-owner", "other-tenant-sees-no-orders-of-a": "orders-owner-b" }[expected.scenarioId];
+      expect(profileOfCase.get(item.caseId), expected.scenarioId).toBe(scenarioProfile);
+    }
     expect(await leftovers(r)).toEqual(NOTHING);
   }, 600_000);
 
@@ -100,7 +111,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   }, 600_000);
 
   it("a seed that exits 3 makes the run UNKNOWN with seed-failed, never starts the app, and removes every labeled resource, the data volume included", async () => {
-    const r = await runAccountsProbe({ recipeSeed: { args: ["-e", "process.exit(3)"] } });
+    const r = await runAccountsProbe({ recipe: { seed: { args: ["-e", "process.exit(3)"] } } });
     expect(r.run.unavailableReason).toBe("seed-failed");
     expect(r.run.actualRun).toBeNull();
     expect(r.outDir).toBeNull();
@@ -109,9 +120,22 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(r.host.readDiagnostics(r.fixture.plan.runId).appLogTail).toContain("seed command");
   }, 600_000);
 
+  it("the data volume is a 256 MiB tmpfs: a seed that writes 300 MB fails, and the run is UNKNOWN seed-failed with nothing left behind", async () => {
+    const r = await runAccountsProbe({ recipe: { seed: { args: ["-e", "require('node:fs').writeFileSync(process.env.ROVARA_DATA_DIR + '/big', Buffer.alloc(300 * 1024 * 1024))"] } } });
+    expect(r.run.unavailableReason).toBe("seed-failed");
+    expect(r.host.readDiagnostics(r.fixture.plan.runId).appLogTail).toMatch(/ENOSPC|no space left/i);
+    expect(await leftovers(r)).toEqual(NOTHING);
+  }, 600_000);
+
+  it("a recipe that states a smaller size gets it: 16 MiB takes the small seed and refuses a 20 MB one", async () => {
+    const r = await runAccountsProbe({ recipe: { dataSizeMiB: 16, seed: { args: ["-e", "require('node:fs').writeFileSync(process.env.ROVARA_DATA_DIR + '/big', Buffer.alloc(20 * 1024 * 1024))"] } } });
+    expect(r.run.unavailableReason).toBe("seed-failed");
+    expect(await leftovers(r)).toEqual(NOTHING);
+  }, 600_000);
+
   it("an application that does not sign the account in makes the run UNKNOWN with login-failed after the form's 10 s, and leaves nothing behind", async () => {
     // The seed exits 0 but leaves the app no users, so the form is submitted and the signed-in marker never shows.
-    const r = await runAccountsProbe({ web: ["owner"], recipeSeed: { args: ["-e", "require('node:fs').writeFileSync(process.env.ROVARA_DATA_DIR + '/users.json', JSON.stringify({ users: [] }))"] } });
+    const r = await runAccountsProbe({ web: ["owner"], recipe: { seed: { args: ["-e", "require('node:fs').writeFileSync(process.env.ROVARA_DATA_DIR + '/users.json', JSON.stringify({ users: [] }))"] } } });
     expect(r.run.unavailableReason, why(r)).toBe("login-failed");
     expect(r.run.actualRun).toBeNull();
     expect(r.outDir).toBeNull();

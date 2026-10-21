@@ -33,6 +33,7 @@ export const E2EApplicationProjectContractSchema = z.object({
     if ((item.authProfileId === E2E_FORM_LOGIN_AUTH_PROFILE) !== (item.login !== undefined)) context.addIssue({ code: "custom", path: ["accountProfiles", index, "login"], message: `a login form is declared exactly for ${E2E_FORM_LOGIN_AUTH_PROFILE} accounts` });
   });
   if (value.recipe.seed !== undefined && value.recipe.seedProfileId !== E2E_ACCOUNTS_FILE_SEED_PROFILE) context.addIssue({ code: "custom", path: ["recipe", "seed"], message: `a seed command belongs to the ${E2E_ACCOUNTS_FILE_SEED_PROFILE} seed profile` });
+  if (value.recipe.dataSizeMiB !== undefined && value.recipe.seedProfileId !== E2E_ACCOUNTS_FILE_SEED_PROFILE) context.addIssue({ code: "custom", path: ["recipe", "dataSizeMiB"], message: `a data volume belongs to the ${E2E_ACCOUNTS_FILE_SEED_PROFILE} seed profile` });
   if (value.service === null && value.recipe.launch.kind === "service") context.addIssue({ code: "custom", path: ["service"], message: "service recipe requires a source service contract" });
   if (value.service !== null && value.recipe.launch.kind !== "service") context.addIssue({ code: "custom", path: ["service"], message: "source service contract requires a service launch recipe" });
   const origins = value.service?.originBindings ?? [];

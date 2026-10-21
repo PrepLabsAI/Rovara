@@ -6,7 +6,27 @@ export type StorageCookie = Readonly<{ name: string; value: string; domain: stri
 /** What a context kept after the form login: its cookies and the localStorage of the origins it visited. Secret: it is held in the executor's memory and nowhere else. */
 export type FormLoginStorageState = Readonly<{ cookies: readonly StorageCookie[]; origins: readonly Readonly<{ origin: string; localStorage: readonly Readonly<{ name: string; value: string }>[] }>[] }>;
 
-export type FormRequestResult = Readonly<{ status: number; body: Uint8Array; contentType: string }>;
+/** `setCookies` are the raw Set-Cookie lines of the answer, for the caller to tell the executor which values the application issued since the sign-in. */
+export type FormRequestResult = Readonly<{ status: number; body: Uint8Array; contentType: string; setCookies: readonly string[] }>;
+
+/** A cookie shorter than this is never a secret, whatever it is: `1`, `true`, `accepted` and `dark` are settings. */
+const MIN_COOKIE_SECRET_LENGTH = 16;
+/** An HttpOnly cookie is the application's own (the page cannot read it, so it is a session or a token); it counts from this length, the floor the redactor itself keeps. */
+const MIN_HTTP_ONLY_COOKIE_SECRET_LENGTH = 8;
+/**
+ * Whether a cookie the application issued is a session secret the executor must keep out of everything it writes: 16 characters or more, or HttpOnly and 8 or more. Real session ids
+ * and tokens are longer than that; a consent flag, a count, a language or a theme is not, and redacting it would rewrite the same word or number wherever it appears in a report.
+ */
+export function isSessionCookieSecret(cookie: { value: string; httpOnly: boolean }): boolean {
+  return cookie.value.length >= MIN_COOKIE_SECRET_LENGTH || (cookie.httpOnly && cookie.value.length >= MIN_HTTP_ONLY_COOKIE_SECRET_LENGTH);
+}
+/** The name, value and HttpOnly flag of a Set-Cookie line; null for a line that is not `name=value; ...`. */
+export function parseSetCookie(line: string): { name: string; value: string; httpOnly: boolean } | null {
+  const [head, ...attributes] = line.split(";").map((part) => part.trim());
+  const separator = head?.indexOf("=") ?? -1;
+  if (head === undefined || separator < 1) return null;
+  return { name: head.slice(0, separator), value: head.slice(separator + 1), httpOnly: attributes.some((attribute) => attribute.toLowerCase() === "httponly") };
+}
 /** A Playwright request context that carries the storage state's cookies (and takes whatever the application rotates). */
 export type FormRequestContext = Readonly<{
   request(input: { method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; body?: unknown; signal: AbortSignal }): Promise<FormRequestResult>;
@@ -81,7 +101,8 @@ export function createPlaywrightFormLoginDriver(input: { cdpEndpoint: string; gu
           signal.throwIfAborted();
           const bytes = await response.body();
           if (bytes.byteLength > MAX_BODY_BYTES) throw new Error("application response exceeds the fixed bound");
-          return { status: response.status(), body: new Uint8Array(bytes), contentType: response.headers()["content-type"] ?? "application/octet-stream" };
+          return { status: response.status(), body: new Uint8Array(bytes), contentType: response.headers()["content-type"] ?? "application/octet-stream",
+            setCookies: response.headersArray().filter((header) => header.name.toLowerCase() === "set-cookie").map((header) => header.value) };
         },
         dispose: () => context.dispose(),
       });

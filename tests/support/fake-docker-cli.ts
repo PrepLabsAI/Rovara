@@ -32,6 +32,8 @@ export class FakeDockerCli implements DockerCli {
   volumeCreateFails = false;
   /** When set, `docker volume rm` reports success but the volume stays, as a volume still held by a container does. */
   volumesSurviveRemoval = false;
+  /** When set, the container that holds the data volume open cannot be started (or, with "exits", starts and is gone at once). */
+  keeperFails: false | "refused" | "exits" = false;
   /** Images the host does not hold: `image inspect` fails for them until they are pulled. */
   readonly missingImages = new Set<string>();
   /** `docker pull` calls that fail before one succeeds, and whether the image is on the host by the time the first of them reports failure (another process pulled it). */
@@ -93,7 +95,7 @@ export class FakeDockerCli implements DockerCli {
   }
   networks(): string[] { return [...this.resources.values()].filter((item) => item.kind === "network").map((item) => item.name); }
   /** The arguments of the `docker run` call that created the named kind of container. */
-  argsFor(kind: "app" | "executor" | "build" | "seed" | "datainit"): string[] {
+  argsFor(kind: "app" | "executor" | "build" | "seed" | "datakeep"): string[] {
     const found = this.calls.find((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith(`rovara-${kind}-`));
     if (!found) throw new Error(`no ${kind} container was started`);
     return found;
@@ -230,7 +232,11 @@ export class FakeDockerCli implements DockerCli {
       if (!this.mocksNeverReady) writeFileSync(join(this.mockOutDir, `${args[args.indexOf("--origin") + 1]}.ready`), "ready\n");
       return { code: 0, stdout: "container-id", stderr: "" };
     }
-    if (name.startsWith("rovara-datainit-")) return { code: 0, stdout: "", stderr: "" };
+    if (name.startsWith("rovara-datakeep-")) {
+      if (this.keeperFails === "refused") return { code: 125, stdout: "", stderr: "docker: Error response from daemon: cannot start the data keeper" };
+      this.resources.set(name, { kind: "container", name, labels: this.mark(args), state: this.keeperFails === "exits" ? "exited" : "running", exitCode: this.keeperFails === "exits" ? 1 : 0, logs: "" });
+      return { code: 0, stdout: "container-id", stderr: "" };
+    }
     if (name.startsWith("rovara-seed-")) {
       // The seed runs in the foreground and stays behind, stopped, until the host removes it (it has no `--rm`).
       this.resources.set(name, { kind: "container", name, labels: this.mark(args), state: "exited", exitCode: this.seedExitCode, logs: "" });

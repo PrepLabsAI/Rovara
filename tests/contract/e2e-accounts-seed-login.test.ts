@@ -46,6 +46,14 @@ describe("the account seed and login declarations", () => {
     expect(() => contractOf(ordersManifestWith((e2e) => { withGenericAccounts(e2e); delete (e2e.accountProfiles[0] as Record<string, unknown>).login; }))).toThrow(/login form is declared exactly for rovara-form-login\/v1/);
   });
 
+  it("lets the recipe state the size of the run's data volume (16 to 1024 MiB, whole numbers), only under the accounts-file seed profile, and covers it in the account digest", () => {
+    const sized = (mib: unknown) => ordersManifestWith((e2e) => { withGenericAccounts(e2e); (e2e.recipe as unknown as Record<string, unknown>).dataSizeMiB = mib; });
+    expect((contractOf(sized(64)).recipe as unknown as { dataSizeMiB: number }).dataSizeMiB).toBe(64);
+    for (const bad of [15, 1025, 64.5, "64"]) expect(() => contractOf(sized(bad)), String(bad)).toThrow();
+    expect(() => contractOf(ordersManifestWith((e2e) => { (e2e.recipe as unknown as Record<string, unknown>).dataSizeMiB = 64; }))).toThrow(/rovara-accounts-file\/v1/);
+    for (const profile of generic.accountProfiles) expect(digestOf(contractOf(sized(64)), profile.profileId)).not.toBe(digestOf(generic, profile.profileId));
+  });
+
   it("refuses a seed command that carries a credential-looking environment name, as every recipe command does", () => {
     expect(() => contractOf(ordersManifestWith((e2e) => { withGenericAccounts(e2e); seedOf(e2e).env = { SEED_TOKEN: "x" }; }))).toThrow();
   });

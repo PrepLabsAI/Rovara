@@ -17,6 +17,7 @@ import { attestWhenSettled, type inspectChromiumSandbox, type InspectChromiumSan
 import { launchLocalChromium, type LocalChromium } from "./local-browser.js";
 import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, admittedCapturePolicy, finalizeCaptureArtifacts } from "./capture.js";
 import { createCredentialRedactor, type CredentialRedactor } from "./redact.js";
+import { validateFormLogins } from "./accounts.js";
 import { createLaunchContexts, resolveE2EExecutorSuite, type ResolvedExecutorSuite } from "./suite.js";
 
 const MAX_PLAN_BYTES = 20 * 1024 * 1024;
@@ -329,6 +330,9 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     redactor = createCredentialRedactor(plan.accounts);
     try { resolved = resolveE2EExecutorSuite(plan); }
     catch (error) { await log(`unavailable: admission-invalid: ${error instanceof Error ? error.message : "unreadable"}`); reason = "admission-invalid"; return; }
+    // A form-login configuration that is not the approved source's (the parent always launches a browser for one, so the browser is there) is refused before anything starts.
+    try { validateFormLogins(plan, true); }
+    catch (error) { await log(`unavailable: plan-invalid: ${error instanceof Error ? error.message : "unreadable"}`); reason = "plan-invalid"; return; }
     if (Date.now() >= resolved.deadlineAtMs) { await log("unavailable: deadline-exceeded before the run started"); reason = "deadline-exceeded"; return; }
     const registration = await verifyExecutorHostRegistration(resolved.suite.cliHost);
     if (!registration.available) { await log(`unavailable: host-unavailable: ${registration.reason}`); reason = "host-unavailable"; return; }

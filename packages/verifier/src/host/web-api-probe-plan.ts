@@ -149,8 +149,6 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   recipeBuild?: { program: string; args: string[]; cwd: string; timeoutMs: number; env: Record<string, string> }[];
   /** Overrides of the recipe's start command (arguments, timeout, env); the recipe digest is recomputed to match. */
   recipeStart?: { args?: string[]; timeoutMs?: number; env?: Record<string, string> };
-  /** Overrides of the recipe's seed command (arguments, timeout, env), for an app whose recipe has one; the recipe digest is recomputed to match. */
-  recipeSeed?: { program?: string; args?: string[]; timeoutMs?: number; env?: Record<string, string> };
   /**
    * Plans one scenario per listed account instead of the probe's single scenario, all in the same group (Task 3.2). The probe name still decides the target kind (`web-` or `api-`).
    * Every listed profile must be one of the app's account profiles with a target variant of that kind.
@@ -159,11 +157,10 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const kind = options.probe.startsWith("web-") ? "web" as const : "api" as const;
   const rawPackage = JSON.parse(readFileSync(join(options.appRoot, "package.json"), "utf8")) as { agentx: { e2e: { targetAccounts: { baseTargetId: string; profileId: string }[];
     recipe: { recipeDigest: string; build: unknown[]; launch: { start: Record<string, unknown> } } } } };
-  if (options.recipeBuild || options.recipeStart || options.recipeSeed) {
-    const recipe = rawPackage.agentx.e2e.recipe as typeof rawPackage.agentx.e2e.recipe & { seed?: Record<string, unknown> };
+  if (options.recipeBuild || options.recipeStart) {
+    const recipe = rawPackage.agentx.e2e.recipe;
     const launch = options.recipeStart ? { ...recipe.launch, start: { ...recipe.launch.start, ...options.recipeStart } } : recipe.launch;
-    if (options.recipeSeed && recipe.seed === undefined) throw new Error("the app's recipe has no seed command to override");
-    const { recipeDigest: _digest, ...body } = { ...recipe, launch, build: options.recipeBuild ?? recipe.build, ...(options.recipeSeed ? { seed: { ...recipe.seed, ...options.recipeSeed } } : {}) };
+    const { recipeDigest: _digest, ...body } = { ...recipe, launch, build: options.recipeBuild ?? recipe.build };
     void _digest;
     rawPackage.agentx.e2e.recipe = { ...body, recipeDigest: hash(canonicalJson(body)) };
   }

@@ -266,11 +266,17 @@ const CommandRecipeSchema = z.object({ program: id(256), args: z.array(z.string(
   if (/(^|[/\\])(?:sh|bash|zsh|cmd|powershell|pwsh)(\.exe)?$/i.test(command.program) || command.args.some((arg) => /(^|\s)(?:\||&&|;|>|<|\$\(|`)/.test(arg))) context.addIssue({ code: "custom", message: "shell wrappers and shell-interpreted arguments are forbidden" });
 });
 export type E2ECommandRecipe = z.infer<typeof CommandRecipeSchema>;
+/** The smallest, largest and default size of the data volume a recipe may ask for, in MiB. */
+export const E2E_DATA_VOLUME_MIN_MIB = 16;
+export const E2E_DATA_VOLUME_MAX_MIB = 1024;
+export const E2E_DATA_VOLUME_DEFAULT_MIB = 256;
 /** The longest a recipe's seed command may run (Task 3.2). */
 export const E2E_SEED_COMMAND_MAX_TIMEOUT_MS = 60_000;
 export const E2EAppRecipeSchema = z.object({ schemaVersion: z.literal(1), recipeDigest: digest, build: z.array(CommandRecipeSchema).max(16), launch: z.discriminatedUnion("kind", [z.object({ kind: z.literal("service"), start: CommandRecipeSchema, health: z.object({ path: sameOriginAppPath, expectedStatus: z.number().int().min(100).max(599) }).strict() }).strict(), z.object({ kind: z.literal("application"), appId: id(200), artifactRef: id(500), arguments: z.array(z.string().max(8192)).max(100) }).strict(), z.object({ kind: z.literal("contract"), adapterProfileId: id(120), operationIds: ids(200) }).strict()]), serviceProfileIds: z.array(id(120)).max(8), seedProfileId: id(120), accountProfileIds: ids(32), allowedOrigins: z.array(id(200)).max(64),
   /** Seeds the app's own data from the accounts file (`rovara-accounts-file/v1`) before the app starts; at most a minute. Part of the recipe digest, so a change re-versions every account that runs under it. */
-  seed: CommandRecipeSchema.refine((command) => command.timeoutMs <= E2E_SEED_COMMAND_MAX_TIMEOUT_MS, "the seed command may run for at most 60000 ms").optional() }).strict();
+  seed: CommandRecipeSchema.refine((command) => command.timeoutMs <= E2E_SEED_COMMAND_MAX_TIMEOUT_MS, "the seed command may run for at most 60000 ms").optional(),
+  /** The size of the run's data volume (a tmpfs) under `rovara-accounts-file/v1`, in MiB; 256 when not stated. Part of the recipe digest. */
+  dataSizeMiB: z.number().int().min(E2E_DATA_VOLUME_MIN_MIB).max(E2E_DATA_VOLUME_MAX_MIB).optional() }).strict();
 export type E2EAppRecipe = z.infer<typeof E2EAppRecipeSchema>;
 /** The seed profile whose accounts file the host writes for the app (`/app/.owned/rovara-accounts.json`) and the recipe's `seed` command reads (Task 3.2). */
 export const E2E_ACCOUNTS_FILE_SEED_PROFILE = "rovara-accounts-file/v1" as const;

@@ -1048,19 +1048,43 @@ describe("docker application host: the recipe-declared account seed", () => {
     expect((await runWith(s)).unavailableReason).toBeNull();
     const create = fake.call("volume create");
     expect(create).toEqual(expect.arrayContaining(["--label", `rovara.run=${s.runId}`]));
+    // A tmpfs of 256 MiB, owned by the unprivileged user: nothing seeded reaches the runner's disk, and nothing can fill it.
+    expect(create).toEqual(expect.arrayContaining(["--driver", "local", "--opt", "type=tmpfs", "--opt", "device=tmpfs", "--opt", "o=size=256m,uid=1000,gid=1000,mode=0700"]));
     expect(create.some((value) => /^rovara\.created=\d+$/.test(value))).toBe(true);
     expect(create.at(-1)).toBe(`rovara-data-${s.runId}`);
     const holders = rows(fake).filter((args) => args.some((value, index) => args[index - 1] === "-v" && value.startsWith(`rovara-data-${s.runId}:`)))
       .map((args) => nameOf(args).replace(`-${s.runId}`, ""));
-    // The one root container that opens the empty volume to the unprivileged user is the only other holder; it has no network and no capability.
-    expect(holders.sort()).toEqual(["rovara-app", "rovara-datainit", "rovara-seed"]);
+    // The one other holder is the keeper that keeps the tmpfs mounted between the seed and the app; it has no network and no capability, and runs as the unprivileged user.
+    expect(holders.sort()).toEqual(["rovara-app", "rovara-datakeep", "rovara-seed"]);
     for (const kind of ["seed", "app"] as const) expect(fake.mountsFor(kind)).toContain(`rovara-data-${s.runId}:/data`);
     expect(fake.mountsFor("executor").some((mount) => mount.includes("rovara-data"))).toBe(false);
     for (const args of rows(fake).filter((call) => nameOf(call).startsWith("rovara-mock-"))) expect(args.join(" ")).not.toContain("rovara-data");
-    const init = fake.argsFor("datainit");
-    expect(init).toEqual(expect.arrayContaining(["--network", "none", "--cap-drop=ALL", "--user", "0:0", "--entrypoint", "chmod", "--rm"]));
-    expect(init.slice(-3)).toEqual(["rovara-executor:test", "0777", "/data"]);
+    const keeper = fake.argsFor("datakeep");
+    expect(keeper).toEqual(expect.arrayContaining(["-d", "--network", "none", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--user", "1000:1000", "--entrypoint", "sleep"]));
+    expect(keeper).not.toContain("0:0");
+    expect(keeper.slice(-2)).toEqual(["rovara-executor:test", "infinity"]);
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
+  it("sizes the tmpfs from the recipe's dataSizeMiB when it states one", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake, { fixture: createAccountsExecutorPlan({ recipe: { dataSizeMiB: 64 } }) });
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    expect(fake.call("volume create")).toEqual(expect.arrayContaining(["--opt", "o=size=64m,uid=1000,gid=1000,mode=0700"]));
+  });
+
+  it("holds the data volume open before the seed, and is unavailable with seed-failed when the keeper cannot be started or does not stay up", async () => {
+    for (const keeperFails of ["refused", "exits"] as const) {
+      const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+      fake.keeperFails = keeperFails;
+      expect((await runWith(s)).unavailableReason, keeperFails).toBe("seed-failed");
+      expect(() => fake.argsFor("seed")).toThrow();
+      expect(() => fake.argsFor("app")).toThrow();
+      expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+    }
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    const order = rows(fake).map(nameOf);
+    expect(order.findIndex((name) => name.startsWith("rovara-datakeep-"))).toBeLessThan(order.findIndex((name) => name.startsWith("rovara-seed-")));
   });
 
   it("runs the seed with at most the recipe's timeout (never more than 60 s) and removes its container", async () => {
@@ -1110,7 +1134,7 @@ describe("docker application host: the recipe-declared account seed", () => {
   it("gives the app, the seed and the volume setup no AWS_, AGENTX_, TOKEN or SECRET variable and no docker socket", async () => {
     const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
     expect((await runWith(s)).unavailableReason).toBeNull();
-    for (const args of [fake.argsFor("seed"), fake.argsFor("app"), fake.argsFor("datainit"), fake.call("volume create")]) {
+    for (const args of [fake.argsFor("seed"), fake.argsFor("app"), fake.argsFor("datakeep"), fake.call("volume create")]) {
       expect(args.join(" ")).not.toMatch(/docker\.sock|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|(^| )-p /);
     }
   });

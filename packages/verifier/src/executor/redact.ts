@@ -42,8 +42,11 @@ const localPartOf = (email: string): string => { const part = email.slice(0, ema
 
 /** What replaces a session secret in text. */
 export const SESSION_REDACTION_LABEL = "<session>";
-/** A session secret shorter than this is redacted from text but is not looked for in bytes, where a handful of characters would match almost anything. */
-const MIN_SESSION_BYTE_SCAN_LENGTH = 8;
+/**
+ * A session secret shorter than this is ignored altogether: not looked for in bytes, where a handful of characters would match almost anything, and not replaced in text, where a
+ * value like `1`, `true` or `accepted` would rewrite numbers, booleans and words in a report and corrupt it.
+ */
+const MIN_SESSION_SECRET_LENGTH = 8;
 
 type Rule = { form: string; label: string; bytes: boolean; session: boolean };
 
@@ -83,9 +86,9 @@ export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]
       return unwrapped !== null && active.some((rule) => unwrapped.includes(rule.form));
     },
     addSessionSecret(value: string): void {
-      if (typeof value !== "string" || value.length === 0) return;
+      if (typeof value !== "string" || value.length < MIN_SESSION_SECRET_LENGTH) return;
       for (const form of spellings(value)) {
-        if (!rules.some((rule) => rule.form === form)) rules.push({ form, label: SESSION_REDACTION_LABEL, bytes: value.length >= MIN_SESSION_BYTE_SCAN_LENGTH, session: true });
+        if (!rules.some((rule) => rule.form === form)) rules.push({ form, label: SESSION_REDACTION_LABEL, bytes: true, session: true });
       }
       rules.sort((a, b) => b.form.length - a.form.length);
     },

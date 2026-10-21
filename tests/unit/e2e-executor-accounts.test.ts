@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { E2E_EXECUTOR_COMPILED_ORIGIN, readE2EApplicationProjectContract, type E2ERuntimeAccountRef } from "@agentx/contracts";
-import { createExecutorSessionStore } from "../../packages/verifier/src/executor/accounts.js";
-import { FormLoginError, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext } from "../../packages/verifier/src/executor/form-login.js";
+import { createExecutorSessionStore, validateFormLogins } from "../../packages/verifier/src/executor/accounts.js";
+import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { FormLoginError, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "../../packages/verifier/src/executor/form-login.js";
 import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
 
 // Task 3.2: the executor's `rovara-form-login/v1`. The store signs each case's account in through the application's own form (a driver stands in for the browser here), keeps the
@@ -21,7 +25,7 @@ type SignIn = Parameters<FormLoginDriver["signIn"]>[0];
 type Identity = { subjectId: string; tenantId: string; role: string };
 
 /** A stand-in for the application and the browser: it knows the plan's accounts, issues one cookie per sign-in, and answers /api/me and /api/orders.csv for the cookie's account. */
-function fakeApplication(options: { failFor?: string; identityOf?: (profileId: string) => Identity; tag?: string } = {}) {
+function fakeApplication(options: { failFor?: string; identityOf?: (profileId: string) => Identity; tag?: string; extraCookies?: Array<Partial<StorageCookie> & { name: string; value: string }>; rotate?: string[] } = {}) {
   const signIns: SignIn[] = []; const requests: { token: string; method: string; path: string; body: unknown }[] = []; const disposed: string[] = [];
   const sessions = new Map<string, { profileId: string; identity: Identity }>();
   const identityOf = options.identityOf ?? ((profileId: string) => {
@@ -35,7 +39,8 @@ function fakeApplication(options: { failFor?: string; identityOf?: (profileId: s
       if (!account || account.profileId === options.failFor) throw new Error(`page said: bad credentials for ${input.email} / ${input.password}`);
       const token = `tok-${options.tag ?? ""}${sha(`${input.email}${signIns.length}`).slice(0, 24)}`;
       sessions.set(token, { profileId: account.profileId, identity: identityOf(account.profileId) });
-      const state: FormLoginStorageState = { cookies: [{ name: "sid", value: token, domain: "127.0.0.1", path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Strict" }],
+      const state: FormLoginStorageState = { cookies: [{ name: "sid", value: token, domain: "127.0.0.1", path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Strict" },
+          ...(options.extraCookies ?? []).map((cookie) => ({ domain: "127.0.0.1", path: "/", expires: -1, httpOnly: false, secure: false, sameSite: "Lax" as const, ...cookie }))],
         origins: [{ origin: input.origin, localStorage: [{ name: "theme", value: "dark" }] }] };
       return { state, status: 200 };
     },
@@ -44,10 +49,11 @@ function fakeApplication(options: { failFor?: string; identityOf?: (profileId: s
       return { async request({ method, path, body }) {
         requests.push({ token, method, path, body });
         const session = sessions.get(token);
-        const json = (status: number, value: unknown) => ({ status, body: new TextEncoder().encode(JSON.stringify(value)), contentType: "application/json" });
+        const json = (status: number, value: unknown) => ({ status, body: new TextEncoder().encode(JSON.stringify(value)), contentType: "application/json", setCookies: [] as string[] });
+        if (path === "/api/rotate") return { ...json(200, {}), setCookies: options.rotate ?? [] };
         if (!session) return json(401, { error: "authentication required" });
         if (path === "/api/me") return json(200, session.identity);
-        if (path === "/api/orders.csv") return session.identity.role === "owner" ? { status: 200, body: new TextEncoder().encode("id\r\na1\r\n"), contentType: "text/csv" } : json(403, { error: "owner role required" });
+        if (path === "/api/orders.csv") return session.identity.role === "owner" ? { status: 200, body: new TextEncoder().encode("id\r\na1\r\n"), contentType: "text/csv", setCookies: [] } : json(403, { error: "owner role required" });
         return json(404, {});
       }, async dispose() { disposed.push(token); } };
     },
@@ -127,20 +133,21 @@ describe("the executor's form login (rovara-form-login/v1)", () => {
     expect(failed).toEqual(["orders-owner"]);
   });
 
-  it("refuses a plan account whose login differs from the one the approved source declares", async () => {
+  it("refuses a plan whose login differs from the approved source's when the store is made, before any case, and signs nobody in", async () => {
     const app = fakeApplication();
     const tampered = { ...fixture.plan, accounts: fixture.plan.accounts.map((account) => (account.profileId === "orders-owner" && account.login ? { ...account, login: { ...account.login, successTestId: "other" } } : account)) };
-    const store = createExecutorSessionStore({ plan: tampered, formLogin: app.driver });
-    await expect(store.open(openFor("orders-owner"), signal)).rejects.toThrow(/login/i);
+    expect(() => createExecutorSessionStore({ plan: tampered, formLogin: app.driver })).toThrow(/account profile orders-owner/);
+    expect(() => validateFormLogins(tampered, true)).toThrow(/orders-owner/);
     expect(app.signIns).toHaveLength(0);
   });
 
-  it("refuses an account whose plan entry carries no login while the profile declares one, and a login with no driver", async () => {
+  it("refuses, when the store is made, a plan that lacks the login its profile declares, one that has a login its profile does not declare, and a login with no browser to sign in through", () => {
     const app = fakeApplication();
     const stripped = { ...fixture.plan, accounts: fixture.plan.accounts.map((account) => { const { login, ...rest } = account; void login; return rest; }) };
-    await expect(createExecutorSessionStore({ plan: stripped, formLogin: app.driver }).open(openFor("orders-owner"), signal)).rejects.toThrow(/login/i);
-    await expect(createExecutorSessionStore({ plan: fixture.plan }).open(openFor("orders-owner"), signal)).rejects.toThrow(/browser/i);
+    expect(() => createExecutorSessionStore({ plan: stripped, formLogin: app.driver })).toThrow(/login/i);
+    expect(() => createExecutorSessionStore({ plan: fixture.plan })).toThrow(/browser/i);
     expect(app.signIns).toHaveLength(0);
+    expect(() => createExecutorSessionStore({ plan: fixture.plan, formLogin: app.driver })).not.toThrow();
   });
 
   it("refuses an account open outside the admitted application, origin and account", async () => {
@@ -212,5 +219,53 @@ describe("the executor's form login (rovara-form-login/v1)", () => {
     expect(text).not.toContain(account.password);
     expect(text).not.toContain(account.email);
     expect(text).not.toContain(store.browserStateFor(sessionRef).cookies[0]!.value);
+  });
+
+  describe("which cookies are session secrets", () => {
+    const registered = async (extraCookies: NonNullable<NonNullable<Parameters<typeof fakeApplication>[0]>["extraCookies"]>) => {
+      const secrets: string[] = [];
+      const app = fakeApplication({ tag: "p", extraCookies });
+      await storeWith(app, { registerSecret: (value) => secrets.push(value) }).open(openFor("orders-owner"), signal);
+      return secrets;
+    };
+
+    it("keeps real session ids (16 characters or more, or HttpOnly and 8 or more) and drops values like 1, true, accepted and dark, which would corrupt a report that holds them", async () => {
+      const secrets = await registered([
+        { name: "consent", value: "1" }, { name: "ok", value: "true" }, { name: "cookie_consent", value: "accepted" }, { name: "theme", value: "dark" },
+        { name: "short_http_only", value: "abc12", httpOnly: true }, { name: "lang", value: "en-US" },
+        { name: "long_plain", value: "0123456789abcdefghij" }, { name: "http_only_12", value: "abcdef123456", httpOnly: true },
+      ]);
+      expect(secrets.filter((value) => !value.startsWith("tok-p")).sort()).toEqual(["0123456789abcdefghij", "abcdef123456"]);
+      expect(secrets.some((value) => value.startsWith("tok-p"))).toBe(true);
+      for (const word of ["1", "true", "accepted", "dark", "abc12", "en-US"]) expect(secrets).not.toContain(word);
+    });
+  });
+
+  describe("cookies the application replaces after the sign-in", () => {
+    it("registers a rotated session value an API answer sets, and ignores a short one", async () => {
+      const secrets: string[] = [];
+      const app = fakeApplication({ rotate: ["sid=rotated-session-value-0123456789; HttpOnly; Path=/", "consent=2; Path=/", "flag=yes; Path=/", "x=; Max-Age=0"] });
+      const store = storeWith(app, { registerSecret: (value) => secrets.push(value) });
+      const { sessionRef } = await store.open(openFor("orders-owner"), signal);
+      const before = secrets.length;
+      await store.request({ sessionRef, origin: E2E_EXECUTOR_COMPILED_ORIGIN, method: "GET", path: "/api/rotate" }, signal);
+      expect(secrets.slice(before)).toEqual(["rotated-session-value-0123456789"]);
+    });
+  });
+});
+
+describe("the executor refuses a form-login plan that does not match its source before it starts anything", () => {
+  const dirs: string[] = [];
+  afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+  it("exits 2 plan-invalid, says which profile, and never waits for the application", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "plan-login-")); dirs.push(dir);
+    const tampered = { ...fixture.plan, accounts: fixture.plan.accounts.map((account) => (account.profileId === "orders-owner" && account.login ? { ...account, login: { ...account.login, path: "/signin" } } : account)) };
+    await writeFile(join(dir, "plan.json"), JSON.stringify(tampered));
+    const result = await runE2EExecutor({ planPath: join(dir, "plan.json"), outDir: join(dir, "out"), signal, localAppUpstream: "http://127.0.0.1:9" });
+    expect(result).toEqual({ exitCode: 2, reason: "plan-invalid" });
+    const log = await readFile(join(dir, "out", "executor.log"), "utf8");
+    expect(log).toContain("plan-invalid");
+    expect(log).toContain("orders-owner");
+    expect(log).not.toContain("waiting for");
   });
 });

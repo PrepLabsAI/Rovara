@@ -20,7 +20,7 @@ function readDefect() {
   const absolute = resolve(path);
   if (!absolute.startsWith(`${root}/.owned/`)) throw new Error("the defect file must be under the owned mount");
   const value = JSON.parse(readFileSync(absolute, "utf8"));
-  const known = { "viewer-access/v1": "allow-viewer-export", "echo-session/v1": "show-session-token", "echo-email/v1": "show-account-email" };
+  const known = { "viewer-access/v1": "allow-viewer-export", "echo-session/v1": "show-session-token", "echo-email/v1": "show-account-email", "rotate-echo/v1": "rotate-session-and-show-it" };
   if (known[value?.defectId] !== value?.mutation) throw new Error("unknown defect");
   return value;
 }
@@ -28,7 +28,7 @@ function readDefect() {
 export function createApplication({ users, orders, defect = null }) {
   const sessions = new Map();
   // The two echo defects are a careless page: it prints the session token, or the account's email, where only the name and role belong.
-  const identityText = (token, account) => `${account.displayName} (${account.role})${defect?.defectId === "echo-session/v1" ? ` ${token}` : defect?.defectId === "echo-email/v1" ? ` ${account.email}` : ""}`;
+  const identityText = (token, account) => `${account.displayName} (${account.role})${defect?.defectId === "echo-session/v1" || defect?.defectId === "rotate-echo/v1" ? ` ${token}` : defect?.defectId === "echo-email/v1" ? ` ${account.email}` : ""}`;
   const canExport = (account) => account.role === "owner" || (defect?.defectId === "viewer-access/v1" && account.role === "viewer");
   const tokenOf = (request) => cookieValue(request.headers?.cookie, "sid");
   const accountFor = (request) => { const token = tokenOf(request); return token ? sessions.get(token) ?? null : null; };
@@ -41,11 +41,14 @@ export function createApplication({ users, orders, defect = null }) {
     if (method === "GET" && url.pathname === "/") {
       // The page is rendered for the signed-in account (its name and role, never its email, its tenant's orders and the export button only when it may export), or shows the login form.
       const account = accountFor(request);
+      // The rotate-echo defect: the app swaps the session cookie for a new one on every page (the old one stays valid) and prints the new one, as a careless app that rotates sessions might.
+      let rotated = null;
+      if (account !== null && defect?.defectId === "rotate-echo/v1") { rotated = randomBytes(32).toString("base64url"); sessions.set(rotated, account); }
       const section = account === null
         ? '<form id="login"><label>Email <input data-testid="email" name="email" autocomplete="username"></label><label>Password <input data-testid="password" name="password" type="password" autocomplete="current-password"></label><button data-testid="login-submit" type="submit">Sign in</button></form>'
-        : `<p data-testid="identity">${escapeHtml(identityText(tokenOf(request), account))}</p>${canExport(account) ? '<button data-testid="export-csv" type="button">Export orders CSV</button>' : ""}`
+        : `<p data-testid="identity">${escapeHtml(identityText(rotated ?? tokenOf(request), account))}</p>${canExport(account) ? '<button data-testid="export-csv" type="button">Export orders CSV</button>' : ""}`
           + `<table data-testid="orders-table"><tbody>${rowsOf(account).map((row) => `<tr data-testid="order-row-${escapeHtml(row.id)}"><td>${[row.id, row.customer, row.total, row.state].map((value) => escapeHtml(String(value))).join("</td><td>")}</td></tr>`).join("")}</tbody></table>`;
-      return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body: readFileSync(join(root, "public/index.html"), "utf8").replace("<!--ACCOUNT-->", section) };
+      return { status: 200, headers: { "content-type": "text/html; charset=utf-8", ...(rotated === null ? {} : { "set-cookie": `sid=${rotated}; HttpOnly; SameSite=Strict; Path=/` }) }, body: readFileSync(join(root, "public/index.html"), "utf8").replace("<!--ACCOUNT-->", section) };
     }
     if (method === "POST" && url.pathname === "/api/login") {
       const body = request.body;
@@ -55,7 +58,7 @@ export function createApplication({ users, orders, defect = null }) {
       if (candidate === undefined || !timingSafeEqual(sha(body.password), expected)) return json(401, { error: "invalid credentials" });
       const token = randomBytes(32).toString("base64url");
       sessions.set(token, Object.freeze({ subjectId: candidate.subjectId, tenantId: candidate.tenantId, role: candidate.role, displayName: candidate.displayName, email: candidate.email }));
-      return json(200, { displayName: candidate.displayName, role: candidate.role }, { "set-cookie": `sid=${token}; HttpOnly; SameSite=Strict; Path=/` });
+      return json(200, { displayName: candidate.displayName, role: candidate.role }, { "set-cookie": [`sid=${token}; HttpOnly; SameSite=Strict; Path=/`, "consent=1; Path=/", "ok=true; Path=/", "cookie_consent=accepted; Path=/", "theme=dark; Path=/"] });
     }
     const account = accountFor(request);
     if (method === "GET" && url.pathname === "/api/me") {
