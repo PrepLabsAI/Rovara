@@ -276,7 +276,7 @@ export interface DeveloperTaskRouteDependencies {
   validateWorkflowE2EApplicationPlan?(input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string };
     /** The owner's retry approving the same, already approved plan again: the latest registered test accounts are pinned, not compared with the plan's refs. */
     reapproval?: boolean }):
-    Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems }>;
+    Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems; baselineWanted?: boolean }>;
   /** Resolves only a URL loaded from the task's immutable registered project revision. */
   registeredRepositoryIdentity?(url: string): Promise<{ repositoryId: number; fullName: string } | undefined>;
 }
@@ -1950,6 +1950,8 @@ export async function decideTaskWorkflow(
   // The digests below identify the approved intent and its policy/bundle; candidate-specific execution-plan identity is
   // bound later by the server-created CHECKS admission and round.
   let applicationConditions: TransactItems = [];
+  /** M1.3 Task 3.7b: whether the project wants the baseline round, so the coding run is asked to export the unchanged code. */
+  let baselineSource = false;
   if (request.decision === "APPROVE" && documentType === "plan" && loaded?.format === "structured" && loaded.plan.e2e !== undefined) {
     const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
     if (pinnedProject?.definition.e2e === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the approved feature E2E intent has no pinned project policy");
@@ -1965,6 +1967,7 @@ export async function decideTaskWorkflow(
       const validated = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: decided!.id, sha256: decided!.sha256 } });
       applicationSelection = validated.selection;
       applicationConditions = validated.conditions;
+      baselineSource = validated.baselineWanted === true;
     }
     const bundleBody = { schemaVersion: 1 as const, planDigest: decided!.sha256, templateVersion: "trusted-e2e/v1", scenarios: intent.scenarios, bundleDigest: "0".repeat(64) };
     const bundleDigest = e2eScenarioBundleDigest(bundleBody);
@@ -2073,7 +2076,9 @@ export async function decideTaskWorkflow(
           ...applicationConditions,
           accessFence(deps, access),
         ];
-      }, { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}), ...(workflowDependencies === undefined ? {} : { workflowDependencies }) });
+      }, { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}), ...(workflowDependencies === undefined ? {} : { workflowDependencies }),
+        // M1.3 Task 3.7b (owner decision D2): the coding run also exports the unchanged code, for the approved application plan's baseline round.
+        ...(mode === "IMPLEMENT" && baselineSource ? { workflowE2EBaselineSource: true as const } : {}) });
     });
   } catch (error) {
     // Another decision got there first: the same request (a double press) is that decision; any other is refused with
@@ -3101,6 +3106,54 @@ export async function startTaskWorkflowE2EChecksFromSystem(
     ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
   ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission,
     readiness: workflowSelectedChecks(workflow.checkPolicy).map((check) => check.command), ...taskBaseOption(task, next) });
+  return accepted.duplicate ? "DUPLICATE" : "STARTED";
+}
+
+/**
+ * M1.3 Task 3.7b: starts the baseline round (the approved scenarios on the unchanged code, for information only) as a separate server-admitted CHECKS operation from
+ * VERIFY/WAITING. Unlike the candidate's CHECKS it changes nothing about the workflow: no revision, no state, no round. The workflow is only held to be where the dispatch saw it
+ * (a condition check), so a round never starts for a task that has moved on. `extra` is the baseline record's own start (REQUESTED to STARTED), written in the same transaction
+ * as the operation, so there is at most one baseline round per plan and never an operation without its record.
+ */
+export async function startTaskWorkflowE2EBaselineFromSystem(
+  deps: DeveloperTaskRouteDependencies,
+  taskId: string,
+  expected: { workflowRevision: number; candidateDigest: string },
+  admission: E2EWorkflowAdmissionRef,
+  operationId: string,
+  extra: TransactItems,
+  actor?: DeveloperCaller,
+): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined
+    || workflow.revision !== expected.workflowRevision || workflow.stage !== "VERIFY" || workflow.state !== "WAITING"
+    || workflow.e2e?.required !== true || workflow.candidate?.digest !== expected.candidateDigest
+    || admission.purpose !== "baseline" || admission.baseCommitSha === undefined || admission.attempt === undefined || admission.taskId !== taskId
+    || admission.workflowRevision !== workflow.revision || admission.roundId.length === 0
+    || admission.groupRunIds.length === 0 || new Set(admission.groupRunIds).size !== admission.groupRunIds.length) return "STALE";
+  const dispatchAccess = await systemTaskAccess(deps, task);
+  const workspace = await deps.actions.workspace(task.workspaceId);
+  if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
+  const receivedAt = iso(deps);
+  const requestId = workflowRequestId("agentx-baseline-e2e-checks", taskId, workflow.revision, admission.baseCommitSha, admission.attempt);
+  const accepted = await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, {
+    requestId, conversationId: task.conversationId,
+    prompt: "Run the broker-admitted baseline E2E verification groups on the unchanged code. Do not edit files or expand the admitted scenarios.",
+  }, (operation) => [
+    { ConditionCheck: {
+      TableName: deps.tableName, Key: taskKey(taskId),
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate AND workflow.e2e.required = :required AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+      ExpressionAttributeValues: { ":revision": workflow.revision, ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": expected.candidateDigest, ":required": true },
+    } },
+    putNew(turnTable(deps), aiToolTurn({
+      party: actor === undefined ? partyOfTask(task) : partyOfTaskActor(task, actor), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+      receivedAt, finishedAt: iso(deps), request: "Run baseline E2E verification", response: `Broker-admitted baseline E2E CHECKS on the unchanged code started as operation ${operation.id}.`, operationId: operation.id,
+    })),
+    ...extra,
+    ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+  ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission, readiness: [] });
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
 

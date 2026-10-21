@@ -230,7 +230,11 @@ import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eS
 import { renderE2EMcpProjection, renderE2EPageHtml, renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
 import type { DisplayArtifact } from "../e2e/application-display.js";
 import { loadStoredScenarioResults, loadWorkflowE2EArtifact as loadStoredWorkflowE2EArtifact, resultsWithStoredArtifacts, storeWorkflowE2EArtifacts } from "./workflow-e2e-artifacts.js";
-import { readWorkflowE2EBaseline, requestWorkflowE2EBaselineRound, type WorkflowE2EBaselineRunner } from "./workflow-e2e-baseline.js";
+import { BaselineSourceBodySchema, BaselineSourceWireSchema, StoredBaselineSourceSchema, assessBaselineSource, parseBaselineExport, type ReadyBaselineSource, type StoredBaselineSource } from "./baseline-source.js";
+import {
+  E2E_BASELINE_ATTEMPT, E2E_BASELINE_PURPOSE, E2E_BASELINE_RUN_GRACE_MS, baselineStartItem, markWorkflowE2EBaselineUnavailable, projectE2EBaselineWanted, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord,
+  recordWorkflowE2EBaseline, requestWorkflowE2EBaselineRound, verifyBaselineEvidence, type BaselineRecord, type BaselineUnavailableReason,
+} from "./workflow-e2e-baseline.js";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { outcomeMetric } from "./admin-change-audit.js";
@@ -299,7 +303,7 @@ import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from ".
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, candidateBuildSourceAdmissionReference, type StoredCandidateBuildSource } from "./candidate-build-source.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
@@ -465,8 +469,6 @@ interface AwsBrokerDependencies {
   projectSetupRuntimeCatalogId?: string;
   /** Separate server-selected namespace for the already qualified portable feature verifier. */
   e2eFeatureRuntimeCatalogId?: string;
-  /** Owner decision D2: starts the informational baseline round (the approved scenarios on the unchanged code) when an application plan is approved. Absent: no baseline is asked for. */
-  e2eBaselineRound?: WorkflowE2EBaselineRunner;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
@@ -1033,7 +1035,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|e2e-admission|e2e-evidence|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -4089,7 +4091,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; operationId?: string; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowE2EAdmission?: E2EWorkflowAdmissionRef; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; workflowReviewNote?: WorkflowReviewNote; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; operationId?: string; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowE2EAdmission?: E2EWorkflowAdmissionRef; workflowE2EBaselineSource?: true; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; workflowReviewNote?: WorkflowReviewNote; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -4184,6 +4186,7 @@ async function taskOperationParts(
       ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
       ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
       ...(input.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: input.workflowE2EAdmission }),
+      ...(input.workflowE2EBaselineSource === true ? { workflowE2EBaselineSource: true as const } : {}),
       ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
       ...(input.workflowBase === undefined ? {} : { workflowBase: input.workflowBase }),
       ...(input.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: input.workflowReviewChecks }),
@@ -4356,10 +4359,14 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
  * Either way nothing is approved.
  */
 async function validateWorkflowE2EApplicationPlan(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, intent: E2EApplicationPlanIntent,
-  artifact: { id: string; sha256: string }, options: { reapproval?: boolean } = {}): Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems }> {
+  artifact: { id: string; sha256: string }, options: { reapproval?: boolean } = {}): Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems; baselineWanted: boolean }> {
   // A first approval holds the plan's account refs to the registry's latest; a retry that approves the same plan again pins the latest instead (the plan keeps its refs).
   const derived = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact, { mode: options.reapproval === true ? "reapprove" : "approve", pinned: [] });
-  if (derived.ok) return { selection: derived.selection, conditions: derived.conditions };
+  if (derived.ok) {
+    // M1.3 Task 3.7b (owner decision D2): whether this project wants the informational baseline round; the coding run is then asked to export the unchanged code.
+    const baselineWanted = projectE2EBaselineWanted(await requireProject(dependencies, task.project, task.startingRevision));
+    return { selection: derived.selection, conditions: derived.conditions, baselineWanted };
+  }
   if (derived.kind === "unevaluable") {
     throw agentXError("RUNTIME_UNAVAILABLE",
       `the application E2E plan could not be checked for approval (${derived.reason}); nothing was approved. Keep this plan and approve it again once it can be checked, or request changes`);
@@ -4495,7 +4502,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; operationId?: string; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowE2EAdmission?: E2EWorkflowAdmissionRef; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; workflowReviewNote?: WorkflowReviewNote; retiredClaimIds?: readonly string[] } = {},
+  options: { sharedTask?: boolean; operationId?: string; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowE2EAdmission?: E2EWorkflowAdmissionRef; workflowE2EBaselineSource?: true; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; workflowReviewNote?: WorkflowReviewNote; retiredClaimIds?: readonly string[] } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -4546,6 +4553,7 @@ async function acceptTask(
     ...(options.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: options.workflowFeedbackReview }),
     ...(options.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: options.workflowFeedbackApproval }),
     ...(options.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: options.workflowE2EAdmission }),
+    ...(options.workflowE2EBaselineSource === true ? { workflowE2EBaselineSource: true as const } : {}),
     ...(options.workflowDependencies === undefined ? {} : { workflowDependencies: options.workflowDependencies }),
     ...(options.workflowBase === undefined ? {} : { workflowBase: options.workflowBase }),
     ...(options.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: options.workflowReviewChecks }),
@@ -5598,8 +5606,8 @@ export function workflowApplicationRouteDependencies(dependencies: AwsBrokerDepe
     // M1.3 Task 3.7: the task page's rows, the screenshot behind a row, and the baseline round asked for when an application plan is approved.
     workflowE2EScenarioResults: (input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }) => loadWorkflowE2EScenarioResults(dependencies, input.task, input.operations, input.actor),
     workflowE2EArtifact: (input: { task: DeveloperTaskRecord; sha256: string }) => loadWorkflowE2EArtifact(dependencies, input.task, input.sha256),
-    startWorkflowE2EBaseline: (input: { task: DeveloperTaskRecord }) => requestWorkflowE2EBaselineRound({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
-      ...(dependencies.e2eBaselineRound === undefined ? {} : { startBaseline: dependencies.e2eBaselineRound }) }, input.task),
+    startWorkflowE2EBaseline: async (input: { task: DeveloperTaskRecord }) => requestWorkflowE2EBaselineRound({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, input.task,
+      { enabled: projectE2EBaselineWanted(await requireProject(dependencies, input.task.project, input.task.startingRevision)) }),
     validateWorkflowE2EApplicationPlan: (input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string }; reapproval?: boolean }) =>
       validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact, input.reapproval === true ? { reapproval: true } : {}),
     registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : (url: string) => dependencies.githubPullRequests.getRepositoryIdentity!(url),
@@ -6079,6 +6087,12 @@ async function handleCallback(
     }
     return json(await handleWorkflowCandidateBuildSource(dependencies, operation, body), request.requestId);
   }
+  if (action === "baseline-source") {
+    if (operation.kind !== "task" || operation.workflowMode !== "IMPLEMENT" || operation.status !== "RUNNING") {
+      throw agentXError("CALLBACK_FORBIDDEN", "baseline source export is limited to the current implementation operation");
+    }
+    return json(await handleWorkflowBaselineSource(dependencies, operation, body), request.requestId);
+  }
   if (action === "e2e-admission") {
     if (operation.kind !== "task" || operation.workflowMode !== "CHECKS" || operation.status !== "RUNNING" || operation.workflowE2EAdmission === undefined) {
       throw agentXError("CALLBACK_FORBIDDEN", "E2E admission reads require the active server-assigned CHECKS operation");
@@ -6088,7 +6102,15 @@ async function handleCallback(
     if (body.sha256 !== reference.admissionRef.sha256 || body.offset % WORKFLOW_CANDIDATE_CHUNK_BYTES !== 0
       || body.offset >= reference.admissionRef.byteLength) throw agentXError("CALLBACK_FORBIDDEN", "E2E admission read is outside its immutable reference");
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(reference.taskId));
-    if (task?.workspaceId !== operation.workspaceId || task.workflow?.stage !== "VERIFY" || task.workflow.state !== "RUNNING"
+    if (reference.purpose === "baseline") {
+      // M1.3 Task 3.7b: a baseline round is not the workflow's current round (the workflow is not running it, and its candidate is another), so it is read on what the baseline's
+      // own record says instead: this operation is the round that record started, for this plan, base commit and attempt.
+      const record = task === undefined ? undefined : await readWorkflowE2EBaselineRecord(dependencies, task);
+      if (task === undefined || task.workspaceId !== operation.workspaceId || task.closedAt !== undefined || record === undefined || record.state !== "STARTED" || record.operationId !== operation.id
+        || record.roundId !== reference.roundId || record.admissionSha256 !== reference.admissionRef.sha256 || record.baseCommitSha !== reference.baseCommitSha || record.attempt !== reference.attempt) {
+        throw agentXError("STALE_FENCE", "the baseline round is no longer the one that was started");
+      }
+    } else if (task?.workspaceId !== operation.workspaceId || task.workflow?.stage !== "VERIFY" || task.workflow.state !== "RUNNING"
       || task.workflow.revision !== reference.workflowRevision || task.workflow.candidate?.digest !== reference.candidateDigest
       || task.workflow.e2e?.currentRoundId !== reference.roundId
       || canonicalJson(task.workflow.e2e.currentGroupRunIds) !== canonicalJson(reference.groupRunIds)) {
@@ -6380,6 +6402,136 @@ async function handleWorkflowCandidateBuildSource(dependencies: AwsBrokerDepende
   }
   const answer = await record(stored, { uploadId: body.uploadId, sha256: body.sha256, closing: "COMPLETE" });
   for (let index = 0; index < Number(upload.chunkCount); index += 1) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: stagingKey(index) }));
+  return answer;
+}
+
+/**
+ * M1.3 Task 3.7b: receives the unchanged code (the task's base commit) a worker exported at the end of a coding run, for the baseline round. It follows nothing and decides nothing
+ * about the coding run: one upload (the export and its build source manifest, as the exact bytes the worker made) or one report that there is none, judged by `assessBaselineSource`
+ * and recorded once on the coding operation. A refusal of the manifest is a successful answer (the baseline then says it could not be checked); an export that is not the unchanged
+ * code of one repository is an error and records nothing. Whether it is the base the task pinned is decided at the baseline's dispatch, not here.
+ */
+async function handleWorkflowBaselineSource(dependencies: AwsBrokerDependencies, operation: OperationRecord, rawBody: unknown): Promise<unknown> {
+  const body = BaselineSourceBodySchema.parse(rawBody);
+  const operationRowKey = operationKey(operation.workspaceId, operation.id);
+  const uploadKey = { pk: `WORKSPACE#${operation.workspaceId}`, sk: `BASELINE_SOURCE#${operation.id}` };
+  const stagingKey = (uploadId: string, index: number) => `workflow-baseline-staging/${operation.workspaceId}/${operation.id}/${uploadId}/${index}.chunk`;
+  const recorded = StoredBaselineSourceSchema.safeParse(operation.baselineSource);
+  /** Records `stored` once; a record already there is answered from, and differs only as an error. `closing` closes the upload row in the same transaction. */
+  const record = async (stored: StoredBaselineSource, closing?: { uploadId: string; sha256: string }): Promise<unknown> => {
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        ...(closing === undefined ? [] : [{ Update: { TableName: dependencies.tableName, Key: uploadKey, UpdateExpression: "SET #status = :complete",
+          ConditionExpression: "#status = :open AND uploadId = :uploadId AND sha256 = :sha256 AND operationId = :operationId AND fence = :fence",
+          ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":complete": "COMPLETE", ":open": "OPEN", ":uploadId": closing.uploadId, ":sha256": closing.sha256,
+            ":operationId": operation.id, ":fence": operation.fence } } }]),
+        { Update: { TableName: dependencies.tableName, Key: operationRowKey, UpdateExpression: "SET baselineSource = :stored",
+          ConditionExpression: "#status = :running AND fence = :fence AND workflowMode = :mode AND attribute_not_exists(baselineSource)",
+          ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":stored": stored, ":running": "RUNNING", ":fence": operation.fence, ":mode": "IMPLEMENT" } } },
+      ] }));
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      const winner = StoredBaselineSourceSchema.safeParse((await getItem<OperationRecord>(dependencies, operationRowKey))?.baselineSource);
+      if (!winner.success) throw agentXError("STALE_FENCE", "the baseline source can no longer be recorded for this operation");
+      if (canonicalJson(winner.data) !== canonicalJson(stored)) throw agentXError("CALLBACK_FORBIDDEN", "this implementation already recorded a different baseline source");
+      return { accepted: stored.status === "READY", baselineSource: stored, duplicate: true };
+    }
+    return { accepted: stored.status === "READY", baselineSource: stored };
+  };
+  if (body.stage === "unavailable") {
+    const stored: StoredBaselineSource = { status: "REFUSED", reason: `the worker could not export the unchanged code: ${body.reason}`.slice(0, 600) };
+    if (recorded.success) {
+      if (canonicalJson(recorded.data) !== canonicalJson(stored)) throw agentXError("CALLBACK_FORBIDDEN", "this implementation already recorded a different baseline source");
+      return { accepted: false, baselineSource: stored, duplicate: true };
+    }
+    return record(stored);
+  }
+  const upload = await getItem<Record<string, unknown>>(dependencies, uploadKey);
+  if (body.stage === "init") {
+    if (body.chunkCount !== Math.ceil(body.totalBytes / WORKFLOW_CANDIDATE_CHUNK_BYTES) || body.totalBytes > MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES) {
+      throw agentXError("CONFIG_INVALID", "baseline source chunk count does not match its total, or the upload is over its bound");
+    }
+    if (upload) {
+      if (upload.entityType !== "WORKFLOW_BASELINE_SOURCE" || upload.status !== "OPEN" || upload.operationId !== operation.id || upload.fence !== operation.fence
+        || upload.totalBytes !== body.totalBytes || upload.chunkCount !== body.chunkCount || upload.sha256 !== body.sha256 || typeof upload.uploadId !== "string") {
+        throw agentXError("CALLBACK_FORBIDDEN", "implementation already owns a different baseline source upload");
+      }
+      return { uploadId: upload.uploadId, chunkBytes: WORKFLOW_CANDIDATE_CHUNK_BYTES, totalBytes: body.totalBytes, chunkCount: body.chunkCount };
+    }
+    if (recorded.success) throw agentXError("CALLBACK_FORBIDDEN", "this implementation already recorded its baseline source");
+    const uploadId = randomUUID();
+    await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: { ...uploadKey, entityType: "WORKFLOW_BASELINE_SOURCE", schemaVersion: 1,
+      workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, uploadId, totalBytes: body.totalBytes, chunkCount: body.chunkCount, sha256: body.sha256,
+      nextChunkIndex: 0, status: "OPEN", createdAt: new Date().toISOString() }, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
+    return { uploadId, chunkBytes: WORKFLOW_CANDIDATE_CHUNK_BYTES, totalBytes: body.totalBytes, chunkCount: body.chunkCount };
+  }
+  if (!upload || upload.entityType !== "WORKFLOW_BASELINE_SOURCE" || upload.operationId !== operation.id || upload.fence !== operation.fence) {
+    throw agentXError("STALE_FENCE", "baseline source upload is not current");
+  }
+  if (body.stage === "finalize" && upload.status === "COMPLETE" && upload.uploadId === body.uploadId && upload.sha256 === body.sha256 && recorded.success) {
+    return { accepted: recorded.data.status === "READY", baselineSource: recorded.data, duplicate: true };
+  }
+  if (upload.status !== "OPEN") throw agentXError("STALE_FENCE", "baseline source upload is no longer open");
+  if (body.stage === "chunk") {
+    if (upload.uploadId !== body.uploadId || body.index >= Number(upload.chunkCount)) throw agentXError("CALLBACK_FORBIDDEN", "baseline source chunk is outside its owned upload");
+    const bytes = Buffer.from(body.bytesBase64, "base64");
+    const expected = body.index === Number(upload.chunkCount) - 1 ? Number(upload.totalBytes) - body.index * WORKFLOW_CANDIDATE_CHUNK_BYTES : WORKFLOW_CANDIDATE_CHUNK_BYTES;
+    if (bytes.byteLength !== expected || bytes.toString("base64") !== body.bytesBase64 || createHash("sha256").update(bytes).digest("hex") !== body.sha256) {
+      throw agentXError("CONFIG_INVALID", "baseline source chunk bytes or digest are invalid");
+    }
+    const nextIndex = Number(upload.nextChunkIndex);
+    if (body.index > nextIndex) throw agentXError("CONFIG_INVALID", "baseline source chunks must arrive in order");
+    if (body.index < nextIndex) {
+      const prior = await readSetupChunk(dependencies, stagingKey(body.uploadId, body.index));
+      if (!prior?.equals(bytes)) throw agentXError("CALLBACK_FORBIDDEN", "replayed baseline source chunk differs from its owned bytes");
+      return { accepted: true, index: body.index, duplicate: true };
+    }
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: stagingKey(body.uploadId, body.index), Body: bytes,
+      ContentType: "application/octet-stream", Metadata: { sha256: body.sha256, upload: body.uploadId, index: String(body.index) }, IfNoneMatch: "*" }));
+    await dependencies.documentClient.send(new UpdateCommand({ TableName: dependencies.tableName, Key: uploadKey, UpdateExpression: "SET nextChunkIndex = :next",
+      ConditionExpression: "#status = :open AND nextChunkIndex = :index AND operationId = :operationId AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":next": body.index + 1, ":open": "OPEN", ":index": body.index, ":operationId": operation.id, ":fence": operation.fence } }));
+    return { accepted: true, index: body.index, duplicate: false };
+  }
+  if (upload.uploadId !== body.uploadId || upload.sha256 !== body.sha256 || Number(upload.nextChunkIndex) !== Number(upload.chunkCount)) {
+    throw agentXError("STALE_FENCE", "baseline source upload is incomplete or changed");
+  }
+  const chunks: Buffer[] = [];
+  for (let index = 0; index < Number(upload.chunkCount); index += 1) {
+    const chunk = await readSetupChunk(dependencies, stagingKey(body.uploadId, index));
+    if (!chunk) throw agentXError("RUNTIME_UNAVAILABLE", "an owned baseline source chunk is missing");
+    chunks.push(chunk);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (bytes.byteLength !== Number(upload.totalBytes) || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "baseline source bytes do not match their stored digest");
+  let sourceBytes: Buffer;
+  let manifestBytes: Buffer;
+  let stored: StoredBaselineSource;
+  try {
+    const wire = BaselineSourceWireSchema.parse(JSON.parse(bytes.toString("utf8")) as unknown);
+    sourceBytes = Buffer.from(wire.sourceBase64, "base64");
+    manifestBytes = Buffer.from(wire.manifestBase64, "base64");
+    if (sourceBytes.toString("base64") !== wire.sourceBase64 || manifestBytes.toString("base64") !== wire.manifestBase64) throw new Error("the baseline source encoding is invalid");
+    stored = assessBaselineSource({ sourceBytes, manifestBytes });
+  } catch (error) {
+    throw agentXError("CONFIG_INVALID", `baseline source export is malformed or is not the unchanged code of one repository: ${error instanceof Error ? error.message : "unreadable"}`.slice(0, 480));
+  }
+  if (stored.status === "READY") {
+    const content = [{ key: stored.sourceRef.key, bytes: sourceBytes, limit: MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES }, { key: stored.buildSource.manifestRef.key, bytes: manifestBytes, limit: E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES }];
+    for (const item of content) {
+      try {
+        await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: item.key, Body: item.bytes, ContentType: "application/json",
+          Metadata: { sha256: createHash("sha256").update(item.bytes).digest("hex"), candidate: stored.sourceRef.candidateDigest, operation: operation.id }, IfNoneMatch: "*" }));
+      } catch (error) {
+        const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+        if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
+        const existing = await readStoredBytes(dependencies, item.key, item.limit);
+        if (existing === undefined || !existing.equals(item.bytes)) throw agentXError("RUNTIME_UNAVAILABLE", "an existing baseline source object does not match its content address");
+      }
+    }
+  }
+  const answer = await record(stored, { uploadId: body.uploadId, sha256: body.sha256 });
+  for (let index = 0; index < Number(upload.chunkCount); index += 1) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: stagingKey(body.uploadId, index) }));
   return answer;
 }
 
@@ -7260,6 +7412,9 @@ async function verifyWorkflowE2EEvidence(
     const workflow = task.workflow;
     if (workflow === undefined) return unavailable("workflow-missing");
     const reference = operation.workflowE2EAdmission;
+    // M1.3 Task 3.7b: this is the candidate's verification. A baseline round (the unchanged code, for information only) is never a candidate round, whatever the workflow's current
+    // round says: its own completion path verifies it (verifyBaselineEvidence), and nothing here can turn it into a verdict on the candidate.
+    if (reference?.purpose === "baseline") return unavailable("baseline-admission-is-not-a-candidate-round");
     const evidenceRef = operation.workflowE2EEvidenceRef;
     const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
     const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
@@ -7673,6 +7828,56 @@ function storedAdmissionSchemaVersion(admissionText: string | undefined): string
 const APPLICATION_VERDICT_REASON_MAX_CHARS = 240;
 
 /**
+ * The evidence an application round's operation has accepted, read back and held to the content addresses the broker recorded: the aggregate (when it was accepted), each accepted
+ * group's evidence, and the broker's own receipt time of each group (when its upload started). The candidate's verification and the baseline's both start from this, so what a
+ * round is judged on is read the same way for both. `unavailable` names the first thing that could not be read or does not match.
+ */
+async function loadApplicationEvidenceInputs(dependencies: AwsBrokerDependencies, operation: OperationRecord, reference: E2EWorkflowAdmissionRef, admission: E2EApplicationExecutionAdmission):
+  Promise<{ aggregate: unknown; groupEvidence: Map<string, unknown>; receivedAt: Map<string, string> } | { unavailable: string }> {
+  const unavailableInputs = (reason: string) => ({ unavailable: reason });
+  const limits = applicationEvidenceLimits(admission);
+  const evidenceRef = operation.workflowE2EEvidenceRef;
+  const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
+  const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
+  if (groupEvidenceRefs.length !== groupEvidenceRunIds.length
+    || canonicalJson(groupEvidenceRefs.map((raw) => E2EWorkflowGroupEvidenceRefSchema.parse(raw).groupRunId)) !== canonicalJson(groupEvidenceRunIds)
+    || new Set(groupEvidenceRunIds).size !== groupEvidenceRunIds.length
+    || groupEvidenceRunIds.some((runId) => !reference.groupRunIds.includes(runId))) return unavailableInputs("accepted-group-reference-list-invalid");
+  if (evidenceRef === undefined && groupEvidenceRefs.length === 0) return unavailableInputs("group-results-not-yet-accepted");
+  let aggregate: unknown;
+  if (evidenceRef !== undefined) {
+    const aggregateText = evidenceRef.key === `workflow-e2e-evidence/sha256/${evidenceRef.sha256}.json`
+      ? await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, limits.aggregate) : undefined;
+    if (aggregateText === undefined || createHash("sha256").update(aggregateText).digest("hex") !== evidenceRef.sha256 || Buffer.byteLength(aggregateText) !== evidenceRef.byteLength) {
+      return unavailableInputs("admission-or-evidence-reference-integrity");
+    }
+    aggregate = JSON.parse(aggregateText) as unknown;
+  }
+  const groupEvidence = new Map<string, unknown>();
+  const receivedAt = new Map<string, string>();
+  for (const raw of groupEvidenceRefs) {
+    const parsedRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(raw);
+    if (!parsedRef.success) return unavailableInputs("accepted-group-reference-schema");
+    const { groupRunId, evidenceRef: stored } = parsedRef.data;
+    const limit = limits.byGroup.get(groupRunId);
+    if (limit === undefined || groupEvidence.has(groupRunId) || stored.key !== `workflow-e2e-group-evidence/sha256/${stored.sha256}.json`) return unavailableInputs("accepted-group-reference-subject");
+    const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, stored.key, limit);
+    if (groupText === undefined || Buffer.byteLength(groupText) !== stored.byteLength || createHash("sha256").update(groupText).digest("hex") !== stored.sha256) {
+      return unavailableInputs("accepted-group-evidence-integrity");
+    }
+    groupEvidence.set(groupRunId, JSON.parse(groupText) as unknown);
+    // The broker's own receipt of this group's evidence: the start of the upload that was accepted, recorded once with its row. A row that is not exactly this
+    // operation's completed upload of exactly this content gives no receipt, and the group is then UNKNOWN.
+    const upload = await getItem<Record<string, unknown>>(dependencies, { pk: `WORKSPACE#${operation.workspaceId}`, sk: `WORKFLOW_E2E_UPLOAD#${operation.id}#${groupRunId}` });
+    const accepted = E2EWorkflowGroupEvidenceRefSchema.safeParse(upload?.groupEvidenceRef);
+    if (upload?.entityType === "WORKFLOW_E2E_EVIDENCE_UPLOAD" && upload.status === "COMPLETE" && upload.operationId === operation.id && upload.groupRunId === groupRunId
+      && upload.fence === operation.fence && upload.admissionSha256 === reference.admissionRef.sha256 && accepted.success && accepted.data.evidenceRef.sha256 === stored.sha256
+      && typeof upload.receivedAt === "string") receivedAt.set(groupRunId, upload.receivedAt);
+  }
+  return { aggregate, groupEvidence, receivedAt };
+}
+
+/**
  * Independently decides what the stored evidence of an application round proves, for the result callback, the task presentation and publication alike. Everything the
  * verifier compares the worker's evidence with is the broker's: the stored admission, the operation's own reference and fence, the content-addressed evidence it accepted
  * itself, and the receipt time it recorded when each group's upload started. The verdict is then held to the current authority (creator, project, source, runtime rows),
@@ -7690,45 +7895,9 @@ async function verifyApplicationWorkflowE2EEvidence(input: {
   }
   let admission: E2EApplicationExecutionAdmission;
   try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return unavailable("application-admission-undecodable"); }
-  const limits = applicationEvidenceLimits(admission);
-  const evidenceRef = operation.workflowE2EEvidenceRef;
-  const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
-  const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
-  if (groupEvidenceRefs.length !== groupEvidenceRunIds.length
-    || canonicalJson(groupEvidenceRefs.map((raw) => E2EWorkflowGroupEvidenceRefSchema.parse(raw).groupRunId)) !== canonicalJson(groupEvidenceRunIds)
-    || new Set(groupEvidenceRunIds).size !== groupEvidenceRunIds.length
-    || groupEvidenceRunIds.some((runId) => !reference.groupRunIds.includes(runId))) return unavailable("accepted-group-reference-list-invalid");
-  if (evidenceRef === undefined && groupEvidenceRefs.length === 0) return unavailable("group-results-not-yet-accepted");
-  let aggregate: unknown;
-  if (evidenceRef !== undefined) {
-    const aggregateText = evidenceRef.key === `workflow-e2e-evidence/sha256/${evidenceRef.sha256}.json`
-      ? await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, limits.aggregate) : undefined;
-    if (aggregateText === undefined || createHash("sha256").update(aggregateText).digest("hex") !== evidenceRef.sha256 || Buffer.byteLength(aggregateText) !== evidenceRef.byteLength) {
-      return unavailable("admission-or-evidence-reference-integrity");
-    }
-    aggregate = JSON.parse(aggregateText) as unknown;
-  }
-  const groupEvidence = new Map<string, unknown>();
-  const receivedAt = new Map<string, string>();
-  for (const raw of groupEvidenceRefs) {
-    const parsedRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(raw);
-    if (!parsedRef.success) return unavailable("accepted-group-reference-schema");
-    const { groupRunId, evidenceRef: stored } = parsedRef.data;
-    const limit = limits.byGroup.get(groupRunId);
-    if (limit === undefined || groupEvidence.has(groupRunId) || stored.key !== `workflow-e2e-group-evidence/sha256/${stored.sha256}.json`) return unavailable("accepted-group-reference-subject");
-    const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, stored.key, limit);
-    if (groupText === undefined || Buffer.byteLength(groupText) !== stored.byteLength || createHash("sha256").update(groupText).digest("hex") !== stored.sha256) {
-      return unavailable("accepted-group-evidence-integrity");
-    }
-    groupEvidence.set(groupRunId, JSON.parse(groupText) as unknown);
-    // The broker's own receipt of this group's evidence: the start of the upload that was accepted, recorded once with its row. A row that is not exactly this
-    // operation's completed upload of exactly this content gives no receipt, and the group is then UNKNOWN.
-    const upload = await getItem<Record<string, unknown>>(dependencies, { pk: `WORKSPACE#${operation.workspaceId}`, sk: `WORKFLOW_E2E_UPLOAD#${operation.id}#${groupRunId}` });
-    const accepted = E2EWorkflowGroupEvidenceRefSchema.safeParse(upload?.groupEvidenceRef);
-    if (upload?.entityType === "WORKFLOW_E2E_EVIDENCE_UPLOAD" && upload.status === "COMPLETE" && upload.operationId === operation.id && upload.groupRunId === groupRunId
-      && upload.fence === operation.fence && upload.admissionSha256 === reference.admissionRef.sha256 && accepted.success && accepted.data.evidenceRef.sha256 === stored.sha256
-      && typeof upload.receivedAt === "string") receivedAt.set(groupRunId, upload.receivedAt);
-  }
+  const loaded = await loadApplicationEvidenceInputs(dependencies, operation, reference, admission);
+  if ("unavailable" in loaded) return unavailable(loaded.unavailable);
+  const { aggregate, groupEvidence, receivedAt } = loaded;
   const terminalStatus = input.terminalStatus ?? (operation.status === "SUCCEEDED" || operation.status === "FAILED" ? operation.status : undefined);
   const verified = verifyApplicationE2EEvidence({ admissionBytes, subject: { taskId: task.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
     candidateDigest: candidate.digest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
@@ -7747,6 +7916,47 @@ async function verifyApplicationWorkflowE2EEvidence(input: {
     diagnostic.reason = verified.reason.replace(/\p{Cc}+/gu, " ").replace(/\s+/gu, " ").trim().slice(0, APPLICATION_VERDICT_REASON_MAX_CHARS);
   }
   return verified.verdict;
+}
+
+/**
+ * M1.3 Task 3.7b: the baseline round's own completion. When its operation ends, this settles the baseline's record, and does nothing else: no workflow transition, no
+ * `qualifiedRound` or `failedRound`, no send-back, no publication. An operation that did not succeed leaves the record saying the unchanged code could not be checked; one that
+ * succeeded is verified exactly as a candidate's evidence is read (`loadApplicationEvidenceInputs`, then the verifier for the purpose it was signed with), and only that
+ * verification's rows are recorded, conditionally, on the plan, base commit, attempt, operation and round the record started. It never throws: whatever goes wrong here, the baseline
+ * is a record that stays STARTED and is shown as not run once its time is up.
+ */
+async function settleBaselineRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus): Promise<void> {
+  const reference = operation.workflowE2EAdmission;
+  if (operation.kind !== "task" || reference?.purpose !== "baseline" || reference.baseCommitSha === undefined || reference.attempt === undefined) return;
+  try {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(reference.taskId));
+    if (task === undefined || task.workspaceId !== operation.workspaceId) return;
+    const record = await readWorkflowE2EBaselineRecord(dependencies, task);
+    if (record === undefined || record.state !== "STARTED" || record.operationId !== operation.id) return;
+    const unavailable = (reason: BaselineUnavailableReason) => markWorkflowE2EBaselineUnavailable(dependencies, task, reason, { from: ["STARTED"], operationId: operation.id });
+    if (status !== "SUCCEEDED") { await unavailable("run-failed"); return; }
+    const verified = await verifyBaselineRound(dependencies, operation, reference);
+    if (verified === undefined) { await unavailable("unverified"); return; }
+    await recordWorkflowE2EBaseline({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task,
+      { verified, expected: { operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256, baseCommitSha: reference.baseCommitSha, attempt: reference.attempt } });
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
+  }
+}
+
+/** The broker's own verification of a finished baseline round's evidence, or undefined when the admission or the evidence cannot be read or verify to no rows. */
+async function verifyBaselineRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, reference: E2EWorkflowAdmissionRef) {
+  const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
+  if (admissionText === undefined) return undefined;
+  const admissionBytes = Buffer.from(admissionText, "utf8");
+  if (createHash("sha256").update(admissionBytes).digest("hex") !== reference.admissionRef.sha256 || admissionBytes.byteLength !== reference.admissionRef.byteLength) return undefined;
+  let admission: E2EApplicationExecutionAdmission;
+  try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return undefined; }
+  const loaded = await loadApplicationEvidenceInputs(dependencies, operation, reference, admission);
+  if ("unavailable" in loaded) return undefined;
+  return verifyBaselineEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
+    candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
+  aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED" });
 }
 
 /**
@@ -8029,7 +8239,12 @@ export async function loadWorkflowE2EScenarioResults(
   actor: "owner" | "viewer" = "viewer",
 ): Promise<E2EScenarioResults | undefined> {
   if (task.closedAt !== undefined) return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor))?.scenarioResults;
-  return loadStoredScenarioResults({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task);
+  const stored = await loadStoredScenarioResults({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task);
+  // M1.3 Task 3.7b: the baseline round has a record of its own and runs before the candidate's, so it shows as soon as it is recorded, or known not to have run, whether or not the
+  // candidate's round has a single row yet. The record is the baseline's truth: a display written earlier may not carry it.
+  const baseline = await readWorkflowE2EBaseline(dependencies, task).catch(() => undefined);
+  if (stored === undefined && baseline === undefined) return undefined;
+  return { scenarios: stored?.scenarios ?? [], ...((baseline ?? stored?.baseline) === undefined ? {} : { baseline: (baseline ?? stored?.baseline)! }) };
 }
 
 /** A screenshot behind a row of the task's current display, by its digest; undefined for a digest the display does not name. The caller has already checked who may read it. */
@@ -8038,7 +8253,8 @@ export async function loadWorkflowE2EArtifact(
   task: DeveloperTaskRecord,
   sha256: string,
 ): Promise<{ contentType: "image/jpeg"; bytes: Uint8Array } | undefined> {
-  return loadStoredWorkflowE2EArtifact({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task, sha256);
+  const baseline = await readWorkflowE2EBaseline(dependencies, task).catch(() => undefined);
+  return loadStoredWorkflowE2EArtifact({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task, sha256, baseline === undefined ? {} : { baseline });
 }
 
 /** Reloads the exact current CHECKS evidence for publication and returns its final-effect fences. */
@@ -10179,7 +10395,7 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     }, caller, undefined, null);
     const expected = { workflowRevision: item.workflowRevision, candidateDigest: item.candidateDigest };
     // A fix for the pull requests already open is pushed to them by the same start, which sees they exist.
-    let outcome: "STARTED" | "DUPLICATE" | "STALE";
+    let outcome: "STARTED" | "DUPLICATE" | "STALE" | "WAITING";
     if (item.kind === "CHECKS") {
       const readiness = await ensureWorkflowE2EComputeReadiness(dependencies, routeDependencies, item);
       if (readiness.status === "WAITING") return "DISPATCHED";
@@ -10188,6 +10404,8 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
         return "STALE";
       }
       outcome = await startWorkflowE2EChecksDispatch(dependencies, routeDependencies, readiness.task, expected, caller);
+      // The baseline round holds the workspace: the row stays, and the next pass (or the baseline's own result) tries again.
+      if (outcome === "WAITING") return "DISPATCHED";
     } else {
       outcome = item.kind === "PUBLISH" || item.kind === "UPDATE"
         ? await startTaskWorkflowPublicationFromSystem(routeDependencies, item.taskId, expected, { taskPageUrl: taskPageUrl(dependencies.developer.issuer, item.taskId) })
@@ -10429,6 +10647,123 @@ async function startApplicationE2EChecksDispatch(
   return startTaskWorkflowE2EChecksFromSystem(routeDependencies, task.taskId, expected, admissionRef, operationId, input.caller);
 }
 
+/** How long past its deadline and grace a dead baseline round is waited for to end before the candidate's CHECKS stop waiting for it (the baseline never gates, even in time). */
+const BASELINE_HOLD_LIMIT_MS = 20 * 60_000;
+
+/**
+ * M1.3 Task 3.7b, owner decision D2: the baseline round runs before the candidate's CHECKS, on the same ready compute (a workspace runs one operation at a time, so the two cannot
+ * overlap). The candidate's CHECKS dispatch asks here first. A REQUESTED baseline is started (and the candidate waits for it); a STARTED one is waited for until its deadline and
+ * grace, then marked as not run and its operation cancelled so the workspace is free again; anything else (recorded, could not run, never asked for) lets the candidate go on.
+ * Whatever goes wrong with the baseline lets the candidate go on: it never gates, and it never spends the dispatch's attempts while it is merely running.
+ */
+async function runBaselineRoundFirst(
+  dependencies: AwsBrokerDependencies,
+  routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
+  input: { task: DeveloperTaskRecord; caller: Parameters<typeof startTaskWorkflowReviewFromSystem>[3]; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string };
+    approval: NonNullable<ReturnType<typeof resolveWorkflowE2ECanonicalApproval>> },
+): Promise<"WAIT" | "GO"> {
+  const { task } = input;
+  const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
+  try {
+    const record = await readWorkflowE2EBaselineRecord(store, task);
+    if (record === undefined || record.state === "RECORDED") return "GO";
+    if (record.state === "REQUESTED") return await startBaselineApplicationRound(dependencies, routeDependencies, { ...input, record });
+    const operation = record.operationId === undefined ? undefined : await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, record.operationId));
+    if (operation === undefined || TERMINAL.has(operation.status)) {
+      // Its operation has ended but the record was not settled (the settling is best effort): settle it now. Settling twice is harmless.
+      if (record.state === "STARTED") {
+        if (operation?.status === "SUCCEEDED") await settleBaselineRound(dependencies, operation, "SUCCEEDED");
+        else await markWorkflowE2EBaselineUnavailable(store, task, "run-failed", { from: ["STARTED"], ...(record.operationId === undefined ? {} : { operationId: record.operationId }) });
+      }
+      return "GO";
+    }
+    const lateBy = Date.now() - (Date.parse(record.deadlineAt ?? "") + E2E_BASELINE_RUN_GRACE_MS);
+    if (record.state === "STARTED" && !(lateBy > 0)) return "WAIT";
+    if (record.state === "STARTED") await markWorkflowE2EBaselineUnavailable(store, task, "timed-out", { from: ["STARTED"], operationId: operation.id });
+    // Past its time: the round is dead or stuck. Ask for it to be cancelled, so the workspace is free for the candidate, and wait for the worker to say so (for a while only).
+    if (!(lateBy < BASELINE_HOLD_LIMIT_MS)) return "GO";
+    const workspace = await requireWorkspace(dependencies, task.workspaceId);
+    if (workspace.activeOperationId === operation.id && operation.status !== "CANCEL_REQUESTED") await requestCancellation(dependencies, workspace, operation.id, {});
+    return "WAIT";
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_dispatch_failed", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }));
+    return "GO";
+  }
+}
+
+/** The base commit the task pinned for its one repository: the workflow's pinned base, else the base the candidate recorded. */
+function pinnedBaseCommitOf(task: DeveloperTaskRecord): { repositoryId: string; baseCommitSha: string } | undefined {
+  const candidate = task.workflow?.candidate;
+  if (candidate === undefined || candidate.repositories.length !== 1) return undefined;
+  const repositoryId = candidate.repositories[0]!.repositoryId;
+  const baseCommitSha = task.workflow?.reviewBase?.find((entry) => entry.repositoryId === repositoryId)?.baseCommitSha ?? candidate.repositories[0]!.baseCommitSha;
+  return baseCommitSha === undefined ? undefined : { repositoryId, baseCommitSha };
+}
+
+/**
+ * Starts the baseline round: the unchanged code the coding run exported (held to the base the task pinned), an admission built from it with the same code as a candidate's and
+ * signed as a baseline, and the one CHECKS operation that carries exactly that admission, with the record's own start in the same transaction. Anything missing or disagreeing
+ * leaves the record saying the unchanged code could not be checked, and the candidate goes on.
+ */
+async function startBaselineApplicationRound(
+  dependencies: AwsBrokerDependencies,
+  routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
+  input: { task: DeveloperTaskRecord; caller: Parameters<typeof startTaskWorkflowReviewFromSystem>[3]; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string };
+    approval: NonNullable<ReturnType<typeof resolveWorkflowE2ECanonicalApproval>>; record: BaselineRecord },
+): Promise<"WAIT" | "GO"> {
+  const { task, intent, artifact, approval } = input;
+  const workflow = task.workflow!;
+  const candidate = workflow.candidate!;
+  const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
+  const unavailable = async (reason: BaselineUnavailableReason): Promise<"GO"> => {
+    await markWorkflowE2EBaselineUnavailable(store, task, reason, { from: ["REQUESTED"] });
+    return "GO";
+  };
+  const sourceOperation = await candidateSourceOperation(dependencies, task, candidate.digest);
+  const exported = StoredBaselineSourceSchema.safeParse(sourceOperation?.baselineSource);
+  if (!exported.success) return unavailable("not-exported");
+  if (exported.data.status === "REFUSED") return unavailable("refused");
+  const stored: ReadyBaselineSource = exported.data;
+  const pinned = pinnedBaseCommitOf(task);
+  if (pinned === undefined || stored.repositoryId !== pinned.repositoryId || stored.baseCommitSha !== pinned.baseCommitSha || stored.buildSource.commitSha !== stored.baseCommitSha
+    || stored.buildSource.treeSha !== stored.baseTreeSha) return unavailable("refused");
+  try {
+    const sourceBytes = await readStoredBytes(dependencies, stored.sourceRef.key, MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES);
+    if (sourceBytes === undefined || sourceBytes.byteLength !== stored.sourceRef.byteLength || createHash("sha256").update(sourceBytes).digest("hex") !== stored.sourceRef.sha256) return await unavailable("refused");
+    const exportedSource = parseBaselineExport(sourceBytes);
+    const repository = exportedSource.repositories[0]!;
+    if (repository.commitSha !== stored.baseCommitSha || repository.treeSha !== stored.baseTreeSha || exportedSource.candidate.digest !== stored.sourceRef.candidateDigest) return await unavailable("refused");
+    const manifest = await readCandidateBuildSourceManifest(dependencies, stored.buildSource);
+    const snapshot: E2ESourceSnapshot = { candidate: exportedSource.candidate, commitSha: repository.commitSha, treeSha: repository.treeSha, treeComplete: true, treePaths: repository.treePaths,
+      sources: repository.sources.map((source) => ({ path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })) };
+    const current = await requireApplicationSelectionStillCurrent(dependencies, task, intent, artifact);
+    const creatorAuthority = await requireWorkflowE2ECreatorAuthority(dependencies, task);
+    const workspace = await routeDependencies.actions.workspace(task.workspaceId);
+    const operationId = randomUUID();
+    const planDigest = createHash("sha256").update(canonicalJson({
+      domain: "workflow-application-e2e-baseline-plan/v1", taskId: task.taskId, artifactId: approval.artifactId, artifactSha256: approval.artifactDigest,
+      graphDigest: approval.graphDigest, graphRunId: approval.runId, workflowRevision: approval.workflowRevision, actorId: approval.actorId, baseCommitSha: stored.baseCommitSha,
+    })).digest("hex");
+    const built = buildApplicationExecutionAdmission({ taskId: task.taskId, operationId, operationFence: workspace.fence + 1, workflowRevision: workflow.revision, roundId: randomUUID(),
+      runId: randomUUID, intent, artifact, snapshot, setupProposal: current.inputs.setup.setupProposal, setupApproval: current.inputs.setup.setupApproval, policy: current.inputs.policy,
+      registeredRuntimes: current.inputs.rows, runtimeCatalogId: current.inputs.runtimeCatalogId, runtimeBinding: current.inputs.runtimeBinding,
+      buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored.buildSource) }, planDigest, now: Date.now(), creatorAuthority, accountEntries: current.inputs.accountEntries,
+      recordedSelection: E2EApplicationSelectionRecordSchema.parse(workflow.e2e?.applicationSelection), baseline: { baseCommitSha: stored.baseCommitSha, attempt: E2E_BASELINE_ATTEMPT } });
+    const admissionRef = E2EWorkflowAdmissionRefSchema.parse({ schemaVersion: 1, kind: "application", taskId: task.taskId, workflowRevision: workflow.revision, candidateDigest: built.admission.candidateDigest,
+      roundId: built.roundId, groupRunIds: built.groupRunIds, admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength },
+      purpose: E2E_BASELINE_PURPOSE, baseCommitSha: stored.baseCommitSha, attempt: E2E_BASELINE_ATTEMPT });
+    await storeWorkflowE2EAdmission(dependencies, { key: admissionRef.admissionRef.key, sha256: built.sha256, bytes: built.bytes, taskId: task.taskId, candidateDigest: built.admission.candidateDigest });
+    const outcome = await startTaskWorkflowE2EBaselineFromSystem(routeDependencies, task.taskId, { workflowRevision: workflow.revision, candidateDigest: candidate.digest }, admissionRef, operationId,
+      [baselineStartItem(store, task, { baseCommitSha: stored.baseCommitSha, operationId, roundId: built.roundId, admissionSha256: built.sha256, startedAt: new Date().toISOString(), deadlineAt: built.admission.round.deadlineAt })],
+      input.caller);
+    return outcome === "STALE" ? "GO" : "WAIT";
+  } catch (error) {
+    // The candidate goes on: its own dispatch makes the same checks and, for a plan that cannot run, blocks the workflow with the reason. The baseline only says it could not be checked.
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_not_started", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }));
+    return unavailable(error instanceof ApplicationDispatchRefusal || error instanceof ApplicationPlanDefect ? "refused" : "start-failed");
+  }
+}
+
 /** Creates the content-addressed admission and starts the separate current CHECKS operation. */
 async function startWorkflowE2EChecksDispatch(
   dependencies: AwsBrokerDependencies,
@@ -10436,7 +10771,7 @@ async function startWorkflowE2EChecksDispatch(
   task: DeveloperTaskRecord,
   expected: { workflowRevision: number; candidateDigest: string },
   caller: Parameters<typeof startTaskWorkflowReviewFromSystem>[3],
-): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+): Promise<"STARTED" | "DUPLICATE" | "STALE" | "WAITING"> {
   const workflow = task.workflow;
   const candidate = workflow?.candidate;
   const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
@@ -10462,6 +10797,8 @@ async function startWorkflowE2EChecksDispatch(
   }
   // An application (v2) intent is never dispatched through the portable path below: it has its own admission, and every way it can fail ends in a block.
   if (approved.plan.e2e?.schemaVersion === 2) {
+    // M1.3 Task 3.7b: the informational baseline round runs first, on this same ready compute; the candidate's CHECKS wait for it (without spending the dispatch's attempts) or go on.
+    if (await runBaselineRoundFirst(dependencies, routeDependencies, { task, caller, intent: approved.plan.e2e, artifact, approval: canonicalApproval }) === "WAIT") return "WAITING";
     return startApplicationE2EChecksDispatch(dependencies, routeDependencies, { task, expected, caller, intent: approved.plan.e2e, artifact, approval: canonicalApproval });
   }
   const portableIntent = portableFeatureIntentOf(approved.plan);
@@ -10871,6 +11208,9 @@ async function completedWorkflowItems(
   }
   if (operation.kind === "maintain") return completedPullRequestUpdateItems(dependencies, operation, task as DeveloperTaskRecord & { workflow: WorkflowSnapshot }, terminalStatus, now, result, terminalError);
   if (operation.kind !== "task" || operation.workflowMode === undefined || task.workflow.state !== "RUNNING") return [];
+  // M1.3 Task 3.7b: the candidate's completion refuses a baseline round (the unchanged code, for information only), whatever state the workflow is in. Its result moves nothing here:
+  // it settles its own record (settleBaselineRound) after the terminal result is committed.
+  if (operation.workflowE2EAdmission?.purpose === "baseline") return [];
   let next: WorkflowSnapshot;
   // The planning answer's own outcome for the task record: why it could not be read, or `null` to forget an old reason.
   let planUnreadable: DeveloperTaskRecord["planUnreadable"] | null | undefined;
@@ -10982,6 +11322,7 @@ async function completedWorkflowItems(
         let e2eQualification: { candidateDigest: string; contractDigest: string; policyDigest: string; bundleDigest: string; executionPlanDigest: string;
           roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string } | undefined;
         if (operation.workflowMode === "CHECKS" && task.workflow.e2e?.required === true) {
+          if (operation.workflowE2EAdmission?.purpose === "baseline") throw new Error("a baseline round is never a candidate's CHECKS");
           if (task.workflow.e2e.currentGroupRunIds.length === 0 || task.workflow.e2e.currentRoundId === undefined
             || operation.workflowE2EAdmission === undefined || operation.workflowE2EEvidenceRef === undefined) {
             verificationFailure = "the current candidate-bound E2E round or its private evidence is missing";
@@ -11709,8 +12050,9 @@ async function recordTerminalResult(
     : await currentGraphCancelTarget(dependencies, operation, cancelTargetOperation);
   const graphCancelBoundTarget = cancelTargetOperation?.kind === "task" && cancelTargetOperation.workflowMode === "IMPLEMENT"
     && cancelTargetOperation.workflowDependencies !== undefined ? cancelTargetOperation : undefined;
+  // A baseline round is not the workflow's: cancelling it never touches the workflow (M1.3 Task 3.7b).
   const e2eCancelBoundTarget = cancelTargetOperation?.kind === "task" && cancelTargetOperation.workflowMode === "CHECKS"
-    && cancelTargetOperation.workflowE2EAdmission !== undefined ? cancelTargetOperation : undefined;
+    && cancelTargetOperation.workflowE2EAdmission !== undefined && cancelTargetOperation.workflowE2EAdmission.purpose !== "baseline" ? cancelTargetOperation : undefined;
   if (graphCancelBoundTarget !== undefined && graphCancelBoundTarget.fence !== operation.fence) {
     throw agentXError("STALE_FENCE", "cancel and graph target no longer share the current workspace fence");
   }
@@ -11860,6 +12202,8 @@ async function recordTerminalResult(
     throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
   }
   if (closeCanFinish && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id, operation.createdAt, operation.discardUnpublished === true && closePreflight?.safeToClose !== true);
+  // M1.3 Task 3.7b: a baseline round settles its own record now that its result is committed, before the step it was holding back is started.
+  if (recordedStatus === terminalStatus) await settleBaselineRound(dependencies, operation, terminalStatus);
   // Gap 6: start any step this result made due (its dispatch row committed above); a lost start is the sweep's.
   if (taskPointer !== undefined) await dispatchWorkflowContinuation(dependencies, taskPointer.taskId);
   // A task that finished while this ran (merged during a feedback review, say) gives back its slot and workspace now.

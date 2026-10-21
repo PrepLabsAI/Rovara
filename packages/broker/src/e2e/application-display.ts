@@ -12,9 +12,11 @@ import { E2EScenarioResultsSchema, E2E_DISPLAY_SCREENSHOT_MAX_BYTES, canonicalJs
  *
  * Emails are replaced and an account is shown by its profile id only. Credentials are another matter, and this module only does part of it: the free text is run through the
  * redactor by pattern (`redactText`: `password=...`, bearer tokens and the like), which cannot recognise a bare value. The broker never holds a run's synthetic passwords, so it
- * cannot scan for them. What keeps a bare password out of an observed value is the chain upstream of the broker: the Docker host's own scan of the run output against the run's
- * credentials (every spelling it knows), which withholds evidence that carries one before the worker packs it. `credential-echo` in tests/e2e/m1-3-journeys.test.ts runs that
- * chain end to end.
+ * cannot scan for them. What keeps a bare password out of an observed value is the chain upstream of the broker, in two layers. First the executor itself: it refuses to record
+ * verdict-input evidence (an observation, a download) that carries one of the run's account credentials (`record` in verifier/src/executor/case-ledger.ts, with the redactor of
+ * Task 3.6), so the case has no value to show. Then the Docker host's own scan of the run output against the run's credentials (every spelling it knows, `snapshotExecutorOutput`),
+ * which holds back the operator evidence (captures, log heads) that carries one before the worker packs it. `credential-echo` in tests/e2e/m1-3-journeys.test.ts runs the chain end
+ * to end, and checks that a credential reached it and was withheld, so a round that fails for another reason does not pass for a proof.
  */
 
 const EMAIL = /[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/gu;

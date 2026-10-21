@@ -249,6 +249,13 @@ export async function executeWorkflowE2EApplicationChecks(input: {
     || canonicalJson([...runIds].sort()) !== canonicalJson([...reference.groupRunIds].sort()) || new Set(runIds).size !== runIds.length) {
     throw new Error("native E2E application admission does not match the signed CHECKS invocation");
   }
+  // M1.3 Task 3.7b: a baseline round (the approved scenarios on the unchanged code) is a kind of its own. The operation's signed reference and the admission it names must agree on
+  // that kind, on the base commit and on the attempt, so a baseline is never run as a candidate round and a candidate round is never run as a baseline.
+  const signedBaseline = admission.baseline;
+  if ((reference.purpose === "baseline") !== (signedBaseline !== undefined) || (signedBaseline !== undefined
+    && (signedBaseline.baseCommitSha !== reference.baseCommitSha || signedBaseline.attempt !== reference.attempt || signedBaseline.baseCommitSha !== admission.candidateCommitSha))) {
+    throw new Error("native E2E baseline admission does not match the purpose, base commit and attempt of the signed CHECKS reference");
+  }
   const validated = validateE2EApplicationExecutionAdmission(admission);
   // The portable child groups of a mixed plan are not executed here; running them would be a second authority, so they are refused rather than skipped.
   if (admission.portableProjection !== null || admission.groups.some((group) => group.protocol !== "trusted-e2e-application/v1")

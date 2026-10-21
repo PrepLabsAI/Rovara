@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { GetObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
-import { E2E_DISPLAY_SCREENSHOT_MAX_BYTES, type E2EScenarioResults } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_TAG, E2E_DISPLAY_SCREENSHOT_MAX_BYTES, type E2EDisplayBaseline, type E2EScenarioResults } from "@agentx/contracts";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { readWorkflowE2ENotifierProjection, workflowE2EArtifactKey } from "./workflow-e2e-notifier-projection.js";
 
@@ -25,7 +25,9 @@ export async function storeWorkflowE2EArtifacts(store: WorkflowE2EArtifactStore,
     if (artifact.contentType !== "image/jpeg" || artifact.bytes.byteLength === 0 || artifact.bytes.byteLength > E2E_DISPLAY_SCREENSHOT_MAX_BYTES
       || !isJpeg(artifact.bytes) || sha256Of(artifact.bytes) !== artifact.sha256) continue;
     await store.s3.send(new PutObjectCommand({ Bucket: store.artifactBucketName, Key: workflowE2EArtifactKey(owner.ownerKey, owner.workspaceId, artifact.sha256),
-      Body: artifact.bytes, ContentType: artifact.contentType, Metadata: { sha256: artifact.sha256 } }));
+      Body: artifact.bytes, ContentType: artifact.contentType, Metadata: { sha256: artifact.sha256 },
+      // Owner decision D4: the bucket expires an object that carries this tag after 30 days (a rule on the artifact bucket), and this is the only object that does.
+      Tagging: E2E_ARTIFACT_RETENTION_TAG }));
     stored.add(artifact.sha256);
   }
   return stored;
@@ -72,12 +74,14 @@ export async function loadStoredScenarioResults(store: WorkflowE2EArtifactStore,
  * The screenshot a digest names, when the task's current display has a row (or a baseline row) that links it and the stored object is exactly those bytes. Anything else is
  * undefined: a digest that no row names is not served, however it came to be in the task's storage.
  */
-export async function loadWorkflowE2EArtifact(store: WorkflowE2EArtifactStore, task: Pick<DeveloperTaskRecord, "ownerKey" | "workspaceId" | "workflow">, sha256: string):
+export async function loadWorkflowE2EArtifact(store: WorkflowE2EArtifactStore, task: Pick<DeveloperTaskRecord, "ownerKey" | "workspaceId" | "workflow">, sha256: string,
+  /** The baseline round's own record (Task 3.7b): its rows are the task's to read as soon as it is recorded, before any display names them. */
+  extra: { baseline?: E2EDisplayBaseline } = {}):
   Promise<{ contentType: "image/jpeg"; bytes: Uint8Array } | undefined> {
   if (!/^[a-f0-9]{64}$/u.test(sha256)) return undefined;
   const results = await loadStoredScenarioResults(store, task);
-  if (results === undefined) return undefined;
-  const ref = [...results.scenarios, ...(results.baseline?.scenarios ?? [])].find((row) => row.screenshotRef?.sha256 === sha256)?.screenshotRef;
+  if (results === undefined && extra.baseline === undefined) return undefined;
+  const ref = [...(results?.scenarios ?? []), ...(results?.baseline?.scenarios ?? []), ...(extra.baseline?.scenarios ?? [])].find((row) => row.screenshotRef?.sha256 === sha256)?.screenshotRef;
   if (ref === undefined) return undefined;
   const bytes = await readPrivateObject(store, workflowE2EArtifactKey(task.ownerKey, task.workspaceId, sha256), ref.bytes);
   if (bytes === undefined || bytes.byteLength !== ref.bytes || sha256Of(bytes) !== sha256 || !isJpeg(bytes)) return undefined;

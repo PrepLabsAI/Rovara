@@ -17,6 +17,7 @@ import type { WorkerTerminalResult } from "./server.js";
 import type { CodeBuildSink } from "./codebuild.js";
 import type { CommittedCandidateSourceExport } from "./verification/candidate.js";
 import type { CandidateBuildSourceExport } from "./e2e-build-source-export.js";
+import type { BaselineSourceExport } from "./baseline-source-export.js";
 
 export type TerminalResultSink = (result: WorkerTerminalResult) => Promise<void>;
 
@@ -89,6 +90,8 @@ export function createWorkerCallbackSinks(input: {
   candidateSourceExportSink: (source: CommittedCandidateSourceExport) => Promise<void>;
   /** Reports the build source manifest of the candidate that candidateSourceExportSink just exported, or why there is none. Separate from, and after, that export. */
   candidateBuildSourceSink: (buildSource: CandidateBuildSourceExport) => Promise<void>;
+  /** M1.3 Task 3.7b: reports the unchanged code (the task's base commit) the coding run exported for the baseline round, or why there is none. Separate from, and after, the candidate's. */
+  baselineSourceSink: (source: BaselineSourceExport) => Promise<void>;
   workflowE2EAdmissionReader: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
   workflowE2EEvidenceSink: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
   feedbackBundleReader: FeedbackBundleReader;
@@ -169,6 +172,29 @@ export function createWorkerCallbackSinks(input: {
         bytesBase64: chunk.toString("base64"), sha256: createHash("sha256").update(chunk).digest("hex") });
     }
     await postForResult("candidate-build-source", { stage: "finalize", schemaVersion: "workflow-candidate-build-source-finalize/v1", uploadId, sha256 });
+  };
+  const baselineSourceSink = async (source: BaselineSourceExport): Promise<void> => {
+    const reason = source.status === "UNAVAILABLE" ? source.reason : source.buildSource.status === "UNAVAILABLE" ? `the build source of the unchanged code is unavailable: ${source.buildSource.reason}` : undefined;
+    if (reason !== undefined || source.status !== "READY" || source.buildSource.status !== "READY") {
+      await postForResult("baseline-source", { stage: "unavailable", schemaVersion: "workflow-baseline-source-unavailable/v1", reason: reason ?? "the unchanged code was not exported" });
+      return;
+    }
+    const bytes = Buffer.from(JSON.stringify({ schemaVersion: "workflow-baseline-source/v1", sourceBase64: Buffer.from(JSON.stringify(source.source), "utf8").toString("base64"),
+      manifestBase64: Buffer.from(JSON.stringify(source.buildSource.manifest), "utf8").toString("base64") }), "utf8");
+    const chunkBytes = 64 * 1024;
+    const chunkCount = Math.ceil(bytes.byteLength / chunkBytes);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const initialized = await postForResult("baseline-source", { stage: "init", schemaVersion: "workflow-baseline-source-upload/v1", totalBytes: bytes.byteLength, chunkCount, sha256 });
+    if (!initialized || typeof initialized !== "object" || typeof (initialized as { uploadId?: unknown }).uploadId !== "string"
+      || (initialized as { chunkBytes?: unknown }).chunkBytes !== chunkBytes || (initialized as { chunkCount?: unknown }).chunkCount !== chunkCount) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "baseline source upload initialization is invalid");
+    }
+    const uploadId = (initialized as { uploadId: string }).uploadId;
+    for (let index = 0; index < chunkCount; index += 1) {
+      const chunk = bytes.subarray(index * chunkBytes, Math.min((index + 1) * chunkBytes, bytes.byteLength));
+      await postForResult("baseline-source", { stage: "chunk", schemaVersion: "workflow-baseline-source-chunk/v1", uploadId, index, bytesBase64: chunk.toString("base64"), sha256: createHash("sha256").update(chunk).digest("hex") });
+    }
+    await postForResult("baseline-source", { stage: "finalize", schemaVersion: "workflow-baseline-source-finalize/v1", uploadId, sha256 });
   };
   const workflowE2EAdmissionReader = async (reference: E2EWorkflowAdmissionRef, offset: number) => {
     const value = await postForResult("e2e-admission", { stage: "read", offset, sha256: reference.admissionRef.sha256 });
@@ -290,6 +316,7 @@ export function createWorkerCallbackSinks(input: {
     },
     candidateSourceExportSink,
     candidateBuildSourceSink,
+    baselineSourceSink,
     workflowE2EAdmissionReader,
     workflowE2EEvidenceSink,
   };

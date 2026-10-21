@@ -23,6 +23,16 @@ export const E2E_DISPLAY_ASSERTION_KINDS = ["text", "visible", "csv", "http-stat
 /** A kept screenshot is at most this large (the executor's own bound), so a row can never point at a bigger object. */
 export const E2E_DISPLAY_SCREENSHOT_MAX_BYTES = 524_288;
 
+/**
+ * How long a stored screenshot lives (M1.3 Task 3.7b, owner decision D4: 30 days). The artifact bucket expires the object that carries this tag; S3 lifecycle filters match the
+ * start of a key, and a screenshot's key starts like every other private object's, so the tag is what tells it apart. The broker puts the tag on a screenshot and on nothing else.
+ */
+export const E2E_ARTIFACT_RETENTION_DAYS = 30;
+export const E2E_ARTIFACT_RETENTION_TAG_KEY = "rovara-retention";
+export const E2E_ARTIFACT_RETENTION_TAG_VALUE = "e2e-screenshot";
+/** The `x-amz-tagging` form of the tag. */
+export const E2E_ARTIFACT_RETENTION_TAG = `${E2E_ARTIFACT_RETENTION_TAG_KEY}=${E2E_ARTIFACT_RETENTION_TAG_VALUE}`;
+
 export const E2EDisplayScenarioSchema = z.object({
   scenarioId: z.string().min(1).max(120),
   title: z.string().min(1).max(120),
