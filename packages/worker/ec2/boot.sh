@@ -439,6 +439,7 @@ readonly EVIDENCE_HOST=${AGENTX_HOST_ROOT:-}/mnt/workspace/.agentx-runtime/evide
 readonly EVIDENCE_CONTAINER=/mnt/agentx-runtime/evidence
 readonly CHALLENGE_NAME=runtime-install-challenge.json
 readonly PROPOSAL_NAME=runtime-install-proposal.json
+readonly FAILURE_NAME=runtime-install-failure.json
 readonly CHALLENGE_MAX_BYTES=65536
 readonly PROPOSAL_MAX_BYTES=5242880
 readonly POLL=${AGENTX_E2E_QUALIFICATION_POLL_SECONDS:-10}
@@ -462,6 +463,13 @@ EXTRA=",\"executorImage\":\"$EXECUTOR\""
 upload() { aws s3api put-object --bucket "$BUCKET" --key "$PREFIX$1" --body "$2" --server-side-encryption AES256 --region "$REGION" --no-cli-pager >/dev/null; }
 publish_status() {
   printf '{"state":"%s","reason":"%s","finishedAt":"%s"%s}\n' "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$EXTRA" >"$STAGE/status.json" && upload status.json "$STAGE/status.json"
+}
+# Only codes leave the failure file: 16 at most, the stage first (parts of at most 48 characters, so under 2 KB).
+add_failure() {
+  local f="$EVIDENCE_HOST/$FAILURE_NAME" c
+  [[ -f "$f" && ! -L "$f" ]] || return 0
+  c=$(head -c 16384 "$f" | grep -oE '"[a-z0-9-]{1,48}(:[a-z0-9-]{1,48})?"[],}]' | head -n 16 | tr -d '],}' | paste -sd, -)
+  EXTRA+=",\"failure\":{\"codes\":[$c]}"
 }
 fail_with() {
   log "failed: $1"
@@ -494,11 +502,11 @@ size=$(wc -c <"$fetched" | tr -d '[:space:]')
 ((size > 0 && size <= CHALLENGE_MAX_BYTES)) || fail_with challenge-size-rejected
 [[ -d "$EVIDENCE_HOST" && ! -L "$EVIDENCE_HOST" ]] || fail_with evidence-directory-unavailable
 chown 1000:1000 "$fetched" && chmod 0600 "$fetched" && mv -fT "$fetched" "$EVIDENCE_HOST/$CHALLENGE_NAME" || fail_with challenge-install-failed
-rm -f "$EVIDENCE_HOST/$PROPOSAL_NAME"
-timeout --foreground --kill-after=10s "${QUALIFY_SECONDS}s" docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js --profile "$PROFILE" --challenge-file "$EVIDENCE_CONTAINER/$CHALLENGE_NAME" --evidence-root "$EVIDENCE_CONTAINER" --out "$EVIDENCE_CONTAINER/$PROPOSAL_NAME" >"$STAGE/qualifier.log" 2>&1
+rm -f "$EVIDENCE_HOST/$PROPOSAL_NAME" "$EVIDENCE_HOST/$FAILURE_NAME"
+timeout --foreground --kill-after=10s "${QUALIFY_SECONDS}s" docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js --profile "$PROFILE" --challenge-file "$EVIDENCE_CONTAINER/$CHALLENGE_NAME" --evidence-root "$EVIDENCE_CONTAINER" --out "$EVIDENCE_CONTAINER/$PROPOSAL_NAME" --failure-out "$EVIDENCE_CONTAINER/$FAILURE_NAME" >"$STAGE/qualifier.log" 2>&1
 status=$?
 tail -c 2000 "$STAGE/qualifier.log" | while IFS= read -r line; do log "qualifier: $line"; done
-((status == 0)) || fail_with "qualification-failed-exit-$status"
+((status == 0)) || { add_failure; fail_with "qualification-failed-exit-$status"; }
 proposal="$EVIDENCE_HOST/$PROPOSAL_NAME"
 [[ -f "$proposal" && ! -L "$proposal" ]] || fail_with proposal-missing
 size=$(wc -c <"$proposal" | tr -d '[:space:]')
