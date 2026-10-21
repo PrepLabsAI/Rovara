@@ -1049,19 +1049,76 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
       expect(dispatched.taskNow().workflow.blockReason).toContain("The AI navigation settings changed");
     });
 
-    it("blocks with agent-route-not-approved, saying the settings are unreadable, when they cannot be read at dispatch", async () => {
-      const state = { current: async () => anthropic as Record<string, unknown> };
-      const { dispatched } = await agentRound(state);
-      state.current = async () => { throw new Error("ssm down"); };
-      await expectBlockedAtDispatch(dispatched, reason("agent-route-not-approved"));
-      expect(dispatched.taskNow().workflow.blockReason).toMatch(/could not be read/);
+    const awsError = (name: string, status?: number) => Object.assign(new Error(name), { name, ...(status === undefined ? {} : { $metadata: { httpStatusCode: status } }) });
+    const latestRead = (input: Record<string, unknown>) => String((input.Key as { sk?: string } | undefined)?.sk).startsWith("E2E_MODEL_ROUTE_LATEST#");
+    const budgetRead = (input: Record<string, unknown>) => String((input.Key as { sk?: string } | undefined)?.sk).startsWith("E2E_MODEL_BUDGET#");
+
+    describe("a fault that is not deterministic stays retryable (Ruling M4-AE): the dispatch row is kept, with its attempt counted, and the task is not blocked", () => {
+      async function expectRetryable(dispatched: Awaited<ReturnType<typeof atChecksDispatch>>) {
+        await dispatched.runDispatch();
+        expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+        expect(dispatched.taskNow().workflow.blockReason).toBeUndefined();
+        expect(dispatched.dispatchRow()).toMatchObject({ attempts: 1 });
+        expect(dispatched.checksOperations()).toEqual([]);
+      }
+
+      it.each([["DynamoDB throttling", awsError("ProvisionedThroughputExceededException")], ["DynamoDB request limit", awsError("RequestLimitExceeded")],
+        ["DynamoDB throttling by name", awsError("ThrottlingException")], ["an InternalServerError", awsError("InternalServerError")], ["a 503", awsError("ServiceUnavailable", 503)],
+        ["an abort", awsError("AbortError")], ["a timeout", awsError("TimeoutError")]])(
+        "when the registry read fails with %s", async (_name, error) => {
+          const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+          planned.harness.db.injectFault({ command: "GetCommand", match: latestRead, error, times: 1 });
+          await expectRetryable(dispatched);
+        });
+
+      it("when the budget row read fails with throttling", async () => {
+        const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+        planned.harness.db.injectFault({ command: "GetCommand", match: budgetRead, error: awsError("ThrottlingException"), times: 1 });
+        await expectRetryable(dispatched);
+      });
+
+      it.each([["SSM throttling", awsError("ThrottlingException")], ["an SSM 5xx", awsError("InternalServerError", 500)], ["a network error", Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" })]])(
+        "when the installation's settings fail with %s", async (_name, error) => {
+          const state = { current: async () => anthropic as Record<string, unknown> };
+          const { dispatched } = await agentRound(state);
+          state.current = async () => { throw error; };
+          await expectRetryable(dispatched);
+        });
+
+      it("and the next sweep, once the fault is gone, goes on to the candidate checks", async () => {
+        const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+        planned.harness.db.injectFault({ command: "GetCommand", match: latestRead, error: awsError("ThrottlingException"), times: 1 });
+        await dispatched.runDispatch();
+        expect(dispatched.taskNow().workflow.state).toBe("WAITING");
+        // The backoff is not waited out here: the row is made due again.
+        planned.harness.db.set({ ...dispatched.dispatchRow()!, dispatchDueSk: `2000-01-01T00:00:00.000Z#${String(dispatched.dispatchRow()!.sk)}`, nextAttemptAt: "2000-01-01T00:00:00.000Z" });
+        await dispatched.runDispatch();
+        expect(dispatched.taskNow().workflow.blockReason).toContain("no committed source export");
+      });
     });
 
-    it("blocks with a plain dispatch refusal, not a generic failure, when the table cannot be read at dispatch", async () => {
-      const { planned, dispatched } = await agentRound({ current: async () => anthropic });
-      planned.harness.db.injectFault({ command: "GetCommand", match: (input) => String((input.Key as { sk?: string } | undefined)?.sk).startsWith("E2E_MODEL_ROUTE_LATEST#"),
-        error: { name: "InternalServerError" }, times: 5 });
-      await expectBlockedAtDispatch(dispatched, reason("agent-route-not-approved"));
+    describe("a refusal that is deterministic is a terminal block with its code", () => {
+      it.each([["settings that are missing (ParameterNotFound)", awsError("ParameterNotFound")], ["settings that cannot be read for want of permission (AccessDenied)", awsError("AccessDeniedException")],
+        ["settings that fail for a reason of their own", new Error("ssm down")]])("for %s", async (_name, error) => {
+        const state = { current: async () => anthropic as Record<string, unknown> };
+        const { dispatched } = await agentRound(state);
+        state.current = async () => { throw error; };
+        await expectBlockedAtDispatch(dispatched, reason("agent-route-not-approved"));
+        expect(dispatched.taskNow().workflow.blockReason).toMatch(/could not be read/);
+      });
+
+      it("for a registry read that is denied", async () => {
+        const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+        planned.harness.db.injectFault({ command: "GetCommand", match: latestRead, error: awsError("AccessDeniedException"), times: 5 });
+        await expectBlockedAtDispatch(dispatched, reason("agent-route-not-approved"));
+      });
+
+      it("for a latest-route row that is malformed", async () => {
+        const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+        const row = planned.harness.db.get("E2E_MODEL_ROUTES", "E2E_MODEL_ROUTE_LATEST#rovara-e2e-default")!;
+        planned.harness.db.set({ ...row, revisionNumber: "not-a-number" });
+        await expectBlockedAtDispatch(dispatched, reason("agent-route-not-approved"));
+      });
     });
 
     it("blocks with model-route-budget-exhausted before anything starts when the project's day has no room", async () => {

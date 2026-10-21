@@ -25,6 +25,27 @@ import type { E2EDayBudget, E2EDayLimits, E2EDayReservation } from "@agentx/mode
 
 export const E2E_MODEL_ROUTE_PARTITION = "E2E_MODEL_ROUTES" as const;
 
+const TRANSIENT_FAULT_NAMES: ReadonlySet<string> = new Set([
+  "ProvisionedThroughputExceededException", "ThrottlingException", "ThrottledException", "RequestLimitExceeded", "TooManyRequestsException", "InternalServerError",
+  "InternalFailure", "ServiceUnavailable", "ServiceUnavailableException", "RequestTimeout", "RequestTimeoutException", "TimeoutError", "AbortError",
+]);
+const TRANSIENT_NETWORK_CODES: ReadonlySet<string> = new Set(["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EAI_AGAIN", "EPIPE", "ENETUNREACH", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"]);
+
+/**
+ * Whether a failure to read DynamoDB or SSM is the kind that a later attempt can be expected to get past: throttling, a 5xx or InternalServerError, or a network, timeout or abort
+ * error. Anything else (AccessDenied, ParameterNotFound, a malformed row, a validation error) is deterministic and will fail the same way again.
+ */
+export function isTransientAwsFault(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const fault = error as { name?: unknown; code?: unknown; $metadata?: { httpStatusCode?: unknown }; $fault?: unknown; cause?: unknown };
+  if (typeof fault.name === "string" && TRANSIENT_FAULT_NAMES.has(fault.name)) return true;
+  if (typeof fault.code === "string" && TRANSIENT_NETWORK_CODES.has(fault.code)) return true;
+  const status = fault.$metadata?.httpStatusCode;
+  if (typeof status === "number" && (status >= 500 || status === 429)) return true;
+  if (fault.$fault === "server") return true;
+  return fault.cause !== undefined && fault.cause !== error ? isTransientAwsFault(fault.cause) : false;
+}
+
 export const e2eModelRouteRevisionKey = (routeId: string, revisionNumber: number) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE#${routeId}#REV#${revisionNumber}` });
 export const e2eModelRouteLatestKey = (routeId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_LATEST#${routeId}` });
 export const e2eModelRouteCanaryKey = (routeId: string, definitionDigest: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_CANARY#${routeId}#${definitionDigest}` });

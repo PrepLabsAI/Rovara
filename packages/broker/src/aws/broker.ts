@@ -288,7 +288,7 @@ import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationR
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
-import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRoutePolicyLimits, e2eDayBudgetRoom, planE2EAgentRoute,
+import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
 import { applicationEvidenceLimits, verifyApplicationE2EEvidence } from "../e2e/application-evidence.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
@@ -10371,16 +10371,18 @@ export async function requireAgentRouteStillCurrent(dependencies: AwsBrokerDepen
   const agentSteps = intent.scenarios.reduce((total, scenario) => total + scenario.steps.filter((step) => step.kind === "agent").length, 0);
   if (agentSteps === 0) return false;
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
-  // Whatever cannot be read (the installation's settings, the registry, the budget row) is a plain refusal with its code, never a generic failure: no round starts without the check.
-  const unreadable = (what: string) => new ApplicationDispatchRefusal(`agent-route-not-approved: ${what} could not be read, so the AI navigation steps were not started. Retry the checks once it can be`);
+  // No round starts without the check. What cannot be read for a lasting reason (settings missing or denied, a malformed row) is a plain refusal with its code. A fault that a later
+  // attempt can get past (throttling, a 5xx, a network error, a timeout) is rethrown, so the dispatch takes its ordinary bounded retry path and the task is not blocked.
+  const unreadable = (what: string, error: unknown): Error => isTransientAwsFault(error) ? (error instanceof Error ? error : new Error(String(error)))
+    : new ApplicationDispatchRefusal(`agent-route-not-approved: ${what} could not be read, so the AI navigation steps were not started. Retry the checks once it can be`);
   let installation: E2EAgentInstallation;
   try {
     if (dependencies.e2eAgentInstallation === undefined) throw new Error("not configured");
     installation = await dependencies.e2eAgentInstallation();
-  } catch { throw unreadable("The AI navigation settings of this installation"); }
+  } catch (error) { throw unreadable("The AI navigation settings of this installation", error); }
   let check: Awaited<ReturnType<typeof checkE2EAgentRouteCurrent>>;
   try { check = await checkE2EAgentRouteCurrent(store, installation, policy.modelRouteRevision); }
-  catch { throw unreadable("The approved AI navigation route"); }
+  catch (error) { throw unreadable("The approved AI navigation route", error); }
   if (!check.ok) throw new ApplicationDispatchRefusal(`${check.code}: ${check.detail}`);
   const derived = deriveE2EAgentRoute(installation);
   const budgets = derived.status === "available" ? derived.definition.budgets : E2E_MODEL_ROUTE_DEFAULT_BUDGETS;
@@ -10388,7 +10390,7 @@ export async function requireAgentRouteStillCurrent(dependencies: AwsBrokerDepen
   const need = { calls, inputTokens: Math.min(budgets.maxInputTokensPerGroup, calls * budgets.maxInputTokens) };
   let room: boolean;
   try { room = await e2eDayBudgetRoom({ ...store, projectName, now: Date.now() }, need, { maxInputTokens: budgets.maxInputTokensPerProjectDay, maxCalls: budgets.maxCallsPerProjectDay }); }
-  catch { throw unreadable("The project's daily AI navigation budget"); }
+  catch (error) { throw unreadable("The project's daily AI navigation budget", error); }
   if (!room) throw new ApplicationDispatchRefusal("model-route-budget-exhausted: This project's daily AI navigation budget is spent, so the checks did not start. They can run again tomorrow (UTC)");
   return true;
 }

@@ -6,7 +6,7 @@ import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/confi
 import { E2E_BUDGET_EXHAUSTED_PREFIX, createGovernedE2EModelRoute } from "../../packages/model-runtime/src/e2e-route.js";
 import {
   E2E_MODEL_ROUTE_PARTITION, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, createBrokerE2EDayBudget, deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest,
-  e2eDayBudgetRoom, e2eModelBudgetKey, e2eModelRouteCanaryKey, e2eModelRouteLatestKey, planE2EAgentRoute, readE2EModelRouteLatest, type E2EAgentInstallation,
+  e2eDayBudgetRoom, e2eModelBudgetKey, isTransientAwsFault, e2eModelRouteCanaryKey, e2eModelRouteLatestKey, planE2EAgentRoute, readE2EModelRouteLatest, type E2EAgentInstallation,
 } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { E2E_MODEL_ROUTE } from "../../scripts/test-deploy-check.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -497,4 +497,18 @@ describe("a project's policy carries the approved revision", () => {
       limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
     expect(E2EPolicySchema.parse(policy).modelRouteRevision).toBe(revision);
   });
+});
+
+describe("which read failures a later attempt can get past (Ruling M4-AE)", () => {
+  const named = (name: string, extra: Record<string, unknown> = {}) => Object.assign(new Error(name), { name, ...extra });
+  it.each([
+    ["DynamoDB throttling", named("ProvisionedThroughputExceededException")], ["a request limit", named("RequestLimitExceeded")], ["throttling", named("ThrottlingException")],
+    ["an InternalServerError", named("InternalServerError")], ["a 5xx status", named("Whatever", { $metadata: { httpStatusCode: 502 } })], ["a 429 status", named("Whatever", { $metadata: { httpStatusCode: 429 } })],
+    ["a server fault", named("Whatever", { $fault: "server" })], ["a network reset", named("Error", { code: "ECONNRESET" })], ["a connect timeout", named("Error", { code: "ETIMEDOUT" })],
+    ["a timeout", named("TimeoutError")], ["an abort", named("AbortError")], ["a transient cause behind a wrapper", named("Error", { cause: named("ThrottlingException") })],
+  ])("is transient: %s", (_label, error) => { expect(isTransientAwsFault(error)).toBe(true); });
+  it.each([
+    ["access denied", named("AccessDeniedException", { $metadata: { httpStatusCode: 400 } })], ["a missing parameter", named("ParameterNotFound")], ["a validation error", named("ValidationException")],
+    ["a malformed row", new Error("the stored latest route revision cannot be read")], ["a conditional failure", named("ConditionalCheckFailedException")], ["a string", "boom"], ["nothing", undefined],
+  ])("is deterministic: %s", (_label, error) => { expect(isTransientAwsFault(error)).toBe(false); });
 });
