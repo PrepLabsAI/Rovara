@@ -136,7 +136,9 @@ export function bedrockConverseOutput(identifier: string, response: ConverseComm
     servedModelId: identifier,
     content,
     finishReason: finishOf(response.stopReason),
-    usage: { inputTokens: (usage?.inputTokens ?? 0) + (usage?.cacheReadInputTokens ?? 0) + (usage?.cacheWriteInputTokens ?? 0), outputTokens: usage?.outputTokens ?? 0 },
+    // No usage is passed on as none, never as zero: the route then fails closed and counts its reserved bound.
+    usage: usage?.inputTokens === undefined || usage.outputTokens === undefined ? undefined
+      : { inputTokens: usage.inputTokens + (usage.cacheReadInputTokens ?? 0) + (usage.cacheWriteInputTokens ?? 0), outputTokens: usage.outputTokens },
   };
 }
 

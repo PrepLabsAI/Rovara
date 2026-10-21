@@ -41,10 +41,21 @@ const SHAPES: readonly RegExp[] = [
 type Call = E2EModelChannelRequest["call"];
 
 export type CredentialInspection =
-  | { refuse: true; category: "password" | "cookie" | "credential-shape" | "account-identity" }
+  | { refuse: true; category: "password" | "cookie" | "credential-shape" | "account-identity" | "unscannable-credential" }
   | { refuse: false; call: Call; redactions: number };
 
+export interface E2ECredentialGuardOptions {
+  /**
+   * What to do with a value too short to scan for safely. `throw` is for the seeded set at start (the run cannot begin);
+   * `latch` is for values reported during a run, where a throw would be an unhandled failure: the guard then refuses
+   * every later call instead.
+   */
+  onUnscannable?: "throw" | "latch";
+}
+
 export interface E2ECredentialGuard {
+  /** True once a value that cannot be scanned was supplied (latch mode): every inspection refuses. */
+  readonly unscannable: boolean;
   /** Decides whether the call may go to the provider, and returns the call with page-text emails replaced. */
   inspect(call: Call): CredentialInspection;
   /** A copy of any JSON value with every credential, email and credential-shaped string replaced, for evidence. */
@@ -65,13 +76,21 @@ function secretVariants(values: readonly string[], label: string): string[] {
   return [...out];
 }
 
-export function createE2ECredentialGuard(set: E2ECredentialSet): E2ECredentialGuard {
-  const passwords = secretVariants(set.passwords, "password");
+export function createE2ECredentialGuard(set: E2ECredentialSet, guardOptions: E2ECredentialGuardOptions = {}): E2ECredentialGuard {
+  let unscannable = false;
+  const latch = guardOptions.onUnscannable === "latch";
+  const scanned = (values: readonly string[], label: string): string[] => {
+    // A value that cannot be scanned is dropped here and, in latch mode, refuses every call; in throw mode it fails the start.
+    const kept = latch ? values.filter((value) => value === "" || value.length >= MIN_SCANNABLE_SECRET_LENGTH) : values;
+    if (latch && kept.length !== values.length) unscannable = true;
+    return secretVariants(kept, label);
+  };
+  const passwords = scanned(set.passwords, "password");
   const cookieSeeds = set.cookieValues.flatMap((line) => {
     const afterName = /^[^=;\s]+=([^;]+)/.exec(line)?.[1];
     return afterName !== undefined && afterName.length >= MIN_SCANNABLE_SECRET_LENGTH ? [line, afterName] : [line];
   });
-  const cookies = secretVariants(cookieSeeds, "cookie value");
+  const cookies = scanned(cookieSeeds, "cookie value");
   const emails = [...new Set(set.emails.filter((email) => email !== ""))];
   const localParts = [...new Set(emails.map((email) => email.split("@")[0] ?? "").filter((local) => local.length >= MIN_LOCAL_PART_LENGTH))];
   const emailPattern = emails.length === 0 ? undefined : new RegExp(emails.map(escapeRegExp).join("|"), "gi");
@@ -106,11 +125,12 @@ export function createE2ECredentialGuard(set: E2ECredentialSet): E2ECredentialGu
   function scrubValue<T>(value: T): T {
     if (typeof value === "string") return scrubText(value) as T;
     if (Array.isArray(value)) return (value as unknown[]).map((item) => scrubValue(item)) as T;
-    if (typeof value === "object" && value !== null) return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, scrubValue(item)])) as T;
+    if (typeof value === "object" && value !== null) return Object.fromEntries(Object.entries(value).map(([key, item]) => [scrubText(key), scrubValue(item)])) as T;
     return value;
   }
 
   function inspect(call: Call): CredentialInspection {
+    if (unscannable) return { refuse: true, category: "unscannable-credential" };
     let refusal: Extract<CredentialInspection, { refuse: true }>["category"] | undefined;
     let redactions = 0;
     /** Text Rovara or the page wrote: secrets refuse, identity is replaced. */
@@ -159,5 +179,5 @@ export function createE2ECredentialGuard(set: E2ECredentialSet): E2ECredentialGu
     return { refuse: false, call: cleaned, redactions };
   }
 
-  return { inspect, scrubValue };
+  return { get unscannable() { return unscannable; }, inspect, scrubValue };
 }

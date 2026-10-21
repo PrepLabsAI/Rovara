@@ -11,7 +11,7 @@ import {
   e2eModelRouteRevision,
   type E2EModelReceipt,
 } from "../../packages/contracts/src/e2e-model-channel.js";
-import { createGovernedE2EModelRoute, type E2EInvoke } from "../../packages/model-runtime/src/e2e-route.js";
+import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget, type E2EInvoke } from "../../packages/model-runtime/src/e2e-route.js";
 import { startE2EModelProxy, type E2EModelEvidenceSink, type E2EModelProxy, type E2EModelTranscript } from "../../packages/worker/src/e2e-model-proxy.js";
 import { CASE_ID, MODEL_ID, RUN_ID, bedrockRoute, call, channelRequest, loweredBudgets, tapAnswer } from "../support/e2e-model-fixtures.js";
 
@@ -69,14 +69,15 @@ function post(body: unknown, options: { method?: string; path?: string; raw?: bo
 async function start(invoke: E2EInvoke, extra: Record<string, unknown> = {}, definition = bedrockRoute()) {
   let clock = Date.parse("2026-10-21T10:00:00.000Z");
   const now = () => (clock += 3);
-  const route = createGovernedE2EModelRoute(definition, { invoke, now });
+  const route = createGovernedE2EModelRoute(definition, { invoke, now, dayBudget: createInMemoryE2EDayBudget() });
   const evidence = new Sink();
+  const rest = Object.fromEntries(Object.entries(extra).filter(([key]) => key !== "begin"));
   const proxy = await startE2EModelProxy({
     socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence, deadlineAt: Date.parse("2026-10-21T11:00:00.000Z"), now,
-    ...extra,
+    ...rest,
   });
   proxies.push(proxy);
-  proxy.beginStep({ caseId: CASE_ID, stepIndex: 0 });
+  if (extra["begin"] !== false) proxy.beginStep({ caseId: CASE_ID, stepIndex: 0 });
   return { proxy, evidence, route, tick: (ms: number) => { clock += ms; } };
 }
 
@@ -120,7 +121,7 @@ describe("e2e model proxy: socket", () => {
   it("refuses a socket that exists as a regular file", async () => {
     const { writeFile } = await import("node:fs/promises");
     await writeFile(socketPath, "not a socket");
-    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now });
+    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
     await expect(startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000 })).rejects.toThrow(/not a socket/);
   });
 });
@@ -233,13 +234,13 @@ describe("e2e model proxy: budgets", () => {
 
   it("refuses a call that could pass the group's input token cap", async () => {
     const heavy: E2EInvoke = async () => tapAnswer({ usage: { inputTokens: 1_200, outputTokens: 20 } });
-    const budgets = loweredBudgets({ maxInputTokensPerGroup: 2_000 });
+    const budgets = loweredBudgets({ maxInputTokensPerGroup: 3_000 });
     const { proxy } = await start(heavy, { budgets });
     expect((await post(channelRequest())).body.result.status).toBe("ok");
     expect((await post(channelRequest({ callIndex: 1 }))).body.result).toMatchObject({ status: "error", code: "budget" });
     const { receipts } = await proxy.close();
     expect(checkE2EGroupModelBudget({ receipts, budgets })).toMatchObject({ ok: false, code: "budget-refused" });
-    expect(receipts.filter((item) => item.outcome !== "budget").reduce((total, item) => total + item.inputTokens, 0)).toBeLessThanOrEqual(2_000);
+    expect(receipts.filter((item) => item.outcome !== "budget").reduce((total, item) => total + item.inputTokens, 0)).toBeLessThanOrEqual(3_000);
   });
 
   it("uses the route's own lowered per-step budget", async () => {
@@ -348,21 +349,21 @@ describe("e2e model proxy: no credentials to the model", () => {
   it("stores no seeded credential in any transcript, receipt, summary or reply, refused calls included", async () => {
     const seen: unknown[] = [];
     const { proxy, evidence } = await start(okInvoke(seen));
-    const replies = [
-      await post(channelRequest({ callIndex: 0, callOverride: call(`#n1 textbox "Password" value="${PASSWORD}"`) })),
-      await post(channelRequest({ callIndex: 1, callOverride: call(`Signed in as ${EMAIL}; cookie ${COOKIE}; key ${AWS_KEY}`) })),
-      await post(channelRequest({ callIndex: 2, callOverride: call('#n2 textbox "File name"', { typed: LOCAL_PART }) })),
-      await post(channelRequest({ callIndex: 3, callOverride: call(`Signed in as ${EMAIL}`) })),
-    ];
+    // One refused call per step: a credential hit latches its step, so each shape needs a step of its own.
+    const replies = [await post(channelRequest({ callIndex: 0, callOverride: call(`#n1 textbox "Password" value="${PASSWORD}"`) }))];
+    proxy.beginStep({ caseId: CASE_ID, stepIndex: 1 });
+    replies.push(await post(channelRequest({ stepIndex: 1, callIndex: 0, callOverride: call(`Signed in as ${EMAIL}; cookie ${COOKIE}; key ${AWS_KEY}`) })));
+    proxy.beginStep({ caseId: CASE_ID, stepIndex: 2 });
+    replies.push(await post(channelRequest({ stepIndex: 2, callIndex: 0, callOverride: call('#n2 textbox "File name"', { typed: LOCAL_PART }) })));
     const summary = await proxy.close();
-    expect(summary.receipts.map((item) => item.outcome)).toEqual(["refused-credential-match", "refused-credential-match", "refused-credential-match", "ok"]);
+    expect(summary.receipts.map((item) => item.outcome)).toEqual(["refused-credential-match", "refused-credential-match", "refused-credential-match"]);
     const stored = JSON.stringify({ transcripts: evidence.transcripts, receipts: evidence.receipts, summary, replies: replies.map((item) => item.text), invoked: seen });
     const bytes = Buffer.from(stored, "utf8");
     for (const secret of SECRETS) {
       expect(bytes.includes(Buffer.from(secret, "utf8")), `${secret} leaked`).toBe(false);
       expect(bytes.includes(Buffer.from(JSON.stringify(secret).slice(1, -1), "utf8")), `${secret} leaked escaped`).toBe(false);
     }
-    expect(evidence.transcripts).toHaveLength(4);
+    expect(evidence.transcripts).toHaveLength(3);
     expect(evidence.transcripts.every((item) => item.prompt !== null)).toBe(true);
   });
 
@@ -377,8 +378,128 @@ describe("e2e model proxy: no credentials to the model", () => {
   });
 
   it("rejects a credential set it cannot scan safely", async () => {
-    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now });
+    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
     await expect(startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: { passwords: ["abc"], emails: [], cookieValues: [] }, evidence: new Sink(), deadlineAt: Date.now() + 60_000 })).rejects.toThrow(/too short/);
+  });
+});
+
+describe("e2e model proxy: fix round 1", () => {
+  it("F1: refuses a 200 KB prompt before invoke, and receipts never pass the group's token cap", async () => {
+    const invoke = vi.fn(okInvoke());
+    const { proxy } = await start(invoke);
+    const big = await post(channelRequest({ callOverride: call("y".repeat(200_000)) }));
+    expect(big.body.result).toMatchObject({ status: "error", code: "refused-protocol" });
+    expect(invoke).not.toHaveBeenCalled();
+    const { receipts } = await proxy.close();
+    expect(receipts[0]).toMatchObject({ outcome: "refused-protocol", inputTokens: 0 });
+    expect(checkE2EGroupModelBudget({ receipts, budgets: bedrockRoute().budgets })).toMatchObject({ ok: true });
+  });
+
+  it("F1: a provider count over the bound is charged to the group in full and shown in the summary", async () => {
+    const { proxy } = await start(async () => tapAnswer({ usage: { inputTokens: 70_000, outputTokens: 5 } }));
+    expect((await post(channelRequest())).body.result).toMatchObject({ code: "invalid-output" });
+    const summary = await proxy.close();
+    expect(summary.chargedInputTokens).toBe(70_000);
+    expect(summary.overrun).toBe(true);
+    expect(summary.receipts[0]!.inputTokens).toBe(64_000);
+  });
+
+  it("F3: applies the group's lowered per-call limits", async () => {
+    const seen: Array<{ max: number }> = [];
+    const budgets = loweredBudgets({ maxPromptBytes: 4_096, maxOutputTokens: 100 });
+    const { proxy } = await start(async (input) => { seen.push({ max: input.maxOutputTokens }); return tapAnswer(); }, { budgets });
+    expect((await post(channelRequest({ callOverride: call("x".repeat(6_000)) }))).body.result).toMatchObject({ code: "refused-protocol" });
+    expect((await post(channelRequest({ callIndex: 1 }))).body.result.status).toBe("ok");
+    expect(seen).toEqual([{ max: 100 }]);
+    await proxy.close();
+  });
+
+  it("F4: scans a cookie reported after the start, and latches refusal on a value it cannot scan instead of throwing", async () => {
+    const seen: unknown[] = [];
+    const { proxy } = await start(okInvoke(seen));
+    const late = "late-session-9a8b7c6d5e4f";
+    expect((await post(channelRequest({ callIndex: 0, callOverride: call(`cookie ${late}`) }))).body.result.status).toBe("ok");
+    proxy.addCredentialValues({ cookieValues: [`sid=${late}`] });
+    expect((await post(channelRequest({ callIndex: 1, callOverride: call(`cookie ${late}`) }))).body.result).toMatchObject({ code: "refused-credential-match" });
+    proxy.beginStep({ caseId: CASE_ID, stepIndex: 1 });
+    expect((await post(channelRequest({ stepIndex: 1, callIndex: 0 }))).body.result.status).toBe("ok");
+    expect(() => proxy.addCredentialValues({ cookieValues: ["abc"] })).not.toThrow();
+    expect((await post(channelRequest({ stepIndex: 1, callIndex: 1 }))).body.result).toMatchObject({ code: "refused-credential-match" });
+    expect((await post(channelRequest({ stepIndex: 1, callIndex: 2 }))).body.result).toMatchObject({ code: "refused-credential-match" });
+    expect(seen).toHaveLength(2);
+    await proxy.close();
+  });
+
+  it("F5: redacts object keys in stored transcripts", async () => {
+    const { proxy, evidence } = await start(okInvoke());
+    const callWithKey = call("#n2 textbox", { typed: "x" });
+    (callWithKey.prompt[2] as { content: Array<{ input: unknown }> }).content[0]!.input = { [PASSWORD]: "v", target: "n2" };
+    const reply = await post(channelRequest({ callOverride: callWithKey }));
+    expect(reply.body.result).toMatchObject({ code: "refused-credential-match" });
+    const summary = await proxy.close();
+    const stored = JSON.stringify({ transcripts: evidence.transcripts, summary });
+    expect(stored).not.toContain(PASSWORD);
+    expect(stored).not.toContain(JSON.stringify(PASSWORD).slice(1, -1));
+  });
+
+  it("F7: a route that fails inside gives a receipt, so there is no call index gap", async () => {
+    let first = true;
+    const dayBudget = { reserve: () => { if (first) { first = false; throw new Error("table unreachable"); } return { settle: () => undefined }; } };
+    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget });
+    const evidence = new Sink();
+    const proxy = await startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence, deadlineAt: Date.now() + 60_000 });
+    proxies.push(proxy);
+    proxy.beginStep({ caseId: CASE_ID, stepIndex: 0 });
+    expect((await post(channelRequest({ callIndex: 0 }))).body.result).toMatchObject({ code: "budget" });
+    expect((await post(channelRequest({ callIndex: 1 }))).body.result.status).toBe("ok");
+    expect((await proxy.close()).receipts.map((item) => [item.callIndex, item.outcome])).toEqual([[0, "budget"], [1, "ok"]]);
+  });
+
+  it("F8: needs a socket directory that only its owner can use, makes a missing one with mode 0700, and does not touch the process umask", async () => {
+    const { chmod, mkdir } = await import("node:fs/promises");
+    const open = join(dir, "open");
+    await mkdir(open);
+    await chmod(open, 0o755);
+    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
+    const base = { runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000 };
+    await expect(startE2EModelProxy({ ...base, socketPath: join(open, "m.sock") })).rejects.toThrow(/mode 0700/);
+    const umask = vi.spyOn(process, "umask");
+    const fresh = join(dir, "fresh", "model");
+    const proxy = await startE2EModelProxy({ ...base, socketPath: join(fresh, "model.sock") });
+    proxies.push(proxy);
+    expect((await stat(fresh)).mode & 0o777).toBe(0o700);
+    expect((await stat(join(fresh, "model.sock"))).mode & 0o777).toBe(0o600);
+    expect(umask).not.toHaveBeenCalled();
+    umask.mockRestore();
+  });
+
+  it("F13: after a credential match the step refuses every later call without reaching the provider; another step is not latched", async () => {
+    const seen: unknown[] = [];
+    const { proxy } = await start(okInvoke(seen));
+    expect((await post(channelRequest({ callIndex: 0, callOverride: call(`pw ${PASSWORD}`) }))).body.result).toMatchObject({ code: "refused-credential-match" });
+    const later = await post(channelRequest({ callIndex: 1 }));
+    expect(later.body.result).toMatchObject({ code: "refused-credential-match" });
+    expect(seen).toHaveLength(0);
+    proxy.beginStep({ caseId: CASE_ID, stepIndex: 1 });
+    expect((await post(channelRequest({ stepIndex: 1, callIndex: 0 }))).body.result.status).toBe("ok");
+    const { receipts } = await proxy.close();
+    expect(receipts.map((item) => item.outcome)).toEqual(["refused-credential-match", "refused-credential-match", "ok"]);
+  });
+
+  it("F14: a call before any step is refused with no receipt and no phantom step", async () => {
+    const invoke = vi.fn(okInvoke());
+    const { proxy } = await start(invoke, { begin: false });
+    const reply = await post(channelRequest());
+    expect(reply.body.result).toMatchObject({ status: "error", code: "refused-protocol" });
+    expect(invoke).not.toHaveBeenCalled();
+    for (let step = 0; step < 3; step += 1) {
+      proxy.beginStep({ caseId: CASE_ID, stepIndex: step });
+      expect((await post(channelRequest({ stepIndex: step, callIndex: 0 }))).body.result.status).toBe("ok");
+    }
+    const summary = await proxy.close();
+    expect(summary.unscopedRequests).toBe(1);
+    expect(summary.receipts).toHaveLength(3);
+    expect(checkE2EGroupModelBudget({ receipts: summary.receipts, budgets: bedrockRoute().budgets })).toMatchObject({ ok: true, agentSteps: 3 });
   });
 });
 
@@ -388,7 +509,7 @@ describe("e2e model proxy: the scripted route", () => {
   });
 
   it("is refused outside a qualification policy unless the CI harness sets ROVARA_E2E_SCRIPTED_MODEL=1", async () => {
-    const route = createGovernedE2EModelRoute(scriptedDefinition(), { invoke: async () => tapAnswer({ servedModelId: "rovara-scripted-v1" }), now: Date.now });
+    const route = createGovernedE2EModelRoute(scriptedDefinition(), { invoke: async () => tapAnswer({ servedModelId: "rovara-scripted-v1" }), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
     const base = { socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000 };
     await expect(startE2EModelProxy({ ...base, policyScope: "standard", environment: {} })).rejects.toThrow(/scripted/);
     await expect(startE2EModelProxy({ ...base, policyScope: "standard", environment: { ROVARA_E2E_SCRIPTED_MODEL: "0" } })).rejects.toThrow(/scripted/);

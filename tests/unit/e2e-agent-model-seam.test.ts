@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import { z } from "zod";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { E2EModelChannelRequest } from "../../packages/contracts/src/e2e-model-channel.js";
 import { createBedrockE2EInvoke } from "../../packages/model-runtime/src/e2e-bedrock-invoke.js";
-import { createGovernedE2EModelRoute } from "../../packages/model-runtime/src/e2e-route.js";
+import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
 import { startE2EModelProxy, type E2EModelProxy } from "../../packages/worker/src/e2e-model-proxy.js";
 import { CASE_ID, MODEL_ID, RUN_ID, bedrockRoute } from "../support/e2e-model-fixtures.js";
 import { createChannelLanguageModel } from "../support/e2e-model-adapter.js";
@@ -17,6 +17,30 @@ const root = new URL("../../", import.meta.url);
 interface Manifest { version?: string; dependencies?: Record<string, string>; devDependencies?: Record<string, string>; peerDependencies?: Record<string, string>; optionalDependencies?: Record<string, string> }
 const readJson = (path: string) => JSON.parse(readFileSync(new URL(path, root), "utf8")) as Manifest;
 const readLock = () => (JSON.parse(readFileSync(new URL("package-lock.json", root), "utf8")) as { packages: Record<string, { version?: string }> }).packages;
+
+/** Every non-test TypeScript source under a package tree (not node_modules or dist). */
+function sourceFiles(dir: string): string[] {
+  const base = new URL(`${dir}/`, root).pathname.replace(/\/$/, "");
+  const out: string[] = [];
+  const walk = (current: string) => {
+    for (const name of readdirSync(current)) {
+      if (name === "node_modules" || name === "dist") continue;
+      const path = join(current, name);
+      if (statSync(path).isDirectory()) walk(path);
+      else if (/\.(?:[cm]?[jt]sx?)$/.test(name) && !/\.d\.ts$/.test(name)) out.push(path);
+    }
+  };
+  walk(base);
+  return out;
+}
+
+/** Module specifiers a file names with from, import, import() or require(), in single, double or back quotes. */
+function specifiersOf(file: string): string[] {
+  const text = readFileSync(file, "utf8");
+  return [...text.matchAll(/(?:\bfrom|\bimport|\brequire)\s*\(?\s*(['"`])([^'"`\n]+)\1/g)].map((match) => match[2]!);
+}
+
+const isAiSpecifier = (specifier: string) => /^(?:ai|@ai-sdk)(?:\/|$)/.test(specifier);
 
 describe("Step 0: the pinned dependencies", () => {
   it("pins ai at 7.0.127 in the verifier package, and ai's @ai-sdk/provider is the copy e2e 0.20.0 pins", () => {
@@ -42,14 +66,30 @@ describe("Step 0: the pinned dependencies", () => {
     expect(withAi).toEqual(["verifier"]);
     expect(readJson("package.json").dependencies?.ai).toBeUndefined();
     expect(readJson("package.json").devDependencies?.ai).toBeUndefined();
-    const { execFileSync } = await import("node:child_process");
-    let importers = "";
-    try {
-      importers = execFileSync("grep", ["-rlE", "from \"(ai|@ai-sdk/[a-z-]+)\"|import\\(\"(ai|@ai-sdk/[a-z-]+)\"\\)", "packages/model-runtime/src", "packages/worker/src", "packages/broker/src", "packages/cli/src"], { cwd: new URL(".", root).pathname }).toString().trim();
-    } catch (error) {
-      if ((error as { status?: number }).status !== 1) throw error;
-    }
-    expect(importers, "no model-runtime, worker, broker or cli source imports ai").toBe("");
+    const offenders = sourceFiles("packages").filter((file) => !file.includes("/packages/verifier/")).flatMap((file) => specifiersOf(file).filter(isAiSpecifier).map((specifier) => `${file}: ${specifier}`));
+    expect(offenders, "no source outside the verifier imports ai or an @ai-sdk package, in any quote style, require or dynamic import").toEqual([]);
+  });
+
+  it("keeps ai out of the worker's module graph: no import of the verifier executor, and nothing reachable from the verifier's root loads ai", () => {
+    const workerLike = ["packages/worker", "packages/model-runtime", "packages/broker", "packages/cli"].flatMap((dir) => sourceFiles(`${dir}/src`));
+    const executorImports = workerLike.flatMap((file) => specifiersOf(file).filter((specifier) => /^@agentx\/verifier\/executor(?:\/|$)|verifier\/src\/executor|verifier\/dist\/executor/.test(specifier)).map((specifier) => `${file}: ${specifier}`));
+    expect(executorImports).toEqual([]);
+    const verifierSrc = new URL("packages/verifier/src/", root).pathname;
+    const seen = new Set<string>();
+    const reached: string[] = [];
+    const visit = (file: string) => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      for (const specifier of specifiersOf(file)) {
+        if (isAiSpecifier(specifier)) reached.push(`${file}: ${specifier}`);
+        if (!specifier.startsWith(".")) continue;
+        const target = join(file, "..", specifier.replace(/\.js$/, ".ts"));
+        if (target.startsWith(verifierSrc) && statSync(target, { throwIfNoEntry: false })?.isFile()) visit(target);
+      }
+    };
+    visit(join(verifierSrc, "index.ts"));
+    expect(seen.size).toBeGreaterThan(5);
+    expect(reached).toEqual([]);
   });
 
   it("has one @ai-sdk/provider in the lockfile, and no @ai-sdk package but the three ai needs itself", () => {
@@ -130,7 +170,7 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
     const converse: Converse[] = [];
     const answers = [toolUse("tooluse_a", "tap", { target: "n1" }), toolUse("tooluse_b", "complete_step", { status: "passed", summary: "Tapped the export button." })];
     const client = { send: async (command: { input: unknown }) => { converse.push(command.input as Converse); return answers[converse.length - 1]; } };
-    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: createBedrockE2EInvoke({ clientFor: () => client }), now: Date.now });
+    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: createBedrockE2EInvoke({ clientFor: () => client }), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
     proxy = await startE2EModelProxy({ socketPath: join(dir, "m.sock"), runId: RUN_ID, route, credentialSet: { passwords: [], emails: [], cookieValues: [] }, evidence: { writeReceipt: () => undefined, writeTranscript: () => undefined }, deadlineAt: Date.now() + 120_000 });
     proxy.beginStep({ caseId: CASE_ID, stepIndex: 0 });
 
@@ -174,7 +214,7 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
   it("does not resend when the channel fails: a refused call ends the step with one request", async () => {
     const converse: unknown[] = [];
     const client = { send: async (command: { input: unknown }) => { converse.push(command.input); throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException", $metadata: { httpStatusCode: 429 } }); } };
-    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: createBedrockE2EInvoke({ clientFor: () => client }), now: Date.now });
+    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: createBedrockE2EInvoke({ clientFor: () => client }), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
     proxy = await startE2EModelProxy({ socketPath: join(dir, "m.sock"), runId: RUN_ID, route, credentialSet: { passwords: [], emails: [], cookieValues: [] }, evidence: { writeReceipt: () => undefined, writeTranscript: () => undefined }, deadlineAt: Date.now() + 120_000 });
     proxy.beginStep({ caseId: CASE_ID, stepIndex: 0 });
     const model = createChannelLanguageModel({ socketPath: join(dir, "m.sock"), runId: RUN_ID, caseId: CASE_ID, stepIndex: 0 });

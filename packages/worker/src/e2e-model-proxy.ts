@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { chmod, chown, lstat, stat, unlink } from "node:fs/promises";
+import { chmod, chown, lstat, mkdir, stat, unlink } from "node:fs/promises";
+import { dirname } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES,
@@ -20,7 +21,7 @@ import {
   type E2EModelGenerateOutcome,
   type GovernedE2EModelRoute,
 } from "@agentx/model-runtime";
-import { createE2ECredentialGuard, type E2ECredentialSet } from "./e2e-model-credential-guard.js";
+import { createE2ECredentialGuard, type E2ECredentialGuard, type E2ECredentialSet } from "./e2e-model-credential-guard.js";
 import { isScriptedE2EModelAdmissible } from "./e2e-model-scripted.js";
 
 /**
@@ -53,6 +54,8 @@ export interface E2EModelTranscript {
   /** The answer, redacted. Null when omitted or when there was none. */
   response: string | null;
   omitted?: "budget" | "unparseable";
+  /** `usage-missing`: the provider reported no usage, so the reserved bound was counted. */
+  note?: "usage-missing";
 }
 
 /** Where the proxy writes. Receipts go to the worker's evidence; transcripts are operator-only and never reach a page. */
@@ -91,6 +94,12 @@ export interface E2EModelReceiptSummary {
   receipts: E2EModelReceipt[];
   /** Requests that could not be given a receipt because a step already held the 100 the schema can number. Anything but 0 fails the run closed. */
   droppedRequests: number;
+  /** Requests that arrived before any `beginStep`. They have no step to take a receipt, so they are counted here; anything but 0 means the executor called out of turn and the collector should fail closed. */
+  unscopedRequests: number;
+  /** Input tokens charged to the group, unclamped (a receipt holds at most 64000). */
+  chargedInputTokens: number;
+  /** True when a call was charged more than its receipt can show, or the group's input token cap was passed. Fails the run closed. */
+  overrun: boolean;
   /** Receipts or transcripts the evidence sink failed to write. Anything but 0 means the stored copy is incomplete. */
   evidenceErrors: number;
   transcriptBytes: number;
@@ -100,6 +109,11 @@ export interface E2EModelProxy {
   readonly socketPath: string;
   /** The run reached an agent step. Calls are attributed to it, and its deadline starts now. */
   beginStep(position: { caseId: string; stepIndex: number }): void;
+  /**
+   * Values learned during the run, such as `Set-Cookie` values after login. Later calls are scanned for them. A value
+   * too short to scan for safely does not throw: it latches the proxy to refuse every later call.
+   */
+  addCredentialValues(values: Partial<E2ECredentialSet>): void;
   /** The step ended. A call that arrives after is refused. */
   endStep(): void;
   receipts(): E2EModelReceipt[];
@@ -109,7 +123,6 @@ export interface E2EModelProxy {
 
 const DEFAULT_TRANSCRIPT_BUDGET_BYTES = 1_048_576;
 const MAX_CALL_INDEX = 99;
-const UNSCOPED = Object.freeze({ caseId: "unscoped", stepIndex: 0 });
 const sha256 = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 
 type Position = { caseId: string; stepIndex: number };
@@ -162,7 +175,10 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     throw new Error("a scripted model route is admitted only under a qualification policy or with ROVARA_E2E_SCRIPTED_MODEL=1");
   }
   const budgets = effectiveBudgets(definition.budgets, options.budgets);
-  const guard = createE2ECredentialGuard(options.credentialSet);
+  let credentials: E2ECredentialSet = {
+    passwords: [...options.credentialSet.passwords], emails: [...options.credentialSet.emails], cookieValues: [...options.credentialSet.cookieValues],
+  };
+  let guard: E2ECredentialGuard = createE2ECredentialGuard(credentials);
   const transcriptBudget = options.transcriptBudgetBytes ?? DEFAULT_TRANSCRIPT_BUDGET_BYTES;
   const stepCallLimit = budgets.maxActionsPerStep + budgets.extraModelCallsPerStep;
 
@@ -175,6 +191,10 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
   let groupCounted = 0;
   let groupInputTokens = 0;
   let droppedRequests = 0;
+  let unscopedRequests = 0;
+  let chargedInputTokens = 0;
+  let overrun = false;
+  const credentialLatched = new Set<string>();
   let evidenceErrors = 0;
   let transcriptBytes = 0;
   let lastStartedMs = 0;
@@ -190,14 +210,14 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     return state;
   };
 
-  async function record(receipt: E2EModelReceipt, extra: { prompt: string | null; response: string | null; omitted?: E2EModelTranscript["omitted"] }): Promise<void> {
+  async function record(receipt: E2EModelReceipt, extra: { prompt: string | null; response: string | null; omitted?: E2EModelTranscript["omitted"]; note?: E2EModelTranscript["note"] }): Promise<void> {
     receipts.push(receipt);
     try { await evidence.writeReceipt(receipt); } catch { evidenceErrors += 1; }
     let { prompt, response, omitted } = extra;
     const size = Buffer.byteLength(prompt ?? "", "utf8") + Buffer.byteLength(response ?? "", "utf8");
     if (omitted === undefined && transcriptBytes + size > transcriptBudget) { prompt = null; response = null; omitted = "budget"; }
     else transcriptBytes += size;
-    const transcript: E2EModelTranscript = { receiptId: receipt.receiptId, runId: receipt.runId, caseId: receipt.caseId, stepIndex: receipt.stepIndex, callIndex: receipt.callIndex, outcome: receipt.outcome, prompt, response, ...(omitted === undefined ? {} : { omitted }) };
+    const transcript: E2EModelTranscript = { receiptId: receipt.receiptId, runId: receipt.runId, caseId: receipt.caseId, stepIndex: receipt.stepIndex, callIndex: receipt.callIndex, outcome: receipt.outcome, prompt, response, ...(omitted === undefined ? {} : { omitted }), ...(extra.note === undefined ? {} : { note: extra.note }) };
     try { await evidence.writeTranscript(transcript); } catch { evidenceErrors += 1; }
   }
 
@@ -212,7 +232,12 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
   /** Everything up to the provider call is synchronous, so two requests can never both pass the same budget check. */
   async function serve(body: BodyRead): Promise<{ status: number; body: unknown }> {
     const startedAt = stamp();
-    const position = current?.position ?? last ?? UNSCOPED;
+    const position = current?.position ?? last;
+    if (position === null) {
+      // No step has begun. There is no step to take a receipt, and an invented one would use up an agent step slot.
+      unscopedRequests += 1;
+      return { status: 200, body: { schemaVersion: "rovara-e2e-model-channel/v1", receiptId: "unscoped", result: { status: "error", code: "refused-protocol", message: "no agent step has begun" } } };
+    }
     const state = stateFor(position);
     if (state.nextIndex > MAX_CALL_INDEX) {
       droppedRequests += 1;
@@ -234,6 +259,9 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     if (!countedSteps.has(stepKey(position)) && countedSteps.size >= budgets.maxAgentStepsPerGroup) return declined("budget", budgetMessage("the group's agent step limit is reached"), { counts: false });
     if (inFlight !== null) return declined("refused-busy", "another model call is in flight");
     if (closing) return declined("refused-busy", "the model channel is closing");
+    if (credentialLatched.has(stepKey(position)) || guard.unscannable) {
+      return declined("refused-credential-match", "model-prompt-credential-match: an earlier call in this step carried a credential, or a reported credential cannot be scanned", { omitted: "unparseable" });
+    }
     if (body.kind === "too-large") return declined("refused-protocol", `the request is over ${E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES} bytes`, { status: 413, omitted: "unparseable" });
     if (body.kind === "failed") return declined("refused-protocol", "the request body could not be read", { omitted: "unparseable" });
     if (current === null) return declined("refused-protocol", "no agent step is running", { omitted: "unparseable" });
@@ -251,10 +279,15 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
 
     const inspection = guard.inspect(request.call);
     if (inspection.refuse) {
+      credentialLatched.add(stepKey(position));
       return declined("refused-credential-match", "model-prompt-credential-match: the prompt carried a seeded credential or credential-shaped text", { promptSha256, prompt: redactedForEvidence() });
     }
     const promptBytes = Buffer.byteLength(canonicalJson(inspection.call), "utf8");
-    if (groupInputTokens + e2eReservedInputTokens(promptBytes, budgets) > budgets.maxInputTokensPerGroup) {
+    const bound = e2eReservedInputTokens(promptBytes);
+    if (bound > budgets.maxInputTokens) {
+      return declined("refused-protocol", `the prompt could pass the per-call input token limit of ${budgets.maxInputTokens} (upper bound ${bound})`, { promptSha256, prompt: redactedForEvidence() });
+    }
+    if (groupInputTokens + bound > budgets.maxInputTokensPerGroup) {
       return declined("budget", budgetMessage("the group's input token limit would be passed"), { counts: false, promptSha256, prompt: redactedForEvidence() });
     }
 
@@ -264,9 +297,23 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     let settle!: () => void;
     inFlight = new Promise<void>((resolve) => { settle = resolve; });
     try {
-      const outcome = await route.generate(sent, { signal: lifetime.signal, deadlineAt: Math.min(options.deadlineAt, stepDeadline), startedAt });
-      groupInputTokens += outcome.receipt.inputTokens;
-      await record(outcome.receipt, { prompt: JSON.stringify(guard.scrubValue(sent.call)), response: JSON.stringify(guard.scrubValue(outcome.result)) });
+      let outcome: E2EModelGenerateOutcome;
+      try {
+        outcome = await route.generate(sent, {
+          signal: lifetime.signal, deadlineAt: Math.min(options.deadlineAt, stepDeadline), startedAt,
+          budgets: { callTimeoutMs: budgets.callTimeoutMs, maxOutputTokens: budgets.maxOutputTokens, maxPromptBytes: budgets.maxPromptBytes, maxInputTokens: budgets.maxInputTokens },
+        });
+      } catch {
+        // The route failed inside. The request still gets a receipt, so call indexes stay contiguous.
+        outcome = route.decline(identity, "provider-error", "the model route failed", { promptSha256, startedAt });
+      }
+      groupInputTokens += outcome.chargedInputTokens;
+      chargedInputTokens += outcome.chargedInputTokens;
+      if (outcome.chargedInputTokens > outcome.receipt.inputTokens || groupInputTokens > budgets.maxInputTokensPerGroup) overrun = true;
+      await record(outcome.receipt, {
+        prompt: JSON.stringify(guard.scrubValue(sent.call)), response: JSON.stringify(guard.scrubValue(outcome.result)),
+        ...(outcome.usageMissing === true ? { note: "usage-missing" as const } : {}),
+      });
       const body = { schemaVersion: "rovara-e2e-model-channel/v1", ...answer(outcome) };
       return { status: 200, body: E2EModelChannelResponseSchema.parse(body) };
     } finally {
@@ -289,20 +336,25 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     })();
   });
 
+  // The socket lives in a directory only its owner can use, so there is no window in which another user could reach it
+  // between bind and chmod, and no change to the process umask (which every other file the worker creates would share).
+  const directory = dirname(socketPath);
+  const existed = await stat(directory).then(() => true, () => false);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  if (!existed) await chmod(directory, 0o700);
+  if (((await stat(directory)).mode & 0o077) !== 0) throw new Error("the model socket directory must be mode 0700");
   await prepareSocketPath(socketPath);
-  const previousUmask = process.umask(0o177);
-  try {
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(socketPath, () => { server.off("error", reject); resolve(); });
-    });
-  } finally {
-    process.umask(previousUmask);
-  }
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, () => { server.off("error", reject); resolve(); });
+  });
   try {
     await chmod(socketPath, 0o600);
     if (((await stat(socketPath)).mode & 0o777) !== 0o600) throw new Error("the model socket is not mode 0600");
-    if (options.socketOwner !== undefined) await chown(socketPath, options.socketOwner.uid, options.socketOwner.gid);
+    if (options.socketOwner !== undefined) {
+      await chown(directory, options.socketOwner.uid, options.socketOwner.gid);
+      await chown(socketPath, options.socketOwner.uid, options.socketOwner.gid);
+    }
   } catch (error) {
     await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
     await unlink(socketPath).catch(() => undefined);
@@ -329,13 +381,21 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     } finally {
       await unlink(socketPath).catch(() => undefined);
     }
-    return { runId, routeId: definition.routeId, routeRevision: route.routeRevision, receipts: orderedReceipts(), droppedRequests, evidenceErrors, transcriptBytes };
+    return { runId, routeId: definition.routeId, routeRevision: route.routeRevision, receipts: orderedReceipts(), droppedRequests, unscopedRequests, chargedInputTokens, overrun, evidenceErrors, transcriptBytes };
   }
 
   const proxy: E2EModelProxy = {
     socketPath,
     beginStep(position) { current = { position: { caseId: position.caseId, stepIndex: position.stepIndex }, startedMs: now() }; last = current.position; },
     endStep() { current = null; },
+    addCredentialValues(values) {
+      credentials = {
+        passwords: [...credentials.passwords, ...(values.passwords ?? [])],
+        emails: [...credentials.emails, ...(values.emails ?? [])],
+        cookieValues: [...credentials.cookieValues, ...(values.cookieValues ?? [])],
+      };
+      guard = createE2ECredentialGuard(credentials, { onUnscannable: "latch" });
+    },
     receipts: orderedReceipts,
     close() { closePromise ??= doClose(); return closePromise; },
   };

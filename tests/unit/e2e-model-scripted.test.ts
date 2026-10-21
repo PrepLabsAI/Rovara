@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { E2EModelChannelResponseSchema, E2EModelRouteDefinitionSchema, e2eModelRouteRevision } from "../../packages/contracts/src/e2e-model-channel.js";
-import { createGovernedE2EModelRoute } from "../../packages/model-runtime/src/e2e-route.js";
+import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
 import {
   SCRIPTED_E2E_ROUTE_ID,
   createScriptedE2EInvoke,
@@ -15,7 +15,7 @@ const GOAL = "export the orders";
 const SNAPSHOT = '#n1 button "Export orders" testid="export"\n#n2 textbox "File name"\n#n3 button "Delete all orders"';
 
 function routeFor(scripts: Record<string, never[] | readonly unknown[]>) {
-  return createGovernedE2EModelRoute(scriptedE2ERouteDefinition(), { invoke: createScriptedE2EInvoke({ scripts: scripts as never }), now: Date.now });
+  return createGovernedE2EModelRoute(scriptedE2ERouteDefinition(), { invoke: createScriptedE2EInvoke({ scripts: scripts as never }), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
 }
 
 describe("scripted e2e model route", () => {

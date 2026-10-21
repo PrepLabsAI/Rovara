@@ -54,15 +54,22 @@ export interface E2EInvokeOutput {
   servedModelId: string;
   content: ReadonlyArray<Record<string, unknown>>;
   finishReason: { unified: string; raw: string | null };
-  usage: { inputTokens: number; outputTokens: number };
+  /** Absent when the provider reported none. The route then fails closed and counts the reserved bound. */
+  usage?: { inputTokens: number; outputTokens: number } | undefined;
 }
 
 export type E2EInvoke = (input: E2EInvokeInput) => Promise<E2EInvokeOutput>;
 
+/** The day caps the route holds the budget to: the route definition's, never the budget's own. */
+export interface E2EDayLimits {
+  maxInputTokens: number;
+  maxCalls: number;
+}
+
 /** The project's day budget, kept outside the worker (the broker's table); the route only reserves and settles. */
 export interface E2EDayBudget {
-  /** Reserves one call and `inputTokens`, or returns null when either day cap would be passed. */
-  reserve(inputTokens: number): E2EDayReservation | null | Promise<E2EDayReservation | null>;
+  /** Reserves one call and `inputTokens`, or returns null when either day cap in `limits` would be passed. */
+  reserve(inputTokens: number, limits: E2EDayLimits): E2EDayReservation | null | Promise<E2EDayReservation | null>;
 }
 export interface E2EDayReservation {
   /** Settles the reservation with the tokens the provider reported. Not called when the spend is unknown, which keeps the reservation. */
@@ -74,12 +81,12 @@ export interface InMemoryE2EDayBudget extends E2EDayBudget {
 }
 
 /** A day budget held in memory: the test double, and a single-process fallback. The broker-backed one is Task 4.2's. */
-export function createInMemoryE2EDayBudget(input: { maxInputTokens: number; maxCalls: number; usedInputTokens?: number; usedCalls?: number }): InMemoryE2EDayBudget {
+export function createInMemoryE2EDayBudget(input: { usedInputTokens?: number; usedCalls?: number } = {}): InMemoryE2EDayBudget {
   let usedInputTokens = input.usedInputTokens ?? 0;
   let usedCalls = input.usedCalls ?? 0;
   return {
-    reserve(inputTokens) {
-      if (usedCalls + 1 > input.maxCalls || usedInputTokens + inputTokens > input.maxInputTokens) return null;
+    reserve(inputTokens, limits) {
+      if (usedCalls + 1 > limits.maxCalls || usedInputTokens + inputTokens > limits.maxInputTokens) return null;
       usedCalls += 1;
       usedInputTokens += inputTokens;
       let settled = false;
@@ -93,7 +100,8 @@ export interface GovernedE2EModelRouteDependencies {
   invoke: E2EInvoke;
   /** Milliseconds since the epoch. Injected so tests control time. */
   now: () => number;
-  dayBudget?: E2EDayBudget;
+  /** Required: a route with no day budget has no day cap. Its limits are the definition's `maxInputTokensPerProjectDay` and `maxCallsPerProjectDay`. */
+  dayBudget: E2EDayBudget;
   newReceiptId?: () => string;
 }
 
@@ -103,11 +111,17 @@ export interface E2EModelGenerateOptions {
   deadlineAt?: number;
   /** Epoch ms the request arrived, for the receipt. Defaults to the route's clock. */
   startedAt?: number;
+  /** Per-call limits a group lowered below the route's. They can only lower the route's own, never raise them. */
+  budgets?: Partial<Pick<Budgets, "callTimeoutMs" | "maxOutputTokens" | "maxPromptBytes" | "maxInputTokens">>;
 }
 
 export interface E2EModelGenerateOutcome {
   result: E2EModelChannelResult;
   receipt: E2EModelReceipt;
+  /** Input tokens to charge against the group and the day. Unlike the receipt's count (the schema holds at most 64000), it is never clamped. */
+  chargedInputTokens: number;
+  /** The provider reported no usage, so the reserved upper bound is charged. */
+  usageMissing?: true;
 }
 
 export interface E2EModelCallIdentity {
@@ -123,7 +137,7 @@ export interface GovernedE2EModelRoute {
   readonly routeRevision: string;
   generate(request: E2EModelChannelRequest, options?: E2EModelGenerateOptions): Promise<E2EModelGenerateOutcome>;
   /** A call the worker received and did not send to the provider (budget, busy, protocol, credential). It still gets a receipt. */
-  decline(identity: E2EModelCallIdentity, code: Exclude<E2EModelErrorCode, "provider-error" | "invalid-output">, message: string, options?: { promptSha256?: string; startedAt?: number }): E2EModelGenerateOutcome;
+  decline(identity: E2EModelCallIdentity, code: E2EModelErrorCode, message: string, options?: { promptSha256?: string; startedAt?: number }): E2EModelGenerateOutcome;
 }
 
 export const E2E_BUDGET_EXHAUSTED_PREFIX = "model-route-budget-exhausted";
@@ -141,13 +155,18 @@ export function e2ePromptSha256(call: unknown): string {
   return digestOf(call ?? null);
 }
 
+/** Room for what the provider adds around the prompt: the role markers and the tool-use preamble Claude models carry when tools are present. */
+const PROVIDER_PROMPT_OVERHEAD_TOKENS = 1_024;
+
 /**
- * Tokens to reserve for a call before it is made: an upper bound from the prompt's size (a token is at least a byte of
- * text in practice, and the tool and role overhead is small), capped at the route's per-call input bound. The group and
- * the day reserve this, then settle with what the provider reports, so neither can be passed by a call in flight.
+ * A true upper bound on the input tokens of a call, from the prompt's size alone: a token covers at least one byte of
+ * text, plus the provider's own overhead. It is deliberately not capped at the route's per-call bound: a prompt whose
+ * bound passes that limit (or the group's or the day's room) is refused before the call, so the bound is what the
+ * group and the day reserve and no call in flight can pass a cap. It is conservative: the effective prompt size is
+ * about `maxInputTokens - 1024` bytes until a token counter is wired in.
  */
-export function e2eReservedInputTokens(promptBytes: number, budgets: Pick<Budgets, "maxInputTokens">): number {
-  return Math.min(budgets.maxInputTokens, promptBytes + 256);
+export function e2eReservedInputTokens(promptBytes: number): number {
+  return promptBytes + PROVIDER_PROMPT_OVERHEAD_TOKENS;
 }
 
 /** The provider's failure in words that cannot carry the prompt: the error's name and HTTP status, nothing else. */
@@ -159,8 +178,11 @@ function describeProviderFailure(error: unknown): string {
   return detail === "" ? "provider call failed" : `provider call failed (${detail})`;
 }
 
-type Checked = { ok: true; result: Extract<E2EModelChannelResult, { status: "ok" }>; inputTokens: number; outputTokens: number }
-  | { ok: false; code: "invalid-output" | "provider-error"; message: string; inputTokens: number; outputTokens: number; raw: unknown };
+type Limits = Pick<Budgets, "callTimeoutMs" | "maxOutputTokens" | "maxPromptBytes" | "maxInputTokens">;
+type Failed = { ok: false; code: "invalid-output" | "provider-error"; message: string; inputTokens: number; outputTokens: number; raw: unknown; usageMissing?: true };
+type Checked = { ok: true; result: Extract<E2EModelChannelResult, { status: "ok" }>; inputTokens: number; outputTokens: number } | Failed;
+
+const RECEIPT_MAX_OUTPUT_TOKENS = 1_024;
 
 export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefinition, dependencies: GovernedE2EModelRouteDependencies): GovernedE2EModelRoute {
   const definition = E2EModelRouteDefinitionSchema.parse(rawDefinition);
@@ -169,39 +191,45 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
   const budgets = definition.budgets;
   const { invoke, now } = dependencies;
   const newReceiptId = dependencies.newReceiptId ?? (() => `rcpt-${randomUUID()}`);
+  const givenDayBudget = dependencies.dayBudget as E2EDayBudget | undefined;
+  if (givenDayBudget === undefined || typeof givenDayBudget.reserve !== "function") throw new Error("a governed e2e model route needs a day budget");
+  const dayBudget: E2EDayBudget = givenDayBudget;
+  const dayLimits: E2EDayLimits = { maxInputTokens: budgets.maxInputTokensPerProjectDay, maxCalls: budgets.maxCallsPerProjectDay };
 
   function receiptFor(identity: E2EModelCallIdentity, receiptId: string, fields: { startedAtMs: number; outcome: E2EModelReceipt["outcome"]; inputTokens: number; outputTokens: number; latencyMs: number; promptSha256: string; responseSha256: string | null }): E2EModelReceipt {
     return E2EModelReceiptSchema.parse({
       receiptId, runId: identity.runId, caseId: identity.caseId, stepIndex: identity.stepIndex, callIndex: identity.callIndex,
       routeId: definition.routeId, routeRevision, provider: definition.provider, modelId: definition.modelId,
       startedAt: new Date(fields.startedAtMs).toISOString(),
-      inputTokens: clamp(fields.inputTokens, 64_000), outputTokens: clamp(fields.outputTokens, budgets.maxOutputTokens),
+      inputTokens: clamp(fields.inputTokens, 64_000), outputTokens: clamp(fields.outputTokens, RECEIPT_MAX_OUTPUT_TOKENS),
       latencyMs: clamp(fields.latencyMs, 120_000), promptSha256: fields.promptSha256, responseSha256: fields.responseSha256, outcome: fields.outcome,
     });
   }
 
-  function decline(identity: E2EModelCallIdentity, code: Exclude<E2EModelErrorCode, "provider-error" | "invalid-output">, message: string, options: { promptSha256?: string; startedAt?: number } = {}): E2EModelGenerateOutcome {
+  function decline(identity: E2EModelCallIdentity, code: E2EModelErrorCode, message: string, options: { promptSha256?: string; startedAt?: number } = {}): E2EModelGenerateOutcome {
     const startedAtMs = options.startedAt ?? now();
     const receipt = receiptFor(identity, newReceiptId(), {
       startedAtMs, outcome: code, inputTokens: 0, outputTokens: 0, latencyMs: Math.max(0, now() - startedAtMs),
       promptSha256: options.promptSha256 ?? sha256("no-prompt"), responseSha256: null,
     });
-    return { result: { status: "error", code, message: message.slice(0, 240) }, receipt };
+    return { result: { status: "error", code, message: message.slice(0, 240) }, receipt, chargedInputTokens: 0 };
   }
 
-  function check(request: E2EModelChannelRequest, receiptId: string, output: E2EInvokeOutput): Checked {
-    const bad = (message: string, tokens = { inputTokens: 0, outputTokens: 0 }): Checked => ({ ok: false, code: "invalid-output", message, ...tokens, raw: output });
-    if (typeof output !== "object" || output === null) return bad("the provider returned no answer");
+  function check(request: E2EModelChannelRequest, receiptId: string, output: E2EInvokeOutput, limits: Limits, reserved: number): Checked {
+    const bad = (message: string, tokens = { inputTokens: 0, outputTokens: 0 }): Failed => ({ ok: false, code: "invalid-output", message, ...tokens, raw: output });
+    if (typeof output !== "object" || output === null) return { ...bad("the provider returned no answer", { inputTokens: reserved, outputTokens: 0 }), usageMissing: true };
     const usage = output.usage as { inputTokens?: unknown; outputTokens?: unknown } | undefined;
     const isCount = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0;
-    if (usage === undefined || !isCount(usage.inputTokens) || !isCount(usage.outputTokens)) return bad("the provider reported no usable token counts");
+    if (usage === undefined || usage === null || !isCount(usage.inputTokens) || !isCount(usage.outputTokens)) {
+      return { ...bad("the provider reported no usable usage; the reserved bound is counted", { inputTokens: reserved, outputTokens: 0 }), usageMissing: true };
+    }
     const tokens = { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
     if (output.servedModelId !== identifier && output.servedModelId !== definition.modelId) return bad("the answer came from a different model than the route pins", tokens);
     const unified = output.finishReason?.unified;
     if (unified === "error") return { ok: false, code: "provider-error", message: "the provider ended the answer with an error", ...tokens, raw: output };
     if (unified !== "stop" && unified !== "tool-calls") return bad(`the answer did not finish cleanly (${typeof unified === "string" ? unified.slice(0, 32) : "unknown"})`, tokens);
-    if (tokens.inputTokens > budgets.maxInputTokens) return bad("the provider reported more input tokens than the route allows", tokens);
-    if (tokens.outputTokens > budgets.maxOutputTokens) return bad("the provider reported more output tokens than the route allows", tokens);
+    if (tokens.inputTokens > limits.maxInputTokens) return bad("the provider reported more input tokens than the route allows", tokens);
+    if (tokens.outputTokens > limits.maxOutputTokens) return bad("the provider reported more output tokens than the route allows", tokens);
     const offered = new Set<string>(request.call.tools?.map((tool) => tool.name) ?? []);
     const content: ReadonlyArray<Record<string, unknown>> = Array.isArray(output.content) ? (output.content as ReadonlyArray<Record<string, unknown>>) : [];
     const seenIds = new Set<string>();
@@ -231,24 +259,35 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
     const promptSha256 = digestOf(rawRecord.call ?? null);
     if (!parsedRequest.success) return decline(identity, "refused-protocol", "the request is not a valid model channel request", { promptSha256, startedAt: startedAtMs });
     const request = parsedRequest.data;
+    const limits: Limits = {
+      callTimeoutMs: Math.min(budgets.callTimeoutMs, options.budgets?.callTimeoutMs ?? budgets.callTimeoutMs),
+      maxOutputTokens: Math.min(budgets.maxOutputTokens, options.budgets?.maxOutputTokens ?? budgets.maxOutputTokens),
+      maxPromptBytes: Math.min(budgets.maxPromptBytes, options.budgets?.maxPromptBytes ?? budgets.maxPromptBytes),
+      maxInputTokens: Math.min(budgets.maxInputTokens, options.budgets?.maxInputTokens ?? budgets.maxInputTokens),
+    };
     const promptBytes = Buffer.byteLength(canonicalJson(request.call), "utf8");
-    if (promptBytes > budgets.maxPromptBytes) return decline(identity, "refused-protocol", "the prompt is above the route's prompt bound", { promptSha256, startedAt: startedAtMs });
-    if (request.call.maxOutputTokens !== undefined && request.call.maxOutputTokens > budgets.maxOutputTokens) {
+    if (promptBytes > limits.maxPromptBytes) return decline(identity, "refused-protocol", "the prompt is above the route's prompt bound", { promptSha256, startedAt: startedAtMs });
+    if (request.call.maxOutputTokens !== undefined && request.call.maxOutputTokens > limits.maxOutputTokens) {
       return decline(identity, "refused-protocol", "the call asks for more output than the route allows", { promptSha256, startedAt: startedAtMs });
+    }
+    const reserved = e2eReservedInputTokens(promptBytes);
+    if (reserved > limits.maxInputTokens) {
+      return decline(identity, "refused-protocol", `the prompt could pass the per-call input token limit of ${limits.maxInputTokens} (upper bound ${reserved})`, { promptSha256, startedAt: startedAtMs });
     }
     const deadline = options.deadlineAt ?? Number.POSITIVE_INFINITY;
     const remainingMs = deadline - now();
     if (remainingMs <= 0) {
       return decline(identity, "timeout", "the run or step deadline passed before the call", { promptSha256, startedAt: startedAtMs });
     }
-    const reserved = e2eReservedInputTokens(promptBytes, budgets);
-    const reservation = dependencies.dayBudget === undefined ? undefined : await dependencies.dayBudget.reserve(reserved);
+    let reservation: E2EDayReservation | null;
+    try { reservation = await dayBudget.reserve(reserved, dayLimits); }
+    catch { return decline(identity, "budget", `${E2E_BUDGET_EXHAUSTED_PREFIX}: the project's daily model budget could not be reserved`, { promptSha256, startedAt: startedAtMs }); }
     if (reservation === null) return decline(identity, "budget", `${E2E_BUDGET_EXHAUSTED_PREFIX}: the project's daily model budget is spent`, { promptSha256, startedAt: startedAtMs });
 
     const receiptId = newReceiptId();
     const controller = new AbortController();
     let timedOut = false;
-    const timeoutMs = Math.max(1, Math.min(budgets.callTimeoutMs, remainingMs));
+    const timeoutMs = Math.max(1, Math.min(limits.callTimeoutMs, remainingMs));
     const timer = setTimeout(() => { timedOut = true; controller.abort(new Error("model call timed out")); }, timeoutMs);
     const onCallerAbort = () => controller.abort(new Error("model call cancelled"));
     if (options.signal?.aborted === true) onCallerAbort();
@@ -266,7 +305,7 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
     try {
       const pending = (async () => invoke({
         identifier, region: definition.region, call: request.call, temperature: 0, signal: controller.signal,
-        maxOutputTokens: Math.min(budgets.maxOutputTokens, request.call.maxOutputTokens ?? budgets.maxOutputTokens),
+        maxOutputTokens: Math.min(limits.maxOutputTokens, request.call.maxOutputTokens ?? limits.maxOutputTokens),
       }))();
       pending.catch(() => undefined);
       output = await Promise.race([pending, stopped]);
@@ -279,26 +318,33 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
     }
     const latencyMs = Math.max(0, now() - startedAtMs);
 
-    const finish = async (outcome: E2EModelReceipt["outcome"], result: E2EModelChannelResult, tokens: { inputTokens: number; outputTokens: number }, responseSha256: string | null, spendKnown: boolean): Promise<E2EModelGenerateOutcome> => {
+    const finish = async (outcome: E2EModelReceipt["outcome"], result: E2EModelChannelResult, tokens: { inputTokens: number; outputTokens: number }, responseSha256: string | null, spendKnown: boolean, extra: { usageMissing?: true } = {}): Promise<E2EModelGenerateOutcome> => {
+      if (spendKnown) {
+        try { await reservation?.settle(tokens.inputTokens); }
+        catch {
+          const receipt = receiptFor(identity, receiptId, { startedAtMs, outcome: "provider-error", ...tokens, latencyMs, promptSha256, responseSha256: null });
+          return { result: { status: "error", code: "provider-error", message: "the project's daily model budget could not be settled" }, receipt, chargedInputTokens: tokens.inputTokens };
+        }
+      }
       const receipt = receiptFor(identity, receiptId, { startedAtMs, outcome, ...tokens, latencyMs, promptSha256, responseSha256 });
-      if (spendKnown) await reservation?.settle(tokens.inputTokens);
-      return { result, receipt };
+      return { result, receipt, chargedInputTokens: tokens.inputTokens, ...extra };
     };
 
     if (failed || output === undefined) {
       if (timedOut) return finish("timeout", { status: "error", code: "timeout", message: "the model call exceeded its time limit" }, { inputTokens: reserved, outputTokens: 0 }, null, false);
       const cancelled = controller.signal.aborted;
-      return finish("provider-error", { status: "error", code: "provider-error", message: cancelled ? "the model call was cancelled by the run" : describeProviderFailure(failure) }, { inputTokens: 0, outputTokens: 0 }, null, false);
+      const outcome = await finish("provider-error", { status: "error", code: "provider-error", message: cancelled ? "the model call was cancelled by the run" : describeProviderFailure(failure) }, { inputTokens: 0, outputTokens: 0 }, null, false);
+      return { ...outcome, chargedInputTokens: 0 };
     }
-    if (latencyMs > budgets.callTimeoutMs) {
+    if (latencyMs > limits.callTimeoutMs) {
       return finish("timeout", { status: "error", code: "timeout", message: "the model call exceeded its time limit" }, { inputTokens: reserved, outputTokens: 0 }, null, false);
     }
-    const checked = check(request, receiptId, output);
+    const checked = check(request, receiptId, output, limits, reserved);
     if (checked.ok) {
       return finish("ok", checked.result, { inputTokens: checked.inputTokens, outputTokens: checked.outputTokens }, digestOf(checked.result), true);
     }
     const responseSha256 = checked.code === "invalid-output" ? digestOf(checked.raw) : null;
-    return finish(checked.code, { status: "error", code: checked.code, message: checked.message.slice(0, 240) }, { inputTokens: checked.inputTokens, outputTokens: checked.outputTokens }, responseSha256, checked.code === "invalid-output");
+    return finish(checked.code, { status: "error", code: checked.code, message: checked.message.slice(0, 240) }, { inputTokens: checked.inputTokens, outputTokens: checked.outputTokens }, responseSha256, checked.code === "invalid-output", checked.usageMissing === true ? { usageMissing: true } : {});
   }
 
   return { definition, routeRevision, generate, decline };
