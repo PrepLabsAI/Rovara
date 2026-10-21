@@ -1901,7 +1901,7 @@ async function registerProject(
         || (refreshed.catalog?.latestRevision ?? 0) > (snapshot.catalog?.latestRevision ?? 0);
       // Another registration may have moved an account under this one: plan again (a stale setup is refused then) rather than give up.
       const accountsMoved = accountSetup !== undefined && (await planAccounts()).planKey !== accounts.planKey;
-      // The registrant's standing may have changed under this attempt (a membership revoked, the project registered by a rival): refused here, not as a catalog conflict.
+      // The registrant's standing may have changed under this attempt (the membership removed or downgraded outside the API, the project registered by a rival): refused here, not as a catalog conflict.
       const authorityMoved = (await judgeAuthority(refreshed.newestRevision)) !== authority;
       if ((!advanced && !accountsMoved && !authorityMoved) || attempt + 1 === maxRegistrationAttempts) {
         throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration could not commit against the current catalog");

@@ -138,6 +138,38 @@ describe("registering a project", () => {
       expect(broker.takeovers("billing")).toEqual([]);
     });
 
+    it("is one transaction: the revision, the membership grant and the audit row commit together, and a failed commit leaves none of them", async () => {
+      const broker = await brokerWithPayments();
+      type Item = { Put?: { Item?: Record<string, unknown> } };
+      const transactions: Item[][] = [];
+      const writes: string[] = [];
+      let failNext = true;
+      const send = broker.harness.db.send.bind(broker.harness.db);
+      broker.harness.db.send = async (command) => {
+        const name = command.constructor.name;
+        if (name === "TransactWriteCommand") {
+          const items = (command as unknown as { input: { TransactItems: Item[] } }).input.TransactItems;
+          if (items.some((item) => item.Put?.Item?.entityType === "PROJECT_OWNERSHIP_TAKEOVER")) {
+            transactions.push(items);
+            if (failNext) { failNext = false; throw Object.assign(new Error("the table is unavailable"), { name: "InternalServerError" }); }
+          }
+        } else if (name === "PutCommand" || name === "UpdateCommand") writes.push(name);
+        return send(command);
+      };
+      const before = structuredClone(broker.harness.db.find(() => true));
+      const failed = await broker.register(OTHER, 2, { takeOwnership: true, takeOwnershipReason: "the owner left" });
+      expect(failed.status).toBeGreaterThanOrEqual(500);
+      expect(broker.harness.db.find(() => true)).toEqual(before);
+      const taken = await broker.register(OTHER, 2, { takeOwnership: true, takeOwnershipReason: "the owner left" });
+      expect(taken.status, JSON.stringify(taken.body)).toBe(201);
+      // The one transaction that committed holds all three, and nothing else wrote an audit row or a membership outside it.
+      const committed = transactions.at(-1)!.map((item) => item.Put?.Item?.entityType);
+      expect(committed).toEqual(expect.arrayContaining(["PROJECT", "MEMBERSHIP", "PROJECT_OWNERSHIP_TAKEOVER"]));
+      expect(writes).toEqual([]);
+      expect(broker.memberships()).toHaveLength(2);
+      expect(broker.takeovers()).toHaveLength(1);
+    });
+
     it("is recorded only when its transaction commits: a revision that a rival stored first leaves no takeover behind", async () => {
       const broker = await brokerWithPayments();
       const send = broker.harness.db.send.bind(broker.harness.db);
@@ -187,6 +219,27 @@ describe("registering a project", () => {
       expect(broker.memberships("billing")[0]!.ownerKey).toBe(firstKey);
     });
 
+    it("a first-registration race loser who asked for a takeover is made administrator only with an audit row", async () => {
+      const broker = await brokerWithPayments();
+      let fired = false;
+      const send = broker.harness.db.send.bind(broker.harness.db);
+      broker.harness.db.send = async (command) => {
+        const items = command.constructor.name === "TransactWriteCommand" ? (command as unknown as { input: { TransactItems: Array<{ Put?: { Item?: Record<string, unknown> } }> } }).input.TransactItems : [];
+        if (!fired && items.some((item) => item.Put?.Item?.entityType === "PROJECT" && (item.Put.Item.definition as { name?: string; revision?: number } | undefined)?.name === "billing"
+          && (item.Put.Item.definition as { revision?: number }).revision === 2)) {
+          fired = true;
+          expect((await broker.register(FIRST, 1, {}, "billing")).status).toBe(201);
+        }
+        return send(command);
+      };
+      // OTHER judged this a first registration; FIRST commits revision 1 before OTHER's commit, so the retry must judge it a takeover.
+      const loser = await broker.register(OTHER, 2, { takeOwnership: true, takeOwnershipReason: "raced" }, "billing");
+      expect(loser.status, JSON.stringify(loser.body)).toBe(201);
+      expect(broker.memberships("billing")).toHaveLength(2);
+      expect(broker.takeovers("billing")).toHaveLength(1);
+      expect(loser.body.ownershipTakenOver).toBe(true);
+    });
+
     it("of two administrators racing the same first revision, only one of them administers the project", async () => {
       const broker = await brokerWithPayments();
       const [first, second] = await Promise.all([broker.register(FIRST, 1, {}, "billing"), broker.register(OTHER, 1, {}, "billing")]);
@@ -196,7 +249,7 @@ describe("registering a project", () => {
       expect(broker.memberships("billing")).toHaveLength(1);
     });
 
-    it("refuses an administrator whose membership is revoked between the check and the commit", async () => {
+    it("refuses an administrator whose membership stops saying administrator between the check and the commit", async () => {
       const broker = await brokerWithPayments();
       const [membership] = broker.memberships();
       let fired = false;
