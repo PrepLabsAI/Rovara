@@ -171,6 +171,21 @@ describe("the deciding and commenting script", () => {
       expect(page.reloads).toEqual([]);
     });
 
+    it("says only the owner can retry when the broker answers 403, keeps the task on screen and offers no second press", async () => {
+      const page = boot(await blockedPage(), { respond: (entry) => entry.url.endsWith("/api/retry") ? { status: 403, body: { error: "owners_only", message: "Only owners decide." } } : { status: 200, body: {} } });
+      page.byId("retry-application").click();
+      await page.settle();
+      expect(page.byId("retry-error").hidden).toBe(false);
+      expect(page.byId("retry-error").textContent).toBe("Only the task owner can retry these checks.");
+      expect(page.byId("retry-status").textContent).toBe("");
+      expect(page.document.querySelector("main")!.hidden).toBe(false);
+      expect(page.byId("retry-application").hidden).toBe(true);
+      page.byId("retry-application").click();
+      await page.settle();
+      expect(posts(page, "/api/retry")).toHaveLength(1);
+      expect(page.reloads).toEqual([]);
+    });
+
     it("gives a reader who is not the owner no button and no way to post", async () => {
       const html = await blockedPage(false);
       expect(html).not.toContain('id="retry-application"');

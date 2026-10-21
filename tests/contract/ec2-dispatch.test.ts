@@ -211,6 +211,7 @@ describe("ec2-ebs delivery", () => {
     const complete = createWorkflowE2EReadinessCompleter({ documentClient: documentClient as never, tableName: "state" });
     const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
     const deliver = createEc2Delivery({
+      applicationPlanNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation, privateIp: "10.42.128.10" }) },
       binding: async () => binding, sign: kmsSign, post, progress: async () => undefined, now: () => NOW,
       validateWorkflowE2EReadiness: validate,
@@ -494,6 +495,57 @@ describe("ec2-ebs delivery", () => {
         const older = delivery({ workerFeatures: async () => checksFeatures });
         expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
         expect(postedPayload(older.post).workflowE2EAdmission).toEqual(ref);
+      });
+
+      describe("the reference's kind against the admission it names (checked before delivery)", () => {
+        const APPLICATION = "workflow-e2e-application-admission/v1";
+        const PORTABLE = "workflow-e2e-admission/v1";
+        const capable = [...checksFeatures, "task.workflowE2EApplicationChecks"];
+        const withSchema = (schema: string | undefined | Error) => vi.fn(async () => { if (schema instanceof Error) throw schema; return schema; });
+
+        it("refuses a reference without kind whose admission is an application admission, and sends nothing", async () => {
+          const record = checks(admission());
+          const reader = withSchema(APPLICATION);
+          const unmarked = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: reader });
+          await expect(unmarked.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("kind") as unknown });
+          expect(reader).toHaveBeenCalledTimes(1);
+          expect(unmarked.post).not.toHaveBeenCalled();
+        });
+
+        it("refuses a reference marked application whose admission is a portable one, and sends nothing", async () => {
+          const record = checks(admission({ kind: "application" }));
+          const marked = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: withSchema(PORTABLE) });
+          await expect(marked.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+          expect(marked.post).not.toHaveBeenCalled();
+        });
+
+        it("delivers when the kind and the admission agree, application or portable", async () => {
+          const app = checks(admission({ kind: "application" }));
+          const one = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: withSchema(APPLICATION) });
+          expect(await one.deliver(app, app.invocation)).toBe("DELIVERED");
+          const portable = checks(admission());
+          const two = delivery({ workerFeatures: async () => checksFeatures, workflowE2EAdmissionSchemaVersion: withSchema(PORTABLE) });
+          expect(await two.deliver(portable, portable.invocation)).toBe("DELIVERED");
+        });
+
+        it("fails closed, retryably, when the admission cannot be read or is not one it knows", async () => {
+          const record = checks(admission());
+          for (const schema of [undefined, new Error("s3 down")]) {
+            const unreadable = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: withSchema(schema) });
+            await expect(unreadable.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+            expect(unreadable.post).not.toHaveBeenCalled();
+          }
+          const unknown = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: withSchema("something-else/v1") });
+          await expect(unknown.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+        });
+
+        it("reads no admission for an invocation that carries none", async () => {
+          const reader = withSchema(APPLICATION);
+          const plain = taskRecord({});
+          const d = delivery({ workflowE2EAdmissionSchemaVersion: reader });
+          await d.deliver(plain, plain.invocation);
+          expect(reader).not.toHaveBeenCalled();
+        });
       });
 
       it("is advertised by the worker's own /ping feature list", () => {
@@ -1065,6 +1117,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
     db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record });
     const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
     const deliver = createEc2Delivery({
+      applicationPlanNotNegotiated: async () => undefined,
       sessions,
       binding: (workspaceId) => workspaceBinding(db, "state", workspaceId),
       sign: kmsSign,
@@ -1106,6 +1159,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
     const markFailed = vi.fn(async () => undefined);
     const markDelivered = vi.fn(async () => undefined);
     const deliver = createEc2Delivery({
+      applicationPlanNotNegotiated: async () => undefined,
       sessions,
       binding: (workspaceId) => workspaceBinding(fixture.db, "state", workspaceId),
       sign: kmsSign,

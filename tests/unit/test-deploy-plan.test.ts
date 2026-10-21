@@ -1,6 +1,8 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Change } from "@aws-sdk/client-cloudformation";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CONTROL_PLANE_LAMBDAS,
   DEFAULT_DEPLOY_UNITS,
@@ -18,6 +20,8 @@ import {
   resolveArtifactBucket,
   resolveCodeArtifactBucket,
   resolveTestStacks,
+  saveChangeSetOrDrop,
+  saveDescribedChangeSet,
   verifyStackResources,
   waitForStackUpdate,
   type BuiltArtifacts,
@@ -985,5 +989,64 @@ describe("resolveCodeArtifactBucket for a function whose Code reads its bucket f
   it("refuses when the parameter is not on the stack, or the bucket is neither a literal nor a parameter", () => {
     expect(() => resolveCodeArtifactBucket(runnerWith(undefined), "us-east-1", ENV, "DeveloperSignInFunction10B62B05")).toThrow(/S3Bucket/);
     expect(() => resolveCodeArtifactBucket(runnerWith(ACCESS_BUCKET, { S3Bucket: { "Fn::ImportValue": "x" } }), "us-east-1", ENV, "DeveloperSignInFunction10B62B05")).toThrow(/S3Bucket/);
+  });
+});
+
+describe("saveDescribedChangeSet", () => {
+  const change = (action: string, logicalId: string): Change => ({ Type: "Resource", ResourceChange: { Action: action as never, LogicalResourceId: logicalId, ResourceType: "AWS::Lambda::Function", Details: [] } });
+
+  it("writes the described change set, every page of its changes, under the evidence directory before anything executes it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "test-deploy-evidence-"));
+    try {
+      const path = saveDescribedChangeSet(dir, { StackName: "agentx-x-control-plane", ChangeSetName: "test-deploy-code-1", Status: "CREATE_COMPLETE", Capabilities: ["CAPABILITY_IAM"],
+        CreationTime: new Date("2026-10-20T10:00:00.000Z") }, [change("Modify", "BrokerFunction1"), change("Add", "NewQueue")]);
+      expect(path.startsWith(dir)).toBe(true);
+      expect(path).toMatch(/change-set-agentx-x-control-plane-test-deploy-code-1\.json$/);
+      const saved = JSON.parse(readFileSync(path, "utf8")) as { StackName: string; ChangeSetName: string; Status: string; CreationTime: string; Changes: Change[] };
+      expect(saved).toMatchObject({ StackName: "agentx-x-control-plane", ChangeSetName: "test-deploy-code-1", Status: "CREATE_COMPLETE", CreationTime: "2026-10-20T10:00:00.000Z" });
+      expect(saved.Changes.map((item) => item.ResourceChange?.LogicalResourceId)).toEqual(["BrokerFunction1", "NewQueue"]);
+      expect(observedChanges(saved.Changes).map((item) => `${item.action} ${item.logicalId}`)).toEqual(["Modify BrokerFunction1", "Add NewQueue"]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("keeps a stack or change set name from steering the file outside the directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "test-deploy-evidence-"));
+    try {
+      const path = saveDescribedChangeSet(dir, { StackName: "../../etc/x", ChangeSetName: "a/b" }, []);
+      expect(path.startsWith(join(dir, "change-set-"))).toBe(true);
+      expect(path.slice(dir.length + 1)).not.toContain("/");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("writes the file readable by its owner only, even over a file that was more open", () => {
+    const dir = mkdtempSync(join(tmpdir(), "test-deploy-evidence-"));
+    try {
+      const first = saveDescribedChangeSet(dir, { StackName: "s", ChangeSetName: "c" }, []);
+      expect(statSync(first).mode & 0o777).toBe(0o600);
+      writeFileSync(first, "old", { mode: 0o644 });
+      const again = saveDescribedChangeSet(dir, { StackName: "s", ChangeSetName: "c" }, []);
+      expect(again).toBe(first);
+      expect(statSync(again).mode & 0o777).toBe(0o600);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("saveChangeSetOrDrop", () => {
+  it("returns the saved path and leaves the change set alone when the save works", async () => {
+    const drop = vi.fn(async () => undefined);
+    await expect(saveChangeSetOrDrop(() => "/evidence/change-set-x.json", drop)).resolves.toBe("/evidence/change-set-x.json");
+    expect(drop).not.toHaveBeenCalled();
+  });
+
+  it("deletes the change set and fails, naming the cause, when the save throws", async () => {
+    const drop = vi.fn(async () => undefined);
+    await expect(saveChangeSetOrDrop(() => { throw new Error("ENOSPC: no space left on device"); }, drop)).rejects.toThrow(/could not be saved.*ENOSPC.*deleted and nothing was applied/s);
+    expect(drop).toHaveBeenCalledTimes(1);
+  });
+
+  it("still fails with the save's cause when deleting the change set fails too", async () => {
+    const drop = vi.fn(async () => { throw new Error("AccessDenied"); });
+    await expect(saveChangeSetOrDrop(() => { throw new Error("EACCES"); }, drop)).rejects.toThrow(/EACCES/);
+    expect(drop).toHaveBeenCalledTimes(1);
   });
 });

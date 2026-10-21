@@ -17,7 +17,7 @@ import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRunt
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
 import { postWorkerTerminalResult } from "./terminal-callback.js";
 import { executeWorkerCancelInvocation } from "./cancel-invocation.js";
-import { createWorkflowE2EApplicationRuntime } from "./workflow-e2e-application-runtime.js";
+import { createApplicationChecksFeatureMonitor, createWorkflowE2EApplicationRuntime } from "./workflow-e2e-application-runtime.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -38,6 +38,8 @@ const projectSetupRuntime = createReadinessGatedProjectSetupRuntime(containedRun
   evidenceRoot: requiredEnvironment("CONTAINED_FOUNDATION_EVIDENCE_DIR"),
   controlPlaneUrl: requiredEnvironment("AGENTX_CONTROL_PLANE_URL"),
 }));
+const applicationChecks = createApplicationChecksFeatureMonitor({ environment: process.env });
+applicationChecks.start();
 const journal = new OperationJournal(rootPath);
 const cancellationController = new WorkerCancellationController();
 const state = createWorkerServerState(
@@ -45,6 +47,8 @@ const state = createWorkerServerState(
   {
     invocationFeatures: projectSetupRuntime.invocationFeatures,
     invocationFeatureDiagnostics: projectSetupRuntime.invocationFeatureDiagnostics,
+    // Application CHECKS are listed on /ping only while this worker can run them, from the last background check (never a Docker call per ping).
+    ...applicationChecks.executor,
     async execute(invocation: WorkerInvocation): Promise<unknown> {
       if (invocation.kind === "project-setup-smoke") {
         return projectSetupRuntime.execute(invocation);

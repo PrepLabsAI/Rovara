@@ -7,7 +7,7 @@ import { E2E_HARD_LIMITS, WorkerInvocationSchema, type E2EApplicationExecutionAd
 import { createDockerApplicationHost, DEFAULT_DEADLINE_GRACE_MS, STALE_RUN_SWEEP_AGE_MS, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
-import { createEvidenceBudget } from "../../packages/worker/src/workflow-e2e-application-checks.js";
+import { DIAGNOSTICS_NOTICE, createEvidenceBudget } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES } from "@agentx/contracts";
 import type { CandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
@@ -34,7 +34,7 @@ async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: Fa
     projectRevision: 1, callbackCapability: "c".repeat(32),
     payload: { conversationId: "33333333-3333-4333-8333-333333333333", prompt: "Run the approved E2E checks.", workflowMode: "CHECKS",
       readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 }],
-      workflowE2EAdmission: { schemaVersion: 1, taskId: admission.taskId, workflowRevision: admission.workflowRevision, candidateDigest: admission.candidateDigest,
+      workflowE2EAdmission: { schemaVersion: 1, kind: "application", taskId: admission.taskId, workflowRevision: admission.workflowRevision, candidateDigest: admission.candidateDigest,
         roundId: admission.round.roundId, groupRunIds: admission.groups.map((group) => group.outerBinding.runId),
         admissionRef: { key: `workflow-e2e-admissions/sha256/${admissionSha}.json`, sha256: admissionSha, byteLength: admissionBytes.byteLength } } },
   });
@@ -96,6 +96,8 @@ type SavedEvidence = { schemaVersion: string; round: unknown; groupRun: Record<s
   payload: { kind: string; groupRuns: Array<{ collection: { status: string } }> } };
 const evidenceOf = (saved: Array<{ bytes: Buffer; groupRunId: string | undefined }>, groupRunId?: string) =>
   JSON.parse(saved.find((item) => item.groupRunId === groupRunId)!.bytes.toString("utf8")) as SavedEvidence;
+
+const withoutKind = (reference: object | undefined) => Object.fromEntries(Object.entries(reference ?? {}).filter(([key]) => key !== "kind"));
 
 describe("workflow E2E application rounds", () => {
   it("runs an application admission through the docker host once per group and uploads application evidence", async () => {
@@ -220,7 +222,7 @@ describe("workflow E2E application rounds", () => {
 
   describe("evidence when a group ends without a qualification", () => {
     const shardRun = (shardId: string, report: Buffer) => ({ shardId, launchId: randomUUID(), rawReportBytes: new Uint8Array(report), runStderrBytes: new Uint8Array(Buffer.from("stderr")) });
-    const diagnosticsOf = (s: Awaited<ReturnType<typeof setup>>) => evidenceOf(s.saved, s.runId).groupRun.diagnostics as { shardReports?: Array<{ shardId: string; byteLength: number; truncated: boolean; rawReportBase64: string }> };
+    const diagnosticsOf = (s: Awaited<ReturnType<typeof setup>>) => evidenceOf(s.saved, s.runId).groupRun.diagnostics as { notice?: string; shardReports?: Array<{ shardId: string; byteLength: number; truncated: boolean; rawReportBase64: string }> };
 
     it("keeps each shard's raw report, base64 and bounded, when the collector throws", async () => {
       const first = Buffer.from(JSON.stringify({ run: { status: "passed" } }));
@@ -240,6 +242,19 @@ describe("workflow E2E application rounds", () => {
       expect(kept.byteLength).toBeLessThanOrEqual(64 * 1024);
       expect(kept.byteLength).toBeGreaterThan(0);
       expect(kept.equals(second.subarray(0, kept.byteLength))).toBe(true);
+    });
+
+    it("labels the diagnostics as the application's own output, for operators only, and keeps at most eight shards", async () => {
+      const shards = Array.from({ length: 10 }, (_, index) => shardRun(`shard-${index}`, Buffer.from(`report-${index}`)));
+      const s = await setup({ assembled: { ...assembledRun, shards } });
+      s.fake.onExecutor = s.okOutput;
+      s.collect.mockImplementationOnce(() => { throw new Error("report digest does not match"); });
+      await s.run();
+      const diagnostics = diagnosticsOf(s);
+      expect(diagnostics.notice).toBe(DIAGNOSTICS_NOTICE);
+      expect(DIAGNOSTICS_NOTICE).toMatch(/application's own output/);
+      expect(DIAGNOSTICS_NOTICE).toMatch(/operator/);
+      expect(diagnostics.shardReports).toHaveLength(8);
     });
 
     it("keeps them too when the collector answers unavailable, and keeps nothing for a group that was qualified", async () => {
@@ -263,7 +278,7 @@ describe("workflow E2E application rounds", () => {
       operationFence: s.admission.operationFence, workflowRevision: s.admission.workflowRevision, candidateDigest: s.admission.candidateDigest, round: {} }), "utf8");
     const portableSha = sha(portableBytes);
     const portableRead = vi.fn(async () => ({ totalBytes: portableBytes.byteLength, chunkBase64: portableBytes.toString("base64"), sha256: portableSha }));
-    const invocation = WorkerInvocationSchema.parse({ ...s.invocation, payload: { ...s.invocation.payload, workflowE2EAdmission: { ...s.invocation.payload.workflowE2EAdmission,
+    const invocation = WorkerInvocationSchema.parse({ ...s.invocation, payload: { ...s.invocation.payload, workflowE2EAdmission: { ...withoutKind(s.invocation.payload.workflowE2EAdmission),
       admissionRef: { key: `workflow-e2e-admissions/sha256/${portableSha}.json`, sha256: portableSha, byteLength: portableBytes.byteLength } } } });
     const construct = vi.fn(() => { throw new Error("the docker host must not be constructed"); });
     const touched = vi.fn(() => { throw new Error("portable admission must not touch the application runtime"); });
@@ -288,6 +303,33 @@ describe("workflow E2E application rounds", () => {
       evidenceRoot: "/evidence" })).rejects.toThrow(/application runtime/);
     expect(s.saveEvidence).not.toHaveBeenCalled();
     expect(s.fake.calls).toEqual([]);
+  });
+
+  describe("the reference's kind against the admission it names", () => {
+    const runtimeOf = (s: Awaited<ReturnType<typeof setup>>) => ({ runRoot: s.runRoot, createHost: s.createHost, git: { treeOf: s.treeOf, materializeInto: s.materializeInto } });
+    const execute = (s: Awaited<ReturnType<typeof setup>>, invocation: unknown, readAdmission: Awaited<ReturnType<typeof setup>>["readAdmission"]) => executeWorkflowE2EChecks({ invocation, readAdmission,
+      saveEvidence: s.saveEvidence, sourceRoot: "/workspace/runtime", evidenceRoot: "/evidence", application: runtimeOf(s), candidateRepositoryRoot: () => s.repositoryRoot } as Parameters<typeof executeWorkflowE2EChecks>[0]);
+
+    it("refuses an application admission whose reference does not say it is one, before anything runs", async () => {
+      const s = await setup();
+      const unmarked = WorkerInvocationSchema.parse({ ...s.invocation, payload: { ...s.invocation.payload, workflowE2EAdmission: withoutKind(s.invocation.payload.workflowE2EAdmission) } });
+      await expect(execute(s, unmarked, s.readAdmission)).rejects.toThrow(/reference kind/);
+      expect(s.treeOf).not.toHaveBeenCalled();
+      expect(s.createHost).not.toHaveBeenCalled();
+      expect(s.saveEvidence).not.toHaveBeenCalled();
+    });
+
+    it("refuses a portable admission whose reference says it is an application one, before anything runs", async () => {
+      const s = await setup();
+      const portableBytes = Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-admission/v1", taskId: s.admission.taskId }), "utf8");
+      const portableSha = sha(portableBytes);
+      const marked = WorkerInvocationSchema.parse({ ...s.invocation, payload: { ...s.invocation.payload, workflowE2EAdmission: { ...s.invocation.payload.workflowE2EAdmission,
+        admissionRef: { key: `workflow-e2e-admissions/sha256/${portableSha}.json`, sha256: portableSha, byteLength: portableBytes.byteLength } } } });
+      const read = vi.fn(async () => ({ totalBytes: portableBytes.byteLength, chunkBase64: portableBytes.toString("base64"), sha256: portableSha }));
+      await expect(execute(s, marked, read)).rejects.toThrow(/reference kind/);
+      expect(s.createHost).not.toHaveBeenCalled();
+      expect(s.saveEvidence).not.toHaveBeenCalled();
+    });
   });
 
   it("refuses an admission that is not the signed invocation's, before anything runs", async () => {

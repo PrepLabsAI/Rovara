@@ -51,6 +51,11 @@ const tail = (text: string) => utf8Tail(text, DIAGNOSTIC_TAIL_BYTES);
 /** How much of each shard's raw report, and of how many shards, a group that never reached a qualification keeps (the head, base64). The executor already redacted it. */
 const SHARD_REPORT_DIAGNOSTIC_BYTES = 64 * 1024;
 const SHARD_REPORT_DIAGNOSTIC_SHARDS = 8;
+/**
+ * Said inside the diagnostics themselves: the logs and raw reports are the application's own output (its page text, network URLs and log lines), kept as the application wrote it.
+ * Only account credentials are redacted from them. They are for operators; nothing shows them to the task owner or in Slack, and they must stay that way for real customer code.
+ */
+export const DIAGNOSTICS_NOTICE = "operator-only: the application's own output (log lines, page text, URLs) kept as written, with account credentials redacted";
 
 /**
  * What a run that was read back but not qualified (the collector threw, or answered unavailable) keeps of each shard's raw report, so the reason it was refused can be
@@ -183,7 +188,7 @@ export async function executeWorkflowE2EApplicationChecks(input: {
       const diagnostics = qualification !== null ? null : (() => {
         const logs = host.readDiagnostics(binding.runId);
         const shardReports = run.actualRun === null ? [] : shardReportDiagnostics(run.actualRun);
-        return { appLogTail: tail(logs.appLogTail), buildLogTail: tail(logs.buildLogTail), executorLogTail: tail(logs.executorLogTail), ...(shardReports.length === 0 ? {} : { shardReports }) };
+        return { notice: DIAGNOSTICS_NOTICE, appLogTail: tail(logs.appLogTail), buildLogTail: tail(logs.buildLogTail), executorLogTail: tail(logs.executorLogTail), ...(shardReports.length === 0 ? {} : { shardReports }) };
       })();
       const groupRun: Record<string, unknown> = { kind: "application", group: validated.executionPlan.groups.find((item) => item.groupId === compiled.group.groupId), binding,
         collection: qualification ?? { status: "UNKNOWN", reason: unavailableReason }, unavailableReason,

@@ -213,8 +213,9 @@ export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;
 
 /**
  * Server-assigned admission object reference for a separate native CHECKS operation. `kind` is "application" for a browser or API round (and absent for a
- * portable one): the dispatcher reads it, with no access to the stored admission, to hand such a round only to a worker that lists
- * "task.workflowE2EApplicationChecks" (Ruling BQ, mixed fleet).
+ * portable one): the dispatcher uses it to hand such a round only to a worker that lists "task.workflowE2EApplicationChecks" (Ruling BQ, mixed fleet).
+ * Neither side trusts the kind alone: the dispatcher (where it can read admissions) and the worker both read the admission and refuse a round whose reference
+ * kind and admission schemaVersion disagree.
  */
 export const E2EWorkflowAdmissionRefSchema = z.object({
   schemaVersion: z.literal(1), kind: z.literal("application").optional(), taskId: z.string().uuid(), workflowRevision: positiveInt,

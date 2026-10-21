@@ -45,6 +45,16 @@ const actionsOf = (statement: PolicyStatement) => [statement.Action].flat();
 describe("hosted Slack control-plane infrastructure", () => {
   const template = Template.fromStack(new ControlPlaneStack(new App(), "SlackControlPlane"));
 
+  it("lets the dispatcher read only the immutable E2E admission objects, to hold a reference's kind to its admission", () => {
+    const statements = statementsForRole(template, "DispatcherServiceRole");
+    const reads = statements.filter((statement) => actionsOf(statement).some((action) => action === "s3:GetObject*" || action === "s3:GetObject"));
+    expect(reads).toHaveLength(1);
+    expect(JSON.stringify(reads[0]!.Resource)).toContain("/workflow-e2e-admissions/*");
+    expect(actionsOf(reads[0]!).some((action) => /Put|Delete/.test(action))).toBe(false);
+    const dispatcher = Object.values(template.findResources("AWS::Lambda::Function")).find((fn) => JSON.stringify(fn).includes("MAX_DISPATCH_ATTEMPTS")) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
+    expect(dispatcher.Properties.Environment.Variables).toHaveProperty("ARTIFACT_BUCKET_NAME");
+  });
+
   it("routes Slack events without a JWT and service calls only with IAM authorization", () => {
     template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
       RouteKey: "POST /v1/slack/events",

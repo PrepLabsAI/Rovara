@@ -517,8 +517,13 @@ describe("Slack native workflow review controls", () => {
     };
     const refused = (code?: string) => async () => { throw Object.assign(new Error("task authorization refused"), code === undefined ? {} : { code }); };
 
-    it.each(["FORBIDDEN", "TASK_NOT_FOUND"])("tells a member the task owner decides when the broker answers %s", async (code) => {
+    it.each(["FORBIDDEN", "TASK_NOT_FOUND", "TASK_ACCESS_DENIED", "PROJECT_ACCESS_DENIED"])("tells a member the task owner decides when the broker answers %s", async (code) => {
       await expect(pressWith(refused(code))()).rejects.toThrow("Only the task owner can approve this step.");
+    });
+
+    it("says tasks are not turned on for the project, not that only the owner can act, when the broker answers PROJECT_TASKS_DISABLED", async () => {
+      const said = await pressWith(refused("PROJECT_TASKS_DISABLED"))().then(() => "", (error: unknown) => (error as Error).message);
+      expect(said).toBe("AgentX tasks aren't turned on for this project. Ask an AgentX admin to turn them on.");
     });
 
     it.each(["INTERNAL_ERROR", "RUNTIME_UNAVAILABLE", undefined])("does not blame the member for a %s failure: it asks them to try again, and logs the code", async (code) => {

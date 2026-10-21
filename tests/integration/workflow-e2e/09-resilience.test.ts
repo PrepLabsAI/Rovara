@@ -1217,6 +1217,7 @@ describe("Suite 9: resilience", () => {
     const binding: Ec2RuntimeBinding = { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0",
       subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0aaaaaaaaaaaaaaaa" }], volumeSizeGiB: 20, volumeType: "gp3" };
     const deliver = createEc2Delivery({
+      applicationPlanNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "10.0.0.9" }) },
       binding: async () => binding,
       sign: async () => new Uint8Array([1, 2, 3]),

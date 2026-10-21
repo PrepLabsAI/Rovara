@@ -38,3 +38,74 @@ export function createWorkflowE2EApplicationRuntime(environment: NodeJS.ProcessE
   return Object.freeze({ runRoot: config.runRoot,
     createHost: (input) => createDockerApplicationHost(workflowE2EApplicationHostDeps(config, docker, now, input)) });
 }
+
+export type WorkflowE2EApplicationChecksAvailability = Readonly<{ status: "ready" } | { status: "unavailable"; reason: "executor-image-not-configured" | "no-shared-runtime-directory" | "executor-image-not-on-host" | "not-yet-checked" }>;
+
+const IMAGE_INSPECT_TIMEOUT_MS = 10_000;
+
+/**
+ * Whether this worker can run an application round now: EXECUTOR_IMAGE names an image, the host has a shared runtime directory and the host already holds the
+ * image (the boot pulled it). The worker lists task.workflowE2EApplicationChecks on /ping only while this is ready, so the dispatcher refuses an application
+ * round for a worker that could not run it with the clear reason, instead of the round failing on the worker. It never throws: a Docker that cannot answer is unavailable.
+ * It can take seconds, so /ping never calls it: createApplicationChecksFeatureMonitor runs it in the background.
+ */
+export async function workflowE2EApplicationChecksAvailability(environment: NodeJS.ProcessEnv = process.env,
+  options: { platform?: string; arch?: string; docker?: DockerCli } = {}): Promise<WorkflowE2EApplicationChecksAvailability> {
+  let config: WorkflowE2EApplicationRuntimeConfig;
+  try { config = workflowE2EApplicationRuntimeConfig(environment, options.platform, options.arch); } catch (error) {
+    return { status: "unavailable", reason: /shared runtime directory/.test(error instanceof Error ? error.message : "") ? "no-shared-runtime-directory" : "executor-image-not-configured" };
+  }
+  try {
+    const inspected = await (options.docker ?? createProcessDockerCli()).run(["image", "inspect", config.executorImage],
+      { signal: AbortSignal.timeout(IMAGE_INSPECT_TIMEOUT_MS), timeoutMs: IMAGE_INSPECT_TIMEOUT_MS });
+    return inspected.code === 0 ? { status: "ready" } : { status: "unavailable", reason: "executor-image-not-on-host" };
+  } catch {
+    return { status: "unavailable", reason: "executor-image-not-on-host" };
+  }
+}
+
+const APPLICATION_CHECKS_FEATURE = "task.workflowE2EApplicationChecks" as const;
+/** A check that has not answered by then is an unavailable answer, so one hung Docker cannot stop the refresh for good. */
+const AVAILABILITY_CHECK_LIMIT_MS = IMAGE_INSPECT_TIMEOUT_MS + 5_000;
+export const APPLICATION_CHECKS_REFRESH_MS = 30_000;
+
+/**
+ * Keeps the last known availability of application CHECKS, checked at boot and again on an interval, and gives the worker server what it needs to list the feature on
+ * /ping from that value alone. It starts as unavailable ("not-yet-checked") until the first check answers, so a worker never advertises what it has not proved.
+ */
+export function createApplicationChecksFeatureMonitor(input: { environment?: NodeJS.ProcessEnv; platform?: string; arch?: string; docker?: DockerCli; intervalMs?: number }) {
+  let latest: WorkflowE2EApplicationChecksAvailability = { status: "unavailable", reason: "not-yet-checked" };
+  let running = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const check = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    try {
+      let limit: ReturnType<typeof setTimeout> | undefined;
+      const answer = await Promise.race([
+        workflowE2EApplicationChecksAvailability(input.environment ?? process.env, { ...(input.platform === undefined ? {} : { platform: input.platform }),
+          ...(input.arch === undefined ? {} : { arch: input.arch }), ...(input.docker === undefined ? {} : { docker: input.docker }) }),
+        new Promise<WorkflowE2EApplicationChecksAvailability>((resolve) => { limit = setTimeout(() => resolve({ status: "unavailable", reason: "executor-image-not-on-host" }), AVAILABILITY_CHECK_LIMIT_MS); }),
+      ]).finally(() => clearTimeout(limit));
+      latest = answer;
+    } catch {
+      latest = { status: "unavailable", reason: "executor-image-not-on-host" };
+    } finally { running = false; }
+  };
+  return {
+    current: (): WorkflowE2EApplicationChecksAvailability => latest,
+    /** Starts the first check now (not awaited) and the refresh; the timer does not keep the process alive. */
+    start(): void {
+      if (timer !== undefined) return;
+      void check();
+      timer = setInterval(() => { void check(); }, input.intervalMs ?? APPLICATION_CHECKS_REFRESH_MS);
+      timer.unref?.();
+    },
+    stop(): void { if (timer !== undefined) { clearInterval(timer); timer = undefined; } },
+    /** The parts of a WorkerExecutor that keep the feature off /ping while it is unavailable. */
+    executor: {
+      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE] as const,
+      withheldInvocationFeatures: () => latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest },
+    },
+  };
+}
