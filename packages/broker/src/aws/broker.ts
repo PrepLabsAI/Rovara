@@ -229,7 +229,7 @@ import {
 import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { renderE2EMcpProjection, renderE2EPageHtml, renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
 import type { DisplayArtifact } from "../e2e/application-display.js";
-import { loadWorkflowE2EArtifact as loadStoredWorkflowE2EArtifact, resultsWithStoredArtifacts, storeWorkflowE2EArtifacts } from "./workflow-e2e-artifacts.js";
+import { loadStoredScenarioResults, loadWorkflowE2EArtifact as loadStoredWorkflowE2EArtifact, resultsWithStoredArtifacts, storeWorkflowE2EArtifacts } from "./workflow-e2e-artifacts.js";
 import { readWorkflowE2EBaseline, requestWorkflowE2EBaselineRound, type WorkflowE2EBaselineRunner } from "./workflow-e2e-baseline.js";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
@@ -8016,14 +8016,20 @@ async function workflowE2EPresentationDetailed(
   return undefined;
 }
 
-/** The per-scenario rows of the task's current browser and API round (and the baseline round's), for the task page. Read-only; undefined when the task has none. */
+/**
+ * The per-scenario rows of the task's current browser and API round (and the baseline round's), for the task page. Read-only; undefined when the task has none.
+ * The rows are those of the stored display, which the result callback wrote from the broker's own verification when the round ended: the page does not verify the evidence
+ * again on every render, every link on it is one the artifact route serves (the screenshots were stored before the display that names them), and a baseline recorded after
+ * the display shows from the next display. A closed task keeps its recorded rows through the presentation, which reads the same display.
+ */
 export async function loadWorkflowE2EScenarioResults(
   dependencies: AwsBrokerDependencies,
   task: DeveloperTaskRecord,
   operations: readonly unknown[],
   actor: "owner" | "viewer" = "viewer",
 ): Promise<E2EScenarioResults | undefined> {
-  return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor))?.scenarioResults;
+  if (task.closedAt !== undefined) return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor))?.scenarioResults;
+  return loadStoredScenarioResults({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task);
 }
 
 /** A screenshot behind a row of the task's current display, by its digest; undefined for a digest the display does not name. The caller has already checked who may read it. */

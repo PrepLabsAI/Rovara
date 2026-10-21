@@ -65,6 +65,23 @@ const withDefaultDefect = (name: "dependency-route" | "extra-order") => (server:
   if (!server.includes(DEFECT_HOOK)) throw new Error("the fixture's defect hook moved; update the journey's candidates");
   return server.replace(DEFECT_HOOK, `const defect = readOptionalJson(process.env.ORDERS_TEST_DEFECT_FILE) ?? JSON.parse(readFileSync(join(root, "defects/${name}.json"), "utf8"));`);
 };
+/**
+ * The viewer's refused export answers 401 instead of 403: the fixture's own `viewer-access` defect would let the viewer download a file that no assertion of a refusal references
+ * (the collector rightly calls that round incomplete), but a different refusal status fails the viewer's `text` assertion cleanly, with no download.
+ */
+const VIEWER_REFUSAL = 'if (account.role !== "owner" && !viewerBypass) return json(403, { error: "owner role required" });';
+const withViewerRefusedAs401 = (server: string) => {
+  if (!server.includes(VIEWER_REFUSAL)) throw new Error("the fixture's viewer refusal moved; update the journey's candidates");
+  return server.replace(VIEWER_REFUSAL, VIEWER_REFUSAL.replace("json(403", "json(401"));
+};
+/** A candidate that copies the password of the last sign-in into the first row of the owner's export: a bare credential value in an asserted observation. */
+const SIGN_IN_FAILURE = 'if (!matches) return json(401, { error: "invalid credentials" });';
+const OWNER_ROWS = "let rows = orders.orders.filter((item) => item.tenantId === account.tenantId);";
+const withPasswordEchoedIntoExport = (server: string) => {
+  if (!server.includes(SIGN_IN_FAILURE) || !server.includes(OWNER_ROWS)) throw new Error("the fixture's sign-in or export moved; update the journey's candidates");
+  return server.replace(SIGN_IN_FAILURE, `${SIGN_IN_FAILURE} globalThis.lastSignInPassword = body.password;`)
+    .replace(OWNER_ROWS, "let rows = orders.orders.filter((item) => item.tenantId === account.tenantId).map((item, index) => (index === 0 && globalThis.lastSignInPassword ? { ...item, customer: globalThis.lastSignInPassword } : item));");
+};
 async function stageCandidate(root: string, name: string, edit?: (server: string) => string) {
   const dir = join(root, name);
   await mkdir(dir, { recursive: true });
@@ -82,7 +99,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
    * that service, the coder's candidate is the fixture app (optionally with a defect in the call it makes to the service), the broker admits one round, the worker runs it on the
    * production Docker host with the approved mock and the sinkhole, and the broker verifies what came back on its own.
    */
-  async function inventoryJourney(variant: "mocked-origin" | "unmocked-call" | "results") {
+  async function inventoryJourney(variant: "mocked-origin" | "unmocked-call" | "results" | "credential-echo") {
     const base = await realpath(process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR ?? tmpdir());
     const root = await mkdtemp(join(await realpath(tmpdir()), "m1-3-journey-"));
     roots.push(root);
@@ -108,6 +125,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const snapshot: E2ESourceSnapshot = { candidate: createCandidateManifest([{ repositoryId: "example/demo", commitSha: baseCommit, treeSha: baseTree }]), commitSha: baseCommit, treeSha: baseTree,
       treeComplete: true, treePaths: [...planningFiles].sort(), sources };
     const candidate = variant === "mocked-origin" || variant === "results" ? await stageCandidate(root, "candidate")
+      : variant === "credential-echo" ? await stageCandidate(root, "candidate", withPasswordEchoedIntoExport)
       // The coder's call to the inventory service goes to a path that service's contract does not have (the fixture app's own dependency-route defect, as its default).
       : await stageCandidate(root, "candidate", withDefaultDefect("dependency-route"));
     if (variant === "unmocked-call") expect(await readFile(join(candidate, "server.mjs"), "utf8")).toContain("defects/dependency-route.json");
@@ -181,10 +199,12 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       web("owner-export-status", "orders-export-status", target!, openAndExport, [{ kind: "text", testId: "orders-export-status", equals: "Orders exported" }]),
     ];
     const planTargets = variant === "results" ? [target!, viewerTarget!] : [target!];
+    // `credential-echo`: the owner's export, whose first row the candidate fills with the password the owner signed in with.
+    const echoScenarios = variant !== "credential-echo" ? [] : [web("owner-export", "orders-export", target!, openAndExport, [{ kind: "csv", downloadName: "orders.csv", columns: ["id", "customer", "total", "state"], rows: ordersOfOwner }])];
     const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: planTargets.map((item) => item.targetId), portableOperationRefs: [],
-      mockFixtureRefs: variant === "results" ? [] : [{ componentId: mock!.componentId, requestedTargetId: mock!.requestedTargetId, operationId: mock!.operationId, sourcePath: mock!.sourcePath, sourceSha256: mock!.sourceSha256 }],
+      mockFixtureRefs: variant === "results" || variant === "credential-echo" ? [] : [{ componentId: mock!.componentId, requestedTargetId: mock!.requestedTargetId, operationId: mock!.operationId, sourcePath: mock!.sourcePath, sourceSha256: mock!.sourceSha256 }],
       accountContextRefs: planTargets.flatMap((who) => context.accountContextRefs.filter((ref) => ref.applicationId === who.applicationId && ref.profileId === who.accountProfileId)),
-      scenarios: variant === "results" ? resultsScenarios : [scenario], semanticExportDeltas: [],
+      scenarios: variant === "results" ? resultsScenarios : variant === "credential-echo" ? echoScenarios : [scenario], semanticExportDeltas: [],
       applicationRuntimeRefs: planTargets.flatMap((who) => context.runtimeRefs!.filter((ref) => ref.targetId === who.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! }))),
       runtimeAccountRefs: planTargets.flatMap((who) => context.runtimeAccountRefs!.filter((ref) => ref.applicationId === who.applicationId && ref.profileId === who.accountProfileId)), unavailableTargetRefs: [] });
     const { portableOperationRefs: _portable, unavailableTargetRefs: _unavailable, ...plannerIntent } = intent;
@@ -213,9 +233,14 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     };
     const sinksFor = (invocation: WorkerInvocation) => createWorkerCallbackSinks({ controlPlaneUrl: "https://cp.example.test", invocation, fetchImplementation: workerFetch });
     const { modelRuntime, faux } = await fauxModelRuntime();
+    // The host's own credential scan (it holds the run's passwords, which nothing else does), kept to ask it about what the broker stored once the run is over.
+    let hostCredentialScan: ((bytes: Uint8Array) => boolean) | undefined;
     const applicationRuntime: WorkflowE2EApplicationRuntime = { runRoot, collect: collectLikeTheWorker,
-      createHost: (input) => createDockerApplicationHost(workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: WEB_API_BUILD_IMAGE, runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
-        createProcessDockerCli(), () => Date.now(), input)) };
+      createHost: (input) => {
+        const hostDeps = workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: WEB_API_BUILD_IMAGE, runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
+          createProcessDockerCli(), () => Date.now(), input);
+        return createDockerApplicationHost({ ...hostDeps, onRunOutput: async (run) => { hostCredentialScan = (bytes) => run.containsCredential(bytes); await hostDeps.onRunOutput?.(run); } });
+      } };
     const workerState = createWorkerServerState(journal, {
       execute: async (invocation) => {
         const sinks = sinksFor(invocation);
@@ -315,9 +340,8 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
      * `results`: what the task page and Slack show, round by round. The same five scenarios run on three states of the code, in real Chromium on the Docker host:
      *  - the starter with its `extra-order` defect, standing in for the unchanged code. The broker's baseline runner (owner decision D2) is asked at APPROVE; running the base commit is that
      *    runner's work and is not part of this task, so this journey plays it: the first round's verified rows are recorded as the baseline, through the same recorder a runner uses;
-     *  - candidate 1, which still has the `extra-order` defect (the coder's first attempt did not fix the export): FAILED, with a screenshot and expected versus actual. The fixture's
-     *    other web-observable defects cannot be the failure here: a viewer who may export (`viewer-access`) downloads a file that no assertion of a refusal references, and the
-     *    collector rightly calls that round incomplete, not failed; the orders state is only populated by a sign-in on the page, which a case does not see;
+     *  - candidate 1, whose refusal of the viewer's export answers 401 where the plan approved 403: FAILED on `viewer-access`, on the viewer's account, with a screenshot and expected
+     *    versus actual (see `withViewerRefusedAs401` for why it is not the fixture's own `viewer-access` defect);
      *  - candidate 2, as the fixture ships: PASS, publishable; the baseline recorded beside it changed nothing.
      */
     async function resultsFlow() {
@@ -351,7 +375,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
         expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "IMPLEMENT" });
       };
       const unchanged = await stageCandidate(root, "candidate-unchanged", withDefaultDefect("extra-order"));
-      const first = await stageCandidate(root, "candidate-1", withDefaultDefect("extra-order"));
+      const first = await stageCandidate(root, "candidate-1", withViewerRefusedAs401);
       const fixed = await stageCandidate(root, "candidate-2");
 
       // Approval asked the broker's baseline runner for the informational round, once, for this task.
@@ -378,20 +402,20 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       await baselineModule.recordWorkflowE2EBaseline(harness.brokerInput, taskNow(), { baseline: baselineOf(unchangedRows.scenarios), artifacts: baselineArtifacts });
       await sendBack("The exported CSV holds an order that is not the owner's: a3. Export only the owner's tenant's orders.");
 
-      // Candidate 1: the export still holds the extra order. FAILED on that one row, with expected versus actual and a screenshot of the page as it was.
-      await implement(first, "I tried to fix the export.");
+      // Candidate 1: the export is right, but the viewer's refusal answers 401 where 403 is approved. FAILED on that one row, on the viewer's account, with expected versus actual
+      // and a screenshot of the page as it was.
+      await implement(first, "I fixed the export.");
       expect(workflowNow().blockReason).toBe("one or more admitted E2E groups failed");
       expect(e2eNow().failedRound).toMatchObject({ status: "FAILED" });
       expect(e2eNow().qualifiedRound).toBeUndefined();
       const firstRows = (await resultsNow())!;
       expect(firstRows.scenarios).toHaveLength(5);
-      const stateRow = byScenario(firstRows.scenarios)["owner-export"]!;
-      expect(stateRow).toMatchObject({ status: "FAILED", kind: "web", accountLabel: "orders-owner", reason: "expected 2 rows, received 3", failedAssertion: { kind: "csv", expected: "2 rows" } });
-      expect(stateRow.failedAssertion!.actual).toContain("3 rows");
-      expect(stateRow.failedAssertion!.actual).toContain("a3");
+      const stateRow = byScenario(firstRows.scenarios)["viewer-access"]!;
+      expect(stateRow).toMatchObject({ status: "FAILED", kind: "web", accountLabel: "orders-viewer",
+        reason: 'expected "Access refused (403)", received "Access refused (401)"', failedAssertion: { kind: "text", expected: "Access refused (403)", actual: "Access refused (401)" } });
       expect(stateRow.screenshotRef).toMatchObject({ contentType: "image/jpeg" });
-      expect(firstRows.scenarios.filter((row) => row.status === "FAILED").map((row) => row.scenarioId)).toEqual(["owner-export"]);
-      expect(byScenario(firstRows.scenarios)["viewer-access"]).toMatchObject({ status: "PASSED", accountLabel: "orders-viewer" });
+      expect(firstRows.scenarios.filter((row) => row.status === "FAILED").map((row) => row.scenarioId)).toEqual(["viewer-access"]);
+      expect(byScenario(firstRows.scenarios)["owner-export"]).toMatchObject({ status: "PASSED", accountLabel: "orders-owner" });
       expect(firstRows.baseline?.status).toBe("FAILED");
       expect(byScenario(firstRows.baseline!.scenarios)["owner-export"]!.screenshotRef).toBeDefined();
       // The screenshots are behind the page's session: the owner reads them as JPEGs, someone else is refused.
@@ -403,12 +427,14 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       const slackText = JSON.stringify(await notifierModule.workflowE2ENotifierBlocks({ task: taskNow(), taskPageUrl: `https://agentx.example.test/review/${taskId}/task`,
         readPrivateObject: async (key) => { const text = harness.s3.objects.get(key); return text === undefined ? undefined : Buffer.from(text, "utf8"); } }));
       expect(slackText).toContain("Browser and API checks: 4 passed, 1 failed, 0 incomplete");
-      expect(slackText).toContain("Owner export — failed: expected 2 rows, received 3 (orders-owner)");
+      expect(slackText).toContain("Viewer access — failed: expected");
+      expect(slackText).toContain("Access refused (401)");
+      expect(slackText).toContain("(orders-viewer)");
       expect(slackText).toContain("Before the change: 1 of 5 failed, as expected for new behaviour.");
-      await sendBack("The exported CSV still holds an order that is not the owner's: a3.");
+      await sendBack("The viewer's refused export must answer 403.");
 
       // Candidate 2: as the fixture ships. Every row passes; the page lists five rows and the baseline apart; the task goes on to review. The baseline changed nothing about that.
-      await implement(fixed, "I removed the extra order from the export.");
+      await implement(fixed, "I made the refusal a 403 again.");
       expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "REVIEW" });
       expect(e2eNow().qualifiedRound).toBeDefined();
       expect(e2eNow().failedRound).toBeUndefined();
@@ -423,6 +449,45 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       // The baseline's screenshot is still the task's to read.
       const baselineShot = byScenario(lastRows.baseline!.scenarios)["owner-export"]!.screenshotRef!;
       expect((await getArtifact(baselineShot.sha256)).statusCode).toBe(200);
+    }
+
+    /**
+     * `credential-echo`: the broker redacts by pattern and cannot know a run's passwords; what keeps a bare password out of a row, the stored display and Slack is the Docker
+     * host's own scan, which holds them. A candidate copies the password the owner signed in with into the first row of the owner's export, which the CSV assertion observes.
+     * Whatever the round makes of that, no surface the broker stores or shows carries the password, by the host's own predicate (every spelling it knows, base64 included).
+     */
+    async function credentialEchoFlow() {
+      const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+      const notifierModule = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+      faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidate}/." repo/demo/` })]), fauxAssistantMessage("I added the export.")]);
+      await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
+      const implemented = await runOperation("IMPLEMENT");
+      expect(implemented.operation.status, JSON.stringify(implemented.operation)).toBe("SUCCEEDED");
+      await completeReadiness();
+      const checks = await runOperation("CHECKS");
+      expect(checks.operation.status, JSON.stringify({ operation: checks.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
+      const scan = hostCredentialScan;
+      expect(scan, "the host scanned the run's output").toBeDefined();
+      // The echo took effect: the export no longer holds the owner's orders, so the round is not a pass.
+      expect((workflowNow().e2e as { qualifiedRound?: unknown }).qualifiedRound).toBeUndefined();
+      const task = harness.db.get(taskKey.pk, taskKey.sk) as never;
+      const operations = operationRows(() => true);
+      const rows = await brokerModule.loadWorkflowE2EScenarioResults(harness.brokerInput as never, task, operations, "owner");
+      expect(rows?.scenarios.map((row) => row.status), JSON.stringify(rows)).not.toContain("PASSED");
+      const presentation = (await brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, task, operations, "owner"))!;
+      const displayRef = (workflowNow().e2e as { displayRef?: { key: string } }).displayRef;
+      const slack = await notifierModule.workflowE2ENotifierBlocks({ task, taskPageUrl: `https://agentx.example.test/review/${taskId}/task`,
+        readPrivateObject: async (key) => { const text = harness.s3.objects.get(key); return text === undefined ? undefined : Buffer.from(text, "utf8"); } });
+      const surfaces: Record<string, string> = { rows: JSON.stringify(rows), page: presentation.pageHtml, slack: JSON.stringify(slack), presentationSlack: JSON.stringify(presentation.slackBlocks),
+        shared: JSON.stringify(presentation.shared), workflow: JSON.stringify(workflowNow()), display: displayRef === undefined ? "" : harness.s3.objects.get(displayRef.key) ?? "" };
+      expect(surfaces.display, "a display was stored").not.toBe("");
+      for (const [name, text] of Object.entries(surfaces)) expect(scan!(Buffer.from(text, "utf8")), `the ${name} carries a run credential`).toBe(false);
+    }
+
+    if (variant === "credential-echo") {
+      await credentialEchoFlow();
+      await nothingLeftBehind();
+      return;
     }
 
     if (variant === "results") {
@@ -479,6 +544,10 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
 
   it("unmocked-call: a candidate that calls a path the inventory contract does not have gets UNKNOWN for unmocked-external-call, never PASS", async () => {
     await inventoryJourney("unmocked-call");
+  }, 600_000);
+
+  it("credential-echo: a password the candidate copies into an observed export reaches no row, no stored display and no Slack text (the host's scan, end to end)", async () => {
+    await inventoryJourney("credential-echo");
   }, 600_000);
 
   it("results: five scenarios on three states of the code show a row each with its account and kind, a failure with a screenshot and expected versus actual, the baseline apart, and a passing round publishes", async () => {

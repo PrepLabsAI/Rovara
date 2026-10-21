@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection, workflowE2EDisplayRef } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
 import { handler as notifierLambdaHandler, workflowE2ENotifierBlocks } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { renderE2ENotifierSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
+import { renderE2ENotifierSlackBlocks, renderE2EUnavailableSlackBlock } from "../../packages/broker/src/e2e-presentation.js";
+import { readLegacyWorkflowE2ENotifierProjection } from "../support/legacy-display-v1-reader.js";
 import { failedBaseline, failedViewerRow, results, row } from "../support/e2e-scenario-results.js";
 
 const current = { candidateDigest: "a".repeat(64), roundId: "11111111-1111-4111-8111-111111111111",
@@ -109,14 +110,19 @@ describe("notifier E2E display projection", () => {
     it("still writes displaySchemaVersion 1 for a round with no scenario rows, which any reader reads", async () => {
       const object = createWorkflowE2EDisplayObject({ ...owner, view: shared, capturedAt: capturedAtV2, current })!;
       expect((JSON.parse(Buffer.from(object.bytes).toString("utf8")) as { displaySchemaVersion: number }).displaySchemaVersion).toBe(1);
-      const stale = await readWorkflowE2ENotifierProjection({ ref: object.ref, ...owner, current, maxDisplaySchemaVersion: 1, readPrivateObject: readerOf(object.bytes) });
+      // The reader that shipped before M1.3 (pinned verbatim from 3dd0d549, with its own schemas): it reads a version 1 display as it always did.
+      const stale = await readLegacyWorkflowE2ENotifierProjection({ ref: object.ref, ...owner, current, readPrivateObject: readerOf(object.bytes) });
       expect(stale?.view.e2e.status).toBe("UNKNOWN");
-      expect(stale?.scenarioResults).toBeUndefined();
     });
 
-    it("is not read at all by a reader that knows only version 1: it gets nothing, never a verdict", async () => {
+    it("is not read at all by the pre-M1.3 reader: it gets nothing, never a verdict, and the notifier then says 'Open the task page'", async () => {
       const made = make();
-      expect(await readWorkflowE2ENotifierProjection({ ref: made.ref, ...owner, current, maxDisplaySchemaVersion: 1, readPrivateObject: readerOf(made.bytes) })).toBeUndefined();
+      expect(await readLegacyWorkflowE2ENotifierProjection({ ref: made.ref, ...owner, current, readPrivateObject: readerOf(made.bytes) })).toBeUndefined();
+      // The pinned reader is the real one: it refuses the version 2 object because of its schema (a literal version 1, strict), and reads the same object once it is a version 1.
+      const asV1 = Buffer.from(JSON.stringify({ ...made.parsed, displaySchemaVersion: 1, scenarios: undefined, baseline: undefined }), "utf8");
+      const v1Ref = workflowE2EDisplayRef({ ...current, ...owner, bytes: asV1 });
+      expect((await readLegacyWorkflowE2ENotifierProjection({ ref: v1Ref, ...owner, current, readPrivateObject: readerOf(asV1) }))?.view.e2e.status).toBe("UNKNOWN");
+      expect(renderE2EUnavailableSlackBlock("https://agentx.test/review/t/task", true).text.text).toContain("Open the task page");
     });
 
     it("the notifier built for v2 shows the failure in the words of the row, with the counts, what was mocked, the baseline and the page", async () => {

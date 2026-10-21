@@ -135,16 +135,15 @@ describe("the rows of an application round on the real broker", () => {
     expect(found!.scenarios.map((item) => item.accountLabel).sort()).toEqual(["orders-owner", "orders-viewer"]);
   });
 
-  it("shows nothing while the round has no accepted evidence, and a round that is running as incomplete", async () => {
+  it("shows nothing on the page while the round is running: its rows are those of the stored display, written when the round ends (and the live presentation still says incomplete)", async () => {
     const round = await startApplicationRound();
     expect(await scenarioResultsOf(round)).toBeUndefined();
     round.markRunning();
     const groups = await round.collectGroup(round.groupIds[0]!, PASS);
     const uploaded = await round.upload(round.groupEnvelope(groups.groupRun), { groupRunId: groups.runId });
     expect(uploaded.response.status).toBe(200);
-    const found = await scenarioResultsOf(round);
-    expect(found?.scenarios.every((item) => item.status === "UNKNOWN")).toBe(true);
-    expect(found?.scenarios[0]?.reason).toBe("the checks have not finished");
+    expect(await scenarioResultsOf(round)).toBeUndefined();
+    expect(JSON.stringify((await presentationOf(round))!.slackBlocks)).toContain("0 passed, 0 failed, 1 incomplete");
   });
 
   it("a task closed after its round keeps showing the rows recorded in its display", async () => {
@@ -169,5 +168,70 @@ describe("the rows of an application round on the real broker", () => {
     const view = await getTaskDocumentView(deps, maya, round.taskId);
     expect(view.e2eResults?.scenarios.map((item) => [item.scenarioId, item.status, item.reason])).toEqual([["orders-health-0", "FAILED", "expected 200, received 503"]]);
     expect(view.e2eResults?.scenarios[0]?.screenshotRef?.sha256).toBe(SHOT_SHA);
+  });
+
+  describe("the page reads its rows from the stored display (Ruling CT: F2, F11)", () => {
+    const pageView = async (round: ApplicationRound) => {
+      const maya = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: MAYA.provider, name: MAYA.name };
+      const input = round.harness.brokerInput as { documentClient: never; tableName: string; developer: never };
+      const broker = await brokerModule();
+      const deps = developerTaskRouteDependencies({ documentClient: input.documentClient, tableName: input.tableName, developer: input.developer, now: Date.now, tasks: round.harness.actions as never,
+        ...broker.workflowApplicationRouteDependencies(round.harness.brokerInput as never) }, maya);
+      return getTaskDocumentView(deps, maya, round.taskId);
+    };
+    type S3Calls = { send: { mock: { calls: Array<[{ input?: { Key?: string } }]> }; mockClear(): void; getMockImplementation(): ((command: unknown) => Promise<unknown>) | undefined; mockImplementation(fn: (command: unknown) => Promise<unknown>): void } };
+    const s3Of = (round: ApplicationRound) => round.harness.s3 as unknown as S3Calls;
+
+    it("renders a page without reading the round's admission or evidence again", async () => {
+      const round = await startApplicationRound();
+      const [caseId] = caseIdsOf(round);
+      await runRound(round, [FAIL], { tweak: (groupRun) => { groupRun.operatorEvidence = operatorEvidenceWith([{ caseId: caseId!, bytes: SHOT }]); } });
+      s3Of(round).send.mockClear();
+      const view = await pageView(round);
+      expect(view.e2eResults?.scenarios.map((item) => item.status)).toEqual(["FAILED"]);
+      const keys = s3Of(round).send.mock.calls.map(([command]) => String(command.input?.Key ?? ""));
+      expect(keys.filter((key) => /workflow-e2e-(admissions|evidence|group-evidence)\//u.test(key)), JSON.stringify(keys)).toEqual([]);
+    });
+
+    it("shows a baseline recorded after the round's display only from the next display, so every link on the page is one the route serves", async () => {
+      const round = await startApplicationRound({ brokerExtra: { e2eBaselineRound: async () => undefined } });
+      const [caseId] = caseIdsOf(round);
+      await runRound(round, [FAIL], { tweak: (groupRun) => { groupRun.operatorEvidence = operatorEvidenceWith([{ caseId: caseId!, bytes: SHOT }]); } });
+      const baselineModule = await import("../../packages/broker/src/aws/workflow-e2e-baseline.js");
+      await baselineModule.recordWorkflowE2EBaseline(round.harness.brokerInput as never, round.taskNow() as never, {
+        baseline: { status: "FAILED", scenarios: [{ scenarioId: "orders-health-0", title: "Orders health 0", kind: "api", accountLabel: "orders-owner", status: "FAILED", reason: "expected 200, received 503",
+          screenshotRef: { sha256: sha(OTHER_SHOT), bytes: OTHER_SHOT.byteLength, contentType: "image/jpeg" }, mockedOrigins: [] }] },
+        artifacts: [{ sha256: sha(OTHER_SHOT), bytes: OTHER_SHOT, contentType: "image/jpeg" }] });
+      const view = await pageView(round);
+      expect(view.e2eResults?.baseline).toBeUndefined();
+      const broker = await brokerModule();
+      const links = (view.e2eResults?.scenarios ?? []).flatMap((item) => (item.screenshotRef === undefined ? [] : [item.screenshotRef.sha256]));
+      expect(links).toEqual([SHOT_SHA]);
+      for (const link of links) expect(await broker.loadWorkflowE2EArtifact(round.harness.brokerInput as never, round.taskNow() as never, link)).toBeDefined();
+    });
+
+    it("shows no link for a screenshot that could not be stored", async () => {
+      const round = await startApplicationRound();
+      const [caseId] = caseIdsOf(round);
+      const s3 = s3Of(round);
+      const real = s3.send.getMockImplementation()!;
+      s3.send.mockImplementation(async (command) => {
+        const { constructor, input } = command as { constructor: { name: string }; input?: { Key?: string } };
+        if (constructor.name === "PutObjectCommand" && String(input?.Key).includes("workflow-e2e-artifacts")) throw new Error("S3 is down");
+        return real(command);
+      });
+      await runRound(round, [FAIL], { tweak: (groupRun) => { groupRun.operatorEvidence = operatorEvidenceWith([{ caseId: caseId!, bytes: SHOT }]); } });
+      const view = await pageView(round);
+      expect(view.e2eResults?.scenarios.map((item) => [item.status, item.screenshotRef])).toEqual([["FAILED", undefined]]);
+    });
+
+    it("shows nothing while the code is being changed after a send-back", async () => {
+      const round = await startApplicationRound();
+      await runRound(round, [FAIL]);
+      expect((await pageView(round)).e2eResults?.scenarios).toHaveLength(1);
+      const sentBack = await round.harness.dev(MAYA, "POST", `/v1/dev/tasks/${round.taskId}/workflow/send-back`, { requestId: randomUUID(), expectedRevision: round.workflowNow().revision, instructions: "Fix it." });
+      expect(sentBack.status, JSON.stringify(sentBack.body)).toBe(200);
+      expect((await pageView(round)).e2eResults).toBeUndefined();
+    });
   });
 });

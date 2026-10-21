@@ -31,11 +31,6 @@ export async function readWorkflowE2ENotifierProjection(input: {
   ownerKey: string;
   workspaceId: string;
   current: { candidateDigest: string; roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string };
-  /**
-   * The newest display schema this reader understands (default: the newest there is). A reader that knows only version 1, as the notifier and page did before M1.3, gets
-   * nothing from a version 2 object, however much of it looks familiar.
-   */
-  maxDisplaySchemaVersion?: 1 | 2;
   readPrivateObject(key: string, maxBytes: number): Promise<Uint8Array | undefined>;
 }): Promise<{ view: ReturnType<typeof E2ESharedViewSchema.parse>; capturedAt: string; candidateDigest: string; roundId: string; scenarioResults?: E2EScenarioResults } | undefined> {
   const ref = E2EWorkflowDisplayRefSchema.safeParse(input.ref);
@@ -49,7 +44,7 @@ export async function readWorkflowE2ENotifierProjection(input: {
   try {
     const raw: unknown = JSON.parse(Buffer.from(bytes).toString("utf8"));
     const version = typeof raw === "object" && raw !== null ? (raw as { displaySchemaVersion?: unknown }).displaySchemaVersion : undefined;
-    if (version !== 1 && !(version === 2 && (input.maxDisplaySchemaVersion ?? WORKFLOW_E2E_DISPLAY_SCHEMA_VERSION) >= 2)) return undefined;
+    if (version !== 1 && version !== 2) return undefined;
     const envelope = version === 2 ? envelopeV2.safeParse(raw) : envelopeV1.safeParse(raw);
     if (!envelope.success || envelope.data.candidateDigest !== input.current.candidateDigest
       || envelope.data.roundId !== input.current.roundId || JSON.stringify(envelope.data.groupRunIds) !== JSON.stringify(input.current.groupRunIds)

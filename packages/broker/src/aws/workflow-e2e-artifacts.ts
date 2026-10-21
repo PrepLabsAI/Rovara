@@ -60,6 +60,8 @@ export async function loadStoredScenarioResults(store: WorkflowE2EArtifactStore,
   const candidateDigest = task.workflow?.candidate?.digest;
   const ref = progress?.displayRef;
   if (candidateDigest === undefined || progress?.currentRoundId === undefined || ref === undefined) return undefined;
+  // After a send-back the code is being changed: the display is of the code that was sent back, and neither its rows nor its screenshots are shown as the task's current ones.
+  if (task.workflow?.stage === "IMPLEMENT") return undefined;
   const loaded = await readWorkflowE2ENotifierProjection({ ref, ownerKey: task.ownerKey, workspaceId: task.workspaceId,
     current: { candidateDigest, roundId: progress.currentRoundId, groupRunIds: progress.currentGroupRunIds, admissionSha256: ref.admissionSha256, evidenceSha256: ref.evidenceSha256 },
     readPrivateObject: (key, maxBytes) => (/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u.test(key) ? readPrivateObject(store, key, maxBytes) : Promise.resolve(undefined)) });

@@ -10,7 +10,11 @@ import { E2EScenarioResultsSchema, E2E_DISPLAY_SCREENSHOT_MAX_BYTES, canonicalJs
  * reason is one of a fixed set of sentences, never the worker's words. The only worker-supplied thing a row can point at is a screenshot, which is kept only if it is a
  * JPEG of exactly the size and digest the worker listed, for a case of the group, and only for a row whose status the broker found to be failed or incomplete.
  *
- * Nothing here keeps an email or a credential: free text is redacted, emails are replaced, and an account is shown by its profile id only.
+ * Emails are replaced and an account is shown by its profile id only. Credentials are another matter, and this module only does part of it: the free text is run through the
+ * redactor by pattern (`redactText`: `password=...`, bearer tokens and the like), which cannot recognise a bare value. The broker never holds a run's synthetic passwords, so it
+ * cannot scan for them. What keeps a bare password out of an observed value is the chain upstream of the broker: the Docker host's own scan of the run output against the run's
+ * credentials (every spelling it knows), which withholds evidence that carries one before the worker packs it. `credential-echo` in tests/e2e/m1-3-journeys.test.ts runs that
+ * chain end to end.
  */
 
 const EMAIL = /[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/gu;
