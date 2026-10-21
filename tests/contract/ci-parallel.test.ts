@@ -57,6 +57,22 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(run).toContain("npx vitest run tests/linux");
   });
 
+  it("runs the Docker 25 DNS regression test once, in its own step under the same gate as the other Linux tests, and keeps it out of the generic step", async () => {
+    const job = (await workflow()).jobs["linux-runtime"] as Job & { steps: { name?: string; run?: string; env?: Record<string, string> }[] };
+    const generic = job.steps.find((step) => (step.run ?? "").startsWith("npx vitest run tests/linux"))!;
+    expect(generic.run).toContain("--exclude tests/linux/e2e-docker25-dns.test.ts");
+    const step = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/e2e-docker25-dns.test.ts") && candidate !== generic)!;
+    expect(step.run).toBe("npx vitest run tests/linux/e2e-docker25-dns.test.ts");
+    expect(step.name).toMatch(/Docker 25/);
+    expect(step.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
+    const steps = job.steps.map((candidate) => candidate.run ?? "");
+    expect(steps.indexOf(step.run!)).toBeGreaterThan(steps.indexOf(generic.run!));
+    // It starts its own Docker 25 (Docker in Docker); the runner's daemon, iptables and sysctls are what the other steps set up and are not touched by it.
+    const test = readFileSync("tests/linux/e2e-docker25-dns.test.ts", "utf8");
+    expect(readFileSync("tests/support/linux-dind.ts", "utf8")).toMatch(/docker:25\.0\.5-dind@sha256:[0-9a-f]{64}/);
+    expect(test).toContain('describe.runIf(process.env.ROVARA_DOCKER === "1")');
+  });
+
   it("smoke-tests the executor image from CI and from the release path through one definition, with the production sandbox flags", async () => {
     const shared = readFileSync("scripts/executor-smoke.ts", "utf8");
     // The smoke command takes its sandbox and limit flags from the verifier's executor definition (what the Docker host builds its executor command from) and

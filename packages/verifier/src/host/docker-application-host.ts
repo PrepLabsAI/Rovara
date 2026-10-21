@@ -245,7 +245,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const workspace = join(deps.runRoot, runId);
   // The mock fixtures (read-only to the mocks) and the mock ledgers (written by the mocks alone) sit apart from the executor's out directory, which the executor and the app never see.
   const dirs = { app: join(workspace, "app"), owned: join(workspace, "owned"), out: join(workspace, "out"), plan: join(workspace, "plan.json"),
-    mock: join(workspace, "mock"), mockOut: join(workspace, "mock-out") };
+    mock: join(workspace, "mock"), mockOut: join(workspace, "mock-out"), resolv: join(workspace, "resolv.conf") };
   const mockContainers = [{ origin: SINKHOLE_ORIGIN, componentId: null as string | null, fixture: null as (typeof originPlan.mocked)[number]["fixture"] | null },
     ...originPlan.mocked.map((item) => ({ origin: item.originRef, componentId: item.componentId, fixture: item.fixture }))]
     .map((item) => ({ ...item, name: `rovara-mock-${runId}-${item.origin}`, alias: `mock-${item.origin}` }));
@@ -450,12 +450,21 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     await mkdir(ownedMount, { recursive: true });
 
     if (!(await startMocks(signal))) return { kind: "unavailable", reason: signal.aborted ? stopReason() : "mock-unavailable" };
-    // Every name that nothing in the run serves resolves to the sinkhole (the app's resolver forwards to it), so a call to an undeclared host is recorded.
-    const sinkholeAddress = await containerAddress(mockContainers[0]!.name);
-    if (sinkholeAddress === null) { appendBuildLog("the sinkhole has no address on the run network\n"); return { kind: "unavailable", reason: "mock-unavailable" }; }
+    // Every name that nothing in the run serves resolves to the sinkhole, so a call to an undeclared host is recorded. The app is not left to Docker's embedded resolver for that: Docker 25 does not
+    // forward the queries of a container that is only on internal networks to a `--dns` server, so such a lookup would never reach the sinkhole. The app instead gets a run-owned read-only
+    // /etc/resolv.conf that names the sinkhole directly, and the run's own names (every mock alias and the sinkhole's) in its hosts file, which the embedded resolver no longer answers.
+    const addresses: { alias: string; address: string }[] = [];
+    for (const mock of mockContainers) {
+      const address = await containerAddress(mock.name);
+      if (address === null) { appendBuildLog(mock.fixture === null ? "the sinkhole has no address on the run network\n" : `the mock for ${mock.origin} has no address on the run network\n`); return { kind: "unavailable", reason: "mock-unavailable" }; }
+      addresses.push({ alias: mock.alias, address });
+    }
+    const sinkholeAddress = addresses[0]!.address;
+    await writeFile(dirs.resolv, `nameserver ${sinkholeAddress}\noptions ndots:0 timeout:2 attempts:2\n`, { mode: 0o644 });
+    await chmod(dirs.resolv, 0o644);
 
-    const appCreate = await docker.run(["run", "-d", "--name", appName, "--pull=never", ...hardening(["--network", network, "--network-alias", "app", "--dns", sinkholeAddress]), "--read-only",
-      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`, "-w", containerCwd("/app", launch.start.cwd),
+    const appCreate = await docker.run(["run", "-d", "--name", appName, "--pull=never", ...hardening(["--network", network, "--network-alias", "app", ...addresses.flatMap((item) => ["--add-host", `${item.alias}:${item.address}`])]), "--read-only",
+      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`, "-v", `${dirs.resolv}:/etc/resolv.conf:ro`, "-w", containerCwd("/app", launch.start.cwd),
       // The recipe's literals come first, so the host's own port and seed variables always win.
       ...Object.entries(launch.start.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
       // Every declared origin is one of the run's own containers: the approved mock when there is one, the sinkhole otherwise. These come after the recipe's literals, so the recipe cannot point an origin elsewhere.
