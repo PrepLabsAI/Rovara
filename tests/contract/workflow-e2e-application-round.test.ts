@@ -280,6 +280,44 @@ describe("uploading the evidence of an application round: group lookup, sizing a
       expect(e2eOf(round).qualifiedRound, JSON.stringify(round.workflowNow())).toBeDefined();
     });
 
+    it("qualifies every group of a round whose groups finished more than 30 s apart, when each uploads as it finishes (Ruling CL)", async () => {
+      const round = await startApplicationRound({ applications: 4 });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now());
+      round.markRunning();
+      const runs: Record<string, unknown>[] = [];
+      for (const groupId of round.groupIds) {
+        const group = await round.collectGroup(groupId, PASS);
+        const uploaded = await round.upload(round.groupEnvelope(group.groupRun), { groupRunId: group.runId });
+        expect(uploaded.response.status, JSON.stringify(uploaded.response.body)).toBe(200);
+        runs.push(group.groupRun);
+        // The next group finishes 45 s later: past the original group's 30 s post-close window.
+        vi.setSystemTime(Date.now() + 45_000);
+      }
+      const aggregate = await round.upload(round.aggregateEnvelope(runs));
+      expect(aggregate.response.status).toBe(200);
+      await round.finishChecks(aggregate.response.body as { key: string; sha256: string });
+      expect(e2eOf(round).qualifiedRound, JSON.stringify(round.workflowNow())).toBeDefined();
+      expect(e2eOf(round).qualifiedRound!.groupRunIds).toHaveLength(2);
+    });
+
+    it("loses the earlier group to UNKNOWN when its upload waits for a slower group, which is why a worker uploads each group as it finishes", async () => {
+      const round = await startApplicationRound({ applications: 4 });
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now());
+      round.markRunning();
+      const first = await round.collectGroup(round.groupIds[0]!, PASS);
+      vi.setSystemTime(Date.now() + 45_000);
+      const second = await round.collectGroup(round.groupIds[1]!, PASS);
+      for (const group of [first, second]) {
+        const uploaded = await round.upload(round.groupEnvelope(group.groupRun), { groupRunId: group.runId });
+        expect(uploaded.response.status, JSON.stringify(uploaded.response.body)).toBe(200);
+      }
+      const aggregate = await round.upload(round.aggregateEnvelope([first.groupRun, second.groupRun]));
+      await round.finishChecks(aggregate.response.body as { key: string; sha256: string });
+      expect(e2eOf(round).qualifiedRound).toBeUndefined();
+    });
+
     it("is not the time of the verification either: the same round verified 45 minutes later is the same verdict", async () => {
       const round = await startApplicationRound();
       await runRound(round, [PASS]);

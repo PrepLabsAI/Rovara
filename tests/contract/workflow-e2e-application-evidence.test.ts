@@ -7,11 +7,12 @@ import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, WorkerInvocationSchema, type 
 import { createDockerApplicationHost, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
-import { DIAGNOSTICS_NOTICE, allocateGroupEvidence, type GroupEvidenceCandidate, type OperatorEvidence as WorkerOperatorEvidence } from "../../packages/worker/src/workflow-e2e-application-checks.js";
+import { DIAGNOSTICS_NOTICE, fitGroupEvidence, groupEvidenceShare, type GroupEvidenceCandidate, type OperatorEvidence as WorkerOperatorEvidence } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import type { CandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { createApplicationEvidenceFixture } from "../support/e2e-application-evidence-fixture.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
+import { startApplicationRound } from "../support/e2e-application-round-harness.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
 
 // Task 3.6: what the group evidence keeps of a run's raw output, and what it drops when the cap is tight. The captures are the operator's; the verdict inputs are never traded for them.
@@ -42,10 +43,22 @@ const baseRun = (extra: Assembled = {}): Assembled => ({ protocol: "e2e-actual-a
   shards: [{ shardId: "shard-a", launchId: "00000000-0000-4000-8000-000000000001", rawReportBytes: new Uint8Array(Buffer.from('{"run":{"status":"failed"}}')), runStderrBytes: new Uint8Array() }],
   executorEvidence: executorEvidence(), ...extra });
 
-async function setup(options: { assembled?: Assembled } = {}) {
+/** A host whose run finished cleanly and whose readback is `run`: allocate, execute and close succeed at once. */
+function standInHost(run: Assembled): DockerApplicationHost {
+  const at = new Date().toISOString();
+  return { allocate: async () => ({ leaseId: "stand-in", close: async () => ({ confirmed: true }),
+    execute: async () => ({ process: { exitCode: 0, timedOut: false, aborted: false }, rawReport: null, observedUpstreamRunId: null, coverageByCase: new Map(), artifacts: [], modelReceiptIds: [],
+      startedAt: at, finishedAt: at, cleanup: "confirmed" as const }) }),
+  readActualRun: async () => run as never, readCollectionInputs: async () => ({ marker: "collection-inputs" }) as never,
+  readDiagnostics: () => ({ appLogTail: "", buildLogTail: "", executorLogTail: "" }), readBuildResult: () => null };
+}
+
+async function setup(options: { assembled?: Assembled; admission?: E2EApplicationExecutionAdmission; standIn?: boolean;
+  /** Holds one group back (its collection inputs are not read) until the promise settles, and tells the test when a group's evidence is saved. */
+  hold?: { groupIndex: number; until: Promise<unknown> }; onSave?: (groupRunId: string | undefined) => void } = {}) {
   const fake = new FakeDockerCli();
   const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", taskId: TASK_ID });
-  const admission: E2EApplicationExecutionAdmission = fixture.plan.admission;
+  const admission: E2EApplicationExecutionAdmission = options.admission ?? fixture.plan.admission;
   const admissionBytes = Buffer.from(encodeE2EApplicationExecutionAdmission(admission), "utf8");
   const admissionSha = sha(admissionBytes);
   const invocation = WorkerInvocationSchema.parse({
@@ -62,6 +75,7 @@ async function setup(options: { assembled?: Assembled } = {}) {
   const saved: Array<{ bytes: Buffer; groupRunId: string | undefined; maxBytes: number }> = [];
   const saveEvidence = vi.fn(async (bytes: Uint8Array, digest: string, maxBytes: number, groupRunId?: string) => {
     saved.push({ bytes: Buffer.from(bytes), groupRunId, maxBytes });
+    options.onSave?.(groupRunId);
     return { key: `workflow-e2e-${groupRunId === undefined ? "evidence" : "group-evidence"}/sha256/${digest}.json`, sha256: digest };
   });
   const runRoot = await temp("evidence-run-root-");
@@ -76,9 +90,14 @@ async function setup(options: { assembled?: Assembled } = {}) {
       }
       return [];
     }) };
-  const createHost = vi.fn((input: Parameters<WorkflowE2EApplicationRuntime["createHost"]>[0]): DockerApplicationHost => createDockerApplicationHost({ ...input, docker: fake,
-    executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(), appPollMs: 10, deadlineGraceMs: 60,
-    assemble: (() => options.assembled ?? baseRun()) as never, assembleCollectionInputs: (() => ({ marker: "collection-inputs" })) as never }));
+  const createHost = vi.fn((input: Parameters<WorkflowE2EApplicationRuntime["createHost"]>[0]): DockerApplicationHost => {
+    // A round of several applications has groups the docker host (one application per group) cannot run, so its groups run on a stand-in that answers as a finished run.
+    const host = options.standIn === true ? standInHost(options.assembled ?? baseRun()) : createDockerApplicationHost({ ...input, docker: fake,
+      executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(), appPollMs: 10, deadlineGraceMs: 60,
+      assemble: (() => options.assembled ?? baseRun()) as never, assembleCollectionInputs: (() => ({ marker: "collection-inputs" })) as never });
+    const held = options.hold !== undefined && admission.groups[options.hold.groupIndex]!.outerBinding.groupId === input.groupId;
+    return held ? { ...host, readCollectionInputs: async (signal: AbortSignal) => { await options.hold!.until; return host.readCollectionInputs(signal); } } : host;
+  });
   type Qualification = { status: "PASS" | "FAILED" | "UNKNOWN"; reason: string; runId: string | null; rawReportSha256: string | null; result: null };
   const qualified = (status: Qualification["status"] = "FAILED"): Qualification => ({ status, reason: "x", runId: null, rawReportSha256: null, result: null });
   const collect = vi.fn<(input: unknown) => { collection: unknown; oracle: unknown; unavailableReason: string | null; qualification: Qualification | null }>(
@@ -87,8 +106,11 @@ async function setup(options: { assembled?: Assembled } = {}) {
   const run = () => executeWorkflowE2EChecks({ invocation, readAdmission, saveEvidence, sourceRoot: "/workspace/runtime", evidenceRoot,
     candidateRepositoryRoot: () => repositoryRoot, application });
   const runId = admission.groups[0]!.outerBinding.runId; const groupId = admission.groups[0]!.outerBinding.groupId;
-  fake.onExecutor = (outDir: string) => writeExecutorOutput(outDir, { exitCode: 0, reason: null, runId, groupId });
-  return { fake, saved, collect, run, runId, qualified };
+  fake.onExecutor = (outDir: string) => {
+    const group = admission.groups.find((item) => outDir.includes(item.outerBinding.runId)) ?? admission.groups[0]!;
+    writeExecutorOutput(outDir, { exitCode: 0, reason: null, runId: group.outerBinding.runId, groupId: group.outerBinding.groupId });
+  };
+  return { fake, saved, collect, run, runId, groupId, admission, qualified };
 }
 
 type OperatorEvidence = { notice: string; rawReportIn: string | null; observationsIn: string | null; observations: Array<{ artifactId: string; sha256: string; byteLength: number; mediaType: string; contentBase64: string | null }>;
@@ -238,80 +260,118 @@ describe("when the group cap is tight, the capture goes and the verdict inputs s
     expect(group.operatorEvidence).toBeNull();
   });
 });
+// Every group is held to a fixed share of the aggregate that is known before any group runs, so each group can upload the moment it finishes (the broker's 30 s post-close
+// harvest window is measured to the start of that upload) and no group's captures can take another group's room.
+describe("a group's fixed share of the aggregate", () => {
+  const MiB = 1024 * 1024;
+  it("is the group ceiling or an equal part of what the aggregate has beyond its own envelope, whichever is less", () => {
+    expect(groupEvidenceShare({ groupLimit: 8 * MiB, aggregateLimit: 24 * MiB, groupCount: 4 })).toBe(Math.floor(23 * MiB / 4));
+    expect(groupEvidenceShare({ groupLimit: 8 * MiB, aggregateLimit: 16 * MiB, groupCount: 2 })).toBe(Math.floor(15 * MiB / 2));
+    expect(groupEvidenceShare({ groupLimit: 8 * MiB, aggregateLimit: 24 * MiB, groupCount: 2 })).toBe(8 * MiB);
+    expect(groupEvidenceShare({ groupLimit: 8 * MiB, aggregateLimit: 8 * MiB, groupCount: 1 })).toBe(7 * MiB);
+    expect(groupEvidenceShare({ groupLimit: 3 * MiB, aggregateLimit: 24 * MiB, groupCount: 1 })).toBe(3 * MiB);
+    // However many groups, the shares together never pass what the aggregate can hold beside its own envelope.
+    for (const groupCount of [1, 2, 3, 4]) expect(groupEvidenceShare({ groupLimit: 8 * MiB, aggregateLimit: 24 * MiB, groupCount }) * groupCount).toBeLessThanOrEqual(23 * MiB);
+  });
+});
 
-// Several groups share one aggregate. Every group's verdict inputs are reserved before any capture is counted, so a capture can never push a group's verdict inputs to
-// "evidence too large", whatever order the groups finished in.
-describe("sharing the aggregate between groups", () => {
-  const operator = (sizes: number[]): WorkerOperatorEvidence => {
-    const files = sizes.map((size, index) => ({ name: `case-${index}-screenshot.jpg`, sha256: String(index).repeat(64).slice(0, 64), bytes: size, base64: "A".repeat(Math.ceil(size / 3) * 4) }));
-    return { notice: "n", rawReportIn: "collection", observationsIn: "collection", observations: [], executorLogHead: "log",
-      captures: { artifacts: files.map((file, index) => ({ caseId: `case-${index}`, kind: "screenshot" as const, sha256: file.sha256, bytes: file.bytes })), files } };
+describe("fitting one group into its share", () => {
+  const operator = (files: number[], observations: number[] = [], log: string | null = "log"): WorkerOperatorEvidence => {
+    const stored = files.map((size, index) => ({ name: `case-${index}-screenshot.jpg`, sha256: String(index).repeat(64).slice(0, 64), bytes: size, base64: "A".repeat(Math.ceil(size / 3) * 4) }));
+    return { notice: "n", rawReportIn: "diagnostics.shardReports", observationsIn: observations.length > 0 ? "operatorEvidence.observations" : null,
+      observations: observations.map((size, index) => ({ artifactId: `o${index}`, sha256: String(index).repeat(64).slice(0, 64), byteLength: size, mediaType: "application/json", contentBase64: "B".repeat(Math.ceil(size / 3) * 4) })),
+      executorLogHead: log, captures: { artifacts: stored.map((file, index) => ({ caseId: `case-${index}`, kind: "screenshot" as const, sha256: file.sha256, bytes: file.bytes })), files: stored } };
   };
-  /** A group whose plain evidence is `verdict` bytes, with the operator evidence JSON on top. */
-  const group = (verdict: number, limit: number, whole: WorkerOperatorEvidence | null): GroupEvidenceCandidate => ({ limit, whole,
+  const candidate = (verdict: number, share: number, whole: WorkerOperatorEvidence | null): GroupEvidenceCandidate => ({ limit: share, whole,
     build: (op) => Buffer.from(JSON.stringify({ verdict: "v".repeat(verdict), operatorEvidence: op })) });
-  const sizeOf = (verdict: number, op: WorkerOperatorEvidence | null) => group(verdict, 0, null).build(op).byteLength;
+  const plain = (verdict: number) => candidate(verdict, 0, null).build(null).byteLength;
 
-  it("gives a later group's verdict inputs their room even when an earlier group's captures would take all of it", () => {
-    const room = 1_000_000;
-    // Group 0 asks for 900,000 bytes of screenshots (1.2 MB as base64) of a 1,000,000-byte room; group 1's verdict inputs are 400,000 bytes.
-    const big = operator([300_000, 300_000, 300_000]);
-    const groups = [group(100_000, 8_000_000, big), group(400_000, 8_000_000, null)];
-    const result = allocateGroupEvidence(groups, room);
-    expect(result[1]).not.toBeNull();
-    expect(result[1]!.evidence.byteLength).toBe(sizeOf(400_000, null));
-    expect(result[0]).not.toBeNull();
-    const used = result.reduce((sum, item) => sum + (item?.evidence.byteLength ?? 0), 0);
-    expect(used).toBeLessThanOrEqual(room);
-    // What group 0 kept is a subset of its screenshots; the rest are listed as dropped for budget.
-    const kept = result[0]!.operator!.captures!;
-    expect(kept.files.length).toBeLessThan(3);
-    expect(kept.artifacts.filter((entry) => entry.omitted === "budget")).toHaveLength(3 - kept.files.length);
+  it("keeps everything when it fits", () => {
+    const whole = operator([1000, 2000], [500]);
+    const fitted = fitGroupEvidence(candidate(10_000, 1_000_000, whole))!;
+    expect(fitted.operator).toEqual(whole);
   });
 
-  it("is the same whichever group is first: no group's verdict inputs are ever refused for the sake of a capture", () => {
-    const room = 1_200_000;
-    const caps = operator([200_000, 200_000, 200_000, 200_000]);
-    for (const order of [[0, 1, 2], [2, 1, 0], [1, 2, 0]]) {
-      const verdicts = [300_000, 300_000, 300_000];
-      const groups = order.map((index) => group(verdicts[index]!, 8_000_000, index === 0 ? caps : null));
-      const result = allocateGroupEvidence(groups, room);
-      expect(result.every((item) => item !== null)).toBe(true);
-      expect(result.reduce((sum, item) => sum + item!.evidence.byteLength, 0)).toBeLessThanOrEqual(room);
-    }
+  it("sheds capture files first, one at a time, the largest first, and each stays listed as budget", () => {
+    const whole = operator([100_000, 400_000, 200_000], [1000]);
+    const roomFor = (extra: number) => plain(50_000) + extra;
+    const one = fitGroupEvidence(candidate(50_000, roomFor(800_000), whole))!;
+    expect(one.operator!.captures!.files.map((file) => file.name)).toEqual(["case-0-screenshot.jpg", "case-2-screenshot.jpg"]);
+    expect(one.operator!.captures!.artifacts.map((entry) => entry.omitted)).toEqual([undefined, "budget", undefined]);
+    expect(one.operator!.observations[0]!.contentBase64).not.toBeNull();
+    const two = fitGroupEvidence(candidate(50_000, roomFor(400_000), whole))!;
+    expect(two.operator!.captures!.files.map((file) => file.name)).toEqual(["case-0-screenshot.jpg"]);
+    expect(two.evidence.byteLength).toBeLessThanOrEqual(roomFor(400_000));
   });
 
-  it("sheds one file at a time, the largest first", () => {
-    const caps = operator([100_000, 400_000, 200_000]);
-    const plain = sizeOf(500_000, null);
-    const withNames = allocateGroupEvidence([group(500_000, 8_000_000, caps)], plain + 800_000)[0]!;
-    expect(withNames.operator!.captures!.files.map((file) => file.name)).toEqual(["case-0-screenshot.jpg", "case-2-screenshot.jpg"]);
-    const tighter = allocateGroupEvidence([group(500_000, 8_000_000, caps)], plain + 400_000)[0]!;
-    expect(tighter.operator!.captures!.files.map((file) => file.name)).toEqual(["case-0-screenshot.jpg"]);
-    expect(tighter.operator!.captures!.artifacts.map((entry) => entry.omitted)).toEqual([undefined, "budget", "budget"]);
+  it("then sheds the copied observations' bytes largest first, then the log head, then all operator evidence; never the verdict inputs", () => {
+    const whole = operator([], [100_000, 300_000, 200_000], "h".repeat(300));
+    const room = (extra: number) => plain(50_000) + extra;
+    const build = (op: WorkerOperatorEvidence | null) => candidate(50_000, 0, whole).build(op);
+    const dropped = (count: number): WorkerOperatorEvidence => ({ ...whole, observations: whole.observations.map((item, index) => ({ ...item, contentBase64: [1, 2, 0].indexOf(index) < count ? null : item.contentBase64 })) });
+    // Remaining base64: 400,004 with the largest dropped, 133,336 with the two largest dropped.
+    const first = fitGroupEvidence(candidate(50_000, room(450_000), whole))!;
+    expect(first.operator!.observations.map((item) => item.contentBase64 === null)).toEqual([false, true, false]);
+    const second = fitGroupEvidence(candidate(50_000, room(250_000), whole))!;
+    expect(second.operator!.observations.map((item) => item.contentBase64 === null)).toEqual([false, true, true]);
+    // The log head goes only when every observation's bytes are already gone and it still does not fit.
+    const noLog = build({ ...dropped(3), executorLogHead: null }).byteLength;
+    const third = fitGroupEvidence(candidate(50_000, noLog, whole))!;
+    expect(third.operator!.observations.every((item) => item.contentBase64 === null)).toBe(true);
+    expect(third.operator!.executorLogHead).toBeNull();
+    const last = fitGroupEvidence(candidate(50_000, noLog - 1, whole))!;
+    expect(last.operator).toBeNull();
+    expect(last.evidence.byteLength).toBe(plain(50_000));
   });
 
-  it("counts a group's cap on its own: captures that would fit the aggregate but not the group are shed", () => {
-    const caps = operator([300_000, 300_000]);
-    const plain = sizeOf(100_000, null);
-    const result = allocateGroupEvidence([group(100_000, plain + 450_000, caps)], 50_000_000)[0]!;
-    expect(result.evidence.byteLength).toBeLessThanOrEqual(plain + 450_000);
-    expect(result.operator!.captures!.files).toHaveLength(1);
+  it("refuses a group whose verdict inputs alone do not fit its share, and nothing else", () => {
+    expect(fitGroupEvidence(candidate(900_000, plain(500_000), operator([1000])))).toBeNull();
+    expect(fitGroupEvidence(candidate(500_000, plain(500_000), operator([1000])))).not.toBeNull();
   });
+});
 
-  it("sheds raw operator evidence only after the captures, and a group whose verdict inputs do not fit by themselves is the only one refused", () => {
-    const withObservations: WorkerOperatorEvidence = { ...operator([]), rawReportIn: "diagnostics.shardReports", observationsIn: "operatorEvidence.observations",
-      observations: [{ artifactId: "o", sha256: "a".repeat(64), byteLength: 300_000, mediaType: "application/json", contentBase64: "A".repeat(400_000) }] };
-    const plain = sizeOf(200_000, null);
-    const kept = allocateGroupEvidence([group(200_000, 8_000_000, withObservations)], plain + 500_000)[0]!;
-    expect(kept.operator!.observations[0]!.contentBase64).not.toBeNull();
-    const shed = allocateGroupEvidence([group(200_000, 8_000_000, withObservations)], plain + 100_000)[0]!;
-    expect(shed.operator!.observations[0]!.contentBase64).toBeNull();
-    const none = allocateGroupEvidence([group(200_000, 8_000_000, withObservations)], plain + 10)[0]!;
-    expect(none.operator).toBeNull();
-    const mixed = allocateGroupEvidence([group(200_000, 8_000_000, null), group(900_000, 500_000, null), group(200_000, 8_000_000, null)], 1_000_000);
-    expect(mixed.map((item) => item === null)).toEqual([false, true, false]);
-  });
+describe("several groups in one round", () => {
+  const MiB = 1024 * 1024;
+  type Held = { release(): void; promise: Promise<void> };
+  const gate = (): Held => { let release!: () => void; const promise = new Promise<void>((resolve) => { release = resolve; }); return { release, promise }; };
+  const timeout = <T,>(promise: Promise<T>, what: string) => Promise.race([promise, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`timed out: ${what}`)), 25_000))]);
+  const shot = (size: number, fill: number) => { const bytes = Buffer.alloc(size, fill); return { name: "case-0-screenshot.jpg", sha256: sha(bytes), bytes: new Uint8Array(bytes), entry: { caseId: "case-a", kind: "screenshot", sha256: sha(bytes), bytes: size } }; };
+
+  it("uploads each group's evidence the moment that group finishes, not when the slowest group does", async () => {
+    const round = await startApplicationRound({ applications: 4 });
+    const second = gate();
+    let firstSaved: (() => void) | undefined;
+    const firstUploaded = new Promise<void>((resolve) => { firstSaved = resolve; });
+    const s = await setup({ admission: round.admission, standIn: true, hold: { groupIndex: 1, until: second.promise }, onSave: (groupRunId) => {
+      if (groupRunId === round.admission.groups[0]!.outerBinding.runId) { firstSaved?.(); }
+    } });
+    // The second group cannot finish until the first group's evidence has been saved: a worker that held every group's evidence until the end would wait for ever.
+    void firstUploaded.then(() => second.release());
+    await timeout(s.run(), "the first group was not uploaded before the second finished");
+    expect(s.saved.map((item) => item.groupRunId)).toEqual([round.admission.groups[0]!.outerBinding.runId, round.admission.groups[1]!.outerBinding.runId, undefined]);
+  }, 40_000);
+
+  it("keeps a group whose verdict inputs fit its share qualified-eligible whatever another group carries, and makes only the group that does not fit UNKNOWN 'evidence too large'", async () => {
+    const round = await startApplicationRound({ applications: 4 });
+    const s = await setup({ admission: round.admission, standIn: true, assembled: baseRun({ executorEvidence: executorEvidence({ captures: { artifacts: [shot(400_000, 1).entry], files: [shot(400_000, 1)].map(({ name, sha256, bytes }) => ({ name, sha256, bytes })) } }) }) });
+    const [first, second] = round.admission.groups.map((group) => group.outerBinding.runId) as [string, string];
+    const huge = { marker: "x".repeat(9 * MiB) };
+    s.collect.mockImplementation((request) => {
+      const runIdOf = (request as { binding: { runId: string } }).binding.runId;
+      return { collection: runIdOf === second ? huge : { marker: "small" }, oracle: {}, unavailableReason: null, qualification: s.qualified("PASS") };
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try { await s.run(); } finally { log.mockRestore(); }
+    const groupRunOf = (runId: string) => (JSON.parse(s.saved.find((item) => item.groupRunId === runId)!.bytes.toString("utf8")) as { groupRun: { collection: { status: string; reason: string }; actual: unknown; operatorEvidence: { captures: { files: unknown[] } | null } | null } }).groupRun;
+    expect(groupRunOf(first).collection.status).toBe("PASS");
+    expect(groupRunOf(first).actual).not.toBeNull();
+    expect(groupRunOf(first).operatorEvidence!.captures!.files).toHaveLength(1);
+    expect(groupRunOf(second).collection).toMatchObject({ status: "UNKNOWN", reason: "evidence too large" });
+    expect(groupRunOf(second).actual).toBeNull();
+    // Each stored group evidence stays within its share, so the two together and the aggregate's envelope stay within the aggregate.
+    const total = s.saved.filter((item) => item.groupRunId !== undefined).reduce((sum, item) => sum + item.bytes.byteLength, 0);
+    expect(total).toBeLessThanOrEqual(24 * MiB - MiB);
+  }, 60_000);
 });
 
 describe("no stored byte carries a credential", () => {

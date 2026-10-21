@@ -26,6 +26,14 @@ function spellings(value: string): string[] {
   return [...forms].filter((form) => form.length > 0).sort((a, b) => b.length - a.length);
 }
 
+const WRAP_GAP = /(?<=[A-Za-z0-9+/_=-])[\r\n\t ]+(?=[A-Za-z0-9+/_=-])/g;
+/** The bytes with whitespace between two base64 characters removed, or null when there is none. Bytes are kept one for one (latin1), so nothing else changes. */
+function unwrapBase64Lines(bytes: Buffer): Buffer | null {
+  const text = bytes.toString("latin1");
+  const unwrapped = text.replace(WRAP_GAP, "");
+  return unwrapped.length === text.length ? null : Buffer.from(unwrapped, "latin1");
+}
+
 /** What replaces a session secret in text. */
 export const SESSION_REDACTION_LABEL = "<session>";
 /** A session secret shorter than this is redacted from text but is not looked for in bytes, where a handful of characters would match almost anything. */
@@ -61,7 +69,12 @@ export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]
     },
     contains(bytes: Uint8Array, scope: "accounts" | "all" = "all"): boolean {
       const haystack = Buffer.from(bytes);
-      return rules.some((rule) => rule.bytes && (scope === "all" || !rule.session) && haystack.includes(rule.form));
+      const active = rules.filter((rule) => rule.bytes && (scope === "all" || !rule.session));
+      if (active.some((rule) => haystack.includes(rule.form))) return true;
+      // Base64 is often wrapped into lines (MIME, PEM-style bodies, a 20, 64 or 76 column wrap), which cuts a credential's spelling in two. The same bytes with the
+      // whitespace between two base64 characters removed are looked at too.
+      const unwrapped = unwrapBase64Lines(haystack);
+      return unwrapped !== null && active.some((rule) => unwrapped.includes(rule.form));
     },
     addSessionSecret(value: string): void {
       if (typeof value !== "string" || value.length === 0) return;

@@ -458,7 +458,7 @@ export type E2ERound = z.infer<typeof E2ERoundSchema>;
 
 export const E2ECaseStatusSchema = z.enum(["passed", "failed", "unavailable", "skipped", "unstable", "cancelled", "stale"]);
 export type E2ECaseStatus = z.infer<typeof E2ECaseStatusSchema>;
-export const E2EArtifactRefSchema = z.object({ artifactId: id(200), sha256: digest, bytes: z.number().int().nonnegative().max(26_214_400), mediaType: id(120), kind: z.enum(["report", "screenshot", "trace", "video", "download"]), captureQualification: z.enum(["synthetic", "redacted", "restricted"]) }).strict();
+export const E2EArtifactRefSchema = z.object({ artifactId: id(200), sha256: digest, bytes: z.number().int().nonnegative().max(26_214_400), mediaType: id(120), kind: z.enum(["report", "screenshot", "video", "download"]), captureQualification: z.enum(["synthetic", "redacted", "restricted"]) }).strict();
 export type E2EArtifactRef = z.infer<typeof E2EArtifactRefSchema>;
 export const E2EAssertionReceiptSchema = z.object({ assertionIndex: z.number().int().min(0).max(19), assertionDigest: digest, status: E2ECaseStatusSchema, reason: id(500) }).strict();
 export type E2EAssertionReceipt = z.infer<typeof E2EAssertionReceiptSchema>;

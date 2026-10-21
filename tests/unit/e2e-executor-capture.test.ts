@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { E2EPolicySchema } from "@agentx/contracts";
+import { E2EArtifactRefSchema, E2EPolicySchema } from "@agentx/contracts";
 import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, CAPTURE_GROUP_BUDGET_BYTES, CAPTURE_SCREENSHOT_MAX_BYTES, admittedCapturePolicy, createCaptureRecorder, encodedBytes,
   finalizeCaptureArtifacts, type CaptureEntry } from "../../packages/verifier/src/executor/capture.js";
 import { createFileCaseLedger } from "../../packages/verifier/src/executor/case-ledger.js";
@@ -63,6 +63,28 @@ describe("credential redactor scans", () => {
     }
     expect(r.contains(Buffer.from("nothing secret here, just a Basic dXNlcjpwYXNz header"))).toBe(false);
   });
+  it("finds a credential in base64 that is wrapped into lines (MIME style), whatever the column and line ending", () => {
+    const wrap = (text: string, columns: number, eol: string) => text.match(new RegExp(`.{1,${columns}}`, "g"))!.join(eol);
+    for (const email of ["a@b.test", "ab@b.test", EMAIL, `${EMAIL}x`]) {
+      const one = createCredentialRedactor([{ profileId: "p", email, password: PASSWORD }]);
+      const basic = Buffer.from(`${email}:${PASSWORD}`).toString("base64");
+      const payload = Buffer.from(JSON.stringify({ sub: "s", email, pw: PASSWORD })).toString("base64url");
+      for (const columns of [20, 64, 76]) {
+        for (const eol of ["\n", "\r\n", "\r\n "]) {
+          expect(one.contains(Buffer.from(`Authorization: Basic ${wrap(basic, columns, eol)}\n`)), `basic ${email} ${columns} ${JSON.stringify(eol)}`).toBe(true);
+          expect(one.contains(Buffer.from(`eyJhbGciOiJub25lIn0.${wrap(payload, columns, eol)}.sig`)), `jwt ${email} ${columns} ${JSON.stringify(eol)}`).toBe(true);
+        }
+      }
+    }
+    expect(redactor().contains(Buffer.from("a perfectly\nordinary\r\nwrapped text with no secret in it"))).toBe(false);
+  });
+
+  it("finds a credential that a line break splits, and does not mistake two words for one", () => {
+    const r = redactor();
+    expect(r.contains(Buffer.from(`${PASSWORD.slice(0, 10)}\n${PASSWORD.slice(10)}`))).toBe(true);
+    expect(r.contains(Buffer.from(`${PASSWORD.slice(0, 10)} and then ${PASSWORD.slice(10)}`))).toBe(false);
+  });
+
   it("keeps the exact spellings it always had", () => {
     const r = redactor();
     for (const form of [PASSWORD, encodeURIComponent(PASSWORD), Buffer.from(PASSWORD).toString("base64")]) expect(r.contains(Buffer.from(`a${form}b`))).toBe(true);
@@ -155,6 +177,11 @@ describe("the admitted policy never admits a trace", () => {
     expect(() => webApiApplicationLaunchTarget({ target, runtime: row, capture: capture({ traces: true }) })).toThrow(/trace/);
     const declared = webApiApplicationLaunchTarget({ target, runtime: row, capture: capture({}) });
     expect(() => validateE2EApplicationLaunchTarget({ targetId: "t", kind: "web", applicationId: "app", runtimeProfileId: PROFILE, browser: "chromium" } as never, declared, row, capture({ traces: true }))).toThrow(/trace/);
+  });
+  it("has no trace kind left in the contract's artifact reference", () => {
+    const ref = { artifactId: "a", sha256: "a".repeat(64), bytes: 1, mediaType: "image/jpeg", kind: "screenshot", captureQualification: "synthetic" };
+    expect(E2EArtifactRefSchema.safeParse(ref).success).toBe(true);
+    expect(E2EArtifactRefSchema.safeParse({ ...ref, kind: "trace" }).success).toBe(false);
   });
   it("has no trace function left in the web case adapter", () => {
     expect(Object.keys(webRuntime)).not.toContain("startWebCaseTrace");
