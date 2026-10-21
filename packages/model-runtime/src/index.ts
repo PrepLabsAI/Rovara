@@ -1,6 +1,9 @@
 import { MissingProviderSecret, defaultBedrockModel, type ModelRole } from "./config.js";
 import { openRouterRouting, readProviderKey, requireKeyedModel } from "./config.js";
 export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
+// The governed e2e model route (M1.4): its own surface, never reached through the coding-task fallback above.
+export * from "./e2e-route.js";
+export * from "./e2e-bedrock-invoke.js";
 import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type KeyedModelProvider, type ModelIdentifier } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type AnthropicMessagesCompat, type OpenAICompletionsCompat, type OpenAIResponsesCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
