@@ -344,7 +344,7 @@ describe("the opt-in TEST qualification hook", () => {
 
   /** Runs the hook script against fake aws, docker, curl, chown and timeout commands that record every call. */
   const hookArgs = ["us-east-1", qualification.bucket, qualification.roleId, instanceId, qualification.profile, executorImage];
-  type HookOptions = { args?: string[]; challenge?: "present" | "missing"; qualifier?: number; proposalBytes?: number; ping?: "up" | "down"; pingBody?: string; wait?: number; executor?: "present" | "missing" | "pullable" };
+  type HookOptions = { args?: string[]; challenge?: "present" | "missing"; qualifier?: number; failureFile?: string; padBytes?: number; staleFailure?: string; link?: boolean; proposalBytes?: number; ping?: "up" | "down"; pingBody?: string; wait?: number; executor?: "present" | "missing" | "pullable" };
   function runHook(options: HookOptions = {}) {
     const dir = mkdtempSync(join(tmpdir(), "boot-hook-run-"));
     const bin = join(dir, "bin");
@@ -373,21 +373,39 @@ case "$1" in
   login) cat >/dev/null; exit 0 ;;
   pull) [[ "$FAKE_EXECUTOR" == pullable ]] && touch "${dir}/pulled"; exit 0 ;;
 esac
-out=; while (($#)); do [[ "$1" == --out ]] && out=$2; shift; done
-[[ "$FAKE_QUALIFIER" != 0 ]] && exit "$FAKE_QUALIFIER"
-head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename "$out")"`);
+out=; failure=; while (($#)); do [[ "$1" == --out ]] && out=$2; [[ "$1" == --failure-out ]] && failure=$2; shift; done
+if [[ "$FAKE_QUALIFIER" != 0 ]]; then
+  if [[ -n "$failure" && -n "\${FAKE_FAILURE_FILE:-}" ]]; then
+    # A large file is built here, not passed in: Linux refuses a single environment string of 128 KiB or more (E2BIG), which macOS does not.
+    body=$FAKE_FAILURE_FILE; [[ -n "\${FAKE_FAILURE_PAD:-}" ]] && body=\${body/__PAD__/$(head -c "$FAKE_FAILURE_PAD" /dev/zero | tr '\\0' 'y')}
+    if [[ "\${FAKE_LINK:-}" == 1 ]]; then printf '%s' "$body" >"${evidence}/target"; ln -s target "${evidence}/$(basename "$failure")"
+    else printf '%s' "$body" >"${evidence}/$(basename "$failure")"; fi
+  fi
+  exit "$FAKE_QUALIFIER"
+fi
+if [[ "\${FAKE_LINK:-}" == 1 ]]; then head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/target"; ln -s target "${evidence}/$(basename "$out")"
+else head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename "$out")"; fi`);
+    // macOS dd has no iflag=nofollow: the shim refuses a symlink the way GNU dd does, and runs the plain copy otherwise.
+    // GNU dd (Linux, as on the runner) is used as it is, so the real iflag=nofollow is what the test exercises there.
+    fake("dd", `if /bin/dd iflag=nofollow if=/dev/null of=/dev/null count=0 2>/dev/null; then exec /bin/dd "$@"; fi
+a=(); link=; for x in "$@"; do if [[ "$x" == iflag=nofollow ]]; then nf=1; continue; fi; [[ "$x" == if=* && -L "\${x#if=}" ]] && link=1; a+=("$x"); done
+[[ -n "$nf" ]] || { echo "dd without iflag=nofollow" >&2; exit 9; }
+[[ -z "$link" ]] || exit 1
+exec /bin/dd "\${a[@]}"`);
     fake("curl", `[[ "$FAKE_PING" == down ]] && exit 22; if [[ -n "\${FAKE_PING_BODY:-}" ]]; then printf '%s\\n' "$FAKE_PING_BODY"; else echo '{"status":"Healthy","activeOperations":0,"invocationFeatures":["task.readiness","task.workflowChecks"]}'; fi`);
     fake("chown", `printf 'chown %s\\n' "$*" >>"${calls}"`);
     // macOS mv has no -T: the shim keeps the test honest about the flag being passed and runs the plain move.
     fake("mv", `printf 'mv %s\\n' "$*" >>"${calls}"; a=(); for x in "$@"; do [[ "$x" == -fT ]] && x=-f; a+=("$x"); done; exec /bin/mv "\${a[@]}"`);
     fake("timeout", `while [[ "$1" == -* ]]; do shift; done; shift; exec "$@"`);
+    if (options.staleFailure !== undefined) writeFileSync(join(evidence, "runtime-install-failure.json"), options.staleFailure);
     const result = spawnSync("bash", ["-c", qualificationScript, "bash", ...(options.args ?? hookArgs)], {
       encoding: "utf8",
       env: {
+        ...(options.failureFile === undefined ? {} : { FAKE_FAILURE_FILE: options.failureFile }), ...(options.padBytes === undefined ? {} : { FAKE_FAILURE_PAD: String(options.padBytes) }),
         PATH: `${bin}:${process.env.PATH ?? ""}`, AGENTX_HOST_ROOT: hostRoot, TMPDIR: dir,
         AGENTX_E2E_QUALIFICATION_POLL_SECONDS: "0", AGENTX_E2E_QUALIFICATION_HEALTHY_WAIT_SECONDS: String(options.wait ?? 1), AGENTX_E2E_QUALIFICATION_CHALLENGE_WAIT_SECONDS: String(options.wait ?? 1),
         FAKE_CHALLENGE: options.challenge ?? "present", FAKE_QUALIFIER: String(options.qualifier ?? 0), FAKE_PROPOSAL_BYTES: String(options.proposalBytes ?? 64), FAKE_PING: options.ping ?? "up", FAKE_PING_BODY: options.pingBody ?? "",
-        FAKE_EXECUTOR: options.executor ?? "present", AGENTX_E2E_QUALIFICATION_PULL_SECONDS: "5",
+        FAKE_EXECUTOR: options.executor ?? "present", ...(options.link ? { FAKE_LINK: "1" } : {}), AGENTX_E2E_QUALIFICATION_PULL_SECONDS: "5",
       },
     });
     const called = existsSync(calls) ? readFileSync(calls, "utf8").split("\n").filter(Boolean) : [];
@@ -553,5 +571,78 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
     expect(new Set(called.map((call) => call.split(" ")[0]))).toEqual(new Set(tools));
     // Whatever failed, the worker is untouched: the hook never stops, restarts or removes anything.
     expect(called.join("\n")).not.toMatch(/docker (stop|rm|kill|restart)|systemctl/);
+  });
+
+  describe("the failure codes in status.json", () => {
+    type Failure = { codes: string[] };
+    const failureOf = (options: HookOptions) => {
+      const { result, called, object } = runHook({ qualifier: 1, ...options });
+      expect(result.status).toBe(1);
+      const status = JSON.parse(object("status.json") ?? "{}") as { state?: string; reason?: string; failure?: Failure; executorImage?: string };
+      expect(status).toMatchObject({ state: "FAILED", reason: "qualification-failed-exit-1", executorImage });
+      return { status, called, object, result };
+    };
+    /** The qualifier's failure file: the stage first, as the qualifier writes it. */
+    const file = (value: { stage: string; reasons: unknown; summary: unknown } & Record<string, unknown>) => JSON.stringify({ schemaVersion: "runtime-install-failure/v1", ...value });
+    const code = /^[a-z0-9-]+(:[a-z0-9-]+)?$/;
+
+    it("asks the qualifier for a failure file, and shows the stage and the failing probe's codes next to the exit code", () => {
+      const { status, called } = failureOf({ failureFile: file({ stage: "qualification-rejected", reasons: ["probe-wrong-cause:api-egress-denial-v1"],
+        summary: ["api-egress-denial-v1:collector-failed", "api-egress-denial-v1:sinkhole-0"] }) });
+      expect(called.find((call) => call.startsWith("docker exec"))).toContain("--failure-out /mnt/agentx-runtime/evidence/runtime-install-failure.json");
+      expect(status.failure).toEqual({ codes: ["qualification-rejected", "probe-wrong-cause:api-egress-denial-v1", "api-egress-denial-v1:collector-failed", "api-egress-denial-v1:sinkhole-0"] });
+    });
+
+    it("has no failure object when the qualifier left no failure file, even if an earlier run left one", () => {
+      expect(failureOf({}).status).not.toHaveProperty("failure");
+      expect(failureOf({ staleFailure: file({ stage: "qualification-rejected", reasons: ["probe-wrong-cause:stale"], summary: [] }) }).status).not.toHaveProperty("failure");
+    });
+
+    it("opens the qualifier's files without following a symlink, so a link swapped in after a check cannot make the hook read or upload another file", () => {
+      expect(qualificationScript).toContain('dd if="$f" iflag=nofollow bs=16384 count=1');
+      expect(qualificationScript).toContain('dd if="$EVIDENCE_HOST/$PROPOSAL_NAME" iflag=nofollow of="$proposal"');
+      // A failure file that is a symlink yields no codes, however good its target looks.
+      const linked = failureOf({ link: true, failureFile: file({ stage: "qualification-rejected", reasons: ["probe-wrong-cause:from-a-link"], summary: [] }) });
+      expect(linked.status.failure).toEqual({ codes: [] });
+      // A proposal that is a symlink is not uploaded: the hook reports it missing.
+      const proposal = runHook({ link: true });
+      expect(proposal.result.status).toBe(1);
+      expect(JSON.parse(proposal.object("status.json") ?? "{}")).toMatchObject({ state: "FAILED", reason: "proposal-missing" });
+      expect(proposal.object("proposal.json")).toBeUndefined();
+    });
+
+    it("never lets free text through: anything that is not a code is dropped, and the qualifier's log is never uploaded", () => {
+      const secret = "AKIAIOSFODNN7EXAMPLE";
+      const { status, object, called } = failureOf({ failureFile: file({ stage: "qualification-rejected", message: `Error: ${secret} at /home/node/x.js:1`,
+        reasons: ["probe-wrong-cause:web-csv-negative-v1", "Error: token leaked", "has space", "UPPER-case", "a:b:c", "/etc/passwd", `${secret}`, "x".repeat(49), "positive-probe-failed:app-host-denial-v1"],
+        summary: ["web-csv-negative-v1:collector-pass", "not a code", "ok:fine"] }) });
+      expect(status.failure).toEqual({ codes: ["qualification-rejected", "probe-wrong-cause:web-csv-negative-v1", "positive-probe-failed:app-host-denial-v1", "web-csv-negative-v1:collector-pass", "ok:fine"] });
+      expect(JSON.stringify(status)).not.toMatch(/AKIA|token|passwd|home\/node|Error/);
+      expect(called.filter((call) => call.startsWith("aws s3api put-object")).every((call) => !/qualifier\.log|failure\.json/.test(call))).toBe(true);
+      expect(object("qualifier.log")).toBeUndefined();
+      expect(object("runtime-install-failure.json")).toBeUndefined();
+    });
+
+    it("keeps status.json well formed, with no codes, when the file holds none", () => {
+      expect(failureOf({ failureFile: file({ stage: "Free Text: oops", reasons: "Probe Wrong Cause", summary: null }) }).status.failure).toEqual({ codes: [] });
+      expect(failureOf({ failureFile: "not json at all \"quoted free text\"" }).status.failure).toEqual({ codes: [] });
+    });
+
+    it("keeps at most 16 codes and 2 KB, whatever the file holds, and reads only the head of a large file", () => {
+      const reasons = Array.from({ length: 40 }, (_, index) => `probe-wrong-cause:probe-${index}`);
+      const { status } = failureOf({ failureFile: file({ stage: "qualification-rejected", reasons, summary: ["x:one"] }) });
+      expect(status.failure!.codes).toEqual(["qualification-rejected", ...reasons.slice(0, 15)]);
+      // Codes of the longest length the hook accepts (48 characters either side of the colon): 16 of them are still under 2 KB.
+      const longest = Array.from({ length: 40 }, (_, index) => `${String(index).padStart(2, "0")}${"a".repeat(46)}:${"b".repeat(48)}`);
+      const longStatus = failureOf({ failureFile: file({ stage: "s".repeat(48), reasons: longest, summary: [] }) }).status.failure!;
+      expect(longStatus.codes).toEqual(["s".repeat(48), ...longest.slice(0, 15)]);
+      expect(Buffer.byteLength(JSON.stringify(longStatus.codes))).toBeLessThanOrEqual(2_048);
+      for (const entry of longStatus.codes) expect(entry).toMatch(code);
+      // A code with a part longer than 48 characters is not a code the hook keeps.
+      expect(failureOf({ failureFile: file({ stage: "qualification-rejected", reasons: [`${"a".repeat(49)}:b`, "ok:fine"], summary: [] }) }).status.failure!.codes).toEqual(["qualification-rejected", "ok:fine"]);
+      // Only the first 16 KB of the file is read.
+      const huge = failureOf({ padBytes: 200_000, failureFile: `{"pad":"__PAD__","reasons":["probe-wrong-cause:late"],"stage":"qualification-rejected"}` }).status.failure!;
+      expect(huge).toEqual({ codes: [] });
+    });
   });
 });

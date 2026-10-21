@@ -280,14 +280,25 @@ export interface QualificationEffects {
 }
 
 /** The status.json the hook uploads; anything else, or SUCCEEDED without a reason and time, is not a success. */
-function parseStatus(bytes: Buffer): { state: "SUCCEEDED" | "FAILED"; reason: string } {
+function parseStatus(bytes: Buffer): { state: "SUCCEEDED" | "FAILED"; reason: string; failure: readonly string[] } {
   let value: unknown;
   try { value = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("the qualification status is not valid JSON; refusing to register"); }
-  const status = value as { state?: unknown; reason?: unknown; finishedAt?: unknown } | null;
+  const status = value as { state?: unknown; reason?: unknown; finishedAt?: unknown; failure?: unknown } | null;
   if (status === null || typeof status !== "object" || (status.state !== "SUCCEEDED" && status.state !== "FAILED") || typeof status.reason !== "string" || typeof status.finishedAt !== "string") {
     throw new Error("the qualification status is not a SUCCEEDED or FAILED status with a reason and time; refusing to register");
   }
-  return { state: status.state, reason: status.reason };
+  return { state: status.state, reason: status.reason, failure: failureCodes(status.failure) };
+}
+
+/** The hook's own filter, applied again here: what the status object holds is read from S3, so only strings of the code grammar (16 at most) are ever printed from it. */
+export function failureCodes(failure: unknown): string[] {
+  const codes = failure !== null && typeof failure === "object" ? (failure as { codes?: unknown }).codes : undefined;
+  if (!Array.isArray(codes)) return [];
+  return codes.filter((code): code is string => typeof code === "string" && code.length <= 97 && /^[a-z0-9-]+(:[a-z0-9-]+)?$/.test(code)).slice(0, 16);
+}
+/** `qualification-failed-exit-1 (failure: qualification-rejected, probe-wrong-cause:api-egress-denial-v1)`: the reason, with the codes behind it when the hook reported any. */
+export function describeStatusFailure(reason: string, failure: readonly string[]): string {
+  return failure.length === 0 ? reason : `${reason} (failure: ${failure.join(", ")})`;
 }
 
 /** The registration answer's rows: the feature catalog, the profile's two kinds, and the revision each reached. */
@@ -456,7 +467,7 @@ async function waitReady(step: Extract<QualificationStep, { kind: "wait-ready" }
     const status = await effects.getObject(`${prefix}${step.statusObject}`);
     if (status !== undefined) {
       const parsed = parseStatus(status);
-      if (parsed.state === "FAILED") throw new Error(`the worker reported FAILED before it was ready: ${parsed.reason}`);
+      if (parsed.state === "FAILED") throw new Error(`the worker reported FAILED before it was ready: ${describeStatusFailure(parsed.reason, parsed.failure)}`);
     }
     if (effects.now() >= deadline) throw new Error(`the worker was not ready after ${step.timeoutMs / 60_000} minutes; no challenge was issued`);
     await effects.sleep(step.intervalMs);
@@ -470,7 +481,7 @@ async function pollStatus(step: Extract<QualificationStep, { kind: "poll-status"
     if (bytes !== undefined) {
       const status = parseStatus(bytes);
       if (status.state === "SUCCEEDED") return;
-      throw new Error(`the worker reported FAILED: ${status.reason}`);
+      throw new Error(`the worker reported FAILED: ${describeStatusFailure(status.reason, status.failure)}`);
     }
     if (effects.now() >= deadline) throw new Error(`no qualification status after ${step.timeoutMs / 60_000} minutes (the challenge has expired); nothing was registered`);
     await effects.sleep(step.intervalMs);

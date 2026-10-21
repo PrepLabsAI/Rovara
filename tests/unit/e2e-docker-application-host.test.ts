@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -783,25 +783,57 @@ describe("docker application host: approved external-origin mocks and the sinkho
     expect(lastEnv(app, "ORDERS_SERVICE_ORIGIN")).toBe("http://mock-unbound:8080");
   });
 
-  it("resolves every name the run does not serve to the sinkhole, by pointing the app's resolver at it; the executor's arguments are not touched", async () => {
-    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
+  it("resolves every name the run does not serve to the sinkhole through a run-owned read-only resolv.conf, not --dns; the executor's arguments are not touched", async () => {
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake);
+    // The app's resolver file is read while the run is live: the workspace (and the file) is removed at close.
+    let resolv: { source: string; content: string; mode: number } | null = null;
+    fake.onExecutor = (outDir, args) => {
+      okOutput(s)(outDir);
+      void args;
+      const mount = mountsOf(fake.argsFor("app")).find((item) => item.endsWith(":/etc/resolv.conf:ro"))!;
+      const source = mount.slice(0, -":/etc/resolv.conf:ro".length);
+      resolv = { source, content: readFileSync(source, "utf8"), mode: statSync(source).mode & 0o777 };
+    };
     await runWith(s);
     const app = fake.argsFor("app");
-    expect(app.filter((value, index) => app[index - 1] === "--dns")).toEqual([fake.sinkholeAddress]);
-    expect(app).not.toContain("--add-host");
+    // Docker 25 does not forward an internal-only container's embedded-resolver queries to a --dns server, so the app names the sinkhole itself.
+    expect(app).not.toContain("--dns");
+    expect(mountsOf(app).filter((item) => item.includes("/etc/resolv.conf"))).toHaveLength(1);
+    expect(resolv).not.toBeNull();
+    expect(resolv!.content).toBe(`nameserver ${fake.sinkholeAddress}\noptions ndots:0 timeout:2 attempts:2\n`);
+    expect(resolv!.mode).toBe(0o644);
+    expect(resolv!.source.startsWith(`${join(s.runRoot, s.runId)}/`)).toBe(true);
+    // The file is run-owned: it is not under the app, the owned seed, the executor's out directory or the mock directories.
+    expect(resolv!.source).not.toMatch(/\/(app|owned|out|mock|mock-out)\//);
+    // Without the embedded resolver the run's own names are written to the app's hosts file: every mock alias and the sinkhole's, never anything else.
+    const hosts = app.filter((value, index) => app[index - 1] === "--add-host").sort();
+    expect(hosts).toEqual(["app:127.0.0.1", "mock-inventory-v1:172.30.0.10", `mock-unbound:${fake.sinkholeAddress}`]);
     const executor = fake.argsFor("executor");
     expect(executor).not.toContain("--dns");
+    expect(executor).not.toContain("--add-host");
+    expect(executor.some((value) => value.includes("resolv.conf"))).toBe(false);
     const shared = executorContainerArgs(installedExecutorSeccompProfilePath());
     expect(executor.slice(executor.indexOf(shared[0]!), executor.indexOf(shared[0]!) + shared.length)).toEqual(shared);
-    // The sinkhole is up, listening and addressed before the app starts: the app's resolver names it.
+    // The sinkhole is up, listening and addressed before the app starts: the app's resolver file names it.
     const indexOfRun = (prefix: string) => fake.calls.findIndex((call) => call[0] === "run" && call[call.indexOf("--name") + 1]?.startsWith(prefix));
     expect(fake.calls.findIndex((call) => call[0] === "run" && call[call.indexOf("--name") + 1]?.endsWith("-unbound"))).toBeLessThan(indexOfRun("rovara-app-"));
+    // The resolver file is removed with the rest of the workspace.
+    expect(existsSync(resolv!.source)).toBe(false);
+    expect(existsSync(join(s.runRoot, s.runId))).toBe(false);
+  });
+
+  it("gives the app's hosts file only the sinkhole when no mock is approved", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    const app = fake.argsFor("app");
+    expect(app.filter((value, index) => app[index - 1] === "--add-host")).toEqual(["app:127.0.0.1", `mock-unbound:${fake.sinkholeAddress}`]);
+    expect(app).not.toContain("--dns");
   });
 
   it("is unavailable when the sinkhole or the app has no address on the run network, because nothing could then be attributed", async () => {
-    for (const missing of ["sinkhole", "app"] as const) {
+    for (const missing of ["sinkhole", "mock", "app"] as const) {
       const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
-      fake.withoutAddress.add(missing === "app" ? `rovara-app-${s.runId}` : `rovara-mock-${s.runId}-unbound`);
+      fake.withoutAddress.add(missing === "app" ? `rovara-app-${s.runId}` : missing === "mock" ? `rovara-mock-${s.runId}-inventory-v1` : `rovara-mock-${s.runId}-unbound`);
       const result = await runWith(s);
       expect(result.unavailableReason, missing).toBe("mock-unavailable");
       expect(s.assemble).not.toHaveBeenCalled();
@@ -1034,7 +1066,10 @@ describe("docker application host: the recipe-declared account seed", () => {
       expect(args.filter((value) => value.endsWith(":/app:ro"))).toHaveLength(1);
       expect(args.filter((value) => value.endsWith(":/app/.owned:ro"))).toHaveLength(1);
       expect(args).not.toContain("ORDERS_TEST_SEED_FILE=/app/.owned/seed.json");
-      expect(args).toContain("--dns");
+      // The seed resolves like the app: the run-owned resolver file and hosts entries, never --dns.
+      expect(args).not.toContain("--dns");
+      expect(args.filter((value) => value.endsWith(":/etc/resolv.conf:ro"))).toHaveLength(1);
+      expect(args.filter((value, index) => args[index - 1] === "--add-host")).toContain("app:127.0.0.1");
     }
     expect(seed).not.toContain("--network-alias");
     // The seed finishes before the app exists, and after the mocks and the sinkhole it may need to resolve names through.
