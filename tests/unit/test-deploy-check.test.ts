@@ -148,6 +148,8 @@ describe("evaluateTestDeployCheck", () => {
       return copy;
     };
     expect(evaluateTestDeployCheck(input({ headTemplate: versioned("A".repeat(40)), deployedTemplate: versioned("B".repeat(40)) }))).toEqual({ ok: true, findings: [] });
+    // As live TEST spells it: 40 hex characters, upper case then lower case.
+    expect(evaluateTestDeployCheck(input({ headTemplate: versioned("5D5638F1f9693dcd2f6b905cf5c9ff00caecf6fd"), deployedTemplate: versioned("5D5638F12cf3052718f41061830d4c3263592027") }))).toEqual({ ok: true, findings: [] });
   });
 
   it("matches a grant by its condition: the same action under a narrower condition is not the deployed grant", () => {
@@ -346,7 +348,7 @@ describe("gatherCheckFacts", () => {
           if (stack === `agentx-${ENV}-foundation`) return ok({ Outputs: [{ OutputKey: "Ec2WorkerInstanceRoleArn", OutputValue: "arn:aws:iam::123456789012:role/worker-role" }] });
         }
         if (args[0] === "cloudformation" && args[1] === "get-template") return ok(brokerTemplate());
-        if (args[0] === "cloudformation" && args[1] === "describe-stack-resources") return ok([["BrokerE1355FD6", "fn-broker"], [NOTIFIER, "fn-notifier"], ["SessionsSteps3B98DD2B", "fn-sessions"], ["Unrelated", "fn-other"]]);
+        if (args[0] === "cloudformation" && args[1] === "list-stack-resources") return ok([["BrokerE1355FD6", "fn-broker"], [NOTIFIER, "fn-notifier"], ["SessionsSteps3B98DD2B", "fn-sessions"], ["Unrelated", "fn-other"]]);
         if (args[0] === "lambda" && args[1] === "get-function") return ok(`"sha-of-${args[args.indexOf("--function-name") + 1]}"`);
         if (args[0] === "dynamodb" && args[1] === "query") {
           return ok({ Items: overrides.catalogItems ?? [
@@ -379,7 +381,7 @@ describe("gatherCheckFacts", () => {
     expect(facts.builtZipShas).toEqual({ BrokerE1355FD6: "b" });
     expect(facts.catalogRows.map((row) => row.sk).sort()).toEqual(["PROFILE#linux-arm64-web-api-v1#api", "PROFILE#linux-arm64-web-api-v1#web"]);
     expect(facts.runnerFacts).toEqual({ deployedExecutorImage: ACCOUNT_IMAGE, executorImage: ACCOUNT_IMAGE, invocationFeatures: ["task.readiness"] });
-    const readOnly = ["cloudformation describe-stacks", "cloudformation get-template", "cloudformation describe-stack-resources", "lambda get-function", "dynamodb query", "ec2 describe-instances", "iam get-role", "s3api get-object"];
+    const readOnly = ["cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources", "lambda get-function", "dynamodb query", "ec2 describe-instances", "iam get-role", "s3api get-object"];
     for (const call of fake.calls) expect(readOnly, call.join(" ")).toContain(`${call[0]} ${call[1]}`);
   });
 

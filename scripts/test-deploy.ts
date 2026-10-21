@@ -1091,9 +1091,9 @@ function awsJson<T>(readers: Pick<CheckReaders, "runner" | "region">, args: read
   return JSON.parse(result.stdout) as T;
 }
 
-/** The deployed Lambdas' CodeSha256 by logical ID, for every control-plane Lambda this script moves. */
+/** The deployed Lambdas' CodeSha256 by logical ID, for every control-plane Lambda this script moves. list-stack-resources pages through all of them; describe-stack-resources stops at 100 and the stack has more. */
 function deployedCodeShas(readers: CheckReaders, stack: string): Record<string, string> {
-  const resources = awsJson<Array<[string, string]>>(readers, ["cloudformation", "describe-stack-resources", "--stack-name", stack, "--query", "StackResources[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]"]) ?? [];
+  const resources = awsJson<Array<[string, string]>>(readers, ["cloudformation", "list-stack-resources", "--stack-name", stack, "--query", "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]"]) ?? [];
   const physical = new Map(resources);
   const shas: Record<string, string> = {};
   for (const { logicalId } of Object.values(CONTROL_PLANE_LAMBDAS)) {

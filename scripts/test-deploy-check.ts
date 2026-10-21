@@ -134,7 +134,7 @@ function sorted(node: unknown): unknown {
   if (node !== null && typeof node === "object") {
     return Object.fromEntries(Object.entries(node).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, sorted(value)]));
   }
-  if (typeof node === "string") return node.replace(/AssetParameters[0-9a-f]{64}/g, "AssetParameters<hash>").replace(/(CurrentVersion)[0-9A-F]{40}/g, "$1<hash>");
+  if (typeof node === "string") return node.replace(/AssetParameters[0-9a-f]{64}/g, "AssetParameters<hash>").replace(/(CurrentVersion)[0-9A-Fa-f]{40}/g, "$1<hash>");
   return node;
 }
 function list(value: unknown): unknown[] {
