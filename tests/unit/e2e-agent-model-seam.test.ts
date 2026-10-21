@@ -7,10 +7,12 @@ import { createToolLoopExecutor } from "e2e/agent";
 import { z } from "zod";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { E2EModelChannelRequest } from "../../packages/contracts/src/e2e-model-channel.js";
-import { createBedrockE2EInvoke } from "../../packages/model-runtime/src/e2e-bedrock-invoke.js";
+import { createE2ECredentialGuard } from "../../packages/worker/src/e2e-model-credential-guard.js";
+import { createE2EProviderInvoke } from "../../packages/model-runtime/src/e2e-provider-invoke.js";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
 import { startE2EModelProxy, type E2EModelProxy } from "../../packages/worker/src/e2e-model-proxy.js";
-import { CASE_ID, MODEL_ID, RUN_ID, bedrockRoute } from "../support/e2e-model-fixtures.js";
+import { CASE_ID, MODEL_ID, PROVIDER_KEY, RUN_ID, SECRET_ARN, bedrockRoute, keyedRoute } from "../support/e2e-model-fixtures.js";
+import { anthropicSse, bedrockLoopback, bedrockStreamBody, fakeFetch, jsonError, openaiResponsesSse, openrouterSse } from "../support/e2e-provider-fakes.js";
 import { createChannelLanguageModel } from "../support/e2e-model-adapter.js";
 
 const root = new URL("../../", import.meta.url);
@@ -97,7 +99,7 @@ describe("Step 0: the pinned dependencies", () => {
     const provider = Object.keys(lock).filter((key) => key.endsWith("node_modules/@ai-sdk/provider"));
     expect(provider).toEqual(["node_modules/@ai-sdk/provider"]);
     expect(lock["node_modules/@ai-sdk/provider"]!.version).toBe("4.0.21");
-    const aiSdk = Object.keys(lock).filter((key) => /node_modules\/@ai-sdk\//.test(key)).map((key) => key.replace(/^.*node_modules\//, "")).sort();
+    const aiSdk = Object.keys(lock).filter((key) => /(?:^|\/)node_modules\/@ai-sdk\/[^/]+$/.test(key)).map((key) => key.replace(/^.*node_modules\//, "")).sort();
     expect(aiSdk).toEqual(["@ai-sdk/gateway", "@ai-sdk/provider", "@ai-sdk/provider-utils"]);
     expect(lock["node_modules/ai"]!.version).toBe("7.0.127");
   });
@@ -151,80 +153,140 @@ describe("Step 0: e2e never reaches the Vercel AI Gateway on its own", () => {
   });
 });
 
-interface Converse {
-  toolConfig: { toolChoice: unknown; tools: Array<{ toolSpec: { name: string } }> };
-  inferenceConfig: unknown;
-  messages: Array<{ role: string; content: Array<{ toolUse?: unknown; toolResult?: unknown }> }>;
-}
+type Answer = { tool: { id: string; name: string; input: Record<string, unknown> } };
+const TAP: Answer = { tool: { id: "tooluse_a", name: "tap", input: { target: "n1" } } };
+const CONCLUDE: Answer = { tool: { id: "tooluse_b", name: "complete_step", input: { status: "passed", summary: "Tapped the export button." } } };
 
-describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route (pi-ai is not used)", () => {
+const stepContext = (recorded: unknown[] = []) => ({
+  model: undefined, providerOptions: undefined, agentContext: undefined, signal: new AbortController().signal,
+  budgets: { maxModelCalls: 12, remainingMs: () => 60_000, recordModelCall: (call: unknown) => { recorded.push(call); } },
+  step: { instruction: "export the orders" }, attachTurns: () => undefined, attachTranscript: () => undefined,
+});
+
+describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route and pi-ai, for each provider", () => {
   let dir: string;
-  let proxy: E2EModelProxy;
+  let proxy: E2EModelProxy | undefined;
+  let loopback: Awaited<ReturnType<typeof bedrockLoopback>> | undefined;
 
   beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), "rs-")); });
-  afterEach(async () => { await proxy?.close().catch(() => undefined); await rm(dir, { recursive: true, force: true }); });
+  afterEach(async () => {
+    await proxy?.close().catch(() => undefined);
+    await loopback?.close();
+    proxy = undefined;
+    loopback = undefined;
+    await rm(dir, { recursive: true, force: true });
+  });
 
-  const toolUse = (toolUseId: string, name: string, input: unknown) => ({ output: { message: { role: "assistant", content: [{ toolUse: { toolUseId, name, input } }] } }, stopReason: "tool_use", usage: { inputTokens: 800, outputTokens: 25 }, $metadata: {} });
-
-  it("runs the real loop: tool calls go through the channel, the proxy, the route and Bedrock Converse, with no network and one request per turn", async () => {
-    const converse: Converse[] = [];
-    const answers = [toolUse("tooluse_a", "tap", { target: "n1" }), toolUse("tooluse_b", "complete_step", { status: "passed", summary: "Tapped the export button." })];
-    const client = { send: async (command: { input: unknown }) => { converse.push(command.input as Converse); return answers[converse.length - 1]; } };
-    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: createBedrockE2EInvoke({ clientFor: () => client }), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
-    proxy = await startE2EModelProxy({ socketPath: join(dir, "m.sock"), runId: RUN_ID, route, credentialSet: { passwords: [], emails: [], cookieValues: [] }, evidence: { writeReceipt: () => undefined, writeTranscript: () => undefined }, deadlineAt: Date.now() + 120_000 });
+  async function startProxy(invoke: Awaited<ReturnType<typeof createE2EProviderInvoke>>, definition = bedrockRoute()) {
+    const route = createGovernedE2EModelRoute(definition, { invoke, now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
+    proxy = await startE2EModelProxy({
+      socketPath: join(dir, "m.sock"), runId: RUN_ID, route, credentialSet: { passwords: [], emails: [], cookieValues: [] },
+      evidence: { writeReceipt: () => undefined, writeTranscript: () => undefined }, deadlineAt: Date.now() + 120_000, environment: {},
+    });
     proxy.beginStep({ caseId: CASE_ID, stepIndex: 0 });
+    return route;
+  }
 
-    const sent: E2EModelChannelRequest[] = [];
+  function loop(sent: E2EModelChannelRequest[], tapped: string[]) {
     const model = createChannelLanguageModel({ socketPath: join(dir, "m.sock"), runId: RUN_ID, caseId: CASE_ID, stepIndex: 0, onCall: (request) => sent.push(request) });
-    const tapped: string[] = [];
-    const executor = createToolLoopExecutor({
+    return createToolLoopExecutor({
       name: "rovara-seam", model: model as never, system: "You drive a web app.",
       buildPrompt: () => 'Goal: export the orders\n#n1 button "Export orders"',
       tools: () => ({
-        tap: tool({ description: "Tap one node", inputSchema: z.object({ target: z.string() }), execute: async ({ target }) => { tapped.push(target); return `Tapped ${target}.`; } }),
+        tap: tool({ description: "Tap one node", inputSchema: z.object({ target: z.string() }), execute: async ({ target }) => { tapped.push(target); return "Tapped " + target + "."; } }),
       }),
     });
+  }
+
+  it("Bedrock: the real loop's tool calls reach a loopback endpoint as Converse requests, one per turn, and the receipts name the pinned model", async () => {
+    loopback = await bedrockLoopback((_request, count) => ({ status: 200, body: bedrockStreamBody(count === 1 ? TAP : CONCLUDE) }));
+    const invoke = await createE2EProviderInvoke(bedrockRoute(), { environment: {}, testing: { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } } });
+    await startProxy(invoke);
+    const sent: E2EModelChannelRequest[] = [];
+    const tapped: string[] = [];
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const recorded: unknown[] = [];
-    const context = {
-      model: undefined, providerOptions: undefined, agentContext: undefined, signal: new AbortController().signal,
-      budgets: { maxModelCalls: 12, remainingMs: () => 60_000, recordModelCall: (call: unknown) => { recorded.push(call); } },
-      step: { instruction: "export the orders" }, attachTurns: () => undefined, attachTranscript: () => undefined,
-    };
-    const verdict = await executor.runStep(context as never);
+    const verdict = await loop(sent, tapped).runStep(stepContext(recorded) as never);
 
     expect(verdict).toMatchObject({ status: "passed", summary: "Tapped the export button." });
     expect(tapped).toEqual(["n1"]);
-    expect(converse).toHaveLength(2);
+    expect(loopback.requests).toHaveLength(2);
     expect(sent).toHaveLength(2);
     expect(recorded).toHaveLength(2);
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
-    // What e2e asked for is what Bedrock was asked for, in Converse's words.
-    expect(converse[0]!.toolConfig.toolChoice).toEqual({ any: {} });
-    expect(converse[0]!.toolConfig.tools.map((item) => item.toolSpec.name).sort()).toEqual(["complete_step", "tap"]);
-    expect(converse[0]!.inferenceConfig).toEqual({ maxTokens: 1024, temperature: 0 });
-    expect(converse[1]!.messages.map((message) => message.role)).toEqual(["user", "assistant", "user"]);
-    expect(converse[1]!.messages[1]!.content[0]!.toolUse).toMatchObject({ toolUseId: "tooluse_a", name: "tap", input: { target: "n1" } });
-    expect(converse[1]!.messages[2]!.content[0]!.toolResult).toMatchObject({ toolUseId: "tooluse_a", content: [{ text: "Tapped n1." }], status: "success" });
-    const summary = await proxy.close();
-    expect(summary.receipts.map((item) => [item.callIndex, item.outcome, item.modelId])).toEqual([[0, "ok", MODEL_ID], [1, "ok", MODEL_ID]]);
+    const [first, second] = loopback.requests.map((request) => request.body as { toolConfig: { toolChoice: unknown; tools: Array<{ toolSpec: { name: string } }> }; inferenceConfig: unknown; additionalModelRequestFields: unknown; messages: Array<{ role: string; content: Array<{ toolUse?: unknown; toolResult?: unknown }> }> });
+    expect(first!.toolConfig.toolChoice).toEqual({ any: {} });
+    expect(first!.toolConfig.tools.map((item) => item.toolSpec.name).sort()).toEqual(["complete_step", "tap"]);
+    expect(first!.inferenceConfig).toEqual({ maxTokens: 1024 });
+    expect(first!.additionalModelRequestFields).toEqual({ thinking: { type: "disabled" }, output_config: { effort: "low" } });
+    expect(second!.messages.map((message) => message.role)).toEqual(["user", "assistant", "user"]);
+    expect(second!.messages[1]!.content[0]!.toolUse).toMatchObject({ toolUseId: "tooluse_a", name: "tap", input: { target: "n1" } });
+    expect(second!.messages[2]!.content[0]!.toolResult).toMatchObject({ toolUseId: "tooluse_a", content: [{ text: "Tapped n1." }], status: "success" });
+    const summary = await proxy!.close();
+    expect(summary.receipts.map((item) => [item.callIndex, item.outcome, item.modelId, item.servedModelId])).toEqual([[0, "ok", MODEL_ID, null], [1, "ok", MODEL_ID, null]]);
   });
 
-  it("does not resend when the channel fails: a refused call ends the step with one request", async () => {
-    const converse: unknown[] = [];
-    const client = { send: async (command: { input: unknown }) => { converse.push(command.input); throw Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException", $metadata: { httpStatusCode: 429 } }); } };
-    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: createBedrockE2EInvoke({ clientFor: () => client }), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
-    proxy = await startE2EModelProxy({ socketPath: join(dir, "m.sock"), runId: RUN_ID, route, credentialSet: { passwords: [], emails: [], cookieValues: [] }, evidence: { writeReceipt: () => undefined, writeTranscript: () => undefined }, deadlineAt: Date.now() + 120_000 });
-    proxy.beginStep({ caseId: CASE_ID, stepIndex: 0 });
+  const keyed = [
+    { provider: "anthropic" as const, answer: (model: string, turn: Answer) => anthropicSse({ model, ...turn }), idOf: (id: string) => id },
+    { provider: "openai" as const, answer: (model: string, turn: Answer) => openaiResponsesSse({ model, ...turn }), idOf: (id: string) => id },
+    { provider: "openrouter" as const, answer: (model: string, turn: Answer) => openrouterSse({ model, ...turn, upstream: "Anthropic" }), idOf: (id: string) => id },
+  ];
+  for (const spec of keyed) {
+    it(spec.provider + ": the real loop's tool calls reach the provider as its own requests, one per turn, with no call to the global fetch", async () => {
+      const definition = keyedRoute(spec.provider);
+      let turn = 0;
+      const fake = fakeFetch(() => spec.answer(definition.modelId, turn++ === 0 ? TAP : CONCLUDE));
+      const invoke = await createE2EProviderInvoke(definition, { environment: {}, readSecret: async (arn) => (arn === SECRET_ARN ? PROVIDER_KEY : undefined), fetch: fake.fetch });
+      await startProxy(invoke, definition);
+      const tapped: string[] = [];
+      const globalFetch = vi.spyOn(globalThis, "fetch");
+      const verdict = await loop([], tapped).runStep(stepContext() as never);
+      expect(verdict).toMatchObject({ status: "passed" });
+      expect(tapped).toEqual(["n1"]);
+      expect(fake.requests).toHaveLength(2);
+      expect(globalFetch).not.toHaveBeenCalled();
+      globalFetch.mockRestore();
+      const summary = await proxy!.close();
+      expect(summary.receipts.map((item) => [item.outcome, item.provider, item.modelId, item.servedModelId])).toEqual([
+        ["ok", spec.provider, definition.modelId, definition.modelId], ["ok", spec.provider, definition.modelId, definition.modelId],
+      ]);
+      // The provider key is in the auth header and nowhere else: not in a payload, a receipt or the summary.
+      expect(fake.requests.every((request) => !request.bodyText.includes(PROVIDER_KEY))).toBe(true);
+      expect(JSON.stringify(summary)).not.toContain(PROVIDER_KEY);
+    });
+  }
+
+  it("does not resend when the provider throttles: the loop ends the step after one request, on Bedrock and on a keyed provider", async () => {
+    loopback = await bedrockLoopback(() => ({ status: 429, body: JSON.stringify({ message: "Rate exceeded" }), errorType: "ThrottlingException" }));
+    const invoke = await createE2EProviderInvoke(bedrockRoute(), { environment: {}, testing: { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } } });
+    await startProxy(invoke);
     const model = createChannelLanguageModel({ socketPath: join(dir, "m.sock"), runId: RUN_ID, caseId: CASE_ID, stepIndex: 0 });
     const executor = createToolLoopExecutor({ name: "rovara-seam", model: model as never, buildPrompt: () => "Goal: x", tools: () => ({}) });
-    const context = {
-      model: undefined, signal: new AbortController().signal, budgets: { maxModelCalls: 12, remainingMs: () => 60_000, recordModelCall: () => undefined },
-      attachTurns: () => undefined, attachTranscript: () => undefined,
-    };
-    await expect(executor.runStep(context as never)).rejects.toMatchObject({ code: "MODEL_PROVIDER_FAILED" });
-    expect(converse).toHaveLength(1);
-    expect((await proxy.close()).receipts.map((item) => item.outcome)).toEqual(["provider-error"]);
+    await expect(executor.runStep(stepContext() as never)).rejects.toMatchObject({ code: "MODEL_PROVIDER_FAILED" });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(loopback.requests).toHaveLength(1);
+    expect((await proxy!.close()).receipts.map((item) => item.outcome)).toEqual(["provider-error"]);
+
+    const definition = keyedRoute("anthropic");
+    const fake = fakeFetch(() => jsonError(429));
+    const keyedInvoke = await createE2EProviderInvoke(definition, { environment: {}, readSecret: async () => PROVIDER_KEY, fetch: fake.fetch });
+    await startProxy(keyedInvoke, definition);
+    await expect(createToolLoopExecutor({ name: "rovara-seam", model: createChannelLanguageModel({ socketPath: join(dir, "m.sock"), runId: RUN_ID, caseId: CASE_ID, stepIndex: 0 }) as never, buildPrompt: () => "Goal: x", tools: () => ({}) }).runStep(stepContext() as never)).rejects.toMatchObject({ code: "MODEL_PROVIDER_FAILED" });
+    expect(fake.requests).toHaveLength(1);
+  });
+
+  it("scans a provider key the invoke holds: a page that shows it is refused before any request", async () => {
+    const definition = keyedRoute("anthropic");
+    const fake = fakeFetch(() => anthropicSse({ model: definition.modelId, ...TAP }));
+    const invoke = await createE2EProviderInvoke(definition, { environment: {}, readSecret: async () => PROVIDER_KEY, fetch: fake.fetch });
+    await startProxy(invoke, definition);
+    const guard = createE2ECredentialGuard({ passwords: [...invoke.secrets], emails: [], cookieValues: [] });
+    expect(guard.containsSecret({ messages: ["the page shows " + PROVIDER_KEY] })).toBe(true);
+    const model = createChannelLanguageModel({ socketPath: join(dir, "m.sock"), runId: RUN_ID, caseId: CASE_ID, stepIndex: 0 });
+    const executor = createToolLoopExecutor({ name: "rovara-seam", model: model as never, buildPrompt: () => "Goal: the page shows " + PROVIDER_KEY, tools: () => ({}) });
+    await expect(executor.runStep(stepContext() as never)).rejects.toMatchObject({ code: "MODEL_PROVIDER_FAILED" });
+    expect(fake.requests).toHaveLength(0);
+    expect((await proxy!.close()).receipts.map((item) => item.outcome)).toEqual(["refused-credential-match"]);
   });
 });

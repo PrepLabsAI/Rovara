@@ -15,8 +15,21 @@ export const MODEL_ID = "us.anthropic.claude-haiku-5-5";
 export function bedrockRoute(overrides: Record<string, unknown> = {}): E2EModelRouteDefinition {
   return E2EModelRouteDefinitionSchema.parse({
     routeId: "rovara-e2e-default", revision: 1, scope: "standard", provider: "amazon-bedrock", region: "us-east-1",
-    modelId: MODEL_ID, inferenceProfileArn: null, budgets: { ...E2E_MODEL_ROUTE_DEFAULT_BUDGETS },
-    promptProtocol: "e2e-0.20.0-act/v1", temperature: 0, vision: false, ...overrides,
+    modelId: MODEL_ID, inferenceProfileArn: null, secretArn: null, openRouter: null, budgets: { ...E2E_MODEL_ROUTE_DEFAULT_BUDGETS },
+    promptProtocol: "e2e-0.20.0-act/v1", sampling: "provider-default", thinking: "off", effort: "low", vision: false, ...overrides,
+  });
+}
+
+export const SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/provider-key-AbCdEf";
+export const PROVIDER_KEY = "sk-ant-api03-FAKEKEYFORTESTS0123456789abcdef";
+
+/** A route on an installation whose provider is a keyed one (Anthropic, OpenAI or OpenRouter). */
+export function keyedRoute(provider: "anthropic" | "openai" | "openrouter", overrides: Record<string, unknown> = {}): E2EModelRouteDefinition {
+  const modelId = { anthropic: "claude-haiku-5-5", openai: "gpt-5.4-mini", openrouter: "anthropic/claude-haiku-5.5" }[provider];
+  return bedrockRoute({
+    provider, region: null, modelId, secretArn: SECRET_ARN, effort: provider === "openai" ? null : "low",
+    openRouter: provider === "openrouter" ? { allowFallbacks: false, requireParameters: true, dataCollection: "deny", only: [] } : null,
+    ...overrides,
   });
 }
 
@@ -53,7 +66,7 @@ export function channelRequest(overrides: Partial<E2EModelChannelRequest> & { ca
 /** What a provider returns for a model that taps the Export button. */
 export function tapAnswer(overrides: Record<string, unknown> = {}) {
   return {
-    servedModelId: MODEL_ID,
+    servedModelId: null as string | null,
     content: [{ type: "tool-call" as const, toolCallId: "call_tap_1", toolName: "tap", input: JSON.stringify({ target: "n1" }) }],
     finishReason: { unified: "tool-calls", raw: "tool_use" },
     usage: { inputTokens: 900, outputTokens: 40 },

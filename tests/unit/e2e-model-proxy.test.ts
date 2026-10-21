@@ -73,7 +73,7 @@ async function start(invoke: E2EInvoke, extra: Record<string, unknown> = {}, def
   const evidence = new Sink();
   const rest = Object.fromEntries(Object.entries(extra).filter(([key]) => key !== "begin"));
   const proxy = await startE2EModelProxy({
-    socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence, deadlineAt: Date.parse("2026-10-21T11:00:00.000Z"), now,
+    socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence, deadlineAt: Date.parse("2026-10-21T11:00:00.000Z"), now, environment: {},
     ...rest,
   });
   proxies.push(proxy);
@@ -122,7 +122,7 @@ describe("e2e model proxy: socket", () => {
     const { writeFile } = await import("node:fs/promises");
     await writeFile(socketPath, "not a socket");
     const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
-    await expect(startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000 })).rejects.toThrow(/not a socket/);
+    await expect(startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000, environment: {} })).rejects.toThrow(/not a socket/);
   });
 });
 
@@ -447,7 +447,7 @@ describe("e2e model proxy: fix round 1", () => {
     const dayBudget = { reserve: () => { if (first) { first = false; throw new Error("table unreachable"); } return { settle: () => undefined }; } };
     const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget });
     const evidence = new Sink();
-    const proxy = await startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence, deadlineAt: Date.now() + 60_000 });
+    const proxy = await startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence, deadlineAt: Date.now() + 60_000, environment: {} });
     proxies.push(proxy);
     proxy.beginStep({ caseId: CASE_ID, stepIndex: 0 });
     expect((await post(channelRequest({ callIndex: 0 }))).body.result).toMatchObject({ code: "budget" });
@@ -461,7 +461,7 @@ describe("e2e model proxy: fix round 1", () => {
     await mkdir(open);
     await chmod(open, 0o755);
     const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
-    const base = { runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000 };
+    const base = { runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000, environment: {} };
     await expect(startE2EModelProxy({ ...base, socketPath: join(open, "m.sock") })).rejects.toThrow(/mode 0700/);
     const umask = vi.spyOn(process, "umask");
     const fresh = join(dir, "fresh", "model");
@@ -503,9 +503,68 @@ describe("e2e model proxy: fix round 1", () => {
   });
 });
 
+describe("e2e model proxy: the provider layer (amendment A1)", () => {
+  it("refuses to start when the worker environment can redirect a model call, naming the variable and not its value", async () => {
+    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
+    const base = { socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000 };
+    const failure = await startE2EModelProxy({ ...base, environment: { HTTPS_PROXY: "http://proxy.example.test:3128", AWS_BEARER_TOKEN_BEDROCK: "bearer-secret-value" } }).then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toMatch(/environment can redirect model calls/);
+    expect(failure?.message).toContain("HTTPS_PROXY");
+    expect(failure?.message).toContain("AWS_BEARER_TOKEN_BEDROCK");
+    expect(failure?.message).not.toContain("bearer-secret-value");
+    await expect(stat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+    const proxy = await startE2EModelProxy({ ...base, environment: { PATH: "/usr/bin" } });
+    proxies.push(proxy);
+  });
+
+  it("does not apply the guard to a scripted route, which calls no provider", async () => {
+    const scripted = bedrockRoute({ routeId: "rovara-scripted/v1", scope: "qualification", provider: "rovara-scripted", region: null, modelId: "rovara-scripted-v1", effort: null });
+    const route = createGovernedE2EModelRoute(scripted, { invoke: async () => tapAnswer({ servedModelId: "rovara-scripted-v1" }), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
+    const proxy = await startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000, policyScope: "qualification", environment: { HTTPS_PROXY: "http://proxy.example.test:3128" } });
+    proxies.push(proxy);
+  });
+
+  it("scans for the provider key the route's invoke holds, so a prompt can never carry it", async () => {
+    const key = "held-by-the-invoke-0123456789-abcdef";
+    const seen: unknown[] = [];
+    const invoke = Object.assign(okInvoke(seen), { secrets: [key] });
+    const { proxy } = await start(invoke);
+    const reply = await post(channelRequest({ callOverride: call(`The page says ${key}`) }));
+    expect(reply.body.result).toMatchObject({ status: "error", code: "refused-credential-match" });
+    expect(seen).toHaveLength(0);
+    const summary = await proxy.close();
+    expect(JSON.stringify(summary)).not.toContain(key);
+  });
+
+  it("gives the final provider payload to the credential scan, and records the call as refused when it carries a credential", async () => {
+    const seen: unknown[] = [];
+    const invoke: E2EInvoke = async (input) => {
+      seen.push(input.call);
+      input.inspectPayload?.({ messages: [{ content: "clean" }] });
+      input.inspectPayload?.({ messages: [{ content: `leaked ${PASSWORD}` }], [`key-${AWS_KEY}`]: 1 });
+      return tapAnswer();
+    };
+    const { proxy, evidence } = await start(invoke);
+    const reply = await post(channelRequest());
+    expect(reply.body.result).toMatchObject({ status: "error", code: "refused-credential-match" });
+    const summary = await proxy.close();
+    expect(summary.receipts[0]).toMatchObject({ outcome: "refused-credential-match", inputTokens: 0 });
+    expect(JSON.stringify({ evidence: evidence.transcripts, summary, reply: reply.text })).not.toContain(PASSWORD);
+  });
+
+  it("stores the digest of the provider payload and the served model with the transcript and receipt", async () => {
+    const digest = "b".repeat(64);
+    const { proxy, evidence } = await start(async () => tapAnswer({ providerPayloadSha256: digest }));
+    expect((await post(channelRequest())).body.result.status).toBe("ok");
+    await proxy.close();
+    expect(evidence.transcripts[0]).toMatchObject({ providerPayloadSha256: digest });
+    expect(evidence.receipts[0]).toMatchObject({ servedModelId: null, servedUpstream: null });
+  });
+});
+
 describe("e2e model proxy: the scripted route", () => {
   const scriptedDefinition = () => bedrockRoute({
-    routeId: "rovara-scripted/v1", scope: "qualification", provider: "rovara-scripted", region: null, modelId: "rovara-scripted-v1",
+    routeId: "rovara-scripted/v1", scope: "qualification", provider: "rovara-scripted", region: null, modelId: "rovara-scripted-v1", effort: null,
   });
 
   it("is refused outside a qualification policy unless the CI harness sets ROVARA_E2E_SCRIPTED_MODEL=1", async () => {

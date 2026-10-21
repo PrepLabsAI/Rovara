@@ -32,8 +32,8 @@ export function isScriptedE2EModelAdmissible(input: { policyScope: "standard" | 
 export function scriptedE2ERouteDefinition(overrides: Partial<Pick<E2EModelRouteDefinition, "revision" | "budgets">> = {}): E2EModelRouteDefinition {
   return E2EModelRouteDefinitionSchema.parse({
     routeId: SCRIPTED_E2E_ROUTE_ID, revision: 1, scope: "qualification", provider: "rovara-scripted", region: null,
-    modelId: SCRIPTED_E2E_MODEL_ID, inferenceProfileArn: null, budgets: { ...E2E_MODEL_ROUTE_DEFAULT_BUDGETS },
-    promptProtocol: "e2e-0.20.0-act/v1", temperature: 0, vision: false, ...overrides,
+    modelId: SCRIPTED_E2E_MODEL_ID, inferenceProfileArn: null, secretArn: null, openRouter: null, budgets: { ...E2E_MODEL_ROUTE_DEFAULT_BUDGETS },
+    promptProtocol: "e2e-0.20.0-act/v1", sampling: "provider-default", thinking: "off", effort: null, vision: false, ...overrides,
   });
 }
 
@@ -98,7 +98,7 @@ export function createScriptedE2EInvoke(options: ScriptedE2EModelOptions): E2EIn
     const step = script[turn];
     const callId = (name: string) => `scripted_${turn}_${name}_${digest.slice(0, 8)}`;
     const toolCall = (toolName: string, args: Record<string, unknown>): E2EInvokeOutput => ({
-      servedModelId: input.identifier,
+      servedModelId: input.target.identifier,
       content: [{ type: "tool-call", toolCallId: callId(toolName), toolName, input: JSON.stringify(args) }],
       finishReason: { unified: "tool-calls", raw: "scripted" },
       usage: { inputTokens: Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(call), "utf8") / 4)), outputTokens: 20 },

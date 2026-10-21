@@ -14,6 +14,8 @@ import {
 } from "@agentx/contracts";
 import {
   E2E_BUDGET_EXHAUSTED_PREFIX,
+  E2EPayloadRefusedError,
+  assertE2EEnvironmentCannotRedirect,
   e2ePromptSha256,
   e2eReservedInputTokens,
   type E2EModelCallIdentity,
@@ -56,6 +58,8 @@ export interface E2EModelTranscript {
   omitted?: "budget" | "unparseable";
   /** `usage-missing`: the provider reported no usage, so the reserved bound was counted. */
   note?: "usage-missing";
+  /** SHA-256 of the payload actually sent to the provider (after shaping), so the stored record can be tied to what left the worker. */
+  providerPayloadSha256?: string;
 }
 
 /** Where the proxy writes. Receipts go to the worker's evidence; transcripts are operator-only and never reach a page. */
@@ -174,9 +178,12 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
   if (definition.provider === "rovara-scripted" && !isScriptedE2EModelAdmissible({ policyScope: options.policyScope ?? "standard", environment: options.environment ?? process.env })) {
     throw new Error("a scripted model route is admitted only under a qualification policy or with ROVARA_E2E_SCRIPTED_MODEL=1");
   }
+  // A route on a real provider calls it through pi-ai, which reads the environment; refuse to start when that can redirect the call.
+  if (definition.provider !== "rovara-scripted") assertE2EEnvironmentCannotRedirect(options.environment ?? process.env);
   const budgets = effectiveBudgets(definition.budgets, options.budgets);
+  // The provider key the route's invoke holds is a secret the model must never see.
   let credentials: E2ECredentialSet = {
-    passwords: [...options.credentialSet.passwords], emails: [...options.credentialSet.emails], cookieValues: [...options.credentialSet.cookieValues],
+    passwords: [...options.credentialSet.passwords, ...route.secretValues], emails: [...options.credentialSet.emails], cookieValues: [...options.credentialSet.cookieValues],
   };
   let guard: E2ECredentialGuard = createE2ECredentialGuard(credentials);
   const transcriptBudget = options.transcriptBudgetBytes ?? DEFAULT_TRANSCRIPT_BUDGET_BYTES;
@@ -210,14 +217,14 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     return state;
   };
 
-  async function record(receipt: E2EModelReceipt, extra: { prompt: string | null; response: string | null; omitted?: E2EModelTranscript["omitted"]; note?: E2EModelTranscript["note"] }): Promise<void> {
+  async function record(receipt: E2EModelReceipt, extra: { prompt: string | null; response: string | null; omitted?: E2EModelTranscript["omitted"]; note?: E2EModelTranscript["note"]; providerPayloadSha256?: string }): Promise<void> {
     receipts.push(receipt);
     try { await evidence.writeReceipt(receipt); } catch { evidenceErrors += 1; }
     let { prompt, response, omitted } = extra;
     const size = Buffer.byteLength(prompt ?? "", "utf8") + Buffer.byteLength(response ?? "", "utf8");
     if (omitted === undefined && transcriptBytes + size > transcriptBudget) { prompt = null; response = null; omitted = "budget"; }
     else transcriptBytes += size;
-    const transcript: E2EModelTranscript = { receiptId: receipt.receiptId, runId: receipt.runId, caseId: receipt.caseId, stepIndex: receipt.stepIndex, callIndex: receipt.callIndex, outcome: receipt.outcome, prompt, response, ...(omitted === undefined ? {} : { omitted }), ...(extra.note === undefined ? {} : { note: extra.note }) };
+    const transcript: E2EModelTranscript = { receiptId: receipt.receiptId, runId: receipt.runId, caseId: receipt.caseId, stepIndex: receipt.stepIndex, callIndex: receipt.callIndex, outcome: receipt.outcome, prompt, response, ...(omitted === undefined ? {} : { omitted }), ...(extra.note === undefined ? {} : { note: extra.note }), ...(extra.providerPayloadSha256 === undefined ? {} : { providerPayloadSha256: extra.providerPayloadSha256 }) };
     try { await evidence.writeTranscript(transcript); } catch { evidenceErrors += 1; }
   }
 
@@ -302,6 +309,8 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
         outcome = await route.generate(sent, {
           signal: lifetime.signal, deadlineAt: Math.min(options.deadlineAt, stepDeadline), startedAt,
           budgets: { callTimeoutMs: budgets.callTimeoutMs, maxOutputTokens: budgets.maxOutputTokens, maxPromptBytes: budgets.maxPromptBytes, maxInputTokens: budgets.maxInputTokens },
+          // The last credential scan, on the payload exactly as it would be sent.
+          inspectPayload: (payload) => { if (guard.containsSecret(payload)) throw new E2EPayloadRefusedError(); },
         });
       } catch {
         // The route failed inside. The request still gets a receipt, so call indexes stay contiguous.
@@ -313,7 +322,9 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
       await record(outcome.receipt, {
         prompt: JSON.stringify(guard.scrubValue(sent.call)), response: JSON.stringify(guard.scrubValue(outcome.result)),
         ...(outcome.usageMissing === true ? { note: "usage-missing" as const } : {}),
+        ...(outcome.providerPayloadSha256 === undefined ? {} : { providerPayloadSha256: outcome.providerPayloadSha256 }),
       });
+      if (outcome.receipt.outcome === "refused-credential-match") credentialLatched.add(stepKey(position));
       const body = { schemaVersion: "rovara-e2e-model-channel/v1", ...answer(outcome) };
       return { status: 200, body: E2EModelChannelResponseSchema.parse(body) };
     } finally {

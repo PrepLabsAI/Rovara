@@ -58,6 +58,8 @@ export interface E2ECredentialGuard {
   readonly unscannable: boolean;
   /** Decides whether the call may go to the provider, and returns the call with page-text emails replaced. */
   inspect(call: Call): CredentialInspection;
+  /** Whether any string in a JSON value (or any key) carries a seeded secret or credential-shaped text. The last scan, on a provider payload. */
+  containsSecret(value: unknown): boolean;
   /** A copy of any JSON value with every credential, email and credential-shaped string replaced, for evidence. */
   scrubValue<T>(value: T): T;
 }
@@ -129,6 +131,14 @@ export function createE2ECredentialGuard(set: E2ECredentialSet, guardOptions: E2
     return value;
   }
 
+  function containsSecret(value: unknown): boolean {
+    if (unscannable) return true;
+    if (typeof value === "string") return secretCategory(value) !== undefined;
+    if (Array.isArray(value)) return (value as unknown[]).some(containsSecret);
+    if (typeof value === "object" && value !== null) return Object.entries(value).some(([key, item]) => secretCategory(key) !== undefined || containsSecret(item));
+    return false;
+  }
+
   function inspect(call: Call): CredentialInspection {
     if (unscannable) return { refuse: true, category: "unscannable-credential" };
     let refusal: Extract<CredentialInspection, { refuse: true }>["category"] | undefined;
@@ -179,5 +189,5 @@ export function createE2ECredentialGuard(set: E2ECredentialSet, guardOptions: E2
     return { refuse: false, call: cleaned, redactions };
   }
 
-  return { get unscannable() { return unscannable; }, inspect, scrubValue };
+  return { get unscannable() { return unscannable; }, inspect, containsSecret, scrubValue };
 }

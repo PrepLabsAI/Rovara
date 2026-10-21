@@ -8,6 +8,7 @@ import {
   E2E_MODEL_CHANNEL_MAX_RESPONSE_BYTES,
   E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
   E2EAgentActionLedgerSchema,
+  E2E_MODEL_PROVIDERS,
   E2EAgentTraceBindingSchema,
   E2EModelChannelRequestSchema,
   E2EModelChannelResponseSchema,
@@ -19,6 +20,7 @@ import {
   e2eAgentValueDigest,
   e2eAgentValueKeyId,
   e2eModelReceiptAdmissibleForRound,
+  e2eServedModelMatchesPin,
   e2eModelRouteInvokedIdentifier,
   e2eModelRouteRevision,
   generateE2EAgentValueKey,
@@ -40,11 +42,18 @@ function route(overrides: Record<string, unknown> = {}) {
   return {
     routeId: "e2e-act-haiku", revision: 1, scope: "standard", provider: "amazon-bedrock", region: "us-east-1",
     modelId: "us.anthropic.claude-haiku-5-5", inferenceProfileArn: null,
-    budgets: { ...D }, promptProtocol: "e2e-0.20.0-act/v1", temperature: 0, vision: false, ...overrides,
+    secretArn: null, openRouter: null,
+    budgets: { ...D }, promptProtocol: "e2e-0.20.0-act/v1", sampling: "provider-default", thinking: "off", effort: "low", vision: false, ...overrides,
   };
 }
+const SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/anthropic-AbCdEf";
+const OPENROUTER_POLICY = { allowFallbacks: false, requireParameters: true, dataCollection: "deny", only: [] };
+function keyedRoute(provider: "anthropic" | "openai" | "openrouter", overrides: Record<string, unknown> = {}) {
+  const modelId = { anthropic: "claude-haiku-5-5", openai: "gpt-5.4-mini", openrouter: "anthropic/claude-haiku-5.5" }[provider];
+  return route({ provider, region: null, modelId, secretArn: SECRET_ARN, openRouter: provider === "openrouter" ? OPENROUTER_POLICY : null, ...overrides });
+}
 function scriptedRoute(overrides: Record<string, unknown> = {}) {
-  return route({ routeId: "rovara-scripted/v1", scope: "qualification", provider: "rovara-scripted", region: null, modelId: "scripted-v1", ...overrides });
+  return route({ routeId: "rovara-scripted/v1", scope: "qualification", provider: "rovara-scripted", region: null, modelId: "scripted-v1", effort: null, ...overrides });
 }
 
 function call(overrides: Record<string, unknown> = {}) {
@@ -125,9 +134,40 @@ describe("e2e model route definition", () => {
 
   it("pins provider, protocol, temperature and vision, and refuses unknown keys", () => {
     for (const overrides of [
-      { provider: "openai" }, { promptProtocol: "e2e-0.21.0-act/v1" }, { temperature: 0.2 }, { vision: true },
+      { provider: "mystery" }, { promptProtocol: "e2e-0.21.0-act/v1" }, { temperature: 0.2 }, { temperature: 0 }, { sampling: "greedy" }, { thinking: "on" }, { vision: true },
       { fallbackModelId: "x" }, { revision: 0 }, { inferenceProfileArn: "not-an-arn" }, { scope: "production" },
     ]) expect(E2EModelRouteDefinitionSchema.safeParse(route(overrides)).success, JSON.stringify(overrides)).toBe(false);
+  });
+
+  it("represents each installation provider with its own required fields (amendment A1)", () => {
+    for (const provider of ["anthropic", "openai", "openrouter"] as const) {
+      const parsed = E2EModelRouteDefinitionSchema.safeParse(keyedRoute(provider));
+      expect(parsed.success, provider).toBe(true);
+      expect(e2eModelRouteInvokedIdentifier(E2EModelRouteDefinitionSchema.parse(keyedRoute(provider)))).toBe(keyedRoute(provider).modelId);
+      // A keyed provider needs its secret, has no region or profile, and is not a Bedrock route.
+      expect(E2EModelRouteDefinitionSchema.safeParse(keyedRoute(provider, { secretArn: null })).success, `${provider} without secret`).toBe(false);
+      expect(E2EModelRouteDefinitionSchema.safeParse(keyedRoute(provider, { secretArn: "not-an-arn" })).success, `${provider} bad arn`).toBe(false);
+      expect(E2EModelRouteDefinitionSchema.safeParse(keyedRoute(provider, { region: "us-east-1" })).success, `${provider} region`).toBe(false);
+      expect(E2EModelRouteDefinitionSchema.safeParse(keyedRoute(provider, { inferenceProfileArn: PROFILE_ARN })).success, `${provider} profile`).toBe(false);
+    }
+    // Bedrock has no secret and no OpenRouter policy.
+    expect(E2EModelRouteDefinitionSchema.safeParse(route({ secretArn: SECRET_ARN })).success).toBe(false);
+    expect(E2EModelRouteDefinitionSchema.safeParse(route({ openRouter: OPENROUTER_POLICY })).success).toBe(false);
+    // The OpenRouter policy goes with OpenRouter and only with it, and its safe values are fixed.
+    expect(E2EModelRouteDefinitionSchema.safeParse(keyedRoute("openrouter", { openRouter: null })).success).toBe(false);
+    expect(E2EModelRouteDefinitionSchema.safeParse(keyedRoute("anthropic", { openRouter: OPENROUTER_POLICY })).success).toBe(false);
+    for (const policy of [{ allowFallbacks: true }, { requireParameters: false }, { dataCollection: "allow" }, { only: ["Bad Slug"] }, { extra: 1 }]) {
+      expect(E2EModelRouteDefinitionSchema.safeParse(keyedRoute("openrouter", { openRouter: { ...OPENROUTER_POLICY, ...policy } })).success, JSON.stringify(policy)).toBe(false);
+    }
+    expect(E2EModelRouteDefinitionSchema.safeParse(keyedRoute("openrouter", { openRouter: { ...OPENROUTER_POLICY, only: ["anthropic"] } })).success).toBe(true);
+    // The scripted provider carries none of them.
+    expect(E2EModelRouteDefinitionSchema.safeParse(scriptedRoute({ secretArn: SECRET_ARN })).success).toBe(false);
+    expect(E2EModelRouteDefinitionSchema.safeParse(scriptedRoute({ openRouter: OPENROUTER_POLICY })).success).toBe(false);
+    expect(E2EModelRouteDefinitionSchema.safeParse(scriptedRoute({ effort: "low" })).success).toBe(false);
+    // Haiku 5.5 rejects temperature 0, so the definition has no temperature at all, and the provider and secret change the revision.
+    expect(E2EModelRouteDefinitionSchema.safeParse(route({ temperature: 0 })).success).toBe(false);
+    expect(e2eModelRouteRevision(keyedRoute("anthropic"))).not.toBe(e2eModelRouteRevision(keyedRoute("anthropic", { secretArn: SECRET_ARN.replace("AbCdEf", "ZzZzZz") })));
+    expect(E2E_MODEL_PROVIDERS).toEqual(["amazon-bedrock", "openrouter", "anthropic", "openai", "rovara-scripted"]);
   });
 
   it("allows single slashes between route id segments and nothing else", () => {
@@ -360,9 +400,9 @@ describe("e2e model receipt", () => {
     }
   });
 
-  it("refuses unknown keys, another provider and a malformed digest", () => {
+  it("refuses unknown keys, a provider outside the installation set and a malformed digest", () => {
     expect(E2EModelReceiptSchema.safeParse({ ...receipt(), prompt: "text" }).success).toBe(false);
-    expect(E2EModelReceiptSchema.safeParse(receipt({ provider: "openai" })).success).toBe(false);
+    expect(E2EModelReceiptSchema.safeParse(receipt({ provider: "mystery" })).success).toBe(false);
     expect(E2EModelReceiptSchema.safeParse(receipt({ promptSha256: "ABC" })).success).toBe(false);
     expect(E2EModelReceiptSchema.safeParse(receipt({ outcome: "passed" })).success).toBe(false);
   });
@@ -376,6 +416,35 @@ describe("e2e model receipt", () => {
     expect(e2eModelReceiptAdmissibleForRound(real, "qualification")).toEqual({ ok: true });
     expect(E2EModelReceiptSchema.safeParse(receipt({ provider: "rovara-scripted" })).success).toBe(false);
     expect(E2EModelReceiptSchema.safeParse(receipt({ routeId: "rovara-scripted/v1" })).success).toBe(false);
+  });
+});
+
+describe("served model on the receipt (amendment A1)", () => {
+  it("matches an exact pin or the pin plus a date suffix, and nothing else", () => {
+    expect(e2eServedModelMatchesPin("claude-haiku-5-5", "claude-haiku-5-5")).toBe(true);
+    expect(e2eServedModelMatchesPin("claude-haiku-5-5", "claude-haiku-5-5-20261001")).toBe(true);
+    expect(e2eServedModelMatchesPin("anthropic/claude-haiku-5.5", "anthropic/claude-haiku-5.5-2026-10-01")).toBe(true);
+    for (const served of ["claude-sonnet-5-5", "claude-haiku-5-5-latest", "claude-haiku-5-55", "claude-haiku-5-5-2026", "xclaude-haiku-5-5", ""]) {
+      expect(e2eServedModelMatchesPin("claude-haiku-5-5", served), served).toBe(false);
+    }
+  });
+
+  it("takes the served model and upstream as nullable fields that default to null, bounded in length", () => {
+    expect(E2EModelReceiptSchema.parse(receipt())).toMatchObject({ servedModelId: null, servedUpstream: null });
+    expect(E2EModelReceiptSchema.parse(receipt({ provider: "anthropic", modelId: "claude-haiku-5-5", servedModelId: "claude-haiku-5-5-20261001" }))).toMatchObject({ provider: "anthropic", servedModelId: "claude-haiku-5-5-20261001" });
+    expect(E2EModelReceiptSchema.parse(receipt({ provider: "openrouter", modelId: "anthropic/claude-haiku-5.5", servedModelId: "anthropic/claude-haiku-5.5", servedUpstream: "Anthropic" })).servedUpstream).toBe("Anthropic");
+    expect(E2EModelReceiptSchema.safeParse(receipt({ servedModelId: "x".repeat(201) })).success).toBe(false);
+    expect(E2EModelReceiptSchema.safeParse(receipt({ servedUpstream: "" })).success).toBe(false);
+    for (const provider of ["openai", "openrouter", "anthropic"]) expect(E2EModelReceiptSchema.safeParse(receipt({ provider })).success, provider).toBe(true);
+  });
+
+  it("fails a step whose receipt names a served model other than the pin", () => {
+    const identity = { runId: RUN_ID, caseId: "case-orders-export", stepIndex: 1, routeId: "e2e-act-haiku", routeRevision: "r1-0123456789ab", provider: "anthropic" as const, modelId: "claude-haiku-5-5" };
+    const check = (receipts: unknown[]) => checkE2EStepModelAccounting({ roundScope: "standard", identity, reportModelCalls: 1, receipts, maxModelCallsPerStep: 12 });
+    const mine = (overrides: Record<string, unknown>) => receiptAt(0, { provider: "anthropic", modelId: "claude-haiku-5-5", ...overrides });
+    expect(check([mine({ servedModelId: null })])).toMatchObject({ ok: true });
+    expect(check([mine({ servedModelId: "claude-haiku-5-5-20261001" })])).toMatchObject({ ok: true });
+    expect(check([mine({ servedModelId: "claude-sonnet-5-5" })])).toMatchObject({ ok: false, code: "receipt-served-model-mismatch" });
   });
 });
 

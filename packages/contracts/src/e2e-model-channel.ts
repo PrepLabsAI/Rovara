@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
+import { MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN } from "./model-providers.js";
 
 /**
  * The governed model channel for e2e `agent` steps (M1.4).
@@ -89,16 +90,28 @@ export const E2EModelRouteBudgetsSchema = z.object({
 }).strict();
 export type E2EModelRouteBudgets = z.infer<typeof E2EModelRouteBudgetsSchema>;
 
-/** `amazon-bedrock` is the real provider. `rovara-scripted` is the scripted model double of qualification and CI, and exists only on qualification-scoped routes. */
-export const E2E_MODEL_PROVIDERS = ["amazon-bedrock", "rovara-scripted"] as const;
+/**
+ * The installation's configured providers (`MODEL_PROVIDERS`: Bedrock through the worker role, or Anthropic, OpenAI or
+ * OpenRouter through the provider key's secret), reached through model-runtime and pi-ai, plus `rovara-scripted`, the
+ * scripted model double of qualification and CI, which exists only on qualification-scoped routes.
+ */
+export const E2E_MODEL_PROVIDERS = [...MODEL_PROVIDERS, "rovara-scripted"] as const;
 export const E2E_MODEL_SCRIPTED_ROUTE_PREFIX = "rovara-scripted/";
 const modelProvider = z.enum(E2E_MODEL_PROVIDERS);
 
 const ROUTE_ID_PATTERN = /^[a-z0-9][a-z0-9-]*(?:\/[a-z0-9][a-z0-9-]*)*$/;
 const routeIdText = (trim: boolean) => (trim ? z.string().trim() : z.string()).min(1).max(64).regex(ROUTE_ID_PATTERN);
-const bedrockModelId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/);
+const modelIdText = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/);
 const AWS_REGION_PATTERN = /^[a-z]{2}(?:-[a-z]+)+-[0-9]$/;
 const PROFILE_ARN_PATTERN = /^arn:aws[a-z-]*:bedrock:([a-z0-9-]+):[0-9]{12}:(application-)?inference-profile\/([A-Za-z0-9._:/-]{1,200})$/;
+
+/** OpenRouter's routing policy as the route pins it. The three safe values are fixed; `only` is the provider allowlist (empty: any). */
+const openRouterPolicy = z.object({
+  allowFallbacks: z.literal(false),
+  requireParameters: z.literal(true),
+  dataCollection: z.literal("deny"),
+  only: z.array(z.string().regex(/^[a-z0-9][a-z0-9_/-]{0,79}$/)).max(32),
+}).strict();
 
 export const E2EModelRouteDefinitionSchema = z.object({
   routeId: routeIdText(true),
@@ -106,17 +119,27 @@ export const E2EModelRouteDefinitionSchema = z.object({
   /** `qualification` routes may use the scripted provider. A `standard` route is a real model for real rounds. */
   scope: z.enum(["standard", "qualification"]),
   provider: modelProvider,
-  /** The Bedrock region the invocation goes to. Pinned, so a change of worker region cannot silently change the endpoint or data residency. Null for the scripted provider. */
+  /** The Bedrock region the invocation goes to. Pinned, so a change of worker region cannot silently change the endpoint or data residency. Null for every provider but Bedrock. */
   region: z.string().regex(AWS_REGION_PATTERN).nullable(),
-  modelId: bedrockModelId,
+  /** The provider's small model, pinned at setup approval (never the coding model, never a fallback). */
+  modelId: modelIdText,
   /**
    * When set, this ARN is the identifier that is invoked, and it must be in `region`. A system profile's id must equal
    * `modelId`. When null, `modelId` is invoked. See `e2eModelRouteInvokedIdentifier`.
    */
   inferenceProfileArn: z.string().regex(PROFILE_ARN_PATTERN).nullable(),
+  /** A keyed provider's Secrets Manager secret, by ARN only (the value is read by the worker at run time, never stored here). */
+  secretArn: z.string().regex(SECRET_ARN_PATTERN).max(SECRET_ARN_MAX_LENGTH).nullable(),
+  /** OpenRouter's routing policy; present on an OpenRouter route and only there. */
+  openRouter: openRouterPolicy.nullable(),
   budgets: E2EModelRouteBudgetsSchema,
   promptProtocol: z.literal(E2E_MODEL_ROUTE_PROMPT_PROTOCOL),
-  temperature: z.literal(0),
+  /** Provider-default sampling. Haiku 5.5 rejects `temperature: 0` with a 400, so no temperature is ever sent. */
+  sampling: z.literal("provider-default"),
+  /** Claude thinking is sent as disabled: a thinking block counts against the 1024 output cap and the channel schema refuses it. */
+  thinking: z.literal("off"),
+  /** The Claude effort level sent beside disabled thinking. Null where the provider has no such field. */
+  effort: z.literal("low").nullable(),
   vision: z.literal(false),
 }).strict().superRefine((route, context) => {
   const issue = (path: string, message: string) => context.addIssue({ code: "custom", path: [path], message });
@@ -126,17 +149,37 @@ export const E2EModelRouteDefinitionSchema = z.object({
     if (!scriptedId) issue("routeId", `a scripted route id starts with ${E2E_MODEL_SCRIPTED_ROUTE_PREFIX}`);
     if (route.region !== null) issue("region", "the scripted provider has no region");
     if (route.inferenceProfileArn !== null) issue("inferenceProfileArn", "the scripted provider has no inference profile");
+    if (route.secretArn !== null) issue("secretArn", "the scripted provider has no secret");
+    if (route.openRouter !== null) issue("openRouter", "the scripted provider has no OpenRouter policy");
+    if (route.effort !== null) issue("effort", "the scripted provider has no effort");
     return;
   }
   if (scriptedId) issue("routeId", "the scripted route id prefix is reserved for the scripted provider");
-  if (route.region === null) issue("region", "a Bedrock route pins its region");
-  if (route.inferenceProfileArn !== null) {
-    const match = PROFILE_ARN_PATTERN.exec(route.inferenceProfileArn);
-    if (match?.[1] !== route.region) issue("inferenceProfileArn", "the inference profile must be in the route's region");
-    if (match?.[2] === undefined && match?.[3] !== route.modelId) issue("inferenceProfileArn", "a system inference profile must be the profile of modelId");
+  if (route.provider === "amazon-bedrock") {
+    if (route.region === null) issue("region", "a Bedrock route pins its region");
+    if (route.secretArn !== null) issue("secretArn", "a Bedrock route reads no secret: it uses the worker role");
+    if (route.inferenceProfileArn !== null) {
+      const match = PROFILE_ARN_PATTERN.exec(route.inferenceProfileArn);
+      if (match?.[1] !== route.region) issue("inferenceProfileArn", "the inference profile must be in the route's region");
+      if (match?.[2] === undefined && match?.[3] !== route.modelId) issue("inferenceProfileArn", "a system inference profile must be the profile of modelId");
+    }
+  } else {
+    if (route.secretArn === null) issue("secretArn", `a ${route.provider} route needs its provider secret`);
+    if (route.region !== null) issue("region", `a ${route.provider} route has no region`);
+    if (route.inferenceProfileArn !== null) issue("inferenceProfileArn", `a ${route.provider} route has no inference profile`);
   }
+  if ((route.provider === "openrouter") !== (route.openRouter !== null)) issue("openRouter", "the OpenRouter policy goes with an OpenRouter route and only with it");
 });
 export type E2EModelRouteDefinition = z.infer<typeof E2EModelRouteDefinitionSchema>;
+
+/**
+ * Whether a model a provider says served a call is the pinned one: the pin itself, or the pin with a date suffix
+ * (`-YYYY-MM-DD` or `-YYYYMMDD`), which providers append to a snapshot. Anything else is another model.
+ */
+export function e2eServedModelMatchesPin(pinned: string, served: string): boolean {
+  if (served === pinned) return true;
+  return served.startsWith(`${pinned}-`) && /^(?:\d{4}-\d{2}-\d{2}|\d{8})$/.test(served.slice(pinned.length + 1));
+}
 
 /** The one identifier the worker invokes: the inference profile ARN when the route has one, else the model id. */
 export function e2eModelRouteInvokedIdentifier(definition: E2EModelRouteDefinition): string {
@@ -282,11 +325,15 @@ export const E2EModelReceiptSchema = z.object({
   routeId: routeIdText(false),
   routeRevision: z.string().regex(/^r[1-9][0-9]{0,5}-[a-f0-9]{12}$/),
   provider: modelProvider,
-  modelId: bedrockModelId,
+  modelId: modelIdText,
   startedAt: z.string().datetime(),
   inputTokens: nonNegativeInt.max(64_000),
   outputTokens: nonNegativeInt.max(caps.maxOutputTokens),
   latencyMs: nonNegativeInt.max(120_000),
+  /** The model the provider says served the call, when it says (Bedrock does not). It must match the pin. */
+  servedModelId: z.string().min(1).max(200).nullable().default(null),
+  /** OpenRouter's upstream provider for the call, when it says. Informational. */
+  servedUpstream: z.string().min(1).max(200).nullable().default(null),
   promptSha256: digest,
   responseSha256: digest.nullable(),
   outcome: receiptOutcome,
@@ -318,7 +365,7 @@ export function e2eModelReceiptAdmissibleForRound(receipt: E2EModelReceipt, roun
 
 export type E2EStepModelAccounting =
   | { ok: true; okCalls: number; totalCalls: number }
-  | { ok: false; code: "receipt-malformed" | "receipt-not-admissible" | "receipt-identity-mismatch" | "receipt-duplicate-id" | "receipt-index-gap" | "receipt-order" | "over-step-budget" | "budget-refused" | "report-calls-mismatch" };
+  | { ok: false; code: "receipt-malformed" | "receipt-not-admissible" | "receipt-identity-mismatch" | "receipt-served-model-mismatch" | "receipt-duplicate-id" | "receipt-index-gap" | "receipt-order" | "over-step-budget" | "budget-refused" | "report-calls-mismatch" };
 
 /** A limit from the caller, clamped to the owner's cap. Anything that is not a non-negative integer counts as 0, so a bad number fails closed. */
 const clampLimit = (value: unknown, cap: number): number => (typeof value === "number" && Number.isInteger(value) && value >= 0 ? Math.min(value, cap) : 0);
@@ -365,6 +412,7 @@ export function checkE2EStepModelAccounting(input: {
       || item.routeRevision !== identity.routeRevision || item.provider !== identity.provider || item.modelId !== identity.modelId) return { ok: false, code: "receipt-identity-mismatch" };
   }
   if (new Set(receipts.map((item) => item.receiptId)).size !== receipts.length) return { ok: false, code: "receipt-duplicate-id" };
+  if (receipts.some((item) => item.servedModelId !== null && !e2eServedModelMatchesPin(identity.modelId, item.servedModelId))) return { ok: false, code: "receipt-served-model-mismatch" };
   const ordered = [...receipts].sort((left, right) => left.callIndex - right.callIndex);
   if (ordered.some((item, index) => item.callIndex !== index)) return { ok: false, code: "receipt-index-gap" };
   if (ordered.some((item, index) => index > 0 && Date.parse(item.startedAt) < Date.parse(ordered[index - 1]!.startedAt))) return { ok: false, code: "receipt-order" };

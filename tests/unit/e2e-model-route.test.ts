@@ -10,11 +10,11 @@ import * as modelRuntime from "../../packages/model-runtime/src/index.js";
 import {
   createGovernedE2EModelRoute,
   createInMemoryE2EDayBudget,
+  E2EPayloadRefusedError,
   type E2EInvoke,
   type E2EInvokeInput,
 } from "../../packages/model-runtime/src/e2e-route.js";
-import { createBedrockE2EInvoke, createBedrockRuntimeClient } from "../../packages/model-runtime/src/e2e-bedrock-invoke.js";
-import { MODEL_ID, RUN_ID, bedrockRoute, call, channelRequest, loweredBudgets, tapAnswer } from "../support/e2e-model-fixtures.js";
+import { MODEL_ID, RUN_ID, bedrockRoute, call, channelRequest, keyedRoute, loweredBudgets, tapAnswer } from "../support/e2e-model-fixtures.js";
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -24,12 +24,13 @@ function routeWith(invoke: E2EInvoke, definition = bedrockRoute(), extra: Partia
 }
 
 describe("governed e2e model route: the call it makes", () => {
-  it("invokes the pinned model with temperature 0 and the route's output cap, and writes a valid receipt", async () => {
+  it("invokes the pinned model with provider-default sampling, thinking off and the route's output cap, and writes a valid receipt", async () => {
     const seen: E2EInvokeInput[] = [];
     const route = routeWith(async (input) => { seen.push(input); return tapAnswer(); });
     const { result, receipt } = await route.generate(channelRequest());
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatchObject({ identifier: MODEL_ID, region: "us-east-1", temperature: 0, maxOutputTokens: 1024 });
+    expect(seen[0]).toMatchObject({ target: { provider: "amazon-bedrock", identifier: MODEL_ID, region: "us-east-1" }, sampling: "provider-default", thinking: "off", effort: "low", maxOutputTokens: 1024 });
+    expect(seen[0]).not.toHaveProperty("temperature");
     expect(seen[0]!.signal).toBeInstanceOf(AbortSignal);
     expect(result).toMatchObject({ status: "ok", finishReason: { unified: "tool-calls" }, usage: { inputTokens: 900, outputTokens: 40 } });
     expect(E2EModelReceiptSchema.parse(receipt)).toMatchObject({
@@ -48,8 +49,8 @@ describe("governed e2e model route: the call it makes", () => {
     const definition = bedrockRoute({ inferenceProfileArn: arn });
     const route = routeWith(async (input) => { seen.push(input); return tapAnswer({ servedModelId: arn }); }, definition);
     const { receipt } = await route.generate(channelRequest());
-    expect(seen[0]!.identifier).toBe(e2eModelRouteInvokedIdentifier(definition));
-    expect(seen[0]!.identifier).toBe(arn);
+    expect(seen[0]!.target.identifier).toBe(e2eModelRouteInvokedIdentifier(definition));
+    expect(seen[0]!.target.identifier).toBe(arn);
     expect(receipt.outcome).toBe("ok");
     expect(receipt.modelId).toBe(MODEL_ID);
   });
@@ -315,107 +316,80 @@ describe("governed e2e model route: fix round 1", () => {
 
 describe("governed e2e model route: no fallback", () => {
   it("never uses the coding-task fallback or the default model, and is exported from the package", () => {
-    for (const file of ["e2e-route.ts", "e2e-bedrock-invoke.ts"]) {
+    for (const file of ["e2e-route.ts", "e2e-provider-invoke.ts", "e2e-environment-guard.ts"]) {
       const source = readFileSync(new URL(`../../packages/model-runtime/src/${file}`, import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gm, "");
-      expect(source, file).not.toMatch(/createModelRuntimeWithFallback|defaultBedrockModel|createConfiguredModelRuntime|from "\.\/index\.js"|from "\.\/config\.js"/);
+      expect(source, file).not.toMatch(/createModelRuntimeWithFallback|defaultBedrockModel|createConfiguredModelRuntime|from "\.\/index\.js"/);
     }
     expect(typeof modelRuntime.createGovernedE2EModelRoute).toBe("function");
-    expect(typeof modelRuntime.createBedrockE2EInvoke).toBe("function");
+    expect(typeof modelRuntime.createE2EProviderInvoke).toBe("function");
+    expect(typeof modelRuntime.assertE2EEnvironmentCannotRedirect).toBe("function");
+    expect(Object.keys(modelRuntime)).not.toContain("createBedrockE2EInvoke");
   });
 });
 
-describe("bedrock converse invoke", () => {
-  const converseOutput = (content: unknown[], stopReason = "tool_use", usage = { inputTokens: 700, outputTokens: 30 }) => ({ output: { message: { role: "assistant", content } }, stopReason, usage, metrics: { latencyMs: 10 }, $metadata: {} });
+describe("governed e2e model route: served model and payload (amendment A1)", () => {
+  const keyed = (invoke: E2EInvoke, extra: Parameters<typeof routeWith>[2] = {}) => routeWith(invoke, keyedRoute("anthropic"), extra);
 
-  function invokeWith(response: unknown, sent: Array<{ input: Record<string, unknown>; options: unknown }> = []) {
-    const client = { send: async (command: { input: Record<string, unknown> }, options: unknown) => { sent.push({ input: command.input, options }); return response; } };
-    return createBedrockE2EInvoke({ clientFor: () => client });
-  }
-  const input = (overrides: Partial<E2EInvokeInput> = {}): E2EInvokeInput => ({
-    identifier: MODEL_ID, region: "us-east-1", temperature: 0, maxOutputTokens: 1024, signal: new AbortController().signal, call: call(), ...overrides,
+  it("needs a serving model from a keyed provider, and accepts the pin or the pin with a date suffix", async () => {
+    const pinned = await keyed(async () => tapAnswer({ servedModelId: "claude-haiku-5-5" })).generate(channelRequest());
+    expect(pinned.result.status).toBe("ok");
+    expect(pinned.receipt).toMatchObject({ provider: "anthropic", modelId: "claude-haiku-5-5", servedModelId: "claude-haiku-5-5", outcome: "ok" });
+    const dated = await keyed(async () => tapAnswer({ servedModelId: "claude-haiku-5-5-20261001" })).generate(channelRequest());
+    expect(dated.result.status).toBe("ok");
+    expect(dated.receipt.servedModelId).toBe("claude-haiku-5-5-20261001");
+    const other = await keyed(async () => tapAnswer({ servedModelId: "claude-sonnet-5-5" })).generate(channelRequest());
+    expect(other.result).toMatchObject({ status: "error", code: "invalid-output" });
+    expect(other.receipt).toMatchObject({ outcome: "invalid-output", servedModelId: "claude-sonnet-5-5" });
+    const unknown = await keyed(async () => tapAnswer({ servedModelId: null })).generate(channelRequest());
+    expect(unknown.result).toMatchObject({ status: "error", code: "invalid-output" });
+    expect((unknown.result as { message: string }).message).toMatch(/serv/);
   });
 
-  it("maps the call to one Converse request: pinned model, temperature 0, output cap, system, tools and forced choice", async () => {
-    const sent: Array<{ input: Record<string, unknown>; options: { abortSignal?: AbortSignal } }> = [];
-    const invoke = invokeWith(converseOutput([{ toolUse: { toolUseId: "tooluse_1", name: "tap", input: { target: "n1" } } }]), sent);
-    const signal = new AbortController().signal;
-    const answer = await invoke(input({ signal }));
-    expect(sent).toHaveLength(1);
-    const request = sent[0]!.input as { modelId: string; system: unknown; messages: unknown; inferenceConfig: unknown; toolConfig: { tools: Array<{ toolSpec: { name: string; inputSchema: { json: unknown } } }>; toolChoice: unknown }; additionalModelRequestFields?: unknown };
-    expect(request.modelId).toBe(MODEL_ID);
-    expect(request.inferenceConfig).toEqual({ maxTokens: 1024, temperature: 0 });
-    expect(request.system).toEqual([{ text: "You drive a web application one tool call at a time." }]);
-    expect(request.toolConfig.toolChoice).toEqual({ any: {} });
-    expect(request.toolConfig.tools.map((tool) => tool.toolSpec.name)).toEqual(["tap", "type", "complete_step"]);
-    expect(request.toolConfig.tools[0]!.toolSpec.inputSchema.json).toMatchObject({ type: "object" });
-    expect(request.additionalModelRequestFields).toBeUndefined();
-    expect(sent[0]!.options.abortSignal).toBe(signal);
-    expect(answer).toEqual({
-      servedModelId: MODEL_ID,
-      content: [{ type: "tool-call", toolCallId: "tooluse_1", toolName: "tap", input: JSON.stringify({ target: "n1" }) }],
-      finishReason: { unified: "tool-calls", raw: "tool_use" },
-      usage: { inputTokens: 700, outputTokens: 30 },
+  it("lets Bedrock, which reports no serving model, answer with none, and records OpenRouter's upstream", async () => {
+    const bedrock = await routeWith(async () => tapAnswer({ servedModelId: null })).generate(channelRequest());
+    expect(bedrock.result.status).toBe("ok");
+    expect(bedrock.receipt.servedModelId).toBeNull();
+    const openrouter = await routeWith(async () => tapAnswer({ servedModelId: "anthropic/claude-haiku-5.5", servedUpstream: "Anthropic" }), keyedRoute("openrouter")).generate(channelRequest());
+    expect(openrouter.receipt).toMatchObject({ provider: "openrouter", servedModelId: "anthropic/claude-haiku-5.5", servedUpstream: "Anthropic", outcome: "ok" });
+  });
+
+  it("hands the provider payload digest on, from a call that completed or answered badly", async () => {
+    const digest = "a".repeat(64);
+    const ok = await routeWith(async () => tapAnswer({ providerPayloadSha256: digest })).generate(channelRequest());
+    expect(ok.providerPayloadSha256).toBe(digest);
+    const bad = await routeWith(async () => tapAnswer({ providerPayloadSha256: digest, servedModelId: "other-model" })).generate(channelRequest());
+    expect(bad.providerPayloadSha256).toBe(digest);
+  });
+
+  it("passes the proxy's final-payload check to the provider call, and answers refused-credential-match when it refuses", async () => {
+    const seen: Array<(payload: unknown) => void> = [];
+    const route = routeWith(async (input) => {
+      seen.push(input.inspectPayload!);
+      input.inspectPayload!({ messages: ["clean"] });
+      input.inspectPayload!({ messages: ["has the-secret"] });
+      return tapAnswer();
     });
+    const inspectPayload = (payload: unknown) => { if (JSON.stringify(payload).includes("the-secret")) throw new E2EPayloadRefusedError(); };
+    const refused = await route.generate(channelRequest(), { inspectPayload });
+    expect(refused.result).toMatchObject({ status: "error", code: "refused-credential-match" });
+    expect(refused.receipt).toMatchObject({ outcome: "refused-credential-match", inputTokens: 0, outputTokens: 0, responseSha256: null });
+    expect(seen).toHaveLength(1);
   });
 
-  it("maps auto and a named tool to Bedrock tool choices", async () => {
-    const sent: Array<{ input: Record<string, unknown>; options: unknown }> = [];
-    const invoke = invokeWith(converseOutput([{ text: "ok" }], "end_turn"), sent);
-    await invoke(input({ call: { ...call(), toolChoice: { type: "auto" } } }));
-    await invoke(input({ call: { ...call(), toolChoice: { type: "tool", toolName: "complete_step" } } }));
-    const choices = sent.map((item) => (item.input.toolConfig as { toolChoice: unknown }).toolChoice);
-    expect(choices).toEqual([{ auto: {} }, { tool: { name: "complete_step" } }]);
+  it("charges the reserved bound when the provider failed after it had started to answer", async () => {
+    const dayBudget = createInMemoryE2EDayBudget();
+    const route = routeWith(async () => { throw Object.assign(new Error("stream broke"), { mayHaveBeenBilled: true }); }, bedrockRoute(), { dayBudget });
+    const outcome = await route.generate(channelRequest());
+    expect(outcome.result).toMatchObject({ status: "error", code: "provider-error" });
+    expect(outcome.receipt.inputTokens).toBeGreaterThan(500);
+    expect(outcome.chargedInputTokens).toBe(outcome.receipt.inputTokens);
+    const unbilled = await routeWith(async () => { throw new Error("refused at the door"); }).generate(channelRequest());
+    expect(unbilled.receipt.inputTokens).toBe(0);
   });
 
-  it("carries a tool round trip: assistant tool calls, merged tool results, error results, no empty text", async () => {
-    const sent: Array<{ input: Record<string, unknown>; options: unknown }> = [];
-    const invoke = invokeWith(converseOutput([{ text: "done" }], "end_turn"), sent);
-    const withHistory = call("#n1 button \"Export\"", { typed: "orders.csv", toolResult: "Typed." });
-    withHistory.prompt.push({ role: "assistant", content: [{ type: "text", text: "" }, { type: "tool-call", toolCallId: "call_2", toolName: "tap", input: { target: "n1" } }] });
-    withHistory.prompt.push({ role: "tool", content: [{ type: "tool-result", toolCallId: "call_2", toolName: "tap", output: { type: "error-text", value: "not found" } }] });
-    withHistory.prompt.push({ role: "user", content: [{ type: "text", text: "[SYSTEM] continue" }] });
-    await invoke(input({ call: withHistory }));
-    const messages = sent[0]!.input.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
-    expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant", "user"]);
-    expect(messages[1]!.content).toEqual([{ toolUse: { toolUseId: "call_1", name: "type", input: { target: "n2", value: "orders.csv" } } }]);
-    expect(messages[2]!.content).toEqual([{ toolResult: { toolUseId: "call_1", content: [{ text: "Typed." }], status: "success" } }]);
-    expect(messages[3]!.content).toEqual([{ toolUse: { toolUseId: "call_2", name: "tap", input: { target: "n1" } } }]);
-    expect(messages[4]!.content).toEqual([
-      { toolResult: { toolUseId: "call_2", content: [{ text: "not found" }], status: "error" } },
-      { text: "[SYSTEM] continue" },
-    ]);
-  });
-
-  it("maps stop reasons: end_turn and tool_use finish, the rest are not a success", async () => {
-    const reasons = async (stopReason: string) => (await invokeWith(converseOutput([{ text: "x" }], stopReason))(input())).finishReason.unified;
-    expect(await reasons("end_turn")).toBe("stop");
-    expect(await reasons("tool_use")).toBe("tool-calls");
-    expect(await reasons("max_tokens")).toBe("length");
-    expect(await reasons("content_filtered")).toBe("content-filter");
-    expect(await reasons("guardrail_intervened")).toBe("content-filter");
-    expect(await reasons("something_new")).toBe("other");
-  });
-
-  it("returns a content block it does not know as unsupported, so the route refuses it", async () => {
-    const answer = await invokeWith(converseOutput([{ reasoningContent: { reasoningText: { text: "hmm" } } }], "end_turn"))(input());
-    expect(answer.content).toEqual([{ type: "unsupported-block" }]);
-  });
-
-  it("counts cache tokens in the input total, and builds a client that makes one attempt and has the pinned region", async () => {
-    const answer = await invokeWith(converseOutput([{ text: "x" }], "end_turn", { inputTokens: 700, outputTokens: 30, cacheReadInputTokens: 50, cacheWriteInputTokens: 25 } as never))(input());
-    expect(answer.usage).toEqual({ inputTokens: 775, outputTokens: 30 });
-    const client = createBedrockRuntimeClient("eu-west-1");
-    expect(await client.config.maxAttempts()).toBe(1);
-    expect(await client.config.region()).toBe("eu-west-1");
-    client.destroy();
-  });
-
-  it("F6: passes a response with no usage through as no usage, not as zero", async () => {
-    const answer = await invokeWith({ ...converseOutput([{ text: "x" }], "end_turn"), usage: undefined })(input());
-    expect(answer.usage).toBeUndefined();
-  });
-
-  it("refuses to run without a region", async () => {
-    await expect(invokeWith(converseOutput([]))(input({ region: null }))).rejects.toThrow(/region/);
+  it("offers the secrets its invoke holds, so the proxy can add them to the credential scan", () => {
+    const invoke = Object.assign(async () => tapAnswer(), { secrets: ["sk-ant-api03-held-in-memory-1234"] });
+    expect(routeWith(invoke).secretValues).toEqual(["sk-ant-api03-held-in-memory-1234"]);
+    expect(routeWith(async () => tapAnswer()).secretValues).toEqual([]);
   });
 });
