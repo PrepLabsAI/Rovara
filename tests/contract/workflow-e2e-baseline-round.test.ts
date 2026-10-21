@@ -5,6 +5,8 @@ import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { prepareApplicationRound, startApplicationRound, type RoundCore } from "../support/e2e-application-round-harness.js";
 import { FAIL, PASS, caseIdsOf, collectAll, operatorEvidenceWith, runRound, uploadAll } from "../support/e2e-application-round-run.js";
 import { SHOT, SHOT_SHA } from "../support/e2e-scenario-results.js";
+import { randomUUID } from "node:crypto";
+import { MAYA } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
 
 // M1.3 Task 3.7b, owner decision D2 (Review Focus 6 and the 3.7 review's findings F1, F3, F8, F9): when an application plan is approved, the approved scenarios run once on the
@@ -39,6 +41,23 @@ describe("asking for a baseline round at APPROVE", () => {
     expect(prepared.harness.db.get(key.pk, key.sk)).toMatchObject({ entityType: "WORKFLOW_E2E_BASELINE", state: "REQUESTED", purpose: "baseline", attempt: 1 });
     expect(implementInvocation(prepared)?.payload.workflowE2EBaselineSource).toBe(true);
     expect(prepared.workflowNow()).toMatchObject({ stage: "IMPLEMENT" });
+  });
+
+  it("asks again on a retried coding run while the baseline is still only requested (review 3.7b finding 5)", async () => {
+    const prepared = await prepareApplicationRound({ baseline: "source" });
+    expect((await prepared.approve()).status).toBe(200);
+    const implementOps = () => prepared.harness.db.find((item) => item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT");
+    const first = implementOps()[0]!;
+    prepared.harness.db.set({ ...first, status: "RUNNING" });
+    const workspaceId = String(first.workspaceId);
+    await prepared.harness.finish(workspaceId, String(first.id), "FAILED", { error: "the run died" });
+    expect(prepared.workflowNow()).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED" });
+    const retried = await prepared.harness.dev(MAYA, "POST", `/v1/dev/tasks/${prepared.taskId}/workflow/retry`, { requestId: randomUUID(), instructions: "Run the implementation again" });
+    expect(retried.status, JSON.stringify(retried.body)).toBe(200);
+    const invocations = prepared.harness.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")
+      .map((item) => item.invocation as { payload: Record<string, unknown> });
+    expect(invocations).toHaveLength(2);
+    expect(invocations.map((item) => item.payload.workflowE2EBaselineSource)).toEqual([true, true]);
   });
 
   it("asks for nothing when the project switched the baseline off: no record, and the coding run is not asked to export anything", async () => {
@@ -90,6 +109,20 @@ describe("the baseline round has its own admission, and runs before the candidat
       expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason });
       expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
     }
+  });
+
+  it("holds the exported tree to the tree GitHub has for the pinned base (review 3.7b finding 4)", async () => {
+    const matching = await startApplicationRound({ baseline: "source", githubBaseTree: "match" });
+    expect(matching.admissionRef.purpose).toBe("baseline");
+    expect(recordOf(matching)).toMatchObject({ state: "STARTED" });
+    // A worker that labels other code as the base: the tree differs from GitHub's, so no baseline runs, and the candidate goes on.
+    const forged = await startApplicationRound({ baseline: "source", githubBaseTree: "mismatch" });
+    expect(forged.admissionRef.purpose).toBeUndefined();
+    expect(recordOf(forged)).toMatchObject({ state: "UNAVAILABLE", reason: "refused" });
+    // GitHub cannot be asked: the tree cannot be confirmed, so it is not run either.
+    const unreachable = await startApplicationRound({ baseline: "source", githubBaseTree: "unreachable" });
+    expect(unreachable.admissionRef.purpose).toBeUndefined();
+    expect(recordOf(unreachable)).toMatchObject({ state: "UNAVAILABLE", reason: "start-failed" });
   });
 
   it("runs the candidate's CHECKS, and says so, when the exported unchanged code is not the base the task pinned", async () => {
@@ -304,6 +337,78 @@ describe("a baseline whose runner never answers (F3)", () => {
     const candidate = await round.nextRound();
     expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason: "run-failed" });
     expect(candidate.admissionRef.purpose).toBeUndefined();
+  });
+});
+
+describe("a baseline never holds the candidate for ever (review 3.7b finding 3)", () => {
+  it("fails open on a started record whose deadline cannot be read: it is treated as late, marked, and cancelled, and the candidate goes on", async () => {
+    for (const deadlineAt of ["not-a-date", undefined]) {
+      const round = await startApplicationRound({ baseline: "source" });
+      round.markRunning();
+      const { deadlineAt: _kept, ...without } = recordOf(round)!;
+      void _kept;
+      round.harness.db.set(deadlineAt === undefined ? without : { ...without, deadlineAt });
+      await round.runDispatch();
+      expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason: "timed-out" });
+      expect(round.operationNow().status).toBe("CANCEL_REQUESTED");
+      await round.harness.finish(round.workspaceId, round.operationId, "CANCELLED");
+      const candidate = await round.nextRound();
+      expect(candidate.admissionRef.purpose).toBeUndefined();
+      expect(candidate.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+    }
+  });
+
+  it("after the cancel's grace, still held: the candidate is blocked with a reason that names the check on the unchanged code, and its attempts are not spent", async () => {
+    const round = await startApplicationRound({ baseline: "source" });
+    round.markRunning();
+    const { E2E_BASELINE_RUN_GRACE_MS } = await baselineModule();
+    const deadline = Date.parse(String(recordOf(round)!.deadlineAt));
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(deadline + E2E_BASELINE_RUN_GRACE_MS + 1_000);
+    await round.runDispatch();
+    expect(round.operationNow().status).toBe("CANCEL_REQUESTED");
+    expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason: "timed-out" });
+    // The worker never confirms the cancel; 25 minutes pass (the hold limit is 20).
+    vi.setSystemTime(deadline + E2E_BASELINE_RUN_GRACE_MS + 25 * 60_000);
+    await round.runDispatch();
+    expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason: "cancel-unconfirmed" });
+    expect(round.workflowNow().state).toBe("BLOCKED");
+    expect(round.workflowNow().blockReason).toMatch(/unchanged code/iu);
+    expect(round.workflowNow().blockReason).toMatch(/still|did not stop/iu);
+    const rows = round.harness.db.find((item) => item.pk === "WORKFLOW_DISPATCH" && item.taskId === round.taskId);
+    expect(rows.every((row) => (row.attempts ?? 0) === 0)).toBe(true);
+    expect(e2eOf(round).failedRound).toBeUndefined();
+  });
+});
+
+describe("the owner's Stop during the baseline stops the whole CHECKS step (review 3.7b finding 7)", () => {
+  const stop = async (round: RoundCore) => round.harness.dev(MAYA, "POST", `/v1/dev/tasks/${round.taskId}/cancel`, { requestId: randomUUID() });
+
+  it("does not start the candidate's CHECKS afterwards: the workflow stops with the reason a stopped check gives, and the owner can retry", async () => {
+    const round = await startApplicationRound({ baseline: "source" });
+    round.markRunning();
+    const stopped = await stop(round);
+    expect(stopped.status, JSON.stringify(stopped.body)).toBe(200);
+    expect(round.operationNow().status).toBe("CANCEL_REQUESTED");
+    // The worker confirms: the baseline operation ends CANCELLED.
+    await round.harness.finish(round.workspaceId, round.operationId, "CANCELLED");
+    await round.runDispatch();
+    expect(round.checksOperations()).toHaveLength(1);
+    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    expect(String(round.workflowNow().blockReason)).toMatch(/stopped/iu);
+    expect(e2eOf(round).failedRound).toBeUndefined();
+    expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE" });
+  });
+
+  it("a baseline that the system cancelled for running out of time is not the owner's Stop: the candidate goes on", async () => {
+    const round = await startApplicationRound({ baseline: "source" });
+    round.markRunning();
+    const { E2E_BASELINE_RUN_GRACE_MS } = await baselineModule();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.parse(String(recordOf(round)!.deadlineAt)) + E2E_BASELINE_RUN_GRACE_MS + 1_000);
+    await round.runDispatch();
+    await round.harness.finish(round.workspaceId, round.operationId, "CANCELLED");
+    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
   });
 });
 

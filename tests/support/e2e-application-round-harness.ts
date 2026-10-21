@@ -1,3 +1,4 @@
+import { vi } from "vitest";
 import { createHash, randomUUID } from "node:crypto";
 import {
   E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey,
@@ -82,6 +83,8 @@ export type RoundOptions = {
   baseline?: "off" | "source" | "missing" | "refused";
   /** With the baseline's source exported: "other" pins a base commit that is not the exported one. */
   baselinePin?: "other";
+  /** What GitHub says the tree of the pinned base commit is (the broker holds the exported tree to it): the exported one, another, or nothing (GitHub cannot be asked). Absent: GitHub is not consulted. */
+  githubBaseTree?: "match" | "mismatch" | "unreachable";
 };
 
 const READY_API = { kind: "api" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedSteps,
@@ -95,7 +98,13 @@ async function prepareRound(options: RoundOptions = {}) {
   if (accounts.length > 0 && applications !== 1) throw new Error("accounts need exactly one application");
   const { snapshot, tree } = apiApplicationsSnapshot(applications, accounts);
   const capture = async () => snapshot;
-  const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...options.brokerExtra } });
+  const github = { baseTree: undefined as string | undefined };
+  const githubGateway = options.githubBaseTree === undefined ? {} : { githubPullRequests: { reconcilePullRequest: vi.fn(), getPullRequest: vi.fn(), updatePullRequest: vi.fn(),
+    getCommitTree: async (): Promise<string> => {
+      if (options.githubBaseTree === "unreachable") throw new Error("GitHub is down");
+      return options.githubBaseTree === "mismatch" ? "e".repeat(40) : github.baseTree ?? "0".repeat(40);
+    } } };
+  const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...githubGateway, ...options.brokerExtra } });
   const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
   const projectBinding = projectRow().runtimeBinding as typeof binding;
   harness.db.set({ ...apiRowKey, ...webApiRow("api"), binding: projectBinding, bindingDigest: shaCanonical(projectBinding) });
@@ -150,7 +159,7 @@ async function prepareRound(options: RoundOptions = {}) {
   /** The owner's APPROVE of the written plan; a test that wants to change something before it (a registry row, say) calls it itself. */
   const approve = () => harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: workflowNow().revision, decision: "APPROVE",
     reason: "Approve the exact application intent", artifactDigest: workflowNow().artifacts.at(-1)!.sha256 });
-  return { harness, snapshot, tree, taskId, taskKey, workspaceId, operationRows, workflowNow, approve, policy, intent, targets, projectBinding };
+  return { harness, snapshot, tree, taskId, taskKey, workspaceId, operationRows, workflowNow, approve, policy, intent, targets, projectBinding, github };
 }
 
 /**
@@ -167,7 +176,7 @@ export async function prepareApplicationRound(options: RoundOptions = {}) {
  */
 export async function startApplicationRound(options: RoundOptions = {}) {
   const prepared = await prepareRound(options);
-  const { harness, snapshot, tree, taskId, taskKey, workspaceId, operationRows, workflowNow, policy, intent, targets, projectBinding } = prepared;
+  const { harness, snapshot, tree, taskId, taskKey, workspaceId, operationRows, workflowNow, policy, intent, targets, projectBinding, github } = prepared;
   const approved = await prepared.approve();
   if (approved.status !== 200) throw new Error(`plan approval failed: ${JSON.stringify(approved.body)}`);
 
@@ -176,6 +185,7 @@ export async function startApplicationRound(options: RoundOptions = {}) {
   const withBase = options.baseline === "source";
   const real = await createRealCandidate({ ...tree, "src/orders.js": "export const orders = [];\n" },
     withBase ? { repositoryId: "demo", baseTree: tree } : { repositoryId: "demo", baseCommitSha: snapshot.commitSha });
+  github.baseTree = real.baseline?.baseTreeSha;
   const task = harness.db.get(taskKey.pk, taskKey.sk)!;
   const approvedWorkflow = WorkflowSnapshotSchema.parse(task.workflow);
   const pinnedBase = real.baseline === undefined ? undefined : [{ repositoryId: "demo", baseCommitSha: options.baselinePin === "other" ? "7".repeat(40) : real.baseline.baseCommitSha }];

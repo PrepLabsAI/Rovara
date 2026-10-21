@@ -115,17 +115,6 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
               },
               "Status": "Enabled",
             },
-            {
-              "ExpirationInDays": 30,
-              "Id": "ExpireE2EScreenshots",
-              "Status": "Enabled",
-              "TagFilters": [
-                {
-                  "Key": "rovara-retention",
-                  "Value": "e2e-screenshot",
-                },
-              ],
-            },
           ],
         },
         "PublicAccessBlockConfiguration": {
@@ -2155,6 +2144,21 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "ServerSideEncryptionByDefault": {
                 "SSEAlgorithm": "AES256",
               },
+            },
+          ],
+        },
+        "LifecycleConfiguration": {
+          "Rules": [
+            {
+              "ExpirationInDays": 30,
+              "Id": "ExpireE2EScreenshots",
+              "Status": "Enabled",
+              "TagFilters": [
+                {
+                  "Key": "rovara-retention",
+                  "Value": "e2e-screenshot",
+                },
+              ],
             },
           ],
         },

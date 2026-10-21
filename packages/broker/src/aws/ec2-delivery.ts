@@ -429,9 +429,9 @@ async function forWorker(
   return sent;
 }
 
-/** A coding run without the request to export the unchanged code, for a worker that does not list "task.workflowE2EBaselineChecks": it would reject the field. */
+/** A coding run without the request to export the unchanged code, for a worker that does not list "task.workflowE2EBaselineSource": it would reject the field. The export reads the repository alone, so this feature is not withheld with the executor image. */
 function withoutBaselineSource(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
-  if (invocation.kind !== "task" || invocation.payload.workflowE2EBaselineSource === undefined || features.includes("task.workflowE2EBaselineChecks")) return invocation;
+  if (invocation.kind !== "task" || invocation.payload.workflowE2EBaselineSource === undefined || features.includes("task.workflowE2EBaselineSource")) return invocation;
   const { workflowE2EBaselineSource: _request, ...payload } = invocation.payload;
   void _request;
   return { ...invocation, payload };

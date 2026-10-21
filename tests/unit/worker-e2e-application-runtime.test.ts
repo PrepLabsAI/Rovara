@@ -155,6 +155,8 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     await vi.waitFor(() => expect(without.current()).toMatchObject({ status: "unavailable" }));
     const lacking = await pingOf(without);
     expect(lacking.body.invocationFeatures).not.toContain(BASELINE);
+    // Exporting the unchanged code needs the repository alone, so a host without the executor image still lists it (review 3.7b finding 5).
+    expect(lacking.body.invocationFeatures).toContain("task.workflowE2EBaselineSource");
     expect(lacking.body.invocationFeatureDiagnostics).toMatchObject({ [BASELINE]: { status: "unavailable", reason: "executor-image-not-on-host" } });
     without.stop();
   });

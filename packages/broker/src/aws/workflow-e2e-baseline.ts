@@ -30,7 +30,7 @@ export const E2E_BASELINE_RUN_GRACE_MS = 5 * 60_000;
 export type WorkflowE2EBaselineStore = Readonly<{ documentClient: Pick<DynamoDBDocumentClient, "send">; tableName: string }>;
 export type BaselineState = "REQUESTED" | "STARTED" | "RECORDED" | "UNAVAILABLE";
 /** Why a baseline has no result, as a code for the record and the log; the owner reads one fixed sentence. */
-export type BaselineUnavailableReason = "not-exported" | "refused" | "start-failed" | "run-failed" | "unverified" | "timed-out";
+export type BaselineUnavailableReason = "not-exported" | "refused" | "start-failed" | "run-failed" | "unverified" | "timed-out" | "stopped" | "cancel-unconfirmed";
 
 export type BaselineRecord = Readonly<{
   taskId: string; contractDigest: string; attempt: number; state: BaselineState; requestedAt: string;
@@ -93,7 +93,7 @@ export function baselineStartItem(store: Pick<WorkflowE2EBaselineStore, "tableNa
  * recorded result is never replaced, and neither is a round another operation owns. Returns whether the record was changed.
  */
 export async function markWorkflowE2EBaselineUnavailable(store: WorkflowE2EBaselineStore, task: Pick<DeveloperTaskRecord, "taskId" | "workflow">, reason: BaselineUnavailableReason,
-  options: { from: ReadonlyArray<"REQUESTED" | "STARTED">; operationId?: string }): Promise<boolean> {
+  options: { from: ReadonlyArray<"REQUESTED" | "STARTED" | "UNAVAILABLE">; operationId?: string }): Promise<boolean> {
   const contractDigest = baselinePlanDigestOf(task);
   if (contractDigest === undefined) return false;
   const at = new Date().toISOString();

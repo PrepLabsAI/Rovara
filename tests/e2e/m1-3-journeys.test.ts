@@ -241,7 +241,11 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     let hostCredentialScan: ((bytes: Uint8Array) => boolean) | undefined;
     // What the run's raw output showed of an echoed credential, read before the host handed anything out (the run directory is read in place; nothing in it is changed).
     let withheldCredential: { carriedCredential: boolean; executorRefusal: boolean } | undefined;
+    // What the executor leaves when it withholds a credential: it refuses to record evidence that carries one, and its last scan removes any output file that does (it then ends the run
+    // with exit code 2 and reason "credential-leak", and writes this log line).
     const EXECUTOR_REFUSAL = "evidence contains an account credential and cannot be stored";
+    const EXECUTOR_REMOVED_FILE = "removed an output file that carried an account credential";
+    const executorWithheld = (bytes: Buffer) => bytes.includes(EXECUTOR_REFUSAL) || bytes.includes(EXECUTOR_REMOVED_FILE) || /"reason":\s*"credential-leak"/u.test(bytes.toString("utf8"));
     const scanOutput = async (directory: string, containsCredential: (bytes: Uint8Array) => boolean): Promise<{ carriedCredential: boolean; executorRefusal: boolean }> => {
       const seen = { carriedCredential: false, executorRefusal: false };
       for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -254,7 +258,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
           const bytes = await readFile(path);
           if (bytes.byteLength > 16 * 1024 * 1024) continue;
           seen.carriedCredential ||= containsCredential(bytes);
-          seen.executorRefusal ||= bytes.includes(EXECUTOR_REFUSAL);
+          seen.executorRefusal ||= executorWithheld(bytes);
         }
       }
       return seen;
@@ -515,12 +519,16 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       await completeReadiness();
       const checks = await runOperation("CHECKS");
       expect(checks.operation.status, JSON.stringify({ operation: checks.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
+      // N1: positive evidence that a credential was withheld, from whichever layer withheld it. (1) The run's raw output, as the host saw it before anything was handed out, shows the
+      // echo: the credential itself (which the host's scan then held back from the operator evidence), the executor's refusal to record evidence that carries one, its removal of an
+      // output file that did, or its result file's "credential-leak". (2) A run the executor ended for a leak (exit code 2) is not read by the host at all, so there is no raw output
+      // to see; the broker's stored evidence of the group then keeps the executor's log line. One of the two must show it.
+      const groupRuns = ((checks.operation.workflowE2EGroupEvidenceRefs ?? []) as Array<{ evidenceRef: { key: string } }>).map((ref) =>
+        JSON.parse(harness.s3.objects.get(ref.evidenceRef.key) ?? "{}") as { groupRun?: { diagnostics?: { executorLogTail?: string } | null } });
+      const storedLogShowsIt = groupRuns.some((item) => (item.groupRun?.diagnostics?.executorLogTail ?? "").includes(EXECUTOR_REMOVED_FILE));
       const scan = hostCredentialScan;
-      expect(scan, "the host scanned the run's output").toBeDefined();
-      // N1: positive evidence that a credential was withheld. The run's raw output, as the host saw it before anything was handed out, shows the echo: either the credential itself
-      // (which the host's scan then held back from the operator evidence) or the executor's refusal to record evidence that carries one.
-      expect(withheldCredential, "the host saw the run's output").toBeDefined();
-      expect(withheldCredential!.carriedCredential || withheldCredential!.executorRefusal, `the run's output shows neither a credential nor the executor's refusal of one: ${JSON.stringify(withheldCredential)}`).toBe(true);
+      expect(withheldCredential?.carriedCredential === true || withheldCredential?.executorRefusal === true || storedLogShowsIt,
+        `nothing shows a credential reached the run and was withheld: ${JSON.stringify({ withheldCredential, storedLogShowsIt })}`).toBe(true);
       // The echo took effect: the export no longer holds the owner's orders, so the round is not a pass.
       expect((workflowNow().e2e as { qualifiedRound?: unknown }).qualifiedRound).toBeUndefined();
       const task = harness.db.get(taskKey.pk, taskKey.sk) as never;
@@ -534,7 +542,8 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       const surfaces: Record<string, string> = { rows: JSON.stringify(rows), page: presentation.pageHtml, slack: JSON.stringify(slack), presentationSlack: JSON.stringify(presentation.slackBlocks),
         shared: JSON.stringify(presentation.shared), workflow: JSON.stringify(workflowNow()), display: displayRef === undefined ? "" : harness.s3.objects.get(displayRef.key) ?? "" };
       expect(surfaces.display, "a display was stored").not.toBe("");
-      for (const [name, text] of Object.entries(surfaces)) expect(scan!(Buffer.from(text, "utf8")), `the ${name} carries a run credential`).toBe(false);
+      // The host's predicate exists only for a run it read; a run the executor ended for a leak has none, and then the executor's removal of the file is the proof.
+      if (scan !== undefined) for (const [name, text] of Object.entries(surfaces)) expect(scan(Buffer.from(text, "utf8")), `the ${name} carries a run credential`).toBe(false);
     }
 
     if (variant === "credential-echo") {

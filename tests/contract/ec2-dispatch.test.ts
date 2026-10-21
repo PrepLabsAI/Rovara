@@ -588,10 +588,11 @@ describe("ec2-ebs delivery", () => {
         it("asks a coding run to export the unchanged code only of a worker that can, and otherwise delivers the run without the request (a baseline never stops the coding)", async () => {
           const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
           const record = taskRecord({ workflowMode: "IMPLEMENT", workflowE2EBaselineSource: true });
-          const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowE2EBaselineChecks"] });
+          // The executor image is not on the host, so the application and baseline CHECKS features are withheld; the export needs the repository alone (review 3.7b finding 5).
+          const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowE2EBaselineSource"] });
           expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
           expect(postedPayload(capable.post)).toMatchObject({ workflowMode: "IMPLEMENT", workflowE2EBaselineSource: true });
-          const older = delivery({ workerFeatures: async () => ["task.workflowMode"] });
+          const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowE2EBaselineChecks"] });
           expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
           expect(postedPayload(older.post)).not.toHaveProperty("workflowE2EBaselineSource");
           expect(postedPayload(older.post)).toMatchObject({ workflowMode: "IMPLEMENT" });
@@ -602,6 +603,7 @@ describe("ec2-ebs delivery", () => {
 
         it("is advertised by the worker's own /ping feature list", () => {
           expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EBaselineChecks");
+          expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EBaselineSource");
         });
       });
     });

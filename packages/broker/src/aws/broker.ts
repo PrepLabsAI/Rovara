@@ -4164,6 +4164,8 @@ async function taskOperationParts(
   if (input.shared === true && prompt === selectedPrompt) {
     console.log(JSON.stringify({ component: "broker", event: "developer.shared_reread_omitted", operationId }));
   }
+  // M1.3 Task 3.7b: the coding run exports the unchanged code when approval asked for it, and again on any later coding run (a retry) while the baseline is still only requested.
+  const askBaselineSource = input.workflowE2EBaselineSource === true || (input.workflowMode === "IMPLEMENT" && await baselineSourceStillRequested(dependencies, workspace.id));
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
     kind: "task",
@@ -4186,7 +4188,7 @@ async function taskOperationParts(
       ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
       ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
       ...(input.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: input.workflowE2EAdmission }),
-      ...(input.workflowE2EBaselineSource === true ? { workflowE2EBaselineSource: true as const } : {}),
+      ...(askBaselineSource ? { workflowE2EBaselineSource: true as const } : {}),
       ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
       ...(input.workflowBase === undefined ? {} : { workflowBase: input.workflowBase }),
       ...(input.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: input.workflowReviewChecks }),
@@ -4202,6 +4204,16 @@ async function taskOperationParts(
     },
   };
   return { operation, outbox: outboxRecord(workspace, invocation), fence };
+}
+
+/** Whether the workspace's task has a baseline round that is requested and not yet started, so a coding run is to export the unchanged code. Never throws: a baseline never stops the coding. */
+async function baselineSourceStillRequested(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<boolean> {
+  try {
+    const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
+    const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+    if (task === undefined) return false;
+    return (await readWorkflowE2EBaselineRecord({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, task))?.state === "REQUESTED";
+  } catch { return false; }
 }
 
 /**
@@ -7934,7 +7946,8 @@ async function settleBaselineRound(dependencies: AwsBrokerDependencies, operatio
     const record = await readWorkflowE2EBaselineRecord(dependencies, task);
     if (record === undefined || record.state !== "STARTED" || record.operationId !== operation.id) return;
     const unavailable = (reason: BaselineUnavailableReason) => markWorkflowE2EBaselineUnavailable(dependencies, task, reason, { from: ["STARTED"], operationId: operation.id });
-    if (status !== "SUCCEEDED") { await unavailable("run-failed"); return; }
+    // A baseline cancelled while its record still says it is running was stopped by someone (the system marks the record before it cancels a round that ran out of time).
+    if (status !== "SUCCEEDED") { await unavailable(status === "CANCELLED" ? "stopped" : "run-failed"); return; }
     const verified = await verifyBaselineRound(dependencies, operation, reference);
     if (verified === undefined) { await unavailable("unverified"); return; }
     await recordWorkflowE2EBaseline({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task,
@@ -10647,21 +10660,29 @@ async function startApplicationE2EChecksDispatch(
   return startTaskWorkflowE2EChecksFromSystem(routeDependencies, task.taskId, expected, admissionRef, operationId, input.caller);
 }
 
-/** How long past its deadline and grace a dead baseline round is waited for to end before the candidate's CHECKS stop waiting for it (the baseline never gates, even in time). */
+/** Why the checks stopped when the owner stopped the check on the unchanged code, and when that check would not stop. Both are plain sentences for the owner. */
+const BASELINE_STOPPED_REASON = "The check on the unchanged code was stopped, so the checks were stopped with it. Retry the checks when you are ready.";
+const BASELINE_STUCK_REASON = "The check on the unchanged code did not stop in time and still holds the workspace, so the checks could not start. Retry the checks once it has stopped.";
+
+/** How long a baseline round that ran out of time is waited for to stop (after it was marked and cancelled) before the candidate's CHECKS stop waiting for it. */
 const BASELINE_HOLD_LIMIT_MS = 20 * 60_000;
 
 /**
  * M1.3 Task 3.7b, owner decision D2: the baseline round runs before the candidate's CHECKS, on the same ready compute (a workspace runs one operation at a time, so the two cannot
- * overlap). The candidate's CHECKS dispatch asks here first. A REQUESTED baseline is started (and the candidate waits for it); a STARTED one is waited for until its deadline and
- * grace, then marked as not run and its operation cancelled so the workspace is free again; anything else (recorded, could not run, never asked for) lets the candidate go on.
- * Whatever goes wrong with the baseline lets the candidate go on: it never gates, and it never spends the dispatch's attempts while it is merely running.
+ * overlap). The candidate's CHECKS dispatch asks here first. The answer is:
+ *  - WAIT: the baseline is being started or is running within its time, or was cancelled for running out of it and has not stopped yet (for a while only);
+ *  - GO: anything else (recorded, could not run, never asked for, whatever went wrong with it): the candidate goes on, because a baseline never gates;
+ *  - STOPPED: the owner stopped the baseline, which stops the whole CHECKS step with it, as a Stop of the candidate's round does;
+ *  - STUCK: the baseline ran out of time, was cancelled, and still holds the workspace after the wait. The candidate goes on and tries to start; if the workspace is still busy
+ *    the dispatch is blocked with a reason that names the baseline, and the busy workspace does not spend the dispatch's attempts.
+ * A started record whose deadline cannot be read is late (it fails open).
  */
 async function runBaselineRoundFirst(
   dependencies: AwsBrokerDependencies,
   routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
   input: { task: DeveloperTaskRecord; caller: Parameters<typeof startTaskWorkflowReviewFromSystem>[3]; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string };
     approval: NonNullable<ReturnType<typeof resolveWorkflowE2ECanonicalApproval>> },
-): Promise<"WAIT" | "GO"> {
+): Promise<"WAIT" | "GO" | "STOPPED" | "STUCK"> {
   const { task } = input;
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
   try {
@@ -10670,18 +10691,30 @@ async function runBaselineRoundFirst(
     if (record.state === "REQUESTED") return await startBaselineApplicationRound(dependencies, routeDependencies, { ...input, record });
     const operation = record.operationId === undefined ? undefined : await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, record.operationId));
     if (operation === undefined || TERMINAL.has(operation.status)) {
-      // Its operation has ended but the record was not settled (the settling is best effort): settle it now. Settling twice is harmless.
       if (record.state === "STARTED") {
-        if (operation?.status === "SUCCEEDED") await settleBaselineRound(dependencies, operation, "SUCCEEDED");
-        else await markWorkflowE2EBaselineUnavailable(store, task, "run-failed", { from: ["STARTED"], ...(record.operationId === undefined ? {} : { operationId: record.operationId }) });
+        // Its operation has ended but the record was not settled (the settling is best effort): settle it now. Settling twice is harmless.
+        if (operation?.status === "SUCCEEDED") { await settleBaselineRound(dependencies, operation, "SUCCEEDED"); return "GO"; }
+        // Cancelled while the record still said it was running: nobody but its owner (or a Stop from Slack) did that, since the system marks the record before it cancels.
+        const cancelled = operation?.status === "CANCELLED";
+        await markWorkflowE2EBaselineUnavailable(store, task, "run-failed", { from: ["STARTED"], ...(record.operationId === undefined ? {} : { operationId: record.operationId }) });
+        return cancelled ? "STOPPED" : "GO";
+      }
+      if (record.state === "UNAVAILABLE" && record.reason === "stopped") {
+        // The result callback recorded the Stop; it stops the step once, and a retry of the checks then goes on.
+        return await markWorkflowE2EBaselineUnavailable(store, task, "run-failed", { from: ["UNAVAILABLE"], ...(record.operationId === undefined ? {} : { operationId: record.operationId }) }) ? "STOPPED" : "GO";
       }
       return "GO";
     }
-    const lateBy = Date.now() - (Date.parse(record.deadlineAt ?? "") + E2E_BASELINE_RUN_GRACE_MS);
-    if (record.state === "STARTED" && !(lateBy > 0)) return "WAIT";
+    // The operation is still going. Within its time, it is waited for.
+    const timeUp = Date.parse(record.deadlineAt ?? "") + E2E_BASELINE_RUN_GRACE_MS;
+    if (record.state === "STARTED" && Number.isFinite(timeUp) && Date.now() <= timeUp) return "WAIT";
     if (record.state === "STARTED") await markWorkflowE2EBaselineUnavailable(store, task, "timed-out", { from: ["STARTED"], operationId: operation.id });
-    // Past its time: the round is dead or stuck. Ask for it to be cancelled, so the workspace is free for the candidate, and wait for the worker to say so (for a while only).
-    if (!(lateBy < BASELINE_HOLD_LIMIT_MS)) return "GO";
+    // Past its time: the round is dead or stuck. Ask for it to be cancelled, so the workspace is free for the candidate, and wait for the worker to say so, for a while only.
+    const markedAt = record.state === "UNAVAILABLE" ? Date.parse(record.recordedAt ?? "") : Number.NaN;
+    if (Number.isFinite(markedAt) && Date.now() - markedAt > BASELINE_HOLD_LIMIT_MS) {
+      await markWorkflowE2EBaselineUnavailable(store, task, "cancel-unconfirmed", { from: ["UNAVAILABLE"], operationId: operation.id });
+      return "STUCK";
+    }
     const workspace = await requireWorkspace(dependencies, task.workspaceId);
     if (workspace.activeOperationId === operation.id && operation.status !== "CANCEL_REQUESTED") await requestCancellation(dependencies, workspace, operation.id, {});
     return "WAIT";
@@ -10728,6 +10761,13 @@ async function startBaselineApplicationRound(
   if (pinned === undefined || stored.repositoryId !== pinned.repositoryId || stored.baseCommitSha !== pinned.baseCommitSha || stored.buildSource.commitSha !== stored.baseCommitSha
     || stored.buildSource.treeSha !== stored.baseTreeSha) return unavailable("refused");
   try {
+    // The base commit is the task's real one (GitHub has it, and it is pinned); the tree the worker exported for it is held to GitHub's tree for that commit, so a worker cannot label
+    // other code as the unchanged code. Where the broker cannot ask GitHub, the exported tree is the worker's word, and it only ever shapes informational rows.
+    if (dependencies.githubPullRequests.getCommitTree !== undefined) {
+      const project = await requireProject(dependencies, task.project, task.startingRevision);
+      const url = project.definition.repositories.find((entry) => entry.name === stored.repositoryId)?.url;
+      if (url === undefined || await dependencies.githubPullRequests.getCommitTree(url, stored.baseCommitSha) !== stored.baseTreeSha) return await unavailable("refused");
+    }
     const sourceBytes = await readStoredBytes(dependencies, stored.sourceRef.key, MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES);
     if (sourceBytes === undefined || sourceBytes.byteLength !== stored.sourceRef.byteLength || createHash("sha256").update(sourceBytes).digest("hex") !== stored.sourceRef.sha256) return await unavailable("refused");
     const exportedSource = parseBaselineExport(sourceBytes);
@@ -10798,8 +10838,16 @@ async function startWorkflowE2EChecksDispatch(
   // An application (v2) intent is never dispatched through the portable path below: it has its own admission, and every way it can fail ends in a block.
   if (approved.plan.e2e?.schemaVersion === 2) {
     // M1.3 Task 3.7b: the informational baseline round runs first, on this same ready compute; the candidate's CHECKS wait for it (without spending the dispatch's attempts) or go on.
-    if (await runBaselineRoundFirst(dependencies, routeDependencies, { task, caller, intent: approved.plan.e2e, artifact, approval: canonicalApproval }) === "WAIT") return "WAITING";
-    return startApplicationE2EChecksDispatch(dependencies, routeDependencies, { task, expected, caller, intent: approved.plan.e2e, artifact, approval: canonicalApproval });
+    const baseline = await runBaselineRoundFirst(dependencies, routeDependencies, { task, caller, intent: approved.plan.e2e, artifact, approval: canonicalApproval });
+    if (baseline === "WAIT") return "WAITING";
+    if (baseline === "STOPPED") throw new ApplicationDispatchRefusal(BASELINE_STOPPED_REASON);
+    try {
+      return await startApplicationE2EChecksDispatch(dependencies, routeDependencies, { task, expected, caller, intent: approved.plan.e2e, artifact, approval: canonicalApproval });
+    } catch (error) {
+      // The baseline would not stop and still holds the workspace: the candidate cannot start, and the reason says so instead of spending the dispatch's attempts on a busy workspace.
+      if (baseline === "STUCK" && error instanceof AgentXError && error.code === "WORKSPACE_BUSY") throw new ApplicationDispatchRefusal(BASELINE_STUCK_REASON);
+      throw error;
+    }
   }
   const portableIntent = portableFeatureIntentOf(approved.plan);
   if (!portableIntent.ok) {

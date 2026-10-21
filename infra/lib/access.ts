@@ -3,7 +3,6 @@ import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE } from "@agentx/contracts";
 import { defaultBoundaryName, defaultBoundaryStatements, environmentRolePath, operatorRoleStatements, serviceRoleStatements } from "./access-policies.js";
 import type { AgentXNaming } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
@@ -65,12 +64,7 @@ export class AccessStack extends Stack {
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
       versioned: true,
-      lifecycleRules: [
-        { noncurrentVersionExpiration: Duration.days(30) },
-        // M1.3 Task 3.7b, owner decision D4: a browser or API round's screenshots expire 30 days after they are written. A lifecycle filter matches the start of a key, and a screenshot's
-        // key starts like every other private object's, so the rule matches the tag the broker puts on a screenshot and on nothing else. The rule above then removes its old versions.
-        { id: "ExpireE2EScreenshots", expiration: Duration.days(E2E_ARTIFACT_RETENTION_DAYS), tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: E2E_ARTIFACT_RETENTION_TAG_VALUE } },
-      ],
+      lifecycleRules: [{ noncurrentVersionExpiration: Duration.days(30) }],
       // Retained: release artifacts must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
