@@ -1,0 +1,1 @@
+{"schemaVersion":"e2e-application-runtime-probe/v1","probeId":"web-unmocked-call/v1","kind":"web","polarity":"negative","templateId":"web-unmocked-call/v1","requiredCapabilities":["web","mock-origin"],"oracle":{"kind":"unmocked-call","originRef":"inventory-v1","expectedOutcome":"UNKNOWN","expectedReason":"unmocked-external-call","expectedSinkholeCalls":1}}

@@ -158,6 +158,19 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
           resourceType: request.resourceType(), host: url.host, url: `${url.origin}${url.pathname}` })}\n`);
         await route.abort("blockedbyclient");
       });
+      // `route` never sees a WebSocket: without this the candidate's own page could open one to any host of the run network, a mock included, and fabricate a call. Only the
+      // application's own origin may; every other WebSocket opened from the page is closed before it connects and recorded like a blocked request.
+      // This does not cover a WebSocket opened from a Worker: Playwright replaces `WebSocket` with an init script, and init scripts do not run in workers. Such a socket is neither
+      // blocked nor in the blocked log. It still cannot count as a consumption or hide a call: it reaches a mock from the executor's address, so the host's caller check (only the
+      // application container's address may consume) makes it a `foreign-caller` unmatched line, and the case is UNKNOWN.
+      await browserContext.routeWebSocket(/.*/, (socket) => {
+        let url: URL | null = null;
+        try { url = new URL(socket.url()); } catch { /* an unreadable address is blocked below */ }
+        if (url !== null && url.host === new URL(E2E_EXECUTOR_COMPILED_ORIGIN).host) { socket.connectToServer(); return; }
+        appendFileSync(blockedLog, `${JSON.stringify({ at: new Date().toISOString(), caseId: activeCaseId, method: "GET", resourceType: "websocket",
+          host: url?.host ?? "unreadable", url: url === null ? "unreadable" : `${url.origin}${url.pathname}` })}\n`);
+        void socket.close({ code: 1008, reason: "blocked" });
+      });
     };
     // Screenshots and traces of failed cases follow the admitted capture policy and nothing else; with both off the case adapter is given no capture port at all.
     const screenshots = ledger.capture.enabled("screenshot");

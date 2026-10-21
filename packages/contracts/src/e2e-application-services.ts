@@ -22,10 +22,24 @@ export const E2EApplicationExternalConnectionRefSchema = z.object({
 }).strict();
 export type E2EApplicationExternalConnectionRef = z.infer<typeof E2EApplicationExternalConnectionRefSchema>;
 
+/**
+ * The discovery component that stands for the API contract (OpenAPI/Swagger document) at a repository-relative path. Discovery emits one dependency edge to
+ * this component for every such document an application ships, so an approved mock fixture for that edge is linked to the origin whose `contractPath` is the path.
+ */
+export function e2eApiSchemaComponentId(contractPath: string): string {
+  return `api-schema-${createHash("sha256").update(contractPath).digest("hex").slice(0, 12)}`;
+}
+const contractPath = z.string().min(1).max(512).regex(/^[A-Za-z0-9._@~+/-]+$/).refine((value) => !value.startsWith("/") && !value.split("/").some((part) => part === "" || part === "." || part === ".."),
+  "contract path must be a plain repository-relative path")
+  .refine((value) => /(^|\/)(?:openapi|swagger)\.(?:json|ya?ml)$/i.test(value), "contract path must name an OpenAPI or Swagger document");
+
 export const E2EApplicationServiceContractSchema = z.object({
   listenPort: z.number().int().min(1024).max(65535), portEnv: envName.nullable(),
-  originBindings: z.array(z.object({ originRef: id(200), envName }).strict()).max(64),
+  /** `contractPath` is the repository-relative path of the origin's OpenAPI/Swagger document; an approved mock for that document's component serves this origin in a run. */
+  originBindings: z.array(z.object({ originRef: id(200), envName, contractPath: contractPath.optional() }).strict()).max(64),
 }).strict().superRefine((value, context) => {
+  const contractPaths = value.originBindings.flatMap((item) => (item.contractPath === undefined ? [] : [item.contractPath]));
+  if (new Set(contractPaths).size !== contractPaths.length) context.addIssue({ code: "custom", path: ["originBindings"], message: "each contract may describe only one origin" });
   if (new Set(value.originBindings.map((item) => item.originRef)).size !== value.originBindings.length) context.addIssue({ code: "custom", path: ["originBindings"], message: "origin references must be unique" });
   if (new Set(value.originBindings.map((item) => item.envName)).size !== value.originBindings.length) context.addIssue({ code: "custom", path: ["originBindings"], message: "origin environment bindings must be unique" });
   if (value.portEnv !== null && value.originBindings.some((item) => item.envName === value.portEnv)) context.addIssue({ code: "custom", path: ["portEnv"], message: "port and origin environment names must be distinct" });

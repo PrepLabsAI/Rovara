@@ -29,6 +29,8 @@ const common = {
   supportedAssertions: unique(z.enum(assertionKinds), { max: 7 }),
   evidenceScopes: unique(E2EEvidenceScopeSchema, { max: 4 }),
   networkPolicyDigest: digest,
+  /** The fixture formats the runtime can serve to the application as in-network mocks of its declared external origins; absent means it serves none. */
+  mocks: unique(z.literal("source-backed-api-fixtures/v1"), { max: 1 }).optional(),
 };
 const webDetails = { browsers: unique(z.enum(["chromium", "firefox", "webkit"]), { min: 1, max: 3 }) };
 const apiDetails = { protocols: unique(z.literal("http"), { min: 1, max: 1 }) };

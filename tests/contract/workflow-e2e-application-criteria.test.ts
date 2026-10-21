@@ -16,7 +16,7 @@ const { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEviden
 
 describe("a required criterion that cannot run keeps a round from passing", () => {
   it("is UNKNOWN when the plan has an unexecutable required criterion, and PASS when it does not", async () => {
-    const fixture = await createApplicationEvidenceFixture({ probe: "api-egress-denial-v1", observed: { kind: "http-status", status: 200 } });
+    const fixture = await createApplicationEvidenceFixture({ probe: "api-status-mismatch-v1", observed: { kind: "http-status", status: 503 } });
     const admission = fixture.admission;
     const admissionBytes = Buffer.from(encodeE2EApplicationExecutionAdmission(admission), "utf8");
     const admissionSha256 = createHash("sha256").update(admissionBytes).digest("hex");

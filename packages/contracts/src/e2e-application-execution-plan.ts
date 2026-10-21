@@ -42,6 +42,8 @@ export type E2EApplicationPortableProjection = {
 
 /** Why an agent-navigation scenario has no executable case yet: the qualified web/API runtime declares no `agent` step support. */
 export const AGENT_STEPS_UNAVAILABLE_REASON = "agent-steps-arrive-in-m1.4";
+/** Why a scenario whose target has an approved mock has no executable case yet: the registered runtime does not declare that it serves source-backed API fixtures. */
+export const MOCKS_UNAVAILABLE_REASON = "runtime-cannot-serve-approved-mocks";
 /** Why a web/API target whose launch recipe is only inferred (no agentx.e2e project contract) has no executable case yet. */
 export const NEEDS_PROJECT_CONTRACT_REASON = "needs-project-contract";
 
@@ -296,6 +298,11 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
     // Agent navigation is executable only on a runtime whose registered descriptor declares it; the qualified web/API runtime does not until M1.4.
     if (scenario.steps.some((step) => step.kind === "agent") && runtime?.capabilities.supportedSteps.includes("agent") !== true) {
       unavailable.push({ criterionId, reason: AGENT_STEPS_UNAVAILABLE_REASON });
+      continue;
+    }
+    // An approved mock is served by the host only when the registered runtime declares it can: a runner qualified before mocks existed would run the app without one.
+    if (targetApprovedMocks.length > 0 && runtime !== undefined && runtime.capabilities.mocks?.includes("source-backed-api-fixtures/v1") !== true) {
+      unavailable.push({ criterionId, reason: MOCKS_UNAVAILABLE_REASON });
       continue;
     }
     const gatedApplicationId = ref?.applicationId ?? intent.unavailableTargetRefs?.find((item) => item.targetId === targetId)?.applicationId;

@@ -18,7 +18,7 @@ export function proveActualRun(actual: E2EActualApplicationRun, plan: E2EExecuto
     candidateDigest: resolved.binding.candidateDigest, roundId: resolved.binding.roundId, runId: resolved.binding.runId, groupId: resolved.binding.groupId,
     mockManifestDigest: resolved.binding.mockManifestDigest, caseCount: resolved.binding.expectedCases.length,
     expectedSupervisorReceiptRefs: actual.supervisorReceiptRefs.filter((ref) => ref.artifactId !== readback.receipt.ref.artifactId),
-    ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(resolved.binding.runId),
+    ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(resolved.binding.runId, []),
     launches: actual.shards.map((shard) => ({ shardId: shard.shardId, launchId: shard.launchId, upstreamRunId: (shard.runStartCapture as { runId: string }).runId })) },
   applicationCaptures: actual.applicationCaptures, supervisorReceiptRefs: actual.supervisorReceiptRefs, cleanupConfirmed: actual.cleanupConfirmed, cleanupServerListening: actual.cleanupServerListening });
 }

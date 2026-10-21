@@ -1,0 +1,33 @@
+{
+ "schemaVersion": "source-backed-api-fixtures/v1",
+ "operationId": "getStock",
+ "method": "GET",
+ "path": "/v1/stock",
+ "inputField": "orderId",
+ "variants": [
+  {
+   "id": "success",
+   "inputValue": "a1",
+   "status": 200,
+   "body": {
+    "status": "in-stock"
+   }
+  },
+  {
+   "id": "refusal",
+   "inputValue": "a2",
+   "status": 404,
+   "body": {
+    "error": "unknown order"
+   }
+  },
+  {
+   "id": "invalid-data",
+   "inputValue": "b1",
+   "status": 200,
+   "body": {
+    "status": 7
+   }
+  }
+ ]
+}

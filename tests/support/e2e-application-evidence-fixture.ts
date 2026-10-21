@@ -215,9 +215,9 @@ export async function collectApplicationGroupEvidence(options: ApplicationGroupE
   }
 
   // As the host does after close: the owned-cleanup receipt is the one supervisor receipt it attests, and the cleanup frame names it.
-  const cleanupReceipt = dockerOwnedCleanupReceipt(binding.runId, closedAt);
+  const cleanupReceipt = dockerOwnedCleanupReceipt(binding.runId, closedAt, []);
   const cleanupFrame = frame("owned-cleanup", { schemaVersion: "e2e-application-owned-cleanup/v1", context, phase: "after-owned-close", cleanup: "confirmed", confirmed: true,
-    serverListening: false, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId), ownedCleanupReceiptRefs: [cleanupReceipt.ref] });
+    serverListening: false, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId, []), ownedCleanupReceiptRefs: [cleanupReceipt.ref] });
   const expectedSupervisorRefs = [cleanupReceipt.ref];
   const byShard = (left: unknown, right: unknown) => (left as { shardId: string }).shardId.localeCompare((right as { shardId: string }).shardId);
   const receipt = frame("supervisor-top-receipt", { schemaVersion: "e2e-application-supervisor-receipt/v1", context, launches: [...launches].sort(byShard),
@@ -230,7 +230,7 @@ export async function collectApplicationGroupEvidence(options: ApplicationGroupE
   // Exactly what the Docker host reads back after close (assembleDockerCollectionInputs): nothing here decides pass or fail.
   const usage = e2eApplicationAggregateRunUsage(reports.map((report) => report.run.usage as Readonly<Record<string, number>>))!;
   const collectionInputs = { environment: ENVIRONMENT, usage: usage as Record<string, number>, limits: reports[0]!.run.limits,
-    expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId),
+    expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId, []),
     observationBindings, assertionAssets, governedModelReceipts: [] as never[], ownedClosedAt: closedAt };
   const collected = collectE2EApplicationRun({ actual, compiled, binding, round, ...collectionInputs } as never);
   if (collected.collection === null || collected.qualification === null) throw new Error(`the fixture run could not be collected: ${collected.unavailableReason}`);

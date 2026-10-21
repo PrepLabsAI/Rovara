@@ -43,7 +43,7 @@ describe("web/API probe run binding", () => {
     expect(WEB_API_NETWORK_POLICY_DIGEST).toBe(createHash("sha256").update(canonicalJson(WEB_API_NETWORK_POLICY)).digest("hex"));
   });
 
-  it("gives a web/API challenge an hour, long enough for nine container runs", () => {
+  it("gives a web/API challenge an hour, long enough for eleven container runs", () => {
     expect(WEB_API_CHALLENGE_LIFETIME_MS).toBe(60 * 60_000);
   });
 
