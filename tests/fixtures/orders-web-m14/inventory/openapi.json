@@ -1,0 +1,42 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Inventory service", "version": "1.0.0" },
+  "paths": {
+    "/v1/stock": {
+      "get": {
+        "operationId": "getStock",
+        "parameters": [
+          { "name": "orderId", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 64 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stock status of the order's items",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "status": { "type": "string", "enum": ["in-stock", "low", "out"] } },
+                  "required": ["status"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "error": { "type": "string", "maxLength": 200 } },
+                  "required": ["error"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
