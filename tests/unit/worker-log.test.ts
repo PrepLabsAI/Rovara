@@ -5,11 +5,11 @@ import { generateKeyPairSync } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WorkerInvocation } from "@agentx/contracts";
+import { agentXError, type WorkerInvocation } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { OperationJournal, createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/index.js";
 import { WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
-import { logWorkerStarted, readPiAiVersion, type WorkerLogSink } from "../../packages/worker/src/worker-log.js";
+import { WORKER_ERROR_CLASSES, logInvocationStarted, logWorkerStarted, readPiAiVersion, type WorkerLogSink } from "../../packages/worker/src/worker-log.js";
 
 interface Captured { level: "info" | "error"; line: string; json: Record<string, unknown> }
 
@@ -19,13 +19,14 @@ function capture(): { sink: WorkerLogSink; lines: Captured[] } {
   return { sink, lines };
 }
 
+// Built at run time, so the repository holds no literal token-shaped strings for a secret scanner to flag.
 const SECRETS = [
-  "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-  "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789",
-  "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789",
-  "hunter2-super-secret",
-  "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnopqrstuvwxyz0123",
-  "AKIAIOSFODNN7EXAMPLE",
+  "gh" + "p_" + "x1".repeat(18),
+  "s" + "k-" + "proj-" + "abcd1234".repeat(5),
+  "s" + "k-" + "ant-api03-" + "abcd1234".repeat(5),
+  "hunter2-" + "super-" + "secret",
+  ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "abcdefghijklmnopqrstuvwxyz0123"].join("."),
+  "AK" + "IA" + "IOSFODNN7" + "EXAMPLE",
 ];
 
 describe("worker startup log line", () => {
@@ -165,32 +166,118 @@ describe("worker invocation log lines", () => {
     }
   });
 
-  it("logs a failure line with the error name and a short redacted message, never the secrets in it", async () => {
-    const message = `git push to https://x-access-token:${SECRETS[0]}@github.com/o/r failed; Authorization: Bearer ${SECRETS[4]}; OPENAI_API_KEY=${SECRETS[1]}; ANTHROPIC key ${SECRETS[2]}; password=${SECRETS[3]}; aws ${SECRETS[5]}; ${"padding ".repeat(200)}`;
-    class PushRejectedError extends Error { override name = "PushRejectedError"; }
-    const { lines, invocation } = await run(async () => { throw new PushRejectedError(message); });
+  const ALLOWED_FAILURE_KEYS = ["component", "durationMs", "errorClass", "errorCode", "event", "exceptionName", "httpStatus", "invocationId", "kind", "outcome"];
+
+  it("describes a failure by code, class, status and exception name only, with no message field", async () => {
+    const error = agentXError("RUNTIME_UNAVAILABLE", "the model call failed: ThrottlingException: HTTP status 429");
+    const { lines, invocation } = await run(async () => { throw error; });
     expect(lines.map((entry) => entry.json.event)).toEqual(["invocation.started", "invocation.failed"]);
     const failed = lines[1]!;
     expect(failed.level).toBe("error");
-    expect(Object.keys(failed.json).sort()).toEqual(["component", "durationMs", "errorMessage", "errorName", "event", "invocationId", "kind", "outcome"]);
-    expect(failed.json).toMatchObject({ component: "worker", event: "invocation.failed", kind: "task", invocationId: invocation.operationId, outcome: "failed", errorName: "PushRejectedError" });
-    expect((failed.json.errorMessage as string).length).toBeLessThanOrEqual(300);
-    for (const entry of lines) for (const secret of SECRETS) expect(entry.line).not.toContain(secret);
-    expect(failed.line).not.toMatch(/sk-[A-Za-z0-9_-]{8,}/);
-    expect(failed.line).not.toMatch(/gh[pousr]_[A-Za-z0-9]{20,}/);
-    expect(failed.line).not.toMatch(/eyJ[A-Za-z0-9_-]{10,}\./);
+    expect(failed.json).toEqual({
+      component: "worker", event: "invocation.failed", kind: "task", invocationId: invocation.operationId, outcome: "failed",
+      durationMs: failed.json.durationMs, errorCode: "RUNTIME_UNAVAILABLE", errorClass: "model-call", httpStatus: 429, exceptionName: "ThrottlingException",
+    });
+    expect(Number.isInteger(failed.json.durationMs)).toBe(true);
+    expect(failed.json).not.toHaveProperty("errorMessage");
+    expect(failed.json).not.toHaveProperty("errorName");
   });
 
-  it("does not trust an attacker-shaped error name", async () => {
-    const { lines } = await run(async () => { const error = new Error("boom"); error.name = `Evil ${SECRETS[1]}\nnext line`; throw error; });
-    expect(lines[1]!.json.errorName).toBe("Error");
+  it("takes an http status from the error object, and the exception name from a custom error class", async () => {
+    class PushRejectedError extends Error { override name = "PushRejectedError"; status = 403; }
+    const { lines } = await run(async () => { throw new PushRejectedError("denied"); });
+    expect(lines[1]!.json).toMatchObject({ errorClass: "internal", httpStatus: 403, exceptionName: "PushRejectedError" });
+    expect(lines[1]!.json).not.toHaveProperty("errorCode");
+  });
+
+  // What each message would leak if the line quoted it. Each case asserts the sensitive fragments are absent, then the key set.
+  const LEAKY: { label: string; error: () => unknown; fragments: string[]; errorClass: string }[] = [
+    {
+      label: "a Bedrock ValidationException that echoes the prompt",
+      error: () => agentXError("RUNTIME_UNAVAILABLE", 'the model call failed: ValidationException: messages.2.content.0.text: Input should be valid. Got: "Please rewrite our internal pricing algorithm in src/billing/margin.ts so that HTTP status 400'),
+      fragments: ["pricing algorithm", "margin", "Please rewrite", "Input should be valid", "messages.2"],
+      errorClass: "model-call",
+    },
+    {
+      label: "a command-failure tail naming test files and values",
+      error: () => new Error("setup step 1 (npm test in .) exited 1 Last lines: FAIL src/billing/margin.test.ts expected 'acme-internal-customer-list' to equal 'x'"),
+      fragments: ["npm test", "margin.test", "acme-internal", "FAIL", "Last lines"],
+      errorClass: "command",
+    },
+    {
+      label: "a repository file path",
+      error: () => agentXError("CONFIG_INVALID", "broken symlink is not allowed in workspace: customers/acme-secret-deal.txt"),
+      fragments: ["customers", "acme-secret-deal", "symlink"],
+      errorClass: "config",
+    },
+    {
+      label: "a branch and an owner/repo name",
+      error: () => new Error("fatal: unable to access 'https://github.com/acme/secret-repo.git/' repository default branch does not exist: feature/secret-launch"),
+      fragments: ["acme", "secret-repo", "secret-launch", "github.com"],
+      errorClass: "git",
+    },
+    {
+      label: "a 40-hex token",
+      error: () => new Error("authentication failed for token " + "0123456789abcdef".repeat(2) + "01234567"),
+      fragments: ["0123456789abcdef", "authentication failed"],
+      errorClass: "internal",
+    },
+    {
+      label: "a bare AWS secret access key",
+      error: () => new Error("signature mismatch for " + "wJalrXUtnFEMI/K7MDENG/" + "bPxRfiCY" + "EXAMPLEKEY"),
+      fragments: ["wJalrXUtnFEMI", "bPxRfiCY", "signature mismatch"],
+      errorClass: "internal",
+    },
+    {
+      label: "a password in plain prose",
+      error: () => new Error("my password is correct-horse-battery-staple, please keep it"),
+      fragments: ["password", "correct-horse", "battery", "please keep"],
+      errorClass: "internal",
+    },
+    {
+      label: "vendor-shaped credentials",
+      error: () => new Error(`push to https://x-access-token:${SECRETS[0]}@github.com failed; Authorization: Bearer ${SECRETS[4]}; OPENAI_API_KEY=${SECRETS[1]}; ${SECRETS[2]}; password=${SECRETS[3]}; ${SECRETS[5]}`),
+      fragments: SECRETS,
+      errorClass: "internal",
+    },
+  ];
+
+  for (const leaky of LEAKY) {
+    it(`never lets ${leaky.label} reach a log line`, async () => {
+      const { lines } = await run(async () => { throw leaky.error(); });
+      expect(lines.map((entry) => entry.json.event)).toEqual(["invocation.started", "invocation.failed"]);
+      for (const entry of lines) for (const fragment of leaky.fragments) expect(entry.line).not.toContain(fragment);
+      const failed = lines[1]!.json;
+      expect(Object.keys(failed).every((key) => ALLOWED_FAILURE_KEYS.includes(key))).toBe(true);
+      expect(failed.errorClass).toBe(leaky.errorClass);
+      expect(WORKER_ERROR_CLASSES).toContain(failed.errorClass);
+    });
+  }
+
+  it("does not trust an attacker-shaped error name, error code or status", async () => {
+    const { lines } = await run(async () => {
+      const error = Object.assign(new Error("boom"), { code: SECRETS[1], status: 99999, $metadata: { httpStatusCode: "400 " + SECRETS[0] } });
+      error.name = `Evil ${SECRETS[1]}\nnext line`;
+      throw error;
+    });
+    expect(lines[1]!.json).toEqual({
+      component: "worker", event: "invocation.failed", kind: "task", invocationId: lines[0]!.json.invocationId, outcome: "failed",
+      durationMs: lines[1]!.json.durationMs, errorClass: "internal",
+    });
     expect(lines[1]!.line).not.toContain(SECRETS[1]);
+  });
+
+  it("only names an exception from the provider list, never a word the prompt could have supplied", async () => {
+    const { lines } = await run(async () => { throw agentXError("RUNTIME_UNAVAILABLE", "the model call failed: AcmeCustomerListException: bad input"); });
+    expect(lines[1]!.json).toMatchObject({ errorClass: "model-call" });
+    expect(lines[1]!.json).not.toHaveProperty("exceptionName");
+    expect(lines[1]!.line).not.toContain("Acme");
   });
 
   it("logs a non-Error rejection without printing it", async () => {
     // eslint-disable-next-line @typescript-eslint/only-throw-error -- the case under test is a thrown non-Error
-    const { lines } = await run(async () => { throw { token: SECRETS[0] }; });
-    expect(lines[1]!.json).toMatchObject({ event: "invocation.failed", errorName: "Error", errorMessage: "worker execution failed" });
+    const { lines } = await run(async () => { throw { token: SECRETS[0], code: "RUNTIME_UNAVAILABLE" }; });
+    expect(lines[1]!.json).toMatchObject({ event: "invocation.failed", errorClass: "internal", errorCode: "RUNTIME_UNAVAILABLE" });
     expect(lines[1]!.line).not.toContain(SECRETS[0]);
   });
 
@@ -198,7 +285,29 @@ describe("worker invocation log lines", () => {
     const { lines } = await run(async () => { throw new WorkerOperationCancelledError("cancelled by owner"); });
     expect(lines.map((entry) => entry.json.event)).toEqual(["invocation.started", "invocation.finished"]);
     expect(lines[1]!.json).toMatchObject({ outcome: "cancelled" });
-    expect(lines[1]!.json).not.toHaveProperty("errorMessage");
+    expect(lines[1]!.line).not.toContain("owner");
+  });
+
+  it("logs a cancellation before it writes the journal, as a failure does", async () => {
+    const order: string[] = [];
+    const root = await mkdtemp(join(tmpdir(), "agentx-worker-log-order-"));
+    const journal = new OperationJournal(root);
+    const transition = journal.transition.bind(journal);
+    vi.spyOn(journal, "transition").mockImplementation((id, status, ...rest) => { order.push(`journal:${status}`); return transition(id, status, ...rest); });
+    const state = createWorkerServerState(journal, { execute: async () => { throw new WorkerOperationCancelledError("c"); } }, {
+      log: (_level, line) => { order.push(`log:${(JSON.parse(line) as { outcome?: string }).outcome ?? "started"}`); },
+    });
+    await handleWorkerRequest(invocationRequest(taskInvocation()), state);
+    await vi.waitFor(() => expect(order).toContain("journal:CANCELLED"));
+    expect(order.indexOf("log:cancelled")).toBeGreaterThan(-1);
+    expect(order.indexOf("log:cancelled")).toBeLessThan(order.indexOf("journal:CANCELLED"));
+  });
+
+  it("cannot throw out of the start line, whatever the invocation looks like", () => {
+    const hostile = new Proxy({}, { get() { throw new Error("hostile getter"); } }) as unknown as WorkerInvocation;
+    const log = logInvocationStarted(() => undefined, hostile);
+    expect(() => { log.finished("succeeded"); log.failed(new Error("x")); }).not.toThrow();
+    expect(() => logInvocationStarted(() => { throw new Error("stdout closed"); }, taskInvocation())).not.toThrow();
   });
 
   it("names the task for a feedback review, where the invocation carries one", async () => {

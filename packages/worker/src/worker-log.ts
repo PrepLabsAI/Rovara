@@ -1,16 +1,20 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { redactText, type WorkerInvocation } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, redactText, type WorkerInvocation } from "@agentx/contracts";
 
 /**
  * Structured worker logs. The EC2 worker container ships stdout and stderr through docker's awslogs driver
  * (packages/worker/ec2/boot.sh), so one JSON object per line is what shows in the worker's CloudWatch stream.
  *
  * Nothing here prints a prompt, model output, repository content, a callback capability or a user's text. Every field
- * is chosen from a short list, and each value is either checked against a strict shape (an id, a version, an enum) or,
- * for the one free-text field (a failure's error message), redacted with the shared credential redaction and cut short.
- * A value that does not fit its shape is left out, never printed.
+ * is chosen from a short list, and each value is checked against a strict shape or a fixed set (an id, a version, an
+ * enum, an error code, a class label). A value that does not fit is left out, never printed.
+ *
+ * There is deliberately no error message field. A failure's message can carry a provider's echo of the prompt, a command's
+ * output, a repository path or branch, or a token the credential redaction does not recognise, and this stream is readable
+ * by operators. A failure is described by its code, a class label, an HTTP status and an exception name instead; the full
+ * (redacted) message stays in the journal and the control plane's record.
  */
 
 export type WorkerLogLevel = "info" | "error";
@@ -24,15 +28,18 @@ export const consoleWorkerLog: WorkerLogSink = (level, line) => {
 
 export type WorkerInvocationOutcome = "succeeded" | "cancelled" | "failed";
 
-const ERROR_MESSAGE_MAX_CHARS = 200;
+export const WORKER_ERROR_CLASSES = ["model-call", "command", "git", "config", "timeout", "internal"] as const;
+export type WorkerErrorClass = (typeof WORKER_ERROR_CLASSES)[number];
+
 const ID = /^[A-Za-z0-9._-]{1,64}$/u;
 const GENERATION = /^[0-9]{1,9}$/u;
 const INSTANCE_ID = /^i-[0-9a-f]{8,17}$/u;
 const IMAGE_DIGEST = /@(sha256:[0-9a-f]{64})(?![0-9a-f])/u;
 const ENUM_VALUE = /^[A-Za-z0-9._:-]{1,80}$/u;
 const FEATURE = /^[A-Za-z][A-Za-z0-9.]{0,63}$/u;
-const ERROR_NAME = /^[A-Za-z][A-Za-z0-9_.]{0,63}$/u;
-const GENERIC_FAILURE = "worker execution failed";
+const EXCEPTION_NAME = /^[A-Z][A-Za-z0-9]{2,63}$/u;
+/** Provider exceptions named in a model-call failure's text. A fixed list: any other word in that text could come from the prompt. */
+const PROVIDER_EXCEPTION = /\b(ValidationException|ThrottlingException|AccessDeniedException|ModelTimeoutException|ServiceUnavailableException|InternalServerException|ModelErrorException|ModelNotReadyException|ModelStreamErrorException|ResourceNotFoundException|ServiceQuotaExceededException)\b/u;
 
 /** The value if it has the expected shape and the credential redaction leaves it alone; otherwise nothing. */
 function checked(value: unknown, shape: RegExp): string | undefined {
@@ -40,10 +47,10 @@ function checked(value: unknown, shape: RegExp): string | undefined {
   return value;
 }
 
-function write(sink: WorkerLogSink, level: WorkerLogLevel, fields: Record<string, unknown>): void {
-  // Logging must never change what the worker does: a closed stdout or a bad sink is dropped.
+/** The fields are built inside the guard too: logging must never change what the worker does, whatever fails in it. */
+function write(sink: WorkerLogSink, level: WorkerLogLevel, fields: () => Record<string, unknown>): void {
   try {
-    sink(level, JSON.stringify(defined(fields)));
+    sink(level, JSON.stringify(defined(fields())));
   } catch { /* dropped on purpose */ }
 }
 
@@ -94,20 +101,22 @@ export interface WorkerStartedInput {
 
 /** One line, every boot, whatever the runtime state: an empty stream then means the worker never started, not that it was quiet. */
 export function logWorkerStarted(sink: WorkerLogSink, input: WorkerStartedInput): void {
-  const { env, containedRuntime } = input;
-  const reason = containedRuntime.status === "ready" ? undefined : checked(containedRuntime.reason, ENUM_VALUE) ?? "unspecified";
-  const imageDigest = typeof env.AGENTX_WORKER_IMAGE === "string" ? IMAGE_DIGEST.exec(env.AGENTX_WORKER_IMAGE)?.[1] : undefined;
-  write(sink, "info", {
-    component: "worker",
-    event: "worker.started",
-    workspaceId: checked(env.AGENTX_WORKSPACE_ID, ID),
-    generation: checked(env.AGENTX_SESSION_GENERATION, GENERATION),
-    instanceId: checked(env.AGENTX_INSTANCE_ID, INSTANCE_ID),
-    workerVersion: readWorkerVersion(),
-    imageDigest,
-    containedRuntime: defined({ status: checked(containedRuntime.status, ENUM_VALUE) ?? "unknown", reason }),
-    invocationFeatures: input.invocationFeatures.flatMap((feature) => checked(feature, FEATURE) ?? []),
-    piAiVersion: readPiAiVersion(),
+  write(sink, "info", () => {
+    const { env, containedRuntime } = input;
+    const reason = containedRuntime.status === "ready" ? undefined : checked(containedRuntime.reason, ENUM_VALUE) ?? "unspecified";
+    const imageDigest = typeof env.AGENTX_WORKER_IMAGE === "string" ? IMAGE_DIGEST.exec(env.AGENTX_WORKER_IMAGE)?.[1] : undefined;
+    return {
+      component: "worker",
+      event: "worker.started",
+      workspaceId: checked(env.AGENTX_WORKSPACE_ID, ID),
+      generation: checked(env.AGENTX_SESSION_GENERATION, GENERATION),
+      instanceId: checked(env.AGENTX_INSTANCE_ID, INSTANCE_ID),
+      workerVersion: readWorkerVersion(),
+      imageDigest,
+      containedRuntime: defined({ status: checked(containedRuntime.status, ENUM_VALUE) ?? "unknown", reason }),
+      invocationFeatures: input.invocationFeatures.flatMap((feature) => checked(feature, FEATURE) ?? []),
+      piAiVersion: readPiAiVersion(),
+    };
   });
 }
 
@@ -116,43 +125,79 @@ export interface WorkerInvocationLog {
   failed(error: unknown): void;
 }
 
-/** Logs the start line now and returns the writers for the one finish or failure line. */
+const NO_LOG: WorkerInvocationLog = { finished() { /* logging is off */ }, failed() { /* logging is off */ } };
+
+/** Logs the start line now and returns the writers for the one finish or failure line. Never throws. */
 export function logInvocationStarted(sink: WorkerLogSink, invocation: WorkerInvocation): WorkerInvocationLog {
-  const startedAt = performance.now();
-  const durationMs = () => Math.max(0, Math.round(performance.now() - startedAt));
-  const taskId = invocation.kind === "task" ? invocation.payload.workflowFeedbackReview?.taskId : undefined;
-  const line = (event: string, rest: Record<string, unknown>) => ({
-    component: "worker",
-    event,
-    kind: checked(invocation.kind, ENUM_VALUE) ?? "unknown",
-    invocationId: checked(invocation.operationId, ID),
-    taskId: checked(taskId, ID),
-    ...rest,
-  });
-  write(sink, "info", line("invocation.started", {}));
+  try {
+    const startedAt = performance.now();
+    const durationMs = () => Math.max(0, Math.round(performance.now() - startedAt));
+    const line = (event: string, rest: Record<string, unknown>) => {
+      const taskId = invocation.kind === "task" ? invocation.payload.workflowFeedbackReview?.taskId : undefined;
+      return {
+        component: "worker",
+        event,
+        kind: checked(invocation.kind, ENUM_VALUE) ?? "unknown",
+        invocationId: checked(invocation.operationId, ID),
+        taskId: checked(taskId, ID),
+        ...rest,
+      };
+    };
+    write(sink, "info", () => line("invocation.started", {}));
+    return {
+      finished(outcome) {
+        write(sink, "info", () => line("invocation.finished", { outcome, durationMs: durationMs() }));
+      },
+      failed(error) {
+        write(sink, "error", () => line("invocation.failed", { outcome: "failed", durationMs: durationMs(), ...describeFailure(error) }));
+      },
+    };
+  } catch {
+    return NO_LOG;
+  }
+}
+
+export interface WorkerFailureDescription {
+  errorCode?: string;
+  errorClass: WorkerErrorClass;
+  httpStatus?: number;
+  exceptionName?: string;
+}
+
+/**
+ * Describes a failure without quoting it. The message is read only to pick a label from a fixed set and, for a model-call
+ * failure, a provider exception name from a fixed list and an HTTP status number; none of its text is copied out.
+ */
+export function describeFailure(error: unknown): WorkerFailureDescription {
+  const record = typeof error === "object" && error !== null ? error as Record<string, unknown> : {};
+  const message = error instanceof Error ? error.message : "";
+  const code = AgentXErrorCodeSchema.safeParse(record.code);
+  const errorCode = code.success ? code.data : undefined;
+  const errorClass = classify(error, message, errorCode);
+  const name = error instanceof Error ? error.name : undefined;
+  const exceptionName = name !== undefined && name !== "Error" && name !== "AgentXError" && EXCEPTION_NAME.test(name) && redactText(name) === name
+    ? name
+    : errorClass === "model-call" ? PROVIDER_EXCEPTION.exec(message)?.[1] : undefined;
+  const metadata = typeof record.$metadata === "object" && record.$metadata !== null ? (record.$metadata as Record<string, unknown>).httpStatusCode : undefined;
+  const status = [record.status, metadata].find(isHttpStatus)
+    ?? (errorClass === "model-call" ? Number(/\b(?:status(?: code)?|HTTP)\D{0,3}([1-5]\d\d)\b/iu.exec(message)?.[1]) : undefined);
   return {
-    finished(outcome) {
-      write(sink, "info", line("invocation.finished", { outcome, durationMs: durationMs() }));
-    },
-    failed(error) {
-      write(sink, "error", line("invocation.failed", {
-        outcome: "failed",
-        durationMs: durationMs(),
-        errorName: errorName(error),
-        errorMessage: errorMessage(error),
-      }));
-    },
+    ...(errorCode === undefined ? {} : { errorCode }),
+    errorClass,
+    ...(isHttpStatus(status) ? { httpStatus: status } : {}),
+    ...(exceptionName === undefined ? {} : { exceptionName }),
   };
 }
 
-function errorName(error: unknown): string {
-  return error instanceof Error ? checked(error.name, ERROR_NAME) ?? "Error" : "Error";
+function isHttpStatus(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599;
 }
 
-/** Redacted first, then flattened to one line and cut, so the cut never leaves half a credential that the redaction would have caught. */
-function errorMessage(error: unknown): string {
-  if (!(error instanceof Error)) return GENERIC_FAILURE;
-  // eslint-disable-next-line no-control-regex
-  const flat = redactText(error.message).replace(/[\u0000-\u001f\u007f\s]+/gu, " ").trim();
-  return flat === "" ? GENERIC_FAILURE : flat.slice(0, ERROR_MESSAGE_MAX_CHARS);
+function classify(error: unknown, message: string, code: string | undefined): WorkerErrorClass {
+  if (/\bthe model call (?:failed|was aborted)\b/u.test(message)) return "model-call";
+  if (error instanceof Error && (error.name === "TimeoutError" || /\b(?:timed out|ETIMEDOUT)\b/iu.test(message))) return "timeout";
+  if (/\bexited \d+\b|\bLast lines:|\bcommand failed\b/u.test(message)) return "command";
+  if (/\bgit\b|\bfatal: /u.test(message)) return "git";
+  if (code === "CONFIG_INVALID") return "config";
+  return "internal";
 }

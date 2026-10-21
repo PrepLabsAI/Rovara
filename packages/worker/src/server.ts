@@ -187,8 +187,9 @@ async function executeInBackground(invocation: WorkerInvocation, state: WorkerSe
     log?.finished("succeeded");
   } catch (error) {
     if (error instanceof WorkerOperationCancelledError) {
-      await state.journal.transition(invocation.operationId, "CANCELLED", error.message);
+      // Logged before the journal write, as a failure is, so a journal fault leaves a line too.
       log?.finished("cancelled");
+      await state.journal.transition(invocation.operationId, "CANCELLED", error.message);
       terminal = { operationId: invocation.operationId, status: "CANCELLED", error: error.message, ...checksResult(error) };
     } else {
       // Redacted before the journal stores it on disk or the terminal callback sends it: an error
