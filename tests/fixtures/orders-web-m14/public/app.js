@@ -18,6 +18,10 @@ async function refresh() {
   if (!me.ok) return;
   const account = await me.json();
   byId("identity").textContent = `${account.displayName} (${account.role})`;
+  // Once signed in, the form is cleared and hidden so that a typed address cannot appear in a page snapshot.
+  login.elements.email.value = "";
+  login.elements.password.value = "";
+  login.hidden = true;
   const state = await fetch("/api/orders/state").then((response) => response.json());
   byId("orders-state").textContent = JSON.stringify(state);
   const list = await fetch(`/api/tenants/${encodeURIComponent(account.tenantId)}/orders`);

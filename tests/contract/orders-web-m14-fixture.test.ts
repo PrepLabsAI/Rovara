@@ -254,7 +254,6 @@ describe("live baseline (--variant m14)", () => {
     const html = files.get("public/index.html")!;
     expect(html).toMatch(/<button[^>]*data-testid="export-csv"[^>]*>Export CSV<\/button>/);
     for (const [path, text] of files) {
-      if (path === "README.md") continue;
       expect(text, path).not.toContain("download-invoices");
       expect(text, path).not.toContain("Download invoices");
       expect(text, path).not.toContain("/api/invoices.csv");
@@ -319,6 +318,221 @@ describe("publisher --variant m14", () => {
     expect(listed).toContain("inventory/openapi.json");
     expect(listed).toContain("e2e/mocks/inventory-v1.json");
     expect(listed).not.toContain("test/invoices.test.mjs");
+    expect(listed).toContain("README.md");
+    expect(listed).not.toContain("README.baseline.md");
     expect(existsSync(join(root, LOCAL, "test/invoices.test.mjs"))).toBe(true);
   });
 });
+
+describe("publisher guards (F1)", () => {
+  const stripMarkers = (text: string): string => text.split("\n").filter((line) => !line.includes("fixture-variant:local-only")).join("\n");
+
+  it("refuses a render whose local-only block lost its markers instead of leaking the invoices route", () => {
+    const files = fixtureFiles(localDirectory);
+    files.set("server.mjs", stripMarkers(files.get("server.mjs")!));
+    expect(() => renderFixtureVariant("m14", files)).toThrow(/exactly one .*local-only block/);
+  });
+
+  it("refuses a render with a second local-only block", () => {
+    const files = fixtureFiles(localDirectory);
+    files.set("public/app.js", `// fixture-variant:local-only:begin\nconst x = 1;\n// fixture-variant:local-only:end\n${files.get("public/app.js")!}`);
+    expect(() => renderFixtureVariant("m14", files)).toThrow(/exactly one .*local-only block/);
+  });
+
+  it("refuses a render that still contains a decoy string outside the removed block", () => {
+    for (const leak of ["download-invoices", "Download invoices", "/api/invoices.csv", "invoices.csv"]) {
+      const files = fixtureFiles(localDirectory);
+      files.set("public/app.js", `${files.get("public/app.js")!}\n// ${leak}\n`);
+      expect(() => renderFixtureVariant("m14", files), leak).toThrow(/decoy/);
+    }
+  });
+
+  it("refuses a variant whose excluded file or baseline README is missing", () => {
+    const withoutExcluded = fixtureFiles(localDirectory);
+    withoutExcluded.delete("test/invoices.test.mjs");
+    expect(() => renderFixtureVariant("m14", withoutExcluded)).toThrow(/excluded file test\/invoices\.test\.mjs does not exist/);
+    const withoutReadme = fixtureFiles(localDirectory);
+    withoutReadme.delete("README.baseline.md");
+    expect(() => renderFixtureVariant("m14", withoutReadme)).toThrow(/README\.baseline\.md does not exist/);
+  });
+});
+
+describe("baseline README (F5)", () => {
+  it("is its own text, published as README.md, without internal details, the decoy or test ids", () => {
+    const files = renderFixtureVariant("m14", fixtureFiles(localDirectory));
+    expect(files.has("README.baseline.md")).toBe(false);
+    const readme = files.get("README.md")!;
+    expect(readme).toBe(readLocal("README.baseline.md"));
+    expect(readme).not.toBe(readLocal("README.md"));
+    expect(readme).toMatch(/orders/i);
+    for (const forbidden of [/invoice/i, /decoy/i, /fixture-variant/, /publish/i, /M1\.\d/, /data-testid/, /test ?id/i, /download-/, /export-csv/, /local Linux/i, /live baseline/i, /Rovara/, /\bm14\b/]) {
+      expect(readme).not.toMatch(forbidden);
+    }
+  });
+
+  it("leaves the local README describing both variants", () => {
+    expect(readLocal("README.md")).toContain("download-invoices");
+  });
+});
+
+describe("tenant isolation of the invoices decoy (F2)", () => {
+  it("gives tenant-b only its own invoices", async () => {
+    const { createOrdersApplication } = await loadServer(localDirectory);
+    const app = createOrdersApplication({ seed, orders: orders(), fetchDependency: inventory });
+    const invoices = await app.handle({ method: "GET", url: "/api/invoices.csv", headers: await signIn(app, OWNER_B) });
+    expect(invoices.body).toBe("invoice,customer,amount,status\r\ninv-b1,Lin,99,paid\r\n");
+    expect(invoices.body).not.toContain("Ada");
+  });
+});
+
+// A DOM-free harness: public/app.js runs against the real request handler, with the elements taken from public/index.html.
+type Listener = (event: { preventDefault: () => void }) => unknown;
+class Element {
+  hidden = false;
+  textContent = "";
+  value = "";
+  download = "";
+  href = "";
+  dataset: Record<string, string> = {};
+  attributes = new Map<string, string>();
+  children: Element[] = [];
+  listeners = new Map<string, Listener>();
+  elements: Record<string, Element> = {};
+  tbody: Element | undefined;
+  constructor(readonly tag: string, private readonly onClick: (element: Element) => void = () => undefined) {
+    if (tag === "table") this.tbody = new Element("tbody");
+  }
+  addEventListener(type: string, listener: Listener): void { this.listeners.set(type, listener); }
+  setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
+  append(...nodes: Element[]): void { this.children.push(...nodes); }
+  replaceChildren(): void { this.children = []; }
+  click(): void { this.onClick(this); }
+  querySelector(selector: string): Element | null { return selector === "tbody" ? this.tbody ?? null : null; }
+}
+
+interface Page {
+  byTestId: Map<string, Element>;
+  login: Element;
+  downloads: Array<{ filename: string; content: string }>;
+  rows: () => Element[];
+}
+
+async function openPage(directory: string, files: ReadonlyMap<string, string>, signedInAs: string | null, credentials?: { email: string; password: string }): Promise<Page> {
+  const { createOrdersApplication } = await loadServer(directory);
+  const app = createOrdersApplication({ seed, orders: orders(), fetchDependency: inventory });
+  let session: string | null = signedInAs === null ? null : (await signIn(app, signedInAs))["cookie"]!;
+  const downloads: Page["downloads"] = [];
+  const blobs = new Map<string, string>();
+  const byTestId = new Map<string, Element>();
+  const login = new Element("form");
+  login.elements = { email: new Element("input"), password: new Element("input") };
+  const newElement = (tag: string): Element => new Element(tag, (element) => { downloads.push({ filename: element.download, content: blobs.get(element.href) ?? "" }); });
+  for (const match of files.get("public/index.html")!.matchAll(/<(\w+)\b([^>]*)>/g)) {
+    const attributes = match[2]!;
+    const testId = /data-testid="([^"]+)"/.exec(attributes)?.[1];
+    const element = /id="login"/.test(attributes) ? login : testId === undefined ? undefined : new Element(match[1]!);
+    if (element === undefined) continue;
+    if (/(^|\s)hidden(\s|$)/.test(attributes)) element.hidden = true;
+    for (const data of attributes.matchAll(/data-([a-z-]+)="([^"]*)"/g)) {
+      if (data[1] !== "testid") element.dataset[data[1]!.replace(/-(\w)/g, (_, letter: string) => letter.toUpperCase())] = data[2]!;
+    }
+    if (testId !== undefined) byTestId.set(testId, element);
+  }
+  const document = {
+    querySelector: (selector: string): Element | null => {
+      if (selector === "#login") return login;
+      const testId = /^\[data-testid="([^"]+)"\]$/.exec(selector)?.[1];
+      return testId === undefined ? null : byTestId.get(testId) ?? null;
+    },
+    querySelectorAll: (selector: string): Element[] => selector === "[data-download]" ? [...byTestId.values()].filter((element) => element.dataset.download !== undefined) : [],
+    createElement: newElement,
+  };
+  let blobCounter = 0;
+  const url = {
+    createObjectURL: (blob: string): string => { blobCounter += 1; blobs.set(`blob:${blobCounter}`, blob); return `blob:${blobCounter}`; },
+    revokeObjectURL: (): void => undefined,
+  };
+  const fetchStub = async (path: string, init?: { method?: string; body?: string }) => {
+    const reply = await app.handle({ method: init?.method ?? "GET", url: path, headers: session === null ? {} : { cookie: session },
+      ...(init?.body === undefined ? {} : { body: JSON.parse(init.body) as unknown }) });
+    const setCookie = reply.headers["set-cookie"];
+    if (setCookie !== undefined) session = setCookie.split(";")[0]!;
+    return { ok: reply.status < 400, status: reply.status, json: async () => JSON.parse(reply.body) as unknown, blob: async () => reply.body };
+  };
+  const AsyncFunction = (Object.getPrototypeOf(async () => undefined) as { constructor: unknown }).constructor as new (...names: string[]) => (...values: unknown[]) => Promise<void>;
+  await new AsyncFunction("document", "fetch", "URL", files.get("public/app.js")!)(document, fetchStub, url);
+  if (credentials !== undefined) {
+    login.elements.email!.value = credentials.email;
+    login.elements.password!.value = credentials.password;
+    await login.listeners.get("submit")!({ preventDefault: () => undefined });
+  }
+  return { byTestId, login, downloads, rows: () => byTestId.get("orders-table")!.tbody!.children };
+}
+
+describe("page behavior of public/app.js (F2, F3)", () => {
+  const localFiles = (): Map<string, string> => fixtureFiles(localDirectory);
+
+  it("wires each download button to its own URL, and the decoy to a different one", () => {
+    const buttons = [...readLocal("public/index.html").matchAll(/<button[^>]*data-testid="(download-[a-z]+)"[^>]*data-download="([^"]+)"/g)].map((match) => [match[1], match[2]]);
+    expect(buttons).toEqual([["download-orders", "/api/orders.csv"], ["download-invoices", "/api/invoices.csv"]]);
+    const baseline = renderFixtureVariant("m14", localFiles()).get("public/index.html")!;
+    expect([...baseline.matchAll(/<button[^>]*data-testid="(export-csv)"[^>]*data-download="([^"]+)"/g)].map((match) => [match[1], match[2]])).toEqual([["export-csv", "/api/orders.csv"]]);
+  });
+
+  it("downloads the orders CSV from download-orders and a different CSV from the decoy", async () => {
+    const page = await openPage(localDirectory, localFiles(), OWNER_A);
+    await clickDownload(page, "download-orders");
+    await clickDownload(page, "download-invoices");
+    expect(page.downloads.map((item) => [item.filename, item.content.split("\r\n")[0]])).toEqual([
+      ["orders.csv", "id,customer,total,state,inventory"], ["invoices.csv", "invoice,customer,amount,status"],
+    ]);
+  });
+
+  it("downloads the orders CSV from export-csv in the live baseline", async () => {
+    const files = renderFixtureVariant("m14", localFiles());
+    const directory = writeTree(files);
+    const page = await openPage(directory, files, OWNER_A);
+    expect(page.byTestId.has("download-invoices")).toBe(false);
+    await clickDownload(page, "export-csv");
+    expect(page.downloads.map((item) => [item.filename, item.content.split("\r\n")[0]])).toEqual([["orders.csv", "id,customer,total,state,inventory"]]);
+  });
+
+  it("shows an owner the buttons and the tenant's rows, and hides the sign-in form", async () => {
+    const page = await openPage(localDirectory, localFiles(), OWNER_A);
+    expect(page.byTestId.get("identity")!.textContent).toBe("Rovara orders-owner (owner)");
+    expect(page.byTestId.get("download-orders")!.hidden).toBe(false);
+    expect(page.byTestId.get("download-invoices")!.hidden).toBe(false);
+    expect(page.byTestId.get("orders-table")!.hidden).toBe(false);
+    expect(page.rows().map((row) => row.attributes.get("data-testid"))).toEqual(["order-row-a1", "order-row-a2"]);
+    expect(page.login.hidden).toBe(true);
+  });
+
+  it("keeps both download buttons hidden for a viewer", async () => {
+    const page = await openPage(localDirectory, localFiles(), VIEWER_A);
+    expect(page.byTestId.get("identity")!.textContent).toBe("Rovara orders-viewer (viewer)");
+    expect(page.byTestId.get("download-orders")!.hidden).toBe(true);
+    expect(page.byTestId.get("download-invoices")!.hidden).toBe(true);
+    expect(page.byTestId.get("orders-table")!.hidden).toBe(false);
+  });
+
+  it("shows an anonymous visitor the form and nothing else", async () => {
+    const page = await openPage(localDirectory, localFiles(), null);
+    expect(page.login.hidden).toBe(false);
+    expect(page.byTestId.get("identity")!.textContent).toBe("");
+    expect(page.byTestId.get("orders-table")!.hidden).toBe(true);
+    expect(page.byTestId.get("download-orders")!.hidden).toBe(true);
+  });
+
+  it("clears and hides the sign-in form after a form sign-in, so a typed email cannot reach a page snapshot", async () => {
+    const page = await openPage(localDirectory, localFiles(), null, { email: OWNER_A, password: "pw-owner-a" });
+    expect(page.byTestId.get("identity")!.textContent).toBe("Rovara orders-owner (owner)");
+    expect(page.login.hidden).toBe(true);
+    expect(page.login.elements["email"]!.value).toBe("");
+    expect(page.login.elements["password"]!.value).toBe("");
+  });
+});
+
+async function clickDownload(page: Page, testId: string): Promise<void> {
+  const button = page.byTestId.get(testId)!;
+  await button.listeners.get("click")!({ preventDefault: () => undefined });
+}

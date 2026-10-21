@@ -51,10 +51,16 @@ export interface FixtureEdit {
 export interface FixtureVariant {
   /** The committed directory the variant is generated from. */
   directory: string;
-  /** Files of the directory that the variant does not publish. */
+  /** Files of the directory that the variant does not publish. Each one must exist. */
   exclude: readonly string[];
+  /** Files published under another name (source to target), replacing any file at the target. The source must exist and is not published as itself. */
+  renames: Readonly<Record<string, string>>;
+  /** How many local-only blocks the render must remove in total; null when the variant does no block removal. */
+  localOnlyBlocks: number | null;
   /** Exact-once text edits applied to the published files. */
   edits: readonly FixtureEdit[];
+  /** Strings that must not remain in any published file after the render. */
+  forbidden: readonly string[];
 }
 
 const LOCAL_ONLY_BEGIN = "fixture-variant:local-only:begin";
@@ -66,10 +72,14 @@ const LOCAL_ONLY_END = "fixture-variant:local-only:end";
  * fixture (the directory itself) has the renamed button and the decoy, and is never published.
  */
 export const FIXTURE_VARIANTS: Readonly<Record<string, FixtureVariant>> = {
-  [DEFAULT_VARIANT]: { directory: STARTER_DIRECTORY, exclude: [], edits: [] },
+  [DEFAULT_VARIANT]: { directory: STARTER_DIRECTORY, exclude: [], renames: {}, localOnlyBlocks: null, edits: [], forbidden: [] },
   m14: {
     directory: M14_DIRECTORY,
     exclude: ["test/invoices.test.mjs"],
+    // The published repository gets its own README, with nothing about the local fixture, the decoy or this publisher.
+    renames: { "README.baseline.md": "README.md" },
+    localOnlyBlocks: 1,
+    forbidden: ["download-invoices", "Download invoices", "/api/invoices.csv", "invoices.csv"],
     edits: [
       { file: "public/index.html", from: 'data-testid="download-orders"', to: 'data-testid="export-csv"' },
       { file: "public/index.html", from: ">Download orders</button>", to: ">Export CSV</button>" },
@@ -88,33 +98,54 @@ function variantDefinition(name: string): FixtureVariant {
   return definition;
 }
 
-/** Removes every line from a local-only begin marker through its end marker (inclusive). Unbalanced markers are refused. */
-function removeLocalOnlyBlocks(file: string, text: string): string {
+/** Removes every line from a local-only begin marker through its end marker (inclusive), and counts the blocks. Unbalanced markers are refused. */
+function removeLocalOnlyBlocks(file: string, text: string): { text: string; blocks: number } {
   const kept: string[] = [];
   let inside = false;
+  let blocks = 0;
   for (const line of text.split("\n")) {
     if (line.includes(LOCAL_ONLY_BEGIN)) {
       if (inside) throw new Error(`${file} has a nested ${LOCAL_ONLY_BEGIN} marker`);
       inside = true;
+      blocks += 1;
     } else if (line.includes(LOCAL_ONLY_END)) {
       if (!inside) throw new Error(`${file} has a ${LOCAL_ONLY_END} marker without a begin`);
       inside = false;
     } else if (!inside) kept.push(line);
   }
   if (inside) throw new Error(`${file} has a ${LOCAL_ONLY_BEGIN} marker without an end`);
-  return kept.join("\n");
+  return { text: kept.join("\n"), blocks };
 }
 
 /**
- * The files a variant publishes, from the files of its directory (relative POSIX path to text): the excluded files are dropped, the local-only
- * blocks removed and every edit applied. An edit whose text does not occur exactly once is an error, so a baseline can never drift silently.
+ * The files a variant publishes, from the files of its directory (relative POSIX path to text): the excluded files are dropped, renamed files
+ * move to their target, the local-only blocks are removed and every edit applied. Anything unexpected is an error, so a baseline can never drift
+ * silently: an excluded or renamed file that does not exist, an edit whose text does not occur exactly once, a number of local-only blocks other
+ * than the variant declares, or a forbidden (decoy) string left in any published file.
  */
 export function renderFixtureVariant(name: string, files: ReadonlyMap<string, string>): Map<string, string> {
   const variant = variantDefinition(name);
+  for (const file of variant.exclude) {
+    if (!files.has(file)) throw new Error(`variant ${name}: the excluded file ${file} does not exist`);
+  }
+  for (const source of Object.keys(variant.renames)) {
+    if (!files.has(source)) throw new Error(`variant ${name}: the renamed file ${source} does not exist`);
+  }
   const rendered = new Map<string, string>();
+  let blocks = 0;
+  const take = (file: string, text: string): string => {
+    if (variant.localOnlyBlocks === null) return text;
+    const result = removeLocalOnlyBlocks(file, text);
+    blocks += result.blocks;
+    return result.text;
+  };
   for (const [file, text] of files) {
-    if (variant.exclude.includes(file)) continue;
-    rendered.set(file, name === DEFAULT_VARIANT ? text : removeLocalOnlyBlocks(file, text));
+    if (variant.exclude.includes(file) || Object.hasOwn(variant.renames, file)) continue;
+    rendered.set(file, take(file, text));
+  }
+  for (const [source, target] of Object.entries(variant.renames)) rendered.set(target, take(source, files.get(source)!));
+  if (variant.localOnlyBlocks !== null && blocks !== variant.localOnlyBlocks) {
+    throw new Error(`variant ${name}: the render must contain exactly one local-only block (${variant.localOnlyBlocks} expected), removed ${blocks}`);
   }
   for (const edit of variant.edits) {
     const text = rendered.get(edit.file);
@@ -123,6 +154,11 @@ export function renderFixtureVariant(name: string, files: ReadonlyMap<string, st
       throw new Error(`variant ${name}: the edit of ${edit.file} must match exactly once, found ${occurrences}`);
     }
     rendered.set(edit.file, text.replace(edit.from, () => edit.to));
+  }
+  for (const [file, text] of rendered) {
+    for (const forbidden of variant.forbidden) {
+      if (text.includes(forbidden)) throw new Error(`variant ${name}: the decoy string "${forbidden}" remains in ${file}`);
+    }
   }
   return rendered;
 }
@@ -158,12 +194,6 @@ export function assertStarterClean(repositoryRoot: string, starterDirectory: str
   if (status !== "") {
     throw new Error(`${starterDirectory} has uncommitted or untracked changes; commit or remove them before publishing:\n${status}`);
   }
-}
-
-/** The committed files a variant publishes, sorted: the directory's committed files minus the variant's exclusions. */
-export function listVariantFiles(repositoryRoot: string, name: string): string[] {
-  const variant = variantDefinition(name);
-  return listStarterFiles(repositoryRoot, variant.directory).filter((file) => !variant.exclude.includes(file));
 }
 
 /** The committed (HEAD) contents of every file the variant publishes, rendered. */
