@@ -11,7 +11,8 @@ import { E2EApplicationAssertionAssetBindingSchema, E2EApplicationCaseCaptureSch
 import { expectedE2EApplicationReporterDigest } from "../application-runtime-assets.js";
 import type { E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { uuidFor } from "../executor/case-ledger.js";
-import { openRegularFile } from "./regular-file.js";
+import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, CAPTURE_SCREENSHOT_MAX_BYTES, CAPTURE_TRACE_MAX_BYTES, type CaptureEntry } from "../executor/capture.js";
+import { openRegularFile, readRegularFileHead } from "./regular-file.js";
 
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -34,25 +35,39 @@ export const ExecutorResultFileSchema = z.object({
 export type ExecutorResultFile = z.infer<typeof ExecutorResultFileSchema>;
 
 type OutputEvidence = Readonly<{ ref: E2EApplicationEvidenceRef; bytes: Uint8Array; kind: string }>;
+/** A stored screenshot or trace as the executor left it, under the name it was stored by (`case-<index>-<kind>.<ext>`). */
+export type ExecutorCaptureFile = Readonly<{ name: string; sha256: string; bytes: Uint8Array }>;
+/**
+ * What the executor left besides the verdict inputs, read best effort: the head of its own log and the screenshots and traces of failed cases. Neither is ever a verdict
+ * input, so neither can fail a snapshot; what cannot be read is simply absent.
+ */
+export type ExecutorOutputEvidence = Readonly<{
+  /** The first 64 KiB of `executor.log` (redacted by the executor); empty when there is none or it carries a credential. */
+  executorLogHead: Uint8Array;
+  /** `artifacts.json` and the capture files it lists that are still on disk and clean; null when the run listed none. */
+  captures: Readonly<{ artifacts: readonly CaptureEntry[]; files: readonly ExecutorCaptureFile[] }> | null;
+}>;
 type ShardFiles = Readonly<{ list: Uint8Array; listStderr: Uint8Array; report: Uint8Array; runStderr: Uint8Array; runStart: Uint8Array }>;
 /** Everything the host takes out of the executor's out directory, read once, before the directory is removed. */
 export type ExecutorOutputSnapshot = Readonly<{ result: ExecutorResultFile; shardFiles: ReadonlyMap<string, ShardFiles>; evidence: readonly OutputEvidence[];
   /** The protected facts the ledger persisted for the collector's oracle: one observation binding per case, one binding per approved assertion asset. */
   observationBindings: readonly E2EApplicationObservationBinding[]; assertionAssets: readonly E2EApplicationAssertionAssetBinding[];
   /** The merged report for a single-shard run, kept so the host can hand it to the lifecycle as the raw report. */
-  reportBytes: Uint8Array | null }>;
+  reportBytes: Uint8Array | null;
+  /** The executor's log head and its captures, for the operator's evidence; never read to decide a result. */
+  executorEvidence: ExecutorOutputEvidence }>;
 
 /** A regular, non-link file below `root`, read in full and never past the bound. */
-async function readRegular(root: string, relativePath: string, budget: { total: number }): Promise<Uint8Array> {
+async function readRegular(root: string, relativePath: string, budget: { total: number }, maxFileBytes = MAX_FILE_BYTES, maxTotalBytes = MAX_TOTAL_BYTES): Promise<Uint8Array> {
   const path = join(root, ...relativePath.split("/"));
   // Decided on the open handle, not on the path: a link or FIFO swapped in by a container that still runs is refused, never followed or waited on.
   let opened: Awaited<ReturnType<typeof openRegularFile>>;
   try { opened = await openRegularFile(path); } catch { throw new Error(`executor output ${relativePath} is not a bounded regular file`); }
   const { handle, size } = opened;
   try {
-    if (size > MAX_FILE_BYTES) throw new Error(`executor output ${relativePath} is not a bounded regular file`);
+    if (size > maxFileBytes) throw new Error(`executor output ${relativePath} is not a bounded regular file`);
     budget.total += size;
-    if (budget.total > MAX_TOTAL_BYTES) throw new Error("executor output exceeds the host's total read bound");
+    if (budget.total > maxTotalBytes) throw new Error("executor output exceeds the host's total read bound");
     const bytes = await handle.readFile();
     if (bytes.byteLength !== size) throw new Error(`executor output ${relativePath} changed while being read`);
     return Uint8Array.from(bytes);
@@ -86,8 +101,63 @@ export async function readExecutorResultFile(outDir: string): Promise<ExecutorRe
 
 export const executorShardDirectory = (shardId: string): string => sha(shardId).slice(0, 16);
 
+const EXECUTOR_LOG_HEAD_BYTES = 64 * 1024;
+const MAX_ARTIFACTS_FILE_BYTES = 256 * 1024;
+const MAX_CAPTURE_ENTRIES = 256;
+/** A little more than the executor's own budget, so a listing the executor kept within 6 MiB is read whole. */
+const MAX_CAPTURE_READ_BYTES = 7 * 1024 * 1024;
+const captureEntrySchema = z.object({ caseId: z.string().min(1).max(160), kind: z.enum(["screenshot", "trace"]), sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  bytes: z.number().int().nonnegative(), omitted: z.enum(["budget", "credential-match"]).optional() }).strict();
+const artifactsFileSchema = z.object({ schemaVersion: z.literal("e2e-executor-artifacts/v1"), artifacts: z.array(captureEntrySchema).max(MAX_CAPTURE_ENTRIES) }).strict();
+const CAPTURE_FILE = /^case-\d{1,4}-(screenshot|trace)\.(?:jpg|zip)$/;
+const CAPTURE_KIND_MAX = { screenshot: CAPTURE_SCREENSHOT_MAX_BYTES, trace: CAPTURE_TRACE_MAX_BYTES } as const;
+
+/**
+ * The executor's log head and its captures, read best effort from its out directory. A capture file that carries a credential (by the host's own predicate, which also
+ * opens archives) is not handed on and its listing says so; a file the listing names but the directory does not hold is listed as dropped. Anything unreadable leaves
+ * the part it belongs to absent and never fails the snapshot: none of it is a verdict input.
+ */
+async function readExecutorEvidence(outDir: string, containsCredential: (bytes: Uint8Array) => boolean): Promise<ExecutorOutputEvidence> {
+  let executorLogHead: Uint8Array = new Uint8Array();
+  try {
+    const head = await readRegularFileHead(join(outDir, "executor.log"), EXECUTOR_LOG_HEAD_BYTES);
+    if (!containsCredential(head)) executorLogHead = Uint8Array.from(head);
+  } catch { /* a run without a log has no head */ }
+  try {
+    const listing = artifactsFileSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await readRegular(outDir, CAPTURE_ARTIFACTS_FILE, { total: 0 }, MAX_ARTIFACTS_FILE_BYTES))));
+    // Every capture file the directory holds, read once within a bound; a listing is matched to a file by kind and digest, not by trusting a name.
+    const budget = { total: 0 };
+    const loaded: Array<{ name: string; kind: "screenshot" | "trace"; sha256: string; bytes: Uint8Array }> = [];
+    for (const name of (await readdir(join(outDir, CAPTURE_DIR))).sort()) {
+      const match = CAPTURE_FILE.exec(name);
+      if (!match) continue;
+      const kind = match[1] as "screenshot" | "trace";
+      try {
+        const bytes = await readRegular(outDir, `${CAPTURE_DIR}/${name}`, budget, CAPTURE_KIND_MAX[kind], MAX_CAPTURE_READ_BYTES);
+        loaded.push({ name, kind, sha256: sha(bytes), bytes });
+      } catch { /* a file past the bound, or not a plain regular file, is not handed on */ }
+    }
+    const files: ExecutorCaptureFile[] = [];
+    const artifacts: CaptureEntry[] = [];
+    for (const parsed of listing.artifacts) {
+      const entry: CaptureEntry = { caseId: parsed.caseId, kind: parsed.kind, sha256: parsed.sha256, bytes: parsed.bytes, ...(parsed.omitted === undefined ? {} : { omitted: parsed.omitted }) };
+      if (entry.omitted !== undefined) { artifacts.push(entry); continue; }
+      const found = loaded.find((file) => file.kind === entry.kind && file.sha256 === entry.sha256 && file.bytes.byteLength === entry.bytes
+        && !files.some((kept) => kept.name === file.name));
+      if (!found) artifacts.push({ ...entry, omitted: "budget" });
+      else if (containsCredential(found.bytes)) artifacts.push({ ...entry, omitted: "credential-match" });
+      else { files.push({ name: found.name, sha256: found.sha256, bytes: found.bytes }); artifacts.push(entry); }
+    }
+    return Object.freeze({ executorLogHead, captures: Object.freeze({ artifacts: Object.freeze(artifacts), files: Object.freeze(files) }) });
+  } catch { return Object.freeze({ executorLogHead, captures: null }); }
+}
+
 /** Reads the out directory of a finished executor run: its result file, every shard's CLI files and every evidence item. */
-export async function snapshotExecutorOutput(outDir: string, result: ExecutorResultFile): Promise<ExecutorOutputSnapshot> {
+/**
+ * `containsCredential` is the host's own predicate for the run's account credentials (also over archives); a capture or log head it flags is held back from the
+ * operator's evidence. It is never consulted for the verdict inputs, which the collector validates itself.
+ */
+export async function snapshotExecutorOutput(outDir: string, result: ExecutorResultFile, options: { containsCredential?: (bytes: Uint8Array) => boolean } = {}): Promise<ExecutorOutputSnapshot> {
   const budget = { total: 0 };
   const shardFiles = new Map<string, ShardFiles>();
   if (result.shards.length > 0) await requireRealDirectory(join(outDir, "shards"), "shards");
@@ -135,7 +205,7 @@ export async function snapshotExecutorOutput(outDir: string, result: ExecutorRes
   const assertionAssets = await readBindings(/^asset-[A-Za-z0-9._-]+\.json$/, MAX_ASSET_FILES, "e2e-executor-asset-binding/v1",
     (value) => E2EApplicationAssertionAssetBindingSchema.parse(value));
   return Object.freeze({ result, shardFiles, evidence: Object.freeze(evidence), observationBindings: Object.freeze(observationBindings),
-    assertionAssets: Object.freeze(assertionAssets), reportBytes });
+    assertionAssets: Object.freeze(assertionAssets), reportBytes, executorEvidence: await readExecutorEvidence(outDir, options.containsCredential ?? (() => false)) });
 }
 
 /** The identity of what the host owns for one run, so a collector can recompute it without asking the host. */
@@ -273,5 +343,5 @@ export function assembleExecutorActualRun(input: { snapshot: ExecutorOutputSnaps
     declaredMockComponentIds: Object.freeze([...new Set(compiled.group.mocks.map((mock) => mock.componentId))].sort()),
     selected, filtered, supervisorReadback: Object.freeze({ schemaVersion: "e2e-application-supervisor-readback/v1" as const,
       receipt: receiptFrame, evidence: Object.freeze(evidence) }),
-    cleanupConfirmed: true, cleanupServerListening: false, evidenceDirectory: input.evidenceDirectory });
+    cleanupConfirmed: true, cleanupServerListening: false, evidenceDirectory: input.evidenceDirectory, executorEvidence: snapshot.executorEvidence });
 }

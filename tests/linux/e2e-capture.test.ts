@@ -1,0 +1,65 @@
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
+import { CAPTURE_SCREENSHOT_MAX_BYTES, CAPTURE_TRACE_MAX_BYTES } from "../../packages/verifier/src/executor/capture.js";
+import { readZip } from "../../packages/verifier/src/executor/zip.js";
+import { removeProbeDirs, runProbe, type ProbeRun } from "../support/linux-runtime.js";
+
+const why = (r: ProbeRun) => {
+  const logs = r.host.readDiagnostics(r.fixture.plan.runId);
+  return `the run was ${r.run.unavailableReason === null ? "available" : `unavailable (${r.run.unavailableReason})`}; executor exit code ${String(r.exitCode)}\n`
+    + `app log: ${logs.appLogTail || "(empty)"}\nexecutor log: ${logs.executorLogTail || "(empty)"}`;
+};
+const outOf = (r: ProbeRun) => { if (r.outDir === null) throw new Error(`the run was unavailable: ${why(r)}`); return r.outDir; };
+const artifactsOf = async (outDir: string) => (JSON.parse(await readFile(join(outDir, "artifacts.json"), "utf8")) as { artifacts: Array<{ caseId: string; kind: string; sha256: string; bytes: number; omitted?: string }> }).artifacts;
+
+// Task 3.6 on real Docker, the real executor image and a real Chromium (the CI `linux-runtime` job: ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE). Everywhere else it skips.
+describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1")("screenshots and traces of failed cases, in a real executor", () => {
+  afterAll(removeProbeDirs, 120_000);
+  const ON = { screenshots: true, traces: true };
+
+  it("a FAILED web case keeps one JPEG screenshot and one trace, each within its cap, and neither carries a credential", async () => {
+    const r = await runProbe("web-csv-positive-v1", { defect: "extra-order.json", capture: ON });
+    expect(r.exitCode, why(r)).toBe(1);
+    const out = outOf(r);
+    const artifacts = await artifactsOf(out);
+    expect(artifacts.map((item) => item.kind).sort(), JSON.stringify(artifacts)).toEqual(["screenshot", "trace"]);
+    expect(artifacts.every((item) => item.omitted === undefined), JSON.stringify(artifacts)).toBe(true);
+    const screenshot = await readFile(join(out, "captures", "case-0-screenshot.jpg"));
+    const trace = await readFile(join(out, "captures", "case-0-trace.zip"));
+    expect(screenshot.byteLength).toBeLessThanOrEqual(CAPTURE_SCREENSHOT_MAX_BYTES);
+    expect([...screenshot.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+    expect(trace.byteLength).toBeLessThanOrEqual(CAPTURE_TRACE_MAX_BYTES);
+    // A real Playwright trace opens with the strict reader, and holds its action and network logs.
+    expect(readZip(trace)?.map((entry) => entry.name), "the trace is not a readable archive").toEqual(expect.arrayContaining(["trace.trace", "trace.network"]));
+    expect(r.credentialsLeaked).toBe(false);
+    // The worker's view of the same run: the listing and the files travel in the actual run, for the operator's evidence.
+    const captures = (r.run.actualRun as { executorEvidence?: { captures: { artifacts: unknown[]; files: Array<{ name: string }> } | null } } | null)?.executorEvidence?.captures;
+    expect(captures?.files.map((file) => file.name).sort()).toEqual(["case-0-screenshot.jpg", "case-0-trace.zip"]);
+  }, 300_000);
+
+  it("a PASS case keeps no capture, and the listing is empty", async () => {
+    const r = await runProbe("web-csv-positive-v1", { defect: null, capture: ON });
+    expect(r.exitCode, why(r)).toBe(0);
+    const out = outOf(r);
+    expect(await artifactsOf(out)).toEqual([]);
+    expect(await readdir(join(out, "captures")).catch(() => [])).toEqual([]);
+  }, 300_000);
+
+  it("the run's session cookie value is not in a trace, whatever request carried it", async () => {
+    const r = await runProbe("web-csv-positive-v1", { defect: "extra-order.json", capture: ON });
+    const out = outOf(r);
+    const trace = readZip(await readFile(join(out, "captures", "case-0-trace.zip")));
+    expect(trace, "the trace is not a readable archive").not.toBeNull();
+    const text = trace!.map((entry) => Buffer.from(entry.data).toString("latin1")).join("\n");
+    expect(text).not.toMatch(/orders_session=(?!<session>)[A-Za-z0-9_-]{16,}/);
+  }, 300_000);
+
+  it("an API run, whose admission approves no capture, writes no capture file and no listing", async () => {
+    const r = await runProbe("api-state-positive-v1", { defect: null });
+    expect(r.exitCode, why(r)).toBe(0);
+    const out = outOf(r);
+    expect(await readdir(out)).not.toContain("captures");
+    expect(await readdir(out)).not.toContain("artifacts.json");
+  }, 300_000);
+});

@@ -347,11 +347,18 @@ const MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES = 112 * 1024 * 1024;
 const WORKFLOW_CANDIDATE_CHUNK_BYTES = 64 * 1024;
 const EVENT_TRANSACTION_CHUNK = 80;
 
+/**
+ * The capture policy a new setup proposal and its approval carry (owner decision D3): screenshots and traces of failed cases, downloads, no video. The executor keeps
+ * these only for failed cases and only inside a fixed budget (Task 3.6). A project whose setup was approved earlier keeps the policy it was approved with, and a
+ * proposal made before this default existed is no longer approvable: it is proposed again, which is the "approve setup again" step.
+ */
+export const PROJECT_SETUP_CAPTURE_POLICY = Object.freeze({ screenshots: true, traces: true, video: false, downloads: true });
+
 function projectSetupPolicy(proposal: E2ESetupProposal): ReturnType<typeof E2EPolicySchema.parse> {
   return E2EPolicySchema.parse({
     schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: proposal.targets,
     defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
-    capture: { screenshots: false, traces: false, video: false, downloads: false },
+    capture: PROJECT_SETUP_CAPTURE_POLICY,
     limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
       maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null },
   });

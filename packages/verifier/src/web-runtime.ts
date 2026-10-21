@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { E2EApplicationCliHostDescriptorSchema, E2EScenarioSchema, E2ERunBindingSchema, E2ERuntimeAccountRefSchema,
   canonicalJson, type E2ERuntimeAccountRef, type E2EScenario, type E2EApplicationAccountPorts, type E2EApplicationPreparedEnvironment,
   type E2EApplicationSupervisorPorts } from "@agentx/contracts";
@@ -27,7 +29,67 @@ import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const utc = () => new Date().toISOString();
 
+/**
+ * Screenshots and traces of failed cases (owner decision D3). Supplied only by the executor host, from the capture policy the admission approved (Ruling BZ), and only when
+ * a kind is approved; a kind that is not approved is never started, taken or written. Capture is best effort and never changes what a case reports.
+ */
+export type E2EWebCapturePorts = Readonly<{
+  screenshots: boolean;
+  traces: boolean;
+  /** Stores one capture of one case under the executor's budget and credential scan. */
+  record(input: { caseId: string; kind: "screenshot" | "trace"; bytes: Uint8Array }): Promise<unknown>;
+  /** A directory only the executor reads, for the file a trace is written to before it is read back and removed. */
+  scratchDirectory: string;
+}>;
+/** What the case adapter made of the case, for capture: a failed assertion is FAILED, a case that could not be observed is UNKNOWN. */
+export type WebCaseCaptureOutcome = "passed" | "failed" | "unknown";
+const SCREENSHOT_QUALITY = 70;
+const SCREENSHOT_TIMEOUT_MS = 5_000;
+
+/**
+ * Starts tracing the case's browser context. Called after the approved session is applied to the context, so nothing before it (the session set-up) is in the trace.
+ * False when tracing is not approved or would not start.
+ */
+export async function startWebCaseTrace(capture: E2EWebCapturePorts | undefined, context: Pick<BrowserContext, "tracing">): Promise<boolean> {
+  if (!capture?.traces) return false;
+  try {
+    await context.tracing.start({ screenshots: false, snapshots: true, sources: false });
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * Takes what the outcome earns and ends tracing. A FAILED case keeps one screenshot and one trace, an UNKNOWN case one screenshot, a PASS case nothing (its trace is
+ * discarded). Every step is best effort: a page that crashed, a trace that will not save or a recorder that refuses is absorbed, so capture can never turn a case
+ * into a failure or change its verdict.
+ */
+export async function finishWebCaseCapture(input: { capture: E2EWebCapturePorts | undefined; caseId: string; outcome: WebCaseCaptureOutcome;
+  page: Pick<Page, "screenshot"> | null; context: Pick<BrowserContext, "tracing"> | null; tracing: boolean }): Promise<void> {
+  const { capture, caseId, outcome, page, context } = input;
+  if (!capture) return;
+  if (capture.screenshots && outcome !== "passed" && page) {
+    try {
+      const bytes = await page.screenshot({ type: "jpeg", quality: SCREENSHOT_QUALITY, timeout: SCREENSHOT_TIMEOUT_MS });
+      if (bytes.byteLength > 0) await capture.record({ caseId, kind: "screenshot", bytes: Uint8Array.from(bytes) });
+    } catch { /* a page that cannot be photographed leaves no screenshot */ }
+  }
+  if (input.tracing && context) {
+    if (capture.traces && outcome === "failed") {
+      const path = join(capture.scratchDirectory, `trace-${randomUUID()}.zip`);
+      try {
+        await context.tracing.stop({ path });
+        await capture.record({ caseId, kind: "trace", bytes: Uint8Array.from(await readFile(path)) });
+      } catch { /* a trace that cannot be saved or stored leaves none */ }
+      finally { await rm(path, { force: true }).catch(() => undefined); }
+    } else {
+      try { await context.tracing.stop(); } catch { /* nothing to discard */ }
+    }
+  }
+}
+
 export type E2EWebRuntimePorts = Readonly<{
+  /** Screenshots and traces of failed cases; absent when the admission approves none. */
+  capture?: E2EWebCapturePorts;
   casePlans: E2EApplicationCliCasePlanReader;
   caseObservations: E2EApplicationProtectedCaseObservationReader;
   evidence: E2EApplicationCliEvidenceWriter;
@@ -397,6 +459,10 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
       let caseFailed = false;
       let caseError: unknown;
       let sessionClosed: boolean;
+      // For capture only: the live page and context once the case has them, whether tracing started, and what the case turned out to be.
+      let owned = null as { page: Page; context: BrowserContext } | null;
+      let tracing = false;
+      let captureOutcome: WebCaseCaptureOutcome = "unknown";
       try {
         const chain = await runInsideAssertionSteps(fixtures[ASSERTION_FIXTURE], scenario.assertions.length, async () => {
         // The fresh attempt context has no page, and the case needs a live one before approved authentication can be applied. The one
@@ -407,6 +473,9 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
         const context = surface.context();
         const page = surface.page();
         await ports.applyToOwnedBrowserContext(session.sessionRef, context, operationSignal);
+        // Tracing starts only now, after the approved session is in the context, so nothing of the session set-up is in a trace.
+        owned = { page, context };
+        tracing = await startWebCaseTrace(ports.capture, context);
         const protectedObservation = await readValidatedE2EApplicationCaseObservation({ reader: ports.caseObservations,
           launchContext, plan, ownedClientRef: session.sessionRef, expectedSubjectKind: "browser", signal: operationSignal });
         if (protectedObservation.binding.sessionRef !== session.sessionRef || protectedObservation.binding.accountIdDigest !== session.accountIdDigest
@@ -436,12 +505,15 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
         });
         if (chain.outcome === null) throw chain.error;
         const { failedIndex, unavailableIndex } = chain.outcome;
+        captureOutcome = failedIndex >= 0 ? "failed" : unavailableIndex >= 0 ? "unknown" : "passed";
         if (failedIndex >= 0) throw new Error(`web assertion ${failedIndex} failed against the actual owned browser observation`);
         if (unavailableIndex >= 0) throw new Error(`web assertion ${unavailableIndex} is unavailable on the installed fixed browser surface`);
       } catch (error) {
         caseFailed = true;
         caseError = error;
       } finally {
+        // Before the session closes, while the page is still the case's own; best effort, so it can change neither the verdict nor the cleanup below.
+        await finishWebCaseCapture({ capture: ports.capture, caseId, outcome: captureOutcome, page: owned?.page ?? null, context: owned?.context ?? null, tracing });
         try { sessionClosed = (await ports.closeCaseSession(session.sessionRef, AbortSignal.timeout(5_000))).confirmed; }
         catch { sessionClosed = false; }
       }

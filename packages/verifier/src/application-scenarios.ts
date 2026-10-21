@@ -199,7 +199,9 @@ export function validateE2EApplicationLaunchTarget(target: E2EExecutionPlan["eff
   if (launch.targetId !== target.targetId || launch.profileId !== target.runtimeProfileId || runtime.profileId !== target.runtimeProfileId
     || launch.factoryManifestDigest !== runtime.manifestDigest) throw new Error("application launch target differs from its source target or installed runtime descriptor");
   const capability = E2ERuntimeCapabilityDescriptorSchema.parse(runtime.capabilities);
-  const expectedArtifacts = [capture.screenshots ? "screenshot" : null, capture.video ? "video" : null].filter((item): item is "screenshot" | "video" => item !== null);
+  // Only a web target can record a screenshot or a video; an API target's engine has no artifact hook (see webApiApplicationLaunchTarget).
+  const expectedArtifacts = target.kind === "api" ? []
+    : [capture.screenshots ? "screenshot" : null, capture.video ? "video" : null].filter((item): item is "screenshot" | "video" => item !== null);
   // An API target runs on Rovara's own HTTP engine, which has no state hook: its `state` assertions are the runtime's approved probes,
   // so the engine's state capability is false whatever assertions the runtime supports.
   const expectedState = target.kind === "api" && launch.engine !== null ? false : capability.supportedAssertions.includes("state");

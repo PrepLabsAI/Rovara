@@ -127,6 +127,8 @@ export type WebApiProbePlan = Readonly<{
  * `runId` binds the run to a qualification challenge; without it the run id is random.
  */
 export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot: string; runId?: string; /** The workflow task id the run is bound to; default is a fixed qualification label. */ taskId?: string; deadlineMs?: number; healthTimeoutMs?: number; role?: "owner" | "viewer";
+  /** Screenshot and trace capture the plan's policy approves; the qualification probes pass neither, which keeps their own policy (screenshots for a web probe, no traces). Only tests that exercise capture pass them. */
+  capture?: { screenshots?: boolean; traces?: boolean };
   /** Build commands for the recipe (the fixture itself builds nothing); the recipe digest is recomputed to match. */
   recipeBuild?: { program: string; args: string[]; cwd: string; timeoutMs: number; env: Record<string, string> }[];
   /** Overrides of the recipe's start command (arguments, timeout, env); the recipe digest is recomputed to match. */
@@ -175,7 +177,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [scenario.scenarioId],
     targets: setupProposal.targets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
     // The real web engine reports screenshot and video capability, and the compiler binds the launch descriptor to the capture policy.
-    capture: { screenshots: kind === "web", traces: false, video: kind === "web", downloads: false },
+    capture: { screenshots: options.capture?.screenshots ?? kind === "web", traces: options.capture?.traces ?? false, video: kind === "web", downloads: false },
     limits: { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 60_000, caseTimeoutMs: 120_000,
       maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
   const selectionInput = { candidateDigest: candidate.digest, expectedCandidate: candidate, sourceSnapshot: snapshot, planDigest, policy, scenarios: [scenario],

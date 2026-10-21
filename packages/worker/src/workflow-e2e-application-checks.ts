@@ -74,6 +74,72 @@ export function shardReportDiagnostics(actualRun: unknown): Array<{ shardId: str
   return kept;
 }
 
+/** How much of the executor's own log a group keeps, from its start. */
+const EXECUTOR_LOG_HEAD_BYTES = 64 * 1024;
+
+/** The first `maxBytes` of `bytes` as text, cut before a partial multi-byte sequence so no replacement character appears. */
+function utf8Head(bytes: Uint8Array, maxBytes: number): string {
+  let end = Math.min(bytes.byteLength, maxBytes);
+  if (end < bytes.byteLength) while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return Buffer.from(bytes.subarray(0, end)).toString("utf8");
+}
+
+type CaptureArtifactEntry = { caseId: string; kind: "screenshot" | "trace"; sha256: string; bytes: number; omitted?: "budget" | "credential-match" };
+/**
+ * Raw output of a run, kept whatever its verdict and for operators only (the application's own output, with account credentials redacted). The shard report and the
+ * observations are verdict inputs for a group that was qualified, so they stay in its collection and this only says where; for a group that was not, the report is in
+ * `diagnostics.shardReports` and the observations are copied here. The executor's log head and the screenshots and traces of failed cases are here for every group.
+ * Nothing reads this to decide a verdict.
+ */
+export type OperatorEvidence = {
+  notice: string;
+  rawReportIn: "collection" | "diagnostics.shardReports" | null;
+  observationsIn: "collection" | "operatorEvidence.observations" | null;
+  observations: Array<{ artifactId: string; sha256: string; byteLength: number; mediaType: string; contentBase64: string | null }>;
+  executorLogHead: string | null;
+  captures: { artifacts: CaptureArtifactEntry[]; files: Array<{ name: string; sha256: string; bytes: number; base64: string }> } | null;
+};
+
+/** The operator evidence of a run that was read back; null when it holds nothing to keep. */
+export function operatorEvidence(actualRun: unknown, qualified: boolean): OperatorEvidence | null {
+  if (typeof actualRun !== "object" || actualRun === null) return null;
+  const run = actualRun as { supervisorReadback?: { evidence?: unknown }; executorEvidence?: { executorLogHead?: unknown; captures?: unknown } };
+  const observations: OperatorEvidence["observations"] = [];
+  const items = !qualified && Array.isArray(run.supervisorReadback?.evidence) ? run.supervisorReadback.evidence as unknown[] : [];
+  for (const item of items) {
+    const { ref, bytes } = (item ?? {}) as { ref?: { artifactId?: unknown; sha256?: unknown; byteLength?: unknown; mediaType?: unknown }; bytes?: unknown };
+    if (typeof ref?.artifactId !== "string" || typeof ref.sha256 !== "string" || typeof ref.byteLength !== "number" || typeof ref.mediaType !== "string" || !(bytes instanceof Uint8Array)) continue;
+    observations.push({ artifactId: ref.artifactId, sha256: ref.sha256, byteLength: ref.byteLength, mediaType: ref.mediaType, contentBase64: Buffer.from(bytes).toString("base64") });
+  }
+  const head = run.executorEvidence?.executorLogHead;
+  const executorLogHead = head instanceof Uint8Array && head.byteLength > 0 ? utf8Head(head, EXECUTOR_LOG_HEAD_BYTES) : null;
+  const rawCaptures = run.executorEvidence?.captures as { artifacts?: unknown; files?: unknown } | null | undefined;
+  const captures: OperatorEvidence["captures"] = rawCaptures && Array.isArray(rawCaptures.artifacts) && Array.isArray(rawCaptures.files) ? {
+    artifacts: (rawCaptures.artifacts as CaptureArtifactEntry[]).map((entry) => ({ ...entry })),
+    files: (rawCaptures.files as Array<{ name: string; sha256: string; bytes: Uint8Array }>).filter((file) => file.bytes instanceof Uint8Array)
+      .map((file) => ({ name: file.name, sha256: file.sha256, bytes: file.bytes.byteLength, base64: Buffer.from(file.bytes).toString("base64") })) } : null;
+  if (executorLogHead === null && captures === null && observations.length === 0) return null;
+  return { notice: DIAGNOSTICS_NOTICE, rawReportIn: qualified ? "collection" : shardReportDiagnostics(actualRun).length > 0 ? "diagnostics.shardReports" : null,
+    observationsIn: qualified ? "collection" : observations.length > 0 ? "operatorEvidence.observations" : null, observations, executorLogHead, captures };
+}
+
+/**
+ * The operator evidence from whole to nothing, each step dropping more and keeping what matters most for longest: the traces go first, then the screenshots (each
+ * dropped capture stays listed, as `budget`), then the copied observations' bytes, then all of it. The verdict inputs are never in this list, so a group that has to
+ * shed operator evidence to fit keeps every verdict input.
+ */
+export function operatorEvidenceVariants(whole: OperatorEvidence | null): Array<OperatorEvidence | null> {
+  if (whole === null) return [null];
+  const dropped = (keep: (name: string) => boolean): OperatorEvidence => ({ ...whole, captures: whole.captures === null ? null : {
+    artifacts: whole.captures.artifacts.map((entry) => {
+      const stored = whole.captures!.files.some((file) => file.sha256 === entry.sha256 && keep(file.name));
+      return entry.omitted !== undefined || stored ? entry : { ...entry, omitted: "budget" as const };
+    }),
+    files: whole.captures.files.filter((file) => keep(file.name)) } });
+  const withoutObservationBytes: OperatorEvidence = { ...dropped(() => false), observations: whole.observations.map((item) => ({ ...item, contentBase64: null })) };
+  return [whole, dropped((name) => !name.endsWith("-trace.zip")), dropped(() => false), withoutObservationBytes, null];
+}
+
 /** The lifecycle input for one group, derived from what the admission already approved and nothing else. */
 function applicationRunInput(compiled: E2ECompiledApplicationSuite, binding: E2ERunBinding): E2ERunInput {
   const context = compiled.runtimeAdmissionContext;
@@ -190,20 +256,29 @@ export async function executeWorkflowE2EApplicationChecks(input: {
         const shardReports = run.actualRun === null ? [] : shardReportDiagnostics(run.actualRun);
         return { notice: DIAGNOSTICS_NOTICE, appLogTail: tail(logs.appLogTail), buildLogTail: tail(logs.buildLogTail), executorLogTail: tail(logs.executorLogTail), ...(shardReports.length === 0 ? {} : { shardReports }) };
       })();
+      const wholeOperator = run.actualRun === null ? null : operatorEvidence(run.actualRun, qualification !== null);
       const groupRun: Record<string, unknown> = { kind: "application", group: validated.executionPlan.groups.find((item) => item.groupId === compiled.group.groupId), binding,
         collection: qualification ?? { status: "UNKNOWN", reason: unavailableReason }, unavailableReason,
         lifecycle: { cleanup: run.lifecycle.cleanup, process: run.lifecycle.process },
-        actual: qualification === null ? null : { collection: collected, collectionInputs }, diagnostics };
+        actual: qualification === null ? null : { collection: collected, collectionInputs }, diagnostics, operatorEvidence: wholeOperator };
       const envelope = (value: Record<string, unknown>) => Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-group-evidence/v1", admissionSha256: reference.admissionRef.sha256,
         taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
         candidateDigest: admission.candidateDigest, round, groupRun: value }), "utf8");
       const limit = groupLimit(compiled);
-      let uploaded = { groupRun, evidence: envelope(groupRun), succeeded: qualification !== null && run.lifecycle.process.exitCode === 0 };
-      // Evidence the broker would refuse (over the group ceiling, or more than the aggregate has room for) is never sent: this group is UNKNOWN, for a reason that names the cause.
-      if (uploaded.evidence.byteLength > limit || !budget.reserve(uploaded.evidence.byteLength)) {
-        console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_evidence_too_large", groupRunId: binding.runId, evidenceBytes: uploaded.evidence.byteLength,
+      const succeeded = qualification !== null && run.lifecycle.process.exitCode === 0;
+      // Operator evidence (captures, copied observations, the executor log head) is what gives way when evidence is tight, in the order of operatorEvidenceVariants; the verdict
+      // inputs never do. The first form that the broker would take and the aggregate has room for is the one uploaded.
+      let uploaded: { groupRun: Record<string, unknown>; evidence: Buffer; succeeded: boolean } | null = null;
+      for (const variant of operatorEvidenceVariants(wholeOperator)) {
+        const candidate = { ...groupRun, operatorEvidence: variant };
+        const evidence = envelope(candidate);
+        if (evidence.byteLength <= limit && evidence.byteLength <= budget.remaining()) { budget.reserve(evidence.byteLength); uploaded = { groupRun: candidate, evidence, succeeded }; break; }
+      }
+      // Evidence the broker would refuse even without operator evidence (over the group ceiling, or more than the aggregate has room for) is never sent: this group is UNKNOWN, for a reason that names the cause.
+      if (uploaded === null) {
+        console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_evidence_too_large", groupRunId: binding.runId, evidenceBytes: envelope({ ...groupRun, operatorEvidence: null }).byteLength,
           limitBytes: limit, aggregateRemainingBytes: budget.remaining() }));
-        const reduced: Record<string, unknown> = { ...groupRun, collection: { status: "UNKNOWN", reason: EVIDENCE_TOO_LARGE }, unavailableReason: EVIDENCE_TOO_LARGE, actual: null, diagnostics: null };
+        const reduced: Record<string, unknown> = { ...groupRun, collection: { status: "UNKNOWN", reason: EVIDENCE_TOO_LARGE }, unavailableReason: EVIDENCE_TOO_LARGE, actual: null, diagnostics: null, operatorEvidence: null };
         uploaded = { groupRun: reduced, evidence: envelope(reduced), succeeded: false };
         budget.reserve(Math.min(uploaded.evidence.byteLength, budget.remaining()));
       }
