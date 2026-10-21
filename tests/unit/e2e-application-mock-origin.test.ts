@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { canonicalJson } from "../../packages/contracts/src/index.js";
 import { E2EApplicationCollectionOracleSchema, E2EApplicationCollectionSchema, UNMOCKED_EXTERNAL_CALL_REASON, qualifyE2EApplicationCollection,
   type E2EApplicationCollection } from "../../packages/verifier/src/application-result-adapter.js";
+import { MOCK_LEDGER_WITHHELD } from "../../packages/verifier/src/host/mock-ledger.js";
 import { fixtureEvidence } from "../support/web-api-qualification.js";
 
 // The collector's verdict on two real runs of the qualification app, recorded on a Docker host: one whose inventory origin is served by the approved mock, and one whose
@@ -109,6 +110,20 @@ describe("the verdict on a run whose inventory origin is served by the approved 
     // The same frame without the collection's own copy of it is not accepted: the two must agree.
     expect(qualifyE2EApplicationCollection(oracle, injected).status).toBe("UNKNOWN");
     expect(qualifyE2EApplicationCollection(oracle, injected).reason).toMatch(/unmocked call rows differ/);
+  });
+
+  it("is UNKNOWN for unmocked-external-call when the call's path was withheld because it carried a run credential", () => {
+    const readback = collection.supervisorReadback as unknown as { receipt: Wire; evidence: Wire[] };
+    const receipt = frameOf(readback.receipt);
+    const capture = receipt.caseCaptures[0];
+    const call = { requestId: "unbound-req-withheld", origin: "unbound", kind: "unmatched", method: "GET", path: MOCK_LEDGER_WITHHELD, observedAt: receipt.context.observedAt };
+    const frame = encode({ schemaVersion: "e2e-application-unmocked-calls/v1", context: receipt.context, caseId: capture.caseId, shardId: capture.shardId,
+      upstreamRunId: receipt.launches[0].upstreamRunId, calls: [call] }, "rovara-unmocked-calls-withheld");
+    const injected = withReceipt(collection, (next) => { next.unmockedCalls = [{ caseId: capture.caseId, shardId: capture.shardId, ref: frame.ref }]; }, (list) => [...list, frame]);
+    const verdict = qualifyE2EApplicationCollection(oracle, { ...injected, unmockedCalls: [{ caseId: capture.caseId, shardId: capture.shardId, calls: [call] }] } as E2EApplicationCollection);
+    expect(verdict.status).toBe("UNKNOWN");
+    expect(verdict.result?.cases[0]).toMatchObject({ status: "unavailable", reason: UNMOCKED_EXTERNAL_CALL_REASON });
+    expect(verdict.mockSummary?.unmockedCalls).toEqual({ sinkhole: 1, mocked: 0 });
   });
 
   it("is not a pass when the collection's consumption rows differ from the retained frames", () => {

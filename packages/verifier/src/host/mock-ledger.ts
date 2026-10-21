@@ -57,6 +57,34 @@ export function parseMockLedger(input: Readonly<{ origin: string; componentId: s
   return Object.freeze({ origin: input.origin, componentId: input.componentId, inputField: input.fixture?.inputField ?? null, lines: Object.freeze(lines), malformed, overflowed });
 }
 
+/** What replaces a ledger field that carried a run credential. */
+export const MOCK_LEDGER_WITHHELD = "[credential]";
+
+/**
+ * Keeps run credentials out of what the mocks recorded. The app sees the run's passwords when the executor signs in through its form, and a mock records the method, path and
+ * input of every call verbatim, so a hostile app could carry one into the unmocked-call evidence and the display (`http://mock-unbound:8080/<password>`). Each field that the
+ * run's credential check matches, as recorded or percent-decoded, is replaced by a fixed marker. The call itself is never dropped: a line that carried a credential is always
+ * an unmatched call (a consumption is never made of withheld text), so its case stays UNKNOWN `unmocked-external-call`.
+ */
+export function withholdMockLedgerCredentials(ledger: ParsedMockLedger, containsCredential: (bytes: Uint8Array) => boolean): ParsedMockLedger {
+  const carries = (value: string | null): boolean => {
+    if (value === null || value.length === 0) return false;
+    if (containsCredential(Buffer.from(value, "utf8"))) return true;
+    let decoded: string;
+    try { decoded = decodeURIComponent(value.replace(/\+/g, " ")); } catch { return false; }
+    return decoded !== value && containsCredential(Buffer.from(decoded, "utf8"));
+  };
+  const lines = ledger.lines.map((entry): ConsumptionLine | UnmatchedLine => {
+    const { line } = entry;
+    const method = carries(line.method); const path = carries(line.path); const input = carries(line.inputValue);
+    if (!method && !path && !input) return entry;
+    const withheld: MockLedgerLine = { ...line, variantId: null, method: method ? MOCK_LEDGER_WITHHELD : line.method, path: path ? MOCK_LEDGER_WITHHELD : line.path,
+      inputValue: input ? MOCK_LEDGER_WITHHELD : line.inputValue };
+    return Object.freeze(entry.kind === "unmatched" && entry.reason !== undefined ? { kind: "unmatched" as const, line: withheld, reason: entry.reason } : { kind: "unmatched" as const, line: withheld });
+  });
+  return Object.freeze({ ...ledger, lines: Object.freeze(lines) });
+}
+
 export type CaseWindow = Readonly<{ caseId: string; startMs: number; endMs: number }>;
 export type BoundConsumption = Readonly<{ origin: string; componentId: string; inputField: string; line: ConsumptionLine["line"]; variant: ConsumptionLine["variant"] }>;
 export type BoundUnmocked = Readonly<{ origin: string; kind: "unmatched" | "foreign-caller" | "malformed" | "ledger-overflow"; requestId: string; method: string; path: string; observedAt: string }>;

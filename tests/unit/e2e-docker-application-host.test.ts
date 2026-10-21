@@ -900,6 +900,38 @@ describe("docker application host: approved external-origin mocks and the sinkho
     expect(killAt).toBeGreaterThan(fake.events.indexOf("executor finished"));
   });
 
+  it("withholds a run credential the app put into a call it made, and still counts that call as unmocked", async () => {
+    // The app sees the run's passwords when the executor signs in through its form, and the mocks record what it asks verbatim: a call to
+    // `http://mock-unbound:8080/<password>` would otherwise carry the credential into the unmocked-call evidence and the display.
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake);
+    let account = { email: "", password: "" };
+    const unmatched = (requestId: string, method: string, path: string, inputValue: string | null, ms: number) => {
+      const request = { method, path, inputValue };
+      return { requestId, ...request, variantId: null, status: 599, remoteAddress: "172.30.0.3", requestSha256: mockRequestDigest(request),
+        responseSha256: MOCK_UNMOCKED_RESPONSE_DIGEST, observedAt: new Date(Date.parse("2026-10-20T12:00:00.000Z") + ms).toISOString() };
+    };
+    fake.onExecutor = (outDir) => {
+      account = (JSON.parse(readFileSync(join(dirname(outDir), "plan.json"), "utf8")) as { accounts: { email: string; password: string }[] }).accounts[0]!;
+      okOutput(s)(outDir);
+      fake.appendMockLedger("unbound", [unmatched("req-1", "GET", `/${account.password}`, null, 10), unmatched("req-2", "GET", `/login?u=${encodeURIComponent(account.email)}`, null, 20),
+        unmatched("req-3", "GET", "/plain", null, 30)]);
+      fake.appendMockLedger("inventory-v1", [unmatched("req-4", "GET", "/v1/stock", account.password, 40)]);
+    };
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBeNull();
+    expect(account.password.length).toBeGreaterThan(16);
+    const snapshot = (s.assemble.mock.calls[0]![0] as { snapshot: { mockLedgers: { origin: string; malformed: number; lines: { kind: string; line: { requestId: string; method: string; path: string; inputValue: string | null } }[] }[] } }).snapshot;
+    const text = JSON.stringify(snapshot.mockLedgers);
+    for (const secret of [account.password, account.email, encodeURIComponent(account.email)]) expect(text).not.toContain(secret);
+    const sink = snapshot.mockLedgers.find((ledger) => ledger.origin === "unbound")!;
+    // Every call is still there and still unmatched (so its case is UNKNOWN `unmocked-external-call`); only the text that carried a credential is replaced.
+    expect(sink.malformed).toBe(0);
+    expect(sink.lines.map((line) => [line.kind, line.line.requestId, line.line.method, line.line.path])).toEqual([
+      ["unmatched", "req-1", "GET", "[credential]"], ["unmatched", "req-2", "GET", "[credential]"], ["unmatched", "req-3", "GET", "/plain"]]);
+    const inventory = snapshot.mockLedgers.find((ledger) => ledger.origin === "inventory-v1")!;
+    expect(inventory.lines.map((line) => [line.kind, line.line.path, line.line.inputValue])).toEqual([["unmatched", "/v1/stock", "[credential]"]]);
+  });
+
   it("removes the mock and sinkhole containers with the rest of the run, and attests only the run's two core containers", async () => {
     const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
     const result = await runWith(s);

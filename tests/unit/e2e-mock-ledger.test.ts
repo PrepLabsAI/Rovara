@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { E2EApiMockFixture } from "../../packages/contracts/src/index.js";
 import { MOCK_UNMOCKED_RESPONSE_DIGEST, mockRequestDigest, mockResponseDigest, type MockLedgerLine } from "../../packages/verifier/src/executor/mock-server.js";
-import { bindMockLedgers, parseMockLedger, type ParsedMockLedger } from "../../packages/verifier/src/host/mock-ledger.js";
+import { MOCK_LEDGER_WITHHELD, bindMockLedgers, parseMockLedger, withholdMockLedgerCredentials, type ParsedMockLedger } from "../../packages/verifier/src/host/mock-ledger.js";
+import { buildMockProofs } from "../../packages/verifier/src/host/mock-proofs.js";
+import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 
 const fixture: E2EApiMockFixture = { schemaVersion: "source-backed-api-fixtures/v1", operationId: "getStock", method: "GET", path: "/v1/stock", inputField: "orderId", variants: [
   { id: "success", inputValue: "a1", status: 200, body: { status: "in-stock" } },
@@ -136,5 +138,48 @@ describe("binding ledger lines to cases by the time window of the executor's act
     const bound = bind(mocked(...Array.from({ length: 105 }, (_, index) => matched("success", 100 + index % 90))));
     expect(bound.get("case-a")!.consumptions).toHaveLength(100);
     expect(bound.get("case-a")!.unmocked.map((row) => row.kind)).toEqual(["ledger-overflow"]);
+  });
+});
+
+describe("keeping run credentials out of what the mocks recorded", () => {
+  const PASSWORD = "Zq3xV9pL2mN8bR4tY6wK1sD7fG5hJ0cE";
+  const EMAIL = "owner-7f3a@accounts.rovara.test";
+  const redactor = createCredentialRedactor([{ profileId: "owner", email: EMAIL, password: PASSWORD }]);
+  const withhold = (ledger: ParsedMockLedger) => withholdMockLedgerCredentials(ledger, (value) => redactor.contains(value));
+  const line = (ms: number, method: string, path: string, inputValue: string | null, remoteAddress = APP): MockLedgerLine => {
+    counter += 1;
+    return { requestId: `req-${counter}`, method, path, inputValue, variantId: null, status: 599, requestSha256: mockRequestDigest({ method, path, inputValue }),
+      responseSha256: MOCK_UNMOCKED_RESPONSE_DIGEST, observedAt: at(ms), remoteAddress };
+  };
+
+  it("replaces a path, method or input that carries a credential, raw or percent-encoded, and keeps every call as an unmatched one", () => {
+    const ledger = withhold(sink(line(10, "GET", `/${PASSWORD}`, null), line(20, "GET", `/x?u=${encodeURIComponent(EMAIL)}`, null), line(30, "POST", "/plain", null),
+      line(40, "GET", "/a", PASSWORD)));
+    expect(JSON.stringify(ledger)).not.toContain(PASSWORD);
+    expect(JSON.stringify(ledger)).not.toContain(EMAIL);
+    expect(JSON.stringify(ledger)).not.toContain(encodeURIComponent(EMAIL));
+    expect(ledger.lines.map((item) => [item.kind, item.line.method, item.line.path, item.line.inputValue])).toEqual([
+      ["unmatched", "GET", MOCK_LEDGER_WITHHELD, null], ["unmatched", "GET", MOCK_LEDGER_WITHHELD, null], ["unmatched", "POST", "/plain", null], ["unmatched", "GET", "/a", MOCK_LEDGER_WITHHELD]]);
+  });
+
+  it("leaves a ledger without a credential exactly as it was, consumptions included", () => {
+    const parsed = mocked(matched("success", 10), unmatched(20));
+    expect(withhold(parsed)).toEqual(parsed);
+  });
+
+  it("binds withheld calls, from the app or from another caller, into the case's unmocked-call frame without the credential", () => {
+    const foreign = withhold(sink(line(150, "GET", `/${PASSWORD}`, null, "172.30.0.9")));
+    const parsed = parseMockLedger({ appAddress: APP, origin: "unbound", componentId: null, fixture: null, bytes: bytes(line(160, "GET", `/${PASSWORD}`, null)) });
+    const bound = bindMockLedgers({ ledgers: [foreign, withhold(parsed)], windows: [{ caseId: "case-a", startMs: Date.parse(at(100)), endMs: Date.parse(at(200)) }], caseIds: ["case-a"] });
+    expect(bound.get("case-a")!.unmocked.map((call) => [call.kind, call.path])).toEqual([["unmatched", MOCK_LEDGER_WITHHELD], ["unmatched", MOCK_LEDGER_WITHHELD]]);
+    const proof = (value: unknown, mediaType: string, artifactId: string) => {
+      const encoded = Buffer.from(JSON.stringify(value));
+      return { ref: { artifactId, sha256: "0".repeat(64), byteLength: encoded.byteLength, mediaType }, bytes: encoded };
+    };
+    const proofs = buildMockProofs({ runId: "11111111-1111-4111-8111-111111111111", mockManifestDigest: "c".repeat(64), lifecycleId: "rovara-executor-x", context: {}, producer: {},
+      cases: [{ caseId: "case-a", shardId: "shard", upstreamRunId: "u" }], bound, proof });
+    // One unmocked-call frame for the case (so it is UNKNOWN `unmocked-external-call`), and no frame carries the credential.
+    expect(proofs.unmockedEntries.map((entry) => entry.caseId)).toEqual(["case-a"]);
+    for (const frame of proofs.frames) expect(Buffer.from(frame.bytes).toString("utf8")).not.toContain(PASSWORD);
   });
 });

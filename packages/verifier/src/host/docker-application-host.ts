@@ -12,7 +12,7 @@ import { executorContainerArgs } from "./executor-container.js";
 import { verifyExecutorSeccompProfile } from "./executor-seccomp.js";
 import { openRegularFile, readRegularFileTail } from "./regular-file.js";
 import { SINKHOLE_ORIGIN_REF, planApplicationOrigins, mockOriginUrl } from "../application-mocks.js";
-import { SINKHOLE_ORIGIN, parseMockLedger, type ParsedMockLedger } from "./mock-ledger.js";
+import { SINKHOLE_ORIGIN, parseMockLedger, withholdMockLedgerCredentials, type ParsedMockLedger } from "./mock-ledger.js";
 import { assembleDockerCollectionInputs, assembleExecutorActualRun, dockerOwnedResourceInventory, readExecutorActionWindows, readExecutorResultFile, snapshotExecutorOutput, validateExecutorResult,
   type DockerCollectionInputs, type ExecutorOutputSnapshot, type ExecutorResultFile } from "./executor-readback.js";
 
@@ -414,7 +414,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
           const length = Math.min(size, MOCK_LEDGER_READ_BYTES);
           const buffer = Buffer.alloc(length);
           const { bytesRead } = await handle.read(buffer, 0, length, 0);
-          ledgers.push(parseMockLedger({ origin: mock.origin, componentId: mock.componentId, fixture: mock.fixture, appAddress, bytes: buffer.subarray(0, bytesRead), truncated: size > MOCK_LEDGER_READ_BYTES }));
+          // What the app asked is its own text, and it has seen the run's passwords: a credential in it is withheld before the line reaches evidence (the call still counts).
+          ledgers.push(withholdMockLedgerCredentials(parseMockLedger({ origin: mock.origin, componentId: mock.componentId, fixture: mock.fixture, appAddress, bytes: buffer.subarray(0, bytesRead),
+            truncated: size > MOCK_LEDGER_READ_BYTES }), (bytes) => state.redactor.contains(bytes)));
         } finally { await handle.close(); }
       } catch { return null; }
     }
