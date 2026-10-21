@@ -69,7 +69,7 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(steps.indexOf(step.run!)).toBeGreaterThan(steps.indexOf(generic.run!));
     // It starts its own Docker 25 (Docker in Docker); the runner's daemon, iptables and sysctls are what the other steps set up and are not touched by it.
     const test = readFileSync("tests/linux/e2e-docker25-dns.test.ts", "utf8");
-    expect(readFileSync("tests/support/linux-dind.ts", "utf8")).toMatch(/docker:25\.0\.5-dind@sha256:[0-9a-f]{64}/);
+    expect(readFileSync("tests/support/linux-dind.ts", "utf8")).toMatch(/"public\.ecr\.aws\/docker\/library\/docker:25\.0\.5-dind@sha256:[0-9a-f]{64}"/);
     expect(test).toContain('describe.runIf(process.env.ROVARA_DOCKER === "1")');
   });
 

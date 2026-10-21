@@ -259,8 +259,9 @@ function ownAddress(): string | null {
 
 /**
  * A resolver that answers every A query with the sinkhole's own address and every other query with an empty answer. The app is pointed at it, so a name that nothing in the run
- * serves (a hard-coded real host, an SDK's default endpoint) reaches the sinkhole and is recorded instead of failing to resolve in silence. Docker's own resolver still answers
- * for the run's containers first; this one is asked only for the rest.
+ * serves (a hard-coded real host, an SDK's default endpoint) reaches the sinkhole and is recorded instead of failing to resolve in silence. The app's /etc/resolv.conf names this
+ * resolver directly (Docker 25 would not forward to it from an internal-only container), so it is asked for every name; the run's own names (the mocks, the sinkhole, `app`) never
+ * reach it because the host writes them into the app's hosts file.
  */
 export function startSinkholeDns(options: { host?: string; port?: number; address: () => string | null }): Promise<{ port: number; close(): Promise<void> }> {
   const socket = createSocket("udp4");

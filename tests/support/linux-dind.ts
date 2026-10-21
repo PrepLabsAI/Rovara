@@ -12,7 +12,7 @@ const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
  * Docker 25.0.5 in Docker, pinned by the digest of the multi-architecture index. This is the daemon generation of the Amazon Linux 2023 worker (its repository
  * ships 25.0.x only), which does not forward the DNS queries of a container that is only on internal networks to a `--dns` server; the CI runner's own daemon is newer and hides that.
  */
-export const DOCKER_25_DIND_IMAGE = "docker:25.0.5-dind@sha256:b41d0183012e2334aacd4e0b8e339b89246c4fdb7eada6cc86b0355f41328549";
+export const DOCKER_25_DIND_IMAGE = "public.ecr.aws/docker/library/docker:25.0.5-dind@sha256:b41d0183012e2334aacd4e0b8e339b89246c4fdb7eada6cc86b0355f41328549";
 
 export type Dind = Readonly<{
   name: string;

@@ -452,7 +452,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     if (!(await startMocks(signal))) return { kind: "unavailable", reason: signal.aborted ? stopReason() : "mock-unavailable" };
     // Every name that nothing in the run serves resolves to the sinkhole, so a call to an undeclared host is recorded. The app is not left to Docker's embedded resolver for that: Docker 25 does not
     // forward the queries of a container that is only on internal networks to a `--dns` server, so such a lookup would never reach the sinkhole. The app instead gets a run-owned read-only
-    // /etc/resolv.conf that names the sinkhole directly, and the run's own names (every mock alias and the sinkhole's) in its hosts file, which the embedded resolver no longer answers.
+    // /etc/resolv.conf that names the sinkhole directly, and the run's own names (every mock alias and the sinkhole's) in its hosts file, which the embedded resolver no longer answers. The app's own alias (`app`) is there too, pointing at itself, so a candidate that calls itself as `http://app:<port>` is not recorded as an unmocked call.
     const addresses: { alias: string; address: string }[] = [];
     for (const mock of mockContainers) {
       const address = await containerAddress(mock.name);
@@ -463,7 +463,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     await writeFile(dirs.resolv, `nameserver ${sinkholeAddress}\noptions ndots:0 timeout:2 attempts:2\n`, { mode: 0o644 });
     await chmod(dirs.resolv, 0o644);
 
-    const appCreate = await docker.run(["run", "-d", "--name", appName, "--pull=never", ...hardening(["--network", network, "--network-alias", "app", ...addresses.flatMap((item) => ["--add-host", `${item.alias}:${item.address}`])]), "--read-only",
+    const appCreate = await docker.run(["run", "-d", "--name", appName, "--pull=never", ...hardening(["--network", network, "--network-alias", "app", "--add-host", "app:127.0.0.1", ...addresses.flatMap((item) => ["--add-host", `${item.alias}:${item.address}`])]), "--read-only",
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`, "-v", `${dirs.resolv}:/etc/resolv.conf:ro`, "-w", containerCwd("/app", launch.start.cwd),
       // The recipe's literals come first, so the host's own port and seed variables always win.
       ...Object.entries(launch.start.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]),

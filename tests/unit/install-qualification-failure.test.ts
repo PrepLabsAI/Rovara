@@ -70,10 +70,26 @@ describe("the qualification failure report", () => {
     const base = goodWebApiObservation("web-egress-denial-v1");
     const summary = summarizeProbeObservation("web-egress-denial-v1", { ...base, collectorStatus: null, runUnavailableReason: "Build failed: /home/node/secret", runReason: "unmocked-external-call",
       failedAssertionKinds: ["csv", "http-status", "json", "text"], blockedHosts: ["probe.example.com", "169.254.169.254"], buildExitCode: 7, unmockedCalls: { sinkhole: 2, mocked: 1 } });
-    expect(summary).toEqual(["web-egress-denial-v1:collector-none", "web-egress-denial-v1:unavailable-build-failed-home-node-secret", "web-egress-denial-v1:run-unmocked-external-call",
+    // The path text is not a known reason: it is `other`, whatever it says.
+    expect(summary).toEqual(["web-egress-denial-v1:collector-none", "web-egress-denial-v1:unavailable-other", "web-egress-denial-v1:run-unmocked-external-call",
       "web-egress-denial-v1:assert-csv", "web-egress-denial-v1:assert-http-status", "web-egress-denial-v1:assert-json", "web-egress-denial-v1:sinkhole-2", "web-egress-denial-v1:mocked-1", "web-egress-denial-v1:build-exit-7"]);
     for (const code of summary) expect(code).toMatch(QUALIFICATION_FAILURE_CODE);
-    expect(summary.join(" ")).not.toMatch(/example\.com|169\.254/);
+    expect(summary.join(" ")).not.toMatch(/example\.com|169\.254|secret|home/);
+  });
+
+  it("maps a reason or assertion kind that is not on the known lists to `other`, however it is spelled, and keeps the known ones", () => {
+    const base = goodWebApiObservation("web-egress-denial-v1");
+    const hostile = ["application-report-does-not-bind-to-acme-corp-checkout", "secret-token-abc123", "Error: ENOENT /etc/passwd", "app-exited-with-password", "csv2", ""];
+    for (const text of hostile) {
+      const summary = summarizeProbeObservation("web-egress-denial-v1", { ...base, collectorStatus: "FAILED", runUnavailableReason: text === "" ? null : text, runReason: text === "" ? undefined : text, failedAssertionKinds: text === "" ? [] : [text] });
+      expect(summary.join(" "), text).not.toMatch(/secret|token|ENOENT|passwd|acme|password|csv2|report/i);
+      if (text !== "") expect(summary, text).toEqual(expect.arrayContaining(["web-egress-denial-v1:unavailable-other", "web-egress-denial-v1:run-other", "web-egress-denial-v1:assert-other"]));
+    }
+    for (const reason of ["build-failed", "app-unhealthy", "app-exited", "deadline-exceeded", "executor-failed", "executor-result-mismatch", "mock-unavailable", "cancelled", "collector-unavailable", "application-evidence-floor-unmet", "unmocked-external-call"]) {
+      expect(summarizeProbeObservation("p", { ...base, runUnavailableReason: reason }), reason).toContain(`p:unavailable-${reason}`);
+    }
+    for (const kind of ["text", "visible", "csv", "http-status", "json", "state", "file"]) expect(summarizeProbeObservation("p", { ...base, failedAssertionKinds: [kind] }), kind).toContain(`p:assert-${kind}`);
+    expect(summarizeProbeObservation("p", { ...base, runReason: "observed-application-test-failure" })).toContain("p:run-observed-application-test-failure");
   });
 
   it("names every required probe with a code the hook accepts", () => {

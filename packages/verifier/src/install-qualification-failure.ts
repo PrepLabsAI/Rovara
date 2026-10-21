@@ -54,18 +54,27 @@ export function boundQualificationCodes(reasons: readonly unknown[], summary: re
   return { reasons: keptReasons, summary: take(summary) };
 }
 
-const word = (value: string, max: number): string => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+/, "").slice(0, max).replace(/-+$/, "");
+/**
+ * The values the observation's string fields can hold, as far as the code that fills them is concerned: the Docker host's unavailable reasons, the collector's and the
+ * adapter's fixed reason codes, and the assertion kinds. The schema types these fields as free strings (a collector error message can reach one), so only a value on
+ * these lists is ever reported as itself; any other becomes `other`.
+ */
+const KNOWN_UNAVAILABLE = new Set(["build-failed", "app-unhealthy", "app-exited", "deadline-exceeded", "executor-failed", "executor-result-mismatch", "mock-unavailable", "cancelled",
+  "collector-unavailable", "application-evidence-floor-unmet", "unmocked-external-call"]);
+const KNOWN_RUN_REASON = new Set([...KNOWN_UNAVAILABLE, "observed-application-test-failure"]);
+const KNOWN_ASSERTION_KINDS = new Set(["text", "visible", "csv", "http-status", "json", "state", "file"]);
+const known = (value: string, list: ReadonlySet<string>): string => (list.has(value) ? value : "other");
 
 /**
- * The few facts of one probe's observation that tell which cause it showed, as codes: enums, short kebab-case reason words and counters only. The
- * probe's own text (blocked hosts, evidence digests) is never read.
+ * The few facts of one probe's observation that tell which cause it showed, as codes: enums from fixed lists and counters only. The probe's own text (blocked hosts,
+ * evidence digests, any message) is never turned into a code.
  */
 export function summarizeProbeObservation(probeId: string, observation: WebApiProbeObservation): string[] {
   const codes: string[] = [`${probeId}:collector-${observation.collectorStatus === null ? "none" : observation.collectorStatus.toLowerCase()}`];
-  const add = (prefix: string, text: string | null | undefined) => { const found = text === null || text === undefined ? "" : word(text, MAX_PART_LENGTH - 1 - prefix.length); if (found !== "") codes.push(`${probeId}:${prefix}-${found}`); };
-  add("unavailable", observation.runUnavailableReason);
-  add("run", observation.runReason);
-  for (const kind of observation.failedAssertionKinds.slice(0, 3)) add("assert", kind);
+  const add = (prefix: string, text: string | null | undefined, list: ReadonlySet<string>) => { if (text !== null && text !== undefined) codes.push(`${probeId}:${prefix}-${known(text, list)}`); };
+  add("unavailable", observation.runUnavailableReason, KNOWN_UNAVAILABLE);
+  add("run", observation.runReason, KNOWN_RUN_REASON);
+  for (const kind of observation.failedAssertionKinds.slice(0, 3)) add("assert", kind, KNOWN_ASSERTION_KINDS);
   if (observation.unmockedCalls !== undefined) codes.push(`${probeId}:sinkhole-${observation.unmockedCalls.sinkhole}`, `${probeId}:mocked-${observation.unmockedCalls.mocked}`);
   if (observation.buildExitCode !== null) codes.push(`${probeId}:build-exit-${observation.buildExitCode}`);
   return codes.filter(isCode);

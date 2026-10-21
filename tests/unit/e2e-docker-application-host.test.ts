@@ -806,7 +806,7 @@ describe("docker application host: approved external-origin mocks and the sinkho
     expect(resolv!.source).not.toMatch(/\/(app|owned|out|mock|mock-out)\//);
     // Without the embedded resolver the run's own names are written to the app's hosts file: every mock alias and the sinkhole's, never anything else.
     const hosts = app.filter((value, index) => app[index - 1] === "--add-host").sort();
-    expect(hosts).toEqual(["mock-inventory-v1:172.30.0.10", `mock-unbound:${fake.sinkholeAddress}`]);
+    expect(hosts).toEqual(["app:127.0.0.1", "mock-inventory-v1:172.30.0.10", `mock-unbound:${fake.sinkholeAddress}`]);
     const executor = fake.argsFor("executor");
     expect(executor).not.toContain("--dns");
     expect(executor).not.toContain("--add-host");
@@ -825,7 +825,7 @@ describe("docker application host: approved external-origin mocks and the sinkho
     const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.onExecutor = okOutput(s);
     await runWith(s);
     const app = fake.argsFor("app");
-    expect(app.filter((value, index) => app[index - 1] === "--add-host")).toEqual([`mock-unbound:${fake.sinkholeAddress}`]);
+    expect(app.filter((value, index) => app[index - 1] === "--add-host")).toEqual(["app:127.0.0.1", `mock-unbound:${fake.sinkholeAddress}`]);
     expect(app).not.toContain("--dns");
   });
 

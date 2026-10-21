@@ -464,11 +464,10 @@ upload() { aws s3api put-object --bucket "$BUCKET" --key "$PREFIX$1" --body "$2"
 publish_status() {
   printf '{"state":"%s","reason":"%s","finishedAt":"%s"%s}\n' "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$EXTRA" >"$STAGE/status.json" && upload status.json "$STAGE/status.json"
 }
-# Only codes leave the failure file: 16 at most, the stage first (parts of at most 48 characters, so under 2 KB).
 add_failure() {
   local f="$EVIDENCE_HOST/$FAILURE_NAME" c
-  [[ -f "$f" && ! -L "$f" ]] || return 0
-  c=$(head -c 16384 "$f" | grep -oE '"[a-z0-9-]{1,48}(:[a-z0-9-]{1,48})?"[],}]' | head -n 16 | tr -d '],}' | paste -sd, -)
+  [[ -f "$f" ]] || return 0
+  c=$(dd if="$f" iflag=nofollow bs=16384 count=1 2>/dev/null | grep -oE '"[a-z0-9-]{1,48}(:[a-z0-9-]{1,48})?"[],}]' | head -n 16 | tr -d '],}' | paste -sd, -)
   EXTRA+=",\"failure\":{\"codes\":[$c]}"
 }
 fail_with() {
@@ -507,8 +506,8 @@ timeout --foreground --kill-after=10s "${QUALIFY_SECONDS}s" docker exec --user n
 status=$?
 tail -c 2000 "$STAGE/qualifier.log" | while IFS= read -r line; do log "qualifier: $line"; done
 ((status == 0)) || { add_failure; fail_with "qualification-failed-exit-$status"; }
-proposal="$EVIDENCE_HOST/$PROPOSAL_NAME"
-[[ -f "$proposal" && ! -L "$proposal" ]] || fail_with proposal-missing
+proposal="$STAGE/proposal"
+dd if="$EVIDENCE_HOST/$PROPOSAL_NAME" iflag=nofollow of="$proposal" bs=1M count=6 2>/dev/null || fail_with proposal-missing
 size=$(wc -c <"$proposal" | tr -d '[:space:]')
 ((size > 0)) || fail_with proposal-missing
 ((size <= PROPOSAL_MAX_BYTES)) || fail_with proposal-too-large
