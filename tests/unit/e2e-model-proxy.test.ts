@@ -512,7 +512,7 @@ describe("e2e model proxy: fix round 1", () => {
 
   it("F7: a route that fails inside gives a receipt, so there is no call index gap", async () => {
     let first = true;
-    const dayBudget = { reserve: () => { if (first) { first = false; throw new Error("table unreachable"); } return { settle: () => undefined }; } };
+    const dayBudget = { reserve: () => { if (first) { first = false; throw new Error("table unreachable"); } return { settle: () => undefined, release: () => undefined }; } };
     const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget });
     const evidence = new Sink();
     const proxy = await startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence, deadlineAt: Date.now() + 60_000, environment: {} });

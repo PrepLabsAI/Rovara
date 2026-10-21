@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createCandidateManifest, canonicalJson, portableOperationId, buildE2ESharedView, e2ePlanHasCompleteRequiredCriteria, parsePlanDocument, e2eScenarioBundleDigest, type E2EFeaturePlanIntent, type E2EPolicy, type E2ESourceSnapshot } from "@agentx/contracts";
+import { deriveProjectSetupSourceSmoke } from "../../packages/broker/src/e2e/project-setup-source-smoke.js";
+import { selectE2EExecutionPlan } from "../../packages/contracts/src/e2e-execution-plan.js";
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 import { compileE2EScenarios } from "../../packages/verifier/src/scenarios.js";
@@ -261,6 +263,45 @@ describe("source-bound portable feature plan binding", () => {
     expect(() => deriveE2EFeatureExecutionAdmission({ intent, snapshot, artifactId: "plan-artifact", artifactSha256: "b".repeat(64),
       planDigest: "c".repeat(64), policy, runtimeCatalogId: "local-catalog", runtimeBinding: binding,
       featureVerifier: { ...featureRecord, supportedFeatureScopes: ["source-interface"] }, now: Date.parse("2026-10-13T12:30:00.000Z") })).toThrow();
+  });
+
+  describe("a project policy that pins an AI navigation route (M1.4 Task 4.2)", () => {
+    const PINNED = "r1-0123456789ab";
+    const pinned = { ...policy, modelRouteRevision: PINNED };
+    const admit = (candidatePolicy: E2EPolicy) => deriveE2EFeatureExecutionAdmission({ intent, snapshot, artifactId: "plan-artifact", artifactSha256: "b".repeat(64),
+      planDigest: "c".repeat(64), policy: candidatePolicy, runtimeCatalogId: "local-catalog", runtimeBinding: binding,
+      featureVerifier: featureRecord, now: Date.parse("2026-10-13T12:30:00.000Z") });
+
+    it("still selects the same portable groups and cases, with the model-free policy projection", () => {
+      const plain = admit(policy);
+      const withRoute = admit(pinned);
+      expect(withRoute.plan.groups.length).toBeGreaterThan(0);
+      expect(withRoute.plan.groups.flatMap((group) => group.expectedCases).map((item) => item.scenarioId))
+        .toEqual(plain.plan.groups.flatMap((group) => group.expectedCases).map((item) => item.scenarioId));
+      expect(withRoute.selectionInput.policy.modelRouteRevision).toBeNull();
+      expect(withRoute.plan.digest).toBe(plain.plan.digest);
+    });
+
+    it("binds a null model route in every group of the round", () => {
+      const admission = admit(pinned);
+      const { round } = buildE2EFeatureRound({ admission, taskId: "task-1", operationId: "operation-1", operationFence: 3, workflowRevision: 8,
+        roundId: "22222222-2222-4222-8222-222222222222", runIds: admission.plan.groups.map((_, index) => `33333333-3333-4333-8333-33333333333${index}`),
+        admittedAt: "2026-10-13T12:30:00.000Z", deadlineAt: "2026-10-13T12:31:00.000Z" });
+      expect(round.groupBindings.every((item) => item.modelRouteRevision === null)).toBe(true);
+    });
+
+    it("gives project setup smoke the same projection, so a pinned route does not empty its plan", () => {
+      const smoke = (candidatePolicy: E2EPolicy) => deriveProjectSetupSourceSmoke({ projectName: "ordinary-orders", proposalSha256: "d".repeat(64), approval: { proposalSha256: "d".repeat(64) },
+        snapshot, policy: candidatePolicy,
+        sandboxAvailability: { targetId: "default-sandbox", profileId: "default-sandbox", connection: "connected", approval: "approved", qualification: "qualified", authorizationRevision: "catalog-1" },
+        runtimeAvailability: [] });
+      const setupPolicy = { ...policy, baselineScenarioIds: [] };
+      const plain = selectE2EExecutionPlan(smoke(setupPolicy).selectionInput);
+      const withRoute = smoke({ ...setupPolicy, modelRouteRevision: PINNED });
+      expect(plain.groups.length).toBeGreaterThan(0);
+      expect(withRoute.selectionInput.policy.modelRouteRevision).toBeNull();
+      expect(selectE2EExecutionPlan(withRoute.selectionInput).groups.length).toBe(plain.groups.length);
+    });
   });
 
   it("keeps a required browser criterion visible and blocking beside executable portable cases", () => {

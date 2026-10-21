@@ -380,8 +380,8 @@ export function validateE2EScenarioBundleForPolicy(bundle: unknown, policy: unkn
     const agentSteps = scenario.steps.filter((step): step is Extract<E2EStep, { kind: "agent" }> => step.kind === "agent");
     if (agentSteps.some((step) => step.maxActions > budgets.maxActionsPerStep)) throw new Error(`${E2E_AGENT_APPROVAL_REFUSALS.overBudget}: an agent step may take at most ${budgets.maxActionsPerStep} actions (scenario ${scenario.scenarioId})`);
     if (agentSteps.length > budgets.maxAgentStepsPerGroup) throw new Error(`${E2E_AGENT_APPROVAL_REFUSALS.overGroupLimit}: a scenario may have at most ${budgets.maxAgentStepsPerGroup} agent steps (scenario ${scenario.scenarioId})`);
-    // Checks decide: a deterministic assertion after the last agent step is the only thing that can pass the case.
-    if (agentSteps.length > 0 && scenario.assertions.length === 0) throw new Error(`${E2E_AGENT_APPROVAL_REFUSALS.needsAssertion}: scenario ${scenario.scenarioId} needs a deterministic assertion after its last agent step`);
+    // Checks decide: an agent scenario needs a deterministic assertion after its last agent step. `E2EScenarioSchema` already requires at least one assertion, and assertions
+    // run after all steps, so no separate refusal is needed here.
   }
   return parsedBundle;
 }

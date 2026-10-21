@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
-  E2EModelRouteDefinitionSchema, E2E_AGENT_UNAVAILABLE_REASONS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
-  KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, SECRET_ARN_PATTERN, WORKER_SETTING_PARAMETERS, canonicalJson, e2eModelRouteRevision, isKeyedModelProvider,
+  E2EModelRouteDefinitionSchema, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
+  INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, SECRET_ARN_PATTERN, WORKER_SETTING_PARAMETERS, canonicalJson, indexExpiresAt, e2eModelRouteRevision, isKeyedModelProvider,
   type E2EModelRouteDefinition, type ModelProvider,
 } from "@agentx/contracts";
 import { DEFAULT_E2E_AGENT_MODELS } from "@agentx/model-runtime/config";
@@ -110,6 +110,22 @@ export function deriveE2EAgentRoute(installation: E2EAgentInstallation, revision
   return parsed.success ? { status: "available", definition: parsed.data } : unavailable(`the installation's settings do not make a valid route: ${parsed.error.issues[0]?.message ?? "invalid"}`);
 }
 
+/**
+ * The policy limits a project that pins this route runs under (D2). The round holds a group's model requests, tokens and time to them, so they come from the route's budgets: a
+ * group may make `maxModelCallsPerGroup` requests and use `maxInputTokensPerGroup` input tokens and that many calls' output allowance; a case may hold the most agent steps a group
+ * allows (their actions and step deadlines) beside its deterministic steps, within the hard limits. A setup that pins no route keeps the small model-free limits.
+ */
+export function e2eAgentRoutePolicyLimits(budgets: E2EModelRouteDefinition["budgets"]) {
+  const agentActions = budgets.maxAgentStepsPerGroup * budgets.maxActionsPerStep;
+  return {
+    runTimeoutMs: 1_200_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000,
+    caseTimeoutMs: Math.min(E2E_HARD_LIMITS.caseTimeoutMs, budgets.maxAgentStepsPerGroup * budgets.stepDeadlineMs + 30_000),
+    maxActionsPerCase: Math.min(E2E_HARD_LIMITS.maxActionsPerCase, agentActions + 30),
+    maxModelRequests: budgets.maxModelCallsPerGroup, maxInputTokens: budgets.maxInputTokensPerGroup,
+    maxOutputTokens: Math.min(E2E_HARD_LIMITS.maxOutputTokens, budgets.maxModelCallsPerGroup * budgets.maxOutputTokens), maxSpendUsd: null,
+  };
+}
+
 /** The digest of what the route is, apart from its revision number: equal digests are the same route, so approval writes a new revision only when it changes. */
 export function e2eAgentRouteDefinitionDigest(definition: E2EModelRouteDefinition): string {
   const parsed = E2EModelRouteDefinitionSchema.parse(definition);
@@ -191,7 +207,7 @@ const isConditionalFailure = (error: unknown): boolean => {
  * approval won the race for revision n+1) is `model-route-changed-reapprove`, and nothing is written. The row and the latest pointer go in one transaction, conditioned on
  * the pointer still being the one read: a revision row is never overwritten, and a lost race re-reads and re-judges.
  */
-export async function approveE2EAgentRoute(store: E2EModelRouteStore, installation: E2EAgentInstallation, expectedRevision: string, options: { approvedAt?: string } = {}):
+export async function approveE2EAgentRoute(store: E2EModelRouteStore, installation: E2EAgentInstallation, expectedRevision: string, options: { approvedAt?: string; approvedBy?: string; projectName?: string } = {}):
   Promise<{ revision: string; revisionNumber: number; written: boolean }> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const planned = await planE2EAgentRoute(store, installation);
@@ -205,7 +221,8 @@ export async function approveE2EAgentRoute(store: E2EModelRouteStore, installati
       await store.documentClient.send(new TransactWriteCommand({ TransactItems: [
         { Put: { TableName: store.tableName, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)", Item: {
           ...e2eModelRouteRevisionKey(routeId, planned.revisionNumber), entityType: "E2E_MODEL_ROUTE", routeId, revisionNumber: planned.revisionNumber, revision: planned.revision,
-          definitionDigest: planned.definitionDigest, definition: planned.definition, approvedAt } } },
+          definitionDigest: planned.definitionDigest, definition: planned.definition, approvedAt,
+          ...(options.approvedBy === undefined ? {} : { approvedBy: options.approvedBy }), ...(options.projectName === undefined ? {} : { projectName: options.projectName }) } } },
         previous === 0
           ? { Put: { TableName: store.tableName, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)", Item: {
             ...e2eModelRouteLatestKey(routeId), entityType: "E2E_MODEL_ROUTE_LATEST", routeId, revisionNumber: planned.revisionNumber, revision: planned.revision,
@@ -266,10 +283,12 @@ const positiveWhole = (value: number): boolean => Number.isSafeInteger(value) &&
  * - `reserve` is one conditional increment of the tokens and one call: it succeeds only while neither day cap in `limits` would be passed, so two racing reserves can never
  *   both take the last room. A cap that would be passed gives null. Anything that stops the increment being recorded (a throttle, a fault, a bad argument) throws, which the route
  *   treats as an exhausted budget: a reserve that cannot be recorded fails closed and the provider is never called.
- * - `settle(actual)` corrects the reservation to what the provider reported, once. `settle(0)` means the call was never sent (a refusal or a failure before any request went out),
- *   so it releases both the reserved tokens and the call count; a positive amount keeps the call and trues the tokens up, an overrun in full (the provider billed it). A
- *   correction that cannot be recorded throws and leaves the reservation in place, and no counter can be driven below zero.
+ * - `settle(actual)` corrects the reservation of a call that was sent to what it is charged, once: the call stays counted and the tokens are trued up (an overrun in full). It
+ *   takes a positive whole amount only; the route never settles zero (a sent call that reports none is charged the reserved bound).
+ * - `release()` is for a call that was never sent (a refusal, or a failure before any request went out): it gives back both the reserved tokens and the call count.
+ * - A correction that cannot be recorded throws and leaves the reservation in place, and no counter can be driven below zero.
  * - The reservation settles the row of the day it was made on, even if the settle crosses midnight.
+ * - Each row expires through the State table's TTL attribute (`indexExpiresAt`), a retention period after its day.
  */
 export function createBrokerE2EDayBudget(options: BrokerE2EDayBudgetOptions): E2EDayBudget {
   return {
@@ -278,37 +297,47 @@ export function createBrokerE2EDayBudget(options: BrokerE2EDayBudgetOptions): E2
       if (!positiveWhole(limits.maxInputTokens) || !positiveWhole(limits.maxCalls)) throw new Error("a day budget reserve needs positive day limits");
       // Without room for even this call on an empty day, nothing could ever be reserved.
       if (inputTokens > limits.maxInputTokens) return null;
-      const key = e2eModelBudgetKey(options.projectName, utcDay(options.now()));
+      const day = utcDay(options.now());
+      const key = e2eModelBudgetKey(options.projectName, day);
       try {
         await options.documentClient.send(new UpdateCommand({
           TableName: options.tableName, Key: key,
-          UpdateExpression: "ADD #tokens :reserved, #calls :one SET entityType = :entityType",
+          UpdateExpression: "ADD #tokens :reserved, #calls :one SET entityType = :entityType, #expires = :expires",
           ConditionExpression: "(attribute_not_exists(#tokens) OR #tokens <= :tokenRoom) AND (attribute_not_exists(#calls) OR #calls <= :callRoom)",
-          ExpressionAttributeNames: { "#tokens": "inputTokens", "#calls": "calls" },
-          ExpressionAttributeValues: { ":reserved": inputTokens, ":one": 1, ":entityType": "E2E_MODEL_BUDGET", ":tokenRoom": limits.maxInputTokens - inputTokens, ":callRoom": limits.maxCalls - 1 },
+          ExpressionAttributeNames: { "#tokens": "inputTokens", "#calls": "calls", "#expires": INDEX_EXPIRY_ATTRIBUTE },
+          ExpressionAttributeValues: { ":reserved": inputTokens, ":one": 1, ":entityType": "E2E_MODEL_BUDGET", ":tokenRoom": limits.maxInputTokens - inputTokens, ":callRoom": limits.maxCalls - 1,
+            ":expires": indexExpiresAt(`${day}T23:59:59.000Z`) },
         }));
       } catch (error) {
         if (error instanceof Error && error.name === "ConditionalCheckFailedException") return null;
         throw error;
       }
-      let settled = false;
+      let done = false;
       return {
         async settle(actualInputTokens: number): Promise<void> {
-          if (settled) return;
-          if (!Number.isSafeInteger(actualInputTokens) || actualInputTokens < 0) throw new Error("a day budget settle needs a whole number of input tokens");
-          const neverSent = actualInputTokens === 0;
-          const delta = neverSent ? -inputTokens : actualInputTokens - inputTokens;
-          if (delta === 0) { settled = true; return; }
-          // The row must exist and hold at least what is released, so a counter can never go below zero.
-          const floor = neverSent ? { tokens: inputTokens, calls: 1 } : { tokens: delta < 0 ? -delta : 0, calls: 0 };
+          if (done) return;
+          if (!positiveWhole(actualInputTokens)) throw new Error("a day budget settle needs a positive whole number of input tokens");
+          const delta = actualInputTokens - inputTokens;
+          if (delta !== 0) {
+            // The row must exist and hold at least what is taken back, so a counter can never go below zero.
+            await options.documentClient.send(new UpdateCommand({
+              TableName: options.tableName, Key: key, UpdateExpression: "ADD #tokens :delta",
+              ConditionExpression: "attribute_exists(pk) AND #tokens >= :tokenFloor",
+              ExpressionAttributeNames: { "#tokens": "inputTokens" },
+              ExpressionAttributeValues: { ":delta": delta, ":tokenFloor": delta < 0 ? -delta : 0 },
+            }));
+          }
+          done = true;
+        },
+        async release(): Promise<void> {
+          if (done) return;
           await options.documentClient.send(new UpdateCommand({
-            TableName: options.tableName, Key: key,
-            UpdateExpression: neverSent ? "ADD #tokens :delta, #calls :minusOne" : "ADD #tokens :delta",
+            TableName: options.tableName, Key: key, UpdateExpression: "ADD #tokens :minusTokens, #calls :minusOne",
             ConditionExpression: "attribute_exists(pk) AND #tokens >= :tokenFloor AND #calls >= :callFloor",
             ExpressionAttributeNames: { "#tokens": "inputTokens", "#calls": "calls" },
-            ExpressionAttributeValues: { ":delta": delta, ":tokenFloor": floor.tokens, ":callFloor": floor.calls, ...(neverSent ? { ":minusOne": -1 } : {}) },
+            ExpressionAttributeValues: { ":minusTokens": -inputTokens, ":minusOne": -1, ":tokenFloor": inputTokens, ":callFloor": 1 },
           }));
-          settled = true;
+          done = true;
         },
       };
     },

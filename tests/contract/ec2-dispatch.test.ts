@@ -506,6 +506,45 @@ describe("ec2-ebs delivery", () => {
         expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
       });
 
+      describe("the reference's agentSteps flag against the admission it names (checked before delivery)", () => {
+        const withAgents = [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"];
+        const APPLICATION = "workflow-e2e-application-admission/v1";
+        const dependenciesFor = (usesAgentSteps: boolean | undefined | Error, features = withAgents) => ({
+          workerFeatures: async () => features, workflowE2EAdmissionSchemaVersion: async () => APPLICATION,
+          workflowE2EAdmissionUsesAgentSteps: vi.fn(async () => { if (usesAgentSteps instanceof Error) throw usesAgentSteps; return usesAgentSteps; }),
+        });
+
+        it("refuses a reference without agentSteps whose admission has an agent step, so the worker feature gate cannot be skipped", async () => {
+          const record = checks(admission({ kind: "application" }));
+          const unflagged = delivery(dependenciesFor(true));
+          await expect(unflagged.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("agentSteps") as unknown });
+          expect(unflagged.post).not.toHaveBeenCalled();
+        });
+
+        it("refuses a reference marked agentSteps whose admission has none", async () => {
+          const record = checks(admission({ kind: "application", agentSteps: true }));
+          const overstated = delivery(dependenciesFor(false));
+          await expect(overstated.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("agentSteps") as unknown });
+          expect(overstated.post).not.toHaveBeenCalled();
+        });
+
+        it("fails closed, retryably, when the admission cannot be read for its agent steps", async () => {
+          const record = checks(admission({ kind: "application" }));
+          for (const unreadable of [undefined, new Error("s3 down")]) {
+            const attempt = delivery(dependenciesFor(unreadable));
+            await expect(attempt.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+            expect(attempt.post).not.toHaveBeenCalled();
+          }
+        });
+
+        it("delivers a reference whose flag matches its admission, with and without agent steps", async () => {
+          const flagged = checks(admission({ kind: "application", agentSteps: true }));
+          expect(await delivery(dependenciesFor(true)).deliver(flagged, flagged.invocation)).toBe("DELIVERED");
+          const plain = checks(admission({ kind: "application" }));
+          expect(await delivery(dependenciesFor(false)).deliver(plain, plain.invocation)).toBe("DELIVERED");
+        });
+      });
+
       it("does not ask for the agent-steps feature when no group has an agent step", async () => {
         const record = checks(admission({ kind: "application" }));
         const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"] });

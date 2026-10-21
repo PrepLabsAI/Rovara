@@ -303,24 +303,46 @@ describe("the broker-backed day budget", () => {
     expect(row(db)).toMatchObject({ inputTokens: 5_500, calls: 1 });
   });
 
-  it("releases both the tokens and the call count when settle(0) says the call was never sent", async () => {
+  it("releases both the tokens and the call count with release(), for a call that was never sent", async () => {
     const db = new FakeDynamoDb();
     const b = budget(db);
     const kept = (await b.reserve(1_000, LIMITS))!;
     const reservation = (await b.reserve(4_000, LIMITS))!;
-    await reservation.settle(0);
+    await reservation.release();
     expect(row(db)).toMatchObject({ inputTokens: 1_000, calls: 1 });
     await kept.settle(700);
     expect(row(db)).toMatchObject({ inputTokens: 700, calls: 1 });
   });
 
-  it("settles once: a second settle changes nothing", async () => {
+  it("never treats a settle of zero as a release: a sent call keeps its call, and zero is refused", async () => {
     const db = new FakeDynamoDb();
     const reservation = (await budget(db).reserve(4_000, LIMITS))!;
-    await reservation.settle(0);
-    await reservation.settle(0);
+    await expect(reservation.settle(0)).rejects.toThrow();
+    expect(row(db)).toMatchObject({ inputTokens: 4_000, calls: 1 });
+    await reservation.settle(1);
+    expect(row(db)).toMatchObject({ inputTokens: 1, calls: 1 });
+  });
+
+  it("settles or releases once: a second call changes nothing", async () => {
+    const db = new FakeDynamoDb();
+    const reservation = (await budget(db).reserve(4_000, LIMITS))!;
+    await reservation.release();
+    await reservation.release();
     await reservation.settle(3_000);
     expect(row(db)).toMatchObject({ inputTokens: 0, calls: 0 });
+    const sent = (await budget(db).reserve(4_000, LIMITS))!;
+    await sent.settle(900);
+    await sent.settle(2_000);
+    await sent.release();
+    expect(row(db)).toMatchObject({ inputTokens: 900, calls: 1 });
+  });
+
+  it("gives every budget row a TTL through indexExpiresAt, after its day", async () => {
+    const db = new FakeDynamoDb();
+    await budget(db).reserve(4_000, LIMITS);
+    const expires = Number(row(db)?.indexExpiresAt);
+    expect(expires).toBeGreaterThan(Date.parse("2026-10-22T00:00:00.000Z") / 1000);
+    expect(expires).toBeLessThan(Date.parse("2027-12-31T00:00:00.000Z") / 1000);
   });
 
   it("fails closed when a reserve cannot be recorded, and records nothing", async () => {
@@ -355,7 +377,7 @@ describe("the broker-backed day budget", () => {
     const db = new FakeDynamoDb();
     const reservation = (await budget(db).reserve(4_000, LIMITS))!;
     db.set({ ...row(db)!, inputTokens: 100, calls: 0 });
-    await expect(reservation.settle(0)).rejects.toThrow();
+    await expect(reservation.release()).rejects.toThrow();
     expect(row(db)).toMatchObject({ inputTokens: 100, calls: 0 });
   });
 
@@ -400,6 +422,14 @@ describe("the governed route against the broker-backed budget", () => {
     const { receipt } = await route(db, async () => tapAnswer()).generate(channelRequest());
     expect(receipt.outcome).toBe("ok");
     expect(row(db)).toMatchObject({ inputTokens: 900, calls: 1 });
+  });
+
+  it("charges the reserved bound, and keeps the call, when a sent call reports zero input tokens", async () => {
+    const db = new FakeDynamoDb();
+    const { receipt } = await route(db, async () => tapAnswer({ usage: { inputTokens: 0, outputTokens: 5 } })).generate(channelRequest());
+    expect(receipt.outcome).toBe("invalid-output");
+    expect(row(db)?.calls).toBe(1);
+    expect(Number(row(db)?.inputTokens)).toBeGreaterThanOrEqual(1_024);
   });
 
   it("releases the call and its tokens when the request was never sent", async () => {

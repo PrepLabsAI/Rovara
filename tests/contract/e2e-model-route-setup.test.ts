@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { E2EPolicySchema, type E2EApplicationPlanIntent } from "@agentx/contracts";
+import { E2EPolicySchema, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, type E2EApplicationPlanIntent } from "@agentx/contracts";
+import { STALE_RUN_SWEEP_AGE_MS } from "../../packages/verifier/src/host/docker-application-host.js";
+import { e2eApplicationModelUseWithinRound } from "../../packages/verifier/src/application-result-adapter.js";
 import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/config.js";
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
 import {
@@ -61,6 +64,38 @@ describe("a setup proposal and its approval carry the AI navigation route", () =
     expect(stored.policy.modelRouteRevision).toBe(policy.modelRouteRevision);
   });
 
+  it("derives the policy's model and time limits from the route budgets, so a real agent step fits (D2)", async () => {
+    const { harness } = await harnessFor(async () => anthropic);
+    const { limits } = E2EPolicySchema.parse((await propose(harness)).body.policy);
+    const caps = E2E_MODEL_ROUTE_DEFAULT_BUDGETS;
+    expect(limits.maxModelRequests).toBe(caps.maxModelCallsPerGroup);
+    expect(limits.maxInputTokens).toBe(caps.maxInputTokensPerGroup);
+    expect(limits.maxOutputTokens).toBe(caps.maxModelCallsPerGroup * caps.maxOutputTokens);
+    // Three agent steps of eight actions, and the three step deadlines, fit one case; the run holds a whole group of them.
+    expect(limits.maxActionsPerCase).toBeGreaterThanOrEqual(caps.maxAgentStepsPerGroup * caps.maxActionsPerStep);
+    expect(limits.caseTimeoutMs).toBeGreaterThanOrEqual(caps.maxAgentStepsPerGroup * caps.stepDeadlineMs);
+    expect(limits.runTimeoutMs).toBeGreaterThanOrEqual(limits.caseTimeoutMs);
+    expect(limits.runTimeoutMs + 15_000).toBeLessThan(STALE_RUN_SWEEP_AGE_MS);
+  });
+
+  it("accepts, under those limits, the receipts of a group that used its whole D2 allowance, and refuses one over it", async () => {
+    const { harness } = await harnessFor(async () => anthropic);
+    const { limits } = E2EPolicySchema.parse((await propose(harness)).body.policy);
+    const caps = E2E_MODEL_ROUTE_DEFAULT_BUDGETS;
+    const steps = (calls: number, inputTokens: number, outputTokens: number) => [{ metrics: { modelCalls: calls }, model: { inputTokens, outputTokens } }] as never;
+    const within = (calls: number, input: number, output: number) => e2eApplicationModelUseWithinRound({ steps: steps(calls, input, output),
+      usage: { modelTokens: input + output, maxModelCallsInStep: calls }, modelRoutePresent: true, maxModelRequests: limits.maxModelRequests,
+      maxInputTokens: limits.maxInputTokens, maxOutputTokens: limits.maxOutputTokens, actualReceiptCount: calls });
+    expect(within(caps.maxModelCallsPerGroup, caps.maxInputTokensPerGroup, caps.maxModelCallsPerGroup * caps.maxOutputTokens)).toBe(true);
+    expect(within(caps.maxModelCallsPerGroup + 1, 1_000, 1_000)).toBe(false);
+  });
+
+  it("keeps the earlier small limits for a setup that pins no route", async () => {
+    const { harness } = await harnessFor(undefined);
+    const { limits } = E2EPolicySchema.parse((await propose(harness)).body.policy);
+    expect(limits).toMatchObject({ runTimeoutMs: 60_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1 });
+  });
+
   it("records revision 1 and the latest pointer when the setup is approved, and the approval holds the same policy", async () => {
     const { harness } = await harnessFor(async () => anthropic);
     const proposal = await propose(harness);
@@ -107,6 +142,27 @@ describe("a setup proposal and its approval carry the AI navigation route", () =
     expect(JSON.stringify(refused.body)).toMatch(/AI navigation settings changed/);
     expect(routeRows(harness.db)).toEqual([]);
     expect(harness.db.find((item) => item.entityType === "PROJECT_SETUP_APPROVAL")).toEqual([]);
+  });
+
+  it("says the settings are unreadable, not changed, when they cannot be read at approval", async () => {
+    const { harness, state } = await harnessFor(async () => anthropic);
+    const proposal = await propose(harness);
+    state.current = async () => { throw new Error("ssm down"); };
+    const refused = await approve(harness, proposal);
+    expect(refused.status).not.toBe(200);
+    const text = JSON.stringify(refused.body);
+    expect(text).toMatch(/agent-route-not-approved/);
+    expect(text).toMatch(/could not be read/);
+    expect(text).not.toMatch(/model-route-changed-reapprove|settings changed/);
+    expect(routeRows(harness.db)).toEqual([]);
+  });
+
+  it("records who approved the revision and for which project", async () => {
+    const { harness } = await harnessFor(async () => anthropic);
+    await approve(harness, await propose(harness), "payments");
+    const row = harness.db.get(E2E_MODEL_ROUTE_PARTITION, "E2E_MODEL_ROUTE#rovara-e2e-default#REV#1")!;
+    expect(row).toMatchObject({ projectName: "payments", approvedBy: expect.stringMatching(/\S/) as unknown });
+    expect(row.approvedBy).toBe(harness.db.find((item) => item.entityType === "PROJECT_SETUP_APPROVAL")[0]!.ownerKey);
   });
 
   it("refuses the same way when the provider's secret ARN changed", async () => {
@@ -221,6 +277,25 @@ describe("dispatch re-derives the route before an AI navigation round starts", (
     // Another project's day is its own.
     expect(await requireAgentRouteStillCurrent(dependencies(async () => anthropic) as never, "billing", agentIntent, policyAt(revision))).toBe(true);
     expect(db.commandNames()).not.toContain("ScanCommand");
+  });
+});
+
+describe("the dispatch wiring in broker.ts", () => {
+  // The pre-warm-up site is exercised end to end (tests/unit/workflow-e2e-application-planning.test.ts); the admission site runs only past a committed candidate export, which no
+  // agent-capable harness has, so its presence is pinned here: the route check, and the agentSteps flag on the reference that makes delivery demand the worker feature.
+  const source = readFileSync(new URL("../../packages/broker/src/aws/broker.ts", import.meta.url), "utf8");
+
+  it("checks the route both before compute is woken and when the round is admitted", () => {
+    const calls = source.split("\n").filter((line) => line.includes("await requireAgentRouteStillCurrent("));
+    expect(calls).toHaveLength(2);
+    const warmUp = source.slice(source.indexOf("async function refuseApplicationRoundBeforeWarmUp("), source.indexOf("async function readCandidateBuildSourceManifest("));
+    const admission = source.slice(source.indexOf("async function startApplicationE2EChecksDispatch("), source.indexOf("/** Creates the content-addressed admission and starts the separate current CHECKS operation. */"));
+    expect(warmUp).toContain("await requireAgentRouteStillCurrent(");
+    expect(admission).toContain("await requireAgentRouteStillCurrent(");
+  });
+
+  it("marks the admission reference with agentSteps when the round has an AI navigation step", () => {
+    expect(source).toContain("...(usesAgentSteps ? { agentSteps: true } : {})");
   });
 });
 

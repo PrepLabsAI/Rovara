@@ -215,7 +215,7 @@ import {
   type E2EApplicationPlanIntent,
   type E2EApplicationSelectionRecord, type E2ERuntimeAccountRef, type E2EApplicationAccountDefinition, readE2EApplicationProjectContract, e2eSyntheticAccountContractDigest,
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema,
-  E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
+  E2E_AGENT_UNAVAILABLE_REASONS, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
   E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   type E2EApplicationExecutionAdmission,
@@ -288,7 +288,7 @@ import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationR
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
-import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eDayBudgetRoom, planE2EAgentRoute,
+import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRoutePolicyLimits, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
 import { applicationEvidenceLimits, verifyApplicationE2EEvidence } from "../e2e/application-evidence.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
@@ -363,13 +363,16 @@ const EVENT_TRANSACTION_CHUNK = 80;
  */
 export const PROJECT_SETUP_CAPTURE_POLICY = Object.freeze({ screenshots: true, traces: false, video: false, downloads: true });
 
-function projectSetupPolicy(proposal: E2ESetupProposal, modelRouteRevision: string | null = null): ReturnType<typeof E2EPolicySchema.parse> {
+function projectSetupPolicy(proposal: E2ESetupProposal, agentRoute?: { revision: string; definition: { budgets: Parameters<typeof e2eAgentRoutePolicyLimits>[0] } }): ReturnType<typeof E2EPolicySchema.parse> {
   return E2EPolicySchema.parse({
     schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: proposal.targets,
-    defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision,
+    defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision: agentRoute?.revision ?? null,
     capture: PROJECT_SETUP_CAPTURE_POLICY,
-    limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
-      maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null },
+    // A setup that pins a route runs under limits derived from the route's budgets (D2); one that pins none keeps the small model-free limits.
+    limits: agentRoute === undefined
+      ? { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
+        maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null }
+      : e2eAgentRoutePolicyLimits(agentRoute.definition.budgets),
   });
 }
 
@@ -1199,7 +1202,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
             read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
         const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate, readyProfiles });
         const agentRoute = await plannedAgentRoute(dependencies);
-        const policy = projectSetupPolicy(proposal, agentRoute?.revision ?? null);
+        const policy = projectSetupPolicy(proposal, agentRoute);
         const aiNavigation = agentRoute === undefined ? null : agentRouteSummary(agentRoute.definition);
         const repositoryName = urlParts[2].replace(/\.git$/i, "");
         const cleanedRepositoryName = repositoryName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
@@ -1271,7 +1274,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const inspection = inspectE2ERepository(snapshot, candidate).inspection;
         const proposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(artifact.proposal), snapshot, candidate);
         const agentRoute = await plannedAgentRoute(dependencies);
-        const policy = projectSetupPolicy(proposal, agentRoute?.revision ?? null);
+        const policy = projectSetupPolicy(proposal, agentRoute);
         if (!sameJsonContent(artifact.policy, policy)) {
           // A proposal made under an earlier default is not approvable now, but a decision already recorded for it is still answered the same way (an idempotent retry).
           const decided = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` });
@@ -1280,7 +1283,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
             return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
           }
           // The only difference is the AI navigation route: the installation's provider, model, secret or OpenRouter policy changed (or another approval moved the registry) since the proposal.
-          if (sameJsonContent({ ...(artifact.policy as Record<string, unknown>), modelRouteRevision: null }, { ...policy, modelRouteRevision: null })) {
+          if (sameJsonContent({ ...(artifact.policy as Record<string, unknown>), modelRouteRevision: null, limits: null }, { ...policy, modelRouteRevision: null, limits: null })) {
+            // With no route now, the settings were not read or no longer give a usable route; they have not been shown to have changed.
+            if (agentRoute === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: The AI navigation settings of this installation could not be read, or no longer give a usable route; propose the setup again once they can be`);
             throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_MODEL_ROUTE_CHANGED_REAPPROVE}: The AI navigation settings changed; propose the setup again, then approve the new proposal`);
           }
           throw agentXError("RUNTIME_UNAVAILABLE", "this setup proposal was made under an earlier default policy and can no longer be approved: propose the setup again (re-propose the setup), then approve the new proposal");
@@ -1301,9 +1306,14 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         // The approval that pins a route records it first: revision n+1 only when the route's digest changed, conditionally, never overwriting a revision. A route that is no
         // longer the one the proposal showed is refused here, before the approval is recorded.
         if (approvalInput.decision === "approve" && policy.modelRouteRevision !== null) {
-          if (dependencies.e2eAgentInstallation === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_MODEL_ROUTE_CHANGED_REAPPROVE}: The AI navigation settings could not be read; propose the setup again`);
+          const unreadable = () => agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: The AI navigation settings of this installation could not be read; propose the setup again once they can be`);
+          if (dependencies.e2eAgentInstallation === undefined) throw unreadable();
+          let installation: E2EAgentInstallation;
+          try { installation = await dependencies.e2eAgentInstallation(); } catch { throw unreadable(); }
           try {
-            await approveE2EAgentRoute({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, await dependencies.e2eAgentInstallation(), policy.modelRouteRevision);
+            // The revision row records who approved it and for which project (audit; the installation's route is one for every project).
+            await approveE2EAgentRoute({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, installation, policy.modelRouteRevision,
+              { approvedBy: identity.ownerKey, projectName: approvalInput.projectName });
           } catch (error) {
             if (error instanceof E2EModelRouteError) throw agentXError("RUNTIME_UNAVAILABLE", error.message);
             throw error;
@@ -10302,7 +10312,10 @@ async function refuseApplicationRoundBeforeWarmUp(dependencies: AwsBrokerDepende
   if (artifact === undefined || workflow.e2e.contractDigest !== artifact.sha256) return;
   const approved = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), artifact, {});
   if (approved?.format !== "structured" || approved.plan.e2e?.schemaVersion !== 2) return;
-  await requireApplicationSelectionStillCurrent(dependencies, task, approved.plan.e2e, artifact);
+  const current = await requireApplicationSelectionStillCurrent(dependencies, task, approved.plan.e2e, artifact);
+  // Task 4.2: a round with an agent step is refused here, before compute is woken, when its route is no longer the installation's or the project's day has no room. The dispatch
+  // checks it again once the round is being admitted (`startApplicationE2EChecksDispatch`).
+  await requireAgentRouteStillCurrent(dependencies, task.project, approved.plan.e2e, E2EPolicySchema.parse(current.inputs.policy));
   if (workflow.candidate === undefined) return;
   const source = await candidateSourceOperation(dependencies, task, workflow.candidate.digest);
   if (source === undefined) throw applicationRoundRefusal(NO_COMMITTED_EXPORT_REASON);
@@ -10358,22 +10371,25 @@ export async function requireAgentRouteStillCurrent(dependencies: AwsBrokerDepen
   const agentSteps = intent.scenarios.reduce((total, scenario) => total + scenario.steps.filter((step) => step.kind === "agent").length, 0);
   if (agentSteps === 0) return false;
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
+  // Whatever cannot be read (the installation's settings, the registry, the budget row) is a plain refusal with its code, never a generic failure: no round starts without the check.
+  const unreadable = (what: string) => new ApplicationDispatchRefusal(`agent-route-not-approved: ${what} could not be read, so the AI navigation steps were not started. Retry the checks once it can be`);
   let installation: E2EAgentInstallation;
   try {
     if (dependencies.e2eAgentInstallation === undefined) throw new Error("not configured");
     installation = await dependencies.e2eAgentInstallation();
-  } catch {
-    throw new ApplicationDispatchRefusal("agent-route-not-approved: The AI navigation settings of this installation could not be read, so the AI navigation steps were not started. Retry the checks once they can be");
-  }
-  const check = await checkE2EAgentRouteCurrent(store, installation, policy.modelRouteRevision);
+  } catch { throw unreadable("The AI navigation settings of this installation"); }
+  let check: Awaited<ReturnType<typeof checkE2EAgentRouteCurrent>>;
+  try { check = await checkE2EAgentRouteCurrent(store, installation, policy.modelRouteRevision); }
+  catch { throw unreadable("The approved AI navigation route"); }
   if (!check.ok) throw new ApplicationDispatchRefusal(`${check.code}: ${check.detail}`);
   const derived = deriveE2EAgentRoute(installation);
   const budgets = derived.status === "available" ? derived.definition.budgets : E2E_MODEL_ROUTE_DEFAULT_BUDGETS;
   const calls = Math.min(budgets.maxModelCallsPerGroup, agentSteps * (budgets.maxActionsPerStep + budgets.extraModelCallsPerStep));
   const need = { calls, inputTokens: Math.min(budgets.maxInputTokensPerGroup, calls * budgets.maxInputTokens) };
-  if (!(await e2eDayBudgetRoom({ ...store, projectName, now: Date.now() }, need, { maxInputTokens: budgets.maxInputTokensPerProjectDay, maxCalls: budgets.maxCallsPerProjectDay }))) {
-    throw new ApplicationDispatchRefusal("model-route-budget-exhausted: This project's daily AI navigation budget is spent, so the checks did not start. They can run again tomorrow (UTC)");
-  }
+  let room: boolean;
+  try { room = await e2eDayBudgetRoom({ ...store, projectName, now: Date.now() }, need, { maxInputTokens: budgets.maxInputTokensPerProjectDay, maxCalls: budgets.maxCallsPerProjectDay }); }
+  catch { throw unreadable("The project's daily AI navigation budget"); }
+  if (!room) throw new ApplicationDispatchRefusal("model-route-budget-exhausted: This project's daily AI navigation budget is spent, so the checks did not start. They can run again tomorrow (UTC)");
   return true;
 }
 

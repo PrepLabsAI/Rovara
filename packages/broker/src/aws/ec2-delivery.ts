@@ -58,6 +58,11 @@ export interface Ec2DeliveryDependencies {
    * Without it (a deployment that cannot read admissions) only the kind decides, and the worker still cross-checks.
    */
   workflowE2EAdmissionSchemaVersion?: (reference: E2EWorkflowAdmissionRef) => Promise<string | undefined>;
+  /**
+   * Whether an application admission has an `agent` step in its scenarios, read the same way. With it, the dispatcher also holds the reference's `agentSteps` flag to the admission: the
+   * flag decides whether the worker must list the agent-steps feature, so a reference that understated it would skip that gate. Undefined when it cannot be read.
+   */
+  workflowE2EAdmissionUsesAgentSteps?: (reference: E2EWorkflowAdmissionRef) => Promise<boolean | undefined>;
   /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
   guardTaskDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
   /** Loads and validates the durable internal readiness marker before any session provisioning. */
@@ -97,6 +102,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     if (workflowE2EReadiness && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     if (invocation.kind === "project-setup-smoke" && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     await checkAdmissionKind(invocation, dependencies.workflowE2EAdmissionSchemaVersion);
+    await checkAdmissionAgentSteps(invocation, dependencies.workflowE2EAdmissionUsesAgentSteps);
     let binding: Ec2RuntimeBinding | undefined;
     let session: { ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string };
     if (invocation.kind === "project-setup-smoke") {
@@ -187,6 +193,17 @@ async function checkAdmissionKind(invocation: WorkerInvocation, read: Ec2Deliver
   }
   if ((schemaVersion === APPLICATION_ADMISSION_SCHEMA) !== (reference.kind === "application")) {
     throw agentXError("CONFIG_INVALID", "the E2E admission reference's kind does not match the admission it names; no round was sent");
+  }
+}
+
+async function checkAdmissionAgentSteps(invocation: WorkerInvocation, read: Ec2DeliveryDependencies["workflowE2EAdmissionUsesAgentSteps"]): Promise<void> {
+  if (read === undefined || invocation.kind !== "task" || invocation.payload.workflowE2EAdmission?.kind !== "application") return;
+  const reference = invocation.payload.workflowE2EAdmission;
+  let uses: boolean | undefined;
+  try { uses = await read(reference); } catch { uses = undefined; }
+  if (uses === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "could not read the E2E admission to check its agent steps against the reference; no round was sent");
+  if (uses !== (reference.agentSteps === true)) {
+    throw agentXError("CONFIG_INVALID", "the E2E admission reference's agentSteps flag does not match the admission it names; no round was sent");
   }
 }
 

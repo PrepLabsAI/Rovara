@@ -196,10 +196,9 @@ export const E2E_AGENT_UNAVAILABLE_REASONS = Object.freeze({
   routeNotApproved: "agent-route-not-approved",
   webOnly: "agent-steps-web-only",
 } as const);
-/** The refusals approval gives an `agent` step (and the group that holds it) that breaks the owner's D2 caps. */
+/** The refusals approval gives an `agent` step (and the group that holds it) that breaks the owner's D2 caps. A scenario's deterministic assertion after its last agent step is structural: `E2EScenarioSchema` requires one. */
 export const E2E_AGENT_APPROVAL_REFUSALS = Object.freeze({
   overBudget: "agent-step-over-budget",
-  needsAssertion: "agent-step-needs-assertion",
   overGroupLimit: "agent-steps-over-group-limit",
 } as const);
 /** The code the owner sees when the installation's AI navigation settings changed after the route was approved. */

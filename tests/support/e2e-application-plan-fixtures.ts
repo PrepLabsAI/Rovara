@@ -72,7 +72,7 @@ export function approvedSetup(snapshot: E2ESourceSnapshot, readyProfiles: Ready,
   return { inspection, proposal, policy, setupApproval: { artifactId: "setup", digest: shaCanonical(proposal) } };
 }
 
-export type PlanInput = { snapshot?: E2ESourceSnapshot; scenario?: E2EScenario; targetId?: string; setupReady?: Ready; planRuntimeProfileId?: string; executable?: boolean;
+export type PlanInput = { snapshot?: E2ESourceSnapshot; scenario?: E2EScenario; /** More scenarios on the same target, planned beside the first. */ extraScenarios?: E2EScenario[]; targetId?: string; setupReady?: Ready; planRuntimeProfileId?: string; executable?: boolean;
   registeredRuntimes?: ReturnType<typeof webApiRow>[]; modelRouteRevision?: string; accountRef?: { revision?: number; definitionDigest?: string }; sourceSha?: string };
 
 /** The approved setup, policy and v2 intent for one scenario on one target, as the selection facade and the approval evaluation both take them. */
@@ -93,7 +93,7 @@ export function planFixture(input: PlanInput) {
       : deriveE2ESyntheticRuntimeAccountRef({ applicationId: application.applicationId, accountProfileId: target.accountProfileId, recipeDigest: application.recipe.recipeDigest })), ...input.accountRef };
   const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [], mockFixtureRefs: [],
     accountContextRefs: [{ applicationId: application.applicationId, profileId: target.accountProfileId, sourcePath: "package.json", sourceSha256: refs.find((ref) => ref.path === "package.json")!.sha256 }],
-    scenarios: [scenario], semanticExportDeltas: [],
+    scenarios: [scenario, ...(input.extraScenarios ?? [])], semanticExportDeltas: [],
     applicationRuntimeRefs: executable ? [{ targetId: target.targetId, applicationId: application.applicationId, recipeDigest: application.recipe!.recipeDigest,
       sourceRefs: refs, runtimeProfileId: input.planRuntimeProfileId ?? target.runtimeProfileId, accountProfileId: target.accountProfileId }] : [],
     runtimeAccountRefs: executable ? [accountRef] : [],

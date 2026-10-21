@@ -6,7 +6,7 @@ import {
   E2EWorkflowAdmissionRefSchema, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
   WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, canonicalPlanJson, workflowSendBackOffered,
   WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey, readCanonicalPlan, portableOperationId, type E2EApplicationPlanIntent,
-  selectE2EApplicationExecutionPlan, E2EScenarioSchema, validateE2EScenarioBundleForPolicy,
+  selectE2EApplicationExecutionPlan, E2EScenarioSchema,
   type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
@@ -124,10 +124,18 @@ describe("browser and API scenarios on a qualified runtime profile", () => {
       expect(() => plan({ scenario: agentScenario([step, step, step]), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" })).not.toThrow();
     });
 
-    it("refuses an agent scenario with no deterministic assertion after its last agent step", () => {
+    it("cannot be written without a deterministic assertion after its last agent step: the scenario schema requires one (so approval needs no separate refusal)", () => {
       expect(() => E2EScenarioSchema.parse({ ...agentScenario(), assertions: [] })).toThrow();
-      expect(() => validateE2EScenarioBundleForPolicy({ schemaVersion: 1, planDigest: "1".repeat(64), templateVersion: "t", scenarios: [{ ...agentScenario(), assertions: [] }], bundleDigest: "0".repeat(64) },
-        planFixture({}).policy)).toThrow();
+      expect(E2EScenarioSchema.parse(agentScenario()).assertions.length).toBeGreaterThan(0);
+    });
+
+    it("refuses at approval more than 3 agent steps in one group, counted across its scenarios (2 + 2), and accepts 2 + 1", () => {
+      const step = { kind: "agent" as const, goal: "open the orders page", maxActions: 2 };
+      const two = (id: string): E2EScenario => ({ ...agentScenario([step, step]), scenarioId: id });
+      const one = (id: string): E2EScenario => ({ ...agentScenario([step]), scenarioId: id });
+      const withScenarios = (scenarios: E2EScenario[]) => () => plan({ scenario: scenarios[0]!, extraScenarios: scenarios.slice(1), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" });
+      expect(withScenarios([two("agent-a"), two("agent-b")])).toThrow(/agent-steps-over-group-limit/);
+      expect(withScenarios([two("agent-a"), one("agent-b")])).not.toThrow();
     });
   });
 
@@ -548,10 +556,10 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
   type Rows = Record<"web" | "api", Record<string, unknown> | undefined>;
   const SLACK_THREAD = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000099" };
   /** Registers the project against its approved setup and the catalog rows, then starts a task and runs its preparation, up to the planning invocation. */
-  async function startPlanning(rows: Rows, afterApproval?: (harness: Harness) => void, viaSlack = false) {
+  async function startPlanning(rows: Rows, afterApproval?: (harness: Harness) => void, viaSlack = false, brokerExtra: Record<string, unknown> = {}) {
     const snapshot = contractSnapshot;
     const capture = vi.fn(async () => snapshot);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...brokerExtra } });
     const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     const projectBinding = projectRow().runtimeBinding as typeof binding;
     for (const kind of ["web", "api"] as const) {
@@ -636,8 +644,9 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
   const webKey = e2eRegisteredRuntimeKey("catalog", PROFILE, "web");
 
   /** A planning task whose planner has answered with the v2 intent a planner would build from the prompt's own context. */
-  async function plannedWithApplicationIntent(options: { viaSlack?: boolean; afterApproval?: (harness: Harness) => void; scenarios?: (target: { targetId: string; accountProfileId: string }) => E2EScenario[] } = {}) {
-    const started = await startPlanning({ web: webApiRow("web"), api: webApiRow("api") }, options.afterApproval, options.viaSlack === true);
+  async function plannedWithApplicationIntent(options: { viaSlack?: boolean; afterApproval?: (harness: Harness) => void; scenarios?: (target: { targetId: string; accountProfileId: string }) => E2EScenario[];
+    /** Extra broker dependencies, for example the installation's AI navigation settings. */ brokerExtra?: Record<string, unknown>; rows?: Rows } = {}) {
+    const started = await startPlanning(options.rows ?? { web: webApiRow("web"), api: webApiRow("api") }, options.afterApproval, options.viaSlack === true, options.brokerExtra);
     const { harness, workspaceId, planningId, snapshot } = started;
     const { policy } = started;
     const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_WEB],
@@ -1004,6 +1013,69 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     await expectBlockedAtDispatch(dispatched, /no committed source export/);
     expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX);
     noPortableAdmission(dispatched);
+  });
+
+  // M1.4 Task 4.2: the route the project's setup pinned is re-derived when a round with AI navigation steps is dispatched. These go through the whole broker path (setup approval that
+  // pins the route, plan APPROVE, the dispatch sweep), so deleting the dispatch check from `startApplicationE2EChecksDispatch` fails them.
+  describe("a round with AI navigation steps is dispatched only on the route the setup pinned", () => {
+    const anthropic = { provider: "anthropic", secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/provider-key-AbCdEf" };
+    const agentRows: Rows = { web: webApiRow("web", {}, (value) => ({ ...value, supportedSteps: [...value.supportedSteps, "agent" as const] })), api: webApiRow("api") };
+    const agentScenarios = (target: { targetId: string; accountProfileId: string }): E2EScenario[] => [{ ...csvScenario, scenarioId: "agent-orders", requestedTargetIds: [target.targetId],
+      accountProfileId: target.accountProfileId, steps: [{ kind: "agent", goal: "Export the orders as a CSV file", maxActions: 4 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] }];
+    async function agentRound(installation: { current: () => Promise<Record<string, unknown>> }, scenarios = agentScenarios) {
+      const planned = await plannedWithApplicationIntent({ rows: agentRows, scenarios, brokerExtra: { e2eAgentInstallation: () => installation.current() } });
+      return { planned, dispatched: await atChecksDispatch(planned) };
+    }
+    const reason = (code: string) => new RegExp(`${code}: `);
+
+    it("pins the route in the project's policy and plans the agent scenario as executable", async () => {
+      const planned = await plannedWithApplicationIntent({ rows: agentRows, scenarios: agentScenarios, brokerExtra: { e2eAgentInstallation: async () => anthropic } });
+      expect(planned.policy.modelRouteRevision).toMatch(/^r1-[a-f0-9]{12}$/);
+      expect((await decide(planned, "APPROVE")).status).toBe(200);
+      expect(E2EApplicationSelectionRecordSchema.parse(workflowOf(planned).e2e!.applicationSelection).unavailableCriteria).toEqual([]);
+    });
+
+    it("goes past the route check while the installation is unchanged (what stops it is the candidate export)", async () => {
+      const { dispatched } = await agentRound({ current: async () => anthropic });
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow.blockReason).toContain("no committed source export");
+    });
+
+    it("blocks with model-route-changed-reapprove when the installation's provider changed since the setup was approved", async () => {
+      const state = { current: async () => anthropic as Record<string, unknown> };
+      const { dispatched } = await agentRound(state);
+      state.current = async () => ({ provider: "amazon-bedrock", region: "us-east-1" });
+      await expectBlockedAtDispatch(dispatched, reason("model-route-changed-reapprove"));
+      expect(dispatched.taskNow().workflow.blockReason).toContain("The AI navigation settings changed");
+    });
+
+    it("blocks with agent-route-not-approved, saying the settings are unreadable, when they cannot be read at dispatch", async () => {
+      const state = { current: async () => anthropic as Record<string, unknown> };
+      const { dispatched } = await agentRound(state);
+      state.current = async () => { throw new Error("ssm down"); };
+      await expectBlockedAtDispatch(dispatched, reason("agent-route-not-approved"));
+      expect(dispatched.taskNow().workflow.blockReason).toMatch(/could not be read/);
+    });
+
+    it("blocks with a plain dispatch refusal, not a generic failure, when the table cannot be read at dispatch", async () => {
+      const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+      planned.harness.db.injectFault({ command: "GetCommand", match: (input) => String((input.Key as { sk?: string } | undefined)?.sk).startsWith("E2E_MODEL_ROUTE_LATEST#"),
+        error: { name: "InternalServerError" }, times: 5 });
+      await expectBlockedAtDispatch(dispatched, reason("agent-route-not-approved"));
+    });
+
+    it("blocks with model-route-budget-exhausted before anything starts when the project's day has no room", async () => {
+      const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+      planned.harness.db.set({ pk: "PROJECT#payments", sk: `E2E_MODEL_BUDGET#${new Date().toISOString().slice(0, 10)}`, inputTokens: 1_999_000, calls: 10 });
+      await expectBlockedAtDispatch(dispatched, reason("model-route-budget-exhausted"));
+    });
+
+    it("does not judge the route for a round with no AI navigation step", async () => {
+      const planned = await plannedWithApplicationIntent({ rows: agentRows, brokerExtra: { e2eAgentInstallation: async () => anthropic } });
+      const dispatched = await atChecksDispatch(planned);
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow.blockReason).toContain("no committed source export");
+    });
   });
 
   describe("the selection approved at plan APPROVE must still be the one dispatched (Ruling AL)", () => {

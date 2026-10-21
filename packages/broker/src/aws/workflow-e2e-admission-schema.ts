@@ -6,6 +6,26 @@ import { readObjectText } from "../developer/plan-artifacts.js";
  * How the dispatcher learns what kind of admission a CHECKS reference names: it reads the stored object, holds it to the reference's size and sha256, and answers its
  * `schemaVersion`. Anything it cannot establish (missing, changed, not JSON, no string schemaVersion) answers undefined, which the dispatcher treats as a refusal to deliver.
  */
+/**
+ * Whether the application admission a reference names has an `agent` step in its scenario bundle, read the same way (held to the reference's size and sha256). Anything it
+ * cannot establish answers undefined, which the dispatcher treats as a refusal.
+ */
+export function createWorkflowE2EAdmissionAgentStepsReader(input: { s3: { send(command: never): Promise<unknown> }; bucket: string }) {
+  return async (reference: E2EWorkflowAdmissionRef): Promise<boolean | undefined> => {
+    const { key, sha256, byteLength } = reference.admissionRef;
+    const text = await readObjectText(input.s3, input.bucket, key, byteLength);
+    if (text === undefined) return undefined;
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.byteLength !== byteLength || createHash("sha256").update(bytes).digest("hex") !== sha256) return undefined;
+    try {
+      const scenarios = (JSON.parse(text) as { bundle?: { scenarios?: unknown } } | null)?.bundle?.scenarios;
+      if (!Array.isArray(scenarios)) return undefined;
+      return scenarios.some((scenario) => Array.isArray((scenario as { steps?: unknown })?.steps)
+        && ((scenario as { steps: Array<{ kind?: unknown }> }).steps).some((step) => step?.kind === "agent"));
+    } catch { return undefined; }
+  };
+}
+
 export function createWorkflowE2EAdmissionSchemaReader(input: { s3: { send(command: never): Promise<unknown> }; bucket: string }) {
   return async (reference: E2EWorkflowAdmissionRef): Promise<string | undefined> => {
     const { key, sha256, byteLength } = reference.admissionRef;

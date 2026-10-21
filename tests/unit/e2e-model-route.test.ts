@@ -24,14 +24,23 @@ function routeWith(invoke: E2EInvoke, definition = bedrockRoute(), extra: Partia
 }
 
 describe("the in-memory day budget settles a call that was never sent like the broker's does", () => {
-  it("releases both the tokens and the call count at settle(0), and only the tokens' difference otherwise", async () => {
+  it("releases both the tokens and the call count at release(), and only the tokens' difference at settle", async () => {
     const budget = createInMemoryE2EDayBudget();
     const sent = (await budget.reserve(2_000, { maxInputTokens: 10_000, maxCalls: 5 }))!;
     const unsent = (await budget.reserve(3_000, { maxInputTokens: 10_000, maxCalls: 5 }))!;
-    await unsent.settle(0);
+    await unsent.release();
     expect(budget.snapshot()).toEqual({ usedInputTokens: 2_000, usedCalls: 1 });
     await sent.settle(900);
     expect(budget.snapshot()).toEqual({ usedInputTokens: 900, usedCalls: 1 });
+  });
+
+  it("charges the reserved bound and keeps the call when a sent call reports zero input tokens (never a release)", async () => {
+    const dayBudget = createInMemoryE2EDayBudget();
+    const route = routeWith(async () => tapAnswer({ usage: { inputTokens: 0, outputTokens: 5 } }), bedrockRoute(), { dayBudget });
+    const { receipt, chargedInputTokens } = await route.generate(channelRequest());
+    expect(receipt.outcome).toBe("invalid-output");
+    expect(chargedInputTokens).toBeGreaterThanOrEqual(1_024);
+    expect(dayBudget.snapshot()).toEqual({ usedInputTokens: chargedInputTokens, usedCalls: 1 });
   });
 
   it("leaves nothing spent after a credential refusal through the route", async () => {
@@ -277,7 +286,7 @@ describe("governed e2e model route: fix round 1", () => {
   it("F2: needs a day budget, whose limits are the definition's", async () => {
     expect(() => createGovernedE2EModelRoute(bedrockRoute(), { invoke: async () => tapAnswer(), now: Date.now } as never)).toThrow(/day budget/);
     const limits: unknown[] = [];
-    const dayBudget = { reserve: (_tokens: number, given: unknown) => { limits.push(given); return { settle: () => undefined }; } };
+    const dayBudget = { reserve: (_tokens: number, given: unknown) => { limits.push(given); return { settle: () => undefined, release: () => undefined }; } };
     const route = routeWith(async () => tapAnswer(), bedrockRoute({ budgets: loweredBudgets({ maxInputTokensPerProjectDay: 50_000, maxCallsPerProjectDay: 7 }) }), { dayBudget });
     await route.generate(channelRequest());
     expect(limits).toEqual([{ maxInputTokens: 50_000, maxCalls: 7 }]);
@@ -327,7 +336,7 @@ describe("governed e2e model route: fix round 1", () => {
     expect(refused.result).toMatchObject({ status: "error", code: "budget" });
     expect(refused.receipt.outcome).toBe("budget");
     expect(invoke).not.toHaveBeenCalled();
-    const settleFails = routeWith(invoke, bedrockRoute(), { dayBudget: { reserve: () => ({ settle: () => { throw new Error("table unreachable"); } }) } });
+    const settleFails = routeWith(invoke, bedrockRoute(), { dayBudget: { reserve: () => ({ settle: () => { throw new Error("table unreachable"); }, release: () => { throw new Error("table unreachable"); } }) } });
     const failed = await settleFails.generate(channelRequest());
     expect(failed.result).toMatchObject({ status: "error", code: "provider-error" });
     expect(failed.receipt).toMatchObject({ outcome: "provider-error", responseSha256: null, inputTokens: 900 });
