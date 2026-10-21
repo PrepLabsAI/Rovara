@@ -1,7 +1,9 @@
 import {
   E2EApiMockFixtureSchema, canonicalJson, createE2EOpenApiFixtureDescriptor, e2eApplicationRecipeIsProjectContract, inspectE2EPortableSource,
-  deriveE2ESyntheticRuntimeAccountRef, inspectE2ERepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, redactSecrets, verifyE2ESourceSnapshot, type E2EAppRecipe, type E2EPolicy, type E2ESourceSnapshot,
+  inspectE2ERepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract, redactSecrets, verifyE2ESourceSnapshot,
+  type E2EAppRecipe, type E2EApplicationProjectContract, type E2EPolicy, type E2ERuntimeAccountRef, type E2ESourceSnapshot,
 } from "@agentx/contracts";
+import { E2EAccountRegistryError, latestAccountRef, type E2EAccountRegistryEntry } from "./application-account-registry.js";
 import type { ReadyE2ERuntime } from "../aws/e2e-runtime-readiness.js";
 import { E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs } from "@agentx/contracts";
 import * as ts from "typescript";
@@ -42,9 +44,10 @@ export type FeatureE2EPlanningContext = {
 
 /**
  * Why a target is not executable for application scenarios: the placeholder profile, no launch recipe, only an inferred recipe, a runtime that is not READY
- * now, or an application with no source-owned package or native project identity to bind its account and source references to.
+ * now, an application with no source-owned package or native project identity to bind its account and source references to, or an account with no usable registered
+ * definition (`no-account-definition`: none was written when the setup was approved, or the latest has expired or is not what the approved contract says).
  */
-export type FeatureE2EUnavailableReason = "runtime-unavailable" | "no-launch-recipe" | "needs-project-contract" | "runtime-not-ready" | "no-source-identity";
+export type FeatureE2EUnavailableReason = "runtime-unavailable" | "no-launch-recipe" | "needs-project-contract" | "runtime-not-ready" | "no-source-identity" | "no-account-definition";
 
 export type FeatureE2EPlanningContextResult = FeatureE2EPlanningContext | { status: "unknown"; reason: string };
 
@@ -101,6 +104,10 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
   origin?: FeatureE2EPlanningContext["source"]["origin"]; preparedCommitSha?: string | null;
   /** The web/API runtimes READY for the project's runtime binding right now (see readProjectReadyE2ERuntimes); none when omitted. */
   readyRuntimes?: readonly ReadyE2ERuntime[];
+  /** The registered test accounts of the project (the setup approval writes them): the planner is shown each executable target's latest account ref. None when omitted. */
+  accountRegistry?: readonly E2EAccountRegistryEntry[];
+  /** The clock the registered definitions' expiry is judged by (milliseconds); the current time when omitted. */
+  now?: number;
 } = {}): FeatureE2EPlanningContextResult {
   try {
     const sourceOrigin = identity.origin ?? "prepared-commit";
@@ -141,6 +148,22 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       const profileId = configuredTarget(target.targetId).runtimeProfileId;
       return target.kind === "web" || target.kind === "api" ? readyRuntimes.find((item) => item.kind === target.kind && item.profileId === profileId) : undefined;
     };
+    // The target's account as the registry holds it now, held to the approved contract: absent when none is registered or the latest cannot be used (Task 3.1).
+    const accountNow = identity.now ?? Date.now();
+    const accountRefCache = new Map<string, E2ERuntimeAccountRef | undefined>();
+    const accountRefFor = (applicationId: string, profileId: string): E2ERuntimeAccountRef | undefined => {
+      const key = `${applicationId}\0${profileId}`;
+      if (accountRefCache.has(key)) return accountRefCache.get(key);
+      let contract: E2EApplicationProjectContract | null;
+      try { contract = readE2EApplicationProjectContract(snapshot, applicationId); } catch { contract = null; }
+      let ref: E2ERuntimeAccountRef | undefined;
+      if (contract !== null) {
+        try { ref = latestAccountRef({ contract, entries: identity.accountRegistry ?? [], applicationId, profileId, now: accountNow }); }
+        catch (error) { if (!(error instanceof E2EAccountRegistryError)) throw error; }
+      }
+      accountRefCache.set(key, ref);
+      return ref;
+    };
     const unavailableReason = (target: (typeof targets)[number]): FeatureE2EUnavailableReason | undefined => {
       const profileId = configuredTarget(target.targetId).runtimeProfileId;
       const application = applicationRefs.find((item) => item.applicationId === target.applicationId);
@@ -148,7 +171,8 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       if (application === undefined || isE2EPlaceholderRuntimeProfileId(profileId)) return "runtime-unavailable";
       if (application.recipe === null) return "no-launch-recipe";
       if (isE2EQualifiedRuntimeProfileId(profileId) && !e2eApplicationRecipeIsProjectContract(snapshot, target.applicationId, application.recipe)) return "needs-project-contract";
-      return readyRuntimeFor(target) === undefined ? (isE2EQualifiedRuntimeProfileId(profileId) ? "runtime-not-ready" : "runtime-unavailable") : undefined;
+      if (readyRuntimeFor(target) === undefined) return isE2EQualifiedRuntimeProfileId(profileId) ? "runtime-not-ready" : "runtime-unavailable";
+      return isE2EQualifiedRuntimeProfileId(profileId) && accountRefFor(target.applicationId, target.accountProfileId) === undefined ? "no-account-definition" : undefined;
     };
     const runtimeRefs = targets.flatMap((target) => {
       const applicationRef = applicationRefs.find((item) => item.applicationId === target.applicationId);
@@ -169,9 +193,12 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       const ready = targets.filter((target) => target.kind === kind && unavailableReason(target) === undefined).map(readyRuntimeFor)[0];
       return ready === undefined ? [] : [{ kind, steps: ready.supportedSteps.filter((step) => step !== "agent"), assertions: [...ready.supportedAssertions] }];
     });
-    const runtimeAccountRefs = runtimeRefs.flatMap((ref) => unavailableReasons.some((item) => item.targetId === ref.targetId) || ref.recipeDigest === null ? []
-      : [deriveE2ESyntheticRuntimeAccountRef({ applicationId: ref.applicationId, accountProfileId: ref.accountProfileId, recipeDigest: ref.recipeDigest })])
-      .filter((ref, index, refs) => refs.findIndex((item) => item.applicationId === ref.applicationId && item.profileId === ref.profileId) === index);
+    // The refs the plan copies are the registry's latest, one per (application, account profile): an owner and a viewer of one application each get their own.
+    const runtimeAccountRefs = runtimeRefs.flatMap((ref) => {
+      if (unavailableReasons.some((item) => item.targetId === ref.targetId) || ref.recipeDigest === null) return [];
+      const account = accountRefFor(ref.applicationId, ref.accountProfileId);
+      return account === undefined ? [] : [account];
+    }).filter((ref, index, refs) => refs.findIndex((item) => item.applicationId === ref.applicationId && item.profileId === ref.profileId) === index);
     const portableOperations = discovered.portableOperations.flatMap((operation) => {
       const requestedTargetIds = operation.targetIds.filter((targetId) => selectedTargetIds.has(targetId));
       if (requestedTargetIds.length === 0) return [];

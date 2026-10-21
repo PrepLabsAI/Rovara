@@ -51,6 +51,11 @@ export const WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX = "The approved browse
 /** The approved plan itself can no longer be approved (portable criteria, web and API together): the task goes back to plan review, where Request changes is the way on. */
 export const WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX = "The approved browser and API plan can no longer run as written. Request changes and submit a corrected plan before coding resumes. Why: ";
 export const WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX = "The approved browser and API checks can no longer run as approved. Retry the checks to approve the plan again against what is ready now. What changed: ";
+/**
+ * A test account the plan was approved with has a newer registered definition (the setup was approved again, or the definition expired and was written again). The way on is
+ * the same re-approval as for a requalified runtime: one retry approves the plan again against the accounts that are registered now.
+ */
+export const WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX = "The test accounts changed; approve the checks again. What changed: ";
 
 export const WORKFLOW_BLOCK_REASONS = {
   checksUnconfirmed: "AgentX couldn't confirm the selected checks ran on the final code. Choose checks and retry.",
@@ -110,7 +115,7 @@ export const WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED = "pushing a reviewed 
 export function workflowApplicationRetryOffered(workflow: { stage: string; state: string; blockReason?: string | undefined;
   e2e?: { required?: boolean | undefined; applicationSelection?: unknown } | undefined }): boolean {
   return workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined
-    && [WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX]
+    && [WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX]
       .some((prefix) => workflow.blockReason?.startsWith(prefix) === true);
 }
 
@@ -1768,7 +1773,8 @@ export function workflowSendBackOffered(workflow: {
     // Review only: a rerun of the agent's own tests regressed, and no result was recorded for it.
     if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.regressionFound) return true;
     // Blocks that only an administrator qualifying the runtime, or approving the plan again, can fix: new code cannot, even for a task with no checks.
-    if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true) return false;
+    if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true
+      || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) === true) return false;
     // A required browser and API round that could not be admitted from this candidate (its build source or inputs are unusable): only new code can fix that.
     if (workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX) === true) return true;
     // Review only: there is no check to retry, so coding again is the way on, except from rewritten history.

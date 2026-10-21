@@ -5,6 +5,8 @@ import { applicationEvidenceLimits, expectedApplicationAssertionAssets, verifyAp
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope, type ApplicationEvidenceFixture } from "../support/e2e-application-evidence-fixture.js";
 import { canonicalJson } from "@agentx/contracts";
+import { applicationIntentWithAccountRefs, applicationRoundIntent } from "../../packages/broker/src/e2e/application-plan-approval.js";
+import { planFixture } from "../support/e2e-application-plan-fixtures.js";
 import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStateProbeAsset } from "../../packages/verifier/src/application-state-probes.js";
 import { createPortableApplicationChildFixture } from "../support/e2e-application-fixture.js";
 import { e2eApplicationPrivateTransferMaxBytes } from "@agentx/verifier";
@@ -441,4 +443,25 @@ describe("combining the verdicts of the parts of a round (Ruling BA)", () => {
     [["FAILED", "PASS"], "FAILED"], [["PASS", "FAILED"], "FAILED"], [["FAILED", "UNKNOWN"], "FAILED"], [["UNKNOWN", "FAILED", "PASS"], "FAILED"], [[], "UNKNOWN"],
   ];
   it.each(cases)("%j is %s", (verdicts, expected) => { expect(combineE2EVerdicts(verdicts)).toBe(expected); });
+});
+
+describe("holding an approved plan to its admission when approval pinned the test accounts (Task 3.1)", () => {
+  it("compares parsed intents: a stored plan without the schema's defaulted keys is the admitted intent, with the pinned account ref in place of the plan's own", () => {
+    const fx = planFixture({});
+    const { portableOperationRefs: _portable, mockFixtureRefs: _mocks, unavailableTargetRefs: _unavailable, ...stored } = fx.intent;
+    void _portable; void _mocks; void _unavailable;
+    const pinned = [{ ...fx.accountRef, revision: 2, definitionDigest: "7".repeat(64) }];
+    const admitted = applicationRoundIntent(applicationIntentWithAccountRefs(stored, pinned));
+    expect(admitted.runtimeAccountRefs).toEqual(pinned);
+    // The planner's stored form read back with its keys in another order (a table keeps none) is the same admitted intent: both sides go through the schema.
+    const reread = Object.fromEntries(Object.entries(stored).reverse());
+    expect(canonicalJson(applicationRoundIntent(applicationIntentWithAccountRefs(reread as never, pinned)))).toBe(canonicalJson(admitted));
+    // And the members the schema defaults are written out as empty lists on the admitted side, never compared as the stored JSON spells them.
+    expect(admitted.portableOperationRefs).toEqual([]);
+    // Without a pin (an M1.2 record) the plan's own ref is what runs.
+    expect(applicationRoundIntent(applicationIntentWithAccountRefs(stored, [])).runtimeAccountRefs).toEqual([fx.accountRef]);
+    // A pin for another account of the application leaves this account's ref alone: the lookup is by application and profile.
+    const other = [{ ...pinned[0]!, profileId: "orders-viewer" }];
+    expect(applicationIntentWithAccountRefs(fx.intent, other).runtimeAccountRefs).toEqual([fx.accountRef]);
+  });
 });

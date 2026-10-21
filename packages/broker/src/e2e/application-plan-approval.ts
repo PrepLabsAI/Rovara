@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import {
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, Ec2RuntimeBindingSchema, canonicalJson,
   deriveE2ESyntheticRuntimeAccountRef, E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs, e2eRuntimeKindMatchesTarget, inspectE2ERepository, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract,
-  type E2EApplicationPlanIntent, type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type E2ERuntimeAvailability,
+  type E2EApplicationPlanIntent, type E2EApplicationProjectContract, type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type E2ERuntimeAccountRef, type E2ERuntimeAvailability,
   type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
 } from "@agentx/contracts";
 import { deriveE2EApplicationFeatureExecutionSelection } from "./application-feature-plan-intent.js";
+import { E2EAccountRegistryError, latestAccountRef, type E2EAccountRegistryEntry } from "./application-account-registry.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const REASON_MAX_CHARS = 600;
@@ -38,12 +39,75 @@ export type ApplicationPlanApprovalInput = {
   runtimeCatalogId: string;
   runtimeBinding: Ec2RuntimeBinding;
   now: number;
+  /** The test accounts the plan's runtime account refs are held to (Task 3.1). */
+  accounts: ApplicationAccountsInput;
   /**
    * The plan identity the derivation is made under. Approval leaves it out (the identity of the canonical plan artifact); dispatch gives its own, derived
    * from the approved graph run, revision and actor, so the admission it builds is bound to that one round.
    */
   planDigest?: string;
 };
+
+/**
+ * The registry rows the broker read for the plan's accounts, and what the evaluation is for:
+ * - `approve`: the Owner approves a plan now. Each scenario's account ref must equal the account's latest registered ref, parsed on both sides, and the registry's
+ *   definition must stand behind the approved contract and be unexpired. The M1.2 stand-in is never accepted.
+ * - `reapprove`: the Owner approves the same, already approved plan again (a retry after the accounts or the runtime changed). The plan still carries the ref it was
+ *   approved with; the latest registered ref is pinned instead.
+ * - `current`: dispatch, admission and verification. The refs pinned at approval (`pinned`) are what runs, and the registry must still hold exactly them. A record approved
+ *   under M1.2 pinned none; its plan's recipe-derived stand-in refs are read as they are while the registry holds nothing for the account.
+ */
+export type ApplicationAccountsInput = { entries: readonly E2EAccountRegistryEntry[]; mode: "approve" | "reapprove" | "current"; pinned: readonly E2ERuntimeAccountRef[] };
+
+export const applicationAccountKey = (ref: { applicationId: string; profileId: string }) => `${ref.applicationId}\0${ref.profileId}`;
+const sameRef = (left: E2ERuntimeAccountRef, right: E2ERuntimeAccountRef) => canonicalJson(left) === canonicalJson(right);
+const describeAccount = (applicationId: string, profileId: string) => `account profile ${profileId} of application ${applicationId}`;
+
+/**
+ * The account ref one executable (application, account profile) runs with, or why it cannot. Every lookup is by the pair and must find exactly one account: an owner and a
+ * viewer of one application each get their own ref. Refusals are `accounts-changed-reapprove` (the registered account is not the one the plan stands on) or the registry's
+ * own not-registered / ambiguous messages; a plan that carries no ref for the account is a plan defect.
+ */
+function pinAccountRef(input: { accounts: ApplicationAccountsInput; contract: E2EApplicationProjectContract | null; applicationId: string; profileId: string; recipeDigest: string;
+  planRefs: readonly E2ERuntimeAccountRef[]; now: number }): { ok: true; ref: E2ERuntimeAccountRef } | { ok: false; reason: string; scope: ApplicationRefusalScope } {
+  const { accounts, applicationId, profileId } = input;
+  const what = describeAccount(applicationId, profileId);
+  const matching = (refs: readonly E2ERuntimeAccountRef[]) => refs.filter((ref) => ref.applicationId === applicationId && ref.profileId === profileId);
+  const planned = matching(input.planRefs);
+  if (planned.length !== 1) return { ok: false, scope: "plan", reason: `the plan has ${planned.length === 0 ? "no" : "more than one"} runtime account reference for ${what}; copy runtimeAccountRefs from the planning context` };
+  const planRef = planned[0]!;
+  const registered = accounts.entries.some((entry) => entry.definition.applicationId === applicationId && entry.definition.profileId === profileId);
+  const latest = (): E2ERuntimeAccountRef => {
+    if (input.contract === null) throw new E2EAccountRegistryError("account-not-registered", `no account definition is registered for ${what}: the application has no project contract in the approved source`);
+    return latestAccountRef({ contract: input.contract, entries: accounts.entries, applicationId, profileId, now: input.now });
+  };
+  const changed = (detail: string) => ({ ok: false as const, scope: "accounts" as const, reason: `accounts-changed-reapprove: ${what} ${detail}` });
+  try {
+    if (accounts.mode === "approve") {
+      const current = latest();
+      return sameRef(planRef, current) ? { ok: true, ref: current }
+        : changed(`is registered at revision ${current.revision} now, and the plan's runtime account reference is not that one; copy runtimeAccountRefs from the planning context`);
+    }
+    if (accounts.mode === "reapprove") return { ok: true, ref: latest() };
+    const pinned = matching(accounts.pinned);
+    if (pinned.length > 1) return changed("has more than one pinned account reference");
+    if (pinned.length === 1) {
+      if (!registered) return changed("is no longer registered");
+      const current = latest();
+      return sameRef(pinned[0]!, current) ? { ok: true, ref: pinned[0]! } : changed(`was approved at revision ${pinned[0]!.revision} and is registered at revision ${current.revision} now`);
+    }
+    // A record that pinned any account is an M1.3 record: an account it pinned nothing for is not read as the stand-in, it is refused.
+    if (accounts.pinned.length > 0) return changed("has no pinned account reference in this approval");
+    // An M1.2 record (nothing pinned at all): the plan's ref is the recipe-derived stand-in, which no new approval accepts but a record approved under M1.2 is read with.
+    const standIn = deriveE2ESyntheticRuntimeAccountRef({ applicationId, accountProfileId: profileId, recipeDigest: input.recipeDigest });
+    if (!sameRef(planRef, standIn)) return { ok: false, scope: "plan", reason: `the runtime account reference for ${what} is not the synthetic account identity this plan was approved with; copy runtimeAccountRefs from the planning context` };
+    if (registered) return changed("has a registered definition now, and the plan was approved with the recipe-derived account identity");
+    return { ok: true, ref: standIn };
+  } catch (error) {
+    if (error instanceof E2EAccountRegistryError) return { ok: false, scope: "accounts", reason: error.message };
+    throw error;
+  }
+}
 
 /** As operationStep does: a portable scenario is exactly one portable step. One that goes on to application steps is refused as a mix. */
 const isPortableScenario = (scenario: E2EApplicationPlanIntent["scenarios"][number]) => scenario.steps.length === 1
@@ -56,6 +120,17 @@ const isPortableScenario = (scenario: E2EApplicationPlanIntent["scenarios"][numb
  */
 export function applicationIntentDigest(intent: E2EApplicationPlanIntent): string {
   return sha256(canonicalJson(E2EApplicationPlanIntentSchema.parse(intent)));
+}
+
+/**
+ * The intent with the account refs an approval pinned in place of the ones the stored plan carries (the plan's refs for accounts without a pinned one stay). Approval
+ * pins the registry's latest refs, so a plan approved again after an account moved on still runs the account that is registered; the stored plan, and the digest that
+ * binds it to its approval (`applicationIntentDigest`), are never changed.
+ */
+export function applicationIntentWithAccountRefs(intent: E2EApplicationPlanIntent, pinned: readonly E2ERuntimeAccountRef[]): E2EApplicationPlanIntent {
+  const parsed = E2EApplicationPlanIntentSchema.parse(intent);
+  const byKey = new Map(pinned.map((ref) => [applicationAccountKey(ref), ref]));
+  return E2EApplicationPlanIntentSchema.parse({ ...parsed, runtimeAccountRefs: parsed.runtimeAccountRefs.map((ref) => byKey.get(applicationAccountKey(ref)) ?? ref) });
 }
 
 /**
@@ -79,10 +154,16 @@ export type ApplicationDerivation = ReturnType<typeof deriveE2EApplicationFeatur
 /**
  * Why an approval was refused, when the cause is knowable. `plan`: the plan itself can never run as written (portable criteria, web and api together, no application
  * scenario, a target with no source-owned identity), so only a corrected plan helps. `runtime`: the registered runtime cannot carry it now (no READY row of the kind, bound
- * elsewhere, not READY), so only the runtime being qualified again helps. Anything else has no scope and the reason says what changed.
+ * elsewhere, not READY), so only the runtime being qualified again helps. `accounts`: a test account the plan stands on is not the registered one now (a newer revision, an
+ * expired or unreadable definition, none registered), so only approving the checks again, or the setup being approved again, helps. Anything else has no scope and the
+ * reason says what changed.
  */
-export type ApplicationRefusalScope = "plan" | "runtime";
-export type ApplicationPlanApproval = { ok: true; selection: E2EApplicationSelectionRecord; derivation: ApplicationDerivation } | { ok: false; reason: string; scope?: ApplicationRefusalScope };
+export type ApplicationRefusalScope = "plan" | "runtime" | "accounts";
+export type ApplicationPlanApproval =
+  { ok: true; selection: E2EApplicationSelectionRecord; derivation: ApplicationDerivation;
+    /** The account refs the round runs with, one per executable (application, account profile): what approval pins and what dispatch holds the registry to. */
+    accountRefs: E2ERuntimeAccountRef[] }
+  | { ok: false; reason: string; scope?: ApplicationRefusalScope };
 
 /**
  * Evaluates whether the Owner may approve a plan carrying an application intent, against the approved setup and the READY rows now.
@@ -132,6 +213,7 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     }))].sort();
     if (executableKinds.length > 1) return refuse(`the plan's executable targets span ${executableKinds.join(" and ")}: ${BF_REASON}`, "plan");
     const availability: E2ERuntimeAvailability[] = [];
+    const accountRefs: E2ERuntimeAccountRef[] = [];
     const usedRows: Array<{ kind: "web" | "api"; row: E2ERegisteredRuntime }> = [];
     for (const ref of intent.applicationRuntimeRefs) {
       const target = policy.targets.find((item) => item.targetId === ref.targetId);
@@ -156,11 +238,13 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
       if (contract !== null && contract.accountProfiles.find((profile) => profile.profileId === ref.accountProfileId)?.scope !== "synthetic-test") {
         return refuse(`account profile ${ref.accountProfileId} is not declared as a synthetic test account by the application's project contract`);
       }
-      const account = intent.runtimeAccountRefs.find((item) => item.applicationId === ref.applicationId && item.profileId === ref.accountProfileId);
-      const synthetic = deriveE2ESyntheticRuntimeAccountRef({ applicationId: ref.applicationId, accountProfileId: ref.accountProfileId, recipeDigest: application.recipe.recipeDigest });
-      if (account === undefined || canonicalJson(account) !== canonicalJson(synthetic)) {
-        return refuse(`the runtime account reference for application ${ref.applicationId} and account profile ${ref.accountProfileId} is not its synthetic account identity; copy runtimeAccountRefs from the planning context`);
-      }
+      // Test accounts are registered from the approved project contract; an application with only an inferred launch recipe has none to run as.
+      if (contract === null) return refuse(`needs-project-contract: application ${ref.applicationId} has no project contract in the approved source, so target ${ref.targetId} has no registered test account to run application scenarios as`);
+      // The account the case runs as is the registry's (owner decision D5), found by this application and this account profile, exactly one of it.
+      const pinned = pinAccountRef({ accounts: input.accounts, contract, applicationId: ref.applicationId, profileId: ref.accountProfileId,
+        recipeDigest: application.recipe.recipeDigest, planRefs: intent.runtimeAccountRefs, now: input.now });
+      if (!pinned.ok) return refuse(pinned.reason, pinned.scope);
+      if (!accountRefs.some((item) => applicationAccountKey(item) === applicationAccountKey(pinned.ref))) accountRefs.push(pinned.ref);
       const row = input.registeredRuntimes.find((item) => item.runtimeCatalogId === input.runtimeCatalogId && item.profileId === ref.runtimeProfileId
         && e2eRuntimeKindMatchesTarget({ ...target, runtimeProfileId: ref.runtimeProfileId }, item.capabilities));
       if (row === undefined) return refuse(`no ${target.kind} runtime of profile ${ref.runtimeProfileId} is READY for this project's runtime binding, so target ${ref.targetId} cannot run application scenarios now`, "runtime");
@@ -175,10 +259,12 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     // The approval-time identity of the plan: the canonical artifact. Dispatch derives its own plan digest and re-runs the whole selection.
     const planDigest = input.planDigest ?? sha256(canonicalJson({ domain: "workflow-e2e-application-approval-plan/v1", taskId: input.taskId, artifactId: input.artifact.id, artifactSha256: input.artifact.sha256 }));
     const semanticApproval = { artifactId: input.artifact.id, digest: input.artifact.sha256 };
-    const selection = deriveE2EApplicationFeatureExecutionSelection({ intent, snapshot: input.snapshot, artifactId: semanticApproval.artifactId,
+    // The round runs with the pinned refs, whatever refs the stored plan carries (a re-approved plan still holds the ones it was first approved with).
+    const roundIntent = applicationIntentWithAccountRefs(intent, accountRefs);
+    const selection = deriveE2EApplicationFeatureExecutionSelection({ intent: roundIntent, snapshot: input.snapshot, artifactId: semanticApproval.artifactId,
       artifactSha256: semanticApproval.digest, planDigest, approvedSemanticApproval: semanticApproval, setupProposal: input.setupProposal,
       setupApproval: input.setupApproval, policy: applicationPolicy, registeredRuntimes: input.registeredRuntimes, runtimeAvailability: availability,
-      runtimeAccountRefs: intent.runtimeAccountRefs, runtimeCatalogId: input.runtimeCatalogId, runtimeBinding: input.runtimeBinding, featureVerifier: null, now: input.now });
+      runtimeAccountRefs: roundIntent.runtimeAccountRefs, runtimeCatalogId: input.runtimeCatalogId, runtimeBinding: input.runtimeBinding, featureVerifier: null, now: input.now });
     // A criterion on a target the plan called executable that the selection could not make executable is a refusal; the rest wait as UNKNOWN.
     const executableTargetIds = [...new Set(intent.applicationRuntimeRefs.map((ref) => ref.targetId))].sort();
     const criteria = new Map(selection.plan.criteria.map((criterion) => [criterion.criterionId, criterion]));
@@ -198,7 +284,7 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
       unavailableCriteria: selection.plan.unavailableCriteria.map((item) => ({ criterionId: item.criterionId, reason: item.reason })),
       runtimeRows: usedRows.map(({ kind, row }) => ({ kind, profileId: row.profileId, runtimeCatalogId: row.runtimeCatalogId, catalogRevision: row.catalogRevision,
         generation: row.generation, bindingDigest: row.bindingDigest, capabilityDigest: row.capabilityDigest, expiresAt: row.expiresAt })),
-      evaluatedAt: new Date(input.now).toISOString() }) };
+      accountRefs, evaluatedAt: new Date(input.now).toISOString() }), accountRefs };
   } catch (error) {
     return refuse(`the plan could not be derived against the approved setup and the ready runtimes: ${error instanceof Error ? error.message : "unreadable input"}`);
   }

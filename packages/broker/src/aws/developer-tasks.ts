@@ -105,9 +105,11 @@ import {
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
   WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
+  WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
   workflowApplicationRetryOffered,
   e2eApplicationSelectionFingerprint,
+  e2eApplicationAccountChanges,
   type E2EApplicationReapproval,
   WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
   canonicalPlanJson,
@@ -266,7 +268,9 @@ export interface DeveloperTaskRouteDependencies {
    * READY now: the selection to record and the conditions that keep those rows as read until the approval commits. It throws when the plan cannot be
    * approved (CONFIG_INVALID) or cannot be evaluated (RUNTIME_UNAVAILABLE); without it a v2 plan is never approved.
    */
-  validateWorkflowE2EApplicationPlan?(input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string } }):
+  validateWorkflowE2EApplicationPlan?(input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string };
+    /** The owner's retry approving the same, already approved plan again: the latest registered test accounts are pinned, not compared with the plan's refs. */
+    reapproval?: boolean }):
     Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems }>;
   /** Resolves only a URL loaded from the task's immutable registered project revision. */
   registeredRepositoryIdentity?(url: string): Promise<{ repositoryId: number; fullName: string } | undefined>;
@@ -2280,9 +2284,11 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
         if (deps.validateWorkflowE2EApplicationPlan === undefined) {
           throw agentXError("RUNTIME_UNAVAILABLE", "the plan cannot be approved again here: the check against the approved setup and the ready runtimes is not installed");
         }
-        reapproved = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: planArtifact.id, sha256: planArtifact.sha256 } });
+        reapproved = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: planArtifact.id, sha256: planArtifact.sha256 }, reapproval: true });
+        const accountChanges = e2eApplicationAccountChanges(workflow.e2e.applicationSelection, reapproved.selection);
         reapproval = { requestId: request.requestId, actorId: access.actorId, reason: request.instructions.slice(0, 500), at: receivedAt,
-          previous: e2eApplicationSelectionFingerprint(workflow.e2e.applicationSelection), current: e2eApplicationSelectionFingerprint(reapproved.selection) };
+          previous: e2eApplicationSelectionFingerprint(workflow.e2e.applicationSelection), current: e2eApplicationSelectionFingerprint(reapproved.selection),
+          ...(accountChanges.length === 0 ? {} : { accounts: accountChanges }) };
       }
       const next = WorkflowSnapshotSchema.parse({
         ...retryBase,
@@ -3131,6 +3137,9 @@ export function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: bo
       // A block of a browser and API round names its own way on: new code does not fix a runtime that needs qualifying or a selection that needs approving again.
       if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true) {
         return { status: "The browser and API checks can't run on the runtime as it is now", nextStep: `An administrator must qualify the runtime again; then retry the checks, or close the task ${inSlack}.` };
+      }
+      if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) === true) {
+        return { status: "The approved browser and API checks no longer match the test accounts", nextStep: `The test accounts changed; approve the checks again by retrying them, or close the task ${inSlack}.` };
       }
       if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true) {
         return { status: "The approved browser and API checks no longer match the runtime", nextStep: `Retry the checks to approve the plan again against what is ready now, or close the task ${inSlack}.` };

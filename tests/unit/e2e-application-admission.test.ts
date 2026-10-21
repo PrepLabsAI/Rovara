@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson } from "@agentx/contracts";
+import { E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
+  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eApplicationAccountDefinitionDigest } from "@agentx/contracts";
+import { registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
 import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/broker/src/e2e/application-admission.js";
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
-import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
+import { applicationIntentDigest, evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { binding, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 
@@ -15,9 +17,10 @@ const candidateOf = createRealCandidate;
 const ordersTree = { "package.json": ordersContractManifest, "src/orders.js": "export const orders = [];\n" };
 
 /** The selection the Owner approved: derived against the approved setup snapshot, as plan APPROVE records it. */
-function approvedSelection(fx: ReturnType<typeof planFixture>, rows = [webApiRow("web")], snapshot = fx.snapshot, intent = fx.intent) {
+function approvedSelection(fx: ReturnType<typeof planFixture>, rows = [webApiRow("web")], snapshot = fx.snapshot, intent = fx.intent, registry = fx.registry) {
   const result = evaluateApplicationPlanApproval({ intent, taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot,
-    setupProposal: fx.setup.proposal, setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now() });
+    setupProposal: fx.setup.proposal, setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now(),
+    accounts: { entries: registry, mode: "approve", pinned: [] } });
   if (!result.ok) throw new Error(result.reason);
   return result.selection;
 }
@@ -25,7 +28,8 @@ function approvedSelection(fx: ReturnType<typeof planFixture>, rows = [webApiRow
 function webAndApiSelection(fixture: ReturnType<typeof webAndApiFixture>) {
   const result = evaluateApplicationPlanApproval({ intent: fixture.build({ web: false, api: true }), taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) },
     snapshot: fixture.snapshot, setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy,
-    registeredRuntimes: [webApiRow("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now() });
+    registeredRuntimes: [webApiRow("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now(),
+    accounts: { entries: fixture.registry, mode: "approve", pinned: [] } });
   if (!result.ok) throw new Error(result.reason);
   return result.selection;
 }
@@ -36,7 +40,7 @@ async function inputs(overrides: Partial<ApplicationAdmissionInput> = {}, tree: 
   const base: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
     runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
     setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: binding,
-    buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), recordedSelection: approvedSelection(fx) };
+    buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection(fx) };
   return { fx, candidate, input: { ...base, ...overrides } };
 }
 const refusalOf = (build: () => unknown): string => {
@@ -147,7 +151,7 @@ describe("the application admission built for a single-kind round", () => {
     const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
       runId: randomUUID, intent: fixture.build({ web: false, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
       setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
-      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), recordedSelection: webAndApiSelection(fixture) };
+      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), accountEntries: fixture.registry, recordedSelection: webAndApiSelection(fixture) };
     const built = buildApplicationExecutionAdmission(input);
     expect(built.kind).toBe("api");
     const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
@@ -175,7 +179,7 @@ describe("the builder refuses with a specific reason, never a portable fallback"
     const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
       runId: randomUUID, intent: fixture.build({ web: true, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
       setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
-      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), recordedSelection: webAndApiSelection(fixture) };
+      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), accountEntries: fixture.registry, recordedSelection: webAndApiSelection(fixture) };
     expect(refusalOf(() => buildApplicationExecutionAdmission(input))).toContain("one runtime kind per plan in M1.2");
   });
 
@@ -241,6 +245,77 @@ describe("the builder refuses with a specific reason, never a portable fallback"
         expect(message).toMatch(reason);
       });
     }
+  });
+
+  describe("runs with the account refs the Owner approved, and refuses when the registry no longer holds exactly them (Task 3.1)", () => {
+    it("pins the approved ref into the admitted intent and the selection input", async () => {
+      const { input, fx } = await inputs();
+      const built = buildApplicationExecutionAdmission(input);
+      const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+      expect(input.recordedSelection.accountRefs).toEqual([fx.accountRef]);
+      expect(decoded.selectionInput.runtimeAccountRefs).toEqual([fx.accountRef]);
+      expect(decoded.intent.runtimeAccountRefs).toEqual([fx.accountRef]);
+    });
+
+    it("refuses with the accounts-changed text when the account has a newer revision, whatever the plan still carries", async () => {
+      const { input, fx } = await inputs();
+      const bumped = fx.registry.map((entry) => {
+        const definition = { ...entry.definition, revision: 2 };
+        return { definition, latest: { revision: 2, definitionDigest: e2eApplicationAccountDefinitionDigest(definition) } };
+      });
+      const message = refusalOf(() => buildApplicationExecutionAdmission({ ...input, accountEntries: bumped }));
+      expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+      expect(message).toContain("accounts-changed-reapprove");
+      expect(message).not.toMatch(/send the task back/i);
+    });
+
+    it("refuses when the registry holds nothing for an account that was approved from it", async () => {
+      const { input } = await inputs();
+      expect(refusalOf(() => buildApplicationExecutionAdmission({ ...input, accountEntries: [] }))).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+    });
+
+    it("refuses a registered definition that has expired by the time of dispatch", async () => {
+      const { input } = await inputs();
+      const message = refusalOf(() => buildApplicationExecutionAdmission({ ...input, now: Date.now() + 91 * 86_400_000 }));
+      expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+      expect(message).toMatch(/expired/);
+    });
+
+    it("refuses a definition whose tenant digest is not the contract's, although it is the latest and the one the Owner approved (registry tampering at dispatch)", async () => {
+      const fx = planFixture({});
+      const tampered = fx.registry.map((entry) => {
+        const definition = { ...entry.definition, tenantIdDigest: "f".repeat(64) };
+        return { definition, latest: { revision: definition.revision, definitionDigest: e2eApplicationAccountDefinitionDigest(definition) } };
+      });
+      const ref = deriveE2EApplicationRuntimeAccountRef(tampered[0]!.definition);
+      const { input } = await inputs({ accountEntries: tampered, recordedSelection: { ...approvedSelection(fx), accountRefs: [ref] } });
+      const message = refusalOf(() => buildApplicationExecutionAdmission(input));
+      expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+      expect(message).toContain("accounts-changed-reapprove");
+    });
+
+    it("refuses an account that expires before the round could end, as it does a runtime row, and builds once it outlives the round", async () => {
+      const soon = Date.now() - 90 * 86_400_000 + 30_000;
+      const short = registryFor(planFixture({}).snapshot, soon);
+      const ref = deriveE2EApplicationRuntimeAccountRef(short[0]!.definition);
+      const fx = planFixture({ accountRef: { definitionDigest: ref.definitionDigest } });
+      const { input } = await inputs({ intent: fx.intent, accountEntries: short, recordedSelection: approvedSelection(fx, [webApiRow("web")], fx.snapshot, fx.intent, short) });
+      const message = refusalOf(() => buildApplicationExecutionAdmission(input));
+      expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+      expect(message).toMatch(/expires at .* before this round could end at .*register the project's setup again to renew it/);
+      const later = registryFor(planFixture({}).snapshot, Date.now() - 86_400_000);
+      const fxLater = planFixture({ accountRef: { definitionDigest: deriveE2EApplicationRuntimeAccountRef(later[0]!.definition).definitionDigest } });
+      const { input: ok } = await inputs({ intent: fxLater.intent, accountEntries: later, recordedSelection: approvedSelection(fxLater, [webApiRow("web")], fxLater.snapshot, fxLater.intent, later) });
+      expect(() => buildApplicationExecutionAdmission(ok)).not.toThrow();
+    });
+
+    it("reads an M1.2 record as it is: the recipe-derived ref in the plan, nothing pinned, nothing registered", async () => {
+      const fx = planFixture({ accountRef: deriveE2ESyntheticRuntimeAccountRef({ applicationId: planFixture({}).application.applicationId, accountProfileId: "synthetic",
+        recipeDigest: planFixture({}).application.recipe!.recipeDigest }) });
+      const { input } = await inputs({ intent: fx.intent, accountEntries: [], recordedSelection: { ...approvedSelection(planFixture({})), accountRefs: [], intentDigest: applicationIntentDigest(fx.intent) } });
+      const built = buildApplicationExecutionAdmission(input);
+      expect(decodeE2EApplicationExecutionAdmission(built.bytes).selectionInput.runtimeAccountRefs).toEqual([fx.accountRef]);
+    });
   });
 
   it("states the right remedy for each refusal: the runtime's state asks for an administrator and retry, the candidate's problems for sending it back", async () => {
