@@ -12,12 +12,19 @@ import { readE2EApplicationInstalledFileFixture } from "../application-runtime-a
 import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStateProbeAsset } from "../application-state-probes.js";
 import { isPinnedRovaraHttpEngine } from "../rovara-http-engine-descriptor.js";
 import { createExecutorSessionStore } from "./accounts.js";
-import { createFileCaseLedger } from "./case-ledger.js";
+import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
+import { createPlaywrightFormLoginDriver, isSessionCookieSecret, parseSetCookie } from "./form-login.js";
 import { casePlanFor, resolveE2EExecutorSuite } from "./suite.js";
 
 export const E2E_EXECUTOR_CONTEXT_ENV = "ROVARA_E2E_EXECUTOR_CONTEXT" as const;
 export const E2E_EXECUTOR_BLOCKED_LOG = ".blocked-requests.jsonl" as const;
 export const E2E_EXECUTOR_OUTPUT_DIR = ".agentx-run-output" as const;
+/**
+ * Two private files the CLI process leaves in its shard's project directory (never in the out directory) for the executor parent: the session values it must scrub from the
+ * text it writes (JSON strings, one per line), and the account profiles whose form login did not complete (JSON strings, one per line).
+ */
+export const E2E_EXECUTOR_SESSION_SECRETS_FILE = ".session-secrets.jsonl" as const;
+export const E2E_EXECUTOR_LOGIN_FAILED_FILE = ".login-failed.jsonl" as const;
 const MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024;
 const MAX_PLAN_BYTES = 20 * 1024 * 1024;
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
@@ -108,26 +115,74 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   if (planBytes.byteLength > MAX_PLAN_BYTES) throw new Error("executor plan exceeds its fixed bound");
   const plan = E2EExecutorPlanSchema.parse(JSON.parse(planBytes.toString("utf8")));
   const resolved = resolveE2EExecutorSuite(plan);
-  const store = createExecutorSessionStore({ plan });
-  const ledger = createFileCaseLedger(context.outDir, plan, { observations: { sessionFacts: store.sessionFacts,
-    upstreamRunId: (launch) => readUpstreamRunId(context.projectDir, launch.launchId) } });
   const { launchContext, declaration } = input;
   let activeCaseId: string | null = null;
   let activeSessionRef: string | null = null;
+  let ledger: FileCaseLedger | null = null;
+  const ownedContexts = new Map<string, BrowserContext>();
+
+  // Every browser context the executor opens, the form login's included, may reach the application's origin and nothing else.
+  const guarded = new WeakSet<BrowserContext>();
+  const blockedLog = join(context.outDir, E2E_EXECUTOR_BLOCKED_LOG);
+  const guard = async (browserContext: BrowserContext): Promise<void> => {
+    if (guarded.has(browserContext)) return;
+    guarded.add(browserContext);
+    await browserContext.route("**/*", async (route) => {
+      const request = route.request();
+      let url: URL;
+      try { url = new URL(request.url()); } catch { await route.abort("blockedbyclient"); return; }
+      if (url.origin === E2E_EXECUTOR_COMPILED_ORIGIN || url.protocol === "data:" || url.protocol === "blob:" || url.protocol === "about:") {
+        await route.continue();
+        return;
+      }
+      appendFileSync(blockedLog, `${JSON.stringify({ at: new Date().toISOString(), caseId: activeCaseId, method: request.method(),
+        resourceType: request.resourceType(), host: url.host, url: `${url.origin}${url.pathname}` })}\n`);
+      await route.abort("blockedbyclient");
+    });
+    // `route` never sees a WebSocket: without this the candidate's own page could open one to any host of the run network, a mock included, and fabricate a call. Only the
+    // application's own origin may; every other WebSocket opened from the page is closed before it connects and recorded like a blocked request.
+    // This does not cover a WebSocket opened from a Worker: Playwright replaces `WebSocket` with an init script, and init scripts do not run in workers. Such a socket is neither
+    // blocked nor in the blocked log. It still cannot count as a consumption or hide a call: it reaches a mock from the executor's address, so the host's caller check (only the
+    // application container's address may consume) makes it a `foreign-caller` unmatched line, and the case is UNKNOWN.
+    await browserContext.routeWebSocket(/.*/, (socket) => {
+      let url: URL | null = null;
+      try { url = new URL(socket.url()); } catch { /* an unreadable address is blocked below */ }
+      if (url !== null && url.host === new URL(E2E_EXECUTOR_COMPILED_ORIGIN).host) { socket.connectToServer(); return; }
+      appendFileSync(blockedLog, `${JSON.stringify({ at: new Date().toISOString(), caseId: activeCaseId, method: "GET", resourceType: "websocket",
+        host: url?.host ?? "unreadable", url: url === null ? "unreadable" : `${url.origin}${url.pathname}` })}\n`);
+      void socket.close({ code: 1008, reason: "blocked" });
+    });
+  };
+  // A session value is told to the ledger (so evidence and captures that carry it are caught) and left for the parent (so the text it writes is scrubbed of it).
+  const registerSecret = (value: string): void => {
+    ledger?.registerSessionSecret(value);
+    appendFileSync(join(context.projectDir, E2E_EXECUTOR_SESSION_SECRETS_FILE), `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  };
+  const store = createExecutorSessionStore({ plan, registerSecret,
+    onLoginFailed: (profileId) => appendFileSync(join(context.projectDir, E2E_EXECUTOR_LOGIN_FAILED_FILE), `${JSON.stringify(profileId)}\n`, { mode: 0o600 }),
+    ...(context.cdpEndpoint ? { formLogin: createPlaywrightFormLoginDriver({ cdpEndpoint: context.cdpEndpoint, guard }) } : {}) });
+  const fileLedger = createFileCaseLedger(context.outDir, plan, { observations: { sessionFacts: store.sessionFacts,
+    upstreamRunId: (launch) => readUpstreamRunId(context.projectDir, launch.launchId) } });
+  ledger = fileLedger;
 
   const casePlans: E2EWebRuntimePorts["casePlans"] = { readCasePlan: async (request, signal) => {
-    const result = await ledger.casePlans.readCasePlan(request, signal);
+    const result = await fileLedger.casePlans.readCasePlan(request, signal);
     activeCaseId = request.caseId;
     return result;
   } };
   const shared = {
-    casePlans, caseObservations: ledger.caseObservations, evidence: ledger.evidence, actionWindows: ledger.actionWindows,
+    casePlans, caseObservations: fileLedger.caseObservations, evidence: fileLedger.evidence, actionWindows: fileLedger.actionWindows,
     openCaseSession: async (request: Parameters<E2EWebRuntimePorts["openCaseSession"]>[0], signal: AbortSignal) => {
       const opened = await store.open(request, signal);
       activeSessionRef = opened.sessionRef;
       return opened;
     },
     closeCaseSession: async (sessionRef: string, signal: AbortSignal) => {
+      // The cookies the case's browser holds at the end, whoever set them (the application's headers, or its scripts): any that look like secrets are registered, so a value the
+      // application replaced after the sign-in is scrubbed from what the parent writes and is caught by the out scan. Best effort: a closed page has nothing to ask.
+      const owned = ownedContexts.get(sessionRef);
+      ownedContexts.delete(sessionRef);
+      if (owned) { try { for (const cookie of await owned.cookies()) if (isSessionCookieSecret(cookie)) registerSecret(cookie.value); } catch { /* the context is gone */ } }
       const result = await store.close(sessionRef, signal);
       if (result.confirmed && activeSessionRef === sessionRef) { activeSessionRef = null; activeCaseId = null; }
       return result;
@@ -141,41 +196,10 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   };
 
   if (launchContext.selectedTarget.kind === "web") {
-    const guarded = new WeakSet<BrowserContext>();
-    const blockedLog = join(context.outDir, E2E_EXECUTOR_BLOCKED_LOG);
-    const guard = async (browserContext: BrowserContext): Promise<void> => {
-      if (guarded.has(browserContext)) return;
-      guarded.add(browserContext);
-      await browserContext.route("**/*", async (route) => {
-        const request = route.request();
-        let url: URL;
-        try { url = new URL(request.url()); } catch { await route.abort("blockedbyclient"); return; }
-        if (url.origin === E2E_EXECUTOR_COMPILED_ORIGIN || url.protocol === "data:" || url.protocol === "blob:" || url.protocol === "about:") {
-          await route.continue();
-          return;
-        }
-        appendFileSync(blockedLog, `${JSON.stringify({ at: new Date().toISOString(), caseId: activeCaseId, method: request.method(),
-          resourceType: request.resourceType(), host: url.host, url: `${url.origin}${url.pathname}` })}\n`);
-        await route.abort("blockedbyclient");
-      });
-      // `route` never sees a WebSocket: without this the candidate's own page could open one to any host of the run network, a mock included, and fabricate a call. Only the
-      // application's own origin may; every other WebSocket opened from the page is closed before it connects and recorded like a blocked request.
-      // This does not cover a WebSocket opened from a Worker: Playwright replaces `WebSocket` with an init script, and init scripts do not run in workers. Such a socket is neither
-      // blocked nor in the blocked log. It still cannot count as a consumption or hide a call: it reaches a mock from the executor's address, so the host's caller check (only the
-      // application container's address may consume) makes it a `foreign-caller` unmatched line, and the case is UNKNOWN.
-      await browserContext.routeWebSocket(/.*/, (socket) => {
-        let url: URL | null = null;
-        try { url = new URL(socket.url()); } catch { /* an unreadable address is blocked below */ }
-        if (url !== null && url.host === new URL(E2E_EXECUTOR_COMPILED_ORIGIN).host) { socket.connectToServer(); return; }
-        appendFileSync(blockedLog, `${JSON.stringify({ at: new Date().toISOString(), caseId: activeCaseId, method: "GET", resourceType: "websocket",
-          host: url?.host ?? "unreadable", url: url === null ? "unreadable" : `${url.origin}${url.pathname}` })}\n`);
-        void socket.close({ code: 1008, reason: "blocked" });
-      });
-    };
     // Screenshots and traces of failed cases follow the admitted capture policy and nothing else; with both off the case adapter is given no capture port at all.
-    const screenshots = ledger.capture.enabled("screenshot");
+    const screenshots = fileLedger.capture.enabled("screenshot");
     const ports: E2EWebRuntimePorts = Object.freeze({ ...shared,
-      ...(screenshots ? { capture: { screenshots, record: (item: { caseId: string; kind: "screenshot"; bytes: Uint8Array }) => ledger.capture.record(item) } } : {}),
+      ...(screenshots ? { capture: { screenshots, record: (item: { caseId: string; kind: "screenshot"; bytes: Uint8Array }) => fileLedger.capture.record(item) } } : {}),
       resolveOwnedCdpEndpoint: async () => {
         if (!context.cdpEndpoint) throw new Error("the executor launched no browser for this shard");
         return context.cdpEndpoint;
@@ -190,11 +214,35 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         return { fixture, casePlanDigest: sha(canonicalJson(casePlan)), browserContextId: facts.subject.contextId };
       },
       applyToOwnedBrowserContext: async (sessionRef: string, browserContext: BrowserContext) => {
-        const cookie = store.cookieFor(sessionRef);
-        // Only when screenshots are taken: the cookie is then a secret the captures are scanned for. It is redacted wherever it appears as text and never refuses evidence.
-        if (screenshots) ledger.registerSessionSecret(cookie.value);
-        await browserContext.addCookies([{ name: cookie.name, value: cookie.value, url: cookie.origin, httpOnly: true, sameSite: "Strict" }]);
+        // The session's cookies (the fixed orders cookie, or what the form login's context kept) and the local storage that context kept.
+        const state = store.browserStateFor(sessionRef);
+        // A form login's values were told to the ledger when it signed in. The fixed orders cookie only when screenshots are taken: it is then a secret the captures are scanned
+        // for. It is redacted wherever it appears as text and never refuses evidence.
+        if (screenshots) for (const cookie of state.cookies) fileLedger.registerSessionSecret(cookie.value);
+        await browserContext.addCookies(state.cookies.map((cookie) => ({ ...cookie })));
+        for (const item of state.localStorage) {
+          // Once per tab, before the page's own scripts, as Playwright's own storage state does it.
+          await browserContext.addInitScript(({ origin, entries }) => {
+            // Runs in the page, where these globals exist; this package is compiled without the DOM types.
+            type Store = { getItem(key: string): string | null; setItem(key: string, value: string): void };
+            const page = globalThis as unknown as { location: { origin: string }; sessionStorage: Store; localStorage: Store };
+            if (page.location.origin !== origin || page.sessionStorage.getItem("__rovara_storage_restored") !== null) return;
+            page.sessionStorage.setItem("__rovara_storage_restored", "1");
+            for (const entry of entries) page.localStorage.setItem(entry.name, entry.value);
+          }, { origin: item.origin, entries: item.entries.map((entry) => ({ ...entry })) });
+        }
         await guard(browserContext);
+        ownedContexts.set(sessionRef, browserContext);
+        // A session cookie the application swaps in while the case runs is registered when its answer arrives.
+        browserContext.on("response", (response) => {
+          void response.headersArray().then((headers) => {
+            for (const header of headers) {
+              if (header.name.toLowerCase() !== "set-cookie") continue;
+              const issued = parseSetCookie(header.value);
+              if (issued !== null && isSessionCookieSecret(issued)) registerSecret(issued.value);
+            }
+          }, () => undefined);
+        });
         const page = browserContext.pages()[0];
         if (!page) throw new Error("the owned browser context has no page to identify");
         const session = await browserContext.newCDPSession(page);
@@ -224,10 +272,10 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         const installed = installedE2EApplicationStateProbeAsset(request.probeId);
         if (!installed) throw new Error("state probe is not in the installed fixed probe inventory");
         const bytes = installed.bytes;
-        const ref = await ledger.recordApprovedAsset({ caseId: request.caseId, assetId: request.probeId, bytes });
+        const ref = await fileLedger.recordApprovedAsset({ caseId: request.caseId, assetId: request.probeId, bytes });
         const assetBinding = { caseId: request.caseId, assertionIndex: request.assertionIndex, kind: "state-probe" as const, id: request.probeId,
           manifestDigest: e2eApplicationStateProbeManifestDigest(request.probeId, ref.sha256), ref };
-        await ledger.recordAssetBinding(assetBinding);
+        await fileLedger.recordAssetBinding(assetBinding);
         return { proof: { ref, bytes: Uint8Array.from(bytes) }, assetBinding };
       },
     });

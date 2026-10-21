@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +11,7 @@ import { createDockerApplicationHost, createProcessDockerCli, dockerOwnedCleanup
 import { executorContainerArgs } from "../../packages/verifier/src/host/executor-container.js";
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { createOrdersExecutorPlan, type OrdersExecutorFixture } from "../support/e2e-orders-executor-fixture.js";
+import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
 import { MOCK_UNMOCKED_RESPONSE_DIGEST, mockRequestDigest, mockResponseDigest } from "../../packages/verifier/src/executor/mock-server.js";
 
@@ -24,8 +25,8 @@ type Setup = Awaited<ReturnType<typeof setup>>;
 
 async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; deadlineMs?: number; recipeBuild?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeBuild"];
   recipeStart?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeStart"]; runRoot?: string; role?: "owner" | "viewer"; probe?: Parameters<typeof createOrdersExecutorPlan>[0]["probe"]; mock?: boolean; mockReadyMs?: number;
-  onRunOutput?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["onRunOutput"]> }) {
-  const fixture: OrdersExecutorFixture = createOrdersExecutorPlan({ probe: options.probe ?? "web-csv-positive-v1", ...(options.mock ? { mock: true } : {}), ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
+  onRunOutput?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["onRunOutput"]>; fixture?: OrdersExecutorFixture; ownedFiles?: Record<string, string> }) {
+  const fixture: OrdersExecutorFixture = options.fixture ?? createOrdersExecutorPlan({ probe: options.probe ?? "web-csv-positive-v1", ...(options.mock ? { mock: true } : {}), ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
     ...(options.recipeBuild ? { recipeBuild: options.recipeBuild } : {}), ...(options.recipeStart ? { recipeStart: options.recipeStart } : {}), ...(options.role ? { role: options.role } : {}) });
   const source = await temp("candidate-source-"); await writeFile(join(source, "package.json"), "{}");
   const runRoot = options.runRoot ?? await temp("run-root-");
@@ -33,7 +34,7 @@ async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; 
   const assembleCollectionInputs = vi.fn<(input: unknown) => never>(() => collectionSentinel as never);
   const host = createDockerApplicationHost({ docker: options.fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(),
     admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: source, appPollMs: 10, deadlineGraceMs: 60, ...(options.mockReadyMs ? { mockReadyMs: options.mockReadyMs } : {}), assemble, assembleCollectionInputs, ...(options.imagePullRetryMs ? { imagePullRetryMs: options.imagePullRetryMs } : {}),
-    ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}) });
+    ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}), ...(options.ownedFiles ? { ownedFiles: options.ownedFiles } : {}) });
   const { compiled, plan } = fixture;
   const binding = plan.admission.round.groupBindings[0]!;
   const ref = compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs[0]!;
@@ -953,5 +954,240 @@ describe("docker application host: approved external-origin mocks and the sinkho
     // The receipt names the mock and the sinkhole as well, so a broker derives the very list from the run id and the plan's mocked origins.
     expect([...cleanup.containers].sort()).toEqual([...dockerOwnedResourceInventory(s.runId, ["inventory-v1"]).containers].sort());
     expect(cleanup.containers).toEqual(expect.arrayContaining([`rovara-mock-${s.runId}-inventory-v1`, `rovara-mock-${s.runId}-unbound`]));
+  });
+});
+
+// Task 3.2: a recipe-declared account seed (`rovara-accounts-file/v1`) and form login (`rovara-form-login/v1`). The built-in orders-seed/v1 and orders-auth/v1 are exercised above, unchanged.
+describe("docker application host: the recipe-declared account seed", () => {
+  const mountSource = (args: string[], suffix: string): string => {
+    const mount = args.find((value, index) => args[index - 1] === "-v" && value.endsWith(suffix));
+    if (mount === undefined) throw new Error(`no mount ending ${suffix}`);
+    return mount.slice(0, -suffix.length);
+  };
+  type AccountsFile = { schemaVersion: string; accounts: { profileId: string; email: string; password: string; tenantRef: string; roleRef: string }[] };
+  const accountsSetup = async (fake: FakeDockerCli, options: Partial<Parameters<typeof setup>[0]> = {}) => {
+    const s = await setup({ fake, fixture: createAccountsExecutorPlan(), ...options });
+    const seen: { file: AccountsFile | null; fileText: string; planText: string } = { file: null, fileText: "", planText: "" };
+    fake.onSeed = (args) => {
+      seen.fileText = readFileSync(join(mountSource(args, ":/app/.owned:ro"), "rovara-accounts.json"), "utf8");
+      seen.file = JSON.parse(seen.fileText) as AccountsFile;
+    };
+    fake.onExecutor = (outDir, args) => { okOutput(s)(outDir); seen.planText = readFileSync(mountSource(args, ":/run/rovara/plan.json:ro"), "utf8"); };
+    return { s, seen };
+  };
+  const rows = (fake: FakeDockerCli) => fake.calls.filter((args) => args[0] === "run");
+  const nameOf = (args: string[]) => args[args.indexOf("--name") + 1]!;
+
+  it("writes /app/.owned/rovara-accounts.json with one record per account of the group, each with its own email and a 24-byte password", async () => {
+    const fake = new FakeDockerCli(); const { s, seen } = await accountsSetup(fake);
+    const result = await runWith(s);
+    expect(result.unavailableReason, JSON.stringify(s.host.readDiagnostics(s.runId))).toBeNull();
+    expect(seen.file).toMatchObject({ schemaVersion: "rovara-accounts/v1" });
+    const byProfile = Object.fromEntries(seen.file!.accounts.map((account) => [account.profileId, account]));
+    expect(Object.keys(byProfile).sort()).toEqual(["orders-owner", "orders-owner-b", "orders-viewer"]);
+    expect([byProfile["orders-viewer"]!.tenantRef, byProfile["orders-viewer"]!.roleRef]).toEqual(["tenant-a", "viewer"]);
+    expect([byProfile["orders-owner"]!.tenantRef, byProfile["orders-owner"]!.roleRef]).toEqual(["tenant-a", "owner"]);
+    expect([byProfile["orders-owner-b"]!.tenantRef, byProfile["orders-owner-b"]!.roleRef]).toEqual(["tenant-b", "owner"]);
+    for (const account of seen.file!.accounts) {
+      expect(Object.keys(account).sort()).toEqual(["email", "password", "profileId", "roleRef", "tenantRef"]);
+      expect(account.email).toMatch(new RegExp(`^rovara-${account.profileId}-[0-9a-f]{6}@example\\.test$`));
+      expect(account.password).toMatch(/^[A-Za-z0-9_-]{32}$/);
+    }
+    expect(new Set(seen.file!.accounts.map((account) => account.email)).size).toBe(3);
+    expect(new Set(seen.file!.accounts.map((account) => account.password)).size).toBe(3);
+    // The executor's plan carries the same credentials, each with the login form its profile declares.
+    const plan = E2EExecutorPlanSchema.parse(JSON.parse(seen.planText));
+    expect(plan.accounts.map((account) => [account.profileId, account.email, account.password]).sort()).toEqual(
+      seen.file!.accounts.map((account) => [account.profileId, account.email, account.password]).sort());
+    for (const account of plan.accounts) expect(account.login).toEqual({ kind: "form", path: "/", usernameTestId: "email", passwordTestId: "password", submitTestId: "login-submit", successTestId: "identity" });
+  });
+
+  it("gives two runs different emails and passwords", async () => {
+    const files: AccountsFile[] = [];
+    for (let run = 0; run < 2; run += 1) {
+      const fake = new FakeDockerCli(); const { s, seen } = await accountsSetup(fake);
+      expect((await runWith(s)).unavailableReason).toBeNull();
+      files.push(seen.file!);
+    }
+    const [first, second] = files as [AccountsFile, AccountsFile];
+    for (const profileId of ["orders-viewer", "orders-owner", "orders-owner-b"]) {
+      const a = first.accounts.find((account) => account.profileId === profileId)!; const b = second.accounts.find((account) => account.profileId === profileId)!;
+      expect(a.email).not.toBe(b.email);
+      expect(a.password).not.toBe(b.password);
+    }
+  });
+
+  it("runs the recipe's seed command in a seed container with the app container's flags, the data volume and the two file variables, before the app starts", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    const seed = fake.argsFor("seed"); const app = fake.argsFor("app");
+    expect(seed.slice(seed.indexOf("node:build-test"))).toEqual(["node:build-test", "node", "seed.mjs"]);
+    expect(seed).toEqual(expect.arrayContaining(["--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", "--user", "1000:1000",
+      "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "512", "--cpus", "1", "--pull=never", "--network", `rovara-e2e-${s.runId}`, "--label", `rovara.run=${s.runId}`, "-w", "/app"]));
+    // Every flag the app container is given that is not about its own name, alias, detachment or command, the seed is given too.
+    const flagsOf = (args: string[]) => args.slice(0, args.indexOf("node:build-test"));
+    const own = new Set([`rovara-app-${s.runId}`, `rovara-seed-${s.runId}`, "-d", "--name", "--network-alias", "app"]);
+    const shared = flagsOf(app).filter((value) => !own.has(value) && !value.startsWith("rovara.created="));
+    for (const value of shared) expect(flagsOf(seed), value).toContain(value);
+    for (const args of [seed, app]) {
+      expect(args).toEqual(expect.arrayContaining(["-e", "ROVARA_ACCOUNTS_FILE=/app/.owned/rovara-accounts.json", "-e", "ROVARA_DATA_DIR=/data", "-e", "APP_PORT=4317", "-v", `rovara-data-${s.runId}:/data`]));
+      expect(args.filter((value) => value.endsWith(":/app:ro"))).toHaveLength(1);
+      expect(args.filter((value) => value.endsWith(":/app/.owned:ro"))).toHaveLength(1);
+      expect(args).not.toContain("ORDERS_TEST_SEED_FILE=/app/.owned/seed.json");
+      expect(args).toContain("--dns");
+    }
+    expect(seed).not.toContain("--network-alias");
+    // The seed finishes before the app exists, and after the mocks and the sinkhole it may need to resolve names through.
+    const order = rows(fake).map(nameOf);
+    expect(order.findIndex((name) => name.startsWith("rovara-seed-"))).toBeLessThan(order.findIndex((name) => name.startsWith("rovara-app-")));
+    expect(order.findIndex((name) => name.startsWith("rovara-seed-"))).toBeGreaterThan(order.findIndex((name) => name.startsWith("rovara-mock-")));
+  });
+
+  it("creates the data volume labeled for the run and mounts it read-write in the seed and the app only", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    const create = fake.call("volume create");
+    expect(create).toEqual(expect.arrayContaining(["--label", `rovara.run=${s.runId}`]));
+    // A tmpfs of 256 MiB, owned by the unprivileged user: nothing seeded reaches the runner's disk, and nothing can fill it.
+    expect(create).toEqual(expect.arrayContaining(["--driver", "local", "--opt", "type=tmpfs", "--opt", "device=tmpfs", "--opt", "o=size=256m,uid=1000,gid=1000,mode=0700"]));
+    expect(create.some((value) => /^rovara\.created=\d+$/.test(value))).toBe(true);
+    expect(create.at(-1)).toBe(`rovara-data-${s.runId}`);
+    const holders = rows(fake).filter((args) => args.some((value, index) => args[index - 1] === "-v" && value.startsWith(`rovara-data-${s.runId}:`)))
+      .map((args) => nameOf(args).replace(`-${s.runId}`, ""));
+    // The one other holder is the keeper that keeps the tmpfs mounted between the seed and the app; it has no network and no capability, and runs as the unprivileged user.
+    expect(holders.sort()).toEqual(["rovara-app", "rovara-datakeep", "rovara-seed"]);
+    for (const kind of ["seed", "app"] as const) expect(fake.mountsFor(kind)).toContain(`rovara-data-${s.runId}:/data`);
+    expect(fake.mountsFor("executor").some((mount) => mount.includes("rovara-data"))).toBe(false);
+    for (const args of rows(fake).filter((call) => nameOf(call).startsWith("rovara-mock-"))) expect(args.join(" ")).not.toContain("rovara-data");
+    const keeper = fake.argsFor("datakeep");
+    expect(keeper).toEqual(expect.arrayContaining(["-d", "--network", "none", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--user", "1000:1000", "--entrypoint", "sleep"]));
+    expect(keeper).not.toContain("0:0");
+    expect(keeper.slice(-2)).toEqual(["rovara-executor:test", "infinity"]);
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
+  it("sizes the tmpfs from the recipe's dataSizeMiB when it states one", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake, { fixture: createAccountsExecutorPlan({ recipe: { dataSizeMiB: 64 } }) });
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    expect(fake.call("volume create")).toEqual(expect.arrayContaining(["--opt", "o=size=64m,uid=1000,gid=1000,mode=0700"]));
+  });
+
+  it("holds the data volume open before the seed, and is unavailable with seed-failed when the keeper cannot be started or does not stay up", async () => {
+    for (const keeperFails of ["refused", "exits"] as const) {
+      const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+      fake.keeperFails = keeperFails;
+      expect((await runWith(s)).unavailableReason, keeperFails).toBe("seed-failed");
+      expect(() => fake.argsFor("seed")).toThrow();
+      expect(() => fake.argsFor("app")).toThrow();
+      expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+    }
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    const order = rows(fake).map(nameOf);
+    expect(order.findIndex((name) => name.startsWith("rovara-datakeep-"))).toBeLessThan(order.findIndex((name) => name.startsWith("rovara-seed-")));
+  });
+
+  it("runs the seed with at most the recipe's timeout (never more than 60 s) and removes its container", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    const index = fake.calls.indexOf(fake.argsFor("seed"));
+    expect(fake.timeouts[index]).toBe(30_000);
+    expect(fake.events).toContain(`rm rovara-seed-${s.runId}`);
+  });
+
+  it("is unavailable with seed-failed when the seed exits 3, starts neither the app nor the executor, and removes every labeled resource, the volume included", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+    fake.seedExitCode = 3; fake.seedStdout = "the accounts file is not rovara-accounts/v1\n";
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBe("seed-failed");
+    expect(result.actualRun).toBeNull();
+    expect(() => fake.argsFor("app")).toThrow();
+    expect(() => fake.argsFor("executor")).toThrow();
+    expect(fake.calls.some((args) => args[0] === "volume" && args[1] === "create")).toBe(true);
+    expect(fake.calls.some((args) => args[0] === "volume" && args[1] === "rm")).toBe(true);
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+    expect(await readdir(s.runRoot)).toEqual([]);
+    expect(s.host.readDiagnostics(s.runId).appLogTail).toContain("the accounts file is not rovara-accounts/v1");
+  });
+
+  it("keeps a credential that the seed printed out of the diagnostics", async () => {
+    const fake = new FakeDockerCli(); const { s, seen } = await accountsSetup(fake);
+    fake.seedExitCode = 1;
+    fake.onSeed = (args) => {
+      const file = JSON.parse(readFileSync(join(mountSource(args, ":/app/.owned:ro"), "rovara-accounts.json"), "utf8")) as AccountsFile;
+      seen.file = file;
+      fake.seedStdout = `could not create ${file.accounts[0]!.email} with ${file.accounts[0]!.password}\n`;
+    };
+    expect((await runWith(s)).unavailableReason).toBe("seed-failed");
+    const text = JSON.stringify(s.host.readDiagnostics(s.runId));
+    for (const account of seen.file!.accounts) { expect(text).not.toContain(account.password); expect(text).not.toContain(account.email); }
+    expect(text).toContain("<account:");
+  });
+
+  it("is unavailable with deadline-exceeded, not seed-failed, when the plan deadline cuts the seed short", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake, { fixture: createAccountsExecutorPlan({ deadlineMs: 20_000 }) });
+    fake.seedExitCode = 124;
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBe("deadline-exceeded");
+  });
+
+  it("gives the app, the seed and the volume setup no AWS_, AGENTX_, TOKEN or SECRET variable and no docker socket", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    for (const args of [fake.argsFor("seed"), fake.argsFor("app"), fake.argsFor("datakeep"), fake.call("volume create")]) {
+      expect(args.join(" ")).not.toMatch(/docker\.sock|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|(^| )-p /);
+    }
+  });
+
+  it("puts no password or email in any docker argument", async () => {
+    const fake = new FakeDockerCli(); const { s, seen } = await accountsSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    const everything = fake.calls.map((args) => args.join(" ")).join("\n");
+    for (const account of seen.file!.accounts) { expect(everything).not.toContain(account.password); expect(everything).not.toContain(account.email); }
+  });
+
+  it("is unavailable with login-failed when the executor ended the run because a form login failed", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+    fake.exitCodeOfExecutor(2);
+    fake.onExecutor = (outDir) => writeExecutorOutput(outDir, { exitCode: 2, reason: "login-failed", runId: s.runId, groupId: s.groupId });
+    expect((await runWith(s)).unavailableReason).toBe("login-failed");
+  });
+
+  it("does not let an owned file take the accounts file's name", async () => {
+    const fake = new FakeDockerCli();
+    const s = await setup({ fake, fixture: createAccountsExecutorPlan(), ownedFiles: { "rovara-accounts.json": "{}" } });
+    fake.onExecutor = okOutput(s);
+    const result = await runWith(s);
+    expect(result.actualRun).toBeNull();
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
+  it("leaves the built-in orders-seed/v1 run exactly as it was: seed.json, no volume, no seed container, no accounts file", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    let owned: string[] = [];
+    fake.onExecutor = (outDir) => { okOutput(s)(outDir); owned = readdirSync(mountSource(fake.argsFor("app"), ":/app/.owned:ro")); };
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    expect(owned).toEqual(["seed.json"]);
+    // (The stale-run sweep that starts every allocation only lists volumes.)
+    expect(fake.calls.filter((args) => args[0] === "volume").map((args) => args[1])).toEqual(["ls"]);
+    expect(() => fake.argsFor("seed")).toThrow();
+    const app = fake.argsFor("app");
+    expect(app).toContain("ORDERS_TEST_SEED_FILE=/app/.owned/seed.json");
+    expect(app.join(" ")).not.toMatch(/ROVARA_ACCOUNTS_FILE|ROVARA_DATA_DIR|\/data/);
+  });
+
+  it("sweeps a stale run's data volume with the rest of its resources", async () => {
+    const fake = new FakeDockerCli(); const now = Date.now();
+    fake.seedStale({ runId: "old", ageMs: 3_700_000, now, volume: true }); fake.seedStale({ runId: "fresh", ageMs: 60_000, now, volume: true });
+    expect(await sweepStaleRovaraRuns(fake, 3_600_000, { now: () => now })).toBe(1);
+    expect(fake.liveResources("rovara.run=old")).toEqual([]);
+    expect(fake.liveResources("rovara.run=fresh")).toHaveLength(4);
+  });
+
+  it("does not confirm cleanup while the run's data volume is still there", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+    fake.volumesSurviveRemoval = true;
+    const result = await runWith(s);
+    expect(result.lifecycle.cleanup).not.toBe("confirmed");
   });
 });

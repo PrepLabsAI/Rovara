@@ -89,17 +89,19 @@ describe("credential redactor scans", () => {
     const r = redactor();
     for (const form of [PASSWORD, encodeURIComponent(PASSWORD), Buffer.from(PASSWORD).toString("base64")]) expect(r.contains(Buffer.from(`a${form}b`))).toBe(true);
   });
-  it("redacts a session secret of any length in text and never throws for a short one", () => {
+  it("never throws for a short session secret, and never replaces it in text (a value like 1, true or accepted would corrupt any report that holds it)", () => {
     const r = redactor();
-    expect(() => r.addSessionSecret("abc")).not.toThrow();
-    expect(() => r.addSessionSecret("")).not.toThrow();
+    for (const short of ["abc", "", "1", "true", "enabled", "1234567"]) expect(() => r.addSessionSecret(short)).not.toThrow();
     r.addSessionSecret("sess-token-0123456789abcdef");
-    expect(r.text("cookie abc sess-token-0123456789abcdef end")).toBe("cookie <session> <session> end");
+    expect(r.text('{"passed":1,"ok":true,"cookie":"enabled"} abc sess-token-0123456789abcdef end')).toBe('{"passed":1,"ok":true,"cookie":"enabled"} abc <session> end');
+    expect(r.contains(Buffer.from("Cookies enabled: 1 true 1234567"))).toBe(false);
   });
-  it("lets a long session secret mark bytes, and a short one only redact text", () => {
+  it("lets a session secret of 8 characters or more mark bytes and be redacted from text, and a shorter one do neither", () => {
     const r = redactor();
     r.addSessionSecret("ab");
     expect(r.contains(Buffer.from("plain ab bytes"))).toBe(false);
+    r.addSessionSecret("12345678");
+    expect(r.text("x 12345678 y")).toBe("x <session> y");
     r.addSessionSecret("sess-token-0123456789abcdef");
     expect(r.contains(Buffer.from("x sess-token-0123456789abcdef"))).toBe(true);
     expect(r.contains(Buffer.from("x sess-token-0123456789abcdef"), "accounts")).toBe(false);
