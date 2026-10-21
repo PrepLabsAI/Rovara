@@ -41,8 +41,21 @@ function slackLostRace(reason: string, decidedBy: unknown): string {
  * WORKFLOW_ACTIONABLE_REFUSALS (the plan-correction and retry-selection refusals) are said the same way.
  */
 const SLACK_PLAN_APPROVAL_REASONS = /^(the application E2E plan cannot be approved: |the application E2E plan could not be checked for approval \(|the plan cannot be approved again here: |the approved plan no longer carries the application intent )/u;
+/**
+ * The two refusals M1.3 introduces (Ruling AU): the test accounts, or an outside service's mock, are not the ones the plan was approved with. Only their opening words are
+ * said, as a sentence; what follows names accounts, applications and dates, which is data and never reaches Slack.
+ */
+const SLACK_REAPPROVE_SENTENCES: ReadonlyArray<readonly [string, string]> = [
+  ["accounts-changed-reapprove: ", "The test accounts changed since this plan was approved. Retry the checks to approve the plan again with the accounts that are registered now."],
+  ["mock-fixture-changed-reapprove: ", "The mock for an outside service changed since this plan was approved. Retry the checks to approve the plan again with the mock that is approved now."],
+];
 function slackPlanApprovalRefusal(reason: string): string | undefined {
-  if (!SLACK_PLAN_APPROVAL_REASONS.test(reason) && !SLACK_ACTIONABLE_REASONS.has(reason)) return undefined;
+  // The token opens the reason, or comes right after the opening words of a plan-approval refusal that wraps it ("the application E2E plan cannot be approved: <token>: ...").
+  const wrapped = SLACK_PLAN_APPROVAL_REASONS.exec(reason);
+  const rest = wrapped === null ? reason : reason.slice(wrapped[0].length);
+  const reapprove = SLACK_REAPPROVE_SENTENCES.find(([opening]) => rest.startsWith(opening));
+  if (reapprove !== undefined) return reapprove[1];
+  if (wrapped === null && !SLACK_ACTIONABLE_REASONS.has(reason)) return undefined;
   const escaped = reason.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;").slice(0, 400);
   const sentence = `${escaped.charAt(0).toUpperCase()}${escaped.slice(1)}`;
   return /[.!?]$/u.test(sentence) ? sentence : `${sentence}.`;

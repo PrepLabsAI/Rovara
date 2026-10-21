@@ -141,6 +141,7 @@ import {
   type WorkflowFeatureE2EIntent,
   type E2EApplicationPlanIntent,
   type E2EApplicationSelectionRecord,
+  type E2EScenarioResults,
   type E2EWorkflowAdmissionRef,
   workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
@@ -263,6 +264,10 @@ export interface DeveloperTaskRouteDependencies {
   workflowE2EPresentation?(input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }): Promise<DeveloperTaskView["e2ePresentation"] | undefined>;
   /** Atomic conditions for current managed-E2E authority, attached to publication admission. */
   workflowE2EPublicationChecks?(input: { task: DeveloperTaskRecord; operations: readonly unknown[] }): Promise<TransactItems | undefined>;
+  /** M1.3 Task 3.7: the per-scenario rows of the task's current browser and API round, for the task page; the screenshot behind a row, by digest; the baseline round asked for at APPROVE. */
+  workflowE2EScenarioResults?(input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }): Promise<E2EScenarioResults | undefined>;
+  workflowE2EArtifact?(input: { task: DeveloperTaskRecord; sha256: string }): Promise<{ contentType: "image/jpeg"; bytes: Uint8Array } | undefined>;
+  startWorkflowE2EBaseline?(input: { task: DeveloperTaskRecord }): Promise<unknown>;
   /**
    * Evaluates a plan's schema-v2 application intent for approval against the task's pinned project, the approved setup snapshot and the runtime rows
    * READY now: the selection to record and the conditions that keep those rows as read until the approval commits. It throws when the plan cannot be
@@ -2085,6 +2090,9 @@ export async function decideTaskWorkflow(
     return busyOrClosing(deps, task, error);
   }
   const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
+  // M1.3 Task 3.7 (owner decision D2): the approved application plan asks for its informational baseline round. Best effort and after the approval is committed: whatever
+  // happens to the baseline, the approval and the checks stand exactly as they are.
+  if (request.decision === "APPROVE" && mode === "IMPLEMENT") await deps.startWorkflowE2EBaseline?.({ task: fresh }).catch((error: unknown) => log(deps, { event: "developer.e2e_baseline_not_started", taskId, errorName: error instanceof Error ? error.name : "unknown" }));
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
   return { task: view };
@@ -3663,8 +3671,15 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
       visibleWorkflowDependenciesProgress = [...visibleBySequence.values()].sort((left, right) => left.sequence - right.sequence);
     }
   }
+  // M1.3 Task 3.7: the rows of the task's browser and API round, from the broker's own verification of its stored evidence. A round that cannot be read never hides the page.
+  let e2eResults: E2EScenarioResults | undefined;
+  if (task.workflow?.e2e?.required === true && deps.workflowE2EScenarioResults !== undefined) {
+    try { e2eResults = await deps.workflowE2EScenarioResults({ task, operations: (await workspaceReads(deps, task)).operations, actor: owner ? "owner" : "viewer" }); }
+    catch (error) { log(deps, { event: "developer.task_e2e_results_unavailable", taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
+  }
   return {
     taskId, now: deps.now(), title: task.title, ...taskPageStage(workflow, task.closedAt !== undefined, owner, await publicationAttempts(deps, task)),
+    ...(e2eResults === undefined ? {} : { e2eResults }),
     path: workflow?.path ?? "QUICK", revision: workflow?.revision ?? 0, stage: taskPageStep(workflow, task.closedAt !== undefined), role: owner ? "owner" : "reader",
     documents, ...(unverified.length === 0 ? {} : { unverified }), checks, checksRan: results.length > 0, ...(checksNote === undefined ? {} : { checksNote }), findings,
     ...(acceptedFindings.length === 0 ? {} : { acceptedFindings }),

@@ -60,6 +60,7 @@ import type { AdaptedHttpRequest } from "./lambda.js";
 import { createFeedbackReviewWeb } from "./feedback-review-web.js";
 import { TASK_PAGE, TASK_PEOPLE_CONFIRMATION, TASK_STATUS, createTaskWeb } from "./task-web.js";
 import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
+import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
 
 export interface DeveloperApiConfiguration {
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
@@ -107,6 +108,9 @@ export interface DeveloperRouteDependencies {
   /** Builds E2E projections only from the task's current server-owned admission and evidence references. */
   workflowE2EPresentation?: DeveloperTaskRouteDependencies["workflowE2EPresentation"];
   workflowE2EPublicationChecks?: DeveloperTaskRouteDependencies["workflowE2EPublicationChecks"];
+  workflowE2EScenarioResults?: DeveloperTaskRouteDependencies["workflowE2EScenarioResults"];
+  workflowE2EArtifact?: DeveloperTaskRouteDependencies["workflowE2EArtifact"];
+  startWorkflowE2EBaseline?: DeveloperTaskRouteDependencies["startWorkflowE2EBaseline"];
   /** Checks a plan's application E2E intent when the owner approves it. */
   validateWorkflowE2EApplicationPlan?: DeveloperTaskRouteDependencies["validateWorkflowE2EApplicationPlan"];
   registeredRepositoryIdentity?: DeveloperTaskRouteDependencies["registeredRepositoryIdentity"];
@@ -742,6 +746,9 @@ export function developerTaskRouteDependencies(
     actions: deps.tasks!,
     ...(deps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: deps.workflowE2EPresentation }),
     ...(deps.workflowE2EPublicationChecks === undefined ? {} : { workflowE2EPublicationChecks: deps.workflowE2EPublicationChecks }),
+    ...(deps.workflowE2EScenarioResults === undefined ? {} : { workflowE2EScenarioResults: deps.workflowE2EScenarioResults }),
+    ...(deps.workflowE2EArtifact === undefined ? {} : { workflowE2EArtifact: deps.workflowE2EArtifact }),
+    ...(deps.startWorkflowE2EBaseline === undefined ? {} : { startWorkflowE2EBaseline: deps.startWorkflowE2EBaseline }),
     ...(deps.validateWorkflowE2EApplicationPlan === undefined ? {} : { validateWorkflowE2EApplicationPlan: deps.validateWorkflowE2EApplicationPlan }),
     ...(deps.registeredRepositoryIdentity === undefined ? {} : { registeredRepositoryIdentity: deps.registeredRepositoryIdentity }),
     ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
@@ -843,6 +850,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
           setSuggestion: (caller, taskId, input) => setPageSuggestion(routeDeps(caller), caller, taskId, input),
           decide: (caller, taskId, input) => decideOnPage(routeDeps(caller), caller, taskId, input),
           retryApplicationRound: (caller, taskId, input) => retryApplicationRoundOnPage(routeDeps(caller), caller, taskId, input),
+          readE2EArtifact: (caller, taskId, sha256) => getTaskE2EArtifact(routeDeps(caller), caller, taskId, sha256),
           getPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
           proposePeopleRole: (caller, taskId, input) => proposeTaskPeopleRoleForPage(routeDeps(caller), caller, taskId, input),
           proposeOwnership: (caller, taskId, input) => proposeTaskOwnershipForPage(routeDeps(caller), caller, taskId, input),

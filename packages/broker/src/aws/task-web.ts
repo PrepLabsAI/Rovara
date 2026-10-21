@@ -3,7 +3,8 @@
 // requests and its history. GET only, no forms, and one small script (by nonce) that opens and scrolls to a deep
 // link and, while the page is open, asks this origin's `/task/status` whether the task moved on. Every value is escaped; model and reviewer text is plain text in the page, so a link in it is never a link.
 import { randomBytes } from "node:crypto";
-import { redactText, taskGraphDigest, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskSuggestion, type WorkItemProgressV1 } from "@agentx/contracts";
+import { redactText, taskGraphDigest, type E2EScenarioResults, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskSuggestion, type WorkItemProgressV1 } from "@agentx/contracts";
+import { renderE2EScenarioRowsHtml } from "../e2e-presentation.js";
 import type { TaskRole } from "../developer/task-access.js";
 import type { TaskPeopleView } from "../developer/task-people.js";
 import type { DeveloperCaller } from "./developer-routes.js";
@@ -62,6 +63,8 @@ export interface TaskDocumentView {
   access?: { role: TaskRole; canComment: boolean; canSuggest: boolean; canDecide: boolean; canAsk: boolean };
   /** Present while the task is blocked on an approved browser and API round that one retry can fix; `canRetry` is whether this reader (the owner) may make it. */
   applicationRetry?: { canRetry: boolean };
+  /** The per-scenario results of the task's browser and API round (M1.3 Task 3.7), derived by the broker from evidence it verified itself, and the baseline round on the unchanged code. */
+  e2eResults?: E2EScenarioResults;
   /** The task's comments, replies and AgentX replies, oldest first, as stored (redacted when written; the page escapes them). */
   comments?: TaskComment[];
   /** The suggestions that still apply to each document's current version. */
@@ -454,6 +457,7 @@ async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequ
     + `<p><strong>${escapeHtml(view.status)}</strong></p><p>Next: ${escapeHtml(view.nextStep)}</p>${slackOnly}</header>`
     + `<main>${unverified}${documents}${noDocuments}`
     + (checks === undefined || checks === "" ? "" : `<section id="checks" aria-label="Checks"><h2>Checks</h2>${checks}</section>`)
+    + (view.e2eResults === undefined ? "" : renderE2EScenarioRowsHtml(view.e2eResults, { artifactPath: (sha256) => `/review/${encodeURIComponent(view.taskId)}/task/api/e2e/artifacts/${sha256}` }))
     + applicationRetrySection(view)
     + `<section id="findings" aria-label="Review findings"><h2>Review findings</h2>${findings}</section>`
     + `<section id="pull-requests" aria-label="Pull requests"><h2>Pull requests</h2>${pullRequests}</section>`

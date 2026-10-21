@@ -18,7 +18,8 @@ export const PRIVATE_HEADERS: Record<string, string> = {
   "content-security-policy": "default-src 'none'; style-src 'nonce-{nonce}'; script-src 'nonce-{nonce}'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
 };
 
-export interface WebResponse { statusCode: number; headers: Record<string, string>; body: string }
+/** `isBase64Encoded`: the body is binary (a screenshot) carried as base64 for the gateway, which decodes it. */
+export interface WebResponse { statusCode: number; headers: Record<string, string>; body: string; isBase64Encoded?: boolean }
 
 /** A private response: HTML for a string body, JSON otherwise; `{nonce}` in the policy becomes this page's nonce. */
 export function safeResponse(statusCode: number, body: unknown, nonce = ""): WebResponse {

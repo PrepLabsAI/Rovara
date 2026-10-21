@@ -26,29 +26,39 @@ const signer = localSigner();
  */
 export function memoryS3() {
   const objects = new Map<string, string>();
+  // Bytes that are not valid UTF-8 (a JPEG, say) cannot live in the string map without being changed; they are kept as they are, here.
+  const binary = new Map<string, Buffer>();
   const send = vi.fn(async (command: { constructor: { name: string }; input: { Key?: string; Body?: unknown; Range?: string; IfNoneMatch?: string } }) => {
     const key = command.input.Key ?? "";
     if (command.constructor.name === "PutObjectCommand") {
       // S3's conditional write: an object that is already there is not replaced.
-      if (command.input.IfNoneMatch === "*" && objects.has(key)) throw Object.assign(new Error("At least one of the pre-conditions you specified did not hold"), { name: "PreconditionFailed" });
-      objects.set(key, String(command.input.Body));
+      if (command.input.IfNoneMatch === "*" && (objects.has(key) || binary.has(key))) throw Object.assign(new Error("At least one of the pre-conditions you specified did not hold"), { name: "PreconditionFailed" });
+      const body = command.input.Body;
+      if (body instanceof Uint8Array && !Buffer.from(Buffer.from(body).toString("utf8"), "utf8").equals(Buffer.from(body))) {
+        objects.delete(key);
+        binary.set(key, Buffer.from(body));
+        return {};
+      }
+      binary.delete(key);
+      objects.set(key, String(body));
       return {};
     }
     if (command.constructor.name === "GetObjectCommand") {
-      const body = objects.get(key);
+      const text = objects.get(key);
+      const body = binary.get(key) ?? text;
       if (body === undefined) throw Object.assign(new Error("The specified key does not exist."), { name: "NoSuchKey" });
       const range = /^bytes=0-(\d+)$/.exec(command.input.Range ?? "");
-      const bytes = Buffer.from(body, "utf8");
+      const bytes = typeof body === "string" ? Buffer.from(body, "utf8") : body;
       const served = range ? bytes.subarray(0, Number(range[1]) + 1) : bytes;
       return { ContentLength: served.byteLength, Body: {
         transformToByteArray: async () => Uint8Array.from(served),
         transformToString: async (encoding = "utf8") => served.toString(encoding as BufferEncoding),
       } };
     }
-    if (command.constructor.name === "DeleteObjectCommand") { objects.delete(key); return {}; }
+    if (command.constructor.name === "DeleteObjectCommand") { objects.delete(key); binary.delete(key); return {}; }
     throw new Error(`memoryS3 does not handle ${command.constructor.name}`);
   });
-  return { send, objects };
+  return { send, objects, binary };
 }
 
 async function bearer(who: Developer): Promise<string> {
