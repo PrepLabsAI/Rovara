@@ -19,7 +19,26 @@ export type FindingKind =
   | "catalog-not-ready"
   | "catalog-expiring"
   | "runner-image-mismatch"
-  | "worker-feature-missing";
+  | "worker-feature-missing"
+  | "model-route-not-approved"
+  | "model-access-unverified";
+
+/** The worker feature string for `agent` steps (M1.4). A running worker must list it on /ping before an agent step can be dispatched to it. */
+export const AGENT_STEPS_FEATURE = "task.workflowE2EAgentSteps.v1";
+
+/** The e2e model route as head pins it (decision D1): Bedrock through the worker's instance role, no fallback. */
+export interface E2EModelRoute {
+  routeId: string;
+  modelId: string;
+  /** An application inference profile ARN when the route uses one; null for a model or system-defined profile id. */
+  inferenceProfileArn: string | null;
+}
+/** Replaced by the broker's route registry once Task 4.2 lands; until then head's route is this constant. */
+export const E2E_MODEL_ROUTE: E2EModelRoute = { routeId: "rovara-e2e-default", modelId: "us.anthropic.claude-haiku-5-5", inferenceProfileArn: null };
+/** A route that is not approved is a warning until Task 4.9 approves it at setup; 4.9 flips this to "error". */
+const ROUTE_NOT_APPROVED_SEVERITY: Finding["severity"] = "warning";
+/** Converse is authorized by bedrock:InvokeModel and ConverseStream by bedrock:InvokeModelWithResponseStream (Bedrock API reference, Converse). */
+const ROUTE_INVOKE_ACTIONS = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"] as const;
 
 export interface PolicyStatement {
   Effect?: unknown;
@@ -86,6 +105,41 @@ export interface CheckInput {
    * False is unchanged, true is changed, undefined (or no entry) is unknown. Only read for a Lambda whose zip differs from head's.
    */
   inputsChanged?: Readonly<Record<string, boolean | undefined>> | undefined;
+  /** The e2e model route and what the account, the registry and the worker's role say about it. Undefined skips the route checks. */
+  modelRoute?: ModelRouteCheck | undefined;
+}
+
+/** What `bedrock get-foundation-model-availability` says about one foundation model. */
+export interface ModelAvailabilityFact {
+  modelId: string;
+  authorizationStatus?: string | undefined;
+  entitlementAvailability?: string | undefined;
+  regionAvailability?: string | undefined;
+  /** The agreement's status (`agreementAvailability.status`). */
+  agreementStatus?: string | undefined;
+}
+
+/** The read-only Bedrock control-plane answer for the route's model: never an invocation. */
+export type ModelAccessFacts =
+  /** The profile could not read it (AccessDenied on the Get/List call, a network or CLI failure): neither available nor unavailable. */
+  | { state: "unverifiable"; reason: string }
+  /** Bedrock does not know the model or profile in this account and region. */
+  | { state: "not-found"; detail: string }
+  /** Bedrock answered. `profileStatus` is set when the route names an inference profile; `models` are the foundation models behind it (or the model itself). */
+  | { state: "checked"; profileStatus?: string | undefined; models: ModelAvailabilityFact[] };
+
+export interface ModelRouteCheck {
+  route: E2EModelRoute;
+  /** Whether the broker's registry holds an approved revision of the route; `unreadable` when it could not be asked. */
+  approval: { approved: boolean } | { unreadable: string };
+  access: ModelAccessFacts;
+  /** The worker instance role's grants (from the deployed foundation stack's template) against the ARNs the route invokes. */
+  iam: {
+    foundationTemplate: CheckTemplate;
+    roleLogicalId: string;
+    resources: readonly string[];
+    scope: { partition: string; region: string; accountId: string };
+  };
 }
 
 export interface CheckResult {
@@ -112,6 +166,7 @@ export function evaluateTestDeployCheck(input: CheckInput): CheckResult {
     ...evaluateEnvironmentDrift(input.headTemplate, input.deployedTemplate),
     ...catalogFindings(input.catalogRows, input.now),
     ...runnerFindings(input.runnerFacts),
+    ...(input.modelRoute === undefined ? [] : routeFindings(input.modelRoute)),
   ];
   return { ok: findings.every((finding) => finding.severity !== "error"), findings };
 }
@@ -438,8 +493,137 @@ function runnerFindings(facts: RunnerFacts | undefined): Finding[] {
     findings.push(runner("worker-feature-missing", "the runner's status does not report the worker's features; qualify the runner again", { missing: [] }));
   } else {
     const have = new Set(facts.invocationFeatures);
-    const missing = (facts.requiredFeatures ?? WORKER_INVOCATION_FEATURES).filter((feature) => !have.has(feature));
+    const required = facts.requiredFeatures ?? [...new Set<string>([...WORKER_INVOCATION_FEATURES, AGENT_STEPS_FEATURE])];
+    const missing = required.filter((feature) => !have.has(feature));
     if (missing.length > 0) findings.push(runner("worker-feature-missing", `the running worker lacks ${missing.join(", ")} (its /ping does not list them)`, { missing: [...missing] }));
+  }
+  return findings;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The e2e model route (M1.4): approval, Bedrock access and the worker role's grants. All from reads; nothing invokes a model.
+// ---------------------------------------------------------------------------------------------
+
+function routeFindings(check: ModelRouteCheck): Finding[] {
+  const { route } = check;
+  const finding = (kind: "model-route-not-approved" | "model-access-unverified", severity: Finding["severity"], message: string): Finding =>
+    ({ kind, severity, subject: route.routeId, label: route.routeId, message });
+  const findings: Finding[] = [];
+  if ("unreadable" in check.approval) {
+    findings.push(finding("model-route-not-approved", ROUTE_NOT_APPROVED_SEVERITY, `route ${route.routeId} has no readable approval, so it cannot be called approved: ${check.approval.unreadable}`));
+  } else if (!check.approval.approved) {
+    findings.push(finding("model-route-not-approved", ROUTE_NOT_APPROVED_SEVERITY, `route ${route.routeId} (${route.modelId}) has no approved revision in the broker's route registry; agent steps stay unavailable until setup approves it`));
+  }
+  const problem = modelAccessProblem(route, check.access);
+  if (problem !== undefined) findings.push(finding("model-access-unverified", "error", problem));
+  findings.push(...routeGrantFindings(check.iam, route));
+  return findings;
+}
+
+/** Why the route's model cannot be called as available in this account and region, or undefined when Bedrock says it is. */
+function modelAccessProblem(route: E2EModelRoute, access: ModelAccessFacts): string | undefined {
+  const model = route.inferenceProfileArn ?? route.modelId;
+  if (access.state === "unverifiable") return `model ${model} is unverifiable here, which is not a pass: ${access.reason}`;
+  if (access.state === "not-found") return `model ${model} is not listed as available in this account and region: ${access.detail}`;
+  const problems: string[] = [];
+  if (access.profileStatus !== undefined && access.profileStatus !== "ACTIVE") problems.push(`the inference profile is ${access.profileStatus}, not ACTIVE`);
+  if (access.models.length === 0) problems.push("Bedrock lists no foundation model behind it");
+  for (const model of access.models) {
+    const bad: string[] = [];
+    if (model.authorizationStatus !== "AUTHORIZED") bad.push(`authorization ${model.authorizationStatus ?? "unknown"}`);
+    if (model.entitlementAvailability !== "AVAILABLE") bad.push(`entitlement ${model.entitlementAvailability ?? "unknown"}`);
+    if (model.regionAvailability !== "AVAILABLE") bad.push(`region availability ${model.regionAvailability ?? "unknown"}`);
+    // NOT_AVAILABLE can mean the model needs no agreement; only a pending or failed one blocks.
+    if (model.agreementStatus === "PENDING" || model.agreementStatus === "ERROR") bad.push(`agreement ${model.agreementStatus}`);
+    if (bad.length > 0) problems.push(`${model.modelId}: ${bad.join(", ")}`);
+  }
+  return problems.length === 0 ? undefined : `model ${model} is not available to this account: ${problems.join("; ")}`;
+}
+
+type IamScope = ModelRouteCheck["iam"]["scope"];
+
+/** The text of an ARN or action value, with the pseudo parameters of the deployed template filled in; undefined for anything else (GetAtt, an imported value). */
+function resolveText(node: unknown, scope: IamScope): string | undefined {
+  const pseudo: Record<string, string> = { "AWS::Partition": scope.partition, "AWS::Region": scope.region, "AWS::AccountId": scope.accountId };
+  if (typeof node === "string") return node;
+  if (node === null || typeof node !== "object") return undefined;
+  const intrinsic = node as { Ref?: unknown; "Fn::Join"?: unknown; "Fn::Sub"?: unknown };
+  if (typeof intrinsic.Ref === "string") return pseudo[intrinsic.Ref];
+  const join = intrinsic["Fn::Join"];
+  if (Array.isArray(join) && typeof join[0] === "string" && Array.isArray(join[1])) {
+    const parts = join[1].map((part) => resolveText(part, scope));
+    return parts.every((part) => part !== undefined) ? parts.join(join[0]) : undefined;
+  }
+  if (typeof intrinsic["Fn::Sub"] === "string") {
+    const text = intrinsic["Fn::Sub"].replace(/\$\{(AWS::[A-Za-z]+)\}/g, (whole, name: string) => pseudo[name] ?? whole);
+    return text.includes("${") ? undefined : text;
+  }
+  return undefined;
+}
+
+const globMatches = (pattern: string, value: string, flags = ""): boolean =>
+  new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`, flags).test(value);
+
+/**
+ * Whether one statement applies to `action` on `resource`: yes, no, or maybe when it cannot be told. A Condition is not evaluated, and a
+ * resource written as something this cannot resolve (GetAtt, an import) has no text to match. An Allow that is conditional or unresolved
+ * never counts as a grant (it errs toward alarm). A Deny that is conditional or unresolved while its action matches is "maybe": it might
+ * block the call, so the caller must not report a pass.
+ */
+function statementMatch(statement: PolicyStatement, action: string, resource: string, scope: IamScope): "yes" | "no" | "maybe" {
+  const actions = list(statement.NotAction ?? statement.Action).filter((value): value is string => typeof value === "string");
+  const actionHit = actions.some((pattern) => globMatches(pattern, action, "i"));
+  if (statement.NotAction === undefined ? !actionHit : actionHit) return "no";
+  const resolved = list(statement.NotResource ?? statement.Resource).map((value) => resolveText(value, scope));
+  const resourceHit = resolved.some((pattern) => pattern !== undefined && globMatches(pattern, resource));
+  const resolvable = resolved.every((pattern) => pattern !== undefined);
+  // NotResource applies to everything its patterns do not name; with an unresolved pattern it cannot be told.
+  const resourceMatch: "yes" | "no" | "maybe" = statement.NotResource === undefined
+    ? (resourceHit ? "yes" : resolvable ? "no" : "maybe")
+    : (!resolvable ? "maybe" : resourceHit ? "no" : "yes");
+  if (resourceMatch === "no") return "no";
+  if (statement.Effect === "Allow") return resourceMatch === "yes" && statement.Condition === undefined ? "yes" : "no";
+  return resourceMatch === "yes" && statement.Condition === undefined ? "yes" : "maybe";
+}
+
+/**
+ * The findings for the worker instance role against the actions and ARNs the route invokes: an iam-missing-grant when it lacks some, and a
+ * model-access-unverified when a conditional or unresolved Deny might block one it otherwise holds (that is unverifiable, never a pass).
+ */
+function routeGrantFindings(iam: ModelRouteCheck["iam"], route: E2EModelRoute): Finding[] {
+  const sources = policySources(iam.foundationTemplate).filter((source) => source.roleLogicalIds.includes(iam.roleLogicalId));
+  const statements = sources.flatMap((source) => source.statements);
+  const verdict = (action: string, resource: string): "granted" | "missing" | "maybe-denied" => {
+    const matches = statements.map((statement) => ({ statement, match: statementMatch(statement, action, resource, iam.scope) }));
+    const allowed = matches.some(({ statement, match }) => statement.Effect === "Allow" && match === "yes");
+    if (!allowed || matches.some(({ statement, match }) => statement.Effect === "Deny" && match === "yes")) return "missing";
+    return matches.some(({ statement, match }) => statement.Effect === "Deny" && match === "maybe") ? "maybe-denied" : "granted";
+  };
+  const checked = iam.resources.map((resource) => ({ resource, verdicts: ROUTE_INVOKE_ACTIONS.map((action) => ({ action, verdict: verdict(action, resource) })) }));
+  const findings: Finding[] = [];
+  const lacking = checked.map((entry) => ({ resource: entry.resource, actions: entry.verdicts.filter((item) => item.verdict === "missing").map((item) => item.action) })).filter((entry) => entry.actions.length > 0);
+  if (lacking.length > 0) {
+    const byActions = new Map<string, { actions: string[]; resources: string[] }>();
+    for (const entry of lacking) {
+      const key = entry.actions.join(",");
+      const group = byActions.get(key) ?? { actions: [...entry.actions], resources: [] };
+      group.resources.push(entry.resource);
+      byActions.set(key, group);
+    }
+    const holder = sources.find((source) => source.statements.some((statement) => statement.Sid === "BedrockModelInvocation")) ?? sources[0];
+    const policyLogicalId = holder?.policyLogicalId ?? `${iam.roleLogicalId}DefaultPolicy`;
+    findings.push({
+      kind: "iam-missing-grant", severity: "error", subject: policyLogicalId, label: findingLabel(iam.roleLogicalId), roleLogicalId: iam.roleLogicalId, policyLogicalId,
+      statements: [...byActions.values()].map((group): PolicyStatement => ({ Effect: "Allow", Action: group.actions.length === 1 ? group.actions[0] : group.actions, Resource: group.resources })),
+      message: `${iam.roleLogicalId}, the worker instance role, lacks ${lacking.map((entry) => `${entry.actions.join(" and ")} on ${entry.resource}`).join("; ")}, which the e2e model route invokes`,
+    });
+  }
+  const maybe = checked.filter((entry) => entry.verdicts.some((item) => item.verdict === "maybe-denied")).map((entry) => entry.resource);
+  if (maybe.length > 0) {
+    findings.push({
+      kind: "model-access-unverified", severity: "error", subject: route.routeId, label: route.routeId,
+      message: `whether ${iam.roleLogicalId}, the worker instance role, may invoke ${maybe.join("; ")} is unverifiable, which is not a pass: a Deny statement with a Condition or a resource this check cannot resolve might block it`,
+    });
   }
   return findings;
 }
