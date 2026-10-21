@@ -1088,13 +1088,38 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
 }
 
 // ---------------------------------------------------------------------------------------------
-// --check: the read-only gatherer. Every AWS call below is a read (get-template, describe-*, get-function, get-role, a DynamoDB
-// query and an S3 get-object); the head synth and build are injected so the unit tests run without either.
+// --check: the read-only gatherer. Every AWS call below is one of CHECK_READ_VERBS, and the reader refuses any other before it reaches
+// the CLI: cloudformation describe-stacks, get-template and list-stack-resources; lambda get-function; dynamodb query and scan (COUNT);
+// ec2 describe-instances; iam get-role; s3api get-object; bedrock get-inference-profile and get-foundation-model-availability; and
+// ssm get-parameter (no decryption). The head synth and build are injected so the unit tests run without either.
 // ---------------------------------------------------------------------------------------------
 
 /** The catalog rows' key: the profile the web/API runtime registers its web and API rows under. */
 const CATALOG_PROFILE_PREFIX = `PROFILE#${WEB_API_RUNTIME_PROFILE_ID}#`;
 const CATALOG_ID_VARIABLE = "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID";
+
+/** The only AWS verbs `--check` runs, as `<service> <operation>`. Every one reads; no secret, no KMS, no model invocation. */
+export const CHECK_READ_VERBS: ReadonlySet<string> = new Set([
+  "cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources",
+  "lambda get-function",
+  "dynamodb query", "dynamodb scan",
+  "ec2 describe-instances",
+  "iam get-role",
+  "s3api get-object",
+  "bedrock get-inference-profile", "bedrock get-foundation-model-availability",
+  "ssm get-parameter",
+]);
+
+/** The reader the check gathers through: it refuses any verb outside CHECK_READ_VERBS, so a later edit cannot add a write or a secret read by accident. */
+export function readOnlyAws(runner: AwsReader): AwsReader {
+  return {
+    aws(args: readonly string[], allowFailure?: boolean) {
+      const verb = `${args[0] ?? ""} ${args[1] ?? ""}`;
+      if (!CHECK_READ_VERBS.has(verb)) throw new Error(`test-deploy --check is read-only and "aws ${verb.trim()}" is not a read it runs`);
+      return runner.aws(args, allowFailure);
+    },
+  };
+}
 
 export interface CheckReaders {
   runner: AwsReader;
@@ -1188,7 +1213,6 @@ const failureText = (stderr: string): string => stderr.trim().split("\n").filter
 
 /** `us.`, `eu.`, `apac.` and the other geography prefixes of a system-defined cross-region inference profile id; a foundation model id has none. */
 const INFERENCE_PROFILE_ID = /^(us|us-gov|eu|apac|global|jp|au|ca)\./;
-const isInferenceProfile = (route: E2EModelRoute): boolean => INFERENCE_PROFILE_ID.test(route.modelId);
 
 /**
  * Whether Bedrock lists the route's model for this account and region, from two control-plane reads: get-inference-profile (for a profile:
@@ -1205,19 +1229,14 @@ function readModelAccess(readers: CheckReaders, route: E2EModelRoute): { access:
     // A model or profile Bedrock does not know is a definite answer; anything else (AccessDenied, throttling, no network) leaves it unknown.
     return { failure: /ResourceNotFound|ValidationException/.test(text) && !/AccessDenied/.test(text) ? { state: "not-found", detail: text } : { state: "unverifiable", reason: text } };
   };
-  let profileStatus: string | undefined;
-  let profileArn: string | undefined;
-  let modelArns: string[] = [];
-  let modelIds = [route.modelId];
-  if (isInferenceProfile(route)) {
-    const profile = read(["bedrock", "get-inference-profile", "--inference-profile-identifier", route.modelId]);
-    if ("failure" in profile) return { access: profile.failure, profileArn: undefined, modelArns: [] };
-    profileStatus = typeof profile.value.status === "string" ? profile.value.status : "UNKNOWN";
-    profileArn = typeof profile.value.inferenceProfileArn === "string" ? profile.value.inferenceProfileArn : undefined;
-    modelArns = (Array.isArray(profile.value.models) ? profile.value.models : [])
-      .flatMap((entry) => typeof (entry as { modelArn?: unknown }).modelArn === "string" ? [(entry as { modelArn: string }).modelArn] : []);
-    modelIds = [...new Set(modelArns.map((arn) => arn.slice(arn.indexOf("foundation-model/") + "foundation-model/".length)).filter((id) => id !== ""))];
-  }
+  // The e2e default on Bedrock is always a geography inference profile (a test pins that): its status, and the foundation models in every Region it routes to.
+  const profile = read(["bedrock", "get-inference-profile", "--inference-profile-identifier", route.modelId]);
+  if ("failure" in profile) return { access: profile.failure, profileArn: undefined, modelArns: [] };
+  const profileStatus = typeof profile.value.status === "string" ? profile.value.status : "UNKNOWN";
+  const profileArn = typeof profile.value.inferenceProfileArn === "string" ? profile.value.inferenceProfileArn : undefined;
+  const modelArns = (Array.isArray(profile.value.models) ? profile.value.models : [])
+    .flatMap((entry) => typeof (entry as { modelArn?: unknown }).modelArn === "string" ? [(entry as { modelArn: string }).modelArn] : []);
+  const modelIds = [...new Set(modelArns.map((arn) => arn.slice(arn.indexOf("foundation-model/") + "foundation-model/".length)).filter((id) => id !== ""))];
   const models: ModelAvailabilityFact[] = [];
   for (const modelId of modelIds) {
     const availability = read(["bedrock", "get-foundation-model-availability", "--model-id", modelId]);
@@ -1294,7 +1313,7 @@ function readModelRoute(readers: CheckReaders, input: { table: string; foundatio
   const { access, profileArn, modelArns } = readModelAccess(readers, route);
   // What the route invokes: the profile (when it uses one) and each foundation model behind it, in every Region the profile routes to.
   // Without Bedrock's answer, the profile's own ARN and the model in this region.
-  const profileResource = isInferenceProfile(route) ? [profileArn ?? `arn:${partition}:bedrock:${readers.region}:${accountId}:inference-profile/${route.modelId}`] : [];
+  const profileResource = [profileArn ?? `arn:${partition}:bedrock:${readers.region}:${accountId}:inference-profile/${route.modelId}`];
   const modelResources = modelArns.length > 0 ? modelArns : [`arn:${partition}:bedrock:${readers.region}::foundation-model/${route.modelId.replace(INFERENCE_PROFILE_ID, "")}`];
   return {
     provider: { state: "known", route }, approval: approval(route.routeId),
@@ -1303,7 +1322,8 @@ function readModelRoute(readers: CheckReaders, input: { table: string; foundatio
 }
 
 /** Everything `evaluateTestDeployCheck` needs but the time, read from the live installation and the head build. */
-export async function gatherCheckFacts(readers: CheckReaders): Promise<{ facts: CheckFacts; notes: string[] }> {
+export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts: CheckFacts; notes: string[] }> {
+  const readers: CheckReaders = { ...unchecked, runner: readOnlyAws(unchecked.runner) };
   const stacks = resolveTestStacks(readers.env);
   const controlPlane = describeStack(readers.runner, readers.region, stacks["control-plane"]);
   const deployedTemplate = deployedTemplateOf(readers.runner, readers.region, stacks["control-plane"]);

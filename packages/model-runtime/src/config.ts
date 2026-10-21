@@ -21,6 +21,7 @@ export const DEFAULT_DIRECT_MODELS = {
  * and the e2e route never falls back. The OpenRouter id is provisional until a canary on an OpenRouter installation
  * records the model OpenRouter reports serving it (owner item O5). A test fails if the pinned pi catalog lacks any of them.
  */
+// A default model must show agreement AVAILABLE in `test-deploy --check` (ruling M4-U): a model with no agreement reports NOT_AVAILABLE and fails it.
 export const DEFAULT_E2E_AGENT_MODELS = {
   "amazon-bedrock": "us.anthropic.claude-haiku-5-5",
   anthropic: "claude-haiku-5-5",

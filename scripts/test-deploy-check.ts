@@ -22,6 +22,7 @@ export type FindingKind =
   | "stale-lambda"
   | "iam-missing-grant"
   | "iam-extra-grant"
+  | "iam-explicit-deny"
   | "lambda-env-missing"
   | "catalog-not-ready"
   | "catalog-expiring"
@@ -738,14 +739,14 @@ function agreementProblem(access: ModelAccessFacts): string | undefined {
     : `the model agreement is not AVAILABLE, so Bedrock denies invocation even though the model reads as authorized (${problems.join("; ")}); accept the model's agreement in this account first`;
 }
 
-type IamVerdict = "granted" | "missing" | "maybe-denied";
+type IamVerdict = "granted" | "missing" | "denied" | "maybe-denied";
 
-/** Whether the statements allow `action` on `resource`: a matching Allow, no matching Deny, and no Deny that might match. */
+/** Whether the statements allow `action` on `resource`: a definite Deny, no matching Allow, a Deny that might match, or granted. */
 function iamVerdict(statements: readonly PolicyStatement[], action: string, resource: string, scope: IamScope): IamVerdict {
-  const matches = statements.map((statement) => ({ statement, match: statementMatch(statement, action, resource, scope) }));
-  const allowed = matches.some(({ statement, match }) => statement.Effect === "Allow" && match === "yes");
-  if (!allowed || matches.some(({ statement, match }) => statement.Effect === "Deny" && match === "yes")) return "missing";
-  return matches.some(({ statement, match }) => statement.Effect === "Deny" && match === "maybe") ? "maybe-denied" : "granted";
+  const classified = statements.map((statement) => classifyStatement(statement, action, resource, scope));
+  if (classified.some(({ effect, match }) => effect === "deny" && match === "yes")) return "denied";
+  if (!classified.some(({ effect, match }) => effect === "allow" && match === "yes")) return "missing";
+  return classified.some(({ effect, match }) => effect === "deny" && match === "maybe") ? "maybe-denied" : "granted";
 }
 
 /**
@@ -774,6 +775,13 @@ function routeGrantFindings(iam: BedrockRouteFacts["iam"], route: E2EModelRoute)
       kind: "iam-missing-grant", severity: "error", subject: policyLogicalId, label: findingLabel(iam.roleLogicalId), roleLogicalId: iam.roleLogicalId, policyLogicalId,
       statements: [...byActions.values()].map((group): PolicyStatement => ({ Effect: "Allow", Action: group.actions.length === 1 ? group.actions[0] : group.actions, Resource: group.resources })),
       message: `${iam.roleLogicalId}, the worker instance role, lacks ${lacking.map((entry) => `${entry.actions.join(" and ")} on ${entry.resource}`).join("; ")}, which the e2e model route invokes`,
+    });
+  }
+  const denied = checked.flatMap((entry) => entry.verdicts.filter((item) => item.verdict === "denied").map((item) => `${item.action} on ${entry.resource}`));
+  if (denied.length > 0) {
+    findings.push({
+      kind: "iam-explicit-deny", severity: "error", subject: iam.roleLogicalId, label: findingLabel(iam.roleLogicalId), roleLogicalId: iam.roleLogicalId,
+      message: `${iam.roleLogicalId}, the worker instance role, is explicitly denied ${denied.join("; ")} by a Deny statement in its policies; adding an Allow cannot override a Deny, so remove or narrow the Deny (route ${route.modelId})`,
     });
   }
   const maybe = checked.filter((entry) => entry.verdicts.some((item) => item.verdict === "maybe-denied")).map((entry) => entry.resource);
@@ -808,7 +816,7 @@ function keyedFindings(route: E2EModelRoute, provider: KeyedModelProvider, keyed
   if (provider === "openrouter") findings.push(...openRouterFindings(route, keyed, finding));
   findings.push(
     finding("model-access-unverified", "info", `whether the ${label} key is valid and has credit cannot be checked without a model call, which this check never makes; it shows at the model canary, or at runtime as UNKNOWN model-unavailable`),
-    finding("model-access-unverified", "info", `whether the worker role may decrypt the ${label} secret is unverifiable: a customer-managed KMS key (kms:Decrypt) cannot be evaluated from the ARN alone, and this check reads no secret metadata or value (owner O6)`),
+    finding("model-access-unverified", "info", `a granted verdict covers only the policy statements in the deployed templates; still unverifiable are the role's managed policies, permissions boundaries, service control policies (SCPs), the ${label} secret's resource policy, and a customer-managed KMS key (kms:Decrypt), none of which can be evaluated from the ARN alone: this check reads no secret metadata or value (owner O6)`),
   );
   return findings;
 }
@@ -818,10 +826,14 @@ function controlPlaneWorkerPolicies(template: CheckTemplate, roleName: string, s
   const conditions = (template.Conditions ?? {}) as Record<string, unknown>;
   return Object.entries(template.Resources ?? {}).flatMap(([logicalId, resource]) => {
     if (resource.Type !== "AWS::IAM::Policy" && resource.Type !== "AWS::IAM::ManagedPolicy") return [];
-    if (typeof resource.Condition === "string" && conditionHolds({ Condition: resource.Condition }, conditions, scope) !== true) return [];
+    const enabled = typeof resource.Condition === "string" ? conditionHolds({ Condition: resource.Condition }, conditions, scope) : true;
+    if (enabled === false) return [];
     const roles = list(resource.Properties?.Roles).map((value) => resolveText(value, scope));
     if (!roles.includes(roleName)) return [];
-    return [{ policyLogicalId: logicalId, statements: list((resource.Properties?.PolicyDocument as { Statement?: unknown } | undefined)?.Statement) as PolicyStatement[] }];
+    const statements = list((resource.Properties?.PolicyDocument as { Statement?: unknown } | undefined)?.Statement) as PolicyStatement[];
+    if (enabled === true) return [{ policyLogicalId: logicalId, statements }];
+    // The condition cannot be resolved: an Allow of the policy grants nothing, but a Deny of it might block the call (M4-AB).
+    return [{ policyLogicalId: logicalId, statements: statements.filter((statement) => statement?.Effect !== "Allow").map((statement) => ({ ...statement, Condition: { unresolvedPolicyCondition: resource.Condition } })) }];
   });
 }
 
@@ -859,6 +871,12 @@ function secretGrantFindings(iam: KeyedRouteFacts["iam"], arn: string, construct
   const statements = [...foundation.flatMap((source) => source.statements), ...control.flatMap((policy) => policy.statements)];
   const verdict = iamVerdict(statements, "secretsmanager:GetSecretValue", arn, iam.scope);
   if (verdict === "granted") return [];
+  if (verdict === "denied") {
+    return [{
+      kind: "iam-explicit-deny", severity: "error", subject: iam.roleLogicalId, label: findingLabel(iam.roleLogicalId), roleLogicalId: iam.roleLogicalId,
+      message: `${iam.roleLogicalId}, the worker instance role, is explicitly denied secretsmanager:GetSecretValue on ${arn}, the ${label} key the e2e model route reads, by a Deny statement in its policies; adding an Allow cannot override a Deny, so remove or narrow the Deny`,
+    }];
+  }
   if (verdict === "maybe-denied") {
     return [{
       kind: "model-access-unverified", severity: "error", subject: E2E_MODEL_ROUTE_ID, label: E2E_MODEL_ROUTE_ID,
@@ -940,15 +958,26 @@ const globMatches = (pattern: string, value: string, flags = ""): boolean =>
   new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`, flags).test(value);
 
 /**
- * Whether one statement applies to `action` on `resource`: yes, no, or maybe when it cannot be told. A Condition is not evaluated, and a
- * resource written as something this cannot resolve (GetAtt, an import) has no text to match. An Allow that is conditional or unresolved
- * never counts as a grant (it errs toward alarm). A Deny that is conditional or unresolved while its action matches is "maybe": it might
- * block the call, so the caller must not report a pass.
+ * What one statement does to `action` on `resource`: its effect, and whether it applies (yes, no, or maybe when it cannot be told).
+ * A Condition is not evaluated, and a resource written as something this cannot resolve (GetAtt, an import) has no text to match.
+ * An Allow that is conditional or unresolved never counts as a grant (it errs toward alarm). A Deny that is conditional or unresolved
+ * while its action matches is "maybe": it might block the call, so the caller must not report a pass.
+ *
+ * Ruling M4-AB: every shape this cannot parse is a maybe-Deny, never a skipped statement. That is a statement whose Effect is not
+ * literally "Allow" or "Deny" (a statement wrapped in Fn::If has none) and a Deny whose Action or NotAction has an entry that is not a
+ * string. An Allow with a non-string NotAction entry grants nothing (the entry might exclude the action).
  */
-function statementMatch(statement: PolicyStatement, action: string, resource: string, scope: IamScope): "yes" | "no" | "maybe" {
-  const actions = list(statement.NotAction ?? statement.Action).filter((value): value is string => typeof value === "string");
+function classifyStatement(statement: PolicyStatement, action: string, resource: string, scope: IamScope): { effect: "allow" | "deny"; match: "yes" | "no" | "maybe" } {
+  if (statement === null || typeof statement !== "object" || (statement.Effect !== "Allow" && statement.Effect !== "Deny")) return { effect: "deny", match: "maybe" };
+  const effect = statement.Effect === "Allow" ? "allow" : "deny";
+  const patterns = list(statement.NotAction ?? statement.Action);
+  const actions = patterns.filter((value): value is string => typeof value === "string");
+  const unparsedAction = actions.length !== patterns.length;
   const actionHit = actions.some((pattern) => globMatches(pattern, action, "i"));
-  if (statement.NotAction === undefined ? !actionHit : actionHit) return "no";
+  let actionMatch: "yes" | "no" | "maybe";
+  if (statement.NotAction === undefined) actionMatch = actionHit ? "yes" : unparsedAction ? "maybe" : "no";
+  else actionMatch = unparsedAction ? "maybe" : actionHit ? "no" : "yes";
+  if (actionMatch === "no") return { effect, match: "no" };
   const resolved = list(statement.NotResource ?? statement.Resource).map((value) => resolveText(value, scope));
   const resourceHit = resolved.some((pattern) => pattern !== undefined && globMatches(pattern, resource));
   const resolvable = resolved.every((pattern) => pattern !== undefined);
@@ -956,9 +985,10 @@ function statementMatch(statement: PolicyStatement, action: string, resource: st
   const resourceMatch: "yes" | "no" | "maybe" = statement.NotResource === undefined
     ? (resourceHit ? "yes" : resolvable ? "no" : "maybe")
     : (!resolvable ? "maybe" : resourceHit ? "no" : "yes");
-  if (resourceMatch === "no") return "no";
-  if (statement.Effect === "Allow") return resourceMatch === "yes" && statement.Condition === undefined ? "yes" : "no";
-  return resourceMatch === "yes" && statement.Condition === undefined ? "yes" : "maybe";
+  if (resourceMatch === "no") return { effect, match: "no" };
+  const definite = actionMatch === "yes" && resourceMatch === "yes" && statement.Condition === undefined;
+  if (effect === "allow") return { effect, match: definite ? "yes" : "no" };
+  return { effect, match: definite ? "yes" : "maybe" };
 }
 
 // ---------------------------------------------------------------------------------------------

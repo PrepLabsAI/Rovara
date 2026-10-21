@@ -27,7 +27,7 @@ import {
   type ModelRouteCheck,
   type RunnerFacts,
 } from "../../scripts/test-deploy-check.js";
-import { DeployCheckFindingsError, assertCheckAllowsApply, checkExitCode, checkReport, gatherCheckFacts, main, parseTestDeployArgs, type CfnTemplate } from "../../scripts/test-deploy.js";
+import { CHECK_READ_VERBS, DeployCheckFindingsError, assertCheckAllowsApply, checkExitCode, checkReport, gatherCheckFacts, main, parseTestDeployArgs, readOnlyAws, type CfnTemplate } from "../../scripts/test-deploy.js";
 
 const NOW = new Date("2026-10-20T18:00:00.000Z");
 const hoursFromNow = (hours: number) => new Date(NOW.getTime() + hours * 3_600_000).toISOString();
@@ -435,10 +435,60 @@ describe("the e2e model route", () => {
   it("does not count a conditional Allow, a Deny or an unresolvable resource as a grant", () => {
     const conditional = { ...BEDROCK_SID, Condition: { StringEquals: { "aws:RequestedRegion": "us-east-1" } } };
     expect(kinds(check(withIam({ foundationTemplate: foundation([conditional]) })).findings)).toEqual(["iam-missing-grant"]);
-    const denied = foundation([BEDROCK_SID, { Effect: "Deny", Action: "bedrock:InvokeModel", Resource: "*" }]);
-    expect(kinds(check(withIam({ foundationTemplate: denied })).findings)).toEqual(["iam-missing-grant"]);
     const attribute = foundation([{ Effect: "Allow", Action: "bedrock:InvokeModel*", Resource: { "Fn::GetAtt": ["Somewhere", "Arn"] } }]);
     expect(kinds(check(withIam({ foundationTemplate: attribute })).findings)).toEqual(["iam-missing-grant"]);
+  });
+
+  // F2 (ruling M4-AB): adding an Allow cannot override a Deny, so a definite Deny is its own finding and never a Tier 3 request.
+  it("reports a definite Deny as iam-explicit-deny, with no statements and no Tier 3 request", () => {
+    const denied = foundation([BEDROCK_SID, { Effect: "Deny", Action: "bedrock:InvokeModel", Resource: "*" }]);
+    const result = check(withIam({ foundationTemplate: denied }));
+    expect(result.ok).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ kind: "iam-explicit-deny", severity: "error", roleLogicalId: WORKER_ROLE });
+    expect(result.findings[0]?.statements).toBeUndefined();
+    expect(result.findings[0]?.message).toMatch(/Deny/);
+    expect(result.findings[0]?.message).toContain("bedrock:InvokeModel");
+    expect(result.findings[0]?.message).toMatch(/cannot override|remove or narrow/i);
+    expect(tier3Request(result.findings)).toBe("");
+    // A Deny and a missing Allow on different actions give both findings.
+    const mixed = foundation([{ Effect: "Allow", Action: "bedrock:InvokeModel", Resource: "*" }, { Effect: "Deny", Action: "bedrock:InvokeModel", Resource: MODEL_ARNS[0] }]);
+    expect(kinds(check(withIam({ foundationTemplate: mixed })).findings).sort()).toEqual(["iam-explicit-deny", "iam-missing-grant"]);
+  });
+
+  // F1 (ruling M4-AB): every Deny shape the evaluator cannot parse might block the call, so it is never a pass.
+  describe("a Deny it cannot parse (Bedrock)", () => {
+    const unverified = (statements: unknown[]) => check(withIam({ foundationTemplate: foundation([BEDROCK_SID, ...statements]) }));
+    it("treats a statement wrapped in Fn::If as a maybe-Deny", () => {
+      const wrapped = { "Fn::If": ["DenyIt", { Effect: "Deny", Action: "bedrock:*", Resource: "*" }, { Ref: "AWS::NoValue" }] };
+      const result = unverified([wrapped]);
+      expect(result.ok).toBe(false);
+      expect(kinds(result.findings)).toEqual(["model-access-unverified"]);
+      expect(result.findings[0]?.severity).toBe("error");
+    });
+    it("treats a Deny whose Action is an intrinsic as a maybe-Deny", () => {
+      const result = unverified([{ Effect: "Deny", Action: { "Fn::If": ["DenyIt", "bedrock:*", "s3:*"] }, Resource: "*" }]);
+      expect(result.ok).toBe(false);
+      expect(kinds(result.findings)).toEqual(["model-access-unverified"]);
+      const listed = unverified([{ Effect: "Deny", Action: ["s3:*", { Ref: "SomeAction" }], Resource: "*" }]);
+      expect(kinds(listed.findings)).toEqual(["model-access-unverified"]);
+    });
+    it("treats a statement whose Effect is not literally Allow or Deny as a maybe-Deny", () => {
+      expect(kinds(unverified([{ Effect: { "Fn::If": ["C", "Deny", "Allow"] }, Action: "bedrock:*", Resource: "*" }]).findings)).toEqual(["model-access-unverified"]);
+    });
+    it("does not read an Allow whose NotAction entries are all non-strings as matching every action", () => {
+      const allow = foundation([{ Effect: "Allow", NotAction: [{ Ref: "SomeAction" }], Resource: "*" }]);
+      const result = check(withIam({ foundationTemplate: allow }));
+      expect(result.ok).toBe(false);
+      expect(kinds(result.findings)).toEqual(["iam-missing-grant"]);
+    });
+    it("still ignores a Deny of another action when its Action is plain", () => {
+      expect(unverified([{ Effect: "Deny", Action: "s3:*", Resource: "*" }])).toEqual({ ok: true, findings: [] });
+    });
+  });
+
+  it("uses a geography inference profile as the default Bedrock model, which the Bedrock reads assume (get-inference-profile)", () => {
+    expect(DEFAULT_E2E_AGENT_MODELS["amazon-bedrock"]).toMatch(/^(us|us-gov|eu|apac|global|jp|au|ca)\./);
   });
 
   it("never passes on a Deny it cannot judge: a conditional Deny, or one with a resource it cannot resolve, is model-access-unverified", () => {
@@ -473,7 +523,10 @@ describe("the e2e model route", () => {
     expect(excluded.findings[0]?.statements).toEqual([{ Effect: "Allow", Action: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"], Resource: [PROFILE_ARN] }]);
     // A Deny with a NotResource that names only the profile blocks the model ARNs definitively.
     const denyOutside = foundation([BEDROCK_SID, { Effect: "Deny", Action: "bedrock:InvokeModel", NotResource: PROFILE_ARN }]);
-    expect(check(withIam({ foundationTemplate: denyOutside })).findings[0]?.statements).toEqual([{ Effect: "Allow", Action: "bedrock:InvokeModel", Resource: MODEL_ARNS }]);
+    const outside = check(withIam({ foundationTemplate: denyOutside }));
+    expect(kinds(outside.findings)).toEqual(["iam-explicit-deny"]);
+    for (const arn of MODEL_ARNS) expect(outside.findings[0]?.message).toContain(arn);
+    expect(outside.findings[0]?.message).not.toContain(PROFILE_ARN);
     // A Deny whose NotResource pattern this cannot resolve cannot be judged.
     const unknownDeny = foundation([BEDROCK_SID, { Effect: "Deny", Action: "bedrock:InvokeModel", NotResource: { "Fn::GetAtt": ["Somewhere", "Arn"] } }]);
     expect(kinds(check(withIam({ foundationTemplate: unknownDeny })).findings)).toEqual(["model-access-unverified"]);
@@ -575,6 +628,11 @@ describe("the e2e model route", () => {
       expect(text).toMatch(/key|credit/i);
       expect(text).toMatch(/kms:Decrypt/);
       expect(text).toMatch(/unverifiable/);
+      // F3: the granted verdict ignores all of these, so the info says so.
+      expect(text).toMatch(/managed polic/i);
+      expect(text).toMatch(/permissions? boundar/i);
+      expect(text).toMatch(/SCP/);
+      expect(text).toMatch(/resource polic/i);
     });
 
     it("gives model-route-secret-missing when the ARN setting is absent, unset (none, empty) or not a Secrets Manager ARN", () => {
@@ -629,13 +687,61 @@ describe("the e2e model route", () => {
       expect(result.ok).toBe(true);
     });
 
-    it("never passes on a Deny it cannot judge, and a plain Deny of the secret is a missing grant", () => {
+    it("treats every Deny shape it cannot parse as a maybe-Deny: Fn::If statement, intrinsic Action, a Deny policy under an unresolvable condition", () => {
+      const wrapped = foundation([{ "Fn::If": ["DenyIt", { Effect: "Deny", Action: "secretsmanager:*", Resource: "*" }, { Ref: "AWS::NoValue" }] }]);
+      const intrinsicAction = foundation([{ Effect: "Deny", Action: { "Fn::If": ["DenyIt", "secretsmanager:*", "s3:*"] }, Resource: "*" }]);
+      for (const foundationTemplate of [wrapped, intrinsicAction]) {
+        const result = keyed(provider, keyedFacts(provider, { foundationTemplate }));
+        expect(result.ok).toBe(false);
+        expect(errorsOf(result.findings).map((finding) => finding.kind)).toEqual(["model-access-unverified"]);
+      }
+      // A Deny policy of the control-plane stack on the worker role, under a condition that cannot be resolved here.
+      const withDeny = controlPlaneTemplate(provider);
+      withDeny.Conditions = { ...(withDeny.Conditions as Record<string, unknown>), Mystery: { "Fn::Equals": [{ "Fn::GetAtt": ["Somewhere", "Arn"] }, "x"] } };
+      withDeny.Resources = {
+        ...withDeny.Resources,
+        DenyPolicy: {
+          Type: "AWS::IAM::Policy", Condition: "Mystery",
+          Properties: { Roles: [WORKER_ROLE_EXPRESSION], PolicyDocument: { Statement: [{ Effect: "Deny", Action: "secretsmanager:GetSecretValue", Resource: "*" }] } },
+        },
+      };
+      const conditional = keyed(provider, keyedFacts(provider, { template: withDeny }));
+      expect(conditional.ok).toBe(false);
+      expect(errorsOf(conditional.findings).map((finding) => finding.kind)).toEqual(["model-access-unverified"]);
+      // An Allow policy under the same unresolvable condition grants nothing, as before.
+      const allowOnly = controlPlaneTemplate(provider);
+      allowOnly.Conditions = { Mystery: { "Fn::Equals": [{ "Fn::GetAtt": ["Somewhere", "Arn"] }, "x"] } };
+      (allowOnly.Resources?.[`${PREFIX[provider]}SecretRead`] as { Condition: string }).Condition = "Mystery";
+      expect(kinds(keyed(provider, keyedFacts(provider, { template: allowOnly })).findings)).toContain("iam-missing-grant");
+      // A Deny policy under a condition that is definitely off is skipped.
+      const off = controlPlaneTemplate(provider);
+      off.Resources = { ...off.Resources, DenyPolicy: { Type: "AWS::IAM::Policy", Condition: `${PREFIX[provider]}Enabled`, Properties: { Roles: [WORKER_ROLE_EXPRESSION], PolicyDocument: { Statement: [{ Effect: "Deny", Action: "secretsmanager:GetSecretValue", Resource: "*" }] } } } };
+      expect(errorsOf(keyed(provider, keyedFacts(provider, { template: off, stackArn: "" })).findings).map((finding) => finding.kind)).toEqual(["iam-missing-grant"]);
+    });
+
+    it("does not read an Allow whose NotAction entries are all non-strings as matching every action", () => {
+      const allow = foundation([{ Effect: "Allow", NotAction: [{ Ref: "SomeAction" }], Resource: "*" }]);
+      const result = keyed(provider, keyedFacts(provider, { template: { Resources: {} }, foundationTemplate: allow }));
+      expect(kinds(result.findings)).toContain("iam-missing-grant");
+    });
+
+    it("reports a definite Deny of the secret as iam-explicit-deny: no statements, no Tier 3 request", () => {
+      const result = keyed(provider, keyedFacts(provider, { foundationTemplate: foundation([{ Effect: "Deny", Action: "secretsmanager:*", Resource: "*" }]) }));
+      expect(result.ok).toBe(false);
+      expect(kinds(result.findings)).toContain("iam-explicit-deny");
+      expect(kinds(result.findings)).not.toContain("iam-missing-grant");
+      const deny = result.findings.find((finding) => finding.kind === "iam-explicit-deny");
+      expect(deny).toMatchObject({ severity: "error", roleLogicalId: WORKER_ROLE });
+      expect(deny?.statements).toBeUndefined();
+      expect(deny?.message).toContain(secretArnFor(provider));
+      expect(tier3Request(result.findings)).toBe("");
+    });
+
+    it("never passes on a Deny it cannot judge", () => {
       const conditionalDeny = foundation([{ Effect: "Deny", Action: "secretsmanager:GetSecretValue", Resource: "*", Condition: { Bool: { "aws:SecureTransport": "false" } } }]);
       const maybe = keyed(provider, keyedFacts(provider, { foundationTemplate: conditionalDeny }));
       expect(maybe.ok).toBe(false);
       expect(errorsOf(maybe.findings)[0]).toMatchObject({ kind: "model-access-unverified" });
-      const plainDeny = foundation([{ Effect: "Deny", Action: "secretsmanager:*", Resource: "*" }]);
-      expect(kinds(keyed(provider, keyedFacts(provider, { foundationTemplate: plainDeny })).findings)).toContain("iam-missing-grant");
     });
 
     it("never reads or prints a secret value, and says in its info that the key is not checked without a call", () => {
@@ -944,6 +1050,39 @@ describe("check report and exit codes", () => {
     expect(parseTestDeployArgs(["--env", "e", "--profile", "p", "--check", "--json"])).toMatchObject({ check: true, json: true });
     expect(parseTestDeployArgs(["--env", "e", "--profile", "p", "--check"])).toMatchObject({ json: false });
     expect(() => parseTestDeployArgs(["--env", "e", "--profile", "p", "--json"])).toThrow(/--json only goes with --check/);
+  });
+});
+
+describe("the read-only reader (F6)", () => {
+  const runnerThatAnswers = () => {
+    const calls: Array<{ args: string[]; allowFailure: boolean | undefined }> = [];
+    return { calls, runner: { aws: (args: readonly string[], allowFailure?: boolean) => { calls.push({ args: [...args], allowFailure }); return { status: 0, stdout: "{}", stderr: "" }; } } };
+  };
+
+  it("lists exactly the read verbs the check uses", () => {
+    expect([...CHECK_READ_VERBS].sort()).toEqual([
+      "bedrock get-foundation-model-availability", "bedrock get-inference-profile",
+      "cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources",
+      "dynamodb query", "dynamodb scan", "ec2 describe-instances", "iam get-role", "lambda get-function", "s3api get-object", "ssm get-parameter",
+    ]);
+  });
+
+  it("passes an allowed read through with its arguments and allowFailure", () => {
+    const { calls, runner } = runnerThatAnswers();
+    readOnlyAws(runner).aws(["ssm", "get-parameter", "--name", "/x"], true);
+    expect(calls).toEqual([{ args: ["ssm", "get-parameter", "--name", "/x"], allowFailure: true }]);
+  });
+
+  it("refuses anything else before it reaches the CLI: secrets, KMS, writes, invocations", () => {
+    const { calls, runner } = runnerThatAnswers();
+    const reader = readOnlyAws(runner);
+    for (const args of [
+      ["secretsmanager", "describe-secret"], ["secretsmanager", "get-secret-value"], ["kms", "decrypt"], ["ssm", "put-parameter"], ["ssm", "get-parameters"],
+      ["ssm", "get-parameter-history"], ["cloudformation", "delete-stack"], ["lambda", "invoke"], ["bedrock-runtime", "converse"], ["dynamodb", "put-item"], ["iam", "create-role"], ["s3api", "put-object"], [],
+    ]) {
+      expect(() => reader.aws(args), args.join(" ")).toThrow(/read-only|not a read/);
+    }
+    expect(calls).toEqual([]);
   });
 });
 
