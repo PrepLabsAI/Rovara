@@ -12,7 +12,7 @@ import {
   type E2EApplicationCompilationContext,
 } from "@agentx/verifier";
 import { ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal } from "./application-dispatch-check.js";
-import type { E2EAccountRegistryEntry } from "./application-account-registry.js";
+import { definitionOfAccountRef, type E2EAccountRegistryEntry } from "./application-account-registry.js";
 import { BF_REASON, evaluateApplicationPlanApproval } from "./application-plan-approval.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -150,6 +150,15 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   for (const profileId of profileIds) {
     const row = runtimeFor(profileId);
     if (Date.parse(row.expiresAt) < Date.parse(deadlineAt)) throw applicationRuntimeRefusal(`the ${kind} runtime of profile ${profileId} expires at ${row.expiresAt}, before this round could end at ${deadlineAt}`);
+  }
+  // The same goes for a test account: a round does not start on a definition that expires before it could end, or its verdict could not be verified. Registering the
+  // setup again renews it. (A ref with no registered definition is an M1.2 record's, which has no expiry.)
+  for (const ref of evaluation.accountRefs) {
+    const entry = input.accountEntries.find((item) => item.definition.applicationId === ref.applicationId && item.definition.profileId === ref.profileId);
+    const definition = entry === undefined ? undefined : definitionOfAccountRef(entry, ref);
+    if (definition !== undefined && Date.parse(definition.expiresAt) < Date.parse(deadlineAt)) {
+      throw applicationAccountsRefusal(`accounts-changed-reapprove: account profile ${ref.profileId} of application ${ref.applicationId} expires at ${definition.expiresAt}, before this round could end at ${deadlineAt}; register the project's setup again to renew it`);
+    }
   }
 
   // One build identity per application: the candidate, the approved recipe and lockfiles, the exported source and the installed toolchain. The output digest names

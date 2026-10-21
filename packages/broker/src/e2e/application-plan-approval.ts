@@ -96,7 +96,9 @@ function pinAccountRef(input: { accounts: ApplicationAccountsInput; contract: E2
       const current = latest();
       return sameRef(pinned[0]!, current) ? { ok: true, ref: pinned[0]! } : changed(`was approved at revision ${pinned[0]!.revision} and is registered at revision ${current.revision} now`);
     }
-    // An M1.2 record: the plan's ref is the recipe-derived stand-in, which no new approval accepts but a record approved under M1.2 is read with.
+    // A record that pinned any account is an M1.3 record: an account it pinned nothing for is not read as the stand-in, it is refused.
+    if (accounts.pinned.length > 0) return changed("has no pinned account reference in this approval");
+    // An M1.2 record (nothing pinned at all): the plan's ref is the recipe-derived stand-in, which no new approval accepts but a record approved under M1.2 is read with.
     const standIn = deriveE2ESyntheticRuntimeAccountRef({ applicationId, accountProfileId: profileId, recipeDigest: input.recipeDigest });
     if (!sameRef(planRef, standIn)) return { ok: false, scope: "plan", reason: `the runtime account reference for ${what} is not the synthetic account identity this plan was approved with; copy runtimeAccountRefs from the planning context` };
     if (registered) return changed("has a registered definition now, and the plan was approved with the recipe-derived account identity");

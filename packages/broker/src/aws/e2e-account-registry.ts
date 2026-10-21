@@ -1,28 +1,51 @@
-import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { inspectE2ERepository, readE2EApplicationProjectContract, type E2EApplicationProjectContract, type E2ERuntimeAccountRef, type E2ESourceSnapshot } from "@agentx/contracts";
+import { QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { inspectE2ERepository, readE2EApplicationProjectContract, type E2EApplicationAccountDefinition, type E2EApplicationProjectContract, type E2ERuntimeAccountRef, type E2ESourceSnapshot } from "@agentx/contracts";
 import {
-  accountDefinitionRow, accountLatestRow, e2eAccountDefinitionKey, e2eAccountLatestKey, parseAccountEntry, planSyntheticAccountWrites,
-  type E2EAccountRegistryEntry, type E2EAccountRegistryWrite,
+  E2EAccountRegistryError, accountDefinitionRow, accountLatestRow, e2eAccountDefinitionKey, e2eAccountLatestKey, e2eAccountRevisionPrefix, parseAccountDefinitionRow,
+  parseAccountEntry, planSyntheticAccountWrites, type E2EAccountRegistryEntry, type E2EAccountRegistryWrite,
 } from "../e2e/application-account-registry.js";
 import { getItem, type StateTable } from "./cancellation.js";
-import { isConditional } from "./broker-shared.js";
 import type { TransactItems } from "./developer-task-actions.js";
 
 /**
  * The reads and writes of the account registry (`e2e/application-account-registry.ts` names the rows). It lives in the broker's one table: no table and no index of its own.
  */
 
-/** The registered accounts for the given (application, profile) pairs, read by key and parsed; a pair with nothing registered is simply absent from the result. */
-export async function readAccountRegistryEntries(dependencies: StateTable, projectId: string, pairs: readonly { applicationId: string; profileId: string }[]): Promise<E2EAccountRegistryEntry[]> {
+/** How many older revisions of an account are read when the latest was registered for a different contract than the caller's. */
+const EARLIER_REVISIONS_READ = 6;
+
+export type CorruptAccount = { applicationId: string; profileId: string };
+
+/**
+ * The registered accounts for the given (application, profile) pairs, read by key and parsed. A pair with nothing registered is absent from `entries`; a pair whose rows
+ * cannot be read is listed in `corrupt` and nowhere else, so one bad row never hides the other accounts. `earlierFor` says whether a latest definition is for a different
+ * contract than the caller's, in which case the older revisions are read too (`entry.earlier`).
+ */
+export async function readAccountRegistryEntries(dependencies: StateTable, projectId: string, pairs: readonly { applicationId: string; profileId: string }[],
+  options: { earlierFor?: (latest: E2EApplicationAccountDefinition) => boolean } = {}): Promise<{ entries: E2EAccountRegistryEntry[]; corrupt: CorruptAccount[] }> {
   const unique = [...new Map(pairs.map((pair) => [`${pair.applicationId}\0${pair.profileId}`, pair])).values()];
   const entries: E2EAccountRegistryEntry[] = [];
+  const corrupt: CorruptAccount[] = [];
   for (const { applicationId, profileId } of unique) {
     const latestRow = await getItem<Record<string, unknown>>(dependencies, e2eAccountLatestKey(projectId, applicationId, profileId));
     if (latestRow === undefined) continue;
-    const definitionRow = await getItem<Record<string, unknown>>(dependencies, e2eAccountDefinitionKey(projectId, applicationId, profileId, Number(latestRow.revision)));
-    entries.push(parseAccountEntry(projectId, applicationId, profileId, latestRow, definitionRow));
+    try {
+      const definitionRow = await getItem<Record<string, unknown>>(dependencies, e2eAccountDefinitionKey(projectId, applicationId, profileId, Number(latestRow.revision)));
+      const entry = parseAccountEntry(projectId, applicationId, profileId, latestRow, definitionRow);
+      if (options.earlierFor?.(entry.definition) !== true) { entries.push(entry); continue; }
+      const earlier: E2EApplicationAccountDefinition[] = [];
+      for (let revision = entry.definition.revision - 1; revision >= 1 && revision >= entry.definition.revision - EARLIER_REVISIONS_READ; revision -= 1) {
+        const definition = parseAccountDefinitionRow(projectId, applicationId, profileId, revision,
+          await getItem<Record<string, unknown>>(dependencies, e2eAccountDefinitionKey(projectId, applicationId, profileId, revision)));
+        if (definition !== undefined) earlier.push(definition);
+      }
+      entries.push({ ...entry, earlier });
+    } catch (error) {
+      if (!(error instanceof E2EAccountRegistryError)) throw error;
+      corrupt.push({ applicationId, profileId });
+    }
   }
-  return entries;
+  return { entries, corrupt };
 }
 
 /**
@@ -39,47 +62,60 @@ export function accountRegistryFences(input: { tableName: string; projectId: str
   });
 }
 
-const WRITES_PER_TRANSACTION = 40;
-const WRITE_ATTEMPTS = 3;
-
-function writeItems(tableName: string, projectId: string, write: E2EAccountRegistryWrite): TransactItems {
+function writeItems(tableName: string, projectId: string, write: E2EAccountRegistryWrite, setup: { approvedAt: string; proposalSha256: string }): TransactItems {
   const { definition, latest, previousRevision } = write;
+  const row = accountLatestRow(projectId, definition.applicationId, definition.profileId, latest, { approvedAt: write.setupApprovedAt ?? setup.approvedAt, proposalSha256: setup.proposalSha256 });
   return [
     { Put: { TableName: tableName, Item: accountDefinitionRow(projectId, definition), ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } },
-    { Put: { TableName: tableName, Item: accountLatestRow(projectId, definition.applicationId, definition.profileId, latest),
-      ...(previousRevision === null ? { ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }
-        : { ConditionExpression: "revision = :previous", ExpressionAttributeValues: { ":previous": previousRevision } }) } },
+    { Put: { TableName: tableName, Item: row,
+      ...(write.repair === true ? {}
+        : previousRevision === null ? { ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }
+          : { ConditionExpression: "revision = :previous", ExpressionAttributeValues: { ":previous": previousRevision } }) } },
   ];
 }
 
+/** The highest revision with a definition row for an account, and the revision an unreadable pointer claims (if it claims a whole number); 0 for neither. */
+async function highestRevision(dependencies: StateTable, projectId: string, applicationId: string, profileId: string): Promise<number> {
+  const { pk, prefix } = e2eAccountRevisionPrefix(projectId, applicationId, profileId);
+  let highest = 0;
+  let start: Record<string, unknown> | undefined;
+  do {
+    const response = await dependencies.documentClient.send(new QueryCommand({ TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": pk, ":prefix": prefix }, ConsistentRead: true, ...(start === undefined ? {} : { ExclusiveStartKey: start }) }));
+    for (const item of response.Items ?? []) highest = Math.max(highest, Number(String(item.sk).slice(prefix.length)) || 0);
+    start = response.LastEvaluatedKey;
+  } while (start !== undefined);
+  const raw = await getItem<Record<string, unknown>>(dependencies, e2eAccountLatestKey(projectId, applicationId, profileId));
+  const claimed = Number(raw?.revision);
+  return Math.max(highest, Number.isSafeInteger(claimed) && claimed > 0 ? claimed : 0);
+}
+
 /**
- * Approving a setup writes the synthetic account definitions of every application whose source carries a project contract (owner decision D5): per `synthetic-test`
- * profile, revision n+1 when its definition changed, nothing when it did not. Each write is conditional on the revision it replaces, so two approvals racing for one
- * account write one revision between them; the loser reads again and finds nothing left to write. It is safe to run again for a setup that was already approved.
+ * What registering a setup writes (owner decision D5): the synthetic account definitions of every application whose source carries a project contract, as transaction items
+ * for the same transaction that stores the project revision. Per `synthetic-test` profile it is revision n+1 when the definition changed or is close to expiring, nothing
+ * when it did not, and never a change from an older setup approval than the one that wrote the current definition (`setup-superseded`). Each write is conditional on the
+ * revision it replaces, so two registrations racing for one account write one revision between them; the loser plans again and finds nothing left to write. An account
+ * whose rows cannot be read is written over, which is how it is repaired. `planKey` identifies the plan, so a caller can tell a conflict that changed it from one that did not.
  */
-export async function writeSetupAccountDefinitions(dependencies: StateTable, input: { projectId: string; snapshot: E2ESourceSnapshot; now: number }): Promise<{ written: number }> {
+export async function planSetupAccountWrites(dependencies: StateTable, input: { projectId: string; snapshot: E2ESourceSnapshot; setup: { approvedAt: string; proposalSha256: string }; now: number }):
+  Promise<{ items: TransactItems; written: number; planKey: string }> {
   const inspection = inspectE2ERepository(input.snapshot, input.snapshot.candidate).inspection;
-  let written = 0;
+  const items: TransactItems = [];
+  const planned: string[] = [];
   for (const application of inspection.applications) {
     let contract: E2EApplicationProjectContract | null;
     // An application whose contract cannot be read gets no accounts; planning and approval then say the account is not registered.
     try { contract = readE2EApplicationProjectContract(input.snapshot, application.applicationId); } catch { continue; }
     if (contract === null) continue;
-    for (let attempt = 1; ; attempt += 1) {
-      const pairs = contract.accountProfiles.filter((profile) => profile.scope === "synthetic-test").map((profile) => ({ applicationId: application.applicationId, profileId: profile.profileId }));
-      const writes = planSyntheticAccountWrites({ contract, applicationId: application.applicationId, prior: await readAccountRegistryEntries(dependencies, input.projectId, pairs), now: input.now });
-      if (writes.length === 0) break;
-      try {
-        for (let start = 0; start < writes.length; start += WRITES_PER_TRANSACTION) {
-          await dependencies.documentClient.send(new TransactWriteCommand({
-            TransactItems: writes.slice(start, start + WRITES_PER_TRANSACTION).flatMap((write) => writeItems(dependencies.tableName, input.projectId, write)) }));
-        }
-        written += writes.length;
-        break;
-      } catch (error) {
-        if (!isConditional(error) || attempt === WRITE_ATTEMPTS) throw error;
-      }
+    const pairs = contract.accountProfiles.filter((profile) => profile.scope === "synthetic-test").map((profile) => ({ applicationId: application.applicationId, profileId: profile.profileId }));
+    const read = await readAccountRegistryEntries(dependencies, input.projectId, pairs);
+    const repairs: Array<{ applicationId: string; profileId: string; nextRevision: number }> = [];
+    for (const pair of read.corrupt) repairs.push({ ...pair, nextRevision: (await highestRevision(dependencies, input.projectId, pair.applicationId, pair.profileId)) + 1 });
+    const writes = planSyntheticAccountWrites({ contract, applicationId: application.applicationId, prior: read.entries, now: input.now, setup: { approvedAt: input.setup.approvedAt }, repairs });
+    for (const write of writes) {
+      items.push(...writeItems(dependencies.tableName, input.projectId, write, input.setup));
+      planned.push(`${write.definition.applicationId}\0${write.definition.profileId}\0${write.definition.revision}`);
     }
   }
-  return { written };
+  return { items, written: planned.length, planKey: planned.sort().join("\n") };
 }

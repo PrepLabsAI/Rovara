@@ -109,6 +109,7 @@ import {
   WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
   workflowApplicationRetryOffered,
   e2eApplicationSelectionFingerprint,
+  e2eApplicationAccountChanges,
   type E2EApplicationReapproval,
   WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
   canonicalPlanJson,
@@ -2284,8 +2285,10 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
           throw agentXError("RUNTIME_UNAVAILABLE", "the plan cannot be approved again here: the check against the approved setup and the ready runtimes is not installed");
         }
         reapproved = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: planArtifact.id, sha256: planArtifact.sha256 }, reapproval: true });
+        const accountChanges = e2eApplicationAccountChanges(workflow.e2e.applicationSelection, reapproved.selection);
         reapproval = { requestId: request.requestId, actorId: access.actorId, reason: request.instructions.slice(0, 500), at: receivedAt,
-          previous: e2eApplicationSelectionFingerprint(workflow.e2e.applicationSelection), current: e2eApplicationSelectionFingerprint(reapproved.selection) };
+          previous: e2eApplicationSelectionFingerprint(workflow.e2e.applicationSelection), current: e2eApplicationSelectionFingerprint(reapproved.selection),
+          ...(accountChanges.length === 0 ? {} : { accounts: accountChanges }) };
       }
       const next = WorkflowSnapshotSchema.parse({
         ...retryBase,

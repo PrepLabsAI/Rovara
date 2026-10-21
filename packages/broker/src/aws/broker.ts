@@ -213,7 +213,7 @@ import {
   type E2EPolicy,
   type PlanApprovalRef,
   type E2EApplicationPlanIntent,
-  type E2EApplicationSelectionRecord, type E2ERuntimeAccountRef,
+  type E2EApplicationSelectionRecord, type E2ERuntimeAccountRef, type E2EApplicationAccountDefinition, readE2EApplicationProjectContract, e2eSyntheticAccountContractDigest,
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema,
   E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
@@ -270,8 +270,8 @@ import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePl
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
 import { applicationRuntimeRowFences, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
-import { accountRegistryFences, readAccountRegistryEntries, writeSetupAccountDefinitions } from "./e2e-account-registry.js";
-import { E2EAccountRegistryError, type E2EAccountRegistryEntry } from "../e2e/application-account-registry.js";
+import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntries } from "./e2e-account-registry.js";
+import { E2EAccountRegistryError, unreadableAccountMessage, type E2EAccountRegistryEntry } from "../e2e/application-account-registry.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import {
@@ -1246,8 +1246,6 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const existing = await getItem<Record<string, unknown>>(dependencies, approvalKey);
         if (existing) {
           if (existing.ownerKey !== identity.ownerKey || existing.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
-          // A stored approval whose account definitions were not all written (the write failed after the decision was stored) is completed by the same call again.
-          if (approvalInput.decision === "approve") await writeSetupAccountDefinitions(dependencies, { projectId: approvalInput.projectName, snapshot, now: Date.now() });
           return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
         }
         await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: {
@@ -1256,8 +1254,6 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           repositoryUrl: artifact.repositoryUrl, identityMapping, decision: approvalInput.decision, approvedAt: new Date().toISOString(),
           policyDigest: createHash("sha256").update(canonicalJson(policy), "utf8").digest("hex"), policy, targetIds: proposal.targets.map(target => target.targetId),
         }, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
-        // Owner decision D5: approving a setup registers the synthetic test accounts its source contract declares (a new revision only where a definition changed).
-        if (approvalInput.decision === "approve") await writeSetupAccountDefinitions(dependencies, { projectId: approvalInput.projectName, snapshot, now: Date.now() });
         return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: false }, request.requestId);
       }
 
@@ -1697,6 +1693,7 @@ async function registerProject(
   let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
   let setupExecutionCreated = false;
   let setupApprovalBinding: RegisteredProjectRecord["setupApproval"];
+  let setupApprovedAt = "";
   if (definition.e2e !== undefined || setupApproval !== undefined) {
     if (setupApproval === undefined) throw agentXError("FORBIDDEN", "E2E project registration requires a stored source-backed setup decision");
     const expectedProposalPrefix = `project-setup-proposals/${identity.ownerKey}/`;
@@ -1712,6 +1709,7 @@ async function registerProject(
       if (definition.e2e === undefined || !sameJsonContent(definition.e2e, approval.policy)) throw agentXError("PROJECT_REVISION_MISMATCH", "E2E policy does not match the approved source-backed setup proposal");
     } else if (definition.e2e !== undefined) throw agentXError("FORBIDDEN", "declined setup decision cannot register an E2E policy");
     setupApprovalBinding = { proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: String(approval.candidateDigest), decision: setupApproval.decision };
+    setupApprovedAt = typeof approval.approvedAt === "string" ? approval.approvedAt : "";
     if (setupApproval.decision === "approve" && definition.e2e !== undefined && dependencies.projectSetupRuntimeCatalogId
       && runtimeBinding.deploymentMode === "ec2-ebs") {
       const bindingDigest = projectSetupBindingDigest(runtimeBinding);
@@ -1772,11 +1770,39 @@ async function registerProject(
     ? await createProjectSetupAdmissionRows(dependencies, identity, record, setupApprovalBinding, setupRuntimeAdmission)
     : undefined;
   setupExecutionCreated = setupAdmissionRows !== undefined;
+  // Owner decision D5 (Task 3.1): registering the setup is the step that makes it effective, so it registers the project's synthetic test accounts too, in the transaction
+  // that stores the revision. The setup is the one this registration binds (the registering administrator's own approved proposal for this project), never another.
+  const registerAccounts = setupApprovalBinding?.decision === "approve" && definition.e2e !== undefined && setupApprovedAt !== "";
+  let accountSetup: { snapshot: E2ESourceSnapshot; approvedAt: string; proposalSha256: string } | undefined;
+  if (registerAccounts) {
+    // An existing project's accounts change only at the hand of one of its administrators (the first registration makes the registrant one).
+    if ((await readCatalogSnapshot()).newestRevision > 0) {
+      const authority = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${identity.ownerKey}`, sk: `PROJECT#${definition.name}` });
+      if (authority?.role !== "administrator") throw agentXError("FORBIDDEN", `only an administrator of project ${definition.name} can register a setup that changes its test accounts`);
+    }
+    const repository = definition.repositories[0]!;
+    const repositoryParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(repository.url);
+    const setup = await readApprovedSetupSource(dependencies, record, E2EPolicySchema.parse(definition.e2e), repository,
+      repositoryParts?.[1] && repositoryParts[2] ? `${repositoryParts[1]}/${repositoryParts[2]}` : undefined);
+    if (!setup.ok) throw agentXError("PROJECT_REVISION_MISMATCH", `the approved setup could not be read to register the project's test accounts: ${setup.reason}`);
+    accountSetup = { snapshot: setup.snapshot, approvedAt: setupApprovedAt, proposalSha256: setupApprovalBinding!.proposalSha256 };
+  }
+  const planAccounts = async () => {
+    if (accountSetup === undefined) return { items: [] as TransactItems, written: 0, planKey: "" };
+    try { return await planSetupAccountWrites(dependencies, { projectId: definition.name, snapshot: accountSetup.snapshot, setup: accountSetup, now: Date.now() }); }
+    catch (error) {
+      if (error instanceof E2EAccountRegistryError) throw agentXError("PROJECT_REVISION_MISMATCH", error.message);
+      throw error;
+    }
+  };
   const maxRegistrationAttempts = 3;
   for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
     const snapshot = await readCatalogSnapshot();
     const latestRevision = Math.max(definition.revision, snapshot.newestRevision);
     const updateCatalog = snapshot.catalog?.latestRevision !== latestRevision;
+    const accounts = await planAccounts();
+    // One transaction holds at most 100 items; the project revision, its membership, the catalog and the setup admission take the rest.
+    if (accounts.items.length > 60) throw agentXError("CONFIG_INVALID", "the setup declares more synthetic test accounts than one registration can store");
     try {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Put: { TableName: dependencies.tableName, Item: record, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -1794,6 +1820,7 @@ async function registerProject(
           ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
       } }] : []),
       ...(setupAdmissionRows?.transactionItems ?? []),
+      ...accounts.items,
       ] }));
       return respond(withoutKeys(record), false, preflight);
     } catch (error) {
@@ -1812,7 +1839,9 @@ async function registerProject(
       const refreshed = await readCatalogSnapshot();
       const advanced = refreshed.newestRevision > snapshot.newestRevision
         || (refreshed.catalog?.latestRevision ?? 0) > (snapshot.catalog?.latestRevision ?? 0);
-      if (!advanced || attempt + 1 === maxRegistrationAttempts) {
+      // Another registration may have moved an account under this one: plan again (a stale setup is refused then) rather than give up.
+      const accountsMoved = accountSetup !== undefined && (await planAccounts()).planKey !== accounts.planKey;
+      if ((!advanced && !accountsMoved) || attempt + 1 === maxRegistrationAttempts) {
         throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration could not commit against the current catalog");
       }
     }
@@ -4106,6 +4135,16 @@ async function readApprovedSetupSource(dependencies: AwsBrokerDependencies, proj
   }
 }
 
+/** Whether an account's latest definition was registered for another contract than the snapshot's: a project revision with an older setup then reads the older revisions too. */
+function accountDefinitionIsForOtherContract(snapshot: E2ESourceSnapshot): (definition: E2EApplicationAccountDefinition) => boolean {
+  return (definition) => {
+    try {
+      const contract = readE2EApplicationProjectContract(snapshot, definition.applicationId);
+      return contract === null || e2eSyntheticAccountContractDigest(contract, definition.profileId) !== definition.contractDigest;
+    } catch { return false; }
+  };
+}
+
 /** What deriving a task's application selection against the approved setup and the runtime rows READY right now came to. */
 type ApplicationSelectionNow =
   | { ok: true; selection: E2EApplicationSelectionRecord; conditions: TransactItems;
@@ -4148,7 +4187,11 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
   const projectId = project.definition.name;
   let accountEntries: E2EAccountRegistryEntry[];
   try {
-    accountEntries = await readAccountRegistryEntries(dependencies, projectId, intent.applicationRuntimeRefs.map((ref) => ({ applicationId: ref.applicationId, profileId: ref.accountProfileId })));
+    const read = await readAccountRegistryEntries(dependencies, projectId, intent.applicationRuntimeRefs.map((ref) => ({ applicationId: ref.applicationId, profileId: ref.accountProfileId })),
+      { earlierFor: accountDefinitionIsForOtherContract(setup.snapshot) });
+    // An account whose rows cannot be read refuses only the plans that run as it, and says which account to repair (registering the project's setup again does).
+    if (read.corrupt.length > 0) return { ok: false, kind: "refused", reason: unreadableAccountMessage(read.corrupt[0]!.applicationId, read.corrupt[0]!.profileId), scope: "accounts" };
+    accountEntries = read.entries;
   } catch (error) {
     if (error instanceof E2EAccountRegistryError) return { ok: false, kind: "refused", reason: error.message, scope: "accounts" };
     return unevaluable("the test account registry could not be read");
@@ -4236,8 +4279,10 @@ async function codingPlanFeatureE2EContext(dependencies: AwsBrokerDependencies, 
   // listed as unavailable rather than offered with a ref that approval would then refuse.
   let accountRegistry: E2EAccountRegistryEntry[];
   try {
-    accountRegistry = await readAccountRegistryEntries(dependencies, project.definition.name,
-      parsedPolicy.data.targets.map((target) => ({ applicationId: target.applicationId, profileId: target.accountProfileId })));
+    // An account whose rows cannot be read is left out, so only its own targets are listed as unavailable.
+    accountRegistry = (await readAccountRegistryEntries(dependencies, project.definition.name,
+      parsedPolicy.data.targets.map((target) => ({ applicationId: target.applicationId, profileId: target.accountProfileId })),
+      { earlierFor: accountDefinitionIsForOtherContract(snapshot) })).entries;
   } catch { accountRegistry = []; }
   return buildFeatureE2EPlanningContext(parsedPolicy.data, snapshot, { origin: sourceOrigin,
     preparedCommitSha: prepared?.baseCommitSha ?? null, readyRuntimes, accountRegistry });

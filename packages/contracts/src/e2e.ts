@@ -211,8 +211,23 @@ export function e2eApplicationSelectionFingerprint(record: E2EApplicationSelecti
  * it replaced and the one it recorded. Appended, never overwritten, so what the owner authorized can always be reconstructed.
  */
 export const E2EApplicationReapprovalSchema = z.object({ requestId: id(120), actorId: id(200), reason: id(500), at: id(40),
-  previous: E2EApplicationSelectionFingerprintSchema, current: E2EApplicationSelectionFingerprintSchema }).strict();
+  previous: E2EApplicationSelectionFingerprintSchema, current: E2EApplicationSelectionFingerprintSchema,
+  /** Which test accounts moved: one entry per (application, account profile) whose pinned ref differs, with the revisions before and after (null: none pinned then or now). */
+  accounts: z.array(z.object({ applicationId: id(120), profileId: id(120), from: positiveInt.nullable(), to: positiveInt.nullable() }).strict()).max(24).optional() }).strict();
 export type E2EApplicationReapproval = z.infer<typeof E2EApplicationReapprovalSchema>;
+/** The test accounts whose pinned ref differs between two approvals of one plan, for the re-approval audit. */
+export function e2eApplicationAccountChanges(previous: E2EApplicationSelectionRecord, current: E2EApplicationSelectionRecord): NonNullable<E2EApplicationReapproval["accounts"]> {
+  const keyOf = (ref: { applicationId: string; profileId: string }) => `${ref.applicationId}\0${ref.profileId}`;
+  const before = new Map(previous.accountRefs.map((ref) => [keyOf(ref), ref]));
+  const after = new Map(current.accountRefs.map((ref) => [keyOf(ref), ref]));
+  return [...new Set([...before.keys(), ...after.keys()])].sort().flatMap((key) => {
+    const from = before.get(key);
+    const to = after.get(key);
+    if (from !== undefined && to !== undefined && from.revision === to.revision && from.definitionDigest === to.definitionDigest) return [];
+    const ref = (to ?? from)!;
+    return [{ applicationId: ref.applicationId, profileId: ref.profileId, from: from?.revision ?? null, to: to?.revision ?? null }];
+  });
+}
 export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional(), displayRef: E2EWorkflowDisplayRefSchema.optional(), applicationSelection: E2EApplicationSelectionRecordSchema.optional(), applicationReapprovals: z.array(E2EApplicationReapprovalSchema).max(20).optional() }).strict();
 export type E2EWorkflowProgress = z.infer<typeof E2EWorkflowProgressSchema>;
 export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;

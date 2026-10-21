@@ -140,6 +140,8 @@ export function e2eApplicationAccountDefinitionDigest(definition: E2EApplication
 /** How long a synthetic account definition written at setup approval stays usable (owner decision D5). */
 export const E2E_SYNTHETIC_ACCOUNT_TTL_DAYS = 90;
 const SYNTHETIC_ACCOUNT_TTL_MS = E2E_SYNTHETIC_ACCOUNT_TTL_DAYS * 86_400_000;
+/** Registering a setup again renews a definition that has this many days or fewer left, so it never has to lapse before an administrator happens to register again. */
+export const E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS = 14;
 
 /** The pointer row of the registry: the newest revision of one account and the digest of the definition at that revision. */
 export const E2EApplicationAccountLatestSchema = z.object({

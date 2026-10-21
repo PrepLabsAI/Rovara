@@ -24,7 +24,7 @@ import * as routes from "../../packages/broker/src/aws/developer-routes.js";
 import { decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, isE2EPlanCorrectionBlockReason } from "../../packages/broker/src/developer/task-records.js";
 import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
-import { registryFor } from "../support/e2e-account-registry-fixtures.js";
+import { ordersManifestWith, registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { call, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
@@ -1377,6 +1377,79 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
           expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
           expect((await retry(planned, dispatched)).status).toBeGreaterThanOrEqual(400);
           expect(dispatched.checksOperations()).toEqual([]);
+        });
+
+        /** A newer setup approved and registered as a new project revision: the synthetic account's role changes, so it gets a revision of its own contract. */
+        const registerNewerSetup = async (planned: Planned) => {
+          const admin = { subject: "admin-subject", admin: true };
+          planned.capture.mockImplementation(async () => snapshotOf({ "package.json": ordersManifestWith((e2e) => {
+            e2e.accountProfiles.find((profile) => profile.profileId === planned.target.accountProfileId)!.roleRef = "editor";
+          }) }));
+          const proposal = await call(planned.harness.handler, { method: "POST", path: "/v1/admin/projects/setup-proposals", user: admin, body: { repositoryUrl: "https://github.com/example/demo.git", ref: "main" } });
+          expect(proposal.status, JSON.stringify(proposal.body)).toBe(200);
+          const approved = await call(planned.harness.handler, { method: "POST", path: "/v1/admin/projects/setup-approvals", user: admin,
+            body: { projectName: "payments", proposalRef: String(proposal.body.proposalRef), proposalSha256: String(proposal.body.proposalSha256), decision: "approve" } });
+          expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+          const definition = planned.projectRow().definition as Record<string, unknown> & { revision: number };
+          const latestRevision = Math.max(...planned.harness.db.find((row) => row.entityType === "PROJECT").map((row) => Number((row.definition as { revision: number }).revision)));
+          const registered = await call(planned.harness.handler, { method: "POST", path: "/v1/admin/projects", user: admin,
+            body: { definition: { ...definition, revision: latestRevision + 1, e2e: proposal.body.policy }, runtimeBinding: planned.projectRow().runtimeBinding,
+              setupApproval: { proposalRef: String(proposal.body.proposalRef), proposalSha256: String(proposal.body.proposalSha256), decision: "approve" } } });
+          expect(registered.status, JSON.stringify(registered.body)).toBe(201);
+        };
+        const accountRevision = (planned: Planned) => (planned.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#")
+          && String(row.sk).endsWith(`#${planned.target.accountProfileId}`))[0] as unknown as { revision: number }).revision;
+
+        it("does not strand a task pinned to an older project revision: its own line of definitions still runs, and a retry re-approves within that line, recording which account moved", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          const approvedBefore = selectionOf(planned);
+          // Revision 1 is the approval's. Revision 2 is the same contract renewed; revision 3 comes with a newer setup (another contract).
+          const renewed = registerNextRevision(planned);
+          await registerNewerSetup(planned);
+          expect(accountRevision(planned)).toBe(3);
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+          expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+          expect(dispatched.taskNow().workflow.blockReason).toMatch(/revision 1.*revision 2/);
+          const task = dispatched.taskNow() as unknown as { workflow: Parameters<typeof workflowApplicationRetryOffered>[0] };
+          expect(workflowApplicationRetryOffered(task.workflow)).toBe(true);
+
+          expect((await retry(planned, dispatched)).status).toBe(200);
+          // The retry pins the newest definition this task's contract stands behind (revision 2), not the newer setup's (revision 3).
+          expect(selectionOf(planned).accountRefs).toEqual([renewed]);
+          const audit = workflowOf(planned).e2e!.applicationReapprovals as Array<{ accounts?: unknown }>;
+          expect(audit).toHaveLength(1);
+          expect(audit[0]!.accounts).toEqual([{ applicationId: approvedBefore.accountRefs[0]!.applicationId, profileId: planned.target.accountProfileId, from: 1, to: 2 }]);
+          dispatched.reseedReadiness();
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+        });
+
+        it("keeps running a task pinned to an older project revision while its own definition is the newest its contract stands behind", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          await registerNewerSetup(planned);
+          expect(accountRevision(planned)).toBe(2);
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+          expect(dispatched.checksOperations()).toHaveLength(1);
+        });
+
+        it("tells a stranded task's owner what to do, in the block and in the retry's refusal, once its own line has expired", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          await registerNewerSetup(planned);
+          const first = planned.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).includes("#REV#1") && String(row.sk).endsWith(`${planned.target.accountProfileId}#REV#1`))[0]!;
+          planned.harness.db.set({ ...first, expiresAt: new Date(Date.now() - 1_000).toISOString() });
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+          const before = workflowOf(planned);
+          const retried = await retry(planned, dispatched);
+          expect(retried.status).toBeGreaterThanOrEqual(400);
+          expect(errorOf(retried).message).toMatch(/accounts-changed-reapprove/);
+          expect(errorOf(retried).message).toMatch(/start the task again on the current project revision|expired/);
+          expect(workflowOf(planned)).toEqual(before);
         });
 
         it("keeps the commit fenced on the account pointer: an approval that read revision 1 does not commit once revision 2 is registered", async () => {

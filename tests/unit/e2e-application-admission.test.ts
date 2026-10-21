@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
-  deriveE2ESyntheticRuntimeAccountRef, e2eApplicationAccountDefinitionDigest } from "@agentx/contracts";
+  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eApplicationAccountDefinitionDigest } from "@agentx/contracts";
+import { registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
 import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/broker/src/e2e/application-admission.js";
@@ -16,10 +17,10 @@ const candidateOf = createRealCandidate;
 const ordersTree = { "package.json": ordersContractManifest, "src/orders.js": "export const orders = [];\n" };
 
 /** The selection the Owner approved: derived against the approved setup snapshot, as plan APPROVE records it. */
-function approvedSelection(fx: ReturnType<typeof planFixture>, rows = [webApiRow("web")], snapshot = fx.snapshot, intent = fx.intent) {
+function approvedSelection(fx: ReturnType<typeof planFixture>, rows = [webApiRow("web")], snapshot = fx.snapshot, intent = fx.intent, registry = fx.registry) {
   const result = evaluateApplicationPlanApproval({ intent, taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot,
     setupProposal: fx.setup.proposal, setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now(),
-    accounts: { entries: fx.registry, mode: "approve", pinned: [] } });
+    accounts: { entries: registry, mode: "approve", pinned: [] } });
   if (!result.ok) throw new Error(result.reason);
   return result.selection;
 }
@@ -278,6 +279,34 @@ describe("the builder refuses with a specific reason, never a portable fallback"
       const message = refusalOf(() => buildApplicationExecutionAdmission({ ...input, now: Date.now() + 91 * 86_400_000 }));
       expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
       expect(message).toMatch(/expired/);
+    });
+
+    it("refuses a definition whose tenant digest is not the contract's, although it is the latest and the one the Owner approved (registry tampering at dispatch)", async () => {
+      const fx = planFixture({});
+      const tampered = fx.registry.map((entry) => {
+        const definition = { ...entry.definition, tenantIdDigest: "f".repeat(64) };
+        return { definition, latest: { revision: definition.revision, definitionDigest: e2eApplicationAccountDefinitionDigest(definition) } };
+      });
+      const ref = deriveE2EApplicationRuntimeAccountRef(tampered[0]!.definition);
+      const { input } = await inputs({ accountEntries: tampered, recordedSelection: { ...approvedSelection(fx), accountRefs: [ref] } });
+      const message = refusalOf(() => buildApplicationExecutionAdmission(input));
+      expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+      expect(message).toContain("accounts-changed-reapprove");
+    });
+
+    it("refuses an account that expires before the round could end, as it does a runtime row, and builds once it outlives the round", async () => {
+      const soon = Date.now() - 90 * 86_400_000 + 30_000;
+      const short = registryFor(planFixture({}).snapshot, soon);
+      const ref = deriveE2EApplicationRuntimeAccountRef(short[0]!.definition);
+      const fx = planFixture({ accountRef: { definitionDigest: ref.definitionDigest } });
+      const { input } = await inputs({ intent: fx.intent, accountEntries: short, recordedSelection: approvedSelection(fx, [webApiRow("web")], fx.snapshot, fx.intent, short) });
+      const message = refusalOf(() => buildApplicationExecutionAdmission(input));
+      expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+      expect(message).toMatch(/expires at .* before this round could end at .*register the project's setup again to renew it/);
+      const later = registryFor(planFixture({}).snapshot, Date.now() - 86_400_000);
+      const fxLater = planFixture({ accountRef: { definitionDigest: deriveE2EApplicationRuntimeAccountRef(later[0]!.definition).definitionDigest } });
+      const { input: ok } = await inputs({ intent: fxLater.intent, accountEntries: later, recordedSelection: approvedSelection(fxLater, [webApiRow("web")], fxLater.snapshot, fxLater.intent, later) });
+      expect(() => buildApplicationExecutionAdmission(ok)).not.toThrow();
     });
 
     it("reads an M1.2 record as it is: the recipe-derived ref in the plan, nothing pinned, nothing registered", async () => {
