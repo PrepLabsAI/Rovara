@@ -9,7 +9,7 @@
 - **Model route registry.** The broker holds versioned route definitions (provider, model, budgets, prompt protocol). Setup approval pins `{ routeId, routeRevision }` into `policy.modelRouteRevision`, using the same pattern as the M1.3 account registry.
 - **A governed route in the worker** (`@agentx/model-runtime` plus a per-run proxy in the worker). It is the only code that holds provider access. It enforces budgets and timeouts, refuses any prompt that contains a run credential, writes receipts, and stores redacted transcripts.
 - **A model channel that is a Unix socket, not a network service.** The socket is bind-mounted into the executor container only. The app container shares the run's `rvi` bridge, so a `model-proxy:8080` service on that bridge (as the M1 plan's sketch had it) would let candidate code spend the budget and talk to the model. The executor's network stays `--internal`. This replaces the M1 plan's sketch (see D9).
-- **The agent step driver.** `web-runtime.ts`'s `case "agent"` calls e2e 0.20.0's built-in `agent.act` with a pinned toolset, `vision: false` and the route's budgets. The agent's download is captured, and its actions are written to an action ledger.
+- **The agent step driver.** `web-runtime.ts`'s `case "agent"` runs e2e 0.20.0's `agent.act` through a custom executor built with `createToolLoopExecutor` and a closed toolset, with the route's budgets (M4-B: the built-in agent's toolset cannot be pinned through config, and `act` has no `vision` option; see the Ruling). The agent's download is captured, and its actions are written to an action ledger.
 - **Fail-closed result mapping.** Any model or agent problem makes the case UNKNOWN. Receipts from the worker are cross-checked against the executor's report.
 - **Audit replay.** An operator-triggered `purpose: "replay"` round re-runs the recorded actions with no model channel mounted. It is informational, like the M1.3 baseline round.
 - **Three new qualification probes** run against a scripted model double, so qualification costs no model spend and is deterministic.
@@ -45,14 +45,14 @@
 | Keyed providers (Anthropic, OpenAI or OpenRouter keys) or ChatGPT plans for e2e | After M1.4 if asked | They need a secret per route. Bedrock needs none (D1). |
 | Automatic replay after every verified round | D4 | It costs one runner round per verification. Replay is on demand in M1.4. |
 | Mixed portable + application plans (Ruling BE) | Follow-up issue (as in M1.3) | Unchanged. |
-| The e2e replay cache as a speed-up for candidate rounds | Not scheduled | Candidate rounds keep `cache: "off"`. Replay is only an audit tool. |
+| The e2e replay cache as a speed-up for candidate rounds | Not scheduled | Candidate rounds never replay. Replay is only an audit tool. A candidate round with an agent step uses a capture-only `cache.store` whose `read` always misses (M4-A), so e2e hands Rovara the `ActionTrace` of a verified step; see the Ruling (d). |
 
 ## Global Constraints
 
 Everything in the M1 and M1.3 Global Constraints still applies (containers, labels, result semantics, deterministic assertions, mocks in-network only, credentials never leave the run, capture budget, parsed-form comparisons, mixed-fleet back-compat, owned files, TEST changes through scripts only). In addition:
 
 - **The agent only navigates.** A Rovara scenario may use `agent.act` only. Its own verdict (`passed`, `failed` or `blocked`) is never a case verdict. A case is PASSED only when every deterministic assertion passes on evidence the collector re-derives itself. A scenario must have at least one deterministic assertion after its last `agent` step; one that has none is refused at APPROVE with `agent-step-needs-assertion`.
-- **One route, pinned.** The route definition is `{ routeId, revision, provider: "amazon-bedrock", modelId, inferenceProfileArn | null, budgets, promptProtocol: "e2e-0.20.0-act/v1", temperature: 0, vision: false }`. Its digest is the `routeRevision`. The worker refuses any call whose effective model differs from the definition. The coding-task fallback (`createModelRuntimeWithFallback` to the default Bedrock model) is **never** used for e2e: a route that can't serve its own model makes the case UNKNOWN.
+- **One route, pinned.** The route definition is `{ routeId, revision, scope: "standard" | "qualification", provider: "amazon-bedrock" | "rovara-scripted", region, modelId, inferenceProfileArn | null, budgets, promptProtocol: "e2e-0.20.0-act/v1", temperature: 0, vision: false }`. `routeId` may contain single `/` separators. The `rovara-scripted` provider (route ids `rovara-scripted/...`, no region, no profile) exists only on qualification-scoped routes, and a receipt from it is never accepted for a non-qualification round. A Bedrock route pins its `region`; when `inferenceProfileArn` is set it is the identifier that is invoked (in the same region, and a system profile must be the profile of `modelId`), otherwise `modelId` is. Its digest is the `routeRevision`. The worker refuses any call whose effective model differs from the definition. The coding-task fallback (`createModelRuntimeWithFallback` to the default Bedrock model) is **never** used for e2e: a route that can't serve its own model makes the case UNKNOWN.
 - **Budgets (exact values; owner decision D2):**
   - per agent step: `maxActions` ≤ **8** (the contract allows 100; approval refuses more than 8 with `agent-step-over-budget`). This sets e2e `maxSteps = maxActions` and `maxModelCalls = maxActions + 4`.
   - per model call: timeout **30000 ms** (an AbortSignal on the provider call), output ≤ **1024** tokens, input ≤ **32000** tokens (this is below the existing `maxModelTokensPerCall: 64_000` in `application-evidence.ts:204`), prompt body ≤ **256 KiB**.
@@ -62,13 +62,14 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
   - **No retries** of a model call. A provider error, throttle or timeout ends the step.
 - **The model channel.** For each run the worker creates `<workspace>/model/model.sock` (mode 0600, owned by uid 1000) and mounts it into the executor container only, at `/run/rovara/model.sock`. The protocol is `rovara-e2e-model-channel/v1`: HTTP/1.1 over the socket, `POST /v1/generate` only, request ≤ 256 KiB, response ≤ 32 KiB, at most one call in flight. The app, build, seed and mock containers never get the mount. The executor keeps `--network <rvi>` (internal), and no container gets any provider host, key or `AWS_*` variable. A run whose admission has `modelRoute: null` gets no socket (the existing `(modelRoute === null) === (modelProxyRef === null)` check in `application-services.ts:497`).
 - **No credentials to the model.** Before each provider call, the worker scans the prompt bytes for every seeded password, every account email and its local part, every `Set-Cookie` value the executor reported, and the patterns `AKIA[0-9A-Z]{16}`, `-----BEGIN`, `sk-` and `xox[abp]-`. Any match refuses the call (receipt outcome `refused-credential-match`), and the case is UNKNOWN with `model-prompt-credential-match`. The e2e runner already masks secure fields as `value=<secure>`. The scan is defence in depth.
-- **Logging.** Each call writes one receipt `{ receiptId, runId, caseId, stepIndex, callIndex, routeId, routeRevision, provider, modelId, inputTokens, outputTokens, latencyMs, promptSha256, responseSha256, outcome: "ok" | "provider-error" | "timeout" | "budget" | "refused-credential-match" | "invalid-output" }`.
+- **Logging.** Each call writes one receipt `{ receiptId, runId, caseId, stepIndex, callIndex, routeId, routeRevision, provider, modelId, startedAt, inputTokens, outputTokens, latencyMs, promptSha256, responseSha256, outcome: "ok" | "provider-error" | "timeout" | "budget" | "refused-credential-match" | "refused-protocol" | "refused-busy" | "invalid-output" }`. Every request the worker receives gets a receipt, and the worker assigns `callIndex` (per step) and the identifiers from its own run state.
+  - The relation to the e2e report (M4-F): every call the report counts has exactly one `ok` receipt, any other receipt has a non-`ok` outcome, and all of them count toward the step and group budgets (`checkE2EStepModelAccounting`).
   - The receipt is written by the worker, never by the executor.
   - The redacted prompt and response go to operator-only evidence as `agent-operation-source`, at most 1 MiB per group, inside the 8 MiB group cap. Over that, the bodies are omitted (`omitted: "budget"`) and the receipts still verify.
   - Transcripts never appear on the task page or in Slack.
   - Structured logs (`console.info` JSON) carry the receipt fields only, never prompt text.
-- **The action ledger is always kept.** Per case: `agent-actions.json` `{ schemaVersion: "rovara-agent-actions/v1", steps: [{ stepIndex, goalDigest, actions: [{ tool, node: { role, name ≤ 120, testId | null }, valueDigest | null, url | null, snapshotSha256, outcome }], stopCode, receiptIds }] }`, at most 64 KiB, redacted. Typed values are recorded as digests, plus the literal when the literal appears in the approved goal.
-- **Pinned agent toolset.** The tools are `tap` (click), `type`, `press`, `select`, `scroll` and `navigate`, with navigation same-origin only (e2e already denies non-http schemes, and the network is internal). No pixel tools, no project tools, no `upload`, no `vision`. Task 4.0 confirms how e2e 0.20.0 lets this be pinned, and records the result as a Ruling.
+- **The action ledger is always kept.** Per case: `agent-actions.json` `{ schemaVersion: "rovara-agent-actions/v1", steps: [{ stepIndex, goalDigest, verdict: "concluded" | "cut-short" | "failed", actions: [{ tool, node: { role, name ≤ 120, testId | null }, valueDigest | null, valueLiteral | null, url | null, snapshotSha256, outcome }], stopCode, receiptIds }] }`, at most 64 KiB (the structural caps keep it under), redacted. Typed values are recorded as keyed digests (HMAC-SHA256 under a per-run key), plus the literal when the literal appears in the approved goal. `url` is an app-relative path without query or fragment. Readers must obtain the ledger through `parseVerifiedE2EAgentActionLedger`, which checks it against the approved goals and returns the branded `VerifiedE2EAgentActionLedger`.
+- **Pinned agent toolset.** The tools are `tap` (click), `type`, `press`, `select`, `scroll` and `navigate`, with navigation same-origin only (e2e already denies non-http schemes, and the network is internal). No pixel tools, no project tools, no `upload`, no `vision`. The Ruling records how: a custom executor with a closed toolset (the built-in agent cannot be pinned through config).
 - **Deploy after every task (owner working mode).** Each task merges into the milestone branch and is deployed to TEST with `scripts/test-deploy.ts --check` before and after. Agent steps stay unavailable in TEST until the route is approved at setup (Task 4.9). So every intermediate deploy is dark and safe: `modelRouteRevision` stays null, and gating refuses.
 - **Native journey per new shape.** Every new shape gets a case in `tests/e2e/m1-4-journeys.test.ts`, gated like `m1-web-journey.test.ts` and run in CI `linux-runtime`, with the scripted model double.
 - **Owned files**, one task at a time: `broker.ts`, `developer-tasks.ts`, `packages/contracts/src/index.ts`, `package-lock.json`, `docker-application-host.ts`, `executor/run.ts`, `web-runtime.ts`, `application-result-adapter.ts`.
@@ -103,12 +104,13 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 
 **Files:**
 - Create: `packages/contracts/src/e2e-model-channel.ts` (channel request and response, receipt, action ledger and route definition schemas); modify `packages/contracts/src/index.ts` (the barrel export, so later tasks never touch it)
-- Create: `.superpowers/sdd/m1-browser-api-plan/rulings/m1-4-e2e-agent-seam.md` (Ruling record)
+- Create: `docs/specs/rovara-e2e-runtimes/m1-4-e2e-agent-seam.md` (Ruling record)
 - Test: `tests/contract/e2e-model-channel.test.ts`
 
 **Interfaces:**
 - `E2EModelRouteDefinitionSchema`, `E2EModelChannelRequestSchema` (`{ schemaVersion: "rovara-e2e-model-channel/v1", runId, caseId, stepIndex, callIndex, call }`; `call` is the bounded subset of the AI SDK v4 `doGenerate` options that e2e 0.20.0 sends: prompt messages, tools, toolChoice, maxOutputTokens), `E2EModelChannelResponseSchema`, `E2EModelReceiptSchema`, `E2EAgentActionLedgerSchema`, with the bounds in Global Constraints.
 - `e2eModelRouteRevision(definition) = "r" + n + "-" + sha256(canonicalJson(parsed))[0:12]`.
+- Also exported for the later tasks: `e2eModelRouteInvokedIdentifier`, `e2eModelReceiptAdmissibleForRound`, `checkE2EStepModelAccounting` and `checkE2EGroupModelBudget` (the receipt relation and budget clamp), `parseVerifiedE2EAgentActionLedger` with `VerifiedE2EAgentActionLedger` and `isVerifiedE2EAgentActionLedger`, `crossCheckE2EAgentLedgerReceipts`, `reviewCapturedE2EAgentTrace` with `E2EAgentTraceBindingSchema`, and the keyed digests `e2eAgentValueDigest`, `e2eAgentValueKeyId` and `generateE2EAgentValueKey`.
 - The Ruling answers, with file and line references into `node_modules/e2e/dist`:
   - (a) the exact `doGenerate` options and result shape the built-in agent uses;
   - (b) how to pin the toolset and disable pixel tools and `vision`;
@@ -191,22 +193,24 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 ### Task 4.3: Executor model channel and the agent step driver
 
 **Files:**
-- Modify: `packages/verifier/src/host/docker-application-host.ts` (create `<workspace>/model`, mount the socket into the executor only), `packages/verifier/src/executor/host.ts` and `executor/entry.ts` (`modelFactory`: an `agentx-e2e` v4 model over the socket), `packages/verifier/src/web-runtime.ts` (`:271` `case "agent"` → `agent.act`; the download trigger includes agent steps; the action ledger), `packages/verifier/src/executor/run.ts`, `packages/verifier/src/executor/redact.ts`
+- Modify: `packages/verifier/src/host/docker-application-host.ts` (create `<workspace>/model`, mount the socket into the executor only), `packages/verifier/src/executor/host.ts` and `executor/entry.ts` (`modelFactory`: an `agentx-e2e` v4 model over the socket; the capture-only `cache.store` of M4-A), `packages/verifier/src/web-runtime.ts` (`:271` `case "agent"` → `agent.act`; the download trigger includes agent steps; the action ledger), `packages/verifier/src/executor/run.ts`, `packages/verifier/src/executor/redact.ts`
 - Modify: `packages/worker/src/workflow-e2e-application-checks.ts` (start and close the proxy per group, pass `modelProxyRef` and the credential set)
 - Test: `tests/unit/e2e-docker-application-host.test.ts`, `tests/unit/e2e-executor-agent.test.ts` (new), `tests/linux/e2e-agent.test.ts` (new), `tests/e2e/m1-4-journeys.test.ts` (cases `agent-renamed-export`, `agent-wrong-action`, `agent-model-outage`)
 
 **Interfaces:**
 - Executor argument additions: `-v <workspace>/model/model.sock:/run/rovara/model.sock`, and nothing else. App, build, seed and mock arguments are unchanged (asserted).
-- `case "agent"` runs `agent.act(step.goal, { maxSteps: step.maxActions, maxModelCalls: step.maxActions + 4, timeout: min(90000, remaining) })` with the Ruling's pinned toolset and `vision: false`.
+- `case "agent"` runs `agent.act(step.goal, { maxSteps: step.maxActions, maxModelCalls: step.maxActions + 4, timeout: min(90000, remaining) })` through the Ruling's custom executor with the closed toolset (there is no `vision` option on `act`).
 - When the scenario has a `csv` assertion and the agent step is the last step that can trigger a download, the step runs inside `waitForDownload`:
   - the first download is the evidence;
   - a second one is UNKNOWN `ambiguous-download`;
   - none is UNKNOWN `agent-no-download`.
-- The ledger is written after each action, so a crash still leaves the actions recorded up to that point.
+- The ledger is written after each action, so a crash still leaves the actions recorded up to that point. It carries `runId`, `caseId` and `valueKeyId`, and its typed-value digests are HMACs under the per-run key (`e2eAgentValueDigest`).
+- Capture store (M4-A): a round with an agent step runs with `cache: { mode: "read-write", store: captureStore }` instead of `cache: "off"`. `captureStore.read` always returns a miss (so a candidate round never replays), `write` keeps the `ActionTrace`, and `delete` does nothing. After each agent step the worker runs `reviewCapturedE2EAgentTrace` (credential scan, match against the verified ledger). A kept trace's binding goes into the PASS evidence; a discarded trace only loses the replay input and never fails the round.
 
 - [ ] **Step 1: Write the failing tests.**
   - unit: the executor arguments contain the socket mount and no `AWS_`, `AGENTX_`, `TOKEN`, `SECRET`, `bedrock` or `amazonaws`. The app and mock arguments contain no `model` mount. A `modelRoute: null` run has no mount.
   - unit: the ledger records the node's role, name and testId for each action, and digests a typed value that doesn't appear in the goal.
+  - unit: the capture store's `read` always misses, its `write` keeps the trace, and a credential-scan hit discards the trace and leaves the round's verdict unchanged.
   - Linux (scripted double; the M1.4 fixture with `export-csv` renamed to `download-orders` and the label "Download orders"): the goal "Export the orders as a CSV file" downloads the CSV, and the `csv` assertion passes.
   - Linux: a double that declares done without acting gives UNKNOWN `agent-no-download`.
   - Linux: a double that clicks "Download invoices" (a decoy) gives a deterministic `csv` mismatch, which is FAILED (D3).
@@ -237,7 +241,9 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 | no download, or more than one, for a `csv` case | n/a | UNKNOWN `agent-no-download` or `ambiguous-download` |
 | receipt `refused-credential-match` | any | UNKNOWN `model-prompt-credential-match` |
 | receipt `budget` (group or day) | any | UNKNOWN `model-route-budget-exhausted` |
-| report calls ≠ worker receipts; a receipt route ≠ admission; a transcript digest ≠ receipt; actions > `maxActions`; ledger missing | any | UNKNOWN `model-receipts-mismatch` |
+| the receipt relation fails (`checkE2EStepModelAccounting`: ok receipts ≠ `metrics.modelCalls`, receipts beyond 8+4 that are not `budget` refusals, a missing or repeated receipt index or id, a receipt of another route, provider, model, run, case or step); a ledger receipt id that is not a worker receipt of that run, case and step (`crossCheckE2EAgentLedgerReceipts`); a ledger that is not a `VerifiedE2EAgentActionLedger`; a transcript digest ≠ receipt; actions > `maxActions`; ledger missing | any | UNKNOWN `model-receipts-mismatch` |
+| `budget-refused` from the accounting checker (a `budget` receipt in the step) | any | UNKNOWN `model-route-budget-exhausted` |
+| ledger step `verdict` other than `concluded` | any | UNKNOWN `agent-navigation-incomplete` |
 
 - The act verdict `passed` alone never sets PASSED. An act `failed` never sets FAILED.
 - Display v2 gains, per scenario, `agentNavigation?: { steps: [{ goal ≤ 120, actedOn: [{ role, name ≤ 60 }] ≤ 8, stop }], modelCalls, routeId }`. Readers built before M1.4 ignore it.
@@ -276,7 +282,7 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 
 **Files:**
 - Modify: `packages/broker/src/aws/broker.ts` (an operator-triggered `purpose: "replay"` round for a verified round), `packages/broker/src/aws/developer-tasks.ts` (replay is recorded apart from candidate rounds)
-- Modify: `packages/verifier/src/application-scenarios.ts` and `application-templates.ts` (a replay config: `cache: "read-only"` with a Rovara store, `modelRoute: null`), `packages/verifier/src/executor/host.ts` (a read-only cache store built from the verified ledger)
+- Modify: `packages/verifier/src/application-scenarios.ts` and `application-templates.ts` (a replay config: `cache: { mode: "read-only", store: replayStore }`, `modelRoute: null`, an executor with no model), `packages/verifier/src/executor/host.ts` (a read-only cache store that serves the captured `ActionTrace` whose digest is in the PASS round's evidence manifest; the ledger is the audit view and is not turned into a cache entry, per M4-A)
 - Create: `scripts/e2e-replay-round.ts --env agentxlivetest123 --task <id> --round <id>` (an admin route; read-only for verdicts)
 - Test: `tests/contract/workflow-e2e-replay-round.test.ts` (new), `tests/linux/e2e-agent-replay.test.ts`, `tests/e2e/m1-4-journeys.test.ts` (case `agent-replay`)
 
@@ -291,6 +297,8 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
   - a verified PASS round replays with `reproduced: true` and no socket in the executor arguments;
   - a ledger edited after verification is refused (its digest is bound to the verified evidence);
   - a replay FAILED leaves publication unchanged;
+  - trace binding: a trace is used only when its digest is in the evidence manifest of a round whose Rovara verdict is PASS (a trace captured in an UNKNOWN or FAILED round is never replayed), and a trace that does not match the verified ledger one action at a time is discarded at capture (`reviewCapturedE2EAgentTrace`), so `reproduced: false` with no effect on any verdict;
+  - the replay reads the ledger only through `parseVerifiedE2EAgentActionLedger` and requires the `VerifiedE2EAgentActionLedger` type;
   - journey `agent-replay`.
 - [ ] **Step 2: Run them and confirm FAIL. Implement. Run them again and confirm PASS.**
 - [ ] **Step 3: Commit** `feat(e2e): audit replay of verified agent rounds without model calls`. **Deploy** (`--check`).
@@ -412,7 +420,7 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 
 ## Owner decisions (ask once, up front)
 
-- **D1, model and provider:** Bedrock `us.anthropic.claude-haiku-4-5-20251001-v1:0` (already the installation's classifier default) through the worker's existing instance-role grant, pinned with no fallback. Alternative: `us.anthropic.claude-sonnet-4-6` (the coding default), which is slower and costs more. Also: if the pi-ai path can't carry the agent's tool calls, may Task 4.1 add `@aws-sdk/client-bedrock-runtime` (a lockfile change)? Recommended: Haiku 4.5; yes to the SDK if needed. The first real call (the Task 4.9 canary) runs only with this OK.
+- **D1, model and provider:** Bedrock Haiku 5.5, inference profile `us.anthropic.claude-haiku-5-5` (foundation model `anthropic.claude-haiku-5-5`; ACTIVE in the TEST account, us-east-1) through the worker's existing instance-role grant, pinned with no fallback. Alternative: `us.anthropic.claude-sonnet-4-6` (the coding default), which is slower and costs more. Also: if the pi-ai path can't carry the agent's tool calls, may Task 4.1 add `@aws-sdk/client-bedrock-runtime` (a lockfile change)? Recommended: Haiku 5.5; yes to the SDK if needed. The first real call (the Task 4.9 canary) runs only with this OK.
 - **D2, budgets:** at most 8 actions per step, `maxActions + 4` calls, 30 s per call, 90 s per step, 40 calls and 400k input tokens per group, and 2M input tokens and 400 calls per project per day in TEST, with no retries. Approve these values, or set others. Please confirm the cost ceiling from current Bedrock pricing.
 - **D3, a mismatch after an AI-navigated step:** FAILED, with send-back offered and the display showing what the agent clicked (recommended, because the CSV bytes are real app output). The alternative is UNKNOWN, with a retry: safer against a mis-click, but an AI-navigated check can then never send back.
 - **D4, replay:** on demand only (an operator script), plus once in the live acceptance. Alternative: an automatic replay after every verified agent round (one extra runner round each). Recommended: on demand.
@@ -441,4 +449,4 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 
 ## Owner decisions (recorded 2026-10-21)
 
-All recommended: D1 latest small Claude (Haiku) model available on Bedrock in TEST, pinned, no fallback (verify ID/availability before the first call; may add @aws-sdk/client-bedrock-runtime); D2 plan budgets, estimated max daily cost shown before the first live call; D3 mismatch after an AI-navigated step is FAILED with send-back; D4 replay on demand plus once live; D5 route approval at setup approval, re-approve on change; D6 push the M1.4 fixture baseline and close the M1.3 demo PR unmerged; D7 up to 3 runner launches plus model spend within D2 caps pre-approved; D8 synthetic page text to Bedrock accepted, transcripts operator-only, live outage drill skipped (CI only); D9 Unix socket mounted only into the executor; D10 merge to mainline, no production release.
+All recommended: D1 latest small Claude (Haiku) model available on Bedrock in TEST, pinned, no fallback (resolved by ruling M4-K to `us.anthropic.claude-haiku-5-5`) (verify ID/availability before the first call; may add @aws-sdk/client-bedrock-runtime); D2 plan budgets, estimated max daily cost shown before the first live call; D3 mismatch after an AI-navigated step is FAILED with send-back; D4 replay on demand plus once live; D5 route approval at setup approval, re-approve on change; D6 push the M1.4 fixture baseline and close the M1.3 demo PR unmerged; D7 up to 3 runner launches plus model spend within D2 caps pre-approved; D8 synthetic page text to Bedrock accepted, transcripts operator-only, live outage drill skipped (CI only); D9 Unix socket mounted only into the executor; D10 merge to mainline, no production release.
