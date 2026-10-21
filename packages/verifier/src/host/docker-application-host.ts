@@ -467,7 +467,16 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     if (!(await appStatus()).running) return { kind: "unavailable", reason: "app-exited" };
     // The only caller whose calls to a mock can be evidence that the application made them.
     const appAddress = await containerAddress(appName);
-    if (appAddress === null) { appendBuildLog("the app has no address on the run network\n"); return { kind: "unavailable", reason: "mock-unavailable" }; }
+    if (appAddress === null) {
+      // Docker detaches a stopped container from its networks: an app that exited right after it started has no address any more, and that is the app exiting, not a mock failure.
+      if (!(await appStatus()).running) {
+        const logs = await admin(["logs", "--tail", "400", appName]);
+        state.appLogTail = redact(`${logs.stdout}${logs.stderr}`);
+        return { kind: "unavailable", reason: "app-exited" };
+      }
+      appendBuildLog("the app has no address on the run network\n");
+      return { kind: "unavailable", reason: "mock-unavailable" };
+    }
 
     const executorStop = new AbortController();
     const executorSignal = AbortSignal.any([signal, executorStop.signal]);

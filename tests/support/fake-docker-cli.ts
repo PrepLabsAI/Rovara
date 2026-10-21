@@ -45,6 +45,8 @@ export class FakeDockerCli implements DockerCli {
   sinkholeAddress = "172.30.0.2";
   /** Containers that report no address (as when they are not attached to the network). */
   readonly withoutAddress = new Set<string>();
+  /** When set, the app exits (with this code) between the host's check that it runs and its read of the app's address, as a process that exits at once can. */
+  appExitsBeforeAddressRead: number | null = null;
   /** When set, a mock container opens its ledger but never says it listens. */
   mocksNeverReady = false;
   /** When set, starting a mock or sinkhole container fails, as `docker run` does when the image or the mounts are unusable. */
@@ -165,7 +167,9 @@ export class FakeDockerCli implements DockerCli {
       const item = this.resources.get(args[args.length - 1]!);
       // The address a container has on the run network, as the host asks for it.
       if (args.some((value) => value.includes("IPAddress"))) {
-        if (!item || this.withoutAddress.has(item.name)) return { code: 0, stdout: "", stderr: "" };
+        if (item && item.name.startsWith("rovara-app-") && this.appExitsBeforeAddressRead !== null) { item.state = "exited"; item.exitCode = this.appExitsBeforeAddressRead; }
+        // Docker detaches a stopped container from its networks, so it has no address any more.
+        if (!item || item.state === "exited" || this.withoutAddress.has(item.name)) return { code: 0, stdout: "", stderr: "" };
         return { code: 0, stdout: item.name.startsWith("rovara-app-") ? this.appAddress : item.name.endsWith("-unbound") ? this.sinkholeAddress : "172.30.0.10", stderr: "" };
       }
       return item ? { code: 0, stdout: `${item.state} ${item.exitCode}`, stderr: "" } : { code: 1, stdout: "", stderr: "No such object" };

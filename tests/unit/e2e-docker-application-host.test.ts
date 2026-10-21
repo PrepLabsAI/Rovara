@@ -807,6 +807,16 @@ describe("docker application host: approved external-origin mocks and the sinkho
     }
   });
 
+  it("reports an app that exited before its address could be read as app-exited, not as a mock failure", async () => {
+    // A start command that exits at once can still be "running" when the host first looks and gone, with its address, a moment later.
+    const fake = new FakeDockerCli(); fake.appExitsBeforeAddressRead = 3; const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBe("app-exited");
+    expect(result.actualRun).toBeNull();
+    expect(fake.calls.some((call) => call[0] === "run" && call[call.indexOf("--name") + 1]?.startsWith("rovara-executor-"))).toBe(false);
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
   it("counts a mock as ready only once its server listens, not when its ledger file exists", async () => {
     const fake = new FakeDockerCli(); fake.mocksNeverReady = true;
     const s = await mockedPlan(fake, { mockReadyMs: 300 }); fake.onExecutor = okOutput(s);
