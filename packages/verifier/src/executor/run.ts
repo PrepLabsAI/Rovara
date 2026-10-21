@@ -15,7 +15,7 @@ import { verifyExecutorHostRegistration } from "./host-registry.js";
 import { startAppForwarder, type AppForwarder } from "./app-forward.js";
 import { attestWhenSettled, type inspectChromiumSandbox, type InspectChromiumSandboxInput } from "./chromium-sandbox.js";
 import { launchLocalChromium, type LocalChromium } from "./local-browser.js";
-import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, finalizeCaptureArtifacts } from "./capture.js";
+import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, admittedCapturePolicy, finalizeCaptureArtifacts } from "./capture.js";
 import { createCredentialRedactor, type CredentialRedactor } from "./redact.js";
 import { createLaunchContexts, resolveE2EExecutorSuite, type ResolvedExecutorSuite } from "./suite.js";
 
@@ -264,7 +264,7 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     if (resolved) {
       try {
         const admitted = resolved.suite.runtimeAdmissionContext.selectionInput.policy.capture;
-        await finalizeCaptureArtifacts({ outDir, redactor, policy: { screenshots: admitted.screenshots, traces: admitted.traces },
+        await finalizeCaptureArtifacts({ outDir, redactor, policy: admittedCapturePolicy(admitted),
           caseIds: resolved.suite.expectedCases.map((item) => item.caseId) });
       } catch (error) {
         // Nothing unlisted may stay behind: with no trustworthy listing, no capture is kept.

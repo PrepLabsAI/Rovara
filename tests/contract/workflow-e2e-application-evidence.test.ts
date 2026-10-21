@@ -7,7 +7,7 @@ import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, WorkerInvocationSchema, type 
 import { createDockerApplicationHost, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
-import { DIAGNOSTICS_NOTICE } from "../../packages/worker/src/workflow-e2e-application-checks.js";
+import { DIAGNOSTICS_NOTICE, allocateGroupEvidence, type GroupEvidenceCandidate, type OperatorEvidence as WorkerOperatorEvidence } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import type { CandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { createApplicationEvidenceFixture } from "../support/e2e-application-evidence-fixture.js";
@@ -23,14 +23,14 @@ const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("he
 
 const PASSWORD = "planted-Password-7f3a91c2d4e8b0aa";
 const screenshot = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(2000, 0x41)]);
-const traceZip = Buffer.concat([Buffer.from("PK\u0003\u0004"), Buffer.alloc(3000, 0x42)]);
+const secondScreenshot = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(3000, 0x42)]);
 const captureFiles = [
   { name: "case-0-screenshot.jpg", sha256: sha(screenshot), bytes: new Uint8Array(screenshot) },
-  { name: "case-0-trace.zip", sha256: sha(traceZip), bytes: new Uint8Array(traceZip) },
+  { name: "case-1-screenshot.jpg", sha256: sha(secondScreenshot), bytes: new Uint8Array(secondScreenshot) },
 ];
 const captureArtifacts = [
   { caseId: "case-a", kind: "screenshot", sha256: sha(screenshot), bytes: screenshot.byteLength },
-  { caseId: "case-a", kind: "trace", sha256: sha(traceZip), bytes: traceZip.byteLength },
+  { caseId: "case-b", kind: "screenshot", sha256: sha(secondScreenshot), bytes: secondScreenshot.byteLength },
 ];
 const observation = { ref: { artifactId: "ev-1-0001-abcdef012345", sha256: sha(Buffer.from('{"o":1}')), byteLength: 7, mediaType: "application/json" }, bytes: new Uint8Array(Buffer.from('{"o":1}')) };
 const executorEvidence = (overrides: object = {}) => ({ executorLogHead: new Uint8Array(Buffer.from("2026-10-20T00:00:00.000Z waiting for the application\n")),
@@ -68,9 +68,9 @@ async function setup(options: { assembled?: Assembled } = {}) {
   const evidenceRoot = await temp("evidence-evidence-");
   const repositoryRoot = await temp("evidence-repository-");
   const git: CandidateGit = { treeOf: vi.fn(async () => admission.candidateTreeSha),
-    materializeInto: vi.fn(async (_root, _commitSha, destination) => {
+    materializeInto: vi.fn<CandidateGit["materializeInto"]>(async (_root, _commitSha, destination) => {
       for (const source of admission.sourceSnapshot.sources) {
-        const path = join(destination, source.path);
+        const path = join(destination, String(source.path));
         await mkdir(dirname(path), { recursive: true });
         await writeFile(path, Buffer.from(source.bytesBase64, "base64"));
       }
@@ -93,7 +93,7 @@ async function setup(options: { assembled?: Assembled } = {}) {
 
 type OperatorEvidence = { notice: string; rawReportIn: string | null; observationsIn: string | null; observations: Array<{ artifactId: string; sha256: string; byteLength: number; mediaType: string; contentBase64: string | null }>;
   executorLogHead: string | null; captures: { artifacts: Array<Record<string, unknown>>; files: Array<{ name: string; sha256: string; bytes: number; base64: string }> } | null };
-const groupOf = (s: Awaited<ReturnType<typeof setup>>) => JSON.parse(s.saved.find((item) => item.groupRunId === s.runId)!.bytes.toString("utf8")).groupRun as
+const groupOf = (s: Awaited<ReturnType<typeof setup>>) => (JSON.parse(s.saved.find((item) => item.groupRunId === s.runId)!.bytes.toString("utf8")) as { groupRun: unknown }).groupRun as
   { operatorEvidence: OperatorEvidence | null; diagnostics: { shardReports?: unknown[] } | null; actual: unknown; collection: { status: string; reason: string }; unavailableReason: string | null };
 
 describe("raw evidence and captures in group evidence", () => {
@@ -106,8 +106,8 @@ describe("raw evidence and captures in group evidence", () => {
     expect(group.operatorEvidence).toMatchObject({ notice: DIAGNOSTICS_NOTICE, rawReportIn: "collection", observationsIn: "collection", observations: [] });
     expect(group.operatorEvidence!.executorLogHead).toContain("waiting for the application");
     expect(group.operatorEvidence!.captures!.artifacts).toEqual(captureArtifacts);
-    expect(group.operatorEvidence!.captures!.files.map((file) => [file.name, file.sha256, file.bytes, Buffer.from(file.base64, "base64").equals(file.name.endsWith(".jpg") ? screenshot : traceZip)]))
-      .toEqual([["case-0-screenshot.jpg", sha(screenshot), screenshot.byteLength, true], ["case-0-trace.zip", sha(traceZip), traceZip.byteLength, true]]);
+    expect(group.operatorEvidence!.captures!.files.map((file) => [file.name, file.sha256, file.bytes, Buffer.from(file.base64, "base64").equals(file.name.startsWith("case-0") ? screenshot : secondScreenshot)]))
+      .toEqual([["case-0-screenshot.jpg", sha(screenshot), screenshot.byteLength, true], ["case-1-screenshot.jpg", sha(secondScreenshot), secondScreenshot.byteLength, true]]);
     expect(group.diagnostics).toBeNull();
   });
 
@@ -132,7 +132,8 @@ describe("raw evidence and captures in group evidence", () => {
     await s.run();
     const group = groupOf(s);
     expect(group.operatorEvidence).toMatchObject({ rawReportIn: "collection", observationsIn: "collection", observations: [] });
-    expect(group.actual).toMatchObject({ collection: { shards: [{ rawReport: expect.anything() }], supervisorReadback: expect.anything() } });
+    const anything: unknown = expect.anything();
+    expect(group.actual).toMatchObject({ collection: { shards: [{ rawReport: anything }], supervisorReadback: anything } });
   });
 
   it("copies the observations itself for a group that never reached a qualification, and points at diagnostics for its raw report", async () => {
@@ -156,7 +157,7 @@ describe("raw evidence and captures in group evidence", () => {
   });
 
   it("keeps no file for a capture the executor dropped, and lists the drop", async () => {
-    const dropped = [{ caseId: "case-a", kind: "trace", sha256: sha(traceZip), bytes: traceZip.byteLength, omitted: "credential-match" }];
+    const dropped = [{ caseId: "case-a", kind: "screenshot", sha256: sha(screenshot), bytes: screenshot.byteLength, omitted: "credential-match" }];
     const s = await setup({ assembled: baseRun({ executorEvidence: executorEvidence({ captures: { artifacts: dropped, files: [] } }) }) });
     await s.run();
     expect(groupOf(s).operatorEvidence!.captures).toEqual({ artifacts: dropped, files: [] });
@@ -177,25 +178,25 @@ describe("when the group cap is tight, the capture goes and the verdict inputs s
     const saved = probe.saved.find((item) => item.groupRunId === probe.runId)!;
     return { limit: saved.maxBytes, room: saved.maxBytes - 1024 * 1024, baseBytes: saved.bytes.byteLength };
   }
-  const capturesOf = (items: Array<{ kind: "screenshot" | "trace"; size: number }>) => {
-    const files = items.map((item) => { const bytes = Buffer.alloc(item.size, item.kind === "trace" ? 0x44 : 0x43);
-      return { name: `case-0-${item.kind}.${item.kind === "trace" ? "zip" : "jpg"}`, sha256: sha(bytes), bytes: new Uint8Array(bytes) }; });
-    const artifacts = items.map((item, index) => ({ caseId: "case-a", kind: item.kind, sha256: files[index]!.sha256, bytes: item.size }));
+  const capturesOf = (sizes: number[]) => {
+    const files = sizes.map((size, index) => { const bytes = Buffer.alloc(size, 0x43 + index);
+      return { name: `case-${index}-screenshot.jpg`, sha256: sha(bytes), bytes: new Uint8Array(bytes) }; });
+    const artifacts = sizes.map((size, index) => ({ caseId: `case-${"abcdefg"[index]}`, kind: "screenshot", sha256: files[index]!.sha256, bytes: size }));
     return { files, artifacts };
   };
 
-  it("drops the trace first, then the screenshots, recording each as budget, and leaves the verdict and its inputs untouched", async () => {
+  it("sheds captures one file at a time, the largest first, recording each as budget, and leaves the verdict and its inputs untouched", async () => {
     const { limit, room, baseBytes } = await measure();
     expect(limit).toBeLessThanOrEqual(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES);
-    const captures = capturesOf([{ kind: "screenshot", size: 400_000 }, { kind: "trace", size: 900_000 }]);
-    // 700,000 bytes of room beyond the plain evidence: the screenshot (about 534,000 as base64) fits, the screenshot and the trace together (about 1,734,000) do not.
-    const collection = { marker: "x".repeat(room - baseBytes - 700_000) };
+    // Three screenshots (base64: about 134,000, 534,000 and 267,000): with 800,000 bytes of room beyond the plain evidence the 400,000-byte one goes first, and then it fits.
+    const captures = capturesOf([100_000, 400_000, 200_000]);
+    const collection = { marker: "x".repeat(room - baseBytes - 800_000) };
     const s = await setup({ assembled: baseRun({ executorEvidence: executorEvidence({ captures }) }) });
     s.collect.mockReturnValue({ collection, oracle: {}, unavailableReason: null, qualification: s.qualified("FAILED") });
     await s.run();
     const group = groupOf(s);
-    expect(group.operatorEvidence!.captures!.files.map((file) => file.name)).toEqual(["case-0-screenshot.jpg"]);
-    expect(group.operatorEvidence!.captures!.artifacts).toEqual([captures.artifacts[0], { ...captures.artifacts[1], omitted: "budget" }]);
+    expect(group.operatorEvidence!.captures!.files.map((file) => file.name)).toEqual(["case-0-screenshot.jpg", "case-2-screenshot.jpg"]);
+    expect(group.operatorEvidence!.captures!.artifacts).toEqual([captures.artifacts[0], { ...captures.artifacts[1], omitted: "budget" }, captures.artifacts[2]]);
     expect(group.collection).toMatchObject({ status: "FAILED" });
     expect(group.unavailableReason).toBeNull();
     expect(group.actual).toMatchObject({ collection });
@@ -203,7 +204,7 @@ describe("when the group cap is tight, the capture goes and the verdict inputs s
 
   it("drops every capture before it drops any verdict input", async () => {
     const { limit, room, baseBytes } = await measure();
-    const captures = capturesOf([{ kind: "screenshot", size: 600_000 }]);
+    const captures = capturesOf([600_000]);
     const collection = { marker: "x".repeat(room - baseBytes - 300_000) };
     const s = await setup({ assembled: baseRun({ executorEvidence: executorEvidence({ captures }) }) });
     s.collect.mockReturnValue({ collection, oracle: {}, unavailableReason: null, qualification: s.qualified("FAILED") });
@@ -218,7 +219,7 @@ describe("when the group cap is tight, the capture goes and the verdict inputs s
 
   it("keeps the captures when they fit", async () => {
     const { room, baseBytes } = await measure();
-    const captures = capturesOf([{ kind: "screenshot", size: 100_000 }, { kind: "trace", size: 200_000 }]);
+    const captures = capturesOf([100_000, 200_000]);
     const s = await setup({ assembled: baseRun({ executorEvidence: executorEvidence({ captures }) }) });
     s.collect.mockReturnValue({ collection: { marker: "x".repeat(room - baseBytes - 900_000) }, oracle: {}, unavailableReason: null, qualification: s.qualified("FAILED") });
     await s.run();
@@ -238,10 +239,85 @@ describe("when the group cap is tight, the capture goes and the verdict inputs s
   });
 });
 
+// Several groups share one aggregate. Every group's verdict inputs are reserved before any capture is counted, so a capture can never push a group's verdict inputs to
+// "evidence too large", whatever order the groups finished in.
+describe("sharing the aggregate between groups", () => {
+  const operator = (sizes: number[]): WorkerOperatorEvidence => {
+    const files = sizes.map((size, index) => ({ name: `case-${index}-screenshot.jpg`, sha256: String(index).repeat(64).slice(0, 64), bytes: size, base64: "A".repeat(Math.ceil(size / 3) * 4) }));
+    return { notice: "n", rawReportIn: "collection", observationsIn: "collection", observations: [], executorLogHead: "log",
+      captures: { artifacts: files.map((file, index) => ({ caseId: `case-${index}`, kind: "screenshot" as const, sha256: file.sha256, bytes: file.bytes })), files } };
+  };
+  /** A group whose plain evidence is `verdict` bytes, with the operator evidence JSON on top. */
+  const group = (verdict: number, limit: number, whole: WorkerOperatorEvidence | null): GroupEvidenceCandidate => ({ limit, whole,
+    build: (op) => Buffer.from(JSON.stringify({ verdict: "v".repeat(verdict), operatorEvidence: op })) });
+  const sizeOf = (verdict: number, op: WorkerOperatorEvidence | null) => group(verdict, 0, null).build(op).byteLength;
+
+  it("gives a later group's verdict inputs their room even when an earlier group's captures would take all of it", () => {
+    const room = 1_000_000;
+    // Group 0 asks for 900,000 bytes of screenshots (1.2 MB as base64) of a 1,000,000-byte room; group 1's verdict inputs are 400,000 bytes.
+    const big = operator([300_000, 300_000, 300_000]);
+    const groups = [group(100_000, 8_000_000, big), group(400_000, 8_000_000, null)];
+    const result = allocateGroupEvidence(groups, room);
+    expect(result[1]).not.toBeNull();
+    expect(result[1]!.evidence.byteLength).toBe(sizeOf(400_000, null));
+    expect(result[0]).not.toBeNull();
+    const used = result.reduce((sum, item) => sum + (item?.evidence.byteLength ?? 0), 0);
+    expect(used).toBeLessThanOrEqual(room);
+    // What group 0 kept is a subset of its screenshots; the rest are listed as dropped for budget.
+    const kept = result[0]!.operator!.captures!;
+    expect(kept.files.length).toBeLessThan(3);
+    expect(kept.artifacts.filter((entry) => entry.omitted === "budget")).toHaveLength(3 - kept.files.length);
+  });
+
+  it("is the same whichever group is first: no group's verdict inputs are ever refused for the sake of a capture", () => {
+    const room = 1_200_000;
+    const caps = operator([200_000, 200_000, 200_000, 200_000]);
+    for (const order of [[0, 1, 2], [2, 1, 0], [1, 2, 0]]) {
+      const verdicts = [300_000, 300_000, 300_000];
+      const groups = order.map((index) => group(verdicts[index]!, 8_000_000, index === 0 ? caps : null));
+      const result = allocateGroupEvidence(groups, room);
+      expect(result.every((item) => item !== null)).toBe(true);
+      expect(result.reduce((sum, item) => sum + item!.evidence.byteLength, 0)).toBeLessThanOrEqual(room);
+    }
+  });
+
+  it("sheds one file at a time, the largest first", () => {
+    const caps = operator([100_000, 400_000, 200_000]);
+    const plain = sizeOf(500_000, null);
+    const withNames = allocateGroupEvidence([group(500_000, 8_000_000, caps)], plain + 800_000)[0]!;
+    expect(withNames.operator!.captures!.files.map((file) => file.name)).toEqual(["case-0-screenshot.jpg", "case-2-screenshot.jpg"]);
+    const tighter = allocateGroupEvidence([group(500_000, 8_000_000, caps)], plain + 400_000)[0]!;
+    expect(tighter.operator!.captures!.files.map((file) => file.name)).toEqual(["case-0-screenshot.jpg"]);
+    expect(tighter.operator!.captures!.artifacts.map((entry) => entry.omitted)).toEqual([undefined, "budget", "budget"]);
+  });
+
+  it("counts a group's cap on its own: captures that would fit the aggregate but not the group are shed", () => {
+    const caps = operator([300_000, 300_000]);
+    const plain = sizeOf(100_000, null);
+    const result = allocateGroupEvidence([group(100_000, plain + 450_000, caps)], 50_000_000)[0]!;
+    expect(result.evidence.byteLength).toBeLessThanOrEqual(plain + 450_000);
+    expect(result.operator!.captures!.files).toHaveLength(1);
+  });
+
+  it("sheds raw operator evidence only after the captures, and a group whose verdict inputs do not fit by themselves is the only one refused", () => {
+    const withObservations: WorkerOperatorEvidence = { ...operator([]), rawReportIn: "diagnostics.shardReports", observationsIn: "operatorEvidence.observations",
+      observations: [{ artifactId: "o", sha256: "a".repeat(64), byteLength: 300_000, mediaType: "application/json", contentBase64: "A".repeat(400_000) }] };
+    const plain = sizeOf(200_000, null);
+    const kept = allocateGroupEvidence([group(200_000, 8_000_000, withObservations)], plain + 500_000)[0]!;
+    expect(kept.operator!.observations[0]!.contentBase64).not.toBeNull();
+    const shed = allocateGroupEvidence([group(200_000, 8_000_000, withObservations)], plain + 100_000)[0]!;
+    expect(shed.operator!.observations[0]!.contentBase64).toBeNull();
+    const none = allocateGroupEvidence([group(200_000, 8_000_000, withObservations)], plain + 10)[0]!;
+    expect(none.operator).toBeNull();
+    const mixed = allocateGroupEvidence([group(200_000, 8_000_000, null), group(900_000, 500_000, null), group(200_000, 8_000_000, null)], 1_000_000);
+    expect(mixed.map((item) => item === null)).toEqual([false, true, false]);
+  });
+});
+
 describe("no stored byte carries a credential", () => {
   it("never stores a password, whatever else the captures hold, when the host has already held back the file that carried it", async () => {
     // The host's snapshot excludes a capture file that carries the run's credential; what reaches the worker is the listing with the drop recorded.
-    const clean = [{ caseId: "case-a", kind: "trace", sha256: sha(Buffer.from(PASSWORD)), bytes: PASSWORD.length, omitted: "credential-match" }];
+    const clean = [{ caseId: "case-a", kind: "screenshot", sha256: sha(Buffer.from(PASSWORD)), bytes: PASSWORD.length, omitted: "credential-match" }];
     const s = await setup({ assembled: baseRun({ executorEvidence: executorEvidence({ captures: { artifacts: clean, files: [] } }) }) });
     await s.run();
     for (const item of s.saved) expect(item.bytes.toString("utf8")).not.toContain(PASSWORD);

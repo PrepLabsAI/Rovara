@@ -37,8 +37,6 @@ export type ProbeOptions = Readonly<{
   /** Replaces the app's start arguments, e.g. to make it exit at once. */
   appArgs?: string[];
   healthTimeoutMs?: number;
-  /** The capture the plan's policy approves; default is the qualification probes' own policy. */
-  capture?: { screenshots?: boolean; traces?: boolean };
   /** Replaces the recipe's build commands (the fixture itself builds nothing). */
   recipeBuild?: { program: string; args: string[]; cwd: string; timeoutMs: number; env: Record<string, string> }[];
 }>;
@@ -67,7 +65,7 @@ export async function runProbe(probe: OrdersProbeName, options: ProbeOptions): P
   const defectEnv = options.defect ? { ORDERS_TEST_DEFECT_FILE: "/app/.owned/defect.json" } : {};
   const fixture = createOrdersExecutorPlan({ probe, recipeStart: { env: { ...defectEnv, ...(options.appEnv ?? {}) },
     ...(options.appArgs ? { args: options.appArgs } : {}), ...(options.healthTimeoutMs ? { timeoutMs: options.healthTimeoutMs } : {}) },
-    ...(options.recipeBuild ? { recipeBuild: options.recipeBuild } : {}), ...(options.capture ? { capture: options.capture } : {}) });
+    ...(options.recipeBuild ? { recipeBuild: options.recipeBuild } : {}) });
   const keep = realpathSync(await mkdtemp(join(tmpdir(), "rovara-linux-kept-")));
   linuxDirs.push(keep);
   let credentialsLeaked: boolean | null = null; let outDir: string | null = null;

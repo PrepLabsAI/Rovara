@@ -84,11 +84,11 @@ function utf8Head(bytes: Uint8Array, maxBytes: number): string {
   return Buffer.from(bytes.subarray(0, end)).toString("utf8");
 }
 
-type CaptureArtifactEntry = { caseId: string; kind: "screenshot" | "trace"; sha256: string; bytes: number; omitted?: "budget" | "credential-match" };
+type CaptureArtifactEntry = { caseId: string; kind: "screenshot"; sha256: string; bytes: number; omitted?: "budget" | "credential-match" };
 /**
  * Raw output of a run, kept whatever its verdict and for operators only (the application's own output, with account credentials redacted). The shard report and the
  * observations are verdict inputs for a group that was qualified, so they stay in its collection and this only says where; for a group that was not, the report is in
- * `diagnostics.shardReports` and the observations are copied here. The executor's log head and the screenshots and traces of failed cases are here for every group.
+ * `diagnostics.shardReports` and the observations are copied here. The executor's log head and the screenshots of failed cases are here for every group.
  * Nothing reads this to decide a verdict.
  */
 export type OperatorEvidence = {
@@ -123,21 +123,80 @@ export function operatorEvidence(actualRun: unknown, qualified: boolean): Operat
     observationsIn: qualified ? "collection" : observations.length > 0 ? "operatorEvidence.observations" : null, observations, executorLogHead, captures };
 }
 
-/**
- * The operator evidence from whole to nothing, each step dropping more and keeping what matters most for longest: the traces go first, then the screenshots (each
- * dropped capture stays listed, as `budget`), then the copied observations' bytes, then all of it. The verdict inputs are never in this list, so a group that has to
- * shed operator evidence to fit keeps every verdict input.
- */
-export function operatorEvidenceVariants(whole: OperatorEvidence | null): Array<OperatorEvidence | null> {
-  if (whole === null) return [null];
-  const dropped = (keep: (name: string) => boolean): OperatorEvidence => ({ ...whole, captures: whole.captures === null ? null : {
+/** One group's evidence, as the allocation sees it: its ceiling, its whole operator evidence, and how to serialize its group evidence with a given operator evidence. */
+export type GroupEvidenceCandidate = {
+  /** The most the broker takes of this group's evidence. */
+  limit: number;
+  whole: OperatorEvidence | null;
+  build(operator: OperatorEvidence | null): Buffer;
+  /** The size of the small UNKNOWN "evidence too large" evidence that stands in for this group when its verdict inputs do not fit; reserved so the aggregate still holds it. */
+  reducedBytes?: number;
+};
+export type GroupEvidenceAllocation = { operator: OperatorEvidence | null; evidence: Buffer };
+
+/** The operator evidence at a raw level (0: whole, 1: observation bytes dropped) holding only the capture files in `keep`; each capture not kept stays listed as `budget`. */
+function shapeOperator(whole: OperatorEvidence, level: 0 | 1, keep: ReadonlySet<string>): OperatorEvidence {
+  const captures = whole.captures === null ? null : {
     artifacts: whole.captures.artifacts.map((entry) => {
-      const stored = whole.captures!.files.some((file) => file.sha256 === entry.sha256 && keep(file.name));
+      const stored = whole.captures!.files.some((file) => file.sha256 === entry.sha256 && keep.has(file.name));
       return entry.omitted !== undefined || stored ? entry : { ...entry, omitted: "budget" as const };
     }),
-    files: whole.captures.files.filter((file) => keep(file.name)) } });
-  const withoutObservationBytes: OperatorEvidence = { ...dropped(() => false), observations: whole.observations.map((item) => ({ ...item, contentBase64: null })) };
-  return [whole, dropped((name) => !name.endsWith("-trace.zip")), dropped(() => false), withoutObservationBytes, null];
+    files: whole.captures.files.filter((file) => keep.has(file.name)) };
+  return { ...whole, captures, observations: level === 0 ? whole.observations : whole.observations.map((item) => ({ ...item, contentBase64: null })) };
+}
+
+/**
+ * Shares the room the aggregate has between all groups, in the order of what matters. A capture can therefore never be the reason a group's verdict inputs do not fit:
+ *   1. every group's verdict inputs (its group evidence with no operator evidence) are reserved first, whatever order the groups finished in; a group whose verdict inputs
+ *      do not fit its ceiling or what is left is the only one refused (null), and is the group made UNKNOWN "evidence too large";
+ *   2. then each group's raw operator evidence (executor log head, copied observations; their bytes go before they are all dropped);
+ *   3. then the captures, counted as the base64 stored in the evidence, one file at a time: while a group is over its own ceiling, or the groups together are over what is
+ *      left, the largest capture file goes (the later group, then the later name, among equals), and stays listed as `budget`.
+ */
+export function allocateGroupEvidence(groups: readonly GroupEvidenceCandidate[], room: number): Array<GroupEvidenceAllocation | null> {
+  let remaining = room;
+  const chosen: Array<GroupEvidenceAllocation | null> = groups.map(() => null);
+  const raw: Array<0 | 1 | null> = groups.map(() => null);
+  groups.forEach((group, index) => {
+    const evidence = group.build(null);
+    if (evidence.byteLength <= group.limit && evidence.byteLength <= remaining) { remaining -= evidence.byteLength; chosen[index] = { operator: null, evidence }; }
+    else if (group.reducedBytes !== undefined) remaining -= Math.min(group.reducedBytes, remaining);
+  });
+  const none: ReadonlySet<string> = new Set();
+  groups.forEach((group, index) => {
+    const base = chosen[index];
+    if (!base || group.whole === null) return;
+    for (const level of [0, 1] as const) {
+      const operator = shapeOperator(group.whole, level, none);
+      const evidence = group.build(operator);
+      const delta = evidence.byteLength - base.evidence.byteLength;
+      if (evidence.byteLength <= group.limit && delta <= remaining) { remaining -= delta; chosen[index] = { operator, evidence }; raw[index] = level; return; }
+    }
+  });
+  const keeps = groups.map((group, index) => (raw[index] !== null && group.whole?.captures ? new Set(group.whole.captures.files.map((file) => file.name)) : new Set<string>()));
+  const sizes = groups.map((_, index) => chosen[index]?.evidence.byteLength ?? 0);
+  const sizeWith = (index: number) => groups[index]!.build(shapeOperator(groups[index]!.whole!, raw[index]!, keeps[index]!)).byteLength;
+  const live = groups.map((_, index) => index).filter((index) => keeps[index]!.size > 0);
+  const current = new Map(live.map((index) => [index, sizeWith(index)] as const));
+  for (;;) {
+    const extra = live.reduce((total, index) => total + current.get(index)! - sizes[index]!, 0);
+    const over = live.filter((index) => current.get(index)! > groups[index]!.limit);
+    if (over.length === 0 && extra <= remaining) break;
+    const candidates = (over.length > 0 ? over : live).flatMap((index) => [...keeps[index]!].map((name) => ({ index, name,
+      bytes: groups[index]!.whole!.captures!.files.find((file) => file.name === name)!.bytes })));
+    if (candidates.length === 0) break;
+    candidates.sort((a, b) => (b.bytes - a.bytes) || (b.index - a.index) || b.name.localeCompare(a.name));
+    const victim = candidates[0]!;
+    keeps[victim.index]!.delete(victim.name);
+    current.set(victim.index, sizeWith(victim.index));
+  }
+  for (const index of live) {
+    const operator = shapeOperator(groups[index]!.whole!, raw[index]!, keeps[index]!);
+    const evidence = groups[index]!.build(operator);
+    remaining -= evidence.byteLength - sizes[index]!;
+    chosen[index] = { operator, evidence };
+  }
+  return chosen;
 }
 
 /** The lifecycle input for one group, derived from what the admission already approved and nothing else. */
@@ -224,8 +283,7 @@ export async function executeWorkflowE2EApplicationChecks(input: {
     const collect = runtime.collect ?? collectE2EApplicationRun;
     const groupLimit = (suite: E2ECompiledApplicationSuite) => Math.min(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, e2eApplicationPrivateTransferMaxBytes(suite.expectedCases.length, suite.shards.length));
     const aggregateLimit = Math.min(E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, validated.applicationSuites.reduce((total, suite) => total + groupLimit(suite), 0));
-    const budget = createEvidenceBudget(Math.max(0, aggregateLimit - AGGREGATE_ENVELOPE_RESERVE_BYTES));
-    const runGroup = async (index: number): Promise<{ groupRun: Record<string, unknown>; succeeded: boolean }> => {
+    const runGroup = async (index: number) => {
       const compiled = validated.applicationSuites[index]!;
       const groupAdmission = admission.groups.find((item) => item.outerBinding.groupId === compiled.group.groupId);
       if (!groupAdmission) throw new Error("native E2E application group is not in its immutable admission");
@@ -264,29 +322,32 @@ export async function executeWorkflowE2EApplicationChecks(input: {
       const envelope = (value: Record<string, unknown>) => Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-group-evidence/v1", admissionSha256: reference.admissionRef.sha256,
         taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
         candidateDigest: admission.candidateDigest, round, groupRun: value }), "utf8");
-      const limit = groupLimit(compiled);
-      const succeeded = qualification !== null && run.lifecycle.process.exitCode === 0;
-      // Operator evidence (captures, copied observations, the executor log head) is what gives way when evidence is tight, in the order of operatorEvidenceVariants; the verdict
-      // inputs never do. The first form that the broker would take and the aggregate has room for is the one uploaded.
-      let uploaded: { groupRun: Record<string, unknown>; evidence: Buffer; succeeded: boolean } | null = null;
-      for (const variant of operatorEvidenceVariants(wholeOperator)) {
-        const candidate = { ...groupRun, operatorEvidence: variant };
-        const evidence = envelope(candidate);
-        if (evidence.byteLength <= limit && evidence.byteLength <= budget.remaining()) { budget.reserve(evidence.byteLength); uploaded = { groupRun: candidate, evidence, succeeded }; break; }
-      }
-      // Evidence the broker would refuse even without operator evidence (over the group ceiling, or more than the aggregate has room for) is never sent: this group is UNKNOWN, for a reason that names the cause.
-      if (uploaded === null) {
-        console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_evidence_too_large", groupRunId: binding.runId, evidenceBytes: envelope({ ...groupRun, operatorEvidence: null }).byteLength,
-          limitBytes: limit, aggregateRemainingBytes: budget.remaining() }));
-        const reduced: Record<string, unknown> = { ...groupRun, collection: { status: "UNKNOWN", reason: EVIDENCE_TOO_LARGE }, unavailableReason: EVIDENCE_TOO_LARGE, actual: null, diagnostics: null, operatorEvidence: null };
-        uploaded = { groupRun: reduced, evidence: envelope(reduced), succeeded: false };
-        budget.reserve(Math.min(uploaded.evidence.byteLength, budget.remaining()));
-      }
-      await input.saveEvidence(uploaded.evidence, sha(uploaded.evidence), limit, binding.runId);
-      return { groupRun: uploaded.groupRun, succeeded: uploaded.succeeded };
+      const reduced: Record<string, unknown> = { ...groupRun, collection: { status: "UNKNOWN", reason: EVIDENCE_TOO_LARGE }, unavailableReason: EVIDENCE_TOO_LARGE, actual: null, diagnostics: null, operatorEvidence: null };
+      return { binding, groupRun, reduced, envelope, limit: groupLimit(compiled), whole: wholeOperator, succeeded: qualification !== null && run.lifecycle.process.exitCode === 0 };
     };
-    const groups = await runWithConcurrency(validated.applicationSuites.length, MAX_CONCURRENT_APPLICATION_GROUPS, runGroup, (error) => controller.abort(error));
+    // Every group is run first and nothing is uploaded until all have finished, so the room the aggregate has can be shared with every group's verdict inputs reserved before
+    // any capture is counted (allocateGroupEvidence). The evidence kept when it is tight, in the order it is shed: captures (one file at a time, largest first), then the
+    // copied observations' bytes, then the executor log head and the rest of the operator evidence. Never a verdict input. The raw report and observations of a qualified
+    // group are in its collection (a verdict input); for any other group the report is in diagnostics.shardReports and the observations are in operatorEvidence. Only a group
+    // whose verdict inputs alone do not fit loses all of it, and becomes UNKNOWN "evidence too large" with actual, diagnostics and operatorEvidence null.
+    const prepared = await runWithConcurrency(validated.applicationSuites.length, MAX_CONCURRENT_APPLICATION_GROUPS, runGroup, (error) => controller.abort(error));
     input.throwIfCancelled();
+    const allocations = allocateGroupEvidence(prepared.map((item) => ({ limit: item.limit, whole: item.whole, build: (operator) => item.envelope({ ...item.groupRun, operatorEvidence: operator }),
+      reducedBytes: item.envelope(item.reduced).byteLength })), Math.max(0, aggregateLimit - AGGREGATE_ENVELOPE_RESERVE_BYTES));
+    const groups: Array<{ groupRun: Record<string, unknown>; succeeded: boolean }> = [];
+    for (const [index, item] of prepared.entries()) {
+      const allocation = allocations[index]!;
+      let uploaded: { groupRun: Record<string, unknown>; evidence: Buffer; succeeded: boolean };
+      if (allocation !== null) uploaded = { groupRun: { ...item.groupRun, operatorEvidence: allocation.operator }, evidence: allocation.evidence, succeeded: item.succeeded };
+      else {
+        // Verdict inputs the broker would refuse (over the group ceiling, or more than the aggregate has room for) are never sent: this group is UNKNOWN, for a reason that names the cause.
+        console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_evidence_too_large", groupRunId: item.binding.runId,
+          evidenceBytes: item.envelope({ ...item.groupRun, operatorEvidence: null }).byteLength, limitBytes: item.limit }));
+        uploaded = { groupRun: item.reduced, evidence: item.envelope(item.reduced), succeeded: false };
+      }
+      await input.saveEvidence(uploaded.evidence, sha(uploaded.evidence), item.limit, item.binding.runId);
+      groups.push({ groupRun: uploaded.groupRun, succeeded: uploaded.succeeded });
+    }
     const groupRuns = groups.map((item) => item.groupRun);
     const evidence = Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-evidence/v1", admissionSha256: reference.admissionRef.sha256,
       taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,

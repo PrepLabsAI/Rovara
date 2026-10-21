@@ -1,97 +1,74 @@
 import type { E2EExecutorAccount } from "@agentx/contracts";
-import { looksLikeZip, readZip, writeZip } from "./zip.js";
 
-/** Every spelling of a secret that an HTTP client, a JSON encoder or a URL builder could leave in an output file. */
+/**
+ * Pieces of the base64 (and base64url) text of `value` that stay the same wherever the value sits in a longer encoded string. Base64 groups three bytes into four
+ * characters, so a secret inside a longer string is spelled differently for each of the three alignments, and only its inner characters are the same whatever bytes
+ * come before and after it. Without the shifted forms, a credential in a `Basic` header or a JWT payload is missed two times in three.
+ */
+function base64Fragments(value: string): string[] {
+  const data = Buffer.from(value, "utf8");
+  const forms = new Set<string>();
+  for (let shift = 0; shift < 3; shift += 1) {
+    const encoded = Buffer.concat([Buffer.alloc(shift), data]).toString("base64").replace(/=+$/, "");
+    // The characters the unknown bytes before the value touch, and the one the unknown bytes after it may touch, are left out.
+    const head = Math.ceil((shift * 8) / 6);
+    const tail = (shift + data.byteLength) % 3 === 0 ? 0 : 1;
+    const core = encoded.slice(head, encoded.length - tail);
+    if (core.length >= 6) { forms.add(core); forms.add(core.replace(/\+/g, "-").replace(/\//g, "_")); }
+  }
+  return [...forms];
+}
+
+/** Every spelling of a secret that an HTTP client, a JSON encoder, a URL builder or a base64 or base64url field could leave in an output file. */
 function spellings(value: string): string[] {
   const forms = new Set<string>([value, JSON.stringify(value).slice(1, -1), encodeURIComponent(value),
-    Buffer.from(value, "utf8").toString("base64")]);
+    Buffer.from(value, "utf8").toString("base64"), ...base64Fragments(value)]);
   return [...forms].filter((form) => form.length > 0).sort((a, b) => b.length - a.length);
 }
 
-/** What replaces a session secret that was scrubbed out of a capture. */
-export const SESSION_SCRUB_LABEL = "<session>";
+/** What replaces a session secret in text. */
+export const SESSION_REDACTION_LABEL = "<session>";
+/** A session secret shorter than this is redacted from text but is not looked for in bytes, where a handful of characters would match almost anything. */
+const MIN_SESSION_BYTE_SCAN_LENGTH = 8;
 
-type Rule = { form: string; label: string };
+type Rule = { form: string; label: string; bytes: boolean; session: boolean };
 
 export type CredentialRedactor = Readonly<{
   /** Replaces every credential in text with `<account:profileId>` (an account) or `<session>` (a registered session secret). */
   text(value: string): string;
-  /** True when the bytes contain any account email or password, or registered session secret, in any known spelling. */
-  contains(bytes: Uint8Array): boolean;
   /**
-   * Like `contains`, but also looks inside a ZIP archive's entries: a browser trace is deflated, so a credential in it cannot be seen in the archive's own bytes.
-   * An archive that cannot be opened in full counts as a match, because it cannot be shown clean. `scope` "accounts" leaves the session secrets out, to ask whether
-   * an archive carries an account credential before its session secrets are scrubbed.
+   * True when the bytes contain an account email or password, or a registered session secret, in any known spelling, including base64 and base64url at any alignment.
+   * `scope` "accounts" leaves the session secrets out.
    */
-  containsDeep(bytes: Uint8Array, scope?: "accounts" | "all"): boolean;
-  /** Registers a secret the run created (the session cookie) so `text`, `contains` and `scrubSession` know it. */
+  contains(bytes: Uint8Array, scope?: "accounts" | "all"): boolean;
+  /** Registers a secret the run created (the session cookie) so `text` redacts it and `contains` finds it. It never throws: a short or odd value is still redacted. */
   addSessionSecret(value: string): void;
-  /**
-   * The bytes with every registered session secret replaced by `<session>`, entry by entry for a ZIP archive (rewritten, so it stays a readable archive). The same
-   * bytes when there is nothing to replace; an archive that cannot be opened is returned as it came, for `containsDeep` to refuse.
-   */
-  scrubSession(bytes: Uint8Array): Uint8Array;
 }>;
-
-function replaceAll(haystack: Buffer, needle: Buffer, replacement: Buffer): Buffer {
-  if (needle.byteLength === 0 || haystack.indexOf(needle) < 0) return haystack;
-  const parts: Buffer[] = [];
-  let from = 0;
-  for (let at = haystack.indexOf(needle, from); at >= 0; at = haystack.indexOf(needle, from)) {
-    parts.push(haystack.subarray(from, at), replacement);
-    from = at + needle.byteLength;
-  }
-  parts.push(haystack.subarray(from));
-  return Buffer.concat(parts);
-}
 
 /**
  * Credentials live only in the read-only plan mount. Everything the executor writes under its out directory passes
  * through this: logs and diagnostics are redacted, evidence that carries a credential is refused.
  */
 export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]): CredentialRedactor {
-  const accountRules: Rule[] = accounts.flatMap((account) => [account.password, account.email]
-    .flatMap((secret) => spellings(secret).map((form) => ({ form, label: `<account:${account.profileId}>` }))))
-    .sort((a, b) => b.form.length - a.form.length);
-  const sessionRules: Rule[] = [];
-  const allRules = (): Rule[] => [...accountRules, ...sessionRules].sort((a, b) => b.form.length - a.form.length);
-  const found = (rules: readonly Rule[], bytes: Uint8Array): boolean => {
-    const haystack = Buffer.from(bytes);
-    return rules.some((rule) => haystack.includes(rule.form));
-  };
+  const rules: Rule[] = accounts.flatMap((account) => [account.password, account.email]
+    .flatMap((secret) => spellings(secret).map((form) => ({ form, label: `<account:${account.profileId}>`, bytes: true, session: false }))));
+  rules.sort((a, b) => b.form.length - a.form.length);
   return Object.freeze({
     text(value: string): string {
       let result = value;
-      for (const rule of allRules()) result = result.split(rule.form).join(rule.label);
+      for (const rule of rules) result = result.split(rule.form).join(rule.label);
       return result;
     },
-    contains(bytes: Uint8Array): boolean {
-      return found(allRules(), bytes);
-    },
-    containsDeep(bytes: Uint8Array, scope: "accounts" | "all" = "all"): boolean {
-      const rules = scope === "accounts" ? accountRules : allRules();
-      if (rules.length === 0) return false;
-      if (found(rules, bytes)) return true;
-      if (!looksLikeZip(bytes)) return false;
-      const entries = readZip(bytes);
-      if (entries === null) return true;
-      return entries.some((entry) => found(rules, entry.data) || found(rules, Buffer.from(entry.name, "utf8")));
+    contains(bytes: Uint8Array, scope: "accounts" | "all" = "all"): boolean {
+      const haystack = Buffer.from(bytes);
+      return rules.some((rule) => rule.bytes && (scope === "all" || !rule.session) && haystack.includes(rule.form));
     },
     addSessionSecret(value: string): void {
-      if (typeof value !== "string" || value.length < 8) throw new Error("a session secret must be a long value that cannot be mistaken for ordinary text");
-      for (const form of spellings(value)) if (!sessionRules.some((rule) => rule.form === form)) sessionRules.push({ form, label: SESSION_SCRUB_LABEL });
-    },
-    scrubSession(bytes: Uint8Array): Uint8Array {
-      if (sessionRules.length === 0) return bytes;
-      const scrub = (data: Uint8Array): Uint8Array => {
-        let result: Buffer = Buffer.from(data);
-        for (const rule of [...sessionRules].sort((a, b) => b.form.length - a.form.length)) result = replaceAll(result, Buffer.from(rule.form, "utf8"), Buffer.from(rule.label, "utf8"));
-        return result;
-      };
-      if (!looksLikeZip(bytes)) return scrub(bytes);
-      const entries = readZip(bytes);
-      if (entries === null) return bytes;
-      return writeZip(entries.map((entry) => ({ name: entry.name, data: scrub(entry.data) })));
+      if (typeof value !== "string" || value.length === 0) return;
+      for (const form of spellings(value)) {
+        if (!rules.some((rule) => rule.form === form)) rules.push({ form, label: SESSION_REDACTION_LABEL, bytes: value.length >= MIN_SESSION_BYTE_SCAN_LENGTH, session: true });
+      }
+      rules.sort((a, b) => b.form.length - a.form.length);
     },
   });
 }

@@ -348,11 +348,14 @@ const WORKFLOW_CANDIDATE_CHUNK_BYTES = 64 * 1024;
 const EVENT_TRANSACTION_CHUNK = 80;
 
 /**
- * The capture policy a new setup proposal and its approval carry (owner decision D3): screenshots and traces of failed cases, downloads, no video. The executor keeps
- * these only for failed cases and only inside a fixed budget (Task 3.6). A project whose setup was approved earlier keeps the policy it was approved with, and a
- * proposal made before this default existed is no longer approvable: it is proposed again, which is the "approve setup again" step.
+ * The capture policy a new setup proposal and its approval carry (owner decision D3, as amended by Ruling CJ): screenshots of failed cases and downloads; no video, and no
+ * traces (deferred past M1.3, because a Playwright trace keeps session tokens that cannot be scrubbed reliably). The executor keeps screenshots only for failed cases and
+ * only inside a fixed budget (Task 3.6).
+ * A project whose setup was approved earlier keeps the policy it was approved with (its stored all-false policy is read as written), so it gets screenshots only after its
+ * setup is approved again. A proposal made before this default existed is no longer approvable ("propose the setup again"), though a decision already recorded for it is still
+ * answered as an idempotent retry.
  */
-export const PROJECT_SETUP_CAPTURE_POLICY = Object.freeze({ screenshots: true, traces: true, video: false, downloads: true });
+export const PROJECT_SETUP_CAPTURE_POLICY = Object.freeze({ screenshots: true, traces: false, video: false, downloads: true });
 
 function projectSetupPolicy(proposal: E2ESetupProposal): ReturnType<typeof E2EPolicySchema.parse> {
   return E2EPolicySchema.parse({
@@ -1238,7 +1241,15 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const inspection = inspectE2ERepository(snapshot, candidate).inspection;
         const proposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(artifact.proposal), snapshot, candidate);
         const policy = projectSetupPolicy(proposal);
-        if (!sameJsonContent(artifact.policy, policy)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup policy differs from the fixed approved default");
+        if (!sameJsonContent(artifact.policy, policy)) {
+          // A proposal made under an earlier default is not approvable now, but a decision already recorded for it is still answered the same way (an idempotent retry).
+          const decided = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` });
+          if (decided) {
+            if (decided.ownerKey !== identity.ownerKey || decided.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
+            return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
+          }
+          throw agentXError("RUNTIME_UNAVAILABLE", "this setup proposal was made under an earlier default policy and can no longer be approved: propose the setup again (re-propose the setup), then approve the new proposal");
+        }
         const identityMapping = artifact.identityMapping;
         if (!identityMapping || typeof identityMapping !== "object" || Array.isArray(identityMapping)
           || (identityMapping as Record<string, unknown>).schemaVersion !== "github-source-to-agentx-registration/v1"

@@ -199,6 +199,8 @@ export function validateE2EApplicationLaunchTarget(target: E2EExecutionPlan["eff
   if (launch.targetId !== target.targetId || launch.profileId !== target.runtimeProfileId || runtime.profileId !== target.runtimeProfileId
     || launch.factoryManifestDigest !== runtime.manifestDigest) throw new Error("application launch target differs from its source target or installed runtime descriptor");
   const capability = E2ERuntimeCapabilityDescriptorSchema.parse(runtime.capabilities);
+  // Traces are deferred past M1.3 (Ruling CJ): an admission that approves one is refused.
+  if (capture.traces) throw new Error("trace capture is not supported");
   // Only a web target can record a screenshot or a video; an API target's engine has no artifact hook (see webApiApplicationLaunchTarget).
   const expectedArtifacts = target.kind === "api" ? []
     : [capture.screenshots ? "screenshot" : null, capture.video ? "video" : null].filter((item): item is "screenshot" | "video" => item !== null);

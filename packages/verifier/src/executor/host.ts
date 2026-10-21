@@ -160,10 +160,9 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       });
     };
     // Screenshots and traces of failed cases follow the admitted capture policy and nothing else; with both off the case adapter is given no capture port at all.
-    const screenshots = ledger.capture.enabled("screenshot"); const traces = ledger.capture.enabled("trace");
+    const screenshots = ledger.capture.enabled("screenshot");
     const ports: E2EWebRuntimePorts = Object.freeze({ ...shared,
-      ...(screenshots || traces ? { capture: { screenshots, traces, record: (item: { caseId: string; kind: "screenshot" | "trace"; bytes: Uint8Array }) => ledger.capture.record(item),
-        scratchDirectory: join(context.projectDir, ".tmp") } } : {}),
+      ...(screenshots ? { capture: { screenshots, record: (item: { caseId: string; kind: "screenshot"; bytes: Uint8Array }) => ledger.capture.record(item) } } : {}),
       resolveOwnedCdpEndpoint: async () => {
         if (!context.cdpEndpoint) throw new Error("the executor launched no browser for this shard");
         return context.cdpEndpoint;
@@ -179,8 +178,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       },
       applyToOwnedBrowserContext: async (sessionRef: string, browserContext: BrowserContext) => {
         const cookie = store.cookieFor(sessionRef);
-        // The cookie will be in the page's own requests, so a trace has it scrubbed and plain evidence that carries it is refused.
-        ledger.registerSessionSecret(cookie.value);
+        // Only when screenshots are taken: the cookie is then a secret the captures are scanned for. It is redacted wherever it appears as text and never refuses evidence.
+        if (screenshots) ledger.registerSessionSecret(cookie.value);
         await browserContext.addCookies([{ name: cookie.name, value: cookie.value, url: cookie.origin, httpOnly: true, sameSite: "Strict" }]);
         await guard(browserContext);
         const page = browserContext.pages()[0];

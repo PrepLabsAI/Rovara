@@ -7,7 +7,7 @@ import type { E2EApplicationCliCasePlan } from "../application-services.js";
 import type { E2EApplicationObservationBinding, E2EApplicationOwnedSubject, E2EApplicationProofBytes } from "../application-result-adapter.js";
 import { E2EApplicationObservationBindingSchema, type E2EApplicationAssertionAssetBinding } from "../application-result-adapter.js";
 import type { E2EWebRuntimePorts } from "../web-runtime.js";
-import { createCaptureRecorder, type CaptureRecorder } from "./capture.js";
+import { admittedCapturePolicy, createCaptureRecorder, type CaptureRecorder } from "./capture.js";
 import { createCredentialRedactor } from "./redact.js";
 import { casePlanFor, resolveE2EExecutorSuite, shardOf } from "./suite.js";
 
@@ -71,7 +71,7 @@ export function createFileCaseLedger(root: string, plan: E2EExecutorPlan, option
   const redactor = createCredentialRedactor(plan.accounts);
   const admittedCapture = resolved.suite.runtimeAdmissionContext.selectionInput.policy.capture;
   const capture = createCaptureRecorder({ root, redactor, caseIds: resolved.suite.expectedCases.map((item) => item.caseId),
-    policy: { screenshots: admittedCapture.screenshots, traces: admittedCapture.traces } });
+    policy: admittedCapturePolicy(admittedCapture) });
   const clock = options.clock ?? (() => new Date());
   const instance = randomBytes(4).toString("hex");
   const knownCases = new Set(resolved.suite.expectedCases.map((item) => item.caseId));
@@ -112,7 +112,8 @@ export function createFileCaseLedger(root: string, plan: E2EExecutorPlan, option
     if (!(input.bytes instanceof Uint8Array) || input.bytes.byteLength === 0) throw new Error("evidence must be non-empty bytes");
     const download = input.kind === "download";
     if (input.bytes.byteLength > (download ? MAX_DOWNLOAD_BYTES : MAX_EVIDENCE_BYTES)) throw new Error("evidence exceeds the fixed producer bound");
-    if (redactor.contains(input.bytes)) throw new Error("evidence contains an account credential and cannot be stored");
+    // Only an account credential refuses verdict-input evidence; the session cookie is redacted where it is written as text, never a reason to lose evidence.
+    if (redactor.contains(input.bytes, "accounts")) throw new Error("evidence contains an account credential and cannot be stored");
     const bytes = Uint8Array.from(input.bytes);
     const digest = sha(bytes);
     sequence += 1;
