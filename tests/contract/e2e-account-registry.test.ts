@@ -157,7 +157,7 @@ describe("what a registration writes", () => {
     expect(renewed.map((write) => write.definition.profileId).sort()).toEqual(["orders-owner", "orders-viewer"]);
     expect(renewed.every((write) => write.definition.revision === 2 && write.setupApprovedAt === "2026-10-02T00:00:00.000Z")).toBe(true);
     expect(planSyntheticAccountWrites({ contract: changed, applicationId: ORDERS_APPLICATION_ID, prior, now: T0, setup: { approvedAt: "2026-10-03T00:00:00.000Z" } })
-      .filter((write) => write.previousRevision !== null).map((write) => [write.definition.profileId, write.definition.revision])).toEqual([["orders-viewer", 2]]);
+      .filter((write) => write.previousRevision !== null && write.touch !== true).map((write) => [write.definition.profileId, write.definition.revision])).toEqual([["orders-viewer", 2]]);
   });
 
   it("writes over an account whose rows cannot be read, at the revision after the highest there is", () => {
@@ -166,6 +166,29 @@ describe("what a registration writes", () => {
     const viewer = repaired.find((write) => write.definition.profileId === "orders-viewer")!;
     expect(viewer).toMatchObject({ repair: true, previousRevision: null, definition: { revision: 4 } });
     expect(repaired.filter((write) => write.definition.profileId !== "orders-viewer").every((write) => write.definition.revision === 1)).toBe(true);
+  });
+
+  it("raises the setup approval an account records when a newer setup registers it unchanged, and backfills one that records none", () => {
+    const written = fourWritten().map((write) => ({ definition: write.definition, latest: write.latest, setupApprovedAt: "2026-10-01T00:00:00.000Z" }));
+    const plan = (prior: readonly E2EAccountRegistryEntry[], approvedAt: string) => planSyntheticAccountWrites({ contract: four, applicationId: ORDERS_APPLICATION_ID, prior, now: T0, setup: { approvedAt } });
+    // The same setup again, or an older one: nothing to record.
+    expect(plan(written, "2026-10-01T00:00:00.000Z")).toEqual([]);
+    expect(plan(written, "2026-09-01T00:00:00.000Z")).toEqual([]);
+    // A newer setup with the same definitions: the pointer is raised, no new definition.
+    const raised = plan(written, "2026-10-03T00:00:00.000Z");
+    expect(raised).toHaveLength(4);
+    expect(raised.every((write) => write.touch === true && write.previousRevision === 1 && write.definition.revision === 1 && write.setupApprovedAt === "2026-10-03T00:00:00.000Z")).toBe(true);
+    // A pointer that records no setup approval is the oldest: any setup backfills it.
+    const unrecorded = written.map((entry) => ({ definition: entry.definition, latest: entry.latest }));
+    expect(plan(unrecorded, "2026-09-01T00:00:00.000Z").every((write) => write.touch === true && write.setupApprovedAt === "2026-09-01T00:00:00.000Z")).toBe(true);
+  });
+
+  it("refuses to repair an unreadable account from a setup approved earlier than the one its pointer still names", () => {
+    const repair = { applicationId: ORDERS_APPLICATION_ID, profileId: "orders-viewer", nextRevision: 3, setupApprovedAt: "2026-10-02T00:00:00.000Z" };
+    expect(() => planSyntheticAccountWrites({ contract: four, applicationId: ORDERS_APPLICATION_ID, prior: [], now: T0, setup: { approvedAt: "2026-10-01T00:00:00.000Z" }, repairs: [repair] }))
+      .toThrow(/newer approved setup.*orders-viewer.*roll the account back/s);
+    const repaired = planSyntheticAccountWrites({ contract: four, applicationId: ORDERS_APPLICATION_ID, prior: [], now: T0, setup: { approvedAt: "2026-10-03T00:00:00.000Z" }, repairs: [repair] });
+    expect(repaired.find((write) => write.repair === true)?.setupApprovedAt).toBe("2026-10-03T00:00:00.000Z");
   });
 
   it("names an unreadable row specifically and parses the others", () => {
@@ -550,6 +573,149 @@ describe("the broker's project registration writes the accounts (Task 3.1, owner
     expect(different.latest()["orders-owner"]).toBe(1);
   });
 
+  it("remembers a newer setup that registered unchanged: an older setup that changes the role is still refused afterwards (S1, S3 identical to S1, then S2)", async () => {
+    const broker = await brokerWith(fourSnapshot());
+    const s1 = await broker.propose();
+    await broker.approve(s1, "2026-10-01T00:00:00.000Z");
+    broker.source.current = fourSnapshot(withViewerRole("auditor"));
+    const s2 = await broker.propose();
+    await broker.approve(s2, "2026-10-02T00:00:00.000Z");
+    // S3 declares exactly S1's accounts (only an unrelated file differs, so it is a proposal of its own), approved after S2.
+    broker.source.current = snapshotOf({ "package.json": ordersManifestWith(withOwnerB), "README.md": "the same accounts as S1\n" });
+    const s3 = await broker.propose();
+    await broker.approve(s3, "2026-10-03T00:00:00.000Z");
+    expect((await broker.register(s1)).status).toBe(201);
+    expect((await broker.register(s3)).status).toBe(201);
+    expect(broker.latest()).toEqual({ synthetic: 1, "orders-owner": 1, "orders-viewer": 1, "orders-owner-b": 1 });
+    expect(broker.latestRow("orders-viewer")).toMatchObject({ setupApprovedAt: "2026-10-03T00:00:00.000Z", setupProposalSha256: s3.sha });
+    const refused = await broker.register(s2);
+    expect(refused.status, JSON.stringify(refused.body)).toBeGreaterThanOrEqual(400);
+    expect(JSON.stringify(refused.body)).toMatch(/newer approved setup.*orders-viewer.*roll the account back/s);
+    expect(broker.latest()["orders-viewer"]).toBe(1);
+    expect(broker.definitionRow("orders-viewer", 2)).toBeUndefined();
+  });
+
+  it("treats a pointer that records no setup approval as the oldest: a registration backfills it, and a later older setup is then refused", async () => {
+    const broker = await brokerWith(fourSnapshot());
+    const s1 = await broker.propose();
+    await broker.approve(s1, "2026-10-02T00:00:00.000Z");
+    expect((await broker.register(s1)).status).toBe(201);
+    const { setupApprovedAt: _approvedAt, setupProposalSha256: _sha, ...bare } = broker.latestRow("orders-viewer")!;
+    void _approvedAt; void _sha;
+    broker.harness.db.set(bare);
+    expect(broker.latestRow("orders-viewer")).not.toHaveProperty("setupApprovedAt");
+    expect((await broker.register(s1)).status).toBe(201);
+    expect(broker.latestRow("orders-viewer")).toMatchObject({ setupApprovedAt: "2026-10-02T00:00:00.000Z" });
+    broker.source.current = fourSnapshot(withViewerRole("auditor"));
+    const older = await broker.propose();
+    await broker.approve(older, "2026-10-01T00:00:00.000Z");
+    expect((await broker.register(older)).status).toBeGreaterThanOrEqual(400);
+    expect(broker.latest()["orders-viewer"]).toBe(1);
+  });
+
+  it("checks the administrator authority again on every attempt: of two administrators racing a first registration of a new project name, the loser is refused", async () => {
+    const broker = await brokerWith(fourSnapshot());
+    const base = broker.projectRows().at(-1)!;
+    const proposalFor = async (user: typeof admin) => {
+      const response = await call(broker.harness.handler, { method: "POST", path: "/v1/admin/projects/setup-proposals", user, body: { repositoryUrl: "https://github.com/example/demo.git", ref: "main" } });
+      expect(response.status, JSON.stringify(response.body)).toBe(200);
+      const approval = await call(broker.harness.handler, { method: "POST", path: "/v1/admin/projects/setup-approvals", user,
+        body: { projectName: "billing", proposalRef: String(response.body.proposalRef), proposalSha256: String(response.body.proposalSha256), decision: "approve" } });
+      expect(approval.status, JSON.stringify(approval.body)).toBe(200);
+      return response.body;
+    };
+    const registerBilling = (user: typeof admin, proposal: Record<string, unknown>, revision: number) => call(broker.harness.handler, { method: "POST", path: "/v1/admin/projects", user,
+      body: { definition: { ...(base.definition as Record<string, unknown>), name: "billing", revision, e2e: proposal.policy }, runtimeBinding: base.runtimeBinding,
+        setupApproval: { proposalRef: String(proposal.proposalRef), proposalSha256: String(proposal.proposalSha256), decision: "approve" } } });
+    const first = await proposalFor(admin);
+    const second = await proposalFor(otherAdmin);
+    // Both see no project yet; the first administrator commits while the second is between planning and commit.
+    let committed: Awaited<ReturnType<typeof registerBilling>> | undefined;
+    let fired = false;
+    const send = broker.harness.db.send.bind(broker.harness.db);
+    broker.harness.db.send = async (command) => {
+      const items = command.constructor.name === "TransactWriteCommand" ? (command as unknown as { input: { TransactItems: Array<{ Put?: { Item?: Record<string, unknown> } }> } }).input.TransactItems : [];
+      if (!fired && items.some((item) => item.Put?.Item?.entityType === "PROJECT" && (item.Put.Item.definition as { revision?: number } | undefined)?.revision === 2)) {
+        fired = true;
+        committed = await registerBilling(admin, first, 1);
+      }
+      return send(command);
+    };
+    const loser = await registerBilling(otherAdmin, second, 2);
+    expect(committed?.status, JSON.stringify(committed?.body)).toBe(201);
+    expect(loser.status, JSON.stringify(loser.body)).toBe(403);
+    expect(JSON.stringify(loser.body)).toContain("administrator of project billing");
+    expect(broker.harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string }).name === "billing")).toHaveLength(1);
+    // Only the first administrator's setup wrote accounts, once.
+    expect(broker.harness.db.find((row) => row.pk === "PROJECT#billing" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#"))).toHaveLength(4);
+    expect(broker.harness.db.find((row) => row.pk === "PROJECT#billing" && String(row.sk).includes("#REV#2"))).toHaveLength(0);
+  });
+
+  describe("an account pointer that moves between planning and commit", () => {
+    /** Runs `competitor` once, just before the registration's first transaction that writes accounts commits. */
+    const beforeAccountTransaction = (broker: Awaited<ReturnType<typeof brokerWith>>, competitor: () => void) => {
+      let fired = false;
+      const send = broker.harness.db.send.bind(broker.harness.db);
+      broker.harness.db.send = async (command) => {
+        const items = command.constructor.name === "TransactWriteCommand" ? (command as unknown as { input: { TransactItems: Array<{ Put?: { Item?: Record<string, unknown> } }> } }).input.TransactItems : [];
+        if (!fired && items.some((item) => String(item.Put?.Item?.sk).startsWith("E2E_ACCOUNT"))) { fired = true; competitor(); }
+        return send(command);
+      };
+    };
+    const twoSetups = async () => {
+      const broker = await brokerWith(fourSnapshot());
+      const s1 = await broker.propose();
+      await broker.approve(s1, "2026-10-01T00:00:00.000Z");
+      expect((await broker.register(s1)).status).toBe(201);
+      broker.source.current = fourSnapshot(withViewerRole("auditor"));
+      const s2 = await broker.propose();
+      await broker.approve(s2, "2026-10-02T00:00:00.000Z");
+      return { broker, s2 };
+    };
+    const viewerRevision2 = (broker: Awaited<ReturnType<typeof brokerWith>>, changes: Record<string, unknown>): Record<string, unknown> => {
+      const first = broker.definitionRow("orders-viewer", 1)!;
+      return { ...first, sk: String(first.sk).replace("#REV#1", "#REV#2"), revision: 2, ...changes };
+    };
+
+    it("never overwrites a definition row that already exists, whatever the pointer says", async () => {
+      const { broker, s2 } = await twoSetups();
+      const projectRevisions = broker.projectRows().length;
+      beforeAccountTransaction(broker, () => broker.harness.db.set(viewerRevision2(broker, { roleRef: "competitor" })));
+      const response = await broker.register(s2);
+      expect(response.status, JSON.stringify(response.body)).toBeGreaterThanOrEqual(400);
+      expect(broker.definitionRow("orders-viewer", 2)).toMatchObject({ roleRef: "competitor" });
+      expect(broker.latest()["orders-viewer"]).toBe(1);
+      expect(broker.projectRows()).toHaveLength(projectRevisions);
+    });
+
+    it("moves a pointer only from the revision it read: a pointer that moved first fails the commit, and the registration plans again and writes after it", async () => {
+      const { broker, s2 } = await twoSetups();
+      // A competing writer moved the pointer to revision 2 but its definition row is not (yet) there.
+      beforeAccountTransaction(broker, () => broker.harness.db.set({ ...broker.latestRow("orders-viewer")!, revision: 2, setupApprovedAt: "2026-10-01T00:00:00.000Z" }));
+      const response = await broker.register(s2);
+      expect(response.status, JSON.stringify(response.body)).toBe(201);
+      expect(broker.latest()["orders-viewer"]).toBe(3);
+      expect(broker.definitionRow("orders-viewer", 3)).toMatchObject({ roleRef: "auditor", revision: 3 });
+      expect(broker.definitionRow("orders-viewer", 2)).toBeUndefined();
+    });
+
+    it("refuses, as superseded, when the competing write is a newer setup's: it plans again after the conflict and sees the newer approval", async () => {
+      const { broker, s2 } = await twoSetups();
+      beforeAccountTransaction(broker, () => {
+        const row = viewerRevision2(broker, { roleRef: "newer-role" });
+        const { pk: _pk, sk: _sk, entityType: _entity, ...body } = row;
+        void _pk; void _sk; void _entity;
+        broker.harness.db.set(row);
+        broker.harness.db.set({ ...broker.latestRow("orders-viewer")!, revision: 2, definitionDigest: e2eApplicationAccountDefinitionDigest(E2EApplicationAccountDefinitionSchema.parse(body)),
+          setupApprovedAt: "2026-10-03T00:00:00.000Z" });
+      });
+      const response = await broker.register(s2);
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      expect(JSON.stringify(response.body)).toMatch(/newer approved setup.*orders-viewer.*roll the account back/s);
+      expect(broker.definitionRow("orders-viewer", 2)).toMatchObject({ roleRef: "newer-role" });
+    });
+  });
+
   it("repairs an account whose rows cannot be read by registering the setup again, and leaves the others alone", async () => {
     const broker = await brokerWith(fourSnapshot());
     const proposal = await broker.propose();
@@ -649,7 +815,7 @@ describe("a whole round with two accounts of one application", () => {
     // The reader keeps the readable accounts and lists the unreadable one, for the planner and for registration to act on.
     const read = await readAccountRegistryEntries(both.harness.brokerInput as never, "payments", ACCOUNTS.map((profileId) => ({ applicationId: roundApplicationId, profileId })));
     expect(read.entries.map((entry) => entry.definition.profileId)).toEqual(["orders-owner"]);
-    expect(read.corrupt).toEqual([{ applicationId: roundApplicationId, profileId: "orders-viewer" }]);
+    expect(read.corrupt).toMatchObject([{ applicationId: roundApplicationId, profileId: "orders-viewer" }]);
     // A plan that runs only as the owner is approved all the same.
     const owner = await prepareApplicationRound({ accounts: ["orders-owner"] });
     corrupt(owner);

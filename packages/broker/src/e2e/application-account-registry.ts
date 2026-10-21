@@ -150,12 +150,17 @@ export function latestAccountRef(input: { contract: E2EApplicationProjectContrac
   }
 }
 
+const supersededMessage = (profileId: string, applicationId: string, newer: string, older: string) => `a newer approved setup (approved ${newer}) has already registered account profile ${profileId} of application ${applicationId}; `
+  + `this setup was approved earlier (${older}), so registering it would roll the account back: register the newer setup instead`;
+
 export type E2EAccountRegistryWrite = {
   definition: E2EApplicationAccountDefinition; latest: E2EApplicationAccountLatest; previousRevision: number | null;
   /** The setup approval that wrote this revision (never older than the one that wrote the revision it replaces). */
   setupApprovedAt?: string;
   /** An unreadable pointer is replaced outright: the new revision's definition row is what serializes concurrent repairs. */
   repair?: true;
+  /** Only the pointer is raised, to record a newer setup approval that registered this definition unchanged; `definition` is the one already registered. */
+  touch?: true;
 };
 
 /**
@@ -168,7 +173,9 @@ export type E2EAccountRegistryWrite = {
  * account back. Renewing the same definition is allowed from any setup.
  */
 export function planSyntheticAccountWrites(input: { contract: E2EApplicationProjectContract; applicationId: string; prior: readonly E2EAccountRegistryEntry[]; now: number;
-  setup?: { approvedAt: string }; repairs?: readonly { applicationId: string; profileId: string; nextRevision: number }[] }): E2EAccountRegistryWrite[] {
+  setup?: { approvedAt: string };
+  /** `setupApprovedAt` is what the unreadable pointer still records of the setup that wrote it, if anything. */
+  repairs?: readonly { applicationId: string; profileId: string; nextRevision: number; setupApprovedAt?: string }[] }): E2EAccountRegistryWrite[] {
   const contract = E2EApplicationProjectContractSchema.parse(input.contract);
   const renewalMs = E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS * 86_400_000;
   return contract.accountProfiles.filter((profile) => profile.scope === "synthetic-test").flatMap((profile) => {
@@ -179,7 +186,12 @@ export function planSyntheticAccountWrites(input: { contract: E2EApplicationProj
         ...(approvedAt === undefined ? {} : { setupApprovedAt: approvedAt }), ...(repair ? { repair: true as const } : {}) }];
     };
     const repair = input.repairs?.find((item) => item.applicationId === input.applicationId && item.profileId === profile.profileId);
-    if (repair !== undefined) return make(repair.nextRevision, null, undefined, true);
+    if (repair !== undefined) {
+      if (repair.setupApprovedAt !== undefined && input.setup !== undefined && repair.setupApprovedAt > input.setup.approvedAt) {
+        throw new E2EAccountRegistryError("setup-superseded", supersededMessage(profile.profileId, input.applicationId, repair.setupApprovedAt, input.setup.approvedAt));
+      }
+      return make(repair.nextRevision, null, repair.setupApprovedAt, true);
+    }
     const prior = input.prior.filter((entry) => entry.definition.applicationId === input.applicationId && entry.definition.profileId === profile.profileId);
     if (prior.length > 1) throw new E2EAccountRegistryError("account-ambiguous", `more than one account definition is registered for account profile ${profile.profileId} of application ${input.applicationId}`);
     const previous = prior[0];
@@ -187,10 +199,16 @@ export function planSyntheticAccountWrites(input: { contract: E2EApplicationProj
     const implied = { ...createE2ESyntheticAccountDefinition({ contract, applicationId: input.applicationId, profileId: profile.profileId, revision: previous.definition.revision, now: input.now }),
       expiresAt: previous.definition.expiresAt };
     const sameDefinition = previous.latest.revision === previous.definition.revision && previous.latest.definitionDigest === e2eApplicationAccountDefinitionDigest(implied);
-    if (sameDefinition && Date.parse(previous.definition.expiresAt) - input.now > renewalMs) return [];
+    if (sameDefinition && Date.parse(previous.definition.expiresAt) - input.now > renewalMs) {
+      // Nothing to write, but a newer setup that registers the definition unchanged is still the newest word on it: the pointer records that, or an older setup that
+      // changes the account could be registered after it. A pointer that records no setup approval is the oldest.
+      if (input.setup !== undefined && (previous.setupApprovedAt ?? "") < input.setup.approvedAt) {
+        return [{ definition: previous.definition, latest: previous.latest, previousRevision: previous.latest.revision, setupApprovedAt: input.setup.approvedAt, touch: true }];
+      }
+      return [];
+    }
     if (!sameDefinition && previous.setupApprovedAt !== undefined && input.setup !== undefined && previous.setupApprovedAt > input.setup.approvedAt) {
-      throw new E2EAccountRegistryError("setup-superseded", `a newer approved setup (approved ${previous.setupApprovedAt}) has already registered account profile ${profile.profileId} of application ${input.applicationId}; `
-        + "this setup was approved earlier (" + input.setup.approvedAt + "), so registering it would roll the account back: register the newer setup instead");
+      throw new E2EAccountRegistryError("setup-superseded", supersededMessage(profile.profileId, input.applicationId, previous.setupApprovedAt, input.setup.approvedAt));
     }
     return make(previous.latest.revision + 1, previous.latest.revision, previous.setupApprovedAt, false);
   });

@@ -1775,11 +1775,6 @@ async function registerProject(
   const registerAccounts = setupApprovalBinding?.decision === "approve" && definition.e2e !== undefined && setupApprovedAt !== "";
   let accountSetup: { snapshot: E2ESourceSnapshot; approvedAt: string; proposalSha256: string } | undefined;
   if (registerAccounts) {
-    // An existing project's accounts change only at the hand of one of its administrators (the first registration makes the registrant one).
-    if ((await readCatalogSnapshot()).newestRevision > 0) {
-      const authority = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${identity.ownerKey}`, sk: `PROJECT#${definition.name}` });
-      if (authority?.role !== "administrator") throw agentXError("FORBIDDEN", `only an administrator of project ${definition.name} can register a setup that changes its test accounts`);
-    }
     const repository = definition.repositories[0]!;
     const repositoryParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(repository.url);
     const setup = await readApprovedSetupSource(dependencies, record, E2EPolicySchema.parse(definition.e2e), repository,
@@ -1800,6 +1795,12 @@ async function registerProject(
     const snapshot = await readCatalogSnapshot();
     const latestRevision = Math.max(definition.revision, snapshot.newestRevision);
     const updateCatalog = snapshot.catalog?.latestRevision !== latestRevision;
+    // An existing project's accounts change only at the hand of one of its administrators (the first registration makes the registrant one). Judged against the project as
+    // it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
+    if (registerAccounts && snapshot.newestRevision > 0) {
+      const authority = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${identity.ownerKey}`, sk: `PROJECT#${definition.name}` });
+      if (authority?.role !== "administrator") throw agentXError("FORBIDDEN", `only an administrator of project ${definition.name} can register a setup that changes its test accounts`);
+    }
     const accounts = await planAccounts();
     // One transaction holds at most 100 items; the project revision, its membership, the catalog and the setup admission take the rest.
     if (accounts.items.length > 60) throw agentXError("CONFIG_INVALID", "the setup declares more synthetic test accounts than one registration can store");

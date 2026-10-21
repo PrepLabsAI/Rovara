@@ -14,7 +14,8 @@ import type { TransactItems } from "./developer-task-actions.js";
 /** How many older revisions of an account are read when the latest was registered for a different contract than the caller's. */
 const EARLIER_REVISIONS_READ = 6;
 
-export type CorruptAccount = { applicationId: string; profileId: string };
+/** An account whose rows cannot be read; `setupApprovedAt` is what its pointer still records of the setup that wrote it, when that much is readable. */
+export type CorruptAccount = { applicationId: string; profileId: string; setupApprovedAt?: string };
 
 /**
  * The registered accounts for the given (application, profile) pairs, read by key and parsed. A pair with nothing registered is absent from `entries`; a pair whose rows
@@ -42,7 +43,8 @@ export async function readAccountRegistryEntries(dependencies: StateTable, proje
       entries.push({ ...entry, earlier });
     } catch (error) {
       if (!(error instanceof E2EAccountRegistryError)) throw error;
-      corrupt.push({ applicationId, profileId });
+      const recorded = latestRow.setupApprovedAt;
+      corrupt.push({ applicationId, profileId, ...(typeof recorded === "string" && !Number.isNaN(Date.parse(recorded)) ? { setupApprovedAt: recorded } : {}) });
     }
   }
   return { entries, corrupt };
@@ -65,13 +67,13 @@ export function accountRegistryFences(input: { tableName: string; projectId: str
 function writeItems(tableName: string, projectId: string, write: E2EAccountRegistryWrite, setup: { approvedAt: string; proposalSha256: string }): TransactItems {
   const { definition, latest, previousRevision } = write;
   const row = accountLatestRow(projectId, definition.applicationId, definition.profileId, latest, { approvedAt: write.setupApprovedAt ?? setup.approvedAt, proposalSha256: setup.proposalSha256 });
-  return [
-    { Put: { TableName: tableName, Item: accountDefinitionRow(projectId, definition), ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } },
-    { Put: { TableName: tableName, Item: row,
+  const pointer = { Put: { TableName: tableName, Item: row,
       ...(write.repair === true ? {}
         : previousRevision === null ? { ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }
-          : { ConditionExpression: "revision = :previous", ExpressionAttributeValues: { ":previous": previousRevision } }) } },
-  ];
+          : { ConditionExpression: "revision = :previous", ExpressionAttributeValues: { ":previous": previousRevision } }) } };
+  // A raised pointer writes no definition: the one it names is already there.
+  if (write.touch === true) return [pointer];
+  return [{ Put: { TableName: tableName, Item: accountDefinitionRow(projectId, definition), ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } }, pointer];
 }
 
 /** The highest revision with a definition row for an account, and the revision an unreadable pointer claims (if it claims a whole number); 0 for neither. */
@@ -114,7 +116,7 @@ export async function planSetupAccountWrites(dependencies: StateTable, input: { 
     const writes = planSyntheticAccountWrites({ contract, applicationId: application.applicationId, prior: read.entries, now: input.now, setup: { approvedAt: input.setup.approvedAt }, repairs });
     for (const write of writes) {
       items.push(...writeItems(dependencies.tableName, input.projectId, write, input.setup));
-      planned.push(`${write.definition.applicationId}\0${write.definition.profileId}\0${write.definition.revision}`);
+      planned.push(`${write.definition.applicationId}\0${write.definition.profileId}\0${write.definition.revision}${write.touch === true ? "\0touch" : ""}`);
     }
   }
   return { items, written: planned.length, planKey: planned.sort().join("\n") };
