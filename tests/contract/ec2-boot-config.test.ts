@@ -334,7 +334,7 @@ describe("the opt-in TEST qualification hook", () => {
 
   /** Runs the hook script against fake aws, docker, curl, chown and timeout commands that record every call. */
   const hookArgs = ["us-east-1", qualification.bucket, qualification.roleId, instanceId, qualification.profile, executorImage];
-  type HookOptions = { args?: string[]; challenge?: "present" | "missing"; qualifier?: number; proposalBytes?: number; ping?: "up" | "down"; wait?: number; executor?: "present" | "missing" | "pullable" };
+  type HookOptions = { args?: string[]; challenge?: "present" | "missing"; qualifier?: number; proposalBytes?: number; ping?: "up" | "down"; pingBody?: string; wait?: number; executor?: "present" | "missing" | "pullable" };
   function runHook(options: HookOptions = {}) {
     const dir = mkdtempSync(join(tmpdir(), "boot-hook-run-"));
     const bin = join(dir, "bin");
@@ -366,7 +366,7 @@ esac
 out=; while (($#)); do [[ "$1" == --out ]] && out=$2; shift; done
 [[ "$FAKE_QUALIFIER" != 0 ]] && exit "$FAKE_QUALIFIER"
 head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename "$out")"`);
-    fake("curl", `[[ "$FAKE_PING" == down ]] && exit 22; echo '{"status":"Healthy"}'`);
+    fake("curl", `[[ "$FAKE_PING" == down ]] && exit 22; if [[ -n "\${FAKE_PING_BODY:-}" ]]; then printf '%s\\n' "$FAKE_PING_BODY"; else echo '{"status":"Healthy","activeOperations":0,"invocationFeatures":["task.readiness","task.workflowChecks"]}'; fi`);
     fake("chown", `printf 'chown %s\\n' "$*" >>"${calls}"`);
     // macOS mv has no -T: the shim keeps the test honest about the flag being passed and runs the plain move.
     fake("mv", `printf 'mv %s\\n' "$*" >>"${calls}"; a=(); for x in "$@"; do [[ "$x" == -fT ]] && x=-f; a+=("$x"); done; exec /bin/mv "\${a[@]}"`);
@@ -376,7 +376,7 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
       env: {
         PATH: `${bin}:${process.env.PATH ?? ""}`, AGENTX_HOST_ROOT: hostRoot, TMPDIR: dir,
         AGENTX_E2E_QUALIFICATION_POLL_SECONDS: "0", AGENTX_E2E_QUALIFICATION_HEALTHY_WAIT_SECONDS: String(options.wait ?? 1), AGENTX_E2E_QUALIFICATION_CHALLENGE_WAIT_SECONDS: String(options.wait ?? 1),
-        FAKE_CHALLENGE: options.challenge ?? "present", FAKE_QUALIFIER: String(options.qualifier ?? 0), FAKE_PROPOSAL_BYTES: String(options.proposalBytes ?? 64), FAKE_PING: options.ping ?? "up",
+        FAKE_CHALLENGE: options.challenge ?? "present", FAKE_QUALIFIER: String(options.qualifier ?? 0), FAKE_PROPOSAL_BYTES: String(options.proposalBytes ?? 64), FAKE_PING: options.ping ?? "up", FAKE_PING_BODY: options.pingBody ?? "",
         FAKE_EXECUTOR: options.executor ?? "present", AGENTX_E2E_QUALIFICATION_PULL_SECONDS: "5",
       },
     });
@@ -407,6 +407,32 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
     expect(status).toMatchObject({ state: "SUCCEEDED", reason: "qualified" });
     expect(status.finishedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     expect(called.join("\n")).not.toMatch(/secret|token/i);
+  });
+
+  it("records the executor image and the features /ping reports in ready.json and status.json, for test-deploy --check to read", () => {
+    const { result, object } = runHook();
+    expect(result.status, result.stderr).toBe(0);
+    for (const name of ["ready.json", "status.json"]) {
+      expect(JSON.parse(object(name) ?? "{}"), name).toMatchObject({ executorImage, invocationFeatures: ["task.readiness", "task.workflowChecks"] });
+    }
+    // A failure after the worker answered still says what it was running.
+    const failed = runHook({ challenge: "missing" });
+    expect(JSON.parse(failed.object("status.json") ?? "{}")).toMatchObject({ state: "FAILED", reason: "challenge-unavailable", executorImage, invocationFeatures: ["task.readiness", "task.workflowChecks"] });
+    // A worker that never answered has no features to report, but the image it was given is known.
+    const down = runHook({ ping: "down" });
+    const downStatus = JSON.parse(down.object("status.json") ?? "{}") as Record<string, unknown>;
+    expect(downStatus).toMatchObject({ state: "FAILED", reason: "worker-not-healthy", executorImage });
+    expect(downStatus).not.toHaveProperty("invocationFeatures");
+  });
+
+  it("keeps status.json well formed, and omits the features, when /ping answers with anything but a plain feature list", () => {
+    for (const pingBody of ['{"invocationFeatures":["a\\"b"]}', '{"invocationFeatures":"x"}', '{"invocationFeatures":[1]}', "not json", '{"invocationFeatures":["a b"]}']) {
+      const { result, object } = runHook({ pingBody });
+      expect(result.status, pingBody).toBe(0);
+      const status = JSON.parse(object("status.json") ?? "{}") as Record<string, unknown>;
+      expect(status, pingBody).toMatchObject({ state: "SUCCEEDED", executorImage });
+      expect(status, pingBody).not.toHaveProperty("invocationFeatures");
+    }
   });
 
   it("is refused, touching nothing, for a malformed role ID, instance ID, profile, bucket, region or executor image", () => {

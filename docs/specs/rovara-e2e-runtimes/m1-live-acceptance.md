@@ -14,6 +14,19 @@ M1.1 is accepted when the TEST worker has run the six web/API probes with the ex
 - The ECR repository for the executor image exists beside the worker's (the worker's repository name with `worker` replaced by `executor`, for example `.../worker` becomes `.../executor`). `test-deploy` never creates a repository: a missing one stops the run. The owner approved creating one on 2026-10-19; the operator creates it with the `aws ecr create-repository` command in `test-fast-lane.md` (image scanning on).
 - The standing qualification transport (Task 0.1) is deployed. The first deploy below does it.
 
+### 0. Check TEST before a deploy or a demo
+
+```sh
+npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --check
+```
+
+Read-only; it exits 0 only when nothing is wrong. It needs a clean working tree, because it builds every control-plane Lambda from head and compares each zip's sha256 with the deployed `CodeSha256`. It reports, as findings:
+
+- `stale-lambda`: a control-plane Lambda that is not on the head build (every one, not only the units being deployed).
+- `iam-missing-grant` (error) and `iam-extra-grant` (warning): an IAM grant the head template has and the deployed role lacks, or the reverse, compared per role after ignoring statement order and the asset-parameter and version hashes. An error prints the exact statements for a Tier 3 request. `--apply` of Lambda code runs this part first and refuses while a role one of its Lambdas runs as lacks a grant; the script never applies IAM.
+- `catalog-not-ready` and `catalog-expiring`: a `#web` or `#api` catalog row that is missing, not `READY`, or expires within 24 hours. Rows are read from the state table (`dynamodb:Query`), because the admin API has no catalog read route.
+- `runner-image-mismatch` and `worker-feature-missing`: the qualified runner's `status.json` (found by the web row's private IP, no SSH) names an executor image other than the deployed `ExecutorImageUri`, or the worker's `/ping` lacks a feature string this build needs. A runner qualified before the hook recorded these facts reports both as unknown: qualify it again.
+
 ### 1. Deploy the build
 
 ```sh

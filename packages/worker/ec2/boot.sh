@@ -464,9 +464,11 @@ log() { printf 'agentx-e2e-qualification: %s\n' "$*" >&2; }
 readonly PREFIX="e2e-runtime/$ROLE_ID:$INSTANCE_ID/"
 STAGE=$(mktemp -d) || exit 1
 readonly STAGE
+# Status objects also carry the executor image and /ping's feature list (test-deploy --check).
+EXTRA=",\"executorImage\":\"$EXECUTOR\""
 upload() { aws s3api put-object --bucket "$BUCKET" --key "$PREFIX$1" --body "$2" --server-side-encryption AES256 --region "$REGION" --no-cli-pager >/dev/null; }
 publish_status() {
-  printf '{"state":"%s","reason":"%s","finishedAt":"%s"}\n' "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STAGE/status.json" && upload status.json "$STAGE/status.json"
+  printf '{"state":"%s","reason":"%s","finishedAt":"%s"%s}\n' "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$EXTRA" >"$STAGE/status.json" && upload status.json "$STAGE/status.json"
 }
 fail_with() {
   log "failed: $1"
@@ -474,10 +476,11 @@ fail_with() {
   exit 1
 }
 deadline=$((SECONDS + HEALTHY_WAIT))
-until curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/ping >/dev/null 2>&1; do
+until PING=$(curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/ping 2>/dev/null); do
   ((SECONDS < deadline)) || fail_with worker-not-healthy
   sleep "$POLL"
 done
+features=$(grep -oE '"invocationFeatures":\[("[A-Za-z0-9.]+"(,"[A-Za-z0-9.]+")*)?\]' <<<"$PING") && [[ -n "$features" ]] && EXTRA+=",$features"
 # The boot's preload is optional, the qualification needs the executor image: pull it if missing.
 if ! docker image inspect "$EXECUTOR" >/dev/null 2>&1; then
   log "the executor image is not on this host; pulling it"
@@ -487,7 +490,7 @@ if ! docker image inspect "$EXECUTOR" >/dev/null 2>&1; then
     || log "the executor image could not be pulled"
   docker image inspect "$EXECUTOR" >/dev/null 2>&1 || fail_with executor-image-unavailable
 fi
-printf '{"state":"READY","reason":"worker-healthy","finishedAt":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STAGE/ready.json" && upload ready.json "$STAGE/ready.json" || fail_with ready-upload-failed
+printf '{"state":"READY","reason":"worker-healthy","finishedAt":"%s"%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$EXTRA" >"$STAGE/ready.json" && upload ready.json "$STAGE/ready.json" || fail_with ready-upload-failed
 fetched="$STAGE/challenge.json"
 deadline=$((SECONDS + CHALLENGE_WAIT))
 until aws s3api get-object --bucket "$BUCKET" --key "${PREFIX}challenge.json" --region "$REGION" --no-cli-pager "$fetched" >/dev/null 2>&1; do

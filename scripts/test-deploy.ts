@@ -2,7 +2,11 @@
 //
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test [--apply]
 //     [--only control-plane-code,broker,dispatcher,worker-image,executor-image,qualification-transport]
+//   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --check
 //
+// `--check` is read-only and exits 0 only when every check passes: control-plane Lambdas on the head build, no IAM grant head
+// needs missing from a deployed role, READY catalog rows not about to expire, and a qualified runner and worker that match this
+// build. `--apply` of Lambda code runs the IAM part first and refuses on a missing grant; it never applies IAM itself.
 // Without --apply it prints the plan and exits 0 (it only reads: DescribeStacks for the current
 // parameters). With --apply it runs the plan. The plan reproduces the P0 TEST procedure: every
 // CloudFormation step is a change set that changes only the named Lambda code, image parameter or
@@ -33,6 +37,7 @@ import { GetFunctionConfigurationCommand, LambdaClient } from "@aws-sdk/client-l
 import { build as bundle } from "esbuild";
 import { CDK_CONSTRUCT_IDS, cdkAppArguments } from "../packages/cli/src/deploy/cdk-engine.js";
 import { environmentStackName } from "../packages/contracts/src/environments.js";
+import { WEB_API_RUNTIME_PROFILE_ID } from "../packages/contracts/src/e2e-web-api-qualification.js";
 import {
   Runner,
   assertDigestImage,
@@ -43,10 +48,22 @@ import {
   smokeTestWorker,
   stackExists,
   stackOutput,
+  stackParameter,
   verifyRepositoryImage,
   type ReleaseOptions,
 } from "./release-common.js";
 import { deterministicZip } from "./release/zip.js";
+import {
+  evaluateIamDrift,
+  evaluateTestDeployCheck,
+  formatFindings,
+  lambdaRoleIds,
+  parseRunnerStatus,
+  tier3Request,
+  type CatalogRowFact,
+  type Finding,
+  type RunnerFacts,
+} from "./test-deploy-check.js";
 
 /**
  * `control-plane-code` rebuilds every packaged control-plane Lambda (CONTROL_PLANE_LAMBDAS) in one change set; `broker` and
@@ -181,6 +198,15 @@ export const CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED: Readonly<Record<string, string>
 export type LambdaUnit = keyof typeof CONTROL_PLANE_LAMBDAS;
 const LAMBDAS: Readonly<Record<LambdaUnit, LambdaSpec>> = CONTROL_PLANE_LAMBDAS;
 const LAMBDA_UNITS = Object.keys(CONTROL_PLANE_LAMBDAS) as LambdaUnit[];
+/** The Lambda units a deploy of `units` moves: `control-plane-code` is all of them. */
+export function lambdaUnitsFor(units: readonly DeployUnit[]): LambdaUnit[] {
+  const allCode = units.includes("control-plane-code");
+  return LAMBDA_UNITS.filter((unit) => allCode || units.some((chosen) => chosen === unit));
+}
+function buildStepFor(unit: LambdaUnit, zipPath: string): Extract<DeployStep, { kind: "build-lambda-zip" }> {
+  const { logicalId, entry, extraFiles } = LAMBDAS[unit];
+  return { id: `build-${unit}`, kind: "build-lambda-zip", unit, logicalId, entry, zipPath, ...(extraFiles === undefined ? {} : { extraFiles }) };
+}
 const QUALIFICATION = { logicalIdPrefix: "E2eQualificationTransport", construct: CDK_CONSTRUCT_IDS["control-plane"], context: { "agentx:e2eQualificationTransport": "enabled" } } as const;
 const WORKER_IMAGE_PARAMETER = "WorkerImageUri";
 const EXECUTOR_IMAGE_PARAMETER = "ExecutorImageUri";
@@ -232,6 +258,12 @@ export function resolveArtifactBucket(runner: AwsReader, region: string, env: st
   return bucket;
 }
 
+/** The template a stack was last deployed from, as CloudFormation holds it (`Original`: before the transforms). */
+export function deployedTemplateOf(runner: AwsReader, region: string, stack: string): CfnTemplate {
+  const body = runner.aws(["cloudformation", "get-template", "--stack-name", stack, "--template-stage", "Original", "--query", "TemplateBody", "--region", region, "--output", "json"]).stdout;
+  return JSON.parse(body) as CfnTemplate;
+}
+
 /**
  * As `resolveArtifactBucket`, and the control-plane stack's deployed `logicalId` Lambda must already read its code from that bucket.
  * A function the release pipeline deployed names its bucket through a stack parameter (`{ Ref }`); that parameter's current value
@@ -240,8 +272,7 @@ export function resolveArtifactBucket(runner: AwsReader, region: string, env: st
 export function resolveCodeArtifactBucket(runner: AwsReader, region: string, env: string, logicalId: string): string {
   const bucket = resolveArtifactBucket(runner, region, env);
   const stack = resolveTestStacks(env)["control-plane"];
-  const body = runner.aws(["cloudformation", "get-template", "--stack-name", stack, "--template-stage", "Original", "--query", "TemplateBody", "--region", region, "--output", "json"]).stdout;
-  const template = JSON.parse(body) as CfnTemplate;
+  const template = deployedTemplateOf(runner, region, stack);
   const declared = (template.Resources?.[logicalId]?.Properties?.Code as { S3Bucket?: unknown } | undefined)?.S3Bucket;
   let deployed: string | undefined;
   if (typeof declared === "string") deployed = declared;
@@ -333,13 +364,12 @@ export function planTestDeploy(
   }
 
   // One change set holds every Lambda code change of the run, so the exact-change guard has one list of code units to check.
-  const allCode = units.includes("control-plane-code");
-  const lambdas = LAMBDA_UNITS.filter((unit) => allCode || units.some((chosen) => chosen === unit));
+  const lambdas = lambdaUnitsFor(units);
   if (lambdas.length > 0) {
     for (const unit of lambdas) {
-      const { logicalId, entry, extraFiles } = LAMBDAS[unit];
+      const { logicalId } = LAMBDAS[unit];
       steps.push(
-        { id: `build-${unit}`, kind: "build-lambda-zip", unit, logicalId, entry, zipPath: join(input.artifacts.outputDir, `${unit}-${revision}.zip`), ...(extraFiles === undefined ? {} : { extraFiles }) },
+        buildStepFor(unit, join(input.artifacts.outputDir, `${unit}-${revision}.zip`)),
         { id: `upload-${unit}`, kind: "upload-artifact", bucketFromStack: "access", logicalId, from: `build-${unit}`, keyPrefix: `test-deploy/${revision}/${logicalId}-` },
       );
     }
@@ -648,6 +678,8 @@ export interface TestDeployArgs {
   profile: string;
   region: string;
   apply: boolean;
+  /** Read-only: report stale code, IAM drift, catalog and runner problems, and change nothing. */
+  check: boolean;
   only: DeployUnit[];
 }
 
@@ -678,18 +710,20 @@ export function parseOptions(argv: readonly string[], spec: { values: readonly s
 }
 
 export function parseTestDeployArgs(argv: readonly string[]): TestDeployArgs {
-  const { values, flags } = parseOptions(argv, { values: ["--env", "--profile", "--region", "--only"], flags: ["--apply"] });
+  const { values, flags } = parseOptions(argv, { values: ["--env", "--profile", "--region", "--only"], flags: ["--apply", "--check"] });
   const env = values.get("--env");
   if (env === undefined) throw new Error("--env is required");
   const profile = values.get("--profile");
   if (profile === undefined) throw new Error("--profile is required");
   const onlyValue = values.get("--only");
+  if (flags.has("--check") && flags.has("--apply")) throw new Error("--check is read-only; it cannot be combined with --apply");
+  if (flags.has("--check") && onlyValue !== undefined) throw new Error("--check checks every unit; it does not take --only");
   const only = onlyValue === undefined ? [...DEFAULT_DEPLOY_UNITS] : onlyValue.split(",").map((name) => {
     const unit = DEPLOY_UNITS.find((candidate) => candidate === name.trim());
     if (unit === undefined) throw new Error(`unknown deploy unit ${name}; expected one of ${DEPLOY_UNITS.join(", ")}`);
     return unit;
   });
-  return { env, profile, region: values.get("--region") ?? DEFAULT_REGION, apply: flags.has("--apply"), only };
+  return { env, profile, region: values.get("--region") ?? DEFAULT_REGION, apply: flags.has("--apply"), check: flags.has("--check"), only };
 }
 
 function describeRef(ref: StepRef): string {
@@ -943,29 +977,35 @@ function assertRepositoryExists(context: ApplyContext, repository: string): void
   }
 }
 
+/** Bundles one control-plane Lambda the way the release does and writes its zip; the zip's sha256 is what Lambda reports as CodeSha256 (base64). */
+async function buildLambdaZip(context: ApplyContext, step: Extract<DeployStep, { kind: "build-lambda-zip" }>): Promise<{ sha256Hex: string; sha256Base64: string }> {
+  runNpmBuild(context);
+  const result = await bundle({
+    entryPoints: [step.entry], outfile: "index.js", bundle: true, platform: "node", target: "node22", minify: true, sourcemap: true, external: [], write: false,
+  });
+  const file = (name: string) => {
+    const output = result.outputFiles.find((candidate) => candidate.path.endsWith(`/${name}`));
+    if (output === undefined) throw new Error(`esbuild produced no ${name} for ${step.entry}`);
+    return Buffer.from(output.contents);
+  };
+  // The release bundle holds the handler, its source map and any extra files copied beside it.
+  const zip = deterministicZip([
+    { path: "index.js", data: file("index.js") },
+    { path: "index.js.map", data: file("index.js.map") },
+    ...(step.extraFiles ?? []).map((extra) => ({ path: extra.name, data: readFileSync(extra.from) })),
+  ]);
+  mkdirSync(join(step.zipPath, ".."), { recursive: true });
+  writeFileSync(step.zipPath, zip);
+  return { sha256Hex: sha256(zip).digest("hex"), sha256Base64: sha256(zip).digest("base64") };
+}
+
 async function applyStep(context: ApplyContext, step: DeployStep): Promise<void> {
   console.log(`\n== ${step.id}`);
   switch (step.kind) {
     case "build-lambda-zip": {
-      runNpmBuild(context);
-      const result = await bundle({
-        entryPoints: [step.entry], outfile: "index.js", bundle: true, platform: "node", target: "node22", minify: true, sourcemap: true, external: [], write: false,
-      });
-      const file = (name: string) => {
-        const output = result.outputFiles.find((candidate) => candidate.path.endsWith(`/${name}`));
-        if (output === undefined) throw new Error(`esbuild produced no ${name} for ${step.entry}`);
-        return Buffer.from(output.contents);
-      };
-      // The release bundle holds the handler, its source map and any extra files copied beside it.
-      const zip = deterministicZip([
-        { path: "index.js", data: file("index.js") },
-        { path: "index.js.map", data: file("index.js.map") },
-        ...(step.extraFiles ?? []).map((extra) => ({ path: extra.name, data: readFileSync(extra.from) })),
-      ]);
-      mkdirSync(join(step.zipPath, ".."), { recursive: true });
-      writeFileSync(step.zipPath, zip);
-      recordOutput(context, step.id, { zipPath: step.zipPath, sha256Hex: sha256(zip).digest("hex"), sha256Base64: sha256(zip).digest("base64") });
-      console.log(`${step.zipPath} sha256 ${context.outputs.get(step.id)?.sha256Hex}`);
+      const built = await buildLambdaZip(context, step);
+      recordOutput(context, step.id, { zipPath: step.zipPath, ...built });
+      console.log(`${step.zipPath} sha256 ${built.sha256Hex}`);
       return;
     }
     case "upload-artifact": {
@@ -1024,10 +1064,184 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// --check: the read-only gatherer. Every AWS call below is a read (get-template, describe-*, get-function, get-role, a DynamoDB
+// query and an S3 get-object); the head synth and build are injected so the unit tests run without either.
+// ---------------------------------------------------------------------------------------------
+
+/** The catalog rows' key: the profile the web/API runtime registers its web and API rows under. */
+const CATALOG_PROFILE_PREFIX = `PROFILE#${WEB_API_RUNTIME_PROFILE_ID}#`;
+const CATALOG_ID_VARIABLE = "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID";
+
+export interface CheckReaders {
+  runner: AwsReader;
+  region: string;
+  env: string;
+  /** The control-plane template head synthesizes. */
+  headTemplate: () => CfnTemplate;
+  /** The head build's zip sha256 (base64) by logical ID, for every control-plane Lambda. */
+  builtZipShas: () => Promise<Record<string, string>>;
+}
+
+type CheckFacts = Omit<Parameters<typeof evaluateTestDeployCheck>[0], "now">;
+
+function awsJson<T>(readers: Pick<CheckReaders, "runner" | "region">, args: readonly string[], allowFailure = false): T | undefined {
+  const result = readers.runner.aws([...args, "--region", readers.region, "--output", "json"], allowFailure);
+  if (result.status !== 0) return undefined;
+  return JSON.parse(result.stdout) as T;
+}
+
+/** The deployed Lambdas' CodeSha256 by logical ID, for every control-plane Lambda this script moves. */
+function deployedCodeShas(readers: CheckReaders, stack: string): Record<string, string> {
+  const resources = awsJson<Array<[string, string]>>(readers, ["cloudformation", "describe-stack-resources", "--stack-name", stack, "--query", "StackResources[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]"]) ?? [];
+  const physical = new Map(resources);
+  const shas: Record<string, string> = {};
+  for (const { logicalId } of Object.values(CONTROL_PLANE_LAMBDAS)) {
+    const functionName = physical.get(logicalId);
+    if (functionName === undefined) continue;
+    const sha = awsJson<string>(readers, ["lambda", "get-function", "--function-name", functionName, "--query", "Configuration.CodeSha256"]);
+    if (typeof sha === "string") shas[logicalId] = sha;
+  }
+  return shas;
+}
+
+interface CatalogRead extends CatalogRowFact {
+  endpoint?: string;
+}
+
+/** The web and API rows of the web/API profile in the feature-verifier catalog. The state table is read directly: the admin API has no catalog read route. */
+function readCatalogRows(readers: CheckReaders, table: string, catalogId: string): CatalogRead[] {
+  const result = awsJson<{ Items?: Array<Record<string, { S?: string }>> }>(readers, [
+    "dynamodb", "query", "--table-name", table, "--consistent-read",
+    "--key-condition-expression", "pk = :pk AND begins_with(sk, :prefix)",
+    "--expression-attribute-values", JSON.stringify({ ":pk": { S: `E2E_FEATURE_VERIFIER#${catalogId}` }, ":prefix": { S: CATALOG_PROFILE_PREFIX } }),
+    "--expression-attribute-names", JSON.stringify({ "#s": "state" }),
+    "--projection-expression", "sk, #s, expiresAt, endpoint",
+  ]);
+  if (result === undefined) throw new Error(`cannot read the feature-verifier catalog from ${table}`);
+  return (result.Items ?? []).map((item) => ({
+    sk: item.sk?.S ?? "", state: item.state?.S ?? "", expiresAt: item.expiresAt?.S ?? "",
+    ...(item.endpoint?.S === undefined ? {} : { endpoint: item.endpoint.S }),
+  }));
+}
+
+/**
+ * The qualified runner's facts, from the status.json its qualification hook uploaded under `e2e-runtime/<worker role ID>:<instance ID>/`.
+ * The instance is the running qualification worker at the web row's endpoint; nothing connects to it.
+ */
+function readRunnerFacts(readers: CheckReaders, input: { bucket: string; foundationStack: string; endpoint: string | undefined; deployedExecutorImage: string | undefined }): { facts: RunnerFacts | undefined; notes: string[] } {
+  const none = (note: string) => ({ facts: undefined, notes: [note] });
+  if (input.endpoint === undefined) return none("the catalog's web row has no endpoint, so no runner could be found");
+  const host = /^https?:\/\/(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?:\/|$)/.exec(input.endpoint)?.[1];
+  if (host === undefined) return none(`the catalog's web row endpoint ${input.endpoint} is not a private IP address, so no runner could be found`);
+  const instances = awsJson<string[]>(readers, [
+    "ec2", "describe-instances",
+    "--filters", `Name=private-ip-address,Values=${host}`, "Name=tag:DeploymentMode,Values=e2e-qualification", "Name=instance-state-name,Values=running",
+    "--query", "Reservations[].Instances[].InstanceId",
+  ]) ?? [];
+  const [instanceId] = instances;
+  if (instances.length !== 1 || instanceId === undefined) return none(`${instances.length} running qualification instances have the private IP ${host}; expected exactly one`);
+  const roleArn = stackOutput(describeStack(readers.runner, readers.region, input.foundationStack), "Ec2WorkerInstanceRoleArn");
+  const roleId = awsJson<string>(readers, ["iam", "get-role", "--role-name", roleArn.slice(roleArn.lastIndexOf("/") + 1), "--query", "Role.RoleId"]);
+  if (typeof roleId !== "string") return none(`the worker role ${roleArn} could not be read`);
+  const key = `e2e-runtime/${roleId}:${instanceId}/status.json`;
+  const file = join(mkdtempSync(join(tmpdir(), "test-deploy-check-")), "status.json");
+  const fetched = readers.runner.aws(["s3api", "get-object", "--bucket", input.bucket, "--key", key, "--region", readers.region, file], true);
+  if (fetched.status !== 0) return none(`s3://${input.bucket}/${key} could not be read: ${fetched.stderr.trim().slice(0, 200)}`);
+  const status = parseRunnerStatus(readFileSync(file, "utf8"));
+  if (status === undefined) return none(`s3://${input.bucket}/${key} is not a qualification status`);
+  if (status.state !== "SUCCEEDED") return none(`the runner ${instanceId} qualification status is ${status.state} (${status.reason}), not SUCCEEDED`);
+  return {
+    facts: { deployedExecutorImage: input.deployedExecutorImage, executorImage: status.executorImage, invocationFeatures: status.invocationFeatures },
+    notes: [`runner ${instanceId} (${host}) qualified: ${status.reason}`],
+  };
+}
+
+/** Everything `evaluateTestDeployCheck` needs but the time, read from the live installation and the head build. */
+export async function gatherCheckFacts(readers: CheckReaders): Promise<{ facts: CheckFacts; notes: string[] }> {
+  const stacks = resolveTestStacks(readers.env);
+  const controlPlane = describeStack(readers.runner, readers.region, stacks["control-plane"]);
+  const deployedTemplate = deployedTemplateOf(readers.runner, readers.region, stacks["control-plane"]);
+  const catalogId = (deployedTemplate.Resources?.[CONTROL_PLANE_LAMBDAS.broker.logicalId]?.Properties?.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables?.[CATALOG_ID_VARIABLE];
+  if (typeof catalogId !== "string") throw new Error(`the deployed Broker has no literal ${CATALOG_ID_VARIABLE}, so the feature-verifier catalog cannot be found`);
+  const catalog = readCatalogRows(readers, stackOutput(controlPlane, "StateTableName"), catalogId);
+  const deployedExecutorImage = stackParameter(describeStack(readers.runner, readers.region, stacks.runtime), EXECUTOR_IMAGE_PARAMETER);
+  const web = catalog.find((row) => row.sk.endsWith("#web"));
+  const runner = readRunnerFacts(readers, { bucket: stackOutput(controlPlane, "ArtifactBucketName"), foundationStack: environmentStackName(readers.env, "foundation"), endpoint: web?.endpoint, deployedExecutorImage });
+  return {
+    facts: {
+      headTemplate: readers.headTemplate(),
+      deployedTemplate,
+      lambdaCodeShas: deployedCodeShas(readers, stacks["control-plane"]),
+      builtZipShas: await readers.builtZipShas(),
+      catalogRows: catalog.map(({ sk, state, expiresAt }) => ({ sk, state, expiresAt })),
+      runnerFacts: runner.facts,
+    },
+    notes: runner.notes,
+  };
+}
+
+/**
+ * Refuses a deploy of Lambda code while a role one of its Lambdas runs as lacks a grant head needs: the new code would run and fail on
+ * AccessDenied, as SessionsSteps did in the M1.2 demo. The message carries the statements for a Tier 3 request. IAM is never applied here.
+ */
+export function assertCheckAllowsApply(findings: readonly Finding[], units: readonly DeployUnit[], headTemplate: CfnTemplate): void {
+  const roles = lambdaRoleIds(headTemplate);
+  const deploying = new Set(lambdaUnitsFor(units).flatMap((unit) => roles[LAMBDAS[unit].logicalId] ?? []));
+  const blocking = findings.filter((finding) => finding.kind === "iam-missing-grant" && finding.roleLogicalId !== undefined && deploying.has(finding.roleLogicalId));
+  if (blocking.length === 0) return;
+  const named = [...new Set(blocking.map((finding) => `${finding.kind} ${finding.label} (needs Tier 3 approval)`))];
+  throw new Error(`deploy check failed: ${named.join("; ")}\n\nTier 3 request, the exact statements to add (this script never applies IAM):\n${tier3Request(blocking)}`);
+}
+
+function lambdaZipShas(context: ApplyContext): () => Promise<Record<string, string>> {
+  return async () => {
+    const shas: Record<string, string> = {};
+    for (const unit of LAMBDA_UNITS) {
+      const built = await buildLambdaZip(context, buildStepFor(unit, join(context.outputDir, `${unit}-${context.revision}.zip`)));
+      shas[LAMBDAS[unit].logicalId] = built.sha256Base64;
+    }
+    return shas;
+  };
+}
+
+/** Head's control-plane template: the engine's synth with the standing qualification transport, as TEST runs it. */
+function synthesizeHeadTemplate(context: ApplyContext, identityMode: IdentityMode): CfnTemplate {
+  return synthesizeLiftSource(context, { source: "lift-resources", logicalIdPrefix: QUALIFICATION.logicalIdPrefix, construct: QUALIFICATION.construct, cdkContext: QUALIFICATION.context, identityMode });
+}
+
+function checkContext(args: TestDeployArgs, runner: Runner, options: ReleaseOptions, revision: string, outputDir: string): ApplyContext {
+  return {
+    runner, options, region: args.region, env: args.env, revision,
+    cloudFormation: new CloudFormationClient({ region: args.region, profile: args.profile }),
+    lambda: new LambdaClient({ region: args.region, profile: args.profile }),
+    outputs: new Map(), built: false, outputDir,
+  };
+}
+
 function currentParameters(runner: Runner, region: string, stack: string): Record<string, string> {
   const parameters: Record<string, string> = {};
   for (const parameter of describeStack(runner, region, stack).Parameters ?? []) if (parameter.ParameterKey) parameters[parameter.ParameterKey] = parameter.ParameterValue ?? "";
   return parameters;
+}
+
+/** `--check`: gathers the facts read-only, prints every finding, and fails when one is an error. */
+async function runCheck(args: TestDeployArgs, runner: Runner, options: ReleaseOptions, build: { revision: string; identityMode: IdentityMode; outputDir: string }): Promise<void> {
+  if (runner.capture("git", ["status", "--porcelain"]).stdout.trim() !== "") throw new Error("the working tree is dirty; commit first so the check compares the deployed code with the head build");
+  console.log(`TEST deploy check for ${args.env} (${args.region}), revision ${build.revision}`);
+  const context = checkContext(args, runner, options, build.revision, build.outputDir);
+  const { facts, notes } = await gatherCheckFacts({
+    runner, region: args.region, env: args.env,
+    headTemplate: () => synthesizeHeadTemplate(context, build.identityMode),
+    builtZipShas: lambdaZipShas(context),
+  });
+  for (const note of notes) console.log(note);
+  const result = evaluateTestDeployCheck({ ...facts, now: new Date() });
+  console.log(`\n${formatFindings(result.findings)}`);
+  const request = tier3Request(result.findings);
+  if (request !== "") console.log(`\nTier 3 request, the exact statements to add (this script never applies IAM):\n${request}`);
+  if (!result.ok) throw new Error(`TEST deploy check failed: ${result.findings.filter((finding) => finding.severity === "error").length} problem(s) above`);
+  console.log("\nTEST deploy check passed.");
 }
 
 export async function main(argv: readonly string[]): Promise<void> {
@@ -1036,15 +1250,16 @@ export async function main(argv: readonly string[]): Promise<void> {
   const options: ReleaseOptions = { region: args.region, repository: "", profile: args.profile, allowDirty: false, skipChecks: false, dryRun: !args.apply };
   const runner = new Runner(options);
   const revision = runner.capture("git", ["rev-parse", "HEAD"]).stdout.trim();
+  // The identity stack exists only for a Cognito environment; the engine's synth context differs for an own-OIDC one.
+  const identityMode = stackExists(runner, args.region, environmentStackName(args.env, "identity")) ? "cognito" : "oidc";
+  const outputDir = join(tmpdir(), `test-deploy-${revision.slice(0, 12)}`);
+  if (args.check) return runCheck(args, runner, options, { revision, identityMode, outputDir });
   const stacks = resolveTestStacks(args.env);
   const needsRuntime = args.only.includes("worker-image") || args.only.includes("executor-image");
   const previous: StackParameters = {
     "control-plane": currentParameters(runner, args.region, stacks["control-plane"]),
     runtime: needsRuntime ? currentParameters(runner, args.region, stacks.runtime) : {},
   };
-  // The identity stack exists only for a Cognito environment; the engine's synth context differs for an own-OIDC one.
-  const identityMode = stackExists(runner, args.region, environmentStackName(args.env, "identity")) ? "cognito" : "oidc";
-  const outputDir = join(tmpdir(), `test-deploy-${revision.slice(0, 12)}`);
   const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir }, previous, identityMode });
   console.log(`TEST deploy plan for ${args.env} (${args.region}), revision ${revision}\n${formatPlan(steps)}`);
   if (!args.apply) {
@@ -1052,12 +1267,14 @@ export async function main(argv: readonly string[]): Promise<void> {
     return;
   }
   if (runner.capture("git", ["status", "--porcelain"]).stdout.trim() !== "") throw new Error("the working tree is dirty; commit first so the deployed bytes match the revision");
-  const context: ApplyContext = {
-    runner, options, region: args.region, env: args.env, revision,
-    cloudFormation: new CloudFormationClient({ region: args.region, profile: args.profile }),
-    lambda: new LambdaClient({ region: args.region, profile: args.profile }),
-    outputs: new Map(), built: false, outputDir,
-  };
+  const context = checkContext(args, runner, options, revision, outputDir);
+  // Before anything is pushed or changed: new Lambda code must not go onto a role that lacks a grant head needs.
+  if (steps.some((step) => step.kind === "build-lambda-zip")) {
+    const headTemplate = synthesizeHeadTemplate(context, identityMode);
+    const drift = evaluateIamDrift(headTemplate, deployedTemplateOf(runner, args.region, resolveTestStacks(args.env)["control-plane"]));
+    console.log(`\n${formatFindings(drift)}`);
+    assertCheckAllowsApply(drift, args.only, headTemplate);
+  }
   for (const step of steps) await applyStep(context, step);
   console.log("\nTEST deploy complete.");
 }
