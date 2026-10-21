@@ -18,7 +18,7 @@ function qualifiedWebRuntime(profileId: string, now: number) {
   const capabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ schemaVersion: "e2e-runtime-capabilities/v1", profileId,
     kind: "web", host: { os: "linux", arch: "x64" }, engine: { name: "playwright", version: "1.0.0", spiVersion: 1 },
     runtimeManifestDigest: "a".repeat(64), supportedSteps: ["navigate"], supportedAssertions: ["visible"],
-    evidenceScopes: ["runtime"], networkPolicyDigest: "b".repeat(64), browsers: ["chromium"] });
+    evidenceScopes: ["runtime"], networkPolicyDigest: "b".repeat(64), browsers: ["chromium"], mocks: ["source-backed-api-fixtures/v1"] });
   const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
     subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" as const };
   const runnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: "linux 6.8.0", arch: "x64", runtime: "node v22.23.2" };

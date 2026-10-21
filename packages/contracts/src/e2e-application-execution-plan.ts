@@ -41,6 +41,8 @@ export type E2EApplicationPortableProjection = {
   bundle: E2EScenarioBundle;
 };
 
+/** Why a scenario whose target has an approved mock has no executable case yet: the registered runtime does not declare that it serves source-backed API fixtures. */
+export const MOCKS_UNAVAILABLE_REASON = "runtime-cannot-serve-approved-mocks";
 /** Why a web/API target whose launch recipe is only inferred (no agentx.e2e project contract) has no executable case yet. */
 export const NEEDS_PROJECT_CONTRACT_REASON = "needs-project-contract";
 
@@ -302,6 +304,11 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
         unavailable.push({ criterionId, reason });
         continue;
       }
+    }
+    // An approved mock is served by the host only when the registered runtime declares it can: a runner qualified before mocks existed would run the app without one.
+    if (targetApprovedMocks.length > 0 && runtime !== undefined && runtime.capabilities.mocks?.includes("source-backed-api-fixtures/v1") !== true) {
+      unavailable.push({ criterionId, reason: MOCKS_UNAVAILABLE_REASON });
+      continue;
     }
     const gatedApplicationId = ref?.applicationId ?? intent.unavailableTargetRefs?.find((item) => item.targetId === targetId)?.applicationId;
     // Keyed on the profile the owner approved for the target (a ref cannot name a qualified profile the target does not carry).

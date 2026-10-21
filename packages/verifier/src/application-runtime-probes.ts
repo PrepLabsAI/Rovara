@@ -22,6 +22,12 @@ const probeOracle = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("build-command-failure"), build: z.object({ program: z.literal("node"), args: z.array(z.string().min(1).max(512)).min(1).max(8),
     cwd: z.literal("."), timeoutMs: z.number().int().min(1_000).max(120_000), env: z.object({}).strict() }).strict(),
     expectedExitCode: z.literal(7), expectedUnavailableReason: z.literal("build-failed") }).strict(),
+  // The app reads from a declared external origin whose approved mock serves exactly one `success` variant to it, and no call goes unmatched.
+  z.object({ kind: z.literal("mock-origin"), originRef: z.string().min(1).max(120), contractPath: z.string().min(1).max(512),
+    expectedConsumptions: z.object({ success: z.literal(1), refusal: z.literal(0), invalidData: z.literal(0) }).strict(), expectedUnmockedCalls: z.literal(0) }).strict(),
+  // The app calls a declared external origin that has no approved mock: the call lands in the sinkhole, once, and the case is UNKNOWN with the reason pinned here.
+  z.object({ kind: z.literal("unmocked-call"), originRef: z.string().min(1).max(120), expectedOutcome: z.literal("UNKNOWN"),
+    expectedReason: z.literal("unmocked-external-call"), expectedSinkholeCalls: z.literal(1) }).strict(),
   z.object({ kind: z.literal("tenant-refusal"), path: z.string().startsWith("/"), expectedStatus: z.literal(403), expectedOwnerTenant: z.string().min(1),
     forbiddenTenant: z.string().min(1), expectedOutcome: z.literal("assertion-failed") }).strict(),
 ]);
@@ -31,6 +37,7 @@ const probeSchema = z.object({ schemaVersion: z.literal("e2e-application-runtime
     const webTypes = ["csv", "csv-defect"].includes(value.oracle.kind) || value.oracle.kind === "viewer-refusal" && value.oracle.viewerIdentity !== undefined;
     const expectedOracle = value.kind === "build" ? value.oracle.kind === "build-command-failure" && value.polarity === "negative"
       : value.oracle.kind === "build-command-failure" ? false : value.kind === "web" ? webTypes || value.oracle.kind === "protected-network-denial" || value.oracle.kind === "chromium-sandbox"
+        || value.oracle.kind === "mock-origin" || value.oracle.kind === "unmocked-call"
       : ["json-state", "tenant-refusal"].includes(value.oracle.kind) || value.oracle.kind === "viewer-refusal" && value.oracle.path !== undefined
         || value.oracle.kind === "protected-network-denial";
     if (!expectedOracle) context.addIssue({ code: "custom", path: ["oracle"], message: "runtime probe oracle kind is incompatible with its platform profile" });

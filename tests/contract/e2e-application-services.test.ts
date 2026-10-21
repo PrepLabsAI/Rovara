@@ -6,9 +6,11 @@ import {
   E2EApplicationHostPreparationBindingSchema,
   E2EApplicationPreparedEnvironmentSchema,
   E2EApplicationServiceContractSchema,
+  e2eApiSchemaComponentId,
   e2eApplicationPreparedEnvironmentDigest,
 } from "../../packages/contracts/src/e2e-application-services.js";
 
+const sha256Of = (text: string) => createHash("sha256").update(text).digest("hex");
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const id = () => "11111111-1111-4111-8111-111111111111";
 const preparation = () => ({
@@ -27,6 +29,18 @@ describe("application service and preparation contracts", () => {
     expect(() => E2EApplicationServiceContractSchema.parse({ ...valid, originBindings: [{ originRef: "orders-api", envName: "AWS_SECRET_ACCESS_KEY" }] })).toThrow();
     expect(() => E2EApplicationServiceContractSchema.parse({ ...valid, originBindings: [{ originRef: "orders-api", envName: "lowercase_url" }] })).toThrow();
     expect(() => E2EApplicationServiceContractSchema.parse({ ...valid, executable: "node -e doBadThing" })).toThrow();
+  });
+
+  it("links an origin to its API contract by an optional repository-relative contractPath, and the link is the discovery component id", () => {
+    const valid = { listenPort: 4317, portEnv: "APP_PORT", originBindings: [{ originRef: "inventory-v1", envName: "INVENTORY_ORIGIN", contractPath: "inventory/openapi.json" },
+      { originRef: "orders-api", envName: "ORDERS_API_ORIGIN" }] };
+    expect(E2EApplicationServiceContractSchema.parse(valid)).toEqual(valid);
+    expect(e2eApiSchemaComponentId("inventory/openapi.json")).toBe(`api-schema-${sha256Of("inventory/openapi.json").slice(0, 12)}`);
+    for (const contractPath of ["/etc/passwd", "../openapi.json", "inventory/../openapi.json", "inventory//openapi.json", "", "a".repeat(513), "inventory/open api.json", "inventory\\openapi.json"]) {
+      expect(() => E2EApplicationServiceContractSchema.parse({ ...valid, originBindings: [{ originRef: "inventory-v1", envName: "INVENTORY_ORIGIN", contractPath }] }), contractPath).toThrow();
+    }
+    expect(() => E2EApplicationServiceContractSchema.parse({ ...valid, originBindings: [{ originRef: "a", envName: "A_ORIGIN", contractPath: "x/openapi.json" },
+      { originRef: "b", envName: "B_ORIGIN", contractPath: "x/openapi.json" }] })).toThrow(/contract/);
   });
 
   it("requires strict named external connection references", () => {

@@ -1862,9 +1862,12 @@ describe("native developer task workflow", () => {
     harness.db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people });
     for (const person of people) {
       const personId = randomUUID();
+      // One timestamp for both rows: the identity registry refuses a person whose reverse row's createdAt differs from the
+      // person row's, so two separate clock reads straddling a millisecond made this fixture flaky.
+      const createdAt = new Date().toISOString();
       harness.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId: person.developerId,
-        slackUserId: person.slackUserId, name: person.name, method: "slack", issuer: "https://slack.com", subject: person.slackUserId, createdAt: new Date().toISOString() });
-      harness.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${person.developerId}`, schemaVersion: 1, personId, developerId: person.developerId, createdAt: new Date().toISOString() });
+        slackUserId: person.slackUserId, name: person.name, method: "slack", issuer: "https://slack.com", subject: person.slackUserId, createdAt });
+      harness.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${person.developerId}`, schemaVersion: 1, personId, developerId: person.developerId, createdAt });
     }
     const refused = await harness.handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: creatorSlack });
     expect(JSON.parse(refused.body)).toMatchObject({ outcome: "NOT_OWNER" });

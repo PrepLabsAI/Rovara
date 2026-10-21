@@ -495,12 +495,16 @@ export const E2EArtifactRefSchema = z.object({ artifactId: id(200), sha256: dige
 export type E2EArtifactRef = z.infer<typeof E2EArtifactRefSchema>;
 export const E2EAssertionReceiptSchema = z.object({ assertionIndex: z.number().int().min(0).max(19), assertionDigest: digest, status: E2ECaseStatusSchema, reason: id(500) }).strict();
 export type E2EAssertionReceipt = z.infer<typeof E2EAssertionReceiptSchema>;
-export const E2ECaseResultSchema = z.object({ caseId: id(160), executionDescriptorDigest: digest, accountContextId: id(120), accountContextDigest: digest, status: E2ECaseStatusSchema, reason: id(500), attemptCount: positiveInt.max(2), assertionDigest: digest, assertionReceipts: z.array(E2EAssertionReceiptSchema).min(1).max(20), artifacts: z.array(E2EArtifactRefSchema).max(200), coverage: E2ECaseCoverageSchema }).strict().superRefine((result, context) => {
+export const E2ECaseResultSchema = z.object({ caseId: id(160), executionDescriptorDigest: digest, accountContextId: id(120), accountContextDigest: digest, status: E2ECaseStatusSchema, reason: id(500), attemptCount: positiveInt.max(2), assertionDigest: digest, assertionReceipts: z.array(E2EAssertionReceiptSchema).min(1).max(20), artifacts: z.array(E2EArtifactRefSchema).max(200), coverage: E2ECaseCoverageSchema,
+  /** The declared external origins whose approved in-network mock stood in for the real service in this case; present only when there is one. */
+  mockedOrigins: z.array(id(200)).max(32).optional() }).strict().superRefine((result, context) => {
   if (new Set(result.assertionReceipts.map((receipt) => receipt.assertionIndex)).size !== result.assertionReceipts.length) context.addIssue({ code: "custom", path: ["assertionReceipts"], message: "assertion receipt indices must be unique" });
   if (result.assertionReceipts.some((receipt, index) => receipt.assertionIndex !== index)) context.addIssue({ code: "custom", path: ["assertionReceipts"], message: "assertion receipts must cover contiguous ordered indices" });
 });
 export type E2ECaseResult = z.infer<typeof E2ECaseResultSchema>;
-export const E2EQualifiedResultSchema = z.object({ schemaVersion: z.literal(1), binding: E2ERunBindingSchema, producer: id(120), startedAt: timestamp, finishedAt: timestamp, receivedAt: timestamp, status: E2ECaseStatusSchema, qualification: z.enum(["trusted", "exploratory"]), executionMode: E2EExecutionModeSchema, reason: id(500), cases: z.array(E2ECaseResultSchema).max(64), rawReportSha256: digest.nullable(), modelReceiptIds: z.array(id(200)).max(200), cleanup: z.enum(["confirmed", "pending", "failed"]) }).strict().superRefine((result, context) => {
+export const E2EQualifiedResultSchema = z.object({ schemaVersion: z.literal(1), binding: E2ERunBindingSchema, producer: id(120), startedAt: timestamp, finishedAt: timestamp, receivedAt: timestamp, status: E2ECaseStatusSchema, qualification: z.enum(["trusted", "exploratory"]), executionMode: E2EExecutionModeSchema, reason: id(500), cases: z.array(E2ECaseResultSchema).max(64), rawReportSha256: digest.nullable(), modelReceiptIds: z.array(id(200)).max(200), cleanup: z.enum(["confirmed", "pending", "failed"]),
+  /** The union of the cases' mocked origins; present only when some case had one. */
+  mockedOrigins: z.array(id(200)).max(64).optional() }).strict().superRefine((result, context) => {
   if (Date.parse(result.finishedAt) < Date.parse(result.startedAt)) context.addIssue({ code: "custom", path: ["finishedAt"], message: "finish precedes start" });
   if (new Set(result.cases.map((item) => item.caseId)).size !== result.cases.length) context.addIssue({ code: "custom", path: ["cases"], message: "case results must be unique" });
   const expected = new Set(result.binding.expectedCases.map((item) => item.caseId));

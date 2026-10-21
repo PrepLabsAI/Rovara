@@ -3,7 +3,7 @@ import { types } from "node:util";
 import { z } from "zod";
 import { canonicalJson, copyBoundedE2EJsonData, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema,
   E2EExpectedCaseSchema, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAssertionSchema,
-  E2EScenarioSchema, E2ERuntimeAccountRefSchema, E2EAppArtifactRefSchema, E2EMockSpecSchema, type E2EApplicationEvidenceRef, type E2ECaseCoverage, type E2EQualifiedResult,
+  E2EScenarioSchema, E2ERuntimeAccountRefSchema, E2EAppArtifactRefSchema, E2EMockSpecSchema, readE2EApplicationProjectContract, type E2EApplicationEvidenceRef, type E2ECaseCoverage, type E2EQualifiedResult,
   type E2ERound, type E2ERunBinding, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import { E2E_REPORT_MAX_BYTES, E2E_APP_RPC_FRAME_MAX_BYTES, e2ePrivateTransferMaxBytes, type E2EStructuralQualification } from "./result-adapter.js";
 import { parseE2EApplicationReport, type E2EApplicationReport } from "./application-report-schema.js";
@@ -12,6 +12,7 @@ import { validateE2EApplicationExecutionAdmission, validateE2ECompiledApplicatio
 import { compareE2EApplicationPublicList, E2EApplicationSelectionPacketSchema } from "./application-identity.js";
 import { expectedE2EApplicationReporterDigest } from "./application-runtime-assets.js";
 import { isPinnedRovaraHttpEngine } from "./rovara-http-engine-descriptor.js";
+import { SINKHOLE_ORIGIN_REF, planApplicationOrigins } from "./application-mocks.js";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const id = (max = 256) => z.string().min(1).max(max);
@@ -39,12 +40,20 @@ const supervisorReceiptFrame = z.object({ schemaVersion: z.literal("e2e-applicat
   launches: z.array(z.object({ shardId: id(120), launchId: z.string().uuid(), upstreamRunId: z.string().uuid() }).strict()).min(1).max(3),
   caseCaptures: z.array(z.object({ caseId: id(160), shardId: id(120), ref: supervisorRef }).strict()).max(64),
   mockConsumptions: z.array(z.object({ caseId: id(160), shardId: id(120), ref: supervisorRef }).strict()).max(64),
+  /** One frame per case that had a call no approved mock matched; absent (not empty) when no case had one. */
+  unmockedCalls: z.array(z.object({ caseId: id(160), shardId: id(120), ref: supervisorRef }).strict()).max(64).optional(),
   cleanupRef: supervisorRef, additionalSupervisorReceiptRefs: z.array(supervisorRef).max(32) }).strict();
 const mockConsumptionFrame = z.object({ schemaVersion: z.literal("e2e-application-mock-consumption/v1"), context: supervisorContext,
   caseId: id(160), shardId: id(120), upstreamRunId: z.string().uuid(), rows: z.array(z.object({ caseId: id(160), componentId: id(120),
     runId: z.string().uuid(), mockManifestDigest: sha, lifecycleId: id(120), producer: E2EApplicationProducerSchema,
     requestId: id(256), responseId: id(256), requestSha256: sha, responseSha256: sha, observedAt: utc,
     requestRef: supervisorRef, responseRef: supervisorRef }).strict()).max(100) }).strict();
+/** One call to a declared origin that no approved mock matched: to the sinkhole (origin `unbound`), to a mock that refused it, or a ledger that could not be read in full. */
+const unmockedCall = z.object({ requestId: id(256), origin: id(60), kind: z.enum(["unmatched", "foreign-caller", "malformed", "ledger-overflow"]), method: id(16), path: z.string().max(512), observedAt: utc }).strict();
+export type E2EApplicationUnmockedCall = z.infer<typeof unmockedCall>;
+const unmockedCallsFrame = z.object({ schemaVersion: z.literal("e2e-application-unmocked-calls/v1"), context: supervisorContext,
+  caseId: id(160), shardId: id(120), upstreamRunId: z.string().uuid(), calls: z.array(unmockedCall).min(1).max(100) }).strict();
+const unmockedCallsRow = z.object({ caseId: id(160), shardId: id(120), calls: z.array(unmockedCall).min(1).max(100) }).strict();
 const cleanupFrame = z.object({ schemaVersion: z.literal("e2e-application-owned-cleanup/v1"), context: supervisorContext,
   phase: z.literal("after-owned-close"), cleanup: z.enum(["confirmed", "pending", "failed"]), confirmed: z.boolean(),
   serverListening: z.boolean().nullable(), ownedResourceInventoryDigest: sha, ownedCleanupReceiptRefs: z.array(supervisorRef).max(32) }).strict();
@@ -533,6 +542,22 @@ export function readE2EApplicationSupervisorProof(input: { readback: E2EApplicat
     }
   }
   if (mockRows.length > input.expected.caseCount * 100) throw new Error("supervisor mock witness rows exceed the exact group bound");
+  const unmockedEntries = receipt.unmockedCalls ?? [];
+  if (canonicalJson(unmockedEntries) !== canonicalJson([...unmockedEntries].sort((a, b) => a.caseId.localeCompare(b.caseId)))
+    || unmockedEntries.length > input.expected.caseCount || new Set(unmockedEntries.map((item) => item.caseId)).size !== unmockedEntries.length
+    || unmockedEntries.some((item) => !captures.some((capture) => capture.caseId === item.caseId && capture.shardId === item.shardId))) {
+    throw new Error("supervisor unmocked-call inventory is unordered, duplicated, or outside its exact case bounds");
+  }
+  const unmockedRows: z.infer<typeof unmockedCallsRow>[] = [];
+  for (const entry of unmockedEntries) {
+    const launch = launches.find((item) => item.shardId === entry.shardId);
+    const frame = parseCanonicalFrame(proofFor(entry.ref), unmockedCallsFrame, "unmocked call frame");
+    if (!launch || frame.caseId !== entry.caseId || frame.shardId !== entry.shardId || frame.upstreamRunId !== launch.upstreamRunId || !contextMatches(frame.context)
+      || new Set(frame.calls.map((call) => `${call.origin}\u0000${call.requestId}`)).size !== frame.calls.length) {
+      throw new Error("unmocked call frame is foreign, duplicated, or outside its launch context");
+    }
+    unmockedRows.push({ caseId: frame.caseId, shardId: frame.shardId, calls: frame.calls });
+  }
   const rowsByCase = new Map<string, string[]>();
   for (const row of mockRows) {
     const components = rowsByCase.get(row.caseId) ?? [];
@@ -541,7 +566,7 @@ export function readE2EApplicationSupervisorProof(input: { readback: E2EApplicat
   }
   for (const capture of captures) {
     const observed = [...new Set(rowsByCase.get(capture.caseId) ?? [])].sort();
-    if (canonicalJson(observed) !== canonicalJson([...capture.coverage.mockedComponentIds].sort())) {
+    if (canonicalJson(observed) !== canonicalJson([...capture.coverage.observedMockedComponentIds].sort())) {
       throw new Error("raw mock witness component set differs from the original case capture coverage");
     }
   }
@@ -578,7 +603,8 @@ export function readE2EApplicationSupervisorProof(input: { readback: E2EApplicat
   const agentOperationSourceRefs = captures.flatMap((capture) => readAgentOperationFrames(capture, proofFor).map((item) => item.sourceReceiptRef));
   const referenced: E2EApplicationEvidenceRef[] = [receipt.cleanupRef, ...receipt.additionalSupervisorReceiptRefs,
     ...(input.expected.expectedIdentityRefs ?? []),
-    ...receipt.caseCaptures.flatMap((entry) => [entry.ref]), ...receipt.mockConsumptions.flatMap((entry) => [entry.ref]), ...agentOperationSourceRefs,
+    ...receipt.caseCaptures.flatMap((entry) => [entry.ref]), ...receipt.mockConsumptions.flatMap((entry) => [entry.ref]),
+    ...(receipt.unmockedCalls ?? []).flatMap((entry) => [entry.ref]), ...agentOperationSourceRefs,
     ...captures.flatMap(refsInCapture), ...modelSourceRefs, ...identitySourceRefs, ...observationEvidenceRefs, ...cleanup.ownedCleanupReceiptRefs,
     ...receipt.mockConsumptions.flatMap((entry) => {
       const frame = parseCanonicalFrame(proofFor(entry.ref), mockConsumptionFrame, "mock consumption frame");
@@ -601,7 +627,7 @@ export function readE2EApplicationSupervisorProof(input: { readback: E2EApplicat
   const sortedActualSupervisorRefs = [...claimedSupervisorRefs].sort((a, b) => a.artifactId.localeCompare(b.artifactId));
   if (canonicalJson(actualSupervisorRefs) !== canonicalJson(sortedActualSupervisorRefs)
     || canonicalJson(claimedSupervisorRefs) !== canonicalJson(sortedActualSupervisorRefs)) throw new Error("opaque supervisor receipt refs differ from the exact sorted raw receipt inventory");
-  return { readback, receipt, captures, cleanup, mockConsumptions: mockRows, evidenceBytes: totalBytes };
+  return { readback, receipt, captures, cleanup, mockConsumptions: mockRows, unmockedCalls: unmockedRows, evidenceBytes: totalBytes };
 }
 
 /** Performs raw-frame and transitive-byte closure checks for the installed transport before it returns bytes. */
@@ -623,6 +649,7 @@ export function validateE2EApplicationSupervisorReadbackStructure(readbackInput:
     if (digest) mockManifestDigest = digest;
     for (const row of mock.rows) { proofFor(row.requestRef); proofFor(row.responseRef); }
   }
+  for (const entry of receipt.unmockedCalls ?? []) parseCanonicalFrame(proofFor(entry.ref), unmockedCallsFrame, "unmocked call frame");
   for (const capture of captures) for (const row of capture.modelReceipts) {
     const projection = parseCanonicalFrame(proofFor(row.receiptRef), governedModelReceiptProjectionSchema, "governed model receipt projection");
     if (projection.caseId !== row.caseId || projection.declaredStepIndex !== row.declaredStepIndex
@@ -672,6 +699,8 @@ export const E2EApplicationCollectionSchema = z.object({ protocol: z.literal("e2
   mockConsumptions: z.array(z.object({ caseId: id(160), componentId: id(120), runId: z.string().uuid(), mockManifestDigest: sha, lifecycleId: id(120),
     producer: E2EApplicationProducerSchema, requestId: id(256), responseId: id(256), requestSha256: sha, responseSha256: sha, observedAt: utc,
     requestRef: E2EApplicationEvidenceRefSchema, responseRef: E2EApplicationEvidenceRefSchema }).strict()).max(2048),
+  /** The calls no approved mock matched, per case; absent when there were none. */
+  unmockedCalls: z.array(unmockedCallsRow).max(64).optional(),
   declaredMockComponentIds: z.array(id(120)).max(32), supervisorReadback: E2EApplicationSupervisorReadbackWireSchema,
   receivedAt: utc, cleanup: z.enum(["confirmed", "pending", "failed"]) }).strict().superRefine((collection, context) => {
   const transferCeiling = e2eApplicationPrivateTransferMaxBytes(Math.max(1, collection.applicationCaptures.length), collection.shards.length);
@@ -730,7 +759,7 @@ export const E2EApplicationCollectionSchema = z.object({ protocol: z.literal("e2
   const aggregateBytes = collection.shards.reduce((total, shard) => total + shard.publicListBytes.byteLength + shard.rawReport.byteLength
     + shard.listStderr.byteLength + shard.runStderr.byteLength + shard.runStartCapture.byteLength, 0)
     + Buffer.byteLength(canonicalJson(collection.applicationCaptures)) + Buffer.byteLength(canonicalJson(collection.mockConsumptions))
-    + Buffer.byteLength(canonicalJson(collection.supervisorReadback));
+    + Buffer.byteLength(canonicalJson(collection.unmockedCalls ?? [])) + Buffer.byteLength(canonicalJson(collection.supervisorReadback));
   if (aggregateBytes > e2eApplicationPrivateTransferMaxBytes(Math.max(1, collection.applicationCaptures.length), collection.shards.length)) {
     context.addIssue({ code: "custom", path: [], message: "application private collection exceeds its aggregate transfer ceiling" });
   }
@@ -772,6 +801,8 @@ export const E2EApplicationCollectionOracleSchema = z.object({ protocol: z.liter
   selectionPackets: z.array(selectionPacket).min(1).max(3), compiledShardConfigDigests: z.array(z.object({ shardId: id(120), configDigest: sha }).strict()).min(1).max(3),
   expectedMockComponentIdsByTarget: z.array(z.object({ targetId: id(80), componentIds: z.array(id(120)).max(32) }).strict()).max(3),
   expectedMocksByCase: z.array(z.object({ caseId: id(160), specs: z.array(E2EMockSpecSchema).max(32) }).strict()).max(64),
+  /** The mock components the host serves to the application as in-network mocks of its declared origins, and the origin each stands for. Absent means none: rows for any component then follow the executor-request witness rules. */
+  mockOrigins: z.array(z.object({ componentId: id(120), originRef: id(200) }).strict()).max(32).optional(),
   observationBindings: z.array(E2EApplicationObservationBindingSchema).max(64).nullable(),
   assertionAssets: z.array(E2EApplicationAssertionAssetBindingSchema).max(128),
   governedModelReceipts: z.array(E2EApplicationGovernedModelReceiptRowSchema).max(200).nullable(), ownedClosedAt: utc.nullable(),
@@ -799,6 +830,11 @@ export const E2EApplicationCollectionOracleSchema = z.object({ protocol: z.liter
       for (const spec of row.specs) mockMap.set(canonicalJson(spec), spec);
     }
     const sourceDerivedMocks = [...mockMap.values()];
+    const originRows = oracle.mockOrigins ?? [];
+    if (new Set(originRows.map((item) => item.componentId)).size !== originRows.length
+      || originRows.some((item) => !sourceDerivedMocks.some((spec) => spec.componentId === item.componentId))) {
+      context.addIssue({ code: "custom", path: ["mockOrigins"], message: "mock origins must name each approved mock component at most once" });
+    }
     if (createHash("sha256").update(canonicalJson(sourceDerivedMocks)).digest("hex") !== oracle.binding.mockManifestDigest) {
       context.addIssue({ code: "custom", path: ["expectedMocksByCase"], message: "case mock expectations do not reproduce the admitted mock manifest digest" });
     }
@@ -882,6 +918,22 @@ export function admittedRuntimeAccountRef(input: { runtimeRef: Readonly<{ target
   return matches[0]!;
 }
 
+/**
+ * The mocks the host serves to an application as its declared origins, found the way the host finds them: by the origin's contract path in the application's own project contract.
+ * A broker derives the same list from the admitted plan, so the containers a run owned are known without asking the worker.
+ */
+export function e2eApplicationHostedMockOrigins(compiled: E2ECompiledApplicationSuite): { componentId: string; originRef: string }[] {
+  const runtimeRefs = compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs;
+  const hosted: { componentId: string; originRef: string }[] = [];
+  for (const applicationId of new Set(runtimeRefs.map((ref) => ref.applicationId))) {
+    const service = readE2EApplicationProjectContract(compiled.runtimeAdmission.sourceSnapshot, applicationId)?.service;
+    const targetIds = new Set(compiled.expectedCases.flatMap((expected) => (runtimeRefs.find((ref) => ref.targetId === expected.targetId)?.applicationId === applicationId ? [expected.targetId] : [])));
+    const plan = planApplicationOrigins({ originBindings: service?.originBindings ?? [], mocks: compiled.group.mocks.filter((mock) => targetIds.has(mock.requestedTargetId)) });
+    for (const origin of plan.mocked) hosted.push({ componentId: origin.componentId, originRef: origin.originRef });
+  }
+  return hosted;
+}
+
 type Environment = Readonly<{ ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string }>;
 export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { compiled: E2ECompiledApplicationSuite; binding: E2ERunBinding; round: E2ERound;
   environment: Environment; usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
@@ -924,6 +976,8 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
       engine: target.engine ? { name: target.engine.name, version: target.engine.version, spiVersion: 1, platform: target.engine.platform, capabilities: target.engine.capabilities } : null,
       accountContextId: expected.accountContextId, accountContextDigest: expected.accountContextDigest, assertionDigests: [...expected.assertionDigests], scenario });
   }
+  const hostedMockOrigins = e2eApplicationHostedMockOrigins(input.compiled);
+  const hostedMockComponents = new Set(hostedMockOrigins.map((item) => item.componentId));
   const body = E2EApplicationCollectionOracleSchema.parse({ protocol: "e2e-application-oracle/v1", binding, round, groupId: group.groupId,
     compiledInventoryDigest: input.compiled.inventory.digest, expectedShardIds, expectedCases: input.compiled.expectedCases,
     expectedSupervisorReceiptRefs, ownedResourceInventoryDigest: input.ownedResourceInventoryDigest,
@@ -934,10 +988,10 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
       const scenario = input.compiled.bundle.scenarios.find((item) => item.scenarioId === expected.scenarioId);
       if (!scenario) throw new Error("compiled case has no source-derived scenario for mock expectation projection");
       return { caseId: expected.caseId, specs: input.compiled.group.mocks.filter((mock) => mock.requestedTargetId === expected.targetId
-        && mock.effectiveTargetId === expected.targetId && (mock.kind !== "api"
-          || (!!mock.apiFixture && scenario.steps.some((step) => step.kind === "request" && step.method === mock.apiFixture!.method
-            && step.path === mock.apiFixture!.path)))) };
+        && mock.effectiveTargetId === expected.targetId && (mock.kind !== "api" || (!!mock.apiFixture && (hostedMockComponents.has(mock.componentId)
+          || scenario.steps.some((step) => step.kind === "request" && step.method === mock.apiFixture!.method && step.path === mock.apiFixture!.path))))) };
     }),
+    ...(hostedMockOrigins.length > 0 ? { mockOrigins: hostedMockOrigins } : {}),
     observationBindings: input.observationBindings, assertionAssets: input.assertionAssets,
     governedModelReceipts: input.governedModelReceipts, ownedClosedAt: input.ownedClosedAt,
     applicationIdsByCase: [...appIds.values()],
@@ -982,8 +1036,12 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
   return body;
 }
 
+/** What the verified mock evidence of a run shows, for the people who read the result: how often each variant was served and what no mock matched. Derived from verified bytes only. */
+export type E2EApplicationMockSummary = Readonly<{ consumptions: Readonly<{ success: number; refusal: number; invalidData: number }>;
+  unmockedCalls: Readonly<{ sinkhole: number; mocked: number }>; mockedOrigins: readonly string[] }>;
+export type E2EApplicationQualification = E2EStructuralQualification & Readonly<{ mockSummary?: E2EApplicationMockSummary }>;
 export type E2EApplicationCollectionResult = Readonly<{ collection: E2EApplicationCollection | null; oracle: E2EApplicationCollectionOracle | null;
-  qualification: E2EStructuralQualification | null; unavailableReason: string | null }>;
+  qualification: E2EApplicationQualification | null; unavailableReason: string | null }>;
 type E2EApplicationReportStep = E2EApplicationReport["run"]["results"][number]["attempts"][number]["steps"][number];
 const summedRunUsageKeys = new Set(["discoveredResults", "artifactBytes", "downloads", "events", "modelTokens"]);
 const maximumRunUsageKeys = new Set(["maxAgentContextBytes", "maxLedgerBytes", "maxObservationBytes", "maxModelCallsInStep", "maxActionStepsInStep"]);
@@ -1072,8 +1130,8 @@ export function collectE2EApplicationRun(input: { actual: unknown; compiled: E2E
   } catch (error) { return { collection: null, oracle: null, qualification: null, unavailableReason: error instanceof Error ? error.message : "application collection unavailable" }; }
 }
 
-export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationCollectionOracle, collectionInput: E2EApplicationCollection): E2EStructuralQualification {
-  const unknown = (reason: string, runId: string | null = null, reportHash: string | null = null): E2EStructuralQualification => ({ status: "UNKNOWN", reason, runId, rawReportSha256: reportHash, result: null });
+export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationCollectionOracle, collectionInput: E2EApplicationCollection): E2EApplicationQualification {
+  const unknown = (reason: string, runId: string | null = null, reportHash: string | null = null): E2EApplicationQualification => ({ status: "UNKNOWN", reason, runId, rawReportSha256: reportHash, result: null });
   try {
     const oracle = E2EApplicationCollectionOracleSchema.parse(copyBoundedE2EJsonData(oracleInput, { maxBytes: 8 * 1024 * 1024, maxDepth: 64 }));
     const collection = E2EApplicationCollectionSchema.parse(copyBoundedE2EJsonData(collectionInput, { maxBytes: e2eApplicationPrivateTransferMaxBytes(oracle.expectedCases.length, oracle.expectedShardIds.length), maxDepth: 64 }));
@@ -1105,6 +1163,9 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
       cleanupConfirmed: true, cleanupServerListening: false });
     if (canonicalJson(proof.mockConsumptions) !== canonicalJson(collection.mockConsumptions)) {
       return unknown("normalized mock consumption rows differ from the retained original witness frames", oracle.binding.runId);
+    }
+    if (canonicalJson(proof.unmockedCalls) !== canonicalJson(collection.unmockedCalls ?? [])) {
+      return unknown("normalized unmocked call rows differ from the retained original witness frames", oracle.binding.runId);
     }
     const supervisorObservedAt = Date.parse(proof.receipt.context.observedAt);
     if (!Number.isFinite(supervisorObservedAt) || supervisorObservedAt < closedAt || supervisorObservedAt > receivedAt) {
@@ -1260,6 +1321,9 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
       return unknown("group model SDK calls or token use differ from retained governed receipts or exceed original round limits", oracle.binding.runId);
     }
     const verifiedModelReceiptIds: string[] = [];
+    const summaryConsumptions = { success: 0, refusal: 0, invalidData: 0 };
+    const summaryUnmocked = new Map<string, string>();
+    const summaryOrigins = new Set<string>();
     const normalizedCases = oracle.expectedCases.map((expected) => {
       const capture = captures.get(expected.caseId)!;
       const facts = oracle.applicationIdsByCase.find((item) => item.caseId === expected.caseId)!;
@@ -1494,13 +1558,28 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
         && item.lifecycleId === capture.lifecycleId && item.producer.lifecycleId === capture.lifecycleId
         && item.producer.operationId === oracle.binding.operationId && item.producer.operationFence === oracle.binding.operationFence
         && item.producer.runtimeManifestDigest === facts.runtimeManifestDigest)
-        && canonicalJson([...capture.coverage.mockedComponentIds].sort()) === canonicalJson(observedMockComponents);
-      const mockRequestsBound = mockConsumptionRequestsMatch(facts.scenario, capture, expectedMockRows, caseConsumptions);
+        && canonicalJson([...capture.coverage.observedMockedComponentIds].sort()) === canonicalJson(observedMockComponents);
+      // A mock the host serves to the application is judged on the application's own calls to it; any other mock on the executor's request steps, as before.
+      const hostedComponents = new Set((oracle.mockOrigins ?? []).map((item) => item.componentId));
+      const executorSpecs = expectedMockRows.filter((spec) => !hostedComponents.has(spec.componentId));
+      const hostedSpecs = expectedMockRows.filter((spec) => hostedComponents.has(spec.componentId));
+      const executorRows = caseConsumptions.filter((row) => !hostedComponents.has(row.componentId));
+      const hostedRows = caseConsumptions.filter((row) => hostedComponents.has(row.componentId));
+      const mockRequestsBound = mockConsumptionRequestsMatch(facts.scenario, capture, executorSpecs, executorRows);
+      const hostedWitnessesAll = hostedMockWitnesses(hostedSpecs, hostedRows, proofById, true);
+      const hostedWitnessesSome = hostedMockWitnesses(hostedSpecs, hostedRows, proofById, false);
       const mocksConsumed = expectedMockComponentSet.every((componentId) => observedMockComponents.includes(componentId))
         && observedMockComponents.every((componentId) => expectedMockComponentSet.includes(componentId))
-        && mockRowsBound && mockRequestsBound && mockWitnessesMatch(expectedMockRows, caseConsumptions, proofById, true, facts.scenario, capture);
+        && mockRowsBound && mockRequestsBound && mockWitnessesMatch(executorSpecs, executorRows, proofById, true, facts.scenario, capture) && hostedWitnessesAll.ok;
       const failureMockPreconditions = mockRowsBound && mockRequestsBound
-        && mockWitnessesMatch(expectedMockRows, caseConsumptions, proofById, false, facts.scenario, capture);
+        && mockWitnessesMatch(executorSpecs, executorRows, proofById, false, facts.scenario, capture) && hostedWitnessesSome.ok;
+      // Any call that no approved mock matched makes the case UNKNOWN: it is never a pass, and it is never a failure either, because what the app did with an answer nobody approved says nothing about the feature.
+      const caseUnmockedCalls = (collection.unmockedCalls ?? []).filter((item) => item.caseId === expected.caseId).flatMap((item) => item.calls);
+      const originOfComponent = new Map((oracle.mockOrigins ?? []).map((item) => [item.componentId, item.originRef]));
+      const caseMockedOrigins = [...new Set(hostedSpecs.flatMap((spec) => originOfComponent.get(spec.componentId) ?? []))].sort();
+      if (hostedWitnessesSome.ok) for (const variant of hostedWitnessesSome.variants) summaryConsumptions[variant === "invalid-data" ? "invalidData" : variant] += 1;
+      for (const call of caseUnmockedCalls) summaryUnmocked.set(`${call.origin}\u0000${call.requestId}`, call.origin);
+      for (const origin of caseMockedOrigins) summaryOrigins.add(origin);
       const modelDependent = facts.scenario.steps.some((item) => item.kind === "agent");
       const expectedModelRows = oracle.governedModelReceipts?.filter((item) => item.caseId === expected.caseId) ?? [];
       const actualModelRows = capture.modelReceipts;
@@ -1560,7 +1639,8 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
         : facts.platform === "android" || facts.platform === "ios" ? "mobile" : "desktop";
       const subjectBound = capture.subject.kind === expectedSubjectKind && (capture.subject.kind === "service" ? capture.subject.origin === ownedOrigin
         : capture.subject.kind === "mobile" ? capture.subject.installedArtifactSha256 === protectedBinding.selectedArtifact.sha256 : true);
-      const status = failed && stepsObserved && agentOperationsValid && subjectBound && failureMockPreconditions ? "failed"
+      const status = caseUnmockedCalls.length > 0 ? "unavailable"
+        : failed && stepsObserved && agentOperationsValid && subjectBound && failureMockPreconditions ? "failed"
         : !failed && allPassed && stepsObserved && mocksConsumed && modelBound && evidenceFloor && subjectBound && !hasIncompleteTerminal ? "passed" : "unavailable";
       const assertionReceipts = expected.assertionDigests.map((digest, index) => ({ assertionIndex: index, assertionDigest: digest,
         status: capture.assertions[index]?.outcome === "passed" ? "passed" as const : capture.assertions[index]?.outcome === "failed" ? "failed" as const : "unavailable" as const,
@@ -1570,18 +1650,29 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
         observedMockedComponentIds: [...new Set(observedMocks)].sort(),
         unexercisedBehaviors: capture.assertions.filter((item) => item.outcome !== "passed").map((item) => item.digest) };
       return { caseId: expected.caseId, executionDescriptorDigest: expected.executionDescriptorDigest, accountContextId: expected.accountContextId,
-        accountContextDigest: expected.accountContextDigest, status, reason: status === "passed" ? "structural-application-observations-complete" : status === "failed" ? "observed-application-assertion-failure" : "application-evidence-floor-unmet",
-        attemptCount: 1, assertionDigest: expected.assertionDigest, assertionReceipts, artifacts: [], coverage };
+        accountContextDigest: expected.accountContextDigest, status, reason: status === "passed" ? "structural-application-observations-complete" : status === "failed" ? "observed-application-assertion-failure"
+          : caseUnmockedCalls.length > 0 ? UNMOCKED_EXTERNAL_CALL_REASON : "application-evidence-floor-unmet",
+        attemptCount: 1, assertionDigest: expected.assertionDigest, assertionReceipts, artifacts: [], coverage,
+        ...(caseMockedOrigins.length > 0 ? { mockedOrigins: caseMockedOrigins } : {}) };
     });
     const anyFailed = normalizedCases.some((item) => item.status === "failed"); const allPassed = normalizedCases.every((item) => item.status === "passed");
     const hashes = collection.shards.map((shard) => ({ shardId: shard.shardId, sha256: shard.rawReport.sha256 })).sort((a, b) => a.shardId.localeCompare(b.shardId));
     const reportHash = hashes.length === 1 ? hashes[0]!.sha256 : createHash("sha256").update(canonicalJson(hashes)).digest("hex");
+    const unmockedCases = normalizedCases.some((item) => item.status === "unavailable" && item.reason === UNMOCKED_EXTERNAL_CALL_REASON);
+    const mockedOrigins = [...summaryOrigins].sort();
     const result = E2EQualifiedResultSchema.parse({ schemaVersion: 1, binding: oracle.binding, producer: "structural-application-report-adapter",
       startedAt: collection.shards.map((item) => item.runProcess.startedAt).sort()[0], finishedAt: collection.shards.map((item) => item.runProcess.finishedAt).sort().at(-1),
       receivedAt: collection.receivedAt, status: anyFailed ? "failed" : allPassed ? "passed" : "unavailable", qualification: "exploratory", executionMode: oracle.binding.executionMode,
-      reason: anyFailed ? "observed-application-test-failure" : allPassed ? "structural-application-observations-complete" : "application-evidence-floor-unmet",
-      cases: normalizedCases, rawReportSha256: reportHash, modelReceiptIds: verifiedModelReceiptIds.sort(), cleanup: collection.cleanup });
-    return { status: anyFailed ? "FAILED" : allPassed ? "PASS" : "UNKNOWN", reason: "structural application observations remain exploratory pending independent producer authentication", runId: oracle.binding.runId, rawReportSha256: reportHash, result };
+      reason: anyFailed ? "observed-application-test-failure" : allPassed ? "structural-application-observations-complete" : unmockedCases ? UNMOCKED_EXTERNAL_CALL_REASON : "application-evidence-floor-unmet",
+      cases: normalizedCases, rawReportSha256: reportHash, modelReceiptIds: verifiedModelReceiptIds.sort(), cleanup: collection.cleanup,
+      ...(mockedOrigins.length > 0 ? { mockedOrigins } : {}) });
+    const unmockedByOrigin = [...summaryUnmocked.values()];
+    const mockSummary: E2EApplicationMockSummary | undefined = mockedOrigins.length > 0 || unmockedByOrigin.length > 0
+      ? { consumptions: summaryConsumptions, unmockedCalls: { sinkhole: unmockedByOrigin.filter((origin) => origin === SINKHOLE_ORIGIN_REF).length,
+        mocked: unmockedByOrigin.filter((origin) => origin !== SINKHOLE_ORIGIN_REF).length }, mockedOrigins } : undefined;
+    return { status: anyFailed ? "FAILED" : allPassed ? "PASS" : "UNKNOWN",
+      reason: !anyFailed && !allPassed && unmockedCases ? UNMOCKED_EXTERNAL_CALL_REASON : "structural application observations remain exploratory pending independent producer authentication",
+      runId: oracle.binding.runId, rawReportSha256: reportHash, result, ...(mockSummary ? { mockSummary } : {}) };
   } catch (error) { return unknown(error instanceof Error ? error.message : "application collection unavailable", oracleInput?.binding?.runId ?? null); }
 }
 
@@ -1649,6 +1740,46 @@ function mockWitnessesMatch(expected: readonly z.infer<typeof E2EMockSpecSchema>
   }
   return (!requireEveryExpected || expected.every((spec) => rows.some((row) => row.componentId === spec.componentId)))
     && rows.every((row) => expected.some((spec) => spec.componentId === row.componentId));
+}
+
+/** The reason of a case, and of a run with no failed case, that made a call to a declared origin no approved mock matched. */
+export const UNMOCKED_EXTERNAL_CALL_REASON = "unmocked-external-call";
+
+const hostedRequestFrame = z.object({ requestId: id(256), componentId: id(120), caseId: id(160), method: id(12), path: id(2048), input: z.record(z.string(), boundedData),
+  origin: z.literal("application") }).strict();
+const hostedResponseFrame = z.object({ responseId: id(256), requestId: id(256), status: z.number().int().min(100).max(599), body: boundedData }).strict();
+type HostedMockWitnesses = Readonly<{ ok: true; variants: readonly ("success" | "refusal" | "invalid-data")[] }> | Readonly<{ ok: false }>;
+
+/**
+ * Whether every call the application made to an approved, host-served mock is exactly what that mock's fixture would answer: the request frame is the fixture's method and path
+ * with the one input field set to a variant's value, and the response frame is that variant's status and body. Nothing here relies on a step of the scenario, because it is the
+ * application, not the executor, that makes the call. With `requireEveryExpected`, every approved mock of the case must also have been called at least once, so a dependency
+ * that was never exercised cannot let a case pass.
+ */
+function hostedMockWitnesses(expected: readonly z.infer<typeof E2EMockSpecSchema>[], rows: readonly E2EApplicationMockConsumption[],
+  proofById: ReadonlyMap<string, E2EApplicationProofBytes>, requireEveryExpected: boolean): HostedMockWitnesses {
+  const variants: ("success" | "refusal" | "invalid-data")[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const fixture = expected.find((spec) => spec.componentId === row.componentId && spec.kind === "api")?.apiFixture;
+    if (!fixture || seen.has(row.requestId)) return { ok: false };
+    try {
+      const requestBytes = proofBytesFor(proofById, row.requestRef); const responseBytes = proofBytesFor(proofById, row.responseRef);
+      const requestText = new TextDecoder("utf-8", { fatal: true }).decode(requestBytes); const responseText = new TextDecoder("utf-8", { fatal: true }).decode(responseBytes);
+      const requestValue = JSON.parse(requestText) as unknown; const responseValue = JSON.parse(responseText) as unknown;
+      if (canonicalJson(requestValue) !== requestText || canonicalJson(responseValue) !== responseText) return { ok: false };
+      const request = hostedRequestFrame.parse(requestValue); const response = hostedResponseFrame.parse(responseValue);
+      const selected = request.input[fixture.inputField];
+      const variant = typeof selected === "string" && Object.keys(request.input).length === 1 ? fixture.variants.find((candidate) => candidate.inputValue === selected) : undefined;
+      if (!variant || request.method !== fixture.method || request.path !== fixture.path || response.status !== variant.status
+        || canonicalJson(response.body) !== canonicalJson(variant.body ?? null)
+        || request.requestId !== row.requestId || request.componentId !== row.componentId || request.caseId !== row.caseId
+        || response.responseId !== row.responseId || response.requestId !== row.requestId) return { ok: false };
+      seen.add(row.requestId); variants.push(variant.id);
+    } catch { return { ok: false }; }
+  }
+  if (requireEveryExpected && !expected.every((spec) => rows.some((row) => row.componentId === spec.componentId))) return { ok: false };
+  return { ok: true, variants };
 }
 
 function mockConsumptionRequestsMatch(scenario: z.infer<typeof E2EScenarioSchema>, capture: E2EApplicationCaseCapture,

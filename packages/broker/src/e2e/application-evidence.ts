@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EApplicationExecutionAdmission, type E2EExecutionPlan, type E2ERound,
   type E2EQualifiedResult } from "@agentx/contracts";
 import { createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
-  e2eApplicationAggregateRunUsage, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
+  e2eApplicationAggregateRunUsage, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
   type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { combineE2EVerdicts, type E2EVerdict } from "./verdict.js";
 
@@ -227,8 +227,9 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     const receivedAt = input.receivedAt === undefined ? Number.NaN : Date.parse(input.receivedAt);
     if (!Number.isFinite(receivedAt)) return unknown("the broker has no receipt time for this group's evidence");
     if (receivedAt < Date.parse(round.admittedAt)) return unknown("the group's evidence was not received between the round's admission and the broker's receipt");
-    // The inventory digest is a pure function of the run id.
-    const inventoryDigest = dockerOwnedResourceInventoryDigest(binding.runId);
+    // The inventory digest is a pure function of the run id and the mocked origins of the admitted plan.
+    const mockOrigins = e2eApplicationHostedMockOrigins(suite).map((origin) => origin.originRef);
+    const inventoryDigest = dockerOwnedResourceInventoryDigest(binding.runId, mockOrigins);
     if (inputs.ownedResourceInventoryDigest !== inventoryDigest) return unknown("the group's owned-resource inventory is not the one its run id derives");
     const runtime = suite.runtimeBindings.get(suite.group.runtimeProfileId);
     if (runtime === undefined || !same(inputs.environment, runtime.runnerEnvironment)) return unknown("the runner's environment is not the admitted runtime's environment");
@@ -248,7 +249,7 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
       return unknown("the group's close time is not between the round's admission and the broker's receipt");
     }
     // The one supervisor receipt the host attests is derived from the run id and the close time.
-    const expectedSupervisorReceiptRefs = [dockerOwnedCleanupReceipt(binding.runId, inputs.ownedClosedAt).ref];
+    const expectedSupervisorReceiptRefs = [dockerOwnedCleanupReceipt(binding.runId, inputs.ownedClosedAt, mockOrigins).ref];
     if (!same(inputs.expectedSupervisorReceiptRefs, expectedSupervisorReceiptRefs)) return unknown("the supervisor receipt is not the one derived from the run id and the close time");
     // The approved probe documents are the installed ones, byte for byte, with their manifest digests; only their retained references are the worker's.
     const expectedAssets = expectedApplicationAssertionAssets(suite);

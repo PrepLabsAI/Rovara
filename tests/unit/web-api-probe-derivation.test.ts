@@ -28,10 +28,28 @@ describe("deriving a probe's observation from its retained evidence", () => {
     expect(facts["web-csv-negative-v1"]).toEqual({ ...clean, collectorStatus: "FAILED", failedAssertionKinds: ["csv"], blockedHosts: [] });
     expect(facts["web-egress-denial-v1"]).toMatchObject({ ...clean, collectorStatus: "FAILED", blockedHosts: ["probe.example.com"] });
     expect(facts["api-state-positive-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [] });
-    expect(facts["api-egress-denial-v1"]).toEqual({ ...clean, collectorStatus: "FAILED", failedAssertionKinds: ["http-status"], blockedHosts: [] });
+    // The app asks for a name that resolves to the sinkhole (one recorded call, so UNKNOWN) and dials an IP literal that the wall blocks (so its assertion fails).
+    expect(facts["api-egress-denial-v1"]).toEqual({ ...clean, collectorStatus: "UNKNOWN", failedAssertionKinds: ["http-status"], blockedHosts: [],
+      mockConsumptions: { success: 0, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 1, mocked: 0 }, runReason: "unmocked-external-call" });
     expect(facts["build-imds-denial-v1"]).toEqual({ ...clean, collectorStatus: null, runUnavailableReason: "build-failed", buildExitCode: 7, failedAssertionKinds: [], blockedHosts: [] });
     expect(facts["build-lateral-denial-v1"]).toEqual({ ...clean, collectorStatus: null, runUnavailableReason: "build-failed", buildExitCode: 7, failedAssertionKinds: [], blockedHosts: [] });
     expect(facts["app-host-denial-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [] });
+    // The mock probes and the API egress probe also carry what the verified mock evidence shows; no other probe does, so their recorded observations stay as they were.
+    expect(facts["web-mock-origin-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [],
+      mockConsumptions: { success: 1, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 0, mocked: 0 }, runReason: "structural-application-observations-complete" });
+    expect(facts["web-unmocked-call-v1"]).toEqual({ ...clean, collectorStatus: "UNKNOWN", failedAssertionKinds: [], blockedHosts: [],
+      mockConsumptions: { success: 0, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 1, mocked: 0 }, runReason: "unmocked-external-call" });
+    for (const probe of WEB_API_REQUIRED_PROBES.filter((item) => item.mock !== true)) expect(Object.keys(facts[probe.probeId]!)).not.toContain("mockConsumptions");
+  });
+
+  it("derives the facts of the mock probes from the retained bytes alone, so a record can claim nothing else", () => {
+    for (const probeId of ["web-mock-origin-v1", "web-unmocked-call-v1", "api-egress-denial-v1"]) {
+      const run = fixtureProbeRuns()[probeId]!;
+      expect(verifyWebApiProbeRecord({ challenge, probeId, observation: run.observation, evidence: run.evidence })).toEqual({ ok: true });
+      for (const lie of [{ mockConsumptions: { success: 2, refusal: 0, invalidData: 0 } }, { unmockedCalls: { sinkhole: 5, mocked: 0 } }, { collectorStatus: "FAILED" as const }]) {
+        expect(verifyWebApiProbeRecord({ challenge, probeId, observation: { ...run.observation, ...lie }, evidence: run.evidence })).toEqual({ ok: false, reason: `probe-evidence-mismatch:${probeId}` });
+      }
+    }
   });
 
   it("agrees with the observations the committed runs carry, and a record's claim must be exactly that", () => {
