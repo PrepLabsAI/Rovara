@@ -8,6 +8,7 @@ import {
   type InvokeAuthentication,
   type InvokeRejection,
 } from "./invoke-auth.js";
+import { logInvocationStarted, type WorkerInvocationLog, type WorkerLogSink } from "./worker-log.js";
 
 const MAX_INVOCATION_BYTES = 1_048_576;
 
@@ -44,6 +45,8 @@ export interface WorkerServerCallbacks {
   onTerminal?: (result: WorkerTerminalResult, invocation: WorkerInvocation) => Promise<void>;
   /** Injectable wait between terminal callback retries; tests pass one that does not wait. */
   retrySleep?: (ms: number) => Promise<void>;
+  /** Where the structured per-invocation lines go (worker-log.ts). Absent: no lines, as in tests that do not look. */
+  log?: WorkerLogSink;
 }
 
 export interface WorkerServerState {
@@ -74,19 +77,25 @@ export function createWorkerServerState(
   };
 }
 
+/** What /ping lists: the features this build implements, less those the executor withholds right now (and why). */
+export function advertisedInvocationFeatures(state: WorkerServerState): { features: string[]; withheld: Readonly<Record<string, unknown>> } {
+  let withheld: Readonly<Record<string, unknown>> = {};
+  try { withheld = state.executor.withheldInvocationFeatures?.() ?? {}; } catch {
+    withheld = Object.fromEntries((state.executor.withholdableInvocationFeatures ?? []).map((feature) => [feature, { status: "unavailable", reason: "availability-check-failed" }]));
+  }
+  return { features: state.invocationFeatures.filter((feature) => !Object.hasOwn(withheld, feature)), withheld };
+}
+
 export async function handleWorkerRequest(request: Request, state: WorkerServerState): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/ping") {
-    let withheld: Readonly<Record<string, unknown>> = {};
-    try { withheld = state.executor.withheldInvocationFeatures?.() ?? {}; } catch {
-      withheld = Object.fromEntries((state.executor.withholdableInvocationFeatures ?? []).map((feature) => [feature, { status: "unavailable", reason: "availability-check-failed" }]));
-    }
+    const { features, withheld } = advertisedInvocationFeatures(state);
     const diagnostics = { ...state.invocationFeatureDiagnostics, ...withheld };
     return response(200, {
       status: state.activeOperations.size === 0 ? "Healthy" : "HealthyBusy",
       activeOperations: state.activeOperations.size,
       // Spec 053: the optional invocation fields this build parses and can use now; the dispatcher sends one only when listed.
-      [WORKER_PING_FEATURES_FIELD]: state.invocationFeatures.filter((feature) => !Object.hasOwn(withheld, feature)),
+      [WORKER_PING_FEATURES_FIELD]: features,
       ...(Object.keys(diagnostics).length === 0 ? {} : { invocationFeatureDiagnostics: diagnostics }),
     });
   }
@@ -165,6 +174,7 @@ export function startWorkerServer(
 
 async function executeInBackground(invocation: WorkerInvocation, state: WorkerServerState): Promise<void> {
   let terminal: WorkerTerminalResult;
+  const log: WorkerInvocationLog | undefined = state.callbacks.log === undefined ? undefined : logInvocationStarted(state.callbacks.log, invocation);
   try {
     await state.journal.transition(invocation.operationId, "RUNNING");
     const result = await state.executor.execute(invocation);
@@ -174,14 +184,17 @@ async function executeInBackground(invocation: WorkerInvocation, state: WorkerSe
       status: "SUCCEEDED",
       ...(result === undefined ? {} : { result }),
     };
+    log?.finished("succeeded");
   } catch (error) {
     if (error instanceof WorkerOperationCancelledError) {
       await state.journal.transition(invocation.operationId, "CANCELLED", error.message);
+      log?.finished("cancelled");
       terminal = { operationId: invocation.operationId, status: "CANCELLED", error: error.message, ...checksResult(error) };
     } else {
       // Redacted before the journal stores it on disk or the terminal callback sends it: an error
       // can carry a command's or Git's output (#170).
       const message = redactText(error instanceof Error ? error.message : "worker execution failed");
+      log?.failed(error);
       await state.journal.transition(
         invocation.operationId,
         "FAILED",

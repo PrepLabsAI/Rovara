@@ -9,7 +9,8 @@ import { publishWorkspace } from "./publish.js";
 import { maintainPullRequest } from "./maintain-pull-request.js";
 import { WorkerCancellationController } from "./cancel.js";
 import { inspectWorkspaceForClose } from "./close-workspace.js";
-import { createWorkerServerState, startWorkerServer } from "./server.js";
+import { advertisedInvocationFeatures, createWorkerServerState, startWorkerServer } from "./server.js";
+import { consoleWorkerLog, logWorkerStarted } from "./worker-log.js";
 import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
 import { resolveTaskSessionModel } from "./task-model.js";
 import { chatGptTokenSource } from "./chatgpt-token.js";
@@ -124,6 +125,7 @@ const state = createWorkerServerState(
     },
   },
   {
+    log: consoleWorkerLog,
     async onTerminal(result, invocation) {
       if (invocation.kind === "project-setup-smoke") {
         const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
@@ -140,6 +142,12 @@ const state = createWorkerServerState(
   invokeAuthentication,
 );
 
+// Always, whatever the runtime state: without it a quiet worker's CloudWatch stream is empty and looks like a broken pipeline.
+logWorkerStarted(consoleWorkerLog, {
+  env: process.env,
+  containedRuntime: containedRuntimeReadiness,
+  invocationFeatures: advertisedInvocationFeatures(state).features,
+});
 startWorkerServer(state, { port });
 
 function requiredEnvironment(name: string): string {
