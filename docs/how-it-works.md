@@ -46,7 +46,7 @@ turn records retain those categories and are counted in full. Worker usage index
 before the #220 fix retain their stored uncached-input count: the cache breakdown was discarded,
 so historical worker totals can still undercount. No backfill or token estimate from cost is made.
 
-Both roles currently use `@earendil-works/pi-coding-agent` 1.0.0. GitHub Spec Kit supplies the
+Both roles currently use `@earendil-works/pi-coding-agent` 1.3.0. GitHub Spec Kit supplies the
 specification workflow and demo repository; it is not the coding-agent runtime.
 
 A plan, design or requirements document waiting for its owner can also be decided on the AgentX task

@@ -11,7 +11,7 @@ import type { Context } from "@earendil-works/pi-ai";
 
 const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/openrouter-AbCdEf";
 const secret = "sk-or-test-never-persist-this";
-const selected = { provider: "openrouter", modelId: "anthropic/claude-sonnet-4" };
+const selected = { provider: "openrouter", modelId: "anthropic/claude-sonnet-4.5" };
 const environment = { AGENTX_OPENROUTER_SECRET_ARN: secretArn, AGENTX_OPENROUTER_PROVIDERS: "anthropic" };
 const context: Context = { messages: [{ role: "user", content: "Read a file", timestamp: 0 }], tools: [{ name: "read_file", description: "Read a file", parameters: Type.Object({ path: Type.String() }) }] };
 function response(chunks: unknown[]) {

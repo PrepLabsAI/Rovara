@@ -103,7 +103,7 @@ Add approved pairs to the project's `approvedModels`, as for any provider:
 
 `@agentx use Opus 5 (Anthropic)` switches the project's coding model, and the next turn calls Anthropic
 directly. SWE-bench and SEC-bench runs take the same labels (`… model Opus 5 (Anthropic)`). A model must be
-in the Pi catalog that Rovara pins (Pi 1.0.0 includes `claude-opus-5-5`); a model newer than that
+in the Pi catalog that Rovara pins (Pi 1.3.0 includes `claude-opus-5-5`); a model newer than that
 catalog needs a Rovara release with a newer Pi. An unknown model is refused when it is first used, with "not in the
 installed Pi catalog".
 

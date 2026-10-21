@@ -55,7 +55,7 @@ describe("init prerequisites", () => {
   it("checks OpenRouter independently and never invokes Bedrock for OpenRouter roles", async () => {
     const openRouter = vi.fn(async () => {});
     const checks = passingChecks({ openRouter });
-    const model = "anthropic/claude-sonnet-4";
+    const model = "anthropic/claude-sonnet-4.5";
     await run(sampleAnswers({ models: { orchestrator: model, classifier: model, worker: model,
       providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" },
       openRouter: { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf" },
