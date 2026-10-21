@@ -21,7 +21,7 @@ value; without either, `--yes` refuses before creating anything:
 
 ```sh
 --model-provider openrouter \
---orchestrator-model anthropic/claude-sonnet-4 --classifier-model anthropic/claude-sonnet-4 --worker-model anthropic/claude-sonnet-4 \
+--orchestrator-model anthropic/claude-sonnet-4.5 --classifier-model anthropic/claude-sonnet-4.5 --worker-model anthropic/claude-sonnet-4.5 \
 --openrouter-key-file ./openrouter-key.txt \
 --openrouter-providers anthropic
 ```
@@ -41,9 +41,9 @@ Secrets Manager encryption key. Customer-managed encryption keys require an addi
 administrator-managed `kms:Decrypt` grant and key policy; Rovara does not add that grant.
 
 ```sh
---orchestrator-provider openrouter --orchestrator-model anthropic/claude-sonnet-4 \
---classifier-provider openrouter --classifier-model anthropic/claude-sonnet-4 \
---worker-provider openrouter --worker-model anthropic/claude-sonnet-4 \
+--orchestrator-provider openrouter --orchestrator-model anthropic/claude-sonnet-4.5 \
+--classifier-provider openrouter --classifier-model anthropic/claude-sonnet-4.5 \
+--worker-provider openrouter --worker-model anthropic/claude-sonnet-4.5 \
 --openrouter-secret-arn arn:aws:secretsmanager:us-east-1:123456789012:secret:my-openrouter-key-AbCdEf \
 --openrouter-providers anthropic
 ```
@@ -56,9 +56,9 @@ secret, so it takes `--openrouter-secret-arn` (a secret you made yourself), not 
 ```json
 {
   "models": {
-    "orchestrator": "anthropic/claude-sonnet-4",
+    "orchestrator": "anthropic/claude-sonnet-4.5",
     "classifier": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "worker": "anthropic/claude-sonnet-4",
+    "worker": "anthropic/claude-sonnet-4.5",
     "providers": {
       "orchestrator": "openrouter",
       "classifier": "amazon-bedrock",
@@ -123,7 +123,7 @@ Add approved pairs to the project's existing `approvedModels`, for example:
 ```json
 [
   { "provider": "amazon-bedrock", "modelId": "us.anthropic.claude-sonnet-4-6", "label": "Bedrock Sonnet" },
-  { "provider": "openrouter", "modelId": "anthropic/claude-sonnet-4", "label": "OpenRouter Sonnet" }
+  { "provider": "openrouter", "modelId": "anthropic/claude-sonnet-4.5", "label": "OpenRouter Sonnet" }
 ]
 ```
 

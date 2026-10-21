@@ -389,6 +389,9 @@ interface MembershipRecord {
   projectName: string;
   role: "developer" | "administrator";
   grantId: string;
+  /** Set when an administrator granted the access (the other grant paths record it too). */
+  grantedBy?: { issuer: string; subject: string };
+  grantedAt?: string;
 }
 
 interface ProjectModelSelectionRecord {
@@ -2336,12 +2339,69 @@ async function prepareWorkspace(
     throw agentXError("WORKSPACE_BUSY", `workspace cannot be prepared while ${existing.status}`);
   }
 
-  const preparation = await newWorkspacePreparation(dependencies, identity, project, targetOwnerKey, requestId);
-  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-    ...preparation.items,
-    { Put: { TableName: dependencies.tableName, Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#ADMIN`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId: preparation.operationId, workspaceId: preparation.workspace.id }, ConditionExpression: "attribute_not_exists(pk)" } },
-  ] }));
-  return { operationId: preparation.operationId, workspace: publicWorkspace(preparation.workspace), alreadyReady: false };
+  // The target's membership is created here only when absent, recording who granted it. An existing row is checked, never rewritten: when it changed since
+  // it was read, the transaction is refused and decided again from the row as it now is.
+  for (let attempt = 0; attempt < MEMBERSHIP_PREPARATION_ATTEMPTS; attempt += 1) {
+    const preparation = await newWorkspacePreparation(dependencies, identity, project, targetOwnerKey, requestId, { grantedBy: { issuer: identity.issuer, subject: identity.subject } });
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        ...preparation.items,
+        { Put: { TableName: dependencies.tableName, Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#ADMIN`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId: preparation.operationId, workspaceId: preparation.workspace.id }, ConditionExpression: "attribute_not_exists(pk)" } },
+      ] }));
+    } catch (error) {
+      if (!isConditional(error) || !await membershipMovedSince(dependencies, targetOwnerKey, project.definition.name, preparation.membership)) throw error;
+      continue;
+    }
+    return { operationId: preparation.operationId, workspace: publicWorkspace(preparation.workspace), alreadyReady: false };
+  }
+  throw agentXError("WORKSPACE_BUSY", "the project membership kept changing while the workspace was prepared; try again with the same requestId");
+}
+
+/** Attempts to create a workspace around a project membership that another request keeps changing; the registration retry style. */
+const MEMBERSHIP_PREPARATION_ATTEMPTS = 3;
+
+/** True when the membership row is no longer the one a transaction was built from: gone, created, or another role or grantId. */
+async function membershipMovedSince(dependencies: AwsBrokerDependencies, ownerKey: string, projectName: string, observed: MembershipRecord | undefined): Promise<boolean> {
+  const current = await getMembership(dependencies, ownerKey, projectName);
+  return current?.role !== observed?.role || current?.grantId !== observed?.grantId;
+}
+
+/**
+ * The transaction item for the membership of a workspace's owner, decided from the row as it was read. An absent row is created as a
+ * developer, only if still absent. An existing row keeps its role and grantId: the item only requires it to be as it was read (a legacy row with no
+ * grantId also gains one).
+ */
+function membershipPreparationItem(
+  dependencies: AwsBrokerDependencies,
+  ownerKey: string,
+  projectName: string,
+  observed: MembershipRecord | undefined,
+  grantedBy?: { issuer: string; subject: string },
+): TransactItems[number] {
+  if (observed === undefined) {
+    const created: MembershipRecord = { ...membershipRecord(ownerKey, projectName, "developer"), ...(grantedBy === undefined ? {} : { grantedBy, grantedAt: new Date().toISOString() }) };
+    return { Put: { TableName: dependencies.tableName, Item: created, ConditionExpression: "attribute_not_exists(pk)" } };
+  }
+  const key = { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}` };
+  // A row from before grants were versioned has no grantId. It gets one here, in the same transaction, and keeps everything else it has;
+  // the condition lets it happen only to the row that was read, and never replaces a grantId that exists.
+  if (typeof observed.grantId !== "string") {
+    return { Update: {
+      TableName: dependencies.tableName,
+      Key: key,
+      UpdateExpression: "SET grantId = :grantId",
+      ConditionExpression: "#role = :role AND attribute_not_exists(grantId)",
+      ExpressionAttributeNames: { "#role": "role" },
+      ExpressionAttributeValues: { ":role": observed.role, ":grantId": randomUUID() },
+    } };
+  }
+  return { ConditionCheck: {
+    TableName: dependencies.tableName,
+    Key: key,
+    ConditionExpression: "#role = :role AND grantId = :grantId",
+    ExpressionAttributeNames: { "#role": "role" },
+    ExpressionAttributeValues: { ":role": observed.role, ":grantId": observed.grantId },
+  } };
 }
 
 async function newWorkspacePreparation(
@@ -2350,7 +2410,8 @@ async function newWorkspacePreparation(
   project: RegisteredProjectRecord,
   targetOwnerKey: string,
   requestId: string,
-): Promise<{ workspace: WorkspaceInstance; operationId: string; items: TransactItems }> {
+  options: { grantedBy?: { issuer: string; subject: string } } = {},
+): Promise<{ workspace: WorkspaceInstance; operationId: string; items: TransactItems; membership: MembershipRecord | undefined }> {
   const projectName = project.definition.name;
   const projectRevision = project.definition.revision;
   const now = new Date().toISOString();
@@ -2402,20 +2463,16 @@ async function newWorkspacePreparation(
   };
   const outbox = outboxRecord(workspace, invocation, project.runtimeBinding);
   const existingMembership = await getMembership(dependencies, targetOwnerKey, projectName);
-  const membership = membershipRecord(
-    targetOwnerKey,
-    projectName,
-    existingMembership?.role ?? "developer",
-  );
   return {
     workspace,
     operationId,
+    membership: existingMembership,
     items: [
       { Put: { TableName: dependencies.tableName, Item: workspaceItem(workspace), ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: { pk: `OWNER#${targetOwnerKey}`, sk: `PROJECT#${projectName}`, entityType: "DEFAULT_WORKSPACE", workspaceId }, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
-      { Put: { TableName: dependencies.tableName, Item: membership } },
+      membershipPreparationItem(dependencies, targetOwnerKey, projectName, existingMembership, options.grantedBy),
     ],
   };
 }
@@ -3074,27 +3131,35 @@ async function ensureThreadWorkspace(
   }
   const effective = await effectiveSlackLimits(dependencies, limits);
   await healSlackMemberSlots(dependencies, slack.requester, effective);
-  const preparation = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
   const { teamId, userId } = slack.requester;
-  try {
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      ...preparation.items,
-      { Put: {
-        TableName: dependencies.tableName,
-        Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId: preparation.operationId, workspaceId: preparation.workspace.id },
-        ConditionExpression: "attribute_not_exists(pk)",
-      } },
-      // #213: the starter is recorded with the charge, so a failed preparation can always find it.
-      ...threadChargeItems(dependencies, identity, effective, preparation.workspace.id),
-    ] }));
-  } catch (error) {
-    if (!isConditional(error)) throw error;
-    const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
-    if (concurrent) {
-      return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision, input.includeOpenTaskCount === true);
+  let preparation: Awaited<ReturnType<typeof newWorkspacePreparation>> | undefined;
+  for (let attempt = 0; attempt < MEMBERSHIP_PREPARATION_ATTEMPTS; attempt += 1) {
+    const attempted = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        ...attempted.items,
+        { Put: {
+          TableName: dependencies.tableName,
+          Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId: attempted.operationId, workspaceId: attempted.workspace.id },
+          ConditionExpression: "attribute_not_exists(pk)",
+        } },
+        // #213: the starter is recorded with the charge, so a failed preparation can always find it.
+        ...threadChargeItems(dependencies, identity, effective, attempted.workspace.id),
+      ] }));
+      preparation = attempted;
+      break;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      // The membership changed since it was read: decide again from the row as it now is, never over it.
+      if (await membershipMovedSince(dependencies, identity.ownerKey, slack.binding.projectName, attempted.membership)) continue;
+      const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
+      if (concurrent) {
+        return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision, input.includeOpenTaskCount === true);
+      }
+      return threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective, input.includeOpenTaskCount === true);
     }
-    return threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective, input.includeOpenTaskCount === true);
   }
+  if (preparation === undefined) throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
   await recordThreadRequester(dependencies, identity, preparation.workspace.id, true);
   return {
     outcome: "WORKSPACE",
@@ -3124,38 +3189,47 @@ async function createUnpreparedThreadWorkspace(
   includeSettingsRevision: boolean,
 ): Promise<SlackThreadWorkspaceResult> {
   const projectName = project.definition.name;
-  const workspace = unpreparedWorkspace(project, identity.ownerKey);
-  const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName);
-  try {
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { Put: { TableName: dependencies.tableName, Item: workspaceItem(workspace), ConditionExpression: "attribute_not_exists(pk)" } },
-      { Put: {
-        TableName: dependencies.tableName,
-        Item: { pk: `OWNER#${identity.ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "DEFAULT_WORKSPACE", workspaceId: workspace.id },
-        ConditionExpression: "attribute_not_exists(pk)",
-      } },
-      { Put: { TableName: dependencies.tableName, Item: membershipRecord(identity.ownerKey, projectName, existingMembership?.role ?? "developer") } },
-      { Put: {
-        TableName: dependencies.tableName,
-        Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", workspaceId: workspace.id },
-        ConditionExpression: "attribute_not_exists(pk)",
-      } },
-      // Capture creation provenance atomically, before a later participant can touch the thread.
-      { Update: {
-        TableName: dependencies.tableName,
-        Key: slackThreadKey(identity.ownerKey),
-        UpdateExpression: "SET #creator = if_not_exists(#creator, :creator)",
-        ExpressionAttributeNames: { "#creator": "creator" },
-        ExpressionAttributeValues: { ":creator": { userId: identity.slack!.requester.userId, ...(identity.slack!.requesterName === undefined ? {} : { name: identity.slack!.requesterName }) } },
-      } },
-    ] }));
-  } catch (error) {
-    if (!isConditional(error)) throw error;
-    // Another first message in this thread created the record.
-    const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
-    if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
-    throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
+  let workspace: WorkspaceInstance | undefined;
+  for (let attempt = 0; attempt < MEMBERSHIP_PREPARATION_ATTEMPTS; attempt += 1) {
+    const attempted = unpreparedWorkspace(project, identity.ownerKey);
+    const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName);
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Put: { TableName: dependencies.tableName, Item: workspaceItem(attempted), ConditionExpression: "attribute_not_exists(pk)" } },
+        { Put: {
+          TableName: dependencies.tableName,
+          Item: { pk: `OWNER#${identity.ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "DEFAULT_WORKSPACE", workspaceId: attempted.id },
+          ConditionExpression: "attribute_not_exists(pk)",
+        } },
+        // Created only when absent; an existing row is required to be as it was read, never rewritten.
+        membershipPreparationItem(dependencies, identity.ownerKey, projectName, existingMembership),
+        { Put: {
+          TableName: dependencies.tableName,
+          Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", workspaceId: attempted.id },
+          ConditionExpression: "attribute_not_exists(pk)",
+        } },
+        // Capture creation provenance atomically, before a later participant can touch the thread.
+        { Update: {
+          TableName: dependencies.tableName,
+          Key: slackThreadKey(identity.ownerKey),
+          UpdateExpression: "SET #creator = if_not_exists(#creator, :creator)",
+          ExpressionAttributeNames: { "#creator": "creator" },
+          ExpressionAttributeValues: { ":creator": { userId: identity.slack!.requester.userId, ...(identity.slack!.requesterName === undefined ? {} : { name: identity.slack!.requesterName }) } },
+        } },
+      ] }));
+      workspace = attempted;
+      break;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      // The membership changed since it was read: decide again from the row as it now is, never over it.
+      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, existingMembership)) continue;
+      // Another first message in this thread created the record.
+      const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
+      if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
+      throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
+    }
   }
+  if (workspace === undefined) throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
   // The starter is recorded when compute is prepared, because that member is the one charged.
   await recordThreadRequester(dependencies, identity, workspace.id, false);
   // Each optional field is its own spread, so a later opt-in (phase 14c's action policy) adds one
