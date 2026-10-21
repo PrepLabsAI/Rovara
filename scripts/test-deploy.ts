@@ -4,9 +4,11 @@
 //     [--only control-plane-code,broker,dispatcher,worker-image,executor-image,qualification-transport]
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --check
 //
-// `--check` is read-only and exits 0 only when every check passes: control-plane Lambdas on the head build, no IAM grant head
-// needs missing from a deployed role, READY catalog rows not about to expire, and a qualified runner and worker that match this
-// build. `--apply` of Lambda code runs the IAM part first and refuses on a missing grant; it never applies IAM itself.
+// `--check [--json]` is read-only and exits 0 only when every check passes (1: findings, 2: the check could not run). It looks for
+// control-plane Lambdas not on head's code (by provenance: the deployed S3Key names the commit, and git says whether anything the
+// bundle comes from changed since), IAM grants and environment variables head needs that the deployed stack lacks, READY catalog rows
+// about to expire, and a qualified runner and worker that match this build. `--apply` of Lambda code runs the IAM and environment parts
+// first and refuses on a gap (stale code is expected before a deploy); it never applies IAM or stack changes itself.
 // Without --apply it prints the plan and exits 0 (it only reads: DescribeStacks for the current
 // parameters). With --apply it runs the plan. The plan reproduces the P0 TEST procedure: every
 // CloudFormation step is a change set that changes only the named Lambda code, image parameter or
@@ -54,12 +56,16 @@ import {
 } from "./release-common.js";
 import { deterministicZip } from "./release/zip.js";
 import {
+  evaluateEnvironmentDrift,
   evaluateIamDrift,
   evaluateTestDeployCheck,
   formatFindings,
   lambdaRoleIds,
+  parseDeployedCodeKey,
   parseRunnerStatus,
+  sourcePathsFor,
   tier3Request,
+  type CheckResult,
   type CatalogRowFact,
   type Finding,
   type RunnerFacts,
@@ -680,6 +686,8 @@ export interface TestDeployArgs {
   apply: boolean;
   /** Read-only: report stale code, IAM drift, catalog and runner problems, and change nothing. */
   check: boolean;
+  /** With --check: print the report as one JSON line at the end of stdout. */
+  json: boolean;
   only: DeployUnit[];
 }
 
@@ -710,20 +718,21 @@ export function parseOptions(argv: readonly string[], spec: { values: readonly s
 }
 
 export function parseTestDeployArgs(argv: readonly string[]): TestDeployArgs {
-  const { values, flags } = parseOptions(argv, { values: ["--env", "--profile", "--region", "--only"], flags: ["--apply", "--check"] });
+  const { values, flags } = parseOptions(argv, { values: ["--env", "--profile", "--region", "--only"], flags: ["--apply", "--check", "--json"] });
   const env = values.get("--env");
   if (env === undefined) throw new Error("--env is required");
   const profile = values.get("--profile");
   if (profile === undefined) throw new Error("--profile is required");
   const onlyValue = values.get("--only");
   if (flags.has("--check") && flags.has("--apply")) throw new Error("--check is read-only; it cannot be combined with --apply");
+  if (flags.has("--json") && !flags.has("--check")) throw new Error("--json only goes with --check");
   if (flags.has("--check") && onlyValue !== undefined) throw new Error("--check checks every unit; it does not take --only");
   const only = onlyValue === undefined ? [...DEFAULT_DEPLOY_UNITS] : onlyValue.split(",").map((name) => {
     const unit = DEPLOY_UNITS.find((candidate) => candidate === name.trim());
     if (unit === undefined) throw new Error(`unknown deploy unit ${name}; expected one of ${DEPLOY_UNITS.join(", ")}`);
     return unit;
   });
-  return { env, profile, region: values.get("--region") ?? DEFAULT_REGION, apply: flags.has("--apply"), check: flags.has("--check"), only };
+  return { env, profile, region: values.get("--region") ?? DEFAULT_REGION, apply: flags.has("--apply"), check: flags.has("--check"), json: flags.has("--json"), only };
 }
 
 function describeRef(ref: StepRef): string {
@@ -978,10 +987,10 @@ function assertRepositoryExists(context: ApplyContext, repository: string): void
 }
 
 /** Bundles one control-plane Lambda the way the release does and writes its zip; the zip's sha256 is what Lambda reports as CodeSha256 (base64). */
-async function buildLambdaZip(context: ApplyContext, step: Extract<DeployStep, { kind: "build-lambda-zip" }>): Promise<{ sha256Hex: string; sha256Base64: string }> {
+async function buildLambdaZip(context: ApplyContext, step: Extract<DeployStep, { kind: "build-lambda-zip" }>): Promise<{ sha256Hex: string; sha256Base64: string; inputs: string[] }> {
   runNpmBuild(context);
   const result = await bundle({
-    entryPoints: [step.entry], outfile: "index.js", bundle: true, platform: "node", target: "node22", minify: true, sourcemap: true, external: [], write: false,
+    entryPoints: [step.entry], outfile: "index.js", bundle: true, platform: "node", target: "node22", minify: true, sourcemap: true, external: [], write: false, metafile: true,
   });
   const file = (name: string) => {
     const output = result.outputFiles.find((candidate) => candidate.path.endsWith(`/${name}`));
@@ -996,14 +1005,15 @@ async function buildLambdaZip(context: ApplyContext, step: Extract<DeployStep, {
   ]);
   mkdirSync(join(step.zipPath, ".."), { recursive: true });
   writeFileSync(step.zipPath, zip);
-  return { sha256Hex: sha256(zip).digest("hex"), sha256Base64: sha256(zip).digest("base64") };
+  return { sha256Hex: sha256(zip).digest("hex"), sha256Base64: sha256(zip).digest("base64"), inputs: Object.keys(result.metafile.inputs) };
 }
 
 async function applyStep(context: ApplyContext, step: DeployStep): Promise<void> {
   console.log(`\n== ${step.id}`);
   switch (step.kind) {
     case "build-lambda-zip": {
-      const built = await buildLambdaZip(context, step);
+      const { inputs: _inputs, ...built } = await buildLambdaZip(context, step);
+      void _inputs;
       recordOutput(context, step.id, { zipPath: step.zipPath, ...built });
       console.log(`${step.zipPath} sha256 ${built.sha256Hex}`);
       return;
@@ -1079,8 +1089,11 @@ export interface CheckReaders {
   env: string;
   /** The control-plane template head synthesizes. */
   headTemplate: () => CfnTemplate;
-  /** The head build's zip sha256 (base64) by logical ID, for every control-plane Lambda. */
-  builtZipShas: () => Promise<Record<string, string>>;
+  /** The head build of every control-plane Lambda: its zip sha256 (base64) and the repo paths the bundle comes from, by logical ID. */
+  builtZips: () => Promise<{ shas: Record<string, string>; sources: Record<string, string[]> }>;
+  headRevision: string;
+  /** Whether any of `paths` differs between `revision` and head; undefined when git cannot tell. */
+  changedSince: (revision: string, paths: readonly string[]) => boolean | undefined;
 }
 
 type CheckFacts = Omit<Parameters<typeof evaluateTestDeployCheck>[0], "now">;
@@ -1168,12 +1181,25 @@ export async function gatherCheckFacts(readers: CheckReaders): Promise<{ facts: 
   const deployedExecutorImage = stackParameter(describeStack(readers.runner, readers.region, stacks.runtime), EXECUTOR_IMAGE_PARAMETER);
   const web = catalog.find((row) => row.sk.endsWith("#web"));
   const runner = readRunnerFacts(readers, { bucket: stackOutput(controlPlane, "ArtifactBucketName"), foundationStack: environmentStackName(readers.env, "foundation"), endpoint: web?.endpoint, deployedExecutorImage });
+  const lambdaCodeShas = deployedCodeShas(readers, stacks["control-plane"]);
+  const built = await readers.builtZips();
+  // Only a Lambda whose zip differs from head's, and whose key proves where its code came from, needs a look at what changed since.
+  const inputsChanged: Record<string, boolean | undefined> = {};
+  for (const [logicalId, sha] of Object.entries(built.shas)) {
+    const deployedSha = lambdaCodeShas[logicalId];
+    if (deployedSha === undefined || deployedSha === sha) continue;
+    const key = (deployedTemplate.Resources?.[logicalId]?.Properties?.Code as { S3Key?: unknown } | undefined)?.S3Key;
+    const provenance = parseDeployedCodeKey(typeof key === "string" ? key : undefined, logicalId, deployedSha);
+    if ("revision" in provenance) inputsChanged[logicalId] = readers.changedSince(provenance.revision, built.sources[logicalId] ?? []);
+  }
   return {
     facts: {
       headTemplate: readers.headTemplate(),
       deployedTemplate,
-      lambdaCodeShas: deployedCodeShas(readers, stacks["control-plane"]),
-      builtZipShas: await readers.builtZipShas(),
+      lambdaCodeShas,
+      builtZipShas: built.shas,
+      headRevision: readers.headRevision,
+      inputsChanged,
       catalogRows: catalog.map(({ sk, state, expiresAt }) => ({ sk, state, expiresAt })),
       runnerFacts: runner.facts,
     },
@@ -1182,26 +1208,47 @@ export async function gatherCheckFacts(readers: CheckReaders): Promise<{ facts: 
 }
 
 /**
- * Refuses a deploy of Lambda code while a role one of its Lambdas runs as lacks a grant head needs: the new code would run and fail on
- * AccessDenied, as SessionsSteps did in the M1.2 demo. The message carries the statements for a Tier 3 request. IAM is never applied here.
+ * Refuses a deploy of Lambda code that cannot work on the deployed function: a role one of its Lambdas runs as lacks a grant head needs, or the
+ * function lacks an environment variable head sets. The new code would run and fail (AccessDenied as SessionsSteps did in the M1.2 demo, or a
+ * missing setting), and a code-only change set can fix neither. The message carries the statements for a Tier 3 request. IAM is never applied here.
  */
 export function assertCheckAllowsApply(findings: readonly Finding[], units: readonly DeployUnit[], headTemplate: CfnTemplate): void {
   const roles = lambdaRoleIds(headTemplate);
-  const deploying = new Set(lambdaUnitsFor(units).flatMap((unit) => roles[LAMBDAS[unit].logicalId] ?? []));
-  const blocking = findings.filter((finding) => finding.kind === "iam-missing-grant" && finding.roleLogicalId !== undefined && deploying.has(finding.roleLogicalId));
-  if (blocking.length === 0) return;
-  const named = [...new Set(blocking.map((finding) => `${finding.kind} ${finding.label} (needs Tier 3 approval)`))];
-  throw new Error(`deploy check failed: ${named.join("; ")}\n\nTier 3 request, the exact statements to add (this script never applies IAM):\n${tier3Request(blocking)}`);
+  const moving = lambdaUnitsFor(units).map((unit) => LAMBDAS[unit].logicalId);
+  const deployingRoles = new Set(moving.flatMap((logicalId) => roles[logicalId] ?? []));
+  const grants = findings.filter((finding) => finding.kind === "iam-missing-grant" && finding.roleLogicalId !== undefined && deployingRoles.has(finding.roleLogicalId));
+  const environments = findings.filter((finding) => finding.kind === "lambda-env-missing" && moving.includes(finding.subject));
+  if (grants.length + environments.length === 0) return;
+  const named = [...new Set([
+    ...grants.map((finding) => `${finding.kind} ${finding.label} (needs Tier 3 approval)`),
+    ...environments.map((finding) => `${finding.kind} ${finding.label} (needs a control-plane stack update: ${(finding.missing ?? []).join(", ")})`),
+  ])];
+  const details = [
+    ...(grants.length === 0 ? [] : [`Tier 3 request, the exact statements to add (this script never applies IAM):\n${tier3Request(grants)}`]),
+    ...environments.map((finding) => finding.message),
+  ];
+  throw new Error(`deploy check failed: ${named.join("; ")}\n\n${details.join("\n\n")}`);
 }
 
-function lambdaZipShas(context: ApplyContext): () => Promise<Record<string, string>> {
+function builtLambdaZips(context: ApplyContext): CheckReaders["builtZips"] {
   return async () => {
     const shas: Record<string, string> = {};
+    const sources: Record<string, string[]> = {};
     for (const unit of LAMBDA_UNITS) {
-      const built = await buildLambdaZip(context, buildStepFor(unit, join(context.outputDir, `${unit}-${context.revision}.zip`)));
-      shas[LAMBDAS[unit].logicalId] = built.sha256Base64;
+      const step = buildStepFor(unit, join(context.outputDir, `${unit}-${context.revision}.zip`));
+      const built = await buildLambdaZip(context, step);
+      shas[step.logicalId] = built.sha256Base64;
+      sources[step.logicalId] = sourcePathsFor(built.inputs, (step.extraFiles ?? []).map((extra) => extra.from));
     }
-    return shas;
+    return { shas, sources };
+  };
+}
+
+/** `git diff --quiet <revision> HEAD -- <paths>`: 0 is unchanged, 1 changed, anything else (an unknown revision) is that git cannot tell. */
+function gitChangedSince(runner: Runner): CheckReaders["changedSince"] {
+  return (revision, paths) => {
+    const result = runner.capture("git", ["diff", "--quiet", revision, "HEAD", "--", "package-lock.json", ...paths], true);
+    return result.status === 0 ? false : result.status === 1 ? true : undefined;
   };
 }
 
@@ -1225,23 +1272,47 @@ function currentParameters(runner: Runner, region: string, stack: string): Recor
   return parameters;
 }
 
+/** The check found problems (as opposed to being unable to run): exit 1. */
+export class DeployCheckFindingsError extends Error {
+  constructor(readonly errors: number) {
+    super(`TEST deploy check failed: ${errors} problem(s) above`);
+  }
+}
+
+/** Exit 1 for findings, 2 when `--check` could not run (an unreadable stack, a git or build failure, a bad option), 1 for a failure of any other mode. */
+export function checkExitCode(argv: readonly string[], error: unknown): number {
+  if (error instanceof DeployCheckFindingsError) return 1;
+  return argv.includes("--check") ? 2 : 1;
+}
+
+/** The machine-readable report of a check. */
+export function checkReport(result: CheckResult, notes: readonly string[], context: { env: string; revision: string }) {
+  const errors = result.findings.filter((finding) => finding.severity === "error").length;
+  return { ok: result.ok, env: context.env, revision: context.revision, errors, warnings: result.findings.length - errors, findings: result.findings, notes: [...notes] };
+}
+
 /** `--check`: gathers the facts read-only, prints every finding, and fails when one is an error. */
 async function runCheck(args: TestDeployArgs, runner: Runner, options: ReleaseOptions, build: { revision: string; identityMode: IdentityMode; outputDir: string }): Promise<void> {
+  // With --json stdout ends in the report; everything else this script prints goes to stderr.
+  const say = args.json ? (text: string) => console.error(text) : (text: string) => console.log(text);
   if (runner.capture("git", ["status", "--porcelain"]).stdout.trim() !== "") throw new Error("the working tree is dirty; commit first so the check compares the deployed code with the head build");
-  console.log(`TEST deploy check for ${args.env} (${args.region}), revision ${build.revision}`);
+  say(`TEST deploy check for ${args.env} (${args.region}), revision ${build.revision}`);
   const context = checkContext(args, runner, options, build.revision, build.outputDir);
   const { facts, notes } = await gatherCheckFacts({
     runner, region: args.region, env: args.env,
     headTemplate: () => synthesizeHeadTemplate(context, build.identityMode),
-    builtZipShas: lambdaZipShas(context),
+    builtZips: builtLambdaZips(context),
+    headRevision: build.revision,
+    changedSince: gitChangedSince(runner),
   });
-  for (const note of notes) console.log(note);
+  for (const note of notes) say(note);
   const result = evaluateTestDeployCheck({ ...facts, now: new Date() });
-  console.log(`\n${formatFindings(result.findings)}`);
+  say(`\n${formatFindings(result.findings)}`);
   const request = tier3Request(result.findings);
-  if (request !== "") console.log(`\nTier 3 request, the exact statements to add (this script never applies IAM):\n${request}`);
-  if (!result.ok) throw new Error(`TEST deploy check failed: ${result.findings.filter((finding) => finding.severity === "error").length} problem(s) above`);
-  console.log("\nTEST deploy check passed.");
+  if (request !== "") say(`\nTier 3 request, the exact statements to add (this script never applies IAM):\n${request}`);
+  if (args.json) console.log(JSON.stringify(checkReport(result, notes, { env: args.env, revision: build.revision })));
+  if (!result.ok) throw new DeployCheckFindingsError(result.findings.filter((finding) => finding.severity === "error").length);
+  say("\nTEST deploy check passed.");
 }
 
 export async function main(argv: readonly string[]): Promise<void> {
@@ -1271,7 +1342,8 @@ export async function main(argv: readonly string[]): Promise<void> {
   // Before anything is pushed or changed: new Lambda code must not go onto a role that lacks a grant head needs.
   if (steps.some((step) => step.kind === "build-lambda-zip")) {
     const headTemplate = synthesizeHeadTemplate(context, identityMode);
-    const drift = evaluateIamDrift(headTemplate, deployedTemplateOf(runner, args.region, resolveTestStacks(args.env)["control-plane"]));
+    const deployedTemplate = deployedTemplateOf(runner, args.region, resolveTestStacks(args.env)["control-plane"]);
+    const drift = [...evaluateIamDrift(headTemplate, deployedTemplate), ...evaluateEnvironmentDrift(headTemplate, deployedTemplate)];
     console.log(`\n${formatFindings(drift)}`);
     assertCheckAllowsApply(drift, args.only, headTemplate);
   }
@@ -1282,6 +1354,6 @@ export async function main(argv: readonly string[]): Promise<void> {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv.slice(2)).catch((error: unknown) => {
     console.error(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 1;
+    process.exitCode = checkExitCode(process.argv.slice(2), error);
   });
 }

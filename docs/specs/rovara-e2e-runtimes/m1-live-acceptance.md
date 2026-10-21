@@ -20,12 +20,14 @@ M1.1 is accepted when the TEST worker has run the six web/API probes with the ex
 npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --check
 ```
 
-Read-only; it exits 0 only when nothing is wrong. It needs a clean working tree, because it builds every control-plane Lambda from head and compares each zip's sha256 with the deployed `CodeSha256`. It reports, as findings:
+Read-only. Exit 0: nothing is wrong. Exit 1: findings. Exit 2: the check could not run. `--json` ends stdout with the report as one JSON line. It needs a clean working tree. Run it before a demo (it must exit 0). Before a deploy it is expected to report `stale-lambda`, which is the reason to deploy; the real pre-deploy gate is the IAM and environment check that `--apply` of Lambda code runs first. Findings:
 
-- `stale-lambda`: a control-plane Lambda that is not on the head build (every one, not only the units being deployed).
-- `iam-missing-grant` (error) and `iam-extra-grant` (warning): an IAM grant the head template has and the deployed role lacks, or the reverse, compared per role after ignoring statement order and the asset-parameter and version hashes. An error prints the exact statements for a Tier 3 request. `--apply` of Lambda code runs this part first and refuses while a role one of its Lambdas runs as lacks a grant; the script never applies IAM.
+- `stale-lambda`: a control-plane Lambda that is not on head's code (every one, not only the units being deployed). Provenance first: the deployed `S3Key` must be a test-deploy artifact (`test-deploy/<revision>/<logicalId>-<sha256>.zip`) whose hash is the running `CodeSha256`, otherwise it is stale with unknown provenance. Then currency: current if head's zip is the same, or the artifact was built from head, or `git diff <revision> HEAD` touches nothing the bundle is built from (esbuild inputs, extra files, `package-lock.json`).
+- `iam-missing-grant` (error) and `iam-extra-grant` (warning): an IAM grant the head template has and the deployed role lacks, or the reverse, compared per role after ignoring statement order and the asset-parameter and version hashes. An error prints the exact statements for a Tier 3 request.
+- `lambda-env-missing`: an environment variable head's function sets that the deployed function lacks. A code-only change set cannot add it; it needs a control-plane stack update.
+- `--apply` of Lambda code refuses on an `iam-missing-grant` or `lambda-env-missing` for a Lambda it deploys. The script never applies IAM or stack changes.
 - `catalog-not-ready` and `catalog-expiring`: a `#web` or `#api` catalog row that is missing, not `READY`, or expires within 24 hours. Rows are read from the state table (`dynamodb:Query`), because the admin API has no catalog read route.
-- `runner-image-mismatch` and `worker-feature-missing`: the qualified runner's `status.json` (found by the web row's private IP, no SSH) names an executor image other than the deployed `ExecutorImageUri`, or the worker's `/ping` lacks a feature string this build needs. A runner qualified before the hook recorded these facts reports both as unknown: qualify it again.
+- `runner-image-mismatch` and `worker-feature-missing`: the qualified runner's `status.json` (found by the web row's private IP, no SSH) names an executor image other than the deployed `ExecutorImageUri`, or the worker's `/ping` lacks a feature string this build needs. A runner qualified before the hook recorded these facts reports both as unknown: qualify it again. The facts are a snapshot from qualification time.
 
 ### 1. Deploy the build
 

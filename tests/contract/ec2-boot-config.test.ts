@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,9 @@ import { SECRET_ARN_MAX_LENGTH } from "../../packages/contracts/src/model-provid
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const qualificationScript = /cat >\/usr\/local\/libexec\/agentx-e2e-qualification <<'QUALIFICATION'\n([\s\S]*?)\nQUALIFICATION/.exec(bootScript)?.[1] ?? "";
 const workerLauncher = /cat >\/usr\/local\/libexec\/agentx-worker-start <<'LAUNCHER'\n([\s\S]*?)\nLAUNCHER/.exec(bootScript)?.[1] ?? "";
+
+/** The worst-case size varies by a byte or two with the random workspace ID; the check keeps this much clear of the limit so it never flips on a rerun. */
+const HEADROOM_MARGIN_BYTES = 32;
 
 const config: Ec2WorkerBootConfig = {
   workspaceId: randomUUID(),
@@ -76,10 +79,17 @@ describe("EC2 worker user data", () => {
   });
 
   it("leaves real headroom under EC2's 16 KB user data limit with every value at its maximum (#223, #229)", () => {
-    // Random letters and digits barely compress, so this is the largest user data the schema admits.
+    // Letters and digits that barely compress, so this is the largest user data the schema admits. They come from a fixed hash stream, not
+    // from randomness: the size below must be the same on every run, so the margin it is checked against is a number and not a probability.
+    let counter = 0;
+    const stream = (length: number) => {
+      const bytes: number[] = [];
+      while (bytes.length < length) bytes.push(...createHash("sha256").update(`headroom-${counter++}`).digest());
+      return bytes.slice(0, length);
+    };
     const noise = (length: number) => {
       const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-      return [...randomBytes(length)].map((byte) => alphabet[byte % alphabet.length]).join("");
+      return stream(length).map((byte) => alphabet[byte % alphabet.length]).join("");
     };
     const lower = (length: number) => noise(length).toLowerCase();
     const secretPrefix = "arn:aws:secretsmanager:us-east-1:123456789012:secret:";
@@ -105,7 +115,7 @@ describe("EC2 worker user data", () => {
     // TEST qualification hook (about 1.5 KB compressed) and the executor image setting were added, then 2 KB until the container firewall
     // rules (about 330 bytes compressed) landed: this worst case sets every value at its maximum at once, which no real worker's
     // configuration does.
-    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 1_536);
+    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 1_536 - HEADROOM_MARGIN_BYTES);
   });
 
   it("measures the limit on the compressed user data, not the script (#229)", () => {
@@ -426,13 +436,22 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
   });
 
   it("keeps status.json well formed, and omits the features, when /ping answers with anything but a plain feature list", () => {
-    for (const pingBody of ['{"invocationFeatures":["a\\"b"]}', '{"invocationFeatures":"x"}', '{"invocationFeatures":[1]}', "not json", '{"invocationFeatures":["a b"]}']) {
+    for (const pingBody of ['{"invocationFeatures":["a\\"b"]}', '{"invocationFeatures":"x"}', '{"invocationFeatures":[1]}', "not json", '{"invocationFeatures":["a\\u0020b"]}']) {
       const { result, object } = runHook({ pingBody });
       expect(result.status, pingBody).toBe(0);
       const status = JSON.parse(object("status.json") ?? "{}") as Record<string, unknown>;
       expect(status, pingBody).toMatchObject({ state: "SUCCEEDED", executorImage });
       expect(status, pingBody).not.toHaveProperty("invocationFeatures");
     }
+  });
+
+  it("reads a pretty-printed /ping and records the first features field once", () => {
+    const pretty = '{\n  "status": "Healthy",\n  "invocationFeatures": [\n    "task.readiness",\n    "task.workflowChecks"\n  ]\n}';
+    const first = runHook({ pingBody: pretty });
+    expect(first.result.status, first.result.stderr).toBe(0);
+    expect(JSON.parse(first.object("status.json") ?? "{}")).toMatchObject({ state: "SUCCEEDED", invocationFeatures: ["task.readiness", "task.workflowChecks"] });
+    const twice = runHook({ pingBody: '{"invocationFeatures":["a.b"],"x":{"invocationFeatures":["c.d"]}}' });
+    expect(JSON.parse(twice.object("status.json") ?? "{}")).toMatchObject({ state: "SUCCEEDED", invocationFeatures: ["a.b"] });
   });
 
   it("is refused, touching nothing, for a malformed role ID, instance ID, profile, bucket, region or executor image", () => {

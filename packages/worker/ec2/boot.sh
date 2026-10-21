@@ -20,21 +20,18 @@ readonly WORKER_GID=1000
 readonly WORKER_ENV_FILE=/etc/agentx/worker.env
 readonly WORKER_UNIT=agentx-worker.service
 readonly WORKER_CONTAINER=agentx-worker
-# Docker's data root, on the workspace volume so that a project's devcontainer images, containers
-# and named volumes survive an idle stop (#121). The worker's walks skip it (DOCKER_DATA_DIRECTORY).
+# Docker's data root, on the workspace volume so devcontainer images, containers and volumes survive an idle stop (#121).
 readonly DOCKER_DATA_ROOT=$MOUNT_PATH/.docker
 readonly DOCKER_SOCKET=/var/run/docker.sock
 # The provisioner attaches the volume after the instance is running, so it may appear late.
 readonly DEVICE_WAIT_SECONDS=${AGENTX_DEVICE_WAIT_SECONDS:-120}
 # Where /sys and /dev/disk are; tests set it.
 readonly HOST_ROOT=${AGENTX_HOST_ROOT:-}
-# Network steps try 5 times, waiting 2, 4, 8 and 16 seconds (each plus up to half again as jitter,
-# at most 30 seconds before jitter): at most 45 seconds of waiting per step.
+# Network steps try 5 times, waiting 2, 4, 8, 16 seconds (plus up to half again as jitter): at most 45 seconds per step.
 readonly RETRY_ATTEMPTS=5
 readonly RETRY_BASE_SECONDS=2
 readonly RETRY_MAX_SECONDS=30
-# Every network try has a time limit, and no try runs or waits past this many seconds from the
-# start of the boot, so a failure is reported well inside the provisioner's 10 minute /ping window.
+# No network try runs or waits past this many seconds from boot start, so a failure is reported inside the provisioner's 10 minute /ping window.
 readonly BOOT_DEADLINE=$((SECONDS + ${AGENTX_BOOT_DEADLINE_SECONDS:-480}))
 # The worker's port, which the provisioner probes; a failed boot answers there instead.
 readonly WORKER_PORT=8080
@@ -229,8 +226,7 @@ prepare_contained_runtime_directories() {
   CONTAINED_RUNTIME_AVAILABLE_BOOT=true
 }
 
-# A failed try may leave stale mirror metadata behind (a DNS failure did, #211), so it is dropped
-# before the next try.
+# A failed try may leave stale mirror metadata (#211), so it is dropped before the next try.
 install_docker_package() {
   timeout "$(try_seconds 120)" dnf install -y docker && return 0
   dnf clean metadata >/dev/null 2>&1 || true
@@ -246,9 +242,8 @@ ensure_docker() {
   wall_off_containers
 }
 
-# Untrusted containers (build bridges rvb*, internal app/executor bridges rvi*) cannot reach IMDS, the host or private ranges; only
-# DNS to the VPC resolver stays open (Docker forwards it from the container's namespace). The oneshot unit re-applies the rules
-# after Docker rebuilds its chains, and CI runs this heredoc as is.
+# Untrusted containers (rvb*, rvi* bridges) cannot reach IMDS, the host or private ranges; only VPC resolver DNS stays open.
+# A oneshot unit re-applies the rules after Docker rebuilds its chains; CI runs this heredoc as is.
 readonly FIREWALL_UNIT=rovara-container-firewall.service
 wall_off_containers() {
   install -d -o root -g root -m 0755 /usr/local/libexec
@@ -317,8 +312,7 @@ pull_executor_image() {
   return 1
 }
 
-# Root-only, because the worker's environment is its configuration; none of it is secret today, but
-# the file should not become world-readable if that changes.
+# Root-only: none of the worker's environment is secret today, but it should not become world-readable.
 write_worker_environment() {
   local region=$1
   install -d -m 0700 "$(dirname "$WORKER_ENV_FILE")"
@@ -433,10 +427,8 @@ WantedBy=multi-user.target
 EOF
 }
 
-# Opt-in TEST qualification of the web/API runtime, run only when the user data sets
-# AGENTX_E2E_QUALIFICATION_ROLE_ID, _PROFILE and _BUCKET. Its S3 prefix is e2e-runtime/<role ID>:<instance ID>/,
-# the one the grant e2e-runtime/${aws:userid}/ allows this instance. It runs as its own unit after the worker
-# started, so it cannot fail the boot; it reports through status.json.
+# Opt-in TEST web/API qualification (AGENTX_E2E_QUALIFICATION_*): its own unit after the worker starts, so it cannot fail
+# the boot; reports via status.json under e2e-runtime/<role ID>:<instance ID>/.
 write_e2e_qualification_script() {
   install -d -o root -g root -m 0755 /usr/local/libexec
   cat >/usr/local/libexec/agentx-e2e-qualification <<'QUALIFICATION'
@@ -455,12 +447,13 @@ readonly CHALLENGE_WAIT=${AGENTX_E2E_QUALIFICATION_CHALLENGE_WAIT_SECONDS:-1800}
 readonly QUALIFY_SECONDS=${AGENTX_E2E_QUALIFICATION_QUALIFY_SECONDS:-2700}
 readonly PULL_SECONDS=${AGENTX_E2E_QUALIFICATION_PULL_SECONDS:-300}
 log() { printf 'agentx-e2e-qualification: %s\n' "$*" >&2; }
-[[ "$ROLE_ID" =~ ^AROA[A-Z0-9]{12,}$ ]] || { log "refused: the role ID must be the worker role's unique ID (AROA...)"; exit 2; }
-[[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || { log "refused: the instance ID is not valid"; exit 2; }
-[[ "$EXECUTOR" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]] || { log "refused: the executor image must be an ECR image pinned by digest"; exit 2; }
-[[ "$PROFILE" == linux-arm64-web-api-v1 ]] || { log "refused: the profile must be linux-arm64-web-api-v1"; exit 2; }
-[[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { log "refused: the bucket name is not valid"; exit 2; }
-[[ "$REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { log "refused: the region is not valid"; exit 2; }
+refuse() { log "refused: $1"; exit 2; }
+[[ "$ROLE_ID" =~ ^AROA[A-Z0-9]{12,}$ ]] || refuse "the role ID must be the worker role's unique ID (AROA...)"
+[[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || refuse "the instance ID is not valid"
+[[ "$EXECUTOR" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]] || refuse "the executor image must be an ECR image pinned by digest"
+[[ "$PROFILE" == linux-arm64-web-api-v1 ]] || refuse "the profile must be linux-arm64-web-api-v1"
+[[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || refuse "the bucket name is not valid"
+[[ "$REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || refuse "the region is not valid"
 readonly PREFIX="e2e-runtime/$ROLE_ID:$INSTANCE_ID/"
 STAGE=$(mktemp -d) || exit 1
 readonly STAGE
@@ -480,7 +473,7 @@ until PING=$(curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/pi
   ((SECONDS < deadline)) || fail_with worker-not-healthy
   sleep "$POLL"
 done
-features=$(grep -oE '"invocationFeatures":\[("[A-Za-z0-9.]+"(,"[A-Za-z0-9.]+")*)?\]' <<<"$PING") && [[ -n "$features" ]] && EXTRA+=",$features"
+features=$(tr -d ' \n\r\t' <<<"$PING" | grep -oE '"invocationFeatures":\[("[A-Za-z0-9.]+"(,"[A-Za-z0-9.]+")*)?\]' | head -n1) && [[ -n "$features" ]] && EXTRA+=",$features"
 # The boot's preload is optional, the qualification needs the executor image: pull it if missing.
 if ! docker image inspect "$EXECUTOR" >/dev/null 2>&1; then
   log "the executor image is not on this host; pulling it"

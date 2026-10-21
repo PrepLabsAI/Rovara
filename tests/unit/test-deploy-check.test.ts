@@ -6,13 +6,15 @@ import {
   findingLabel,
   formatFindings,
   lambdaRoleIds,
+  parseDeployedCodeKey,
   parseRunnerStatus,
+  sourcePathsFor,
   type CatalogRowFact,
   type CheckInput,
   type Finding,
   type RunnerFacts,
 } from "../../scripts/test-deploy-check.js";
-import { assertCheckAllowsApply, gatherCheckFacts, main, parseTestDeployArgs, type CfnTemplate } from "../../scripts/test-deploy.js";
+import { DeployCheckFindingsError, assertCheckAllowsApply, checkExitCode, checkReport, gatherCheckFacts, main, parseTestDeployArgs, type CfnTemplate } from "../../scripts/test-deploy.js";
 
 const NOW = new Date("2026-10-20T18:00:00.000Z");
 const hoursFromNow = (hours: number) => new Date(NOW.getTime() + hours * 3_600_000).toISOString();
@@ -73,6 +75,21 @@ function template(variant: Variant = {}): CfnTemplate {
 }
 
 const SHAS = { SessionsSteps3B98DD2B: "c2Vzc2lvbnM=", [NOTIFIER]: "bm90aWZpZXI=", BrokerE1355FD6: "YnJva2Vy" };
+const hexOf = (base64: string) => Buffer.from(base64, "base64").toString("hex");
+const keyFor = (logicalId: string, revision: string, base64: string) => `test-deploy/${revision}/${logicalId}-${hexOf(base64)}.zip`;
+/** A copy of `source` whose Lambda `logicalId` reads its code from `S3Key`. */
+function withKey(source: CfnTemplate, logicalId: string, S3Key: string): CfnTemplate {
+  const copy = JSON.parse(JSON.stringify(source)) as CfnTemplate;
+  (copy.Resources?.[logicalId]?.Properties?.Code as { S3Key: string }).S3Key = S3Key;
+  return copy;
+}
+/** A copy of `source` whose Lambda `logicalId` has exactly these environment variables. */
+function withEnvironment(source: CfnTemplate, logicalId: string, names: readonly string[]): CfnTemplate {
+  const copy = JSON.parse(JSON.stringify(source)) as CfnTemplate;
+  const properties = copy.Resources?.[logicalId]?.Properties;
+  if (properties) properties.Environment = { Variables: Object.fromEntries(names.map((name) => [name, `value-of-${name}`])) };
+  return copy;
+}
 const READY_FEATURES = [...WORKER_INVOCATION_FEATURES];
 const GOOD_RUNNER: RunnerFacts = {
   deployedExecutorImage: `123.dkr.ecr.us-east-1.amazonaws.com/x/executor@sha256:${"a".repeat(64)}`,
@@ -227,6 +244,165 @@ describe("evaluateTestDeployCheck", () => {
   });
 });
 
+describe("stale-lambda: provenance, then currency", () => {
+  const REVISION = "0b35a884aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const HEAD = "f00dfeedbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const DEPLOYED_SHA = Buffer.from("2026-10-14".padEnd(32, "x")).toString("base64");
+  const OTHER_SHA = Buffer.from("other".padEnd(32, "y")).toString("base64");
+  /** The notifier runs code test-deploy uploaded at REVISION; head builds something else. */
+  const deployedWithKey = (key = keyFor(NOTIFIER, REVISION, DEPLOYED_SHA)) => withKey(template(), NOTIFIER, key);
+  const stale = (overrides: Partial<CheckInput>) => evaluateTestDeployCheck(input({
+    deployedTemplate: deployedWithKey(), lambdaCodeShas: { ...SHAS, [NOTIFIER]: DEPLOYED_SHA }, headRevision: HEAD, ...overrides,
+  }));
+
+  it("is current when none of the Lambda's inputs changed between the deployed revision and head, though the zips differ", () => {
+    expect(stale({ inputsChanged: { [NOTIFIER]: false } })).toEqual({ ok: true, findings: [] });
+  });
+
+  it("is stale, naming the revision, when its inputs changed since the deployed revision", () => {
+    const result = stale({ inputsChanged: { [NOTIFIER]: true } });
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ kind: "stale-lambda", severity: "error", subject: NOTIFIER });
+    expect(result.findings[0]?.message).toContain(REVISION.slice(0, 12));
+    expect(result.findings[0]?.message).toMatch(/changed since/);
+  });
+
+  it("is stale when it cannot be told whether its inputs changed (unknown revision, git failure)", () => {
+    for (const inputsChanged of [{ [NOTIFIER]: undefined }, {}, undefined]) {
+      const result = stale({ inputsChanged });
+      expect(result.findings.map((finding) => finding.kind), JSON.stringify(inputsChanged)).toEqual(["stale-lambda"]);
+      expect(result.findings[0]?.message).toMatch(/cannot tell/);
+    }
+  });
+
+  it("is current when the deployed revision is head, even though the zips differ (a build that is not reproducible)", () => {
+    const deployed = deployedWithKey(keyFor(NOTIFIER, HEAD, DEPLOYED_SHA));
+    expect(stale({ deployedTemplate: deployed })).toEqual({ ok: true, findings: [] });
+    // A short revision is the same commit.
+    expect(stale({ deployedTemplate: deployedWithKey(keyFor(NOTIFIER, HEAD.slice(0, 9), DEPLOYED_SHA)) })).toEqual({ ok: true, findings: [] });
+  });
+
+  it("is current when the head build is the deployed zip, whatever the key says", () => {
+    expect(evaluateTestDeployCheck(input({ deployedTemplate: withKey(template(), NOTIFIER, "x"), headRevision: HEAD, inputsChanged: { [NOTIFIER]: true } }))).toEqual({ ok: true, findings: [] });
+  });
+
+  it("is stale with unknown provenance when the key's hash is not the running CodeSha256, even if the inputs did not change", () => {
+    const result = stale({ deployedTemplate: deployedWithKey(keyFor(NOTIFIER, REVISION, OTHER_SHA)), inputsChanged: { [NOTIFIER]: false } });
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ kind: "stale-lambda", subject: NOTIFIER });
+    expect(result.findings[0]?.message).toMatch(/unknown provenance/);
+    // The same when the deployed revision is head: provenance comes first.
+    expect(stale({ deployedTemplate: deployedWithKey(keyFor(NOTIFIER, HEAD, OTHER_SHA)) }).findings[0]?.message).toMatch(/unknown provenance/);
+  });
+
+  it("is stale with unknown provenance for a key that is not a test-deploy artifact of this Lambda", () => {
+    for (const key of ["x", "cdk-hnb659fds/abc.zip", `test-deploy/${REVISION}/OtherFunction123-${hexOf(DEPLOYED_SHA)}.zip`, `test-deploy/${REVISION}/${NOTIFIER}-${hexOf(DEPLOYED_SHA)}.zip.bak`]) {
+      const result = stale({ deployedTemplate: deployedWithKey(key), inputsChanged: { [NOTIFIER]: false } });
+      expect(result.findings[0]?.message, key).toMatch(/unknown provenance/);
+    }
+    expect(stale({ deployedTemplate: withKey(template(), NOTIFIER, "x"), inputsChanged: { [NOTIFIER]: false } }).findings[0]?.message).toMatch(/unknown provenance/);
+  });
+});
+
+describe("parseDeployedCodeKey", () => {
+  it("reads the revision of a test-deploy key whose hash is the running code's", () => {
+    const hex = "ab".repeat(32);
+    expect(parseDeployedCodeKey(`test-deploy/0b35a884/${NOTIFIER}-${hex}.zip`, NOTIFIER, Buffer.from(hex, "hex").toString("base64"))).toEqual({ revision: "0b35a884" });
+    expect(parseDeployedCodeKey(`test-deploy/0b35a884/${NOTIFIER}-${hex}.zip`, NOTIFIER, "other")).toEqual({ problem: expect.stringMatching(/CodeSha256/) as unknown });
+    expect(parseDeployedCodeKey(undefined, NOTIFIER, "x")).toEqual({ problem: expect.stringMatching(/no literal S3Key/) as unknown });
+  });
+});
+
+describe("sourcePathsFor", () => {
+  it("maps built workspace output to its source, drops node_modules for the lockfile, and keeps extra files", () => {
+    expect(sourcePathsFor(
+      ["packages/broker/src/aws/dispatcher.ts", "packages/contracts/dist/session.js", "packages/contracts/dist/sub/x.js", "node_modules/zod/index.js", "node_modules/@aws-sdk/a/b.js"],
+      ["packages/worker/ec2/boot.sh"],
+    )).toEqual([
+      "package-lock.json",
+      "packages/broker/src/aws/dispatcher.ts",
+      "packages/contracts/package.json",
+      "packages/contracts/src/session.ts",
+      "packages/contracts/src/sub/x.ts",
+      "packages/worker/ec2/boot.sh",
+    ]);
+  });
+});
+
+describe("lambda-env-missing", () => {
+  const DISPATCHER = "DispatcherD4A12972";
+  const base = () => {
+    const head = template();
+    head.Resources = { ...head.Resources, [DISPATCHER]: { Type: "AWS::Lambda::Function", Properties: { Role: { "Fn::GetAtt": ["DispatcherServiceRole904BCD09", "Arn"] }, Code: { S3Key: "x" } } }, DispatcherServiceRole904BCD09: role };
+    return head;
+  };
+  const evaluate = (head: CfnTemplate, deployed: CfnTemplate) => evaluateTestDeployCheck(input({ headTemplate: head, deployedTemplate: deployed }));
+
+  it("finds an environment variable head's function has and the deployed function lacks, naming the stack update it needs", () => {
+    const head = withEnvironment(base(), DISPATCHER, ["TABLE_NAME", "ARTIFACT_BUCKET_NAME"]);
+    const deployed = withEnvironment(base(), DISPATCHER, ["TABLE_NAME"]);
+    const result = evaluate(head, deployed);
+    expect(result.ok).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ kind: "lambda-env-missing", severity: "error", subject: DISPATCHER, label: "Dispatcher", missing: ["ARTIFACT_BUCKET_NAME"] });
+    expect(result.findings[0]?.message).toContain("ARTIFACT_BUCKET_NAME");
+    expect(result.findings[0]?.message).toMatch(/stack update/);
+    expect(result.findings[0]?.message).toMatch(/code-only change set cannot add Environment/);
+  });
+
+  it("finds a function whose deployed copy has no Environment at all, and ignores variable order, values and extras", () => {
+    expect(evaluate(withEnvironment(base(), DISPATCHER, ["A"]), base()).findings.map((finding) => finding.missing)).toEqual([["A"]]);
+    expect(evaluate(withEnvironment(base(), DISPATCHER, ["A", "B"]), withEnvironment(base(), DISPATCHER, ["B", "A", "C"]))).toEqual({ ok: true, findings: [] });
+    expect(evaluate(base(), withEnvironment(base(), DISPATCHER, ["OLD"]))).toEqual({ ok: true, findings: [] });
+  });
+
+  it("does not report a function the deployed stack does not have: that is not a code-only gap", () => {
+    const deployed = base();
+    delete deployed.Resources?.[DISPATCHER];
+    expect(evaluate(withEnvironment(base(), DISPATCHER, ["A"]), deployed).findings.filter((finding) => finding.kind === "lambda-env-missing")).toEqual([]);
+  });
+
+  it("refuses --apply of a code-only deploy of that function, and only of a unit that deploys it", () => {
+    const head = withEnvironment(base(), DISPATCHER, ["ARTIFACT_BUCKET_NAME"]);
+    const { findings } = evaluate(head, base());
+    expect(() => assertCheckAllowsApply(findings, ["dispatcher"], head)).toThrow("deploy check failed: lambda-env-missing Dispatcher (needs a control-plane stack update");
+    expect(() => assertCheckAllowsApply(findings, ["control-plane-code"], head)).toThrow(/ARTIFACT_BUCKET_NAME/);
+    expect(() => assertCheckAllowsApply(findings, ["broker"], head)).not.toThrow();
+    expect(() => assertCheckAllowsApply(findings, ["worker-image"], head)).not.toThrow();
+  });
+
+  it("reports an IAM gap and an environment gap in one refusal", () => {
+    const head = withEnvironment(base(), DISPATCHER, ["ARTIFACT_BUCKET_NAME"]);
+    (head.Resources?.[SESSIONS_POLICY]?.Properties as { PolicyDocument: { Statement: Statement[] } }).PolicyDocument.Statement.push({ Effect: "Allow", Action: "s3:GetObject", Resource: "*" });
+    const { findings } = evaluate(head, base());
+    expect(() => assertCheckAllowsApply(findings, ["control-plane-code"], head)).toThrow(/iam-missing-grant SessionsSteps \(needs Tier 3 approval\); lambda-env-missing Dispatcher/);
+  });
+});
+
+describe("check report and exit codes", () => {
+  it("reports ok, the counts, the findings and the notes as one JSON-ready object", () => {
+    const result = evaluateTestDeployCheck(input({ lambdaCodeShas: { ...SHAS, [NOTIFIER]: "x" } }));
+    const report = checkReport(result, ["a note"], { env: "agentxlivetest123", revision: "abc" });
+    expect(report).toMatchObject({ ok: false, env: "agentxlivetest123", revision: "abc", errors: 1, warnings: 0, notes: ["a note"] });
+    expect(report.findings).toEqual(result.findings);
+    expect(JSON.parse(JSON.stringify(report))).toEqual(report);
+  });
+
+  it("exits 1 for findings, 2 when the check could not run, and 1 for any other mode's failure", () => {
+    expect(checkExitCode(["--env", "e", "--check"], new DeployCheckFindingsError(3))).toBe(1);
+    expect(checkExitCode(["--env", "e", "--check"], new Error("cannot read the feature-verifier catalog"))).toBe(2);
+    expect(checkExitCode(["--check", "--json"], new Error("x"))).toBe(2);
+    expect(checkExitCode(["--env", "e", "--apply"], new Error("x"))).toBe(1);
+    expect(new DeployCheckFindingsError(3).message).toBe("TEST deploy check failed: 3 problem(s) above");
+  });
+
+  it("takes --json only with --check", () => {
+    expect(parseTestDeployArgs(["--env", "e", "--profile", "p", "--check", "--json"])).toMatchObject({ check: true, json: true });
+    expect(parseTestDeployArgs(["--env", "e", "--profile", "p", "--check"])).toMatchObject({ json: false });
+    expect(() => parseTestDeployArgs(["--env", "e", "--profile", "p", "--json"])).toThrow(/--json only goes with --check/);
+  });
+});
+
 describe("lambdaRoleIds", () => {
   it("maps each Lambda to the role it runs as", () => {
     expect(lambdaRoleIds(template())).toEqual({
@@ -264,15 +440,9 @@ describe("assertCheckAllowsApply", () => {
     expect(() => assertCheckAllowsApply(result.findings, ["control-plane-code"], template({ sessionsSsm: [...settings, executorImage] }))).toThrow(
       "deploy check failed: iam-missing-grant SessionsSteps (needs Tier 3 approval)",
     );
-    try {
-      assertCheckAllowsApply(result.findings, ["control-plane-code"], template());
-    } catch (error) {
-      const message = (error as Error).message;
-      expect(message).toContain("Tier 3");
-      expect(message).toContain(SESSIONS_POLICY);
-      expect(message).toContain("ssm:GetParameters");
-      expect(message).toContain("worker-executor-image");
-    }
+    expect(() => assertCheckAllowsApply(result.findings, ["control-plane-code"], template())).toThrow(
+      new RegExp(`Tier 3[\\s\\S]*${SESSIONS_POLICY}[\\s\\S]*ssm:GetParameters[\\s\\S]*worker-executor-image`),
+    );
   });
 
   it("refuses when a unit that runs as the drifted role is chosen alone", () => {
@@ -335,7 +505,7 @@ describe("gatherCheckFacts", () => {
   const status = JSON.stringify({ state: "SUCCEEDED", reason: "qualified", finishedAt: "2026-10-20T10:00:00Z", executorImage: ACCOUNT_IMAGE, invocationFeatures: ["task.readiness"] });
 
   /** A fake `aws` that answers each read, records every call, and fails the test on anything it was not told about. */
-  function fakeAws(overrides: { instances?: string[]; statusBody?: string | null; catalogItems?: unknown[] } = {}) {
+  function fakeAws(overrides: { instances?: string[]; statusBody?: string | null; catalogItems?: unknown[]; brokerSha?: string; brokerKey?: string } = {}) {
     const calls: string[][] = [];
     const runner = {
       aws(args: readonly string[]): CommandResult {
@@ -347,9 +517,12 @@ describe("gatherCheckFacts", () => {
           if (stack === `agentx-${ENV}-runtime`) return ok({ Parameters: [{ ParameterKey: "ExecutorImageUri", ParameterValue: ACCOUNT_IMAGE }] });
           if (stack === `agentx-${ENV}-foundation`) return ok({ Outputs: [{ OutputKey: "Ec2WorkerInstanceRoleArn", OutputValue: "arn:aws:iam::123456789012:role/worker-role" }] });
         }
-        if (args[0] === "cloudformation" && args[1] === "get-template") return ok(brokerTemplate());
+        if (args[0] === "cloudformation" && args[1] === "get-template") return ok(overrides.brokerKey === undefined ? brokerTemplate() : withKey(brokerTemplate(), "BrokerE1355FD6", overrides.brokerKey));
         if (args[0] === "cloudformation" && args[1] === "list-stack-resources") return ok([["BrokerE1355FD6", "fn-broker"], [NOTIFIER, "fn-notifier"], ["SessionsSteps3B98DD2B", "fn-sessions"], ["Unrelated", "fn-other"]]);
-        if (args[0] === "lambda" && args[1] === "get-function") return ok(`"sha-of-${args[args.indexOf("--function-name") + 1]}"`);
+        if (args[0] === "lambda" && args[1] === "get-function") {
+          const name = args[args.indexOf("--function-name") + 1];
+          return ok(`"${name === "fn-broker" && overrides.brokerSha !== undefined ? overrides.brokerSha : `sha-of-${name}`}"`);
+        }
         if (args[0] === "dynamodb" && args[1] === "query") {
           return ok({ Items: overrides.catalogItems ?? [
             { sk: { S: "PROFILE#linux-arm64-web-api-v1#api" }, state: { S: "READY" }, expiresAt: { S: "2027-01-01T00:00:00.000Z" }, endpoint: { S: "http://10.0.1.5:8080" } },
@@ -368,10 +541,15 @@ describe("gatherCheckFacts", () => {
     };
     return { runner, calls };
   }
+  const HEAD_REVISION = "f00dfeedbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const changes: Array<{ revision: string; paths: string[] }> = [];
+  let changed: boolean | undefined = false;
   const gather = (fake: ReturnType<typeof fakeAws>) => gatherCheckFacts({
     runner: fake.runner, region: "us-east-1", env: ENV,
     headTemplate: () => template(),
-    builtZipShas: async () => ({ BrokerE1355FD6: "b" }),
+    builtZips: async () => ({ shas: { BrokerE1355FD6: "b" }, sources: { BrokerE1355FD6: ["packages/broker/src/aws/broker.ts"] } }),
+    headRevision: HEAD_REVISION,
+    changedSince: (revision, paths) => { changes.push({ revision, paths: [...paths] }); return changed; },
   });
 
   it("reads the deployed template, code hashes, catalog rows and the runner's status, and only reads", async () => {
@@ -417,6 +595,22 @@ describe("gatherCheckFacts", () => {
     const result = evaluateTestDeployCheck({ ...facts, now: NOW });
     expect(result.findings.filter((finding) => finding.kind === "runner-image-mismatch")).toHaveLength(1);
     expect(result.findings.filter((finding) => finding.kind === "worker-feature-missing")).toHaveLength(0);
+  });
+
+  it("asks git what changed only for a Lambda whose zip differs and whose S3Key proves its revision", async () => {
+    changes.length = 0;
+    changed = true;
+    const hex = "ab".repeat(32);
+    const deployedSha = Buffer.from(hex, "hex").toString("base64");
+    const fake = fakeAws({ brokerSha: deployedSha, brokerKey: `test-deploy/0b35a884/BrokerE1355FD6-${hex}.zip` });
+    const { facts } = await gather(fake);
+    expect(changes).toEqual([{ revision: "0b35a884", paths: ["packages/broker/src/aws/broker.ts"] }]);
+    expect(facts.inputsChanged).toEqual({ BrokerE1355FD6: true });
+    expect(facts.headRevision).toBe(HEAD_REVISION);
+    // Unknown provenance (the fixture's literal key) is never looked up.
+    changes.length = 0;
+    expect((await gather(fakeAws())).facts.inputsChanged).toEqual({});
+    expect(changes).toEqual([]);
   });
 
   it("refuses a deployed Broker with no catalog ID rather than checking nothing", async () => {

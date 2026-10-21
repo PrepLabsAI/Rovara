@@ -15,6 +15,7 @@ export type FindingKind =
   | "stale-lambda"
   | "iam-missing-grant"
   | "iam-extra-grant"
+  | "lambda-env-missing"
   | "catalog-not-ready"
   | "catalog-expiring"
   | "runner-image-mismatch"
@@ -44,7 +45,7 @@ export interface Finding {
   policyLogicalId?: string;
   /** iam-missing-grant: the statements a Tier 3 request needs, holding only what the deployed role lacks. */
   statements?: PolicyStatement[];
-  /** worker-feature-missing: the feature strings. */
+  /** lambda-env-missing: the environment variable names; worker-feature-missing: the feature strings. */
   missing?: string[];
 }
 
@@ -78,6 +79,13 @@ export interface CheckInput {
   /** Undefined when no qualified runner could be found. */
   runnerFacts: RunnerFacts | undefined;
   now: Date;
+  /** The commit being checked. With a deployed revision that is this commit, the deployed code is current whatever its zip hash. */
+  headRevision?: string | undefined;
+  /**
+   * By Lambda: whether anything its bundle is built from changed between the revision its deployed code was uploaded from and head.
+   * False is unchanged, true is changed, undefined (or no entry) is unknown. Only read for a Lambda whose zip differs from head's.
+   */
+  inputsChanged?: Readonly<Record<string, boolean | undefined>> | undefined;
 }
 
 export interface CheckResult {
@@ -101,20 +109,62 @@ export function evaluateTestDeployCheck(input: CheckInput): CheckResult {
   const findings: Finding[] = [
     ...staleLambdas(input),
     ...evaluateIamDrift(input.headTemplate, input.deployedTemplate),
+    ...evaluateEnvironmentDrift(input.headTemplate, input.deployedTemplate),
     ...catalogFindings(input.catalogRows, input.now),
     ...runnerFindings(input.runnerFacts),
   ];
   return { ok: findings.every((finding) => finding.severity !== "error"), findings };
 }
 
+/**
+ * What proves a deployed Lambda runs a test-deploy artifact: its S3Key is `test-deploy/<revision>/<logicalId>-<zip sha256 hex>.zip` and that
+ * hash is the CodeSha256 the function reports (base64). The revision is the commit the artifact was built from.
+ */
+export function parseDeployedCodeKey(s3Key: string | undefined, logicalId: string, codeSha256: string): { revision: string } | { problem: string } {
+  if (s3Key === undefined) return { problem: "its template has no literal S3Key to show where the running code came from" };
+  const match = /^test-deploy\/([0-9a-f]{7,40})\/([A-Za-z0-9]+)-([0-9a-f]{64})\.zip$/.exec(s3Key);
+  if (match === null || match[2] !== logicalId) return { problem: `its S3Key ${s3Key} is not a test-deploy artifact of ${logicalId}` };
+  if (Buffer.from(match[3] ?? "", "hex").toString("base64") !== codeSha256) return { problem: `the sha256 in its S3Key ${s3Key} is not the CodeSha256 ${codeSha256} it runs` };
+  return { revision: match[1] ?? "" };
+}
+
+/** The repo paths a Lambda's bundle comes from: its source inputs (built workspace output mapped back to source), the lockfile for node_modules, and its extra files. */
+export function sourcePathsFor(inputs: readonly string[], extraFiles: readonly string[]): string[] {
+  const paths = new Set<string>(extraFiles);
+  for (const input of inputs) {
+    const built = /^(packages\/[^/]+)\/dist\/(.+)\.js$/.exec(input);
+    if (input.startsWith("node_modules/")) paths.add("package-lock.json");
+    else if (built !== null) {
+      paths.add(`${built[1]}/src/${built[2]}.ts`);
+      paths.add(`${built[1]}/package.json`);
+    } else paths.add(input);
+  }
+  return [...paths].sort();
+}
+
+const sameCommit = (a: string, b: string) => a.length >= 7 && b.length >= 7 && (a.startsWith(b) || b.startsWith(a));
+
+/**
+ * Provenance first: the running code must be a test-deploy artifact whose key proves its hash. Then currency: the head build is the same zip,
+ * or the artifact was built from head, or nothing its bundle comes from changed since. A build that is not byte-reproducible can therefore
+ * still be current; code of unknown origin never is.
+ */
 function staleLambdas(input: CheckInput): Finding[] {
-  return Object.entries(input.builtZipShas).flatMap(([logicalId, built]) => {
+  return Object.entries(input.builtZipShas).flatMap(([logicalId, built]): Finding[] => {
     const deployed = input.lambdaCodeShas[logicalId];
+    const stale = (message: string): Finding[] => [{ kind: "stale-lambda", severity: "error", subject: logicalId, label: findingLabel(logicalId), message }];
+    if (deployed === undefined) return stale(`${logicalId} has no deployed code hash to compare with the head build (${built})`);
     if (deployed === built) return [];
-    const message = deployed === undefined
-      ? `${logicalId} has no deployed code hash to compare with the head build (${built})`
-      : `${logicalId} runs ${deployed}, but the head build is ${built}`;
-    return [{ kind: "stale-lambda", severity: "error", subject: logicalId, label: findingLabel(logicalId), message } satisfies Finding];
+    const code = input.deployedTemplate.Resources?.[logicalId]?.Properties?.Code as { S3Key?: unknown } | undefined;
+    const provenance = parseDeployedCodeKey(typeof code?.S3Key === "string" ? code.S3Key : undefined, logicalId, deployed);
+    if ("problem" in provenance) return stale(`${logicalId} runs code of unknown provenance, so it is stale: ${provenance.problem}`);
+    const { revision } = provenance;
+    if (input.headRevision !== undefined && sameCommit(revision, input.headRevision)) return [];
+    const changed = input.inputsChanged?.[logicalId];
+    if (changed === false) return [];
+    return stale(changed === true
+      ? `${logicalId} runs code built at ${revision.slice(0, 12)}, and its inputs changed since`
+      : `${logicalId} runs code built at ${revision.slice(0, 12)}, and git cannot tell whether its inputs changed since (is that commit in this clone?)`);
   });
 }
 
@@ -274,6 +324,30 @@ export function evaluateIamDrift(headTemplate: CheckTemplate, deployedTemplate: 
     }
   }
   return findings;
+}
+
+/**
+ * The environment variables head's Lambdas have that the deployed ones lack. A code-only change set never changes Environment, so new code
+ * that reads one deploys and then fails at runtime, as the IAM gap did: this needs a stack update first. Only names are compared (values
+ * can be intrinsics), and only for a function both templates have.
+ */
+export function evaluateEnvironmentDrift(headTemplate: CheckTemplate, deployedTemplate: CheckTemplate): Finding[] {
+  const names = (resource: { Properties?: Record<string, unknown> } | undefined): string[] | undefined => {
+    if (resource === undefined) return undefined;
+    const variables = (resource.Properties?.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables;
+    return Object.keys(variables ?? {});
+  };
+  return Object.entries(headTemplate.Resources ?? {}).flatMap(([logicalId, resource]): Finding[] => {
+    if (resource.Type !== "AWS::Lambda::Function") return [];
+    const deployedResource = deployedTemplate.Resources?.[logicalId];
+    const have = new Set(names(deployedResource));
+    const missing = (names(resource) ?? []).filter((name) => deployedResource !== undefined && !have.has(name)).sort();
+    if (missing.length === 0) return [];
+    return [{
+      kind: "lambda-env-missing", severity: "error", subject: logicalId, label: findingLabel(logicalId), missing,
+      message: `${logicalId} lacks the environment variable(s) ${missing.join(", ")} that head sets; this needs a control-plane stack update (cdk deploy, or a reviewed guarded change set that edits Environment), because a code-only change set cannot add Environment`,
+    }];
+  });
 }
 
 /** The role each Lambda function of a template runs as. */

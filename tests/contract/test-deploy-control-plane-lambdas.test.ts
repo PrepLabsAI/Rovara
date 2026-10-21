@@ -3,7 +3,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { CONTROL_PLANE_LAMBDAS, CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED, assertCheckAllowsApply, type CfnTemplate } from "../../scripts/test-deploy.js";
-import { evaluateIamDrift, evaluateTestDeployCheck, findingLabel, lambdaRoleIds } from "../../scripts/test-deploy-check.js";
+import { evaluateEnvironmentDrift, evaluateIamDrift, evaluateTestDeployCheck, findingLabel, lambdaRoleIds } from "../../scripts/test-deploy-check.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
@@ -92,6 +92,19 @@ describe("test-deploy --check on the synthesized control-plane template", () => 
     const findings = evaluateIamDrift(head, deployed);
     expect(findings.map((finding) => [finding.kind, finding.policyLogicalId, findingLabel(finding.roleLogicalId ?? "")])).toEqual([["iam-missing-grant", "SessionsStepsServiceRoleDefaultPolicy9F4B87C9", "SessionsSteps"]]);
     expect(() => assertCheckAllowsApply(findings, ["control-plane-code"], head)).toThrow("deploy check failed: iam-missing-grant SessionsSteps (needs Tier 3 approval)");
+    expect(() => assertCheckAllowsApply(findings, ["broker"], head)).not.toThrow();
+  });
+
+  it("refuses a code-only apply of the Dispatcher when the deployed function lacks one of head's environment variables", () => {
+    const deployed = clone();
+    const variables = (deployed.Resources?.DispatcherD4A12972?.Properties?.Environment as { Variables: Record<string, unknown> }).Variables;
+    const [name] = Object.keys(variables);
+    expect(name, "the Dispatcher has environment variables").toBeDefined();
+    delete variables[name ?? ""];
+    expect(evaluateEnvironmentDrift(head, head)).toEqual([]);
+    const findings = evaluateEnvironmentDrift(head, deployed);
+    expect(findings.map((finding) => [finding.kind, finding.subject, finding.missing])).toEqual([["lambda-env-missing", "DispatcherD4A12972", [name]]]);
+    expect(() => assertCheckAllowsApply(findings, ["dispatcher"], head)).toThrow(/lambda-env-missing Dispatcher \(needs a control-plane stack update/);
     expect(() => assertCheckAllowsApply(findings, ["broker"], head)).not.toThrow();
   });
 });
