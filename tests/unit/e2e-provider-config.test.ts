@@ -1,5 +1,5 @@
 import { MODEL_PROVIDERS } from "../../packages/contracts/src/model-providers.js";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { catalogModel } from "../../packages/model-runtime/src/catalog.js";
 import { DEFAULT_E2E_AGENT_MODELS, requireKeyedModel } from "../../packages/model-runtime/src/config.js";
 import {
@@ -45,7 +45,10 @@ describe("the environment guard: a worker whose environment can redirect model c
     "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "NODE_USE_ENV_PROXY",
     "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS", "PI_CACHE_RETENTION",
+    "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_EC2_METADATA_SERVICE_ENDPOINT",
   ];
+  afterEach(() => { vi.unstubAllEnvs(); });
 
   it("lists the variables of the ruling", () => {
     for (const name of variables) expect(E2E_REDIRECTING_ENVIRONMENT_VARIABLES.map((item) => item.toLowerCase()), name).toContain(name.toLowerCase());
@@ -69,6 +72,22 @@ describe("the environment guard: a worker whose environment can redirect model c
     expect(e2eRedirectingEnvironment({ PATH: "/usr/bin", HOME: "/home/agentx", AWS_REGION: "us-east-1", AGENTX_MODEL_PROVIDER: "amazon-bedrock" })).toEqual([]);
     expect(e2eRedirectingEnvironment({ AWS_MAX_ATTEMPTS: "1" })).toEqual([]);
     for (const value of ["3", "2", "0", "10", "abc"]) expect(e2eRedirectingEnvironment({ AWS_MAX_ATTEMPTS: value }), value).toEqual(["AWS_MAX_ATTEMPTS"]);
+  });
+
+  it("refuses AWS_ROLE_ARN only together with a web identity token file", () => {
+    expect(e2eRedirectingEnvironment({ AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/worker" })).toEqual([]);
+    expect(e2eRedirectingEnvironment({ AWS_ROLE_ARN: "arn:aws:iam::123456789012:role/worker", AWS_WEB_IDENTITY_TOKEN_FILE: "/var/run/token" })).toEqual(["AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"]);
+  });
+
+  it("always reads the process environment, and the caller's as well", () => {
+    expect(() => assertE2EEnvironmentCannotRedirect()).not.toThrow();
+    vi.stubEnv("HTTPS_PROXY", "http://proxy.example.test:3128");
+    expect(() => assertE2EEnvironmentCannotRedirect()).toThrow(/HTTPS_PROXY/);
+    // A caller's own (curated) environment cannot hide what the process holds.
+    expect(() => assertE2EEnvironmentCannotRedirect({})).toThrow(/HTTPS_PROXY/);
+    vi.stubEnv("HTTPS_PROXY", undefined);
+    expect(() => assertE2EEnvironmentCannotRedirect({ AWS_PROFILE: "x" })).toThrow(/AWS_PROFILE/);
+    expect(() => assertE2EEnvironmentCannotRedirect({})).not.toThrow();
   });
 
   it("names every variable found, once, in a stable order", () => {

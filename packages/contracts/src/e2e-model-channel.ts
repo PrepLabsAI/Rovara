@@ -412,7 +412,10 @@ export function checkE2EStepModelAccounting(input: {
       || item.routeRevision !== identity.routeRevision || item.provider !== identity.provider || item.modelId !== identity.modelId) return { ok: false, code: "receipt-identity-mismatch" };
   }
   if (new Set(receipts.map((item) => item.receiptId)).size !== receipts.length) return { ok: false, code: "receipt-duplicate-id" };
-  if (receipts.some((item) => item.servedModelId !== null && !e2eServedModelMatchesPin(identity.modelId, item.servedModelId))) return { ok: false, code: "receipt-served-model-mismatch" };
+  // A model the provider named must be the pin. An ok answer with none is valid only where the provider names none (Bedrock) or is the scripted double.
+  const mayNameNone = (provider: E2EModelReceipt["provider"]) => provider === "amazon-bedrock" || provider === "rovara-scripted";
+  if (receipts.some((item) => (item.servedModelId !== null && !e2eServedModelMatchesPin(identity.modelId, item.servedModelId))
+    || (item.servedModelId === null && item.outcome === "ok" && !mayNameNone(item.provider)))) return { ok: false, code: "receipt-served-model-mismatch" };
   const ordered = [...receipts].sort((left, right) => left.callIndex - right.callIndex);
   if (ordered.some((item, index) => item.callIndex !== index)) return { ok: false, code: "receipt-index-gap" };
   if (ordered.some((item, index) => index > 0 && Date.parse(item.startedAt) < Date.parse(ordered[index - 1]!.startedAt))) return { ok: false, code: "receipt-order" };

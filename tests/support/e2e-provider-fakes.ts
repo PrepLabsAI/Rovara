@@ -124,6 +124,24 @@ function eventFrame(eventType: string, payload: unknown): Buffer {
   return Buffer.concat([message, messageCrc]);
 }
 
+/** Only the first frame of a stream: the response is accepted and then goes away. */
+export function bedrockStartOnly(): Buffer {
+  return eventFrame("messageStart", { role: "assistant" });
+}
+
+/** A 200 event stream that delivers its first events and then breaks. */
+export function brokenSse(first: Response): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const text = await first.text();
+      controller.enqueue(encoder.encode(text.split("\n\n")[0] + "\n\n"));
+      controller.error(new TypeError("terminated"));
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
 export function bedrockStreamBody(facts: Omit<StreamFacts, "model">): Buffer {
   const frames: Buffer[] = [eventFrame("messageStart", { role: "assistant" })];
   let index = 0;
@@ -152,7 +170,7 @@ export interface BedrockLoopback {
 }
 
 /** An HTTP/2 cleartext server standing in for bedrock-runtime. `respond` returns a status and body for each request. */
-export async function bedrockLoopback(respond: (request: { path: string; body: Record<string, any> }, count: number) => { status: number; body: Buffer | string; type?: string; errorType?: string }): Promise<BedrockLoopback> { // eslint-disable-line @typescript-eslint/no-explicit-any
+export async function bedrockLoopback(respond: (request: { path: string; body: Record<string, any> }, count: number) => { status: number; body: Buffer | string; type?: string; errorType?: string; drop?: true; cutAfterBody?: true }): Promise<BedrockLoopback> { // eslint-disable-line @typescript-eslint/no-explicit-any
   const requests: BedrockLoopback["requests"] = [];
   const server: Http2Server = createHttp2Server();
   const sessions = new Set<ServerHttp2Session>();
@@ -165,10 +183,14 @@ export async function bedrockLoopback(respond: (request: { path: string; body: R
       const recorded = { path: String(headers[":path"]), body: text ? JSON.parse(text) as Record<string, any> : {} }; // eslint-disable-line @typescript-eslint/no-explicit-any
       requests.push(recorded);
       const answer = respond(recorded, requests.length);
+      // A dropped session: the connection goes away with no response at all.
+      if (answer.drop === true) { stream.session?.destroy(); return; }
       stream.respond({
         ":status": answer.status, "content-type": answer.type ?? (answer.status === 200 ? "application/vnd.amazon.eventstream" : "application/json"),
         ...(answer.errorType === undefined ? {} : { "x-amzn-errortype": answer.errorType }),
       });
+      // A response cut mid-stream: the status and some frames arrive, then the connection goes away.
+      if (answer.cutAfterBody === true) { stream.write(answer.body); setTimeout(() => stream.session?.destroy(), 20); return; }
       stream.end(answer.body);
     });
   });

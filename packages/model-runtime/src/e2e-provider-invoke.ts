@@ -8,6 +8,7 @@ import { stream as openAIResponsesStream } from "@earendil-works/pi-ai/api/opena
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { catalogModel } from "./catalog.js";
 import { readProviderKey, requireKeyedModel } from "./config.js";
+import { assertE2EEnvironmentCannotRedirect, assertE2ERouteMatchesInstallation } from "./e2e-environment-guard.js";
 import type { E2EInvoke, E2EInvokeInput, E2EInvokeOutput, E2EModelChannelCall } from "./e2e-route.js";
 import { TRANSPORTS, requestCompat } from "./transport.js";
 import type { E2EModelRouteDefinition } from "@agentx/contracts";
@@ -43,12 +44,16 @@ export interface E2EProviderInvokeDependencies {
   readSecret?: (arn: string) => Promise<string | undefined>;
   /** The HTTP transport of the keyed providers. Defaults to `fetch`. Tests pass a fake. */
   fetch?: typeof fetch;
-  /** For loopback tests only: a Bedrock endpoint and provider-scoped environment values. Production leaves it unset. */
-  testing?: { bedrockEndpoint?: string; providerEnv?: Record<string, string> };
 }
 
-/** An invoke that also names the secret values it holds, so the proxy can add them to its credential scan. */
-export type E2EProviderInvoke = E2EInvoke & { readonly secrets: readonly string[] };
+/**
+ * Loopback overrides for tests only. They are the third argument of `buildE2EProviderInvoke`, which the package does
+ * not export; `createE2EProviderInvoke` takes no such argument, and the only caller of the test factory is a test.
+ */
+export interface E2EProviderInvokeTesting { bedrockEndpoint?: string; providerEnv?: Record<string, string> }
+
+/** An invoke that also names the secret values it holds, so the proxy can add them to its credential scan, and the Bedrock endpoint it names. */
+export type E2EProviderInvoke = E2EInvoke & { readonly secrets: readonly string[]; readonly endpoint?: string };
 
 type ProviderError = Error & { status?: number; mayHaveBeenBilled?: boolean };
 
@@ -63,13 +68,15 @@ function providerError(message: string, extra: { status?: number; mayHaveBeenBil
 // The served model, as the provider's stream says it
 // ---------------------------------------------------------------------------------------------------------------------
 
-interface Observed { status?: number; model?: string; upstream?: string }
+/** What a call saw: the status of a failed response, whether a 2xx response arrived, and the served model. */
+interface Observed { status?: number; accepted?: boolean; model?: string; upstream?: string }
 
 /** Observes only the serving model and the router's upstream provider, and the status of a failed response; never a body. */
 function observingFetch(transport: typeof fetch, observed: Observed): typeof fetch {
   return async (input, init) => {
     const response = await transport(input, init);
     if (!response.ok) observed.status = response.status;
+    else observed.accepted = true;
     if (!response.ok || !response.body) return response;
     const decoder = new TextDecoder();
     let pending = "";
@@ -239,17 +246,28 @@ function contentOf(message: AssistantMessage, provider: E2EInvokeInput["target"]
  * pinned catalog lacks) is raised by the returned invoke on every call, so the route answers `provider-error` and the
  * step becomes UNKNOWN with no fall back.
  */
-export async function createE2EProviderInvoke(definition: E2EModelRouteDefinition, dependencies: E2EProviderInvokeDependencies = {}): Promise<E2EProviderInvoke> {
+export function createE2EProviderInvoke(definition: E2EModelRouteDefinition, dependencies: E2EProviderInvokeDependencies = {}): Promise<E2EProviderInvoke> {
+  return buildE2EProviderInvoke(definition, dependencies, undefined);
+}
+
+/** The factory behind `createE2EProviderInvoke`; its third argument is for the test-only factory and is not exported from the package. */
+export async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition, dependencies: E2EProviderInvokeDependencies, testing: E2EProviderInvokeTesting | undefined): Promise<E2EProviderInvoke> {
   if (definition.provider === "rovara-scripted") throw new Error("a scripted route has no provider to call");
   const provider = definition.provider;
   const readSecret = dependencies.readSecret;
   const transport = dependencies.fetch ?? globalThis.fetch;
   const identifier = definition.inferenceProfileArn ?? definition.modelId;
 
+  // Production names the standard regional endpoint. (pi-ai takes its explicit-endpoint path only when no region is
+  // configured anywhere, which a worker with AWS_REGION set never satisfies, so with a region the SDK resolves this same
+  // endpoint itself; the environment guard closes the overrides that could change that.)
+  const bedrockEndpoint = provider === "amazon-bedrock" ? (testing?.bedrockEndpoint ?? `https://bedrock-runtime.${definition.region ?? ""}.amazonaws.com`) : undefined;
+
   let setupFailure: unknown;
   let key: string | undefined;
   let model: Model<Api> | undefined;
   try {
+    assertE2ERouteMatchesInstallation(definition, dependencies.environment ?? process.env);
     if (isKeyedModelProvider(provider)) {
       const keyed: KeyedModelProvider = provider;
       key = await readProviderKey(keyed, definition.secretArn ?? "", readSecret);
@@ -259,8 +277,7 @@ export async function createE2EProviderInvoke(definition: E2EModelRouteDefinitio
     } else {
       const entry = catalogModel({ provider, modelId: definition.modelId });
       if (entry === undefined) throw agentXError("CONFIG_INVALID", "the route's Bedrock model is not in the installed Pi catalog");
-      const region = definition.region ?? "";
-      model = { ...entry, id: identifier, baseUrl: dependencies.testing?.bedrockEndpoint ?? `https://bedrock-runtime.${region}.amazonaws.com`, samplingParams: undefined, samplingParamsByThinkingLevel: undefined } as unknown as Model<Api>;
+      model = { ...entry, id: identifier, baseUrl: bedrockEndpoint, samplingParams: undefined, samplingParamsByThinkingLevel: undefined } as unknown as Model<Api>;
     }
   } catch (error) {
     setupFailure = error;
@@ -268,6 +285,8 @@ export async function createE2EProviderInvoke(definition: E2EModelRouteDefinitio
 
   const invoke = async (input: E2EInvokeInput): Promise<E2EInvokeOutput> => {
     if (setupFailure !== undefined) throw setupFailure as Error;
+    // pi-ai and the AWS SDK read the real process environment on every call, and so does this guard.
+    assertE2EEnvironmentCannotRedirect(dependencies.environment);
     const activeModel = model as Model<Api>;
     // The adapters are given a controller of this call's own, so a failed first response can end the call.
     const attempt = new AbortController();
@@ -304,12 +323,13 @@ export async function createE2EProviderInvoke(definition: E2EModelRouteDefinitio
       if (provider === "amazon-bedrock") {
         events = bedrockStream(activeModel as Model<"bedrock-converse-stream">, context, {
           ...common, toolChoice: common.toolChoice as never, ...(definition.region === null ? {} : { region: definition.region }),
-          ...(dependencies.testing?.providerEnv === undefined ? {} : { env: dependencies.testing.providerEnv }),
+          ...(testing?.providerEnv === undefined ? {} : { env: testing.providerEnv }),
           // pi sets no maxAttempts on its Bedrock client, so the SDK would retry a throttle or a 5xx twice more. Each HTTP
           // response passes here, inside the SDK's retry loop. Throwing a plain error for a failed response makes the loop
           // classify it as a client error and stop (aborting the signal here instead leaves the loop hanging; Step 0).
           onResponse: (response: { status: number }) => {
                 if (response.status >= 400) { observed.status = response.status; throw new Error("the provider refused the call"); }
+                observed.accepted = true;
           },
         });
       } else {
@@ -338,7 +358,10 @@ export async function createE2EProviderInvoke(definition: E2EModelRouteDefinitio
     if (hookFailure !== undefined) throw hookFailure as Error;
     if (final.stopReason === "error" || final.stopReason === "aborted") {
       const status = observed.status;
-      const billed = sawContent || final.usage.input > 0;
+      // The call may have been billed unless the provider refused it with an HTTP status: anything that was accepted (a 2xx
+      // response, even one cut before its first delta) or that went out and got no response at all (a dropped connection,
+      // which the AWS SDK may also have retried) is charged the reserved bound.
+      const billed = sawContent || final.usage.input > 0 || observed.accepted === true || (payloadSha256 !== undefined && status === undefined);
       if (input.signal.aborted && status === undefined) throw providerError("the model call was stopped", { mayHaveBeenBilled: billed });
       throw providerError("the provider call failed", { ...(status === undefined ? {} : { status }), mayHaveBeenBilled: billed });
     }
@@ -356,5 +379,5 @@ export async function createE2EProviderInvoke(definition: E2EModelRouteDefinitio
     };
   };
 
-  return Object.assign(invoke, { secrets: key === undefined ? [] : [key] as readonly string[] });
+  return Object.assign(invoke, { secrets: key === undefined ? [] : [key] as readonly string[], ...(bedrockEndpoint === undefined ? {} : { endpoint: bedrockEndpoint }) });
 }

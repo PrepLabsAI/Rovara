@@ -16,6 +16,7 @@ import {
   E2E_BUDGET_EXHAUSTED_PREFIX,
   E2EPayloadRefusedError,
   assertE2EEnvironmentCannotRedirect,
+  assertE2ERouteMatchesInstallation,
   e2ePromptSha256,
   e2eReservedInputTokens,
   type E2EModelCallIdentity,
@@ -179,7 +180,11 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     throw new Error("a scripted model route is admitted only under a qualification policy or with ROVARA_E2E_SCRIPTED_MODEL=1");
   }
   // A route on a real provider calls it through pi-ai, which reads the environment; refuse to start when that can redirect the call.
-  if (definition.provider !== "rovara-scripted") assertE2EEnvironmentCannotRedirect(options.environment ?? process.env);
+  // The process environment is always checked, whatever environment the caller passes (see assertE2EEnvironmentCannotRedirect).
+  if (definition.provider !== "rovara-scripted") {
+    assertE2EEnvironmentCannotRedirect(options.environment);
+    assertE2ERouteMatchesInstallation(definition, options.environment ?? process.env);
+  }
   const budgets = effectiveBudgets(definition.budgets, options.budgets);
   // The provider key the route's invoke holds is a secret the model must never see.
   let credentials: E2ECredentialSet = {

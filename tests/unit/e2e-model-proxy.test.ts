@@ -13,7 +13,8 @@ import {
 } from "../../packages/contracts/src/e2e-model-channel.js";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget, type E2EInvoke } from "../../packages/model-runtime/src/e2e-route.js";
 import { startE2EModelProxy, type E2EModelEvidenceSink, type E2EModelProxy, type E2EModelTranscript } from "../../packages/worker/src/e2e-model-proxy.js";
-import { CASE_ID, MODEL_ID, RUN_ID, bedrockRoute, call, channelRequest, loweredBudgets, tapAnswer } from "../support/e2e-model-fixtures.js";
+import { CASE_ID, MODEL_ID, RUN_ID, bedrockRoute, call, channelRequest, installationEnvironment, keyedRoute, loweredBudgets, tapAnswer } from "../support/e2e-model-fixtures.js";
+import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 
 interface Reply { schemaVersion: string; receiptId: string; result: { status: string; code?: string; message?: string } }
 
@@ -38,11 +39,13 @@ let socketPath: string;
 let proxies: E2EModelProxy[] = [];
 
 beforeEach(async () => {
+  cleanRedirectingEnvironment();
   dir = await mkdtemp(join(tmpdir(), "rm-"));
   socketPath = join(dir, "m.sock");
   proxies = [];
 });
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const proxy of proxies) await proxy.close().catch(() => undefined);
   await rm(dir, { recursive: true, force: true });
   vi.useRealTimers();
@@ -515,6 +518,29 @@ describe("e2e model proxy: the provider layer (amendment A1)", () => {
     await expect(stat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
     const proxy = await startE2EModelProxy({ ...base, environment: { PATH: "/usr/bin" } });
     proxies.push(proxy);
+  });
+
+  it("R3: refuses to start on a redirecting process environment whatever environment it is given", async () => {
+    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
+    vi.stubEnv("HTTPS_PROXY", "http://proxy.example.test:3128");
+    await expect(startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000, environment: {} })).rejects.toThrow(/HTTPS_PROXY/);
+    await expect(stat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("R2: refuses to start a route whose provider or secret differs from the worker's own settings", async () => {
+    const definition = keyedRoute("anthropic");
+    const route = createGovernedE2EModelRoute(definition, { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
+    const base = { socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000 };
+    for (const environment of [{}, { ...installationEnvironment(definition), AGENTX_MODEL_PROVIDER: "openai" }, { AGENTX_MODEL_PROVIDER: "anthropic", AGENTX_ANTHROPIC_SECRET_ARN: definition.secretArn!.replace("AbCdEf", "ZzZzZz") }]) {
+      await expect(startE2EModelProxy({ ...base, environment })).rejects.toThrow(/model-route-changed-reapprove/);
+    }
+    await expect(stat(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+    const proxy = await startE2EModelProxy({ ...base, environment: installationEnvironment(definition) });
+    proxies.push(proxy);
+    // A Bedrock route on a worker configured for a keyed provider is refused too; an unset provider setting is Bedrock.
+    const bedrock = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
+    await expect(startE2EModelProxy({ ...base, socketPath: join(dir, "b.sock"), route: bedrock, environment: { AGENTX_MODEL_PROVIDER: "anthropic" } })).rejects.toThrow(/model-route-changed-reapprove/);
+    proxies.push(await startE2EModelProxy({ ...base, socketPath: join(dir, "b.sock"), route: bedrock, environment: {} }));
   });
 
   it("does not apply the guard to a scripted route, which calls no provider", async () => {

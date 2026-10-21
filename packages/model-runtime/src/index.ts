@@ -4,7 +4,8 @@ import { TRANSPORTS, requestCompat } from "./transport.js";
 export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
 // The governed e2e model route (M1.4): its own surface, never reached through the coding-task fallback above.
 export * from "./e2e-route.js";
-export * from "./e2e-provider-invoke.js";
+export { createE2EProviderInvoke } from "./e2e-provider-invoke.js";
+export type { E2EProviderInvoke, E2EProviderInvokeDependencies } from "./e2e-provider-invoke.js";
 export * from "./e2e-environment-guard.js";
 import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type KeyedModelProvider, type ModelIdentifier } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream } from "@earendil-works/pi-ai";

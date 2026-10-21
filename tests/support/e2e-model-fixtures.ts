@@ -1,3 +1,4 @@
+import { KEYED_MODEL_PROVIDERS, isKeyedModelProvider } from "../../packages/contracts/src/model-providers.js";
 import {
   E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
   E2EModelRouteDefinitionSchema,
@@ -22,6 +23,12 @@ export function bedrockRoute(overrides: Record<string, unknown> = {}): E2EModelR
 
 export const SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/provider-key-AbCdEf";
 export const PROVIDER_KEY = "sk-ant-api03-FAKEKEYFORTESTS0123456789abcdef";
+
+/** The worker settings of an installation whose provider is the route's: `AGENTX_MODEL_PROVIDER` and, for a keyed provider, its secret ARN. */
+export function installationEnvironment(definition: E2EModelRouteDefinition): Record<string, string> {
+  if (!isKeyedModelProvider(definition.provider)) return { AGENTX_MODEL_PROVIDER: definition.provider };
+  return { AGENTX_MODEL_PROVIDER: definition.provider, [KEYED_MODEL_PROVIDERS[definition.provider].secretArnVariable]: definition.secretArn ?? "" };
+}
 
 /** A route on an installation whose provider is a keyed one (Anthropic, OpenAI or OpenRouter). */
 export function keyedRoute(provider: "anthropic" | "openai" | "openrouter", overrides: Record<string, unknown> = {}): E2EModelRouteDefinition {

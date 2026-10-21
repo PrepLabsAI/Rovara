@@ -9,9 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { E2EModelChannelRequest } from "../../packages/contracts/src/e2e-model-channel.js";
 import { createE2ECredentialGuard } from "../../packages/worker/src/e2e-model-credential-guard.js";
 import { createE2EProviderInvoke } from "../../packages/model-runtime/src/e2e-provider-invoke.js";
+import { createE2EProviderInvokeForTesting } from "../../packages/model-runtime/src/e2e-provider-invoke-testing.js";
+import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
 import { startE2EModelProxy, type E2EModelProxy } from "../../packages/worker/src/e2e-model-proxy.js";
-import { CASE_ID, MODEL_ID, PROVIDER_KEY, RUN_ID, SECRET_ARN, bedrockRoute, keyedRoute } from "../support/e2e-model-fixtures.js";
+import { CASE_ID, MODEL_ID, PROVIDER_KEY, RUN_ID, SECRET_ARN, bedrockRoute, installationEnvironment, keyedRoute } from "../support/e2e-model-fixtures.js";
 import { anthropicSse, bedrockLoopback, bedrockStreamBody, fakeFetch, jsonError, openaiResponsesSse, openrouterSse } from "../support/e2e-provider-fakes.js";
 import { createChannelLanguageModel } from "../support/e2e-model-adapter.js";
 
@@ -168,8 +170,9 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
   let proxy: E2EModelProxy | undefined;
   let loopback: Awaited<ReturnType<typeof bedrockLoopback>> | undefined;
 
-  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), "rs-")); });
+  beforeEach(async () => { cleanRedirectingEnvironment(); dir = await mkdtemp(join(tmpdir(), "rs-")); });
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await proxy?.close().catch(() => undefined);
     await loopback?.close();
     proxy = undefined;
@@ -181,7 +184,7 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
     const route = createGovernedE2EModelRoute(definition, { invoke, now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
     proxy = await startE2EModelProxy({
       socketPath: join(dir, "m.sock"), runId: RUN_ID, route, credentialSet: { passwords: [], emails: [], cookieValues: [] },
-      evidence: { writeReceipt: () => undefined, writeTranscript: () => undefined }, deadlineAt: Date.now() + 120_000, environment: {},
+      evidence: { writeReceipt: () => undefined, writeTranscript: () => undefined }, deadlineAt: Date.now() + 120_000, environment: installationEnvironment(definition),
     });
     proxy.beginStep({ caseId: CASE_ID, stepIndex: 0 });
     return route;
@@ -200,7 +203,7 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
 
   it("Bedrock: the real loop's tool calls reach a loopback endpoint as Converse requests, one per turn, and the receipts name the pinned model", async () => {
     loopback = await bedrockLoopback((_request, count) => ({ status: 200, body: bedrockStreamBody(count === 1 ? TAP : CONCLUDE) }));
-    const invoke = await createE2EProviderInvoke(bedrockRoute(), { environment: {}, testing: { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } } });
+    const invoke = await createE2EProviderInvokeForTesting(bedrockRoute(), { environment: {} }, { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } });
     await startProxy(invoke);
     const sent: E2EModelChannelRequest[] = [];
     const tapped: string[] = [];
@@ -237,7 +240,7 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
       const definition = keyedRoute(spec.provider);
       let turn = 0;
       const fake = fakeFetch(() => spec.answer(definition.modelId, turn++ === 0 ? TAP : CONCLUDE));
-      const invoke = await createE2EProviderInvoke(definition, { environment: {}, readSecret: async (arn) => (arn === SECRET_ARN ? PROVIDER_KEY : undefined), fetch: fake.fetch });
+      const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret: async (arn) => (arn === SECRET_ARN ? PROVIDER_KEY : undefined), fetch: fake.fetch });
       await startProxy(invoke, definition);
       const tapped: string[] = [];
       const globalFetch = vi.spyOn(globalThis, "fetch");
@@ -259,7 +262,7 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
 
   it("does not resend when the provider throttles: the loop ends the step after one request, on Bedrock and on a keyed provider", async () => {
     loopback = await bedrockLoopback(() => ({ status: 429, body: JSON.stringify({ message: "Rate exceeded" }), errorType: "ThrottlingException" }));
-    const invoke = await createE2EProviderInvoke(bedrockRoute(), { environment: {}, testing: { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } } });
+    const invoke = await createE2EProviderInvokeForTesting(bedrockRoute(), { environment: {} }, { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } });
     await startProxy(invoke);
     const model = createChannelLanguageModel({ socketPath: join(dir, "m.sock"), runId: RUN_ID, caseId: CASE_ID, stepIndex: 0 });
     const executor = createToolLoopExecutor({ name: "rovara-seam", model: model as never, buildPrompt: () => "Goal: x", tools: () => ({}) });
@@ -270,7 +273,7 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
 
     const definition = keyedRoute("anthropic");
     const fake = fakeFetch(() => jsonError(429));
-    const keyedInvoke = await createE2EProviderInvoke(definition, { environment: {}, readSecret: async () => PROVIDER_KEY, fetch: fake.fetch });
+    const keyedInvoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret: async () => PROVIDER_KEY, fetch: fake.fetch });
     await startProxy(keyedInvoke, definition);
     await expect(createToolLoopExecutor({ name: "rovara-seam", model: createChannelLanguageModel({ socketPath: join(dir, "m.sock"), runId: RUN_ID, caseId: CASE_ID, stepIndex: 0 }) as never, buildPrompt: () => "Goal: x", tools: () => ({}) }).runStep(stepContext() as never)).rejects.toMatchObject({ code: "MODEL_PROVIDER_FAILED" });
     expect(fake.requests).toHaveLength(1);
@@ -279,7 +282,7 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
   it("scans a provider key the invoke holds: a page that shows it is refused before any request", async () => {
     const definition = keyedRoute("anthropic");
     const fake = fakeFetch(() => anthropicSse({ model: definition.modelId, ...TAP }));
-    const invoke = await createE2EProviderInvoke(definition, { environment: {}, readSecret: async () => PROVIDER_KEY, fetch: fake.fetch });
+    const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret: async () => PROVIDER_KEY, fetch: fake.fetch });
     await startProxy(invoke, definition);
     const guard = createE2ECredentialGuard({ passwords: [...invoke.secrets], emails: [], cookieValues: [] });
     expect(guard.containsSecret({ messages: ["the page shows " + PROVIDER_KEY] })).toBe(true);

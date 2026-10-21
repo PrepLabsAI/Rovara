@@ -442,9 +442,24 @@ describe("served model on the receipt (amendment A1)", () => {
     const identity = { runId: RUN_ID, caseId: "case-orders-export", stepIndex: 1, routeId: "e2e-act-haiku", routeRevision: "r1-0123456789ab", provider: "anthropic" as const, modelId: "claude-haiku-5-5" };
     const check = (receipts: unknown[]) => checkE2EStepModelAccounting({ roundScope: "standard", identity, reportModelCalls: 1, receipts, maxModelCallsPerStep: 12 });
     const mine = (overrides: Record<string, unknown>) => receiptAt(0, { provider: "anthropic", modelId: "claude-haiku-5-5", ...overrides });
-    expect(check([mine({ servedModelId: null })])).toMatchObject({ ok: true });
+    expect(check([mine({ servedModelId: "claude-haiku-5-5" })])).toMatchObject({ ok: true });
     expect(check([mine({ servedModelId: "claude-haiku-5-5-20261001" })])).toMatchObject({ ok: true });
     expect(check([mine({ servedModelId: "claude-sonnet-5-5" })])).toMatchObject({ ok: false, code: "receipt-served-model-mismatch" });
+  });
+
+  it("allows an ok receipt with no served model only for Bedrock and the scripted provider (R7)", () => {
+    const identityFor = (provider: "anthropic" | "openai" | "openrouter" | "amazon-bedrock", modelId: string) => ({ runId: RUN_ID, caseId: "case-orders-export", stepIndex: 1, routeId: "e2e-act-haiku", routeRevision: "r1-0123456789ab", provider, modelId });
+    const run = (provider: "anthropic" | "openai" | "openrouter" | "amazon-bedrock", modelId: string, overrides: Record<string, unknown>) =>
+      checkE2EStepModelAccounting({ roundScope: "standard", identity: identityFor(provider, modelId), reportModelCalls: 0, receipts: [receiptAt(0, { provider, modelId, ...overrides })], maxModelCallsPerStep: 12 });
+    for (const [provider, modelId] of [["anthropic", "claude-haiku-5-5"], ["openai", "gpt-5.4-mini"], ["openrouter", "anthropic/claude-haiku-5.5"]] as const) {
+      expect(checkE2EStepModelAccounting({ roundScope: "standard", identity: identityFor(provider, modelId), reportModelCalls: 1, receipts: [receiptAt(0, { provider, modelId, servedModelId: null })], maxModelCallsPerStep: 12 }), provider)
+        .toMatchObject({ ok: false, code: "receipt-served-model-mismatch" });
+      // A call that never produced an answer has nothing to name.
+      expect(run(provider, modelId, { ...failedCall, servedModelId: null }), `${provider} failed call`).toMatchObject({ ok: true });
+    }
+    expect(checkE2EStepModelAccounting({ roundScope: "standard", identity: identityFor("amazon-bedrock", "us.anthropic.claude-haiku-5-5"), reportModelCalls: 1, receipts: [receiptAt(0, { servedModelId: null })], maxModelCallsPerStep: 12 })).toMatchObject({ ok: true });
+    const scriptedIdentity = { ...identityFor("amazon-bedrock", "scripted-v1"), routeId: "rovara-scripted/v1", provider: "rovara-scripted" as never };
+    expect(checkE2EStepModelAccounting({ roundScope: "qualification", identity: scriptedIdentity, reportModelCalls: 1, receipts: [receiptAt(0, { provider: "rovara-scripted", routeId: "rovara-scripted/v1", modelId: "scripted-v1", servedModelId: null })], maxModelCallsPerStep: 12 })).toMatchObject({ ok: true });
   });
 });
 

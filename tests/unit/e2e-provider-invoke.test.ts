@@ -1,13 +1,20 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { E2EModelRouteDefinition } from "../../packages/contracts/src/e2e-model-channel.js";
 import { MissingProviderSecret } from "../../packages/model-runtime/src/config.js";
 import { E2EPayloadRefusedError, createGovernedE2EModelRoute, createInMemoryE2EDayBudget, type E2EInvokeInput } from "../../packages/model-runtime/src/e2e-route.js";
+import * as modelRuntime from "../../packages/model-runtime/src/index.js";
 import { createE2EProviderInvoke } from "../../packages/model-runtime/src/e2e-provider-invoke.js";
-import { PROVIDER_KEY, SECRET_ARN, TOOLS, bedrockRoute, call, channelRequest, keyedRoute } from "../support/e2e-model-fixtures.js";
+import { createE2EProviderInvokeForTesting } from "../../packages/model-runtime/src/e2e-provider-invoke-testing.js";
+import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
+import { PROVIDER_KEY, SECRET_ARN, TOOLS, bedrockRoute, call, channelRequest, installationEnvironment, keyedRoute } from "../support/e2e-model-fixtures.js";
 import {
-  anthropicSse, bedrockLoopback, bedrockStreamBody, fakeFetch, jsonError, openaiResponsesSse, openrouterSse,
+  anthropicSse, bedrockLoopback, bedrockStartOnly, bedrockStreamBody, brokenSse, fakeFetch, jsonError, openaiResponsesSse, openrouterSse,
   type BedrockLoopback, type RecordedRequest,
 } from "../support/e2e-provider-fakes.js";
+
+beforeEach(() => { cleanRedirectingEnvironment(); });
+afterEach(() => { vi.unstubAllEnvs(); });
 
 const readSecret = async (arn: string) => (arn === SECRET_ARN ? PROVIDER_KEY : undefined);
 const TAP = { id: "call_tap_1", name: "tap", input: { target: "n1" } };
@@ -51,7 +58,7 @@ describe.each(keyedCases)("e2e provider invoke through pi-ai: $provider", (spec)
   const pinned = definition.modelId;
   const make = async (handler: Parameters<typeof fakeFetch>[0], extra: Partial<Parameters<typeof createE2EProviderInvoke>[1]> = {}) => {
     const fake = fakeFetch(handler);
-    return { invoke: await createE2EProviderInvoke(definition, { environment: {}, readSecret, fetch: fake.fetch, ...extra }), ...fake };
+    return { invoke: await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret, fetch: fake.fetch, ...extra }), ...fake };
   };
 
   it("round-trips a tool call, with the key only in the auth header and the pinned model in the payload", async () => {
@@ -143,7 +150,7 @@ describe.each(keyedCases)("e2e provider invoke through pi-ai: $provider", (spec)
 
   it("answers provider-error with no fallback and no request when the provider secret is missing", async () => {
     const fake = fakeFetch(() => spec.response(pinned));
-    const invoke = await createE2EProviderInvoke(definition, { environment: {}, readSecret: async () => undefined, fetch: fake.fetch });
+    const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret: async () => undefined, fetch: fake.fetch });
     await expect(invoke(input(definition))).rejects.toBeInstanceOf(MissingProviderSecret);
     expect(fake.requests).toHaveLength(0);
     const route = createGovernedE2EModelRoute(definition, { invoke, now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
@@ -173,7 +180,7 @@ describe.each(keyedCases)("e2e provider invoke through pi-ai: $provider", (spec)
 describe("final payload shape per provider (Haiku 5.5 rejects temperature 0 and thinks by default)", () => {
   const one = async (definition: E2EModelRouteDefinition, response: () => Response) => {
     const fake = fakeFetch(response);
-    const invoke = await createE2EProviderInvoke(definition, { environment: {}, readSecret, fetch: fake.fetch });
+    const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret, fetch: fake.fetch });
     await invoke(input(definition));
     return fake.requests[0]!.body;
   };
@@ -215,7 +222,7 @@ describe("Bedrock through pi-ai on a loopback endpoint (Step 0)", () => {
   const definition = bedrockRoute();
   const make = async (respond: Parameters<typeof bedrockLoopback>[0]) => {
     loopback = await bedrockLoopback(respond);
-    return createE2EProviderInvoke(definition, { environment: {}, testing: { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } } });
+    return createE2EProviderInvokeForTesting(definition, { environment: installationEnvironment(definition) }, { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } });
   };
 
   it("sends a throttled call to the endpoint exactly once: the SDK's own retries are cut off", async () => {
@@ -266,7 +273,7 @@ describe("Bedrock through pi-ai on a loopback endpoint (Step 0)", () => {
     const arn = `arn:aws:bedrock:us-east-1:123456789012:inference-profile/${definition.modelId}`;
     const withArn = bedrockRoute({ inferenceProfileArn: arn });
     loopback = await bedrockLoopback(() => ({ status: 200, body: bedrockStreamBody({ tool: TAP }) }));
-    const invoke = await createE2EProviderInvoke(withArn, { environment: {}, testing: { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } } });
+    const invoke = await createE2EProviderInvokeForTesting(withArn, { environment: installationEnvironment(withArn) }, { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } });
     await invoke(input(withArn));
     expect(decodeURIComponent(loopback.requests[0]!.path)).toBe(`/model/${arn}/converse-stream`);
   });
@@ -281,5 +288,127 @@ describe("Bedrock through pi-ai on a loopback endpoint (Step 0)", () => {
 
   it("does not call a provider at all for a scripted route", async () => {
     await expect(createE2EProviderInvoke({ ...definition, provider: "rovara-scripted" } as never, { environment: {} })).rejects.toThrow(/scripted/);
+  });
+});
+
+describe("fix round 2 (re-review of amendment A1)", () => {
+  let loopback: BedrockLoopback | undefined;
+  afterEach(async () => { await loopback?.close(); loopback = undefined; });
+
+  const bedrock = bedrockRoute();
+  const bedrockInvoke = async (respond: Parameters<typeof bedrockLoopback>[0]) => {
+    loopback = await bedrockLoopback(respond);
+    return createE2EProviderInvokeForTesting(bedrock, { environment: installationEnvironment(bedrock) }, { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } });
+  };
+  const viaRoute = (invoke: Awaited<ReturnType<typeof createE2EProviderInvoke>>, definition: E2EModelRouteDefinition = bedrock) =>
+    createGovernedE2EModelRoute(definition, { invoke, now: Date.now, dayBudget: createInMemoryE2EDayBudget() }).generate(channelRequest());
+
+  it("R1: a Bedrock connection dropped before any response may be retried by the SDK inside one receipt, which charges the reserved bound", async () => {
+    const invoke = await bedrockInvoke(() => ({ status: 200, body: "", drop: true }));
+    const { result, receipt, chargedInputTokens } = await viaRoute(invoke);
+    expect(result).toMatchObject({ status: "error", code: "provider-error" });
+    expect(receipt.outcome).toBe("provider-error");
+    expect(receipt.inputTokens).toBeGreaterThan(500);
+    expect(chargedInputTokens).toBe(receipt.inputTokens);
+    // The SDK may make up to its three attempts; they all sit inside this one receipt.
+    expect(loopback!.requests.length).toBeGreaterThanOrEqual(1);
+    expect(loopback!.requests.length).toBeLessThanOrEqual(3);
+  });
+
+  it("R1: an HTTP error still stops after one attempt and charges nothing; a keyed provider's dropped connection charges the bound", async () => {
+    const throttled = await bedrockInvoke(() => ({ status: 429, body: JSON.stringify({ message: "x" }), errorType: "ThrottlingException" }));
+    const { receipt } = await viaRoute(throttled);
+    expect(receipt).toMatchObject({ outcome: "provider-error", inputTokens: 0 });
+    expect(loopback!.requests).toHaveLength(1);
+    const definition = keyedRoute("anthropic");
+    const dropped = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret, fetch: fakeFetch(() => { throw new TypeError("fetch failed"); }).fetch });
+    const keyed = await viaRoute(dropped, definition);
+    expect(keyed.receipt.outcome).toBe("provider-error");
+    expect(keyed.receipt.inputTokens).toBeGreaterThan(500);
+  });
+
+  it("R5: a 2xx response that is cut mid-stream is charged the reserved bound, on Bedrock and on a keyed provider", async () => {
+    const invoke = await bedrockInvoke(() => ({ status: 200, body: bedrockStartOnly(), cutAfterBody: true }));
+    const cut = await viaRoute(invoke);
+    expect(cut.result).toMatchObject({ status: "error", code: "provider-error" });
+    expect(cut.receipt.inputTokens).toBeGreaterThan(500);
+    expect(cut.chargedInputTokens).toBe(cut.receipt.inputTokens);
+    for (const provider of ["anthropic", "openai", "openrouter"] as const) {
+      const definition = keyedRoute(provider);
+      const answer = () => (provider === "anthropic" ? anthropicSse({ model: definition.modelId, tool: TAP }) : provider === "openai" ? openaiResponsesSse({ model: definition.modelId, tool: TAP }) : openrouterSse({ model: definition.modelId, tool: TAP, upstream: "Anthropic" }));
+      const keyed = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret, fetch: fakeFetch(() => brokenSse(answer())).fetch });
+      const outcome = await viaRoute(keyed, definition);
+      expect(outcome.result, provider).toMatchObject({ status: "error", code: "provider-error" });
+      expect(outcome.receipt.inputTokens, provider).toBeGreaterThan(500);
+    }
+  });
+
+  it("R2: refuses a route whose provider or secret differs from the worker's own settings, and never calls a provider", async () => {
+    const definition = keyedRoute("anthropic");
+    const cases: Array<[string, Record<string, string>]> = [
+      ["another provider", { ...installationEnvironment(definition), AGENTX_MODEL_PROVIDER: "openai" }],
+      ["no provider setting (Bedrock)", {}],
+      ["another secret", { ...installationEnvironment(definition), AGENTX_ANTHROPIC_SECRET_ARN: SECRET_ARN.replace("AbCdEf", "ZzZzZz") }],
+      ["no secret", { AGENTX_MODEL_PROVIDER: "anthropic" }],
+    ];
+    for (const [label, environment] of cases) {
+      const fake = fakeFetch(() => anthropicSse({ model: definition.modelId, tool: TAP }));
+      const invoke = await createE2EProviderInvoke(definition, { environment, readSecret, fetch: fake.fetch });
+      await expect(invoke(input(definition)), label).rejects.toThrow(/model-route-changed-reapprove/);
+      expect(fake.requests, label).toHaveLength(0);
+    }
+    const onBedrock = await createE2EProviderInvoke(bedrock, { environment: { AGENTX_MODEL_PROVIDER: "anthropic" } });
+    await expect(onBedrock(input(bedrock))).rejects.toThrow(/model-route-changed-reapprove/);
+    // An unset provider setting is Bedrock, as for the coding agent.
+    const fine = await createE2EProviderInvokeForTesting(bedrock, { environment: {} }, { bedrockEndpoint: "http://127.0.0.1:1", providerEnv: {} });
+    expect(fine.secrets).toEqual([]);
+  });
+
+  it("R3: reads the process environment whatever the caller passes, on every call", async () => {
+    const definition = keyedRoute("anthropic");
+    const fake = fakeFetch(() => anthropicSse({ model: definition.modelId, tool: TAP }));
+    const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret, fetch: fake.fetch });
+    await invoke(input(definition));
+    expect(fake.requests).toHaveLength(1);
+    vi.stubEnv("HTTPS_PROXY", "http://proxy.example.test:3128");
+    await expect(invoke(input(definition))).rejects.toThrow(/environment can redirect model calls/);
+    vi.stubEnv("HTTPS_PROXY", undefined);
+    vi.stubEnv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "/creds");
+    await expect(invoke(input(definition))).rejects.toThrow(/AWS_CONTAINER_CREDENTIALS_RELATIVE_URI/);
+    expect(fake.requests).toHaveLength(1);
+  });
+
+  it("R4: a Bedrock route always names the standard regional endpoint, and a keyed route has none", async () => {
+    const invoke = await createE2EProviderInvoke(bedrock, { environment: installationEnvironment(bedrock) });
+    expect(invoke.endpoint).toBe("https://bedrock-runtime.us-east-1.amazonaws.com");
+    const other = bedrockRoute({ region: "eu-west-1" });
+    expect((await createE2EProviderInvoke(other, { environment: installationEnvironment(other) })).endpoint).toBe("https://bedrock-runtime.eu-west-1.amazonaws.com");
+    const keyed = keyedRoute("anthropic");
+    expect((await createE2EProviderInvoke(keyed, { environment: installationEnvironment(keyed), readSecret })).endpoint).toBeUndefined();
+  });
+
+  it("R6: the loopback and environment overrides are not reachable from the production entry point", async () => {
+    // The production factory ignores a testing argument smuggled in through a cast.
+    const smuggled = await createE2EProviderInvoke(bedrock, { environment: installationEnvironment(bedrock), testing: { bedrockEndpoint: "http://127.0.0.1:9", providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } } } as never);
+    expect(smuggled.endpoint).toBe("https://bedrock-runtime.us-east-1.amazonaws.com");
+    // The test factory is not in the package's exports, and nothing but tests imports it.
+    expect(Object.keys(modelRuntime).filter((name) => /testing|internal/i.test(name))).toEqual([]);
+    const manifest = JSON.parse(readFileSync(new URL("../../packages/model-runtime/package.json", import.meta.url), "utf8")) as { exports: Record<string, string> };
+    expect(JSON.stringify(manifest.exports)).not.toMatch(/e2e-provider-invoke/);
+    const { readdirSync, statSync } = await import("node:fs");
+    const offenders: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        if (name === "node_modules" || name === "dist") continue;
+        const path = `${dir}/${name}`;
+        if (statSync(path).isDirectory()) walk(path);
+        else if (/\.ts$/.test(name) && !name.includes("e2e-provider-invoke-testing") && /e2e-provider-invoke-testing/.test(readFileSync(path, "utf8"))) offenders.push(path);
+      }
+    };
+    for (const pkg of readdirSync(new URL("../../packages", import.meta.url).pathname)) {
+      const src = new URL(`../../packages/${pkg}/src`, import.meta.url).pathname;
+      if (statSync(src, { throwIfNoEntry: false })?.isDirectory()) walk(src);
+    }
+    expect(offenders).toEqual([]);
   });
 });
