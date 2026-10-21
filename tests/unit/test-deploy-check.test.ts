@@ -2,6 +2,7 @@ import { writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { WORKER_INVOCATION_FEATURES } from "../../packages/contracts/src/protocol.js";
 import {
+  E2E_MODEL_ROUTE,
   evaluateTestDeployCheck,
   findingLabel,
   formatFindings,
@@ -9,9 +10,11 @@ import {
   parseDeployedCodeKey,
   parseRunnerStatus,
   sourcePathsFor,
+  tier3Request,
   type CatalogRowFact,
   type CheckInput,
   type Finding,
+  type ModelRouteCheck,
   type RunnerFacts,
 } from "../../scripts/test-deploy-check.js";
 import { DeployCheckFindingsError, assertCheckAllowsApply, checkExitCode, checkReport, gatherCheckFacts, main, parseTestDeployArgs, type CfnTemplate } from "../../scripts/test-deploy.js";
@@ -90,7 +93,8 @@ function withEnvironment(source: CfnTemplate, logicalId: string, names: readonly
   if (properties) properties.Environment = { Variables: Object.fromEntries(names.map((name) => [name, `value-of-${name}`])) };
   return copy;
 }
-const READY_FEATURES = [...WORKER_INVOCATION_FEATURES];
+const AGENT_FEATURE = "task.workflowE2EAgentSteps.v1";
+const READY_FEATURES = [...WORKER_INVOCATION_FEATURES, AGENT_FEATURE];
 const GOOD_RUNNER: RunnerFacts = {
   deployedExecutorImage: `123.dkr.ecr.us-east-1.amazonaws.com/x/executor@sha256:${"a".repeat(64)}`,
   executorImage: `123.dkr.ecr.us-east-1.amazonaws.com/x/executor@sha256:${"a".repeat(64)}`,
@@ -241,6 +245,149 @@ describe("evaluateTestDeployCheck", () => {
     const { invocationFeatures: _features, ...unreported } = GOOD_RUNNER;
     void _features;
     expect(kinds(evaluateTestDeployCheck(input({ runnerFacts: unreported })).findings)).toEqual(["worker-feature-missing"]);
+  });
+});
+
+describe("the agent feature", () => {
+  it("is needed by head: a running worker whose /ping lacks task.workflowE2EAgentSteps.v1 gives worker-feature-missing", () => {
+    const withoutAgent = READY_FEATURES.filter((feature) => feature !== AGENT_FEATURE);
+    const result = evaluateTestDeployCheck(input({ runnerFacts: { ...GOOD_RUNNER, invocationFeatures: withoutAgent } }));
+    expect(result.ok).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ kind: "worker-feature-missing", severity: "error", subject: "runner", missing: [AGENT_FEATURE] });
+    expect(result.findings[0]?.message).toContain(AGENT_FEATURE);
+  });
+
+  it("is a plain feature string: a worker that lists it passes, and it is never listed twice as missing", () => {
+    expect(evaluateTestDeployCheck(input({ runnerFacts: { ...GOOD_RUNNER, invocationFeatures: READY_FEATURES } })).ok).toBe(true);
+    const lacking = evaluateTestDeployCheck(input({ runnerFacts: { ...GOOD_RUNNER, invocationFeatures: [] } })).findings[0];
+    expect(lacking?.missing?.filter((feature) => feature === AGENT_FEATURE)).toHaveLength(1);
+  });
+});
+
+describe("the e2e model route", () => {
+  const MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+  const ACCOUNT = "123456789012";
+  const PROFILE_ARN = `arn:aws:bedrock:us-east-1:${ACCOUNT}:inference-profile/${MODEL}`;
+  const MODEL_ARNS = ["us-east-1", "us-east-2", "us-west-2"].map((region) => `arn:aws:bedrock:${region}::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0`);
+  const WORKER_ROLE = "Ec2WorkersInstanceRole5F1A2B3C";
+  const WORKER_POLICY = "Ec2WorkersInstanceRoleDefaultPolicy7D8E9F0A";
+  /** The grant infra/lib/ec2-workers.ts declares, as CDK emits it. */
+  const BEDROCK_SID = {
+    Sid: "BedrockModelInvocation",
+    Effect: "Allow",
+    Action: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+    Resource: [
+      { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":bedrock:*::foundation-model/*"]] },
+      { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":bedrock:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":*"]] },
+    ],
+  };
+  const foundation = (statements: unknown[] = [BEDROCK_SID]): CfnTemplate => ({
+    Resources: {
+      [WORKER_ROLE]: role,
+      [WORKER_POLICY]: { Type: "AWS::IAM::Policy", Properties: { PolicyName: "p", Roles: [{ Ref: WORKER_ROLE }], PolicyDocument: { Version: "2012-10-17", Statement: statements } } },
+    },
+    Outputs: { Ec2WorkerInstanceRoleArn: { Value: { "Fn::GetAtt": [WORKER_ROLE, "Arn"] } } },
+  });
+  const route = (overrides: Partial<ModelRouteCheck> = {}): ModelRouteCheck => ({
+    route: E2E_MODEL_ROUTE,
+    approval: { approved: true },
+    access: { state: "checked", profileStatus: "ACTIVE", models: [{ modelId: "anthropic.claude-haiku-4-5-20251001-v1:0", authorizationStatus: "AUTHORIZED", entitlementAvailability: "AVAILABLE", regionAvailability: "AVAILABLE", agreementStatus: "AVAILABLE" }] },
+    iam: { foundationTemplate: foundation(), roleLogicalId: WORKER_ROLE, resources: [PROFILE_ARN, ...MODEL_ARNS], scope: { partition: "aws", region: "us-east-1", accountId: ACCOUNT } },
+    ...overrides,
+  });
+  const check = (overrides: Partial<ModelRouteCheck> = {}) => evaluateTestDeployCheck(input({ modelRoute: route(overrides) }));
+
+  it("names the pinned Bedrock model of decision D1", () => {
+    expect(E2E_MODEL_ROUTE.modelId).toBe(MODEL);
+    expect(E2E_MODEL_ROUTE.inferenceProfileArn).toBeNull();
+    expect(E2E_MODEL_ROUTE.routeId).not.toBe("");
+  });
+
+  it("passes when the model is available and the worker role already grants the route's ARNs (nothing to add)", () => {
+    expect(check()).toEqual({ ok: true, findings: [] });
+  });
+
+  it("gives model-access-unverified when the route's model is absent from the account's Bedrock listing", () => {
+    const result = check({ access: { state: "not-found", detail: "ResourceNotFoundException: the inference profile could not be found" } });
+    expect(result.ok).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ kind: "model-access-unverified", severity: "error", subject: E2E_MODEL_ROUTE.routeId });
+    expect(result.findings[0]?.message).toContain(MODEL);
+    expect(result.findings[0]?.message).toMatch(/not listed|not available/);
+  });
+
+  it("gives model-access-unverified, as unverifiable and never as a pass, when the profile cannot read the listing", () => {
+    const result = check({ access: { state: "unverifiable", reason: "AccessDeniedException: not authorized to perform bedrock:GetInferenceProfile" } });
+    expect(result.ok).toBe(false);
+    expect(result.findings[0]).toMatchObject({ kind: "model-access-unverified", severity: "error" });
+    expect(result.findings[0]?.message).toMatch(/unverifiable/);
+    expect(result.findings[0]?.message).toContain("bedrock:GetInferenceProfile");
+  });
+
+  it("gives model-access-unverified for a listed model the account is not authorized for, or whose profile is not ACTIVE", () => {
+    const base = route().access;
+    if (base.state !== "checked") throw new Error("fixture");
+    const model = base.models[0]!;
+    const notAuthorized = check({ access: { ...base, models: [{ ...model, authorizationStatus: "NOT_AUTHORIZED" }] } });
+    expect(notAuthorized.findings[0]).toMatchObject({ kind: "model-access-unverified", severity: "error" });
+    expect(notAuthorized.findings[0]?.message).toContain("NOT_AUTHORIZED");
+    expect(check({ access: { ...base, profileStatus: "INACTIVE" } }).findings[0]?.kind).toBe("model-access-unverified");
+    expect(check({ access: { ...base, models: [] } }).findings[0]?.kind).toBe("model-access-unverified");
+    expect(check({ access: { ...base, models: [{ ...model, entitlementAvailability: "NOT_AVAILABLE" }] } }).findings[0]?.kind).toBe("model-access-unverified");
+    expect(check({ access: { ...base, models: [{ ...model, regionAvailability: "NOT_AVAILABLE" }] } }).findings[0]?.kind).toBe("model-access-unverified");
+    expect(check({ access: { ...base, models: [{ ...model, agreementStatus: "PENDING" }] } }).findings[0]?.kind).toBe("model-access-unverified");
+  });
+
+  it("warns, without failing the check, that the route is not approved (until Task 4.9 makes it an error)", () => {
+    const result = check({ approval: { approved: false } });
+    expect(result.ok).toBe(true);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({ kind: "model-route-not-approved", severity: "warning", subject: E2E_MODEL_ROUTE.routeId });
+    const unreadable = check({ approval: { unreadable: "AccessDeniedException: dynamodb:Scan" } });
+    expect(unreadable.ok).toBe(true);
+    expect(unreadable.findings[0]).toMatchObject({ kind: "model-route-not-approved", severity: "warning" });
+    expect(unreadable.findings[0]?.message).toContain("dynamodb:Scan");
+  });
+
+  it("gives iam-missing-grant naming the worker instance role for an inference-profile ARN outside the granted patterns", () => {
+    const outside = "arn:aws:bedrock:us-west-2:210987654321:application-inference-profile/abc123def456";
+    const result = check({ iam: { ...route().iam, resources: [outside, ...MODEL_ARNS] } });
+    expect(result.ok).toBe(false);
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]).toMatchObject({
+      kind: "iam-missing-grant", severity: "error", roleLogicalId: WORKER_ROLE, policyLogicalId: WORKER_POLICY, label: "Ec2WorkersInstanceRole",
+    });
+    expect(result.findings[0]?.message).toContain(outside);
+    expect(result.findings[0]?.statements).toEqual([{ Effect: "Allow", Action: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"], Resource: [outside] }]);
+    expect(tier3Request(result.findings)).toContain(WORKER_ROLE);
+  });
+
+  it("needs bedrock:InvokeModel, which also authorizes Converse, and reports only the action a statement lacks", () => {
+    const onlyStream = [{ ...BEDROCK_SID, Action: "bedrock:InvokeModelWithResponseStream" }];
+    const result = check({ iam: { ...route().iam, foundationTemplate: foundation(onlyStream) } });
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0]?.statements).toEqual([{ Effect: "Allow", Action: "bedrock:InvokeModel", Resource: [PROFILE_ARN, ...MODEL_ARNS] }]);
+  });
+
+  it("does not count a conditional Allow, a Deny or an unresolvable resource as a grant", () => {
+    const conditional = { ...BEDROCK_SID, Condition: { StringEquals: { "aws:RequestedRegion": "us-east-1" } } };
+    expect(kinds(check({ iam: { ...route().iam, foundationTemplate: foundation([conditional]) } }).findings)).toEqual(["iam-missing-grant"]);
+    const denied = foundation([BEDROCK_SID, { Effect: "Deny", Action: "bedrock:InvokeModel", Resource: "*" }]);
+    expect(kinds(check({ iam: { ...route().iam, foundationTemplate: denied } }).findings)).toEqual(["iam-missing-grant"]);
+    const attribute = foundation([{ Effect: "Allow", Action: "bedrock:InvokeModel*", Resource: { "Fn::GetAtt": ["Somewhere", "Arn"] } }]);
+    expect(kinds(check({ iam: { ...route().iam, foundationTemplate: attribute } }).findings)).toEqual(["iam-missing-grant"]);
+  });
+
+  it("matches IAM wildcards in actions and resources, and Fn::Sub spellings", () => {
+    const wildcard = foundation([{ Effect: "Allow", Action: "bedrock:Invoke*", Resource: { "Fn::Sub": "arn:${AWS::Partition}:bedrock:*:*:*" } }]);
+    expect(check({ iam: { ...route().iam, foundationTemplate: wildcard } })).toEqual({ ok: true, findings: [] });
+  });
+
+  it("runs after the other checks and does not disturb them", () => {
+    const result = evaluateTestDeployCheck(input({ lambdaCodeShas: { ...SHAS, [NOTIFIER]: "x" }, modelRoute: route({ approval: { approved: false } }) }));
+    expect(kinds(result.findings)).toEqual(["stale-lambda", "model-route-not-approved"]);
+    expect(formatFindings(result.findings)).toContain("warning model-route-not-approved");
   });
 });
 
@@ -505,7 +652,31 @@ describe("gatherCheckFacts", () => {
   const status = JSON.stringify({ state: "SUCCEEDED", reason: "qualified", finishedAt: "2026-10-20T10:00:00Z", executorImage: ACCOUNT_IMAGE, invocationFeatures: ["task.readiness"] });
 
   /** A fake `aws` that answers each read, records every call, and fails the test on anything it was not told about. */
-  function fakeAws(overrides: { instances?: string[]; statusBody?: string | null; catalogItems?: unknown[]; brokerSha?: string; brokerKey?: string } = {}) {
+  const WORKER_ROLE = "Ec2WorkersInstanceRole5F1A2B3C";
+  const PROFILE_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+  const FOUNDATION_MODEL = "anthropic.claude-haiku-4-5-20251001-v1:0";
+  const foundationTemplate = (): CfnTemplate => ({
+    Resources: {
+      [WORKER_ROLE]: { Type: "AWS::IAM::Role", Properties: {} },
+      WorkerPolicy: {
+        Type: "AWS::IAM::Policy",
+        Properties: {
+          Roles: [{ Ref: WORKER_ROLE }],
+          PolicyDocument: { Statement: [{
+            Sid: "BedrockModelInvocation", Effect: "Allow", Action: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+            Resource: [
+              { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":bedrock:*::foundation-model/*"]] },
+              { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":bedrock:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":*"]] },
+            ],
+          }] },
+        },
+      },
+    },
+    Outputs: { Ec2WorkerInstanceRoleArn: { Value: { "Fn::GetAtt": [WORKER_ROLE, "Arn"] } } },
+  });
+  const failed = (stderr: string): CommandResult => ({ status: 254, stdout: "", stderr });
+  type BedrockMode = "ok" | "not-found" | "denied" | "unauthorized-model";
+  function fakeAws(overrides: { instances?: string[]; statusBody?: string | null; catalogItems?: unknown[]; brokerSha?: string; brokerKey?: string; bedrock?: BedrockMode; routeRows?: number; scan?: "denied" } = {}) {
     const calls: string[][] = [];
     const runner = {
       aws(args: readonly string[]): CommandResult {
@@ -517,6 +688,22 @@ describe("gatherCheckFacts", () => {
           if (stack === `agentx-${ENV}-runtime`) return ok({ Parameters: [{ ParameterKey: "ExecutorImageUri", ParameterValue: ACCOUNT_IMAGE }] });
           if (stack === `agentx-${ENV}-foundation`) return ok({ Outputs: [{ OutputKey: "Ec2WorkerInstanceRoleArn", OutputValue: "arn:aws:iam::123456789012:role/worker-role" }] });
         }
+        if (args[0] === "cloudformation" && args[1] === "get-template" && args[args.indexOf("--stack-name") + 1] === `agentx-${ENV}-foundation`) return ok(foundationTemplate());
+        if (args[0] === "bedrock") {
+          const mode = overrides.bedrock ?? "ok";
+          if (mode === "denied") return failed("An error occurred (AccessDeniedException) when calling the GetInferenceProfile operation: User is not authorized to perform: bedrock:GetInferenceProfile");
+          if (args[1] === "get-inference-profile") {
+            if (mode === "not-found") return failed("An error occurred (ResourceNotFoundException) when calling the GetInferenceProfile operation: Inference profile not found");
+            return ok({
+              inferenceProfileArn: `arn:aws:bedrock:us-east-1:123456789012:inference-profile/${args[args.indexOf("--inference-profile-identifier") + 1]}`, status: "ACTIVE", type: "SYSTEM_DEFINED",
+              models: ["us-east-1", "us-east-2", "us-west-2"].map((region) => ({ modelArn: `arn:aws:bedrock:${region}::foundation-model/${FOUNDATION_MODEL}` })),
+            });
+          }
+          if (args[1] === "get-foundation-model-availability") {
+            return ok({ modelId: args[args.indexOf("--model-id") + 1], agreementAvailability: { status: "AVAILABLE" }, authorizationStatus: mode === "unauthorized-model" ? "NOT_AUTHORIZED" : "AUTHORIZED", entitlementAvailability: "AVAILABLE", regionAvailability: "AVAILABLE" });
+          }
+        }
+        if (args[0] === "dynamodb" && args[1] === "scan") return overrides.scan === "denied" ? failed("AccessDeniedException: not authorized to perform: dynamodb:Scan") : ok({ Count: overrides.routeRows ?? 0 });
         if (args[0] === "cloudformation" && args[1] === "get-template") return ok(overrides.brokerKey === undefined ? brokerTemplate() : withKey(brokerTemplate(), "BrokerE1355FD6", overrides.brokerKey));
         if (args[0] === "cloudformation" && args[1] === "list-stack-resources") return ok([["BrokerE1355FD6", "fn-broker"], [NOTIFIER, "fn-notifier"], ["SessionsSteps3B98DD2B", "fn-sessions"], ["Unrelated", "fn-other"]]);
         if (args[0] === "lambda" && args[1] === "get-function") {
@@ -559,8 +746,64 @@ describe("gatherCheckFacts", () => {
     expect(facts.builtZipShas).toEqual({ BrokerE1355FD6: "b" });
     expect(facts.catalogRows.map((row) => row.sk).sort()).toEqual(["PROFILE#linux-arm64-web-api-v1#api", "PROFILE#linux-arm64-web-api-v1#web"]);
     expect(facts.runnerFacts).toEqual({ deployedExecutorImage: ACCOUNT_IMAGE, executorImage: ACCOUNT_IMAGE, invocationFeatures: ["task.readiness"] });
-    const readOnly = ["cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources", "lambda get-function", "dynamodb query", "ec2 describe-instances", "iam get-role", "s3api get-object"];
+    const readOnly = ["cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources", "lambda get-function", "dynamodb query", "ec2 describe-instances", "iam get-role", "s3api get-object", "bedrock get-inference-profile", "bedrock get-foundation-model-availability", "dynamodb scan"];
     for (const call of fake.calls) expect(readOnly, call.join(" ")).toContain(`${call[0]} ${call[1]}`);
+  });
+
+  describe("the model route", () => {
+    it("reads Bedrock's control plane only: no model is ever invoked, and no bedrock-runtime call is made", async () => {
+      const fake = fakeAws();
+      await gather(fake);
+      const bedrock = fake.calls.filter((call) => call[0]?.startsWith("bedrock"));
+      expect(bedrock.map((call) => `${call[0]} ${call[1]}`).sort()).toEqual(["bedrock get-foundation-model-availability", "bedrock get-inference-profile"]);
+      for (const call of fake.calls) {
+        expect(call[0], call.join(" ")).not.toBe("bedrock-runtime");
+        expect(call[1] ?? "", call.join(" ")).not.toMatch(/^(invoke|converse)/);
+      }
+      expect(bedrock.find((call) => call[1] === "get-inference-profile")?.join(" ")).toContain(`--inference-profile-identifier ${PROFILE_ID}`);
+      // The availability of the foundation model behind the profile, asked once for the three regions' ARNs.
+      expect(bedrock.filter((call) => call[1] === "get-foundation-model-availability").map((call) => call[call.indexOf("--model-id") + 1])).toEqual([FOUNDATION_MODEL]);
+    });
+
+    it("checks the pinned route's model, its approval row, and the worker role's grants for the profile and its models", async () => {
+      const fake = fakeAws();
+      const { facts } = await gather(fake);
+      expect(facts.modelRoute?.route).toEqual(E2E_MODEL_ROUTE);
+      expect(facts.modelRoute?.access).toEqual({
+        state: "checked", profileStatus: "ACTIVE",
+        models: [{ modelId: FOUNDATION_MODEL, authorizationStatus: "AUTHORIZED", entitlementAvailability: "AVAILABLE", regionAvailability: "AVAILABLE", agreementStatus: "AVAILABLE" }],
+      });
+      expect(facts.modelRoute?.approval).toEqual({ approved: false });
+      expect(facts.modelRoute?.iam.roleLogicalId).toBe(WORKER_ROLE);
+      expect(facts.modelRoute?.iam.scope).toEqual({ partition: "aws", region: "us-east-1", accountId: "123456789012" });
+      expect(facts.modelRoute?.iam.resources).toEqual([
+        `arn:aws:bedrock:us-east-1:123456789012:inference-profile/${PROFILE_ID}`,
+        ...["us-east-1", "us-east-2", "us-west-2"].map((region) => `arn:aws:bedrock:${region}::foundation-model/${FOUNDATION_MODEL}`),
+      ]);
+      const scan = fake.calls.find((call) => call[1] === "scan")?.join(" ") ?? "";
+      expect(scan).toContain("--table-name state-table");
+      expect(scan).toContain(`E2E_MODEL_ROUTE_LATEST#${E2E_MODEL_ROUTE.routeId}`);
+      const result = evaluateTestDeployCheck({ ...facts, runnerFacts: { ...GOOD_RUNNER, deployedExecutorImage: ACCOUNT_IMAGE, executorImage: ACCOUNT_IMAGE }, now: NOW });
+      expect(result.findings.filter((finding) => finding.kind === "model-route-not-approved")).toHaveLength(1);
+      expect(result.findings.filter((finding) => finding.kind === "iam-missing-grant" && finding.roleLogicalId === WORKER_ROLE)).toEqual([]);
+    });
+
+    it("reads the route as approved when the registry holds its latest row", async () => {
+      expect((await gather(fakeAws({ routeRows: 1 }))).facts.modelRoute?.approval).toEqual({ approved: true });
+      expect(JSON.stringify((await gather(fakeAws({ scan: "denied" }))).facts.modelRoute?.approval)).toContain("dynamodb:Scan");
+    });
+
+    it("reports a model Bedrock does not know as not-found, a denied listing as unverifiable, and an unauthorized model", async () => {
+      const missing = await gather(fakeAws({ bedrock: "not-found" }));
+      expect(missing.facts.modelRoute?.access.state).toBe("not-found");
+      expect(JSON.stringify(missing.facts.modelRoute?.access)).toContain("ResourceNotFoundException");
+      expect(evaluateTestDeployCheck({ ...missing.facts, now: NOW }).findings.map((finding) => finding.kind)).toContain("model-access-unverified");
+      const denied = await gather(fakeAws({ bedrock: "denied" }));
+      expect(denied.facts.modelRoute?.access.state).toBe("unverifiable");
+      expect(JSON.stringify(denied.facts.modelRoute?.access)).toContain("bedrock:GetInferenceProfile");
+      const unauthorized = await gather(fakeAws({ bedrock: "unauthorized-model" }));
+      expect(evaluateTestDeployCheck({ ...unauthorized.facts, now: NOW }).findings.find((finding) => finding.kind === "model-access-unverified")?.message).toContain("NOT_AUTHORIZED");
+    });
   });
 
   it("looks the runner up by the web row's private IP in the qualification tag, and its status by the worker role's unique ID", async () => {
