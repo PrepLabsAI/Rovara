@@ -119,7 +119,7 @@ jobs:
     needs: scope
     if: needs.scope.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:

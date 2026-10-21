@@ -5,6 +5,7 @@ import { z } from "zod";
 import { E2EApplicationEvidenceRefSchema, ProjectSetupRunnerToolchainSchema, canonicalJson, type E2EApplicationEvidenceRef, type E2ERunBinding } from "@agentx/contracts";
 import { bindMockLedgers, type CaseWindow, type ParsedMockLedger } from "./mock-ledger.js";
 import { buildMockProofs } from "./mock-proofs.js";
+import { SINKHOLE_ORIGIN_REF } from "../application-mocks.js";
 import type { E2EActualApplicationRun, E2EActualApplicationShard } from "../application-collection.js";
 import { compareE2EApplicationPublicList } from "../application-identity.js";
 import { parseE2EApplicationReport } from "../application-report-schema.js";
@@ -164,12 +165,16 @@ export async function readExecutorActionWindows(outDir: string): Promise<readonl
   return Object.freeze(actionWindows);
 }
 
-/** The identity of what the host owns for one run, so a collector can recompute it without asking the host. */
-export function dockerOwnedResourceInventory(runId: string): { schemaVersion: "rovara-docker-owned-inventory/v1"; runId: string; label: string; network: string; containers: string[] } {
+/**
+ * The identity of what the host owns for one run, so a collector can recompute it without asking the host: the app, the executor, the sinkhole (always) and one mock container
+ * for every origin the plan's approved mocks serve (`mockOrigins`, which the collector derives from the admitted plan, never from the worker).
+ */
+export function dockerOwnedResourceInventory(runId: string, mockOrigins: readonly string[]): { schemaVersion: "rovara-docker-owned-inventory/v1"; runId: string; label: string; network: string; containers: string[] } {
+  const origins = [...new Set([...mockOrigins, SINKHOLE_ORIGIN_REF])].sort(compare);
   return { schemaVersion: "rovara-docker-owned-inventory/v1", runId, label: `rovara.run=${runId}`, network: `rovara-e2e-${runId}`,
-    containers: [`rovara-app-${runId}`, `rovara-executor-${runId}`] };
+    containers: [`rovara-app-${runId}`, `rovara-executor-${runId}`, ...origins.map((origin) => `rovara-mock-${runId}-${origin}`)] };
 }
-export const dockerOwnedResourceInventoryDigest = (runId: string): string => sha(canonicalJson(dockerOwnedResourceInventory(runId)));
+export const dockerOwnedResourceInventoryDigest = (runId: string, mockOrigins: readonly string[]): string => sha(canonicalJson(dockerOwnedResourceInventory(runId, mockOrigins)));
 
 const compare = (a: string, b: string) => a.localeCompare(b);
 function proof(value: unknown, mediaType: string, artifactId: string): { ref: E2EApplicationEvidenceRef; bytes: Uint8Array } {
@@ -178,18 +183,18 @@ function proof(value: unknown, mediaType: string, artifactId: string): { ref: E2
 }
 const decode = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 
-type OwnedCleanup = { removedAt: string; containers: readonly string[]; network: string };
+type OwnedCleanup = { removedAt: string; containers: readonly string[]; network: string; mockOrigins: readonly string[] };
 const ownedCleanupReceipt = (binding: Pick<E2ERunBinding, "runId">, cleanup: OwnedCleanup) => proof({ schemaVersion: "rovara-docker-owned-cleanup/v1",
   runId: binding.runId, removedAt: cleanup.removedAt, network: cleanup.network, containers: [...cleanup.containers].sort(compare),
-  inventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId) }, "application/json", `rovara-owned-cleanup-${binding.runId}`);
+  inventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId, cleanup.mockOrigins) }, "application/json", `rovara-owned-cleanup-${binding.runId}`);
 
 /**
  * The owned-cleanup receipt the host attests once a run's resources are gone, recomputed from nothing but the run id and the close time: the inventory is a pure
  * function of the run id, so a broker can derive the receipt (and its reference) it expects without taking it from the worker.
  */
-export function dockerOwnedCleanupReceipt(runId: string, removedAt: string): { ref: E2EApplicationEvidenceRef; bytes: Uint8Array } {
-  const inventory = dockerOwnedResourceInventory(runId);
-  return ownedCleanupReceipt({ runId }, { removedAt, containers: inventory.containers, network: inventory.network });
+export function dockerOwnedCleanupReceipt(runId: string, removedAt: string, mockOrigins: readonly string[]): { ref: E2EApplicationEvidenceRef; bytes: Uint8Array } {
+  const inventory = dockerOwnedResourceInventory(runId, mockOrigins);
+  return ownedCleanupReceipt({ runId }, { removedAt, containers: inventory.containers, network: inventory.network, mockOrigins });
 }
 
 /** What `collectE2EApplicationRun` takes besides the actual run, the compiled suite, the binding and the round. */
@@ -217,7 +222,7 @@ export function assembleDockerCollectionInputs(input: { snapshot: ExecutorOutput
   if (!first || !usage) throw new Error("shard reports do not reconcile to one group usage");
   return Object.freeze({ environment: first.environment, usage, limits: first.limits,
     expectedSupervisorReceiptRefs: Object.freeze([ownedCleanupReceipt(input.binding, input.cleanup).ref]),
-    ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(input.binding.runId),
+    ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(input.binding.runId, input.cleanup.mockOrigins),
     observationBindings: input.snapshot.observationBindings, assertionAssets: input.snapshot.assertionAssets, governedModelReceipts: Object.freeze([]),
     ownedClosedAt: input.cleanup.removedAt });
 }
@@ -302,7 +307,7 @@ export function assembleExecutorActualRun(input: { snapshot: ExecutorOutputSnaps
   });
   const cleanupReceipt = ownedCleanupReceipt(binding, input.cleanup);
   const cleanupFrame = proof({ schemaVersion: "e2e-application-owned-cleanup/v1", context, phase: "after-owned-close", cleanup: "confirmed", confirmed: true,
-    serverListening: false, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId), ownedCleanupReceiptRefs: [cleanupReceipt.ref] },
+    serverListening: false, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId, input.cleanup.mockOrigins), ownedCleanupReceiptRefs: [cleanupReceipt.ref] },
   "application/json", `rovara-cleanup-frame-${binding.runId}`);
   const receiptFrame = proof({ schemaVersion: "e2e-application-supervisor-receipt/v1", context, launches,
     caseCaptures: captures.map(({ capture, item }) => ({ caseId: capture.caseId, shardId: capture.shardId, ref: item.ref })).sort((a, b) => compare(a.caseId, b.caseId)),

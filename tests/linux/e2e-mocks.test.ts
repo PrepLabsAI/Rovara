@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -94,7 +95,6 @@ describe.runIf(process.env.ROVARA_DOCKER === "1")("external-origin mocks and unm
     const network = `${name}-net`;
     try {
       await mkdir(join(root, "mock"), { recursive: true }); await mkdir(join(root, "out"), { recursive: true, mode: 0o777 });
-      const { chmod, readFile } = await import("node:fs/promises");
       await chmod(join(root, "out"), 0o777);
       await writeFile(join(root, "mock", "fixture.json"), await readFile(join(import.meta.dirname, "../fixtures/e2e-web-api-app/e2e/mocks/inventory-v1.json")));
       await docker("network", "create", "--internal", network);
@@ -103,13 +103,80 @@ describe.runIf(process.env.ROVARA_DOCKER === "1")("external-origin mocks and unm
         "-e", "ROVARA_MOCK_FIXTURE=/mock/fixture.json", EXECUTOR_IMAGE, "node", "/opt/agentx/packages/verifier/dist/executor/entry.js", "--mock", "/mock/fixture.json", "--origin", "inventory-v1");
       const ask = "const ask = async (q) => { const r = await fetch('http://mock-inventory-v1:8080' + q); return r.status + ' ' + await r.text(); };"
         + "(async () => { for (let i = 0; i < 60; i += 1) { try { await ask('/v1/stock?orderId=a1'); break; } catch { await new Promise((done) => setTimeout(done, 500)); } }"
-        + "console.log(await ask('/v1/stock?orderId=a2')); console.log(await ask('/v1/stock?orderId=b1')); console.log(await ask('/v1/stock')); console.log(await ask('/health')); })();";
+        + "console.log(await ask('/v1/stock?orderId=a2')); console.log(await ask('/v1/stock?orderId=b1')); console.log(await ask('/v1/stock')); console.log(await ask('/health'));"
+        // HTTPS to the plain HTTP mock, and a malformed request: neither parses as a request, both are recorded.
+        + "await new Promise((done) => { require('https').get('https://mock-inventory-v1:8080/v1/stock?orderId=a1', { rejectUnauthorized: false }, done).on('error', done); });"
+        + "await new Promise((done) => { const s = require('net').connect(8080, 'mock-inventory-v1', () => s.write('GET\\r\\n\\r\\n')); s.on('close', done); s.on('error', done); setTimeout(done, 3000); }); })();";
       const answers = (await docker("run", "--rm", "--pull=never", "--network", network, "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--entrypoint", "node", EXECUTOR_IMAGE, "-e", ask)).split("\n");
       expect(answers).toEqual(['404 {"error":"unknown order"}', '200 {"status":7}', '599 {"error":"rovara-unmocked"}', '599 {"error":"rovara-unmocked"}']);
-      const lines = (await readFile(join(root, "out", "inventory-v1.jsonl"), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { variantId: string | null; status: number });
-      expect(lines.map((line) => [line.variantId, line.status])).toEqual([["success", 200], ["refusal", 404], ["invalid-data", 200], [null, 599], [null, 599]]);
+      const lines = (await readFile(join(root, "out", "inventory-v1.jsonl"), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { variantId: string | null; status: number; method: string });
+      expect(lines.map((line) => [line.variantId, line.status])).toEqual([["success", 200], ["refusal", 404], ["invalid-data", 200], [null, 599], [null, 599], [null, 599], [null, 599]]);
+      expect(lines.slice(5).map((line) => line.method)).toEqual(["UNPARSED", "UNPARSED"]);
+      // Every line says who called, and it is never the mock's own loopback.
+      expect(lines.every((line) => /^\d+\.\d+\.\d+\.\d+$/.test((line as { remoteAddress?: string }).remoteAddress ?? "") && (line as { remoteAddress?: string }).remoteAddress !== "127.0.0.1")).toBe(true);
       // A hardened mock: no capability, no write outside its ledger directory.
       expect(await docker("inspect", "-f", "{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.Config.User}}", name)).toBe("true [ALL] node");
+    } finally {
+      await docker("rm", "-f", name).catch(() => undefined);
+      await docker("network", "rm", network).catch(() => undefined);
+      await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }, 180_000);
+  it("is UNKNOWN for unmocked-external-call when the app calls a host nobody declared: the name resolves to the sinkhole, over HTTP and over HTTPS", async () => {
+    // The app hides the failed call behind the answer the page expects, so before names resolved to the sinkhole this run passed.
+    for (const origin of ["http://payments.undeclared.example.org", "https://payments.undeclared.example.org"]) {
+      const r = await runProbe("web-inventory-status-v1", { defect: "swallow-dependency.json", appEnv: { FIXTURE_INVENTORY_ORIGIN: origin } });
+      expect(r.run.unavailableReason, JSON.stringify(r.host.readDiagnostics(r.fixture.plan.runId))).toBeNull();
+      const collected = await collectLikeTheWorker(r);
+      expect(collected.unavailableReason ?? collected.qualification?.reason, origin).toBe(UNMOCKED_EXTERNAL_CALL_REASON);
+      const verdict = collected.qualification!;
+      expect(verdict.status, origin).toBe("UNKNOWN");
+      expect(verdict.reason).toBe(UNMOCKED_EXTERNAL_CALL_REASON);
+      expect(verdict.result?.cases[0]?.assertionReceipts.map((receipt) => receipt.status)).toEqual(["passed"]);
+      expect(verdict.mockSummary?.unmockedCalls.sinkhole, origin).toBeGreaterThanOrEqual(1);
+    }
+  }, 600_000);
+
+  it("blocks a WebSocket the candidate's page opens to a mock: it is neither a consumption nor a call, and the executor records it as blocked", async () => {
+    // The approved mock is not called by the app in this scenario, and the page tries to fake the call over a WebSocket Upgrade that matches the fixture exactly.
+    const r = await runProbe("web-csv-positive-v1", { defect: null, mock: true, appEnv: { FIXTURE_WS_PROBE_URL: "ws://mock-inventory-v1:8080/v1/stock?orderId=a1" } });
+    expect(r.run.unavailableReason, JSON.stringify(r.host.readDiagnostics(r.fixture.plan.runId))).toBeNull();
+    const verdict = (await collectLikeTheWorker(r)).qualification!;
+    expect(verdict.status).toBe("UNKNOWN");
+    expect(verdict.result?.cases[0]).toMatchObject({ status: "unavailable", reason: "application-evidence-floor-unmet" });
+    expect(verdict.mockSummary?.consumptions).toEqual({ success: 0, refusal: 0, invalidData: 0 });
+    expect(verdict.mockSummary?.unmockedCalls).toEqual({ sinkhole: 0, mocked: 0 });
+    const blocked = JSON.parse(await readFile(join(r.outDir!, "blocked-requests.json"), "utf8")) as { blocked: { host: string; resourceType: string }[] };
+    expect(blocked.blocked).toEqual(expect.arrayContaining([expect.objectContaining({ host: "mock-inventory-v1:8080", resourceType: "websocket" })]));
+  }, 300_000);
+
+  it("resolves a name nothing in the run serves to the sinkhole, which records the call from the caller's own address, and answers on 443 as well", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "rovara-sinkhole-")));
+    const name = `rovara-sinkhole-${Date.now()}`;
+    const network = `${name}-net`;
+    try {
+      await mkdir(join(root, "out"), { recursive: true });
+      await chmod(join(root, "out"), 0o777);
+      await docker("network", "create", "--internal", network);
+      // Exactly the flags the host starts the sinkhole with, the low-port sysctl included.
+      await docker("run", "-d", "--name", name, "--pull=never", "--network", network, "--network-alias", "mock-unbound", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--init",
+        "--memory", "128m", "--memory-swap", "128m", "--pids-limit", "64", "--cpus", "0.5", "--user", "node", "--sysctl", "net.ipv4.ip_unprivileged_port_start=0", "-v", `${join(root, "out")}:/out/mock`,
+        EXECUTOR_IMAGE, "node", "/opt/agentx/packages/verifier/dist/executor/entry.js", "--mock", "--origin", "unbound");
+      for (let index = 0; index < 120 && !existsSync(join(root, "out", "unbound.ready")); index += 1) await new Promise((done) => setTimeout(done, 250));
+      expect(existsSync(join(root, "out", "unbound.ready"))).toBe(true);
+      const address = await docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", name);
+      const script = "(async () => { const get = async (url) => { try { const r = await fetch(url); return r.status + ' ' + await r.text(); } catch (e) { return 'error ' + (e.cause?.code ?? e.code ?? e.message); } };"
+        + "console.log(await get('http://payments.undeclared.example.org/charge')); console.log(await get('https://payments.undeclared.example.org/charge')); console.log(await get('http://app:4317/')); })();";
+      const answers = (await docker("run", "--rm", "--pull=never", "--network", network, "--dns", address, "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--entrypoint", "node", EXECUTOR_IMAGE, "-e", script)).split("\n");
+      expect(answers[0]).toBe('599 {"error":"rovara-unmocked"}');
+      expect(answers[1]).toMatch(/^error /);
+      const lines = (await readFile(join(root, "out", "unbound.jsonl"), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { variantId: string | null; status: number; remoteAddress: string; method: string; path: string });
+      expect(lines.length).toBeGreaterThanOrEqual(2);
+      expect(lines.every((line) => line.variantId === null && line.status === 599)).toBe(true);
+      expect(lines.map((line) => line.method)).toContain("GET");
+      expect(lines.some((line) => line.method === "UNPARSED")).toBe(true);
+      // The caller is the asking container, never the loopback address of the sinkhole itself.
+      expect(lines.every((line) => /^172\.|^10\.|^192\.168\./.test(line.remoteAddress) && line.remoteAddress !== address)).toBe(true);
     } finally {
       await docker("rm", "-f", name).catch(() => undefined);
       await docker("network", "rm", network).catch(() => undefined);

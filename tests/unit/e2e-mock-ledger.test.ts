@@ -8,6 +8,7 @@ const fixture: E2EApiMockFixture = { schemaVersion: "source-backed-api-fixtures/
   { id: "refusal", inputValue: "a2", status: 404, body: { error: "unknown order" } },
   { id: "invalid-data", inputValue: "b1", status: 200, body: { status: 7 } },
 ] };
+const APP = "172.30.0.2";
 const at = (ms: number) => new Date(Date.parse("2026-10-20T12:00:00.000Z") + ms).toISOString();
 
 let counter = 0;
@@ -15,16 +16,16 @@ function matched(variantId: "success" | "refusal" | "invalid-data", ms: number):
   const variant = fixture.variants.find((item) => item.id === variantId)!;
   counter += 1;
   return { requestId: `req-${counter}`, method: "GET", path: "/v1/stock", inputValue: variant.inputValue, variantId, status: variant.status,
-    requestSha256: mockRequestDigest({ method: "GET", path: "/v1/stock", inputValue: variant.inputValue }), responseSha256: mockResponseDigest({ status: variant.status, body: variant.body }), observedAt: at(ms) };
+    requestSha256: mockRequestDigest({ method: "GET", path: "/v1/stock", inputValue: variant.inputValue }), responseSha256: mockResponseDigest({ status: variant.status, body: variant.body }), observedAt: at(ms), remoteAddress: APP };
 }
 function unmatched(ms: number, path = "/internal/admin"): MockLedgerLine {
   counter += 1;
   return { requestId: `req-${counter}`, method: "GET", path, inputValue: null, variantId: null, status: 599,
-    requestSha256: mockRequestDigest({ method: "GET", path, inputValue: null }), responseSha256: MOCK_UNMOCKED_RESPONSE_DIGEST, observedAt: at(ms) };
+    requestSha256: mockRequestDigest({ method: "GET", path, inputValue: null }), responseSha256: MOCK_UNMOCKED_RESPONSE_DIGEST, observedAt: at(ms), remoteAddress: APP };
 }
 const bytes = (...rows: unknown[]) => Buffer.from(rows.map((row) => (typeof row === "string" ? row : JSON.stringify(row))).join("\n") + "\n");
-const mocked = (...rows: unknown[]) => parseMockLedger({ origin: "inventory-v1", componentId: "api-schema-aaaaaaaaaaaa", fixture, bytes: bytes(...rows) });
-const sink = (...rows: unknown[]) => parseMockLedger({ origin: "unbound", componentId: null, fixture: null, bytes: bytes(...rows) });
+const mocked = (...rows: unknown[]) => parseMockLedger({ appAddress: APP, origin: "inventory-v1", componentId: "api-schema-aaaaaaaaaaaa", fixture, bytes: bytes(...rows) });
+const sink = (...rows: unknown[]) => parseMockLedger({ appAddress: APP, origin: "unbound", componentId: null, fixture: null, bytes: bytes(...rows) });
 
 describe("reading a mock ledger the host did not write", () => {
   it("accepts a line only when every field agrees with the approved fixture's variant", () => {
@@ -51,6 +52,30 @@ describe("reading a mock ledger the host did not write", () => {
     const parsed = mocked(row);
     expect(parsed.lines).toEqual([]);
     expect(parsed.malformed).toBe(1);
+  });
+
+  it("accepts a consumption only from the application container's address: from anywhere else it is a call no mock matched", () => {
+    for (const caller of ["172.30.0.3", "127.0.0.1", "unknown", "::1"]) {
+      const parsed = mocked({ ...matched("success", 10), remoteAddress: caller });
+      expect(parsed.malformed).toBe(0);
+      expect(parsed.lines.map((line) => [line.kind, line.kind === "unmatched" ? line.reason : undefined])).toEqual([["unmatched", "foreign-caller"]]);
+    }
+    // Without a known application address nothing can be a consumption.
+    const unknownApp = parseMockLedger({ origin: "inventory-v1", componentId: "api-schema-aaaaaaaaaaaa", fixture, appAddress: null, bytes: bytes(matched("success", 10)) });
+    expect(unknownApp.lines.map((line) => line.kind)).toEqual(["unmatched"]);
+  });
+
+  it("binds a foreign caller's consumption as an unmatched call of the case whose window holds it, with its own kind", () => {
+    const windows = [{ caseId: "case-a", startMs: Date.parse(at(100)), endMs: Date.parse(at(200)) }];
+    const bound = bindMockLedgers({ ledgers: [mocked({ ...matched("success", 150), remoteAddress: "172.30.0.3" })], windows, caseIds: ["case-a"] });
+    expect(bound.get("case-a")!.consumptions).toEqual([]);
+    expect(bound.get("case-a")!.unmocked.map((row) => row.kind)).toEqual(["foreign-caller"]);
+  });
+
+  it("counts a line without the caller's address as malformed", () => {
+    const { remoteAddress: _address, ...without } = matched("success", 10);
+    void _address;
+    expect(mocked(without).malformed).toBe(1);
   });
 
   it("treats every line of the sinkhole as an unmatched call, whatever it says", () => {
@@ -96,7 +121,7 @@ describe("binding ledger lines to cases by the time window of the executor's act
   });
 
   it("gives a malformed line, and an overflow, to every case", () => {
-    const bound = bind(mocked("{nope"), parseMockLedger({ origin: "inventory-v1", componentId: "api-schema-aaaaaaaaaaaa", fixture, bytes: bytes(...Array.from({ length: 2_049 }, (_, index) => matched("success", 1_000 + index))) }));
+    const bound = bind(mocked("{nope"), parseMockLedger({ appAddress: APP, origin: "inventory-v1", componentId: "api-schema-aaaaaaaaaaaa", fixture, bytes: bytes(...Array.from({ length: 2_049 }, (_, index) => matched("success", 1_000 + index))) }));
     for (const caseId of ["case-a", "case-b"]) expect(bound.get(caseId)!.unmocked.map((row) => row.kind).sort()).toEqual(["ledger-overflow", "malformed"]);
   });
 

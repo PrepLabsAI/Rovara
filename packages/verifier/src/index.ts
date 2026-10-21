@@ -33,7 +33,7 @@ export { E2EApplicationProducerSchema, E2EApplicationProofBytesSchema, E2EApplic
   E2EApplicationOwnedSubjectSchema, E2EApplicationCaseCaptureSchema, readE2EApplicationSupervisorProof,
   E2EApplicationCollectionSchema, E2EApplicationCollectionOracleSchema, E2EApplicationGroupResultEnvelopeSchema,
   e2eApplicationPrivateTransferMaxBytes, e2eApplicationAggregateRunUsage, createE2EApplicationCollectionOracleFromCompiledSuite,
-  qualifyE2EApplicationCollection, mapE2EApplicationGroupResult, UNMOCKED_EXTERNAL_CALL_REASON } from "./application-result-adapter.js";
+  qualifyE2EApplicationCollection, mapE2EApplicationGroupResult, UNMOCKED_EXTERNAL_CALL_REASON, e2eApplicationHostedMockOrigins } from "./application-result-adapter.js";
 export type { E2EApplicationProducer, E2EApplicationProofBytes, E2EApplicationSupervisorReadback, E2EApplicationOwnedSubject, E2EApplicationCaseCapture,
   E2EApplicationMockConsumption, E2EApplicationCollection, E2EApplicationCollectionOracle, E2EApplicationGroupResultEnvelope, E2EApplicationMockSummary,
   E2EApplicationQualification, E2EApplicationUnmockedCall } from "./application-result-adapter.js";

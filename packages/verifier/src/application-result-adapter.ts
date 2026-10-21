@@ -49,7 +49,7 @@ const mockConsumptionFrame = z.object({ schemaVersion: z.literal("e2e-applicatio
     requestId: id(256), responseId: id(256), requestSha256: sha, responseSha256: sha, observedAt: utc,
     requestRef: supervisorRef, responseRef: supervisorRef }).strict()).max(100) }).strict();
 /** One call to a declared origin that no approved mock matched: to the sinkhole (origin `unbound`), to a mock that refused it, or a ledger that could not be read in full. */
-const unmockedCall = z.object({ requestId: id(256), origin: id(60), kind: z.enum(["unmatched", "malformed", "ledger-overflow"]), method: id(16), path: z.string().max(512), observedAt: utc }).strict();
+const unmockedCall = z.object({ requestId: id(256), origin: id(60), kind: z.enum(["unmatched", "foreign-caller", "malformed", "ledger-overflow"]), method: id(16), path: z.string().max(512), observedAt: utc }).strict();
 export type E2EApplicationUnmockedCall = z.infer<typeof unmockedCall>;
 const unmockedCallsFrame = z.object({ schemaVersion: z.literal("e2e-application-unmocked-calls/v1"), context: supervisorContext,
   caseId: id(160), shardId: id(120), upstreamRunId: z.string().uuid(), calls: z.array(unmockedCall).min(1).max(100) }).strict();
@@ -918,6 +918,22 @@ export function admittedRuntimeAccountRef(input: { runtimeRef: Readonly<{ target
   return matches[0]!;
 }
 
+/**
+ * The mocks the host serves to an application as its declared origins, found the way the host finds them: by the origin's contract path in the application's own project contract.
+ * A broker derives the same list from the admitted plan, so the containers a run owned are known without asking the worker.
+ */
+export function e2eApplicationHostedMockOrigins(compiled: E2ECompiledApplicationSuite): { componentId: string; originRef: string }[] {
+  const runtimeRefs = compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs;
+  const hosted: { componentId: string; originRef: string }[] = [];
+  for (const applicationId of new Set(runtimeRefs.map((ref) => ref.applicationId))) {
+    const service = readE2EApplicationProjectContract(compiled.runtimeAdmission.sourceSnapshot, applicationId)?.service;
+    const targetIds = new Set(compiled.expectedCases.flatMap((expected) => (runtimeRefs.find((ref) => ref.targetId === expected.targetId)?.applicationId === applicationId ? [expected.targetId] : [])));
+    const plan = planApplicationOrigins({ originBindings: service?.originBindings ?? [], mocks: compiled.group.mocks.filter((mock) => targetIds.has(mock.requestedTargetId)) });
+    for (const origin of plan.mocked) hosted.push({ componentId: origin.componentId, originRef: origin.originRef });
+  }
+  return hosted;
+}
+
 type Environment = Readonly<{ ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string }>;
 export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { compiled: E2ECompiledApplicationSuite; binding: E2ERunBinding; round: E2ERound;
   environment: Environment; usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
@@ -960,14 +976,7 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
       engine: target.engine ? { name: target.engine.name, version: target.engine.version, spiVersion: 1, platform: target.engine.platform, capabilities: target.engine.capabilities } : null,
       accountContextId: expected.accountContextId, accountContextDigest: expected.accountContextDigest, assertionDigests: [...expected.assertionDigests], scenario });
   }
-  // The mocks the host serves to an application as its declared origin, found the way the host finds them: by the origin's contract path in the application's own project contract.
-  const hostedMockOrigins: { componentId: string; originRef: string }[] = [];
-  for (const applicationId of new Set([...appIds.values()].map((item) => item.applicationId))) {
-    const service = readE2EApplicationProjectContract(input.compiled.runtimeAdmission.sourceSnapshot, applicationId)?.service;
-    const targetIds = new Set([...appIds.values()].filter((item) => item.applicationId === applicationId).map((item) => item.targetId));
-    const plan = planApplicationOrigins({ originBindings: service?.originBindings ?? [], mocks: group.mocks.filter((mock) => targetIds.has(mock.requestedTargetId)) });
-    for (const origin of plan.mocked) hostedMockOrigins.push({ componentId: origin.componentId, originRef: origin.originRef });
-  }
+  const hostedMockOrigins = e2eApplicationHostedMockOrigins(input.compiled);
   const hostedMockComponents = new Set(hostedMockOrigins.map((item) => item.componentId));
   const body = E2EApplicationCollectionOracleSchema.parse({ protocol: "e2e-application-oracle/v1", binding, round, groupId: group.groupId,
     compiledInventoryDigest: input.compiled.inventory.digest, expectedShardIds, expectedCases: input.compiled.expectedCases,

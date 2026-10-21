@@ -42,10 +42,20 @@ function externalUrl(name) {
   if (parsed.protocol !== "https:") throw new Error(`${name} must be an https URL`);
   return parsed.href;
 }
+// A WebSocket address for the page to open (the egress tests aim it at a host of the run network); it is a plain ws: or wss: URL from the environment.
+function socketUrl(name) {
+  const value = process.env[name];
+  if (!value) return null;
+  const parsed = new URL(value);
+  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") throw new Error(`${name} must be a ws: or wss: URL`);
+  return parsed.href;
+}
 function withOptionalExternals(html) {
   const font = externalUrl("FIXTURE_EXTERNAL_FONT");
   const probe = externalUrl("FIXTURE_EGRESS_PROBE_URL");
+  const socket = socketUrl("FIXTURE_WS_PROBE_URL");
   let result = html;
+  if (socket) result = result.replace("</head>", `<meta name="ws-probe" content="${socket}"></head>`);
   if (font) result = result.replace("</head>", `<link rel="stylesheet" href="${font}"></head>`);
   if (probe) result = result.replace("</head>", `<meta name="egress-probe" content="${probe}"></head>`);
   return result;
@@ -70,6 +80,8 @@ export function createOrdersApplication({ seed, orders, defect: rawDefect = null
     const token = cookieValue(request.headers?.cookie, "orders_session");
     return token ? sessions.get(token) ?? null : null;
   }
+  // A dependency that cannot be reached at all (no route, no TLS, no answer) is an unavailable dependency, like one that answers with an error.
+  const lookup = (path, request) => fetchDependency("inventory-v1", path, request).catch(() => ({ status: 503, body: {} }));
   async function handle(request) {
     const method = String(request.method ?? "GET").toUpperCase();
     const rawUrl = String(request.url ?? "/");
@@ -120,7 +132,7 @@ export function createOrdersApplication({ seed, orders, defect: rawDefect = null
       // One call to the external inventory origin per order; an order the service refuses is shown as unavailable.
       const rows = [];
       for (const order of orders.orders.filter((item) => item.tenantId === account.tenantId)) {
-        const result = await fetchDependency("inventory-v1", `/v1/stock?orderId=${encodeURIComponent(order.id)}`, request);
+        const result = await lookup(`/v1/stock?orderId=${encodeURIComponent(order.id)}`, request);
         rows.push({ ...order, inventory: result.status === 200 && typeof result.body?.status === "string" ? result.body.status : "unavailable" });
       }
       return { status: 200, headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="orders-inventory.csv"' }, body: csvWithInventory(rows) };
@@ -144,7 +156,7 @@ export function createOrdersApplication({ seed, orders, defect: rawDefect = null
       if (!account) return json(401, { error: "authentication required" });
       // The inventory service is an external origin: the approved mock answers `GET /v1/stock?orderId=a1` with the order's stock status.
       const path = defect?.defectId === "dependency-route/v1" ? defect.path : "/v1/stock?orderId=a1";
-      const result = await fetchDependency("inventory-v1", path, request);
+      const result = await lookup(path, request);
       // The seeded defect hides a failed dependency behind a plausible answer, so the page looks right while the call it made was never approved.
       const stock = result.status === 200 ? result.body : defect?.defectId === "swallow-dependency/v1" ? { status: "in-stock" } : null;
       if (url.pathname === "/api/inventory/status") return stock === null ? json(502, { error: "inventory dependency unavailable" }) : json(200, stock);

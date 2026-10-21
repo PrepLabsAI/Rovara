@@ -80,6 +80,10 @@ describe("web/API runtime qualification", () => {
     ["web-unmocked-call-v1", { unmockedCalls: { sinkhole: 2, mocked: 0 } }],
     ["web-unmocked-call-v1", { unmockedCalls: { sinkhole: 1, mocked: 1 } }],
     ["web-unmocked-call-v1", { mockConsumptions: { success: 1, refusal: 0, invalidData: 0 } }],
+    // UNKNOWN for another cause that also made one sinkhole call is not the pinned outcome: a failed assertion, another reason, or no reason each reject.
+    ["web-unmocked-call-v1", { failedAssertionKinds: ["text"] }],
+    ["web-unmocked-call-v1", { runReason: "application-evidence-floor-unmet" }],
+    ["web-unmocked-call-v1", { runReason: undefined }],
     ["build-imds-denial-v1", { buildExitCode: 1 }],
     ["build-imds-denial-v1", { runUnavailableReason: "app-exited" }],
     // A build that ends in 0 or 3 did not fail because the host was unreachable: only the probe's own exit 7 counts.
@@ -251,6 +255,9 @@ describe("web/API probe assets", () => {
     const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "web-unmocked-call-v1")!;
     expect(asset.probe.oracle).toEqual({ kind: "unmocked-call", originRef: "inventory-v1", expectedOutcome: "UNKNOWN", expectedReason: "unmocked-external-call", expectedSinkholeCalls: 1 });
     expect([asset.kind, asset.polarity]).toEqual(["web", "negative"]);
+    // The reason the evaluator holds the run to is the asset's own.
+    const pin = WEB_API_REQUIRED_PROBES.find((probe) => probe.probeId === "web-unmocked-call-v1")!;
+    expect(pin.cause).toEqual({ kind: "unmocked-external-call", reason: (asset.probe.oracle as { expectedReason: string }).expectedReason });
   });
 
   it("pins eleven probes, two of them the mock probes, each a web probe that pins the mock facts it must show", () => {

@@ -326,9 +326,9 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
 
   it("mocked-origin: the round is PASS with the inventory origin served by its approved mock, named on the result as mockedOrigins [inventory-v1]", async () => {
     await inventoryJourney("mocked-origin");
-  }, 1_800_000);
+  }, 600_000);
 
   it("unmocked-call: a candidate that calls a path the inventory contract does not have gets UNKNOWN for unmocked-external-call, never PASS", async () => {
     await inventoryJourney("unmocked-call");
-  }, 1_800_000);
+  }, 600_000);
 });

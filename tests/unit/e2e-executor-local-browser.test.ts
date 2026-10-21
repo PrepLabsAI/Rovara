@@ -128,7 +128,7 @@ describe.runIf(enabled)("executor against a real Chromium and the fixture app (l
 async function assembleFrom(run: Awaited<ReturnType<typeof runProbe>>) {
   const snapshot = await snapshotExecutorOutput(run.outDir, await readExecutorResultFile(run.outDir));
   const resolved = resolveE2EExecutorSuite(run.fixture.plan);
-  const cleanup = { removedAt: new Date().toISOString(), containers: ["rovara-app"], network: "rovara-e2e" };
+  const cleanup = { removedAt: new Date().toISOString(), containers: ["rovara-app"], network: "rovara-e2e", mockOrigins: [] as string[] };
   return { actual: assembleExecutorActualRun({ snapshot, compiled: resolved.suite, binding: resolved.binding, cleanup, evidenceDirectory: "/out" }),
     inputs: assembleDockerCollectionInputs({ snapshot, binding: resolved.binding, cleanup }) };
 }

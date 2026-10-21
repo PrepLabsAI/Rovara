@@ -11,10 +11,12 @@ export const MOCK_ROWS_PER_CASE = 100;
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const lineSchema = z.object({ requestId: z.string().min(1).max(200), method: z.string().min(1).max(16), path: z.string().max(512), inputValue: z.string().max(128).nullable(),
   variantId: z.enum(["success", "refusal", "invalid-data"]).nullable(), status: z.number().int().min(100).max(599), requestSha256: sha, responseSha256: sha,
+  remoteAddress: z.string().min(1).max(64),
   observedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/).refine((value) => new Date(value).toISOString() === value) }).strict();
 
 export type ConsumptionLine = Readonly<{ kind: "consumption"; line: MockLedgerLine & { variantId: "success" | "refusal" | "invalid-data" }; variant: Readonly<{ status: number; body: unknown }> }>;
-export type UnmatchedLine = Readonly<{ kind: "unmatched"; line: MockLedgerLine }>;
+/** `reason` is set when a line that matches the fixture is not a consumption because the caller was not the application container. */
+export type UnmatchedLine = Readonly<{ kind: "unmatched"; line: MockLedgerLine; reason?: "foreign-caller" }>;
 export type ParsedMockLedger = Readonly<{ origin: string; componentId: string | null; inputField: string | null; lines: readonly (ConsumptionLine | UnmatchedLine)[]; malformed: number; overflowed: boolean }>;
 
 /**
@@ -23,6 +25,8 @@ export type ParsedMockLedger = Readonly<{ origin: string; componentId: string | 
  * The sinkhole has no fixture, so none of its lines can be a consumption.
  */
 export function parseMockLedger(input: Readonly<{ origin: string; componentId: string | null; fixture: E2EApiMockFixture | null; bytes: Uint8Array;
+  /** The application container's address on the run network. A line that matches the fixture counts as a consumption only when it came from this address; with none known, none does. */
+  appAddress: string | null;
   /** True when the ledger file was longer than what `bytes` holds: the rest was never read, which is an overflow. */ truncated?: boolean }>): ParsedMockLedger {
   const text = new TextDecoder("utf-8").decode(input.bytes);
   const rows = text.split("\n");
@@ -46,6 +50,8 @@ export function parseMockLedger(input: Readonly<{ origin: string; componentId: s
     const variant = input.fixture?.variants.find((candidate) => candidate.id === parsed.variantId);
     if (!input.fixture || !variant || parsed.method !== input.fixture.method || parsed.path !== input.fixture.path || parsed.inputValue !== variant.inputValue
       || parsed.status !== variant.status || parsed.responseSha256 !== mockResponseDigest({ status: variant.status, body: variant.body ?? null })) { malformed += 1; return; }
+    // The page of the candidate, the executor or any other container may reach a mock too: what they ask is never evidence that the application did.
+    if (input.appAddress === null || parsed.remoteAddress !== input.appAddress) { lines.push({ kind: "unmatched", line, reason: "foreign-caller" }); return; }
     lines.push({ kind: "consumption", line: { ...line, variantId: parsed.variantId }, variant: { status: variant.status, body: variant.body ?? null } });
   });
   return Object.freeze({ origin: input.origin, componentId: input.componentId, inputField: input.fixture?.inputField ?? null, lines: Object.freeze(lines), malformed, overflowed });
@@ -53,7 +59,7 @@ export function parseMockLedger(input: Readonly<{ origin: string; componentId: s
 
 export type CaseWindow = Readonly<{ caseId: string; startMs: number; endMs: number }>;
 export type BoundConsumption = Readonly<{ origin: string; componentId: string; inputField: string; line: ConsumptionLine["line"]; variant: ConsumptionLine["variant"] }>;
-export type BoundUnmocked = Readonly<{ origin: string; kind: "unmatched" | "malformed" | "ledger-overflow"; requestId: string; method: string; path: string; observedAt: string }>;
+export type BoundUnmocked = Readonly<{ origin: string; kind: "unmatched" | "foreign-caller" | "malformed" | "ledger-overflow"; requestId: string; method: string; path: string; observedAt: string }>;
 export type BoundCase = Readonly<{ consumptions: readonly BoundConsumption[]; unmocked: readonly BoundUnmocked[] }>;
 
 /**
@@ -78,7 +84,7 @@ export function bindMockLedgers(input: Readonly<{ ledgers: readonly ParsedMockLe
         }
         continue;
       }
-      const row: BoundUnmocked = { origin: ledger.origin, kind: "unmatched", requestId: entry.line.requestId, method: entry.line.method, path: entry.line.path, observedAt: entry.line.observedAt };
+      const row: BoundUnmocked = { origin: ledger.origin, kind: entry.reason ?? "unmatched", requestId: entry.line.requestId, method: entry.line.method, path: entry.line.path, observedAt: entry.line.observedAt };
       if (holding.length === 0) everyCase(row); else for (const caseId of holding) unmocked.get(caseId)!.push(row);
     }
     if (ledger.malformed > 0) everyCase({ origin: ledger.origin, kind: "malformed", requestId: `${ledger.origin}-malformed`, method: "UNKNOWN", path: "/", observedAt: fallbackAt });

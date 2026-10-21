@@ -23,7 +23,7 @@ const sentinel = { protocol: "e2e-actual-application-run/v1", cleanupConfirmed: 
 type Setup = Awaited<ReturnType<typeof setup>>;
 
 async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; deadlineMs?: number; recipeBuild?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeBuild"];
-  recipeStart?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeStart"]; runRoot?: string; role?: "owner" | "viewer"; probe?: Parameters<typeof createOrdersExecutorPlan>[0]["probe"]; mock?: boolean;
+  recipeStart?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeStart"]; runRoot?: string; role?: "owner" | "viewer"; probe?: Parameters<typeof createOrdersExecutorPlan>[0]["probe"]; mock?: boolean; mockReadyMs?: number;
   onRunOutput?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["onRunOutput"]> }) {
   const fixture: OrdersExecutorFixture = createOrdersExecutorPlan({ probe: options.probe ?? "web-csv-positive-v1", ...(options.mock ? { mock: true } : {}), ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
     ...(options.recipeBuild ? { recipeBuild: options.recipeBuild } : {}), ...(options.recipeStart ? { recipeStart: options.recipeStart } : {}), ...(options.role ? { role: options.role } : {}) });
@@ -32,7 +32,7 @@ async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; 
   const assemble = vi.fn<(input: unknown) => never>(() => sentinel as never);
   const assembleCollectionInputs = vi.fn<(input: unknown) => never>(() => collectionSentinel as never);
   const host = createDockerApplicationHost({ docker: options.fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(),
-    admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: source, appPollMs: 10, deadlineGraceMs: 60, assemble, assembleCollectionInputs, ...(options.imagePullRetryMs ? { imagePullRetryMs: options.imagePullRetryMs } : {}),
+    admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: source, appPollMs: 10, deadlineGraceMs: 60, ...(options.mockReadyMs ? { mockReadyMs: options.mockReadyMs } : {}), assemble, assembleCollectionInputs, ...(options.imagePullRetryMs ? { imagePullRetryMs: options.imagePullRetryMs } : {}),
     ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}) });
   const { compiled, plan } = fixture;
   const binding = plan.admission.round.groupBindings[0]!;
@@ -58,8 +58,7 @@ describe("docker application host", () => {
     expect(result.unavailableReason).toBeNull();
     for (const args of [fake.argsFor("app"), fake.argsFor("executor")]) {
       expect(args).toEqual(expect.arrayContaining(["--network", `rovara-e2e-${s.runId}`, "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--label", `rovara.run=${s.runId}`]));
-      // Variable names are matched at the start of an argument: a declared origin's own name (`ORDERS_API_ORIGIN`) legitimately contains `PI_`.
-      expect(args.join(" ")).not.toMatch(/docker\.sock|(^| )(AWS_|AGENTX_|PI_|GIT_)|TOKEN|SECRET|(^| )-p /);
+      expect(args.join(" ")).not.toMatch(/docker\.sock|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|(^| )-p /);
     }
     expect(fake.argsFor("app")).toEqual(expect.arrayContaining(["--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", "--network-alias", "app", "APP_PORT=4317",
       "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "512", "--cpus", "1", "--pull=never"]));
@@ -553,10 +552,10 @@ describe("docker application host", () => {
       expect(result.unavailableReason).toBeNull();
       const { cleanup } = s.assemble.mock.calls[0]![0] as { cleanup: { removedAt: string; containers: string[]; network: string } };
       // Not "contains the app": the whole list, so a run that left a build container, lost its executor or removed something that is not its own would differ from the derivation.
-      const inventory = dockerOwnedResourceInventory(s.runId);
+      const inventory = dockerOwnedResourceInventory(s.runId, []);
       expect([...cleanup.containers].sort()).toEqual([...inventory.containers].sort());
       expect(cleanup.network).toBe(inventory.network);
-      const derived = JSON.parse(Buffer.from(dockerOwnedCleanupReceipt(s.runId, cleanup.removedAt).bytes).toString("utf8")) as { containers: string[]; network: string; removedAt: string };
+      const derived = JSON.parse(Buffer.from(dockerOwnedCleanupReceipt(s.runId, cleanup.removedAt, []).bytes).toString("utf8")) as { containers: string[]; network: string; removedAt: string };
       expect(derived).toMatchObject({ containers: [...cleanup.containers].sort(), network: cleanup.network, removedAt: cleanup.removedAt });
     });
 
@@ -726,7 +725,7 @@ describe("docker application host: approved external-origin mocks and the sinkho
       "invalid-data": { inputValue: "b1", status: 200, body: { status: 7 } } };
     const chosen = variantId === null ? null : variant[variantId];
     const request = { method: "GET", path, inputValue: chosen?.inputValue ?? null };
-    return { requestId: `req-${ms}`, ...request, variantId, status: chosen?.status ?? 599, requestSha256: mockRequestDigest(request),
+    return { requestId: `req-${ms}`, ...request, variantId, status: chosen?.status ?? 599, remoteAddress: "172.30.0.3", requestSha256: mockRequestDigest(request),
       responseSha256: chosen === null ? MOCK_UNMOCKED_RESPONSE_DIGEST : mockResponseDigest({ status: chosen.status, body: chosen.body }), observedAt: new Date(Date.parse("2026-10-20T12:00:00.000Z") + ms).toISOString() };
   };
 
@@ -772,11 +771,60 @@ describe("docker application host: approved external-origin mocks and the sinkho
     const sink = fake.mockArgsFor("unbound");
     expect(sink).toEqual(expect.arrayContaining(["--name", `rovara-mock-${s.runId}-unbound`, "--network", `rovara-e2e-${s.runId}`, "--network-alias", "mock-unbound", "--read-only", "--cap-drop=ALL", "--user", "node"]));
     expect(envOf(sink)).toEqual({});
+    // Only the sinkhole may bind the ports a resolved name is asked on (80, 443) and its resolver (53), through one namespaced sysctl; no mock gets it, and nothing else about it is loosened.
+    expect(sink).toEqual(expect.arrayContaining(["--sysctl", "net.ipv4.ip_unprivileged_port_start=0"]));
+    expect(fake.mockArgsFor("inventory-v1")).not.toContain("--sysctl");
+    expect(sink.join(" ")).not.toMatch(/--cap-add|--privileged|seccomp|unconfined|--add-host/);
     expect(mountsOf(sink).some((mount) => mount.endsWith(":/mock:ro"))).toBe(false);
     expect(sink.slice(sink.indexOf("rovara-executor:test"))).toEqual(["rovara-executor:test", "node", "/opt/agentx/packages/verifier/dist/executor/entry.js", "--mock", "--origin", "unbound"]);
     const app = fake.argsFor("app");
     expect(lastEnv(app, "INVENTORY_ORIGIN")).toBe("http://mock-inventory-v1:8080");
-    expect(lastEnv(app, "ORDERS_API_ORIGIN")).toBe("http://mock-unbound:8080");
+    expect(lastEnv(app, "ORDERS_SERVICE_ORIGIN")).toBe("http://mock-unbound:8080");
+  });
+
+  it("resolves every name the run does not serve to the sinkhole, by pointing the app's resolver at it; the executor's arguments are not touched", async () => {
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    const app = fake.argsFor("app");
+    expect(app.filter((value, index) => app[index - 1] === "--dns")).toEqual([fake.sinkholeAddress]);
+    expect(app).not.toContain("--add-host");
+    const executor = fake.argsFor("executor");
+    expect(executor).not.toContain("--dns");
+    const shared = executorContainerArgs(installedExecutorSeccompProfilePath());
+    expect(executor.slice(executor.indexOf(shared[0]!), executor.indexOf(shared[0]!) + shared.length)).toEqual(shared);
+    // The sinkhole is up, listening and addressed before the app starts: the app's resolver names it.
+    const indexOfRun = (prefix: string) => fake.calls.findIndex((call) => call[0] === "run" && call[call.indexOf("--name") + 1]?.startsWith(prefix));
+    expect(fake.calls.findIndex((call) => call[0] === "run" && call[call.indexOf("--name") + 1]?.endsWith("-unbound"))).toBeLessThan(indexOfRun("rovara-app-"));
+  });
+
+  it("is unavailable when the sinkhole or the app has no address on the run network, because nothing could then be attributed", async () => {
+    for (const missing of ["sinkhole", "app"] as const) {
+      const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
+      fake.withoutAddress.add(missing === "app" ? `rovara-app-${s.runId}` : `rovara-mock-${s.runId}-unbound`);
+      const result = await runWith(s);
+      expect(result.unavailableReason, missing).toBe("mock-unavailable");
+      expect(s.assemble).not.toHaveBeenCalled();
+    }
+  });
+
+  it("counts a mock as ready only once its server listens, not when its ledger file exists", async () => {
+    const fake = new FakeDockerCli(); fake.mocksNeverReady = true;
+    const s = await mockedPlan(fake, { mockReadyMs: 300 }); fake.onExecutor = okOutput(s);
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBe("mock-unavailable");
+    expect(fake.calls.some((call) => call[0] === "run" && call[call.indexOf("--name") + 1]?.startsWith("rovara-app-"))).toBe(false);
+    expect(s.host.readDiagnostics(s.runId).buildLogTail).toMatch(/did not become ready/);
+  });
+
+  it("takes a consumption from any address but the app container's as a call no mock matched", async () => {
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake);
+    fake.onExecutor = (outDir) => {
+      okOutput(s)(outDir);
+      fake.appendMockLedger("inventory-v1", [ledgerLine("success", 10), { ...ledgerLine("success", 20), remoteAddress: "172.30.0.4" }]);
+    };
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    const snapshot = (s.assemble.mock.calls[0]![0] as { snapshot: { mockLedgers: { origin: string; lines: { kind: string; reason?: string }[] }[] } }).snapshot;
+    expect(snapshot.mockLedgers.find((ledger) => ledger.origin === "inventory-v1")!.lines.map((line) => [line.kind, line.reason])).toEqual([["consumption", undefined], ["unmatched", "foreign-caller"]]);
   });
 
   it("points every declared origin at the sinkhole when no mock is approved, and never leaves one unset", async () => {
@@ -785,15 +833,15 @@ describe("docker application host: approved external-origin mocks and the sinkho
     expect(fake.mockOrigins()).toEqual(["unbound"]);
     const app = fake.argsFor("app");
     expect(lastEnv(app, "INVENTORY_ORIGIN")).toBe("http://mock-unbound:8080");
-    expect(lastEnv(app, "ORDERS_API_ORIGIN")).toBe("http://mock-unbound:8080");
+    expect(lastEnv(app, "ORDERS_SERVICE_ORIGIN")).toBe("http://mock-unbound:8080");
   });
 
   it("never lets a recipe variable, or the candidate, point a declared origin at a host that is not one of the run's own mocks", async () => {
-    const fake = new FakeDockerCli(); const s = await mockedPlan(fake, { recipeStart: { env: { INVENTORY_ORIGIN: "https://inventory.example.com", ORDERS_API_ORIGIN: "http://169.254.169.254" } } });
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake, { recipeStart: { env: { INVENTORY_ORIGIN: "https://inventory.example.com", ORDERS_SERVICE_ORIGIN: "http://169.254.169.254" } } });
     fake.onExecutor = okOutput(s);
     await runWith(s);
     const app = fake.argsFor("app");
-    for (const name of ["INVENTORY_ORIGIN", "ORDERS_API_ORIGIN"]) {
+    for (const name of ["INVENTORY_ORIGIN", "ORDERS_SERVICE_ORIGIN"]) {
       const value = lastEnv(app, name)!;
       expect(new URL(value).hostname, name).toMatch(/^mock-[A-Za-z0-9-]+$/);
       expect(new URL(value).port).toBe("8080");
@@ -858,7 +906,10 @@ describe("docker application host: approved external-origin mocks and the sinkho
     expect(result.unavailableReason).toBeNull();
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
     expect(fake.events.filter((event) => event.startsWith("rm rovara-mock-"))).toHaveLength(2);
+    expect(dockerOwnedCleanupReceipt(s.runId, "2026-10-20T12:00:00.000Z", ["inventory-v1"]).bytes).not.toEqual(dockerOwnedCleanupReceipt(s.runId, "2026-10-20T12:00:00.000Z", []).bytes);
     const { cleanup } = s.assemble.mock.calls[0]![0] as { cleanup: { containers: string[] } };
-    expect([...cleanup.containers].sort()).toEqual([...dockerOwnedResourceInventory(s.runId).containers].sort());
+    // The receipt names the mock and the sinkhole as well, so a broker derives the very list from the run id and the plan's mocked origins.
+    expect([...cleanup.containers].sort()).toEqual([...dockerOwnedResourceInventory(s.runId, ["inventory-v1"]).containers].sort());
+    expect(cleanup.containers).toEqual(expect.arrayContaining([`rovara-mock-${s.runId}-inventory-v1`, `rovara-mock-${s.runId}-unbound`]));
   });
 });

@@ -456,9 +456,9 @@ describe("planning context for a qualified web target", () => {
     expect(context.unavailableTargetRefs?.map((item) => item.targetId)).toEqual(["web-1"]);
     expect(Object.keys(context)).not.toContain("unavailableReasons");
     expect(Object.keys(context)).not.toContain("executableKinds");
-    // Hashes of the context JSON and of the planner instructions, computed from the code at 8ec3eb02 (before Task 2.2); re-pinned in M1.3 for the fixture contract gaining the inventory origin's contractPath.
-    expect(sha(JSON.stringify(context))).toBe("2b1ff6f3796903e15646d5f88438434e81731b7a5305a21aa49a6f24cce6eaf0");
-    expect(sha(planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context }))).toBe("18918f3b4ba9c8f6628be829dd008f304d61ca030637191d8b30859eed0a6749");
+    // Hashes of the context JSON and of the planner instructions, computed from the code at 8ec3eb02 (before Task 2.2); re-pinned in M1.3 for the fixture contract gaining the inventory origin's contractPath and renaming the orders origin variable.
+    expect(sha(JSON.stringify(context))).toBe("a08213eb26bb5a1f8defff6b6d7b85fcd7f93a9dedef45b3e05c969fcda82cbc");
+    expect(sha(planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context }))).toBe("86217ec02fcdf178489faed92ebc046f7e47b074e564d355ef662e3a9fd9b352");
   });
 });
 

@@ -6,6 +6,7 @@ import { MOCK_UNMOCKED_RESPONSE_DIGEST, mockRequestDigest, mockResponseDigest, t
 import { bindMockLedgers, parseMockLedger } from "../../packages/verifier/src/host/mock-ledger.js";
 import { buildMockProofs } from "../../packages/verifier/src/host/mock-proofs.js";
 
+const APP = "172.30.0.2";
 const fixture: E2EApiMockFixture = { schemaVersion: "source-backed-api-fixtures/v1", operationId: "getStock", method: "GET", path: "/v1/stock", inputField: "orderId", variants: [
   { id: "success", inputValue: "a1", status: 200, body: { status: "in-stock" } },
   { id: "refusal", inputValue: "a2", status: 404, body: { error: "unknown order" } },
@@ -14,13 +15,13 @@ const fixture: E2EApiMockFixture = { schemaVersion: "source-backed-api-fixtures/
 const componentId = e2eApiSchemaComponentId("inventory/openapi.json");
 const spec = (overrides: Partial<E2EMockSpec> = {}): E2EMockSpec => ({ componentId, requestedTargetId: "web-1", effectiveTargetId: "web-1", kind: "api", contractDigest: "a".repeat(64),
   fixtureVersion: "openapi-json-fixture-v1", sourceRefs: [{ path: "inventory/openapi.json", sha256: "b".repeat(64) }], reason: "phase-unavailable", apiFixture: fixture, ...overrides });
-const bindings = [{ originRef: "orders-api", envName: "ORDERS_API_ORIGIN" }, { originRef: "inventory-v1", envName: "INVENTORY_ORIGIN", contractPath: "inventory/openapi.json" }];
+const bindings = [{ originRef: "orders-api", envName: "ORDERS_SERVICE_ORIGIN" }, { originRef: "inventory-v1", envName: "INVENTORY_ORIGIN", contractPath: "inventory/openapi.json" }];
 
 describe("placing approved mocks on a service's declared origins", () => {
   it("serves an approved mock as the origin whose contract it stands for and gives every other declared origin to the sinkhole", () => {
     const plan = planApplicationOrigins({ originBindings: bindings, mocks: [spec()] });
     expect(plan.mocked).toEqual([{ originRef: "inventory-v1", envName: "INVENTORY_ORIGIN", componentId, fixture }]);
-    expect(plan.unbound).toEqual([{ originRef: "orders-api", envName: "ORDERS_API_ORIGIN" }]);
+    expect(plan.unbound).toEqual([{ originRef: "orders-api", envName: "ORDERS_SERVICE_ORIGIN" }]);
     expect(plan.unplaced).toEqual([]);
   });
 
@@ -72,12 +73,12 @@ describe("the frames a run's mock ledgers become", () => {
   const consumption = (variantId: "success" | "refusal", ms: number, id: string): MockLedgerLine => {
     const variant = fixture.variants.find((item) => item.id === variantId)!;
     return { requestId: id, method: "GET", path: "/v1/stock", inputValue: variant.inputValue, variantId, status: variant.status,
-      requestSha256: mockRequestDigest({ method: "GET", path: "/v1/stock", inputValue: variant.inputValue }), responseSha256: mockResponseDigest({ status: variant.status, body: variant.body }), observedAt: at(ms) };
+      requestSha256: mockRequestDigest({ method: "GET", path: "/v1/stock", inputValue: variant.inputValue }), responseSha256: mockResponseDigest({ status: variant.status, body: variant.body }), observedAt: at(ms), remoteAddress: APP };
   };
   const unmatched = (ms: number, id: string): MockLedgerLine => ({ requestId: id, method: "GET", path: "/internal/admin", inputValue: null, variantId: null, status: 599,
-    requestSha256: mockRequestDigest({ method: "GET", path: "/internal/admin", inputValue: null }), responseSha256: MOCK_UNMOCKED_RESPONSE_DIGEST, observedAt: at(ms) });
+    requestSha256: mockRequestDigest({ method: "GET", path: "/internal/admin", inputValue: null }), responseSha256: MOCK_UNMOCKED_RESPONSE_DIGEST, observedAt: at(ms), remoteAddress: APP });
   const ledger = (origin: string, id: string | null, lines: MockLedgerLine[], withFixture = true) =>
-    parseMockLedger({ origin, componentId: id, fixture: withFixture ? fixture : null, bytes: Buffer.from(lines.map((line) => `${JSON.stringify(line)}\n`).join("")) });
+    parseMockLedger({ appAddress: APP, origin, componentId: id, fixture: withFixture ? fixture : null, bytes: Buffer.from(lines.map((line) => `${JSON.stringify(line)}\n`).join("")) });
   const proof = (value: unknown, mediaType: string, artifactId: string) => {
     const bytes = Buffer.from(typeof value === "string" ? value : canonicalJson(value));
     return { ref: { artifactId, sha256: sha(bytes), byteLength: bytes.byteLength, mediaType }, bytes };

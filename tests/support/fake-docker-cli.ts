@@ -40,6 +40,13 @@ export class FakeDockerCli implements DockerCli {
   executorTimeoutMs: number | null = null;
   buildOutput = "";
   executorStdout = "executor said hello\n";
+  /** The addresses the containers have on the run network. */
+  appAddress = "172.30.0.3";
+  sinkholeAddress = "172.30.0.2";
+  /** Containers that report no address (as when they are not attached to the network). */
+  readonly withoutAddress = new Set<string>();
+  /** When set, a mock container opens its ledger but never says it listens. */
+  mocksNeverReady = false;
   /** When set, starting a mock or sinkhole container fails, as `docker run` does when the image or the mounts are unusable. */
   mockStartFails = false;
   /** The host directory the mock containers write their ledgers to (the mount at /out/mock), once the first mock container was started. */
@@ -156,6 +163,11 @@ export class FakeDockerCli implements DockerCli {
     }
     if (command === "inspect") {
       const item = this.resources.get(args[args.length - 1]!);
+      // The address a container has on the run network, as the host asks for it.
+      if (args.some((value) => value.includes("IPAddress"))) {
+        if (!item || this.withoutAddress.has(item.name)) return { code: 0, stdout: "", stderr: "" };
+        return { code: 0, stdout: item.name.startsWith("rovara-app-") ? this.appAddress : item.name.endsWith("-unbound") ? this.sinkholeAddress : "172.30.0.10", stderr: "" };
+      }
       return item ? { code: 0, stdout: `${item.state} ${item.exitCode}`, stderr: "" } : { code: 1, stdout: "", stderr: "No such object" };
     }
     if (command === "logs") return { code: 0, stdout: "", stderr: this.resources.get(args[args.length - 1]!)?.logs ?? this.logs.get(args[args.length - 1]!) ?? "" };
@@ -189,6 +201,8 @@ export class FakeDockerCli implements DockerCli {
       mkdirSync(this.mockOutDir, { recursive: true });
       // The mock opens its ledger before it listens, which is what the host waits for.
       writeFileSync(join(this.mockOutDir, `${args[args.indexOf("--origin") + 1]}.jsonl`), "", { flag: "a" });
+      // ...and writes its ready marker once it listens.
+      if (!this.mocksNeverReady) writeFileSync(join(this.mockOutDir, `${args[args.indexOf("--origin") + 1]}.ready`), "ready\n");
       return { code: 0, stdout: "container-id", stderr: "" };
     }
     if (name.startsWith("rovara-build-")) {

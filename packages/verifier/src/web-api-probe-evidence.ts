@@ -88,7 +88,7 @@ export function deriveWebApiProbeObservation(input: Readonly<{ challenge: Runtim
   const parsedReports = reports.flatMap((report) => (report.kind === "parsed" ? [report.report.run] : []));
   // What the verified mock evidence shows, for the probes that pin it: how often each variant was served and what no mock matched. The adapter derives it from the retained bytes alone.
   const mockFacts = required.mock === true ? { mockConsumptions: qualification.mockSummary?.consumptions ?? { success: 0, refusal: 0, invalidData: 0 },
-    unmockedCalls: qualification.mockSummary?.unmockedCalls ?? { sinkhole: 0, mocked: 0 } } : {};
+    unmockedCalls: qualification.mockSummary?.unmockedCalls ?? { sinkhole: 0, mocked: 0 }, runReason: qualification.result?.reason ?? qualification.reason } : {};
   return { ok: true, observation: WebApiProbeObservationSchema.parse({ collectorStatus: qualification.status, runUnavailableReason: null, failedAssertionKinds, blockedHosts: hosts, buildExitCode: null, ...mockFacts,
     attempts: Math.max(1, ...parsedReports.flatMap((run) => run.results.map((result) => result.attempts.length))),
     skipped: parsedReports.reduce((total, run) => total + run.summary.skipped, 0), flaky: parsedReports.reduce((total, run) => total + run.summary.flaky, 0), evidenceDigest }) };

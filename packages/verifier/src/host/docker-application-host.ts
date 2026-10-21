@@ -96,6 +96,7 @@ const MOCK_ENTRY_POINT = "/opt/agentx/packages/verifier/dist/executor/entry.js";
 const MOCK_LEDGER_READ_BYTES = 4 * 1024 * 1024;
 const MOCK_READY_POLL_MS = 50;
 const MOCK_READY_TIMEOUT_MS = 15_000;
+const IPV4 = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 const sha = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
 export type DockerApplicationUnavailableReason = "build-failed" | "app-unhealthy" | "app-exited" | "deadline-exceeded" | "executor-failed"
@@ -122,6 +123,8 @@ export type DockerApplicationHostDeps = Readonly<{
   candidateSourceDir: string;
   /** How long to wait before pulling a missing image again after a failed pull. Default 2000. */
   imagePullRetryMs?: number;
+  /** How long to wait for the mocks and the sinkhole to listen. Default 15000. */
+  mockReadyMs?: number;
   /** How often the app container is checked while the executor runs. Default 1000. */
   appPollMs?: number;
   /** How long past the plan deadline the host waits for the executor to exit by itself before killing it. Default 15000. */
@@ -243,8 +246,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   // The mock fixtures (read-only to the mocks) and the mock ledgers (written by the mocks alone) sit apart from the executor's out directory, which the executor and the app never see.
   const dirs = { app: join(workspace, "app"), owned: join(workspace, "owned"), out: join(workspace, "out"), plan: join(workspace, "plan.json"),
     mock: join(workspace, "mock"), mockOut: join(workspace, "mock-out") };
-  const mockContainers = [...originPlan.mocked.map((item) => ({ origin: item.originRef, componentId: item.componentId, fixture: item.fixture })),
-    { origin: SINKHOLE_ORIGIN, componentId: null as string | null, fixture: null as (typeof originPlan.mocked)[number]["fixture"] | null }]
+  const mockContainers = [{ origin: SINKHOLE_ORIGIN, componentId: null as string | null, fixture: null as (typeof originPlan.mocked)[number]["fixture"] | null },
+    ...originPlan.mocked.map((item) => ({ origin: item.originRef, componentId: item.componentId, fixture: item.fixture }))]
     .map((item) => ({ ...item, name: `rovara-mock-${runId}-${item.origin}`, alias: `mock-${item.origin}` }));
   const pollMs = deps.appPollMs ?? 1_000;
   const graceMs = deps.deadlineGraceMs ?? DEFAULT_DEADLINE_GRACE_MS;
@@ -362,27 +365,35 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   /**
    * Starts the sinkhole and one mock per approved origin from the executor image on the run's internal network alone. Each gets every capability dropped, a read-only root,
    * Docker's default seccomp profile, the `node` user, small limits and no environment but the path of its fixture; the fixture is mounted read-only and the ledger directory is the only
-   * writable mount. A container is ready once it has opened its ledger, which it does before it listens. Returns false when any of them cannot be started.
+   * writable mount. The sinkhole alone may bind the low ports it answers on (80, 443 and its resolver on 53) through one namespaced sysctl. A container is ready only once its server is
+   * listening, which it says by writing `<origin>.ready` last. Returns false when any of them cannot be started or does not become ready.
    */
   async function startMocks(signal: AbortSignal): Promise<boolean> {
     for (const mock of mockContainers) {
       const fixtureArgs = mock.fixture === null ? [] : ["-v", `${join(dirs.mock, mock.origin)}:/mock:ro`, "-e", "ROVARA_MOCK_FIXTURE=/mock/fixture.json"];
+      const lowPorts = mock.fixture === null ? ["--sysctl", "net.ipv4.ip_unprivileged_port_start=0"] : [];
       const created = await docker.run(["run", "-d", "--name", mock.name, "--pull=never", ...hardening(["--network", network, "--network-alias", mock.alias]), "--read-only", "--init",
-        ...limits("128m", "64", "0.5"), "--user", "node", ...fixtureArgs, "-v", `${dirs.mockOut}:/out/mock`, deps.executorImage,
+        ...limits("128m", "64", "0.5"), "--user", "node", ...lowPorts, ...fixtureArgs, "-v", `${dirs.mockOut}:/out/mock`, deps.executorImage,
         "node", MOCK_ENTRY_POINT, "--mock", ...(mock.fixture === null ? [] : ["/mock/fixture.json"]), "--origin", mock.origin], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
       if (created.code !== 0) { appendBuildLog(`mock container for ${mock.origin} could not be started: ${created.stderr}${created.stdout}\n`); return false; }
     }
-    const readyBy = Math.min(deps.now() + MOCK_READY_TIMEOUT_MS, deadlineAt);
+    const readyBy = Math.min(deps.now() + (deps.mockReadyMs ?? MOCK_READY_TIMEOUT_MS), deadlineAt);
     for (const mock of mockContainers) {
       for (;;) {
         if (signal.aborted) return false;
-        const opened = await openRegularFile(join(dirs.mockOut, `${mock.origin}.jsonl`)).then(async ({ handle }) => { await handle.close(); return true; }, () => false);
+        const opened = await openRegularFile(join(dirs.mockOut, `${mock.origin}.ready`)).then(async ({ handle }) => { await handle.close(); return true; }, () => false);
         if (opened && (await mockRunning(mock.name))) break;
         if (deps.now() >= readyBy) { appendBuildLog(`mock container for ${mock.origin} did not become ready\n`); return false; }
         await new Promise<void>((done) => setTimeout(done, MOCK_READY_POLL_MS));
       }
     }
     return true;
+  }
+  /** The container's address on the run network, or null when it has none (the host then refuses to trust any ledger line's caller). */
+  async function containerAddress(name: string): Promise<string | null> {
+    const inspected = await admin(["inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", name]);
+    const address = inspected.stdout.trim();
+    return inspected.code === 0 && IPV4.test(address) ? address : null;
   }
   async function mockRunning(name: string): Promise<boolean> {
     const inspected = await admin(["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", name]);
@@ -392,7 +403,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
    * Called once the executor is done. Every mock and the sinkhole must still be running: one that stopped cannot have recorded every call made to it, and then no ledger is trusted.
    * They are killed before their ledgers are read, so nothing is appended while it is read, and each ledger is read from an open regular file, bounded.
    */
-  async function stopMocksAndReadLedgers(): Promise<ParsedMockLedger[] | null> {
+  async function stopMocksAndReadLedgers(appAddress: string): Promise<ParsedMockLedger[] | null> {
     for (const mock of mockContainers) if (!(await mockRunning(mock.name))) return null;
     await admin(["kill", ...mockContainers.map((mock) => mock.name)]);
     const ledgers: ParsedMockLedger[] = [];
@@ -403,7 +414,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
           const length = Math.min(size, MOCK_LEDGER_READ_BYTES);
           const buffer = Buffer.alloc(length);
           const { bytesRead } = await handle.read(buffer, 0, length, 0);
-          ledgers.push(parseMockLedger({ origin: mock.origin, componentId: mock.componentId, fixture: mock.fixture, bytes: buffer.subarray(0, bytesRead), truncated: size > MOCK_LEDGER_READ_BYTES }));
+          ledgers.push(parseMockLedger({ origin: mock.origin, componentId: mock.componentId, fixture: mock.fixture, appAddress, bytes: buffer.subarray(0, bytesRead), truncated: size > MOCK_LEDGER_READ_BYTES }));
         } finally { await handle.close(); }
       } catch { return null; }
     }
@@ -437,8 +448,11 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     await mkdir(ownedMount, { recursive: true });
 
     if (!(await startMocks(signal))) return { kind: "unavailable", reason: signal.aborted ? stopReason() : "mock-unavailable" };
+    // Every name that nothing in the run serves resolves to the sinkhole (the app's resolver forwards to it), so a call to an undeclared host is recorded.
+    const sinkholeAddress = await containerAddress(mockContainers[0]!.name);
+    if (sinkholeAddress === null) { appendBuildLog("the sinkhole has no address on the run network\n"); return { kind: "unavailable", reason: "mock-unavailable" }; }
 
-    const appCreate = await docker.run(["run", "-d", "--name", appName, "--pull=never", ...hardening(["--network", network, "--network-alias", "app"]), "--read-only",
+    const appCreate = await docker.run(["run", "-d", "--name", appName, "--pull=never", ...hardening(["--network", network, "--network-alias", "app", "--dns", sinkholeAddress]), "--read-only",
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`, "-w", containerCwd("/app", launch.start.cwd),
       // The recipe's literals come first, so the host's own port and seed variables always win.
       ...Object.entries(launch.start.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
@@ -449,6 +463,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     { signal, timeoutMs: ADMIN_TIMEOUT_MS });
     if (appCreate.code !== 0) { state.appLogTail = redact(`${appCreate.stdout}${appCreate.stderr}`); return { kind: "unavailable", reason: signal.aborted ? stopReason() : "app-exited" }; }
     if (!(await appStatus()).running) return { kind: "unavailable", reason: "app-exited" };
+    // The only caller whose calls to a mock can be evidence that the application made them.
+    const appAddress = await containerAddress(appName);
+    if (appAddress === null) { appendBuildLog("the app has no address on the run network\n"); return { kind: "unavailable", reason: "mock-unavailable" }; }
 
     const executorStop = new AbortController();
     const executorSignal = AbortSignal.any([signal, executorStop.signal]);
@@ -495,7 +512,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       if (result === null) return { kind: "unavailable", reason: "executor-result-mismatch" };
       try { validateExecutorResult(result, binding); } catch { return { kind: "unavailable", reason: "executor-result-mismatch" }; }
       try {
-        const mockLedgers = await stopMocksAndReadLedgers();
+        const mockLedgers = await stopMocksAndReadLedgers(appAddress);
         if (mockLedgers === null) return { kind: "unavailable", reason: signal.aborted ? stopReason() : "mock-unavailable" };
         const snapshot = await snapshotExecutorOutput(dirs.out, result);
         // A run that was stopped (the deadline or the caller) while the output was being read has no result, and nothing is handed out.
@@ -596,9 +613,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const outcome = state.outcome;
     if (outcome === null) throw new Error("the run was never executed");
     if (outcome.kind === "unavailable") throw new Error(outcome.reason);
-    // The cleanup receipt a broker derives from the run id names the run's two core containers; the mocks are covered by the label-based confirmation that nothing of the run is left.
-    const core = new Set(dockerOwnedResourceInventory(runId).containers);
-    return { snapshot: outcome.snapshot, cleanup: { removedAt: state.cleanup.removedAt, containers: state.cleanup.containers.filter((name) => core.has(name)), network } };
+    // The cleanup receipt names every container of the run's inventory (the app, the executor, the sinkhole and each mock), the very list a broker derives from the run id and the plan.
+    const mockOrigins = originPlan.mocked.map((origin) => origin.originRef);
+    const inventory = new Set(dockerOwnedResourceInventory(runId, mockOrigins).containers);
+    return { snapshot: outcome.snapshot, cleanup: { removedAt: state.cleanup.removedAt, containers: state.cleanup.containers.filter((name) => inventory.has(name)), network, mockOrigins } };
   }
 
   async function readActualRun(signal: AbortSignal): Promise<E2EActualApplicationRun> {

@@ -34,9 +34,9 @@ describe("deriving a probe's observation from its retained evidence", () => {
     expect(facts["app-host-denial-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [] });
     // The mock probes also carry what the verified mock evidence shows; no other probe does, so their recorded observations stay as they were.
     expect(facts["web-mock-origin-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [],
-      mockConsumptions: { success: 1, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 0, mocked: 0 } });
+      mockConsumptions: { success: 1, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 0, mocked: 0 }, runReason: "structural-application-observations-complete" });
     expect(facts["web-unmocked-call-v1"]).toEqual({ ...clean, collectorStatus: "UNKNOWN", failedAssertionKinds: [], blockedHosts: [],
-      mockConsumptions: { success: 0, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 1, mocked: 0 } });
+      mockConsumptions: { success: 0, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 1, mocked: 0 }, runReason: "unmocked-external-call" });
     for (const probe of WEB_API_REQUIRED_PROBES.filter((item) => item.mock !== true)) expect(Object.keys(facts[probe.probeId]!)).not.toContain("mockConsumptions");
   });
 
