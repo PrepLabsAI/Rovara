@@ -2,8 +2,8 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, cp, lstat, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { E2E_EXECUTOR_APP_ORIGIN, E2EExecutorPlanSchema, readE2EApplicationProjectContract, redactText, type E2EApplicationExecutionAdmission,
-  type E2ECollection, type E2EExecutorAccount, type E2EExecutorPlan, type E2ELease, type E2ERunInput } from "@agentx/contracts";
+import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_EXECUTOR_APP_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, readE2EApplicationProjectContract, redactText,
+  type E2EApplicationExecutionAdmission, type E2ECollection, type E2EExecutorAccount, type E2EExecutorPlan, type E2EFormLogin, type E2ELease, type E2ERunInput } from "@agentx/contracts";
 import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
 import { validateE2EApplicationExecutionAdmission } from "../application-scenarios.js";
@@ -83,8 +83,14 @@ const ADMIN_TIMEOUT_MS = 30_000;
 const MAX_TAIL_BYTES = 64 * 1024;
 const APP_PORT = 4317;
 const BUILD_COPY_TIMEOUT_MS = 120_000;
-const SUPPORTED_SEED_PROFILE = "orders-seed/v1";
-const SUPPORTED_AUTH_PROFILE = "orders-auth/v1";
+const ORDERS_SEED_PROFILE = "orders-seed/v1";
+const ORDERS_AUTH_PROFILE = "orders-auth/v1";
+const SUPPORTED_SEED_PROFILES: readonly string[] = [ORDERS_SEED_PROFILE, E2E_ACCOUNTS_FILE_SEED_PROFILE];
+const SUPPORTED_AUTH_PROFILES: readonly string[] = [ORDERS_AUTH_PROFILE, E2E_FORM_LOGIN_AUTH_PROFILE];
+/** The accounts file of `rovara-accounts-file/v1`, in the read-only owned mount of the seed and the app, and the data directory (a per-run volume) both may write. */
+const ACCOUNTS_FILE_NAME = "rovara-accounts.json";
+const ACCOUNTS_FILE_PATH = `/app/.owned/${ACCOUNTS_FILE_NAME}`;
+const DATA_DIR = "/data";
 const FORBIDDEN_ENV_NAME = /token|secret/i;
 /** Blank on every container, so an ambient proxy or Node option can never reach the candidate, the build or the executor. */
 const BLANKED_ENV = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "NODE_OPTIONS"].flatMap((name) => ["-e", `${name}=`]);
@@ -100,7 +106,7 @@ const IPV4 = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}
 const sha = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
 export type DockerApplicationUnavailableReason = "build-failed" | "app-unhealthy" | "app-exited" | "deadline-exceeded" | "executor-failed"
-  | "executor-result-mismatch" | "mock-unavailable" | "cancelled";
+  | "executor-result-mismatch" | "mock-unavailable" | "seed-failed" | "login-failed" | "cancelled";
 
 export type DockerApplicationHostDeps = Readonly<{
   docker: DockerCli;
@@ -171,6 +177,8 @@ type Outcome =
   | Readonly<{ kind: "unavailable"; reason: DockerApplicationUnavailableReason }>;
 
 type RunSeed = { accounts: { email: string; passwordDigest: string; subjectId: string; tenantId: string; role: string; displayName: string }[] };
+/** What `rovara-accounts-file/v1` puts in `/app/.owned/rovara-accounts.json`: the credentials themselves, for the recipe's seed command (and the app) to read. */
+type AccountsFile = { schemaVersion: "rovara-accounts/v1"; accounts: { profileId: string; email: string; password: string; tenantRef: string; roleRef: string }[] };
 
 function safeProfileLabel(profileId: string): string {
   const label = profileId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
@@ -178,17 +186,19 @@ function safeProfileLabel(profileId: string): string {
 }
 
 /** One synthetic account per profile the group's cases use; the password reaches only the plan mount and the seed digest. */
-function createRunAccounts(profiles: readonly { profileId: string; tenantRef: string; roleRef: string }[]): { accounts: E2EExecutorAccount[]; seed: RunSeed } {
+function createRunAccounts(profiles: readonly { profileId: string; tenantRef: string; roleRef: string; login?: E2EFormLogin | undefined }[]): { accounts: E2EExecutorAccount[]; seed: RunSeed; accountsFile: AccountsFile } {
   const accounts: E2EExecutorAccount[] = [];
   const seed: RunSeed = { accounts: [] };
+  const accountsFile: AccountsFile = { schemaVersion: "rovara-accounts/v1", accounts: [] };
   for (const profile of profiles) {
     const email = `rovara-${safeProfileLabel(profile.profileId)}-${randomBytes(3).toString("hex")}@example.test`;
     const password = randomBytes(24).toString("base64url");
-    accounts.push({ profileId: profile.profileId, email, password });
+    accounts.push({ profileId: profile.profileId, email, password, ...(profile.login === undefined ? {} : { login: profile.login }) });
     seed.accounts.push({ email, passwordDigest: sha(password), subjectId: `subject-${randomUUID()}`, tenantId: profile.tenantRef, role: profile.roleRef,
       displayName: `Rovara ${profile.profileId}`.slice(0, 120) });
+    accountsFile.accounts.push({ profileId: profile.profileId, email, password, tenantRef: profile.tenantRef, roleRef: profile.roleRef });
   }
-  return { accounts, seed };
+  return { accounts, seed, accountsFile };
 }
 
 const RECIPE_CWD = /^(?:\.|[A-Za-z0-9_@-][A-Za-z0-9._@-]*(?:\/[A-Za-z0-9_@-][A-Za-z0-9._@-]*)*)$/;
@@ -219,7 +229,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   if (!approved) throw new Error("docker application host group has no approved recipe for its application");
   const recipe = approved.recipe;
   if (recipe.launch.kind !== "service") throw new Error("docker application host runs service recipes only");
-  if (recipe.seedProfileId !== SUPPORTED_SEED_PROFILE) throw new Error(`seed profile ${recipe.seedProfileId} is not supported`);
+  if (!SUPPORTED_SEED_PROFILES.includes(recipe.seedProfileId)) throw new Error(`seed profile ${recipe.seedProfileId} is not supported`);
+  if (recipe.seed !== undefined && recipe.seedProfileId !== E2E_ACCOUNTS_FILE_SEED_PROFILE) throw new Error(`a seed command belongs to the ${E2E_ACCOUNTS_FILE_SEED_PROFILE} seed profile`);
+  /** True for `rovara-accounts-file/v1`: the host writes the accounts file and gives the seed and the app a per-run data volume. */
+  const accountsFileSeed = recipe.seedProfileId === E2E_ACCOUNTS_FILE_SEED_PROFILE;
   const launch = recipe.launch;
   const sourceSnapshot = compiled.runtimeAdmission.sourceSnapshot;
   const contract = readE2EApplicationProjectContract(sourceSnapshot, applicationId);
@@ -227,7 +240,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const profileIds = [...new Set(compiled.expectedCases.map((item) => item.accountProfileId))].sort();
   const profiles = profileIds.map((profileId) => {
     const profile = contract.accountProfiles.find((item) => item.profileId === profileId);
-    if (!profile || profile.scope !== "synthetic-test" || profile.authProfileId !== SUPPORTED_AUTH_PROFILE) throw new Error(`account profile ${profileId} is not a supported synthetic account`);
+    if (!profile || profile.scope !== "synthetic-test" || !SUPPORTED_AUTH_PROFILES.includes(profile.authProfileId)
+      || (profile.authProfileId === E2E_FORM_LOGIN_AUTH_PROFILE) !== (profile.login !== undefined)) throw new Error(`account profile ${profileId} is not a supported synthetic account`);
     return profile;
   });
   const portEnv = contract.service?.portEnv ?? "APP_PORT";
@@ -242,6 +256,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const { internal: network, build: buildNetwork, internalBridge, buildBridge } = e2eRunNetworks(runId);
   const appName = `rovara-app-${runId}`;
   const executorName = `rovara-executor-${runId}`;
+  const seedName = `rovara-seed-${runId}`;
+  const dataVolume = `rovara-data-${runId}`;
   const workspace = join(deps.runRoot, runId);
   // The mock fixtures (read-only to the mocks) and the mock ledgers (written by the mocks alone) sit apart from the executor's out directory, which the executor and the app never see.
   const dirs = { app: join(workspace, "app"), owned: join(workspace, "owned"), out: join(workspace, "out"), plan: join(workspace, "plan.json"),
@@ -282,10 +298,13 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     if (containers.length > 0) await admin(["rm", "-f", ...containers]);
     await admin(["network", "rm", buildNetwork]);
     await admin(["network", "rm", network]);
+    // The data volume goes once no container holds it any more.
+    if (accountsFileSeed) await admin(["volume", "rm", "-f", dataVolume]);
     await removeWorkspace();
     const containersLeft = await admin(["ps", "-a", "--filter", `label=${label}`, "--format", "{{.Names}}"]);
     const networksLeft = await admin(["network", "ls", "--filter", `label=${label}`, "--format", "{{.Name}}"]);
-    const left = [containersLeft, networksLeft].some((result) => result.code !== 0 || result.stdout.trim() !== "");
+    const volumesLeft = accountsFileSeed ? [await admin(["volume", "ls", "--filter", `label=${label}`, "--format", "{{.Name}}"])] : [];
+    const left = [containersLeft, networksLeft, ...volumesLeft].some((result) => result.code !== 0 || result.stdout.trim() !== "");
     const workspaceGone = await lstat(workspace).then(() => false, () => true);
     return { confirmed: !left && workspaceGone, containers };
   }
@@ -454,14 +473,38 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const sinkholeAddress = await containerAddress(mockContainers[0]!.name);
     if (sinkholeAddress === null) { appendBuildLog("the sinkhole has no address on the run network\n"); return { kind: "unavailable", reason: "mock-unavailable" }; }
 
-    const appCreate = await docker.run(["run", "-d", "--name", appName, "--pull=never", ...hardening(["--network", network, "--network-alias", "app", "--dns", sinkholeAddress]), "--read-only",
-      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`, "-w", containerCwd("/app", launch.start.cwd),
-      // The recipe's literals come first, so the host's own port and seed variables always win.
-      ...Object.entries(launch.start.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
+    // The app and the seed run under the same flags (the seed has no alias): the candidate tree and the owned mount read-only, the data volume when the seed profile has one, and the
+    // run's own resolver. The recipe's literals come first, so the host's own port and seed variables always win.
+    const appFlags = (command: { cwd: string; env: Readonly<Record<string, string>> }, alias: string | null) => [
+      ...hardening(["--network", network, ...(alias === null ? [] : ["--network-alias", alias]), "--dns", sinkholeAddress]), "--read-only",
+      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`,
+      ...(accountsFileSeed ? ["-v", `${dataVolume}:${DATA_DIR}`] : []), "-w", containerCwd("/app", command.cwd),
+      ...Object.entries(command.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
       // Every declared origin is one of the run's own containers: the approved mock when there is one, the sinkhole otherwise. These come after the recipe's literals, so the recipe cannot point an origin elsewhere.
       ...originPlan.mocked.flatMap((origin) => ["-e", `${origin.envName}=${mockOriginUrl(origin.originRef)}`]),
       ...originPlan.unbound.flatMap((origin) => ["-e", `${origin.envName}=${mockOriginUrl(SINKHOLE_ORIGIN_REF)}`]),
-      "-e", `${portEnv}=${APP_PORT}`, "-e", "ORDERS_TEST_SEED_FILE=/app/.owned/seed.json", ...BLANKED_ENV, deps.buildImage, launch.start.program, ...launch.start.args],
+      "-e", `${portEnv}=${APP_PORT}`,
+      ...(accountsFileSeed ? ["-e", `ROVARA_ACCOUNTS_FILE=${ACCOUNTS_FILE_PATH}`, "-e", `ROVARA_DATA_DIR=${DATA_DIR}`] : ["-e", "ORDERS_TEST_SEED_FILE=/app/.owned/seed.json"]),
+      ...BLANKED_ENV];
+    if (accountsFileSeed) {
+      // A fresh volume belongs to root; the seed and the app run as an unprivileged user, so a throwaway container with no network and no capability opens it (its owner needs none for that).
+      const opened = await docker.run(["run", "--rm", "--name", `rovara-datainit-${runId}`, "--pull=never", ...hardening(["--network", "none"]), "--read-only", ...limits("128m", "64", "0.5"),
+        "--user", "0:0", "--entrypoint", "chmod", "-v", `${dataVolume}:${DATA_DIR}`, ...BLANKED_ENV, deps.executorImage, "0777", DATA_DIR], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+      if (opened.code !== 0) { appendBuildLog(`the data volume could not be opened for the seed: ${opened.stderr}${opened.stdout}\n`); return { kind: "unavailable", reason: signal.aborted ? stopReason() : "seed-failed" }; }
+      if (recipe.seed !== undefined) {
+        const seedTimeoutMs = Math.min(recipe.seed.timeoutMs, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, left());
+        const seeded = await docker.run(["run", "--name", seedName, "--pull=never", ...appFlags(recipe.seed, null), deps.buildImage, recipe.seed.program, ...recipe.seed.args],
+          { signal, timeoutMs: seedTimeoutMs });
+        // The seed is a short-lived container of its own and is gone once it has spoken; what it printed is kept, redacted, for whoever asks why a run was not seeded.
+        await admin(["rm", "-f", seedName]);
+        state.appLogTail = redact(`seed command (${recipe.seed.program}):\n${seeded.stdout}${seeded.stderr}`);
+        if (seeded.code !== 0) {
+          const clamped = seeded.code === 124 && seedTimeoutMs < Math.min(recipe.seed.timeoutMs, E2E_SEED_COMMAND_MAX_TIMEOUT_MS);
+          return { kind: "unavailable", reason: signal.aborted ? stopReason() : clamped ? "deadline-exceeded" : "seed-failed" };
+        }
+      }
+    }
+    const appCreate = await docker.run(["run", "-d", "--name", appName, "--pull=never", ...appFlags(launch.start, "app"), deps.buildImage, launch.start.program, ...launch.start.args],
     { signal, timeoutMs: ADMIN_TIMEOUT_MS });
     if (appCreate.code !== 0) { state.appLogTail = redact(`${appCreate.stdout}${appCreate.stderr}`); return { kind: "unavailable", reason: signal.aborted ? stopReason() : "app-exited" }; }
     if (!(await appStatus()).running) return { kind: "unavailable", reason: "app-exited" };
@@ -538,6 +581,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     // Exit 2 and every other code mean no trustworthy result: nothing from the out directory is read, whatever the reason.
     if (result?.reason === "app-unhealthy") return { kind: "unavailable", reason: (await appStatus()).running ? "app-unhealthy" : "app-exited" };
     if (result?.reason === "deadline-exceeded") return { kind: "unavailable", reason: "deadline-exceeded" };
+    // A form login the application refused (or never completed): the run cannot say anything about the cases that needed it.
+    if (result?.reason === "login-failed") return { kind: "unavailable", reason: "login-failed" };
     return { kind: "unavailable", reason: "executor-failed" };
   }
 
@@ -564,9 +609,11 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
         await mkdir(join(dirs.mock, mock.origin), { mode: 0o755 });
         await writeFile(join(dirs.mock, mock.origin, "fixture.json"), JSON.stringify(mock.fixture), { mode: 0o644 });
       }
-      await writeFile(join(dirs.owned, "seed.json"), JSON.stringify(run.seed), { mode: 0o644 });
+      // One seed profile's file per run: the built-in profile's digests, or the accounts file with the credentials themselves (never in an argument or an environment variable).
+      if (accountsFileSeed) await writeFile(join(dirs.owned, ACCOUNTS_FILE_NAME), JSON.stringify(run.accountsFile), { mode: 0o644 });
+      else await writeFile(join(dirs.owned, "seed.json"), JSON.stringify(run.seed), { mode: 0o644 });
       for (const [name, content] of Object.entries(deps.ownedFiles ?? {})) {
-        if (!OWNED_FILE_NAME.test(name) || name === "seed.json") throw new Error(`owned file name ${name} is not allowed`);
+        if (!OWNED_FILE_NAME.test(name) || name === "seed.json" || name === ACCOUNTS_FILE_NAME) throw new Error(`owned file name ${name} is not allowed`);
         await writeFile(join(dirs.owned, name), content, { mode: 0o644 });
       }
       await writeFile(dirs.plan, JSON.stringify(plan), { mode: 0o644 });
@@ -580,6 +627,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       if (createdBuild.code !== 0) throw new Error(`could not create the run build network: ${redact(createdBuild.stderr)}`);
       const created = await docker.run(["network", "create", "--internal", ...labels, "-o", `com.docker.network.bridge.name=${internalBridge}`, network], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
       if (created.code !== 0) throw new Error(`could not create the run network: ${redact(created.stderr)}`);
+      if (accountsFileSeed) {
+        const volume = await docker.run(["volume", "create", ...labels, dataVolume], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+        if (volume.code !== 0) throw new Error(`could not create the run data volume: ${redact(volume.stderr)}`);
+      }
     } catch (error) {
       await removeOwned().catch(() => undefined);
       throw error;
@@ -664,12 +715,16 @@ export async function sweepStaleRovaraRuns(docker: DockerCli, olderThanMs: numbe
     .filter((row) => row.name !== "" && SAFE_RUN_ID.test(row.runId) && Number.isFinite(row.created));
   const containers = rows((await docker.run(["ps", "-a", "--filter", `label=${ROVARA_RUN_LABEL}`, "--format", format], { signal, timeoutMs: ADMIN_TIMEOUT_MS })).stdout);
   const networks = rows((await docker.run(["network", "ls", "--filter", `label=${ROVARA_RUN_LABEL}`, "--format", format.replace("{{.Names}}", "{{.Name}}")], { signal, timeoutMs: ADMIN_TIMEOUT_MS })).stdout);
+  const volumes = rows((await docker.run(["volume", "ls", "--filter", `label=${ROVARA_RUN_LABEL}`, "--format", format.replace("{{.Names}}", "{{.Name}}")], { signal, timeoutMs: ADMIN_TIMEOUT_MS })).stdout);
   const stale = (row: { created: number }) => now - row.created > olderThanMs;
   const staleContainers = containers.filter(stale);
   const staleNetworks = networks.filter(stale);
+  const staleVolumes = volumes.filter(stale);
   if (staleContainers.length > 0) await docker.run(["rm", "-f", ...staleContainers.map((row) => row.name)], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
   for (const row of staleNetworks) await docker.run(["network", "rm", row.name], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
-  const runIds = new Set([...staleContainers, ...staleNetworks].map((row) => row.runId));
+  // A volume goes after the containers that held it.
+  for (const row of staleVolumes) await docker.run(["volume", "rm", "-f", row.name], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+  const runIds = new Set([...staleContainers, ...staleNetworks, ...staleVolumes].map((row) => row.runId));
   if (options.runRoot) for (const runId of runIds) await rm(join(options.runRoot, runId), { recursive: true, force: true }).catch(() => undefined);
   return runIds.size;
 }

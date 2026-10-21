@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { E2EApplicationExecutionAdmissionSchema } from "./e2e-application-execution.js";
+import { E2EFormLoginSchema } from "./e2e.js";
 
 /** The only application an executor run may reach: the candidate app's alias on the per-run internal network. */
 export const E2E_EXECUTOR_APP_ORIGIN = "http://app:4317" as const;
@@ -26,6 +27,8 @@ export const E2EExecutorAccountSchema = z.object({
   profileId: z.string().min(1).max(120),
   email: z.string().min(3).max(256).regex(/^[^\s@]+@[^\s@]+$/),
   password: z.string().min(16).max(256),
+  /** Present for a `rovara-form-login/v1` account: the form the executor signs in through. Equal to the login the source contract declares. */
+  login: E2EFormLoginSchema.optional(),
 }).strict();
 export type E2EExecutorAccount = z.infer<typeof E2EExecutorAccountSchema>;
 

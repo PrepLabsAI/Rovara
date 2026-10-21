@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DockerCli } from "../../packages/verifier/src/host/docker-application-host.js";
 
-type Resource = { kind: "container" | "network"; name: string; labels: Record<string, string>; state: "running" | "exited"; exitCode: number; logs: string };
+type Resource = { kind: "container" | "network" | "volume"; name: string; labels: Record<string, string>; state: "running" | "exited"; exitCode: number; logs: string };
 type Result = { code: number; stdout: string; stderr: string };
 
 /**
@@ -24,6 +24,14 @@ export class FakeDockerCli implements DockerCli {
   /** The order of the moments a test may need to compare: an executor finishing, and containers being force-removed. */
   readonly events: string[] = [];
   networkCreateFails = false;
+  /** The exit code of the recipe's seed container, what it writes to stdout, and what the test does with the seed's mounts (the accounts file it would read, the data volume it would write). */
+  seedExitCode = 0;
+  seedStdout = "";
+  onSeed: (args: string[]) => void | Promise<void> = () => undefined;
+  /** When set, `docker volume create` is refused. */
+  volumeCreateFails = false;
+  /** When set, `docker volume rm` reports success but the volume stays, as a volume still held by a container does. */
+  volumesSurviveRemoval = false;
   /** Images the host does not hold: `image inspect` fails for them until they are pulled. */
   readonly missingImages = new Set<string>();
   /** `docker pull` calls that fail before one succeeds, and whether the image is on the host by the time the first of them reports failure (another process pulled it). */
@@ -72,8 +80,9 @@ export class FakeDockerCli implements DockerCli {
     const labels: Record<string, string> = { "rovara.run": runId, ...(created === "" ? {} : { "rovara.created": created }) };
     this.resources.set(`rovara-app-${runId}`, { kind: "container", name: `rovara-app-${runId}`, labels, state: "running", exitCode: 0, logs: "" });
   }
-  seedStale(input: { runId: string; ageMs: number; now: number }): void {
+  seedStale(input: { runId: string; ageMs: number; now: number; volume?: boolean }): void {
     const labels = { "rovara.run": input.runId, "rovara.created": String(input.now - input.ageMs) };
+    if (input.volume) this.resources.set(`rovara-data-${input.runId}`, { kind: "volume", name: `rovara-data-${input.runId}`, labels, state: "running", exitCode: 0, logs: "" });
     this.resources.set(`rovara-app-${input.runId}`, { kind: "container", name: `rovara-app-${input.runId}`, labels, state: "running", exitCode: 0, logs: "" });
     for (const name of [`rovara-e2e-${input.runId}`, `rovara-e2e-build-${input.runId}`]) this.resources.set(name, { kind: "network", name, labels, state: "running", exitCode: 0, logs: "" });
   }
@@ -84,7 +93,7 @@ export class FakeDockerCli implements DockerCli {
   }
   networks(): string[] { return [...this.resources.values()].filter((item) => item.kind === "network").map((item) => item.name); }
   /** The arguments of the `docker run` call that created the named kind of container. */
-  argsFor(kind: "app" | "executor" | "build"): string[] {
+  argsFor(kind: "app" | "executor" | "build" | "seed" | "datainit"): string[] {
     const found = this.calls.find((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith(`rovara-${kind}-`));
     if (!found) throw new Error(`no ${kind} container was started`);
     return found;
@@ -108,7 +117,7 @@ export class FakeDockerCli implements DockerCli {
     if (!found) throw new Error(`no docker call starts with "${prefix}"`);
     return found;
   }
-  mountsFor(kind: "app" | "executor"): string[] {
+  mountsFor(kind: "app" | "executor" | "seed"): string[] {
     const args = this.argsFor(kind);
     return args.flatMap((value, index) => (args[index - 1] === "-v" ? [value] : []));
   }
@@ -146,6 +155,18 @@ export class FakeDockerCli implements DockerCli {
       return removed.every(Boolean) ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "No such network" };
     }
     if (command === "network" && sub === "ls") return this.list("network", args);
+    if (command === "volume" && sub === "create") {
+      if (this.volumeCreateFails) return { code: 1, stdout: "", stderr: "volume create refused" };
+      const name = args[args.length - 1]!;
+      this.resources.set(name, { kind: "volume", name, labels: this.mark(args), state: "running", exitCode: 0, logs: "" });
+      return { code: 0, stdout: name, stderr: "" };
+    }
+    if (command === "volume" && sub === "rm") {
+      if (!this.volumesSurviveRemoval) for (const name of args.slice(2).filter((value) => !value.startsWith("-"))) this.resources.delete(name);
+      this.events.push(`volume rm ${args.slice(2).join(" ")}`);
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (command === "volume" && sub === "ls") return this.list("volume", args);
     if (command === "ps") return this.list("container", args);
     if (command === "kill") {
       for (const name of args.slice(1)) {
@@ -208,6 +229,13 @@ export class FakeDockerCli implements DockerCli {
       // ...and writes its ready marker once it listens.
       if (!this.mocksNeverReady) writeFileSync(join(this.mockOutDir, `${args[args.indexOf("--origin") + 1]}.ready`), "ready\n");
       return { code: 0, stdout: "container-id", stderr: "" };
+    }
+    if (name.startsWith("rovara-datainit-")) return { code: 0, stdout: "", stderr: "" };
+    if (name.startsWith("rovara-seed-")) {
+      // The seed runs in the foreground and stays behind, stopped, until the host removes it (it has no `--rm`).
+      this.resources.set(name, { kind: "container", name, labels: this.mark(args), state: "exited", exitCode: this.seedExitCode, logs: "" });
+      await this.onSeed(args);
+      return { code: this.seedExitCode, stdout: this.seedStdout, stderr: "" };
     }
     if (name.startsWith("rovara-build-")) {
       const index = Number(name.split("-").at(-1));

@@ -131,6 +131,8 @@ export type WebApiProbePlan = Readonly<{
   /** The app-side seed matching the plan's synthetic account; mount it read-only at `<app>/.owned/seed.json`. */
   seed: { accounts: { email: string; passwordDigest: string; subjectId: string; tenantId: string; role: "owner" | "viewer"; displayName: string }[] };
   account: { email: string; password: string };
+  /** Every scenario of the plan (one for a probe; one per account for `accountScenarios`), in the order given. */
+  scenarios: readonly E2EScenario[];
 }>;
 
 /**
@@ -146,18 +148,29 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   /** Build commands for the recipe (the fixture itself builds nothing); the recipe digest is recomputed to match. */
   recipeBuild?: { program: string; args: string[]; cwd: string; timeoutMs: number; env: Record<string, string> }[];
   /** Overrides of the recipe's start command (arguments, timeout, env); the recipe digest is recomputed to match. */
-  recipeStart?: { args?: string[]; timeoutMs?: number; env?: Record<string, string> } }): WebApiProbePlan {
+  recipeStart?: { args?: string[]; timeoutMs?: number; env?: Record<string, string> };
+  /** Overrides of the recipe's seed command (arguments, timeout, env), for an app whose recipe has one; the recipe digest is recomputed to match. */
+  recipeSeed?: { program?: string; args?: string[]; timeoutMs?: number; env?: Record<string, string> };
+  /**
+   * Plans one scenario per listed account instead of the probe's single scenario, all in the same group (Task 3.2). The probe name still decides the target kind (`web-` or `api-`).
+   * Every listed profile must be one of the app's account profiles with a target variant of that kind.
+   */
+  accountScenarios?: readonly { accountProfileId: string; scenario(targetId: string): E2EScenario }[] }): WebApiProbePlan {
   const kind = options.probe.startsWith("web-") ? "web" as const : "api" as const;
   const rawPackage = JSON.parse(readFileSync(join(options.appRoot, "package.json"), "utf8")) as { agentx: { e2e: { targetAccounts: { baseTargetId: string; profileId: string }[];
     recipe: { recipeDigest: string; build: unknown[]; launch: { start: Record<string, unknown> } } } } };
-  if (options.recipeBuild || options.recipeStart) {
-    const recipe = rawPackage.agentx.e2e.recipe;
+  if (options.recipeBuild || options.recipeStart || options.recipeSeed) {
+    const recipe = rawPackage.agentx.e2e.recipe as typeof rawPackage.agentx.e2e.recipe & { seed?: Record<string, unknown> };
     const launch = options.recipeStart ? { ...recipe.launch, start: { ...recipe.launch.start, ...options.recipeStart } } : recipe.launch;
-    const { recipeDigest: _digest, ...body } = { ...recipe, launch, build: options.recipeBuild ?? recipe.build };
+    if (options.recipeSeed && recipe.seed === undefined) throw new Error("the app's recipe has no seed command to override");
+    const { recipeDigest: _digest, ...body } = { ...recipe, launch, build: options.recipeBuild ?? recipe.build, ...(options.recipeSeed ? { seed: { ...recipe.seed, ...options.recipeSeed } } : {}) };
     void _digest;
     rawPackage.agentx.e2e.recipe = { ...body, recipeDigest: hash(canonicalJson(body)) };
   }
-  if (kind === "api") rawPackage.agentx.e2e.targetAccounts = rawPackage.agentx.e2e.targetAccounts.map((item) => ({ ...item, baseTargetId: "api-1" }));
+  // The qualification app lists its account variants on the web target only; an app that lists the API target's own variants keeps them.
+  if (kind === "api" && !rawPackage.agentx.e2e.targetAccounts.some((item) => item.baseTargetId === "api-1")) {
+    rawPackage.agentx.e2e.targetAccounts = rawPackage.agentx.e2e.targetAccounts.map((item) => ({ ...item, baseTargetId: "api-1" }));
+  }
   const packagePath = kind === "web" ? "apps/orders/package.json" : "server/package.json";
   const appDirectory = dirname(packagePath);
   // An origin's contract path is repository-relative; the app tree is the repository in the installed asset and sits in `appDirectory` in the plan's snapshot.
@@ -174,12 +187,21 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
     treePaths: sourceFiles.map((item) => item.path).sort(), sources: sourceFiles.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
   const discovery = inspectE2ERepository(snapshot, candidate);
-  const accountProfileId = options.role === "viewer" ? "orders-viewer" : "orders-owner";
-  const target = discovery.inspection.proposedTargets.find((item) => item.kind === kind && item.accountProfileId === accountProfileId)!;
+  const accountProfileIds = options.accountScenarios?.map((item) => item.accountProfileId) ?? [options.role === "viewer" ? "orders-viewer" : "orders-owner"];
+  const targets = accountProfileIds.map((profileId) => {
+    const found = discovery.inspection.proposedTargets.find((item) => item.kind === kind && item.accountProfileId === profileId);
+    if (!found) throw new Error(`the app has no ${kind} target for account profile ${profileId}`);
+    return found;
+  });
+  const target = targets[0]!;
+  const accountProfileId = accountProfileIds[0]!;
   const application = discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
   const accountContext = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths)[0]!;
-  const scenario = scenarioFor(options.probe, target.targetId, accountProfileId);
-  const accountRef = { applicationId: application.applicationId, profileId: accountProfileId, revision: 1, definitionDigest: "8".repeat(64) };
+  const scenarios = options.accountScenarios
+    ? options.accountScenarios.map((item, index) => item.scenario(targets[index]!.targetId))
+    : [scenarioFor(options.probe, target.targetId, accountProfileId)];
+  const scenario = scenarios[0]!;
+  const accountRefs = accountProfileIds.map((profileId) => ({ applicationId: application.applicationId, profileId, revision: 1, definitionDigest: "8".repeat(64) }));
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const runtimeProfileId = E2E_EXECUTOR_HOST_PROFILE_ID;
@@ -188,13 +210,13 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const [openApiFile, fixtureFile] = mockFiles;
   const mockComponentId = openApiFile === undefined ? "" : e2eApiSchemaComponentId(openApiFile.path);
   const mockFixture = fixtureFile === undefined ? undefined : E2EApiMockFixtureSchema.parse(JSON.parse(fixtureFile.bytes.toString("utf8")));
-  const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [],
+  const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: targets.map((item) => item.targetId), portableOperationRefs: [],
     mockFixtureRefs: mockFixture === undefined || fixtureFile === undefined ? [] : [{ componentId: mockComponentId, requestedTargetId: target.targetId, operationId: mockFixture.operationId,
       sourcePath: fixtureFile.path, sourceSha256: hash(fixtureFile.bytes) }],
-    accountContextRefs: [{ applicationId: application.applicationId, profileId: accountProfileId, sourcePath: accountContext.path, sourceSha256: accountContext.sha256 }],
-    scenarios: [scenario], semanticExportDeltas: [], applicationRuntimeRefs: [{ targetId: target.targetId, applicationId: application.applicationId,
+    accountContextRefs: accountProfileIds.map((profileId) => ({ applicationId: application.applicationId, profileId, sourcePath: accountContext.path, sourceSha256: accountContext.sha256 })),
+    scenarios, semanticExportDeltas: [], applicationRuntimeRefs: targets.map((item, index) => ({ targetId: item.targetId, applicationId: application.applicationId,
       recipeDigest: application.recipe!.recipeDigest, sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths),
-      runtimeProfileId, accountProfileId }], runtimeAccountRefs: [accountRef], unavailableTargetRefs: [] });
+      runtimeProfileId, accountProfileId: accountProfileIds[index]! })), runtimeAccountRefs: accountRefs, unavailableTargetRefs: [] });
   // The probe qualifies the runtime that targets are approved against, so its setup carries that qualified profile like a real approved setup.
   const setupProposal = proposeE2ESetup({ inspection: discovery.inspection, snapshot, expectedCandidate: candidate, readyProfiles: [{ kind, profileId: runtimeProfileId }] });
   const setupApproval = { artifactId: "setup-approval", digest: hash(canonicalJson(setupProposal)) };
@@ -202,17 +224,17 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const semanticApproval = { artifactId: "semantic-approval", digest: "d".repeat(64) };
   const applicationApprovalBinding = deriveE2EApplicationApprovalBinding({ preparedSnapshot: snapshot, intent, artifactId: semanticApproval.artifactId,
     artifactSha256: semanticApproval.digest, planDigest, setupProposal, setupApproval });
-  const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [scenario.scenarioId],
+  const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: scenarios.map((item) => item.scenarioId),
     targets: setupProposal.targets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
     // The real web engine reports screenshot and video capability, and the compiler binds the launch descriptor to the capture policy.
     capture: { screenshots: kind === "web", traces: false, video: kind === "web", downloads: false },
     limits: { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 60_000, caseTimeoutMs: 120_000,
       maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
-  const selectionInput = { candidateDigest: candidate.digest, expectedCandidate: candidate, sourceSnapshot: snapshot, planDigest, policy, scenarios: [scenario],
-    selectedTargetIds: [target.targetId], intent, intentDigest: hash(canonicalJson(intent)), setupProposal, setupApproval, applicationApprovalBinding,
-    registeredRuntimes: [runtime], runtimeAccountRefs: [accountRef], now: nowMs, sandboxAvailability: null,
-    runtimeAvailability: [{ targetId: target.targetId, profileId: runtimeProfileId, connection: "connected" as const,
-      approval: "approved" as const, qualification: "qualified" as const, authorizationRevision: "orders-auth-r1" }],
+  const selectionInput = { candidateDigest: candidate.digest, expectedCandidate: candidate, sourceSnapshot: snapshot, planDigest, policy, scenarios,
+    selectedTargetIds: targets.map((item) => item.targetId), intent, intentDigest: hash(canonicalJson(intent)), setupProposal, setupApproval, applicationApprovalBinding,
+    registeredRuntimes: [runtime], runtimeAccountRefs: accountRefs, now: nowMs, sandboxAvailability: null,
+    runtimeAvailability: targets.map((item) => ({ targetId: item.targetId, profileId: runtimeProfileId, connection: "connected" as const,
+      approval: "approved" as const, qualification: "qualified" as const, authorizationRevision: "orders-auth-r1" })),
     portableApprovalBinding: { schemaVersion: "portable-approval-binding/v1" as const, planDigest, semanticApproval, operations: [], accountContexts: [],
       bindingDigest: "0".repeat(64) }, approvedSemanticApproval: semanticApproval,
     mockableComponents: mockFixture === undefined || openApiFile === undefined ? [] : [{ componentId: mockComponentId, requestedTargetId: target.targetId, kind: "api" as const,
@@ -241,8 +263,9 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const preparedEnvironmentDigest = "7".repeat(64);
   const runtimeBindings = new Map([[runtimeProfileId, runtime]]);
   const cliHostsByProfile = new Map([[runtimeProfileId, registeredHost()]]);
-  const launchTargets = [webApiApplicationLaunchTarget({ target: { targetId: target.targetId, kind, applicationId: application.applicationId, runtimeProfileId }, runtime, capture: policy.capture })];
-  const bundleBody = { schemaVersion: 1 as const, planDigest, templateVersion: "trusted-e2e-application/v1" as const, scenarios: [scenario], bundleDigest: "0".repeat(64) };
+  const launchTargets = targets.map((item) => webApiApplicationLaunchTarget({ target: { targetId: item.targetId, kind, applicationId: application.applicationId, runtimeProfileId }, runtime, capture: policy.capture }))
+    .sort((left, right) => (left.targetId < right.targetId ? -1 : left.targetId > right.targetId ? 1 : 0));
+  const bundleBody = { schemaVersion: 1 as const, planDigest, templateVersion: "trusted-e2e-application/v1" as const, scenarios, bundleDigest: "0".repeat(64) };
   const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
   const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets, modelRoute: null, cliHostsByProfile,
     preparedEnvironmentsByGroup: new Map([[group.groupId, { preparedEnvironmentDigest, originByApplicationId: [{ applicationId: application.applicationId, origin: WEB_API_PROBE_APP_ORIGIN }] }]]) };
@@ -275,13 +298,15 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     policy, bundle, executionPlan, portableProjection: null, round, groups: [groupAdmission] };
   const admission = E2EApplicationExecutionAdmissionSchema.parse(JSON.parse(encodeE2EApplicationExecutionAdmission({ ...admissionBody,
     admissionDigest: hash(canonicalJson(admissionBody)) } as never)));
-  const password = `pw-${randomUUID()}-${randomUUID()}`;
-  const email = `rovara-${randomUUID()}@example.invalid`;
   const role = options.role ?? "owner";
+  const declaredProfiles = (rawPackage.agentx.e2e as unknown as { accountProfiles: { profileId: string; login?: unknown }[] }).accountProfiles;
+  const accounts = accountProfileIds.map((profileId) => ({ profileId, email: `rovara-${randomUUID()}@example.invalid`, password: `pw-${randomUUID()}-${randomUUID()}`,
+    ...(declaredProfiles.find((item) => item.profileId === profileId)?.login === undefined ? {} : { login: declaredProfiles.find((item) => item.profileId === profileId)!.login }) }));
+  const { email, password } = accounts[0]!;
   const plan = E2EExecutorPlanSchema.parse({ schemaVersion: "e2e-executor-plan/v1", runId: binding.runId, groupId: group.groupId, admission,
     admissionDigest: admission.admissionDigest, app: { origin: E2E_EXECUTOR_APP_ORIGIN, health: { path: "/health", expectedStatus: 200, timeoutMs: options.healthTimeoutMs ?? 30_000 } },
-    deadlineAt: Date.parse(binding.deadlineAt), accounts: [{ profileId: accountProfileId, email, password }] });
-  return { plan, compiled, caseId: compiled.expectedCases[0]!.caseId, probe: options.probe, scenario,
+    deadlineAt: Date.parse(binding.deadlineAt), accounts });
+  return { plan, compiled, caseId: compiled.expectedCases[0]!.caseId, probe: options.probe, scenario, scenarios,
     seed: { accounts: [{ email, passwordDigest: createHash("sha256").update(password, "utf8").digest("hex"), subjectId: `subject-${randomUUID()}`,
       tenantId: "tenant-a", role, displayName: role === "owner" ? "Orders Owner" : "Orders Viewer" }] },
     account: { email, password } };

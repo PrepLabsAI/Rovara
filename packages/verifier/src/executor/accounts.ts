@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { E2E_EXECUTOR_COMPILED_ORIGIN, E2ERuntimeAccountRefSchema, readE2EApplicationProjectContract, type E2EExecutorPlan, type E2ERuntimeAccountRef } from "@agentx/contracts";
+import { E2E_EXECUTOR_COMPILED_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2ERuntimeAccountRefSchema, canonicalJson, readE2EApplicationProjectContract, type E2EExecutorPlan, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import type { E2EApplicationOwnedSubject } from "../application-result-adapter.js";
 import type { E2EApiRuntimeResponse } from "../api-runtime.js";
 import type { ExecutorSessionFacts } from "./case-ledger.js";
+import { FormLoginError, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
 import { resolveE2EExecutorSuite } from "./suite.js";
 
 const MAX_BODY_BYTES = 1_048_576;
@@ -14,7 +15,13 @@ type Session = {
   sessionRef: string; applicationId: string; profileId: string; accountRef: E2ERuntimeAccountRef; token: string;
   accountIdDigest: string; observedAt: string; login: ExecutorSessionFacts["login"]; identity: ExecutorSessionFacts["identity"];
   subject: E2EApplicationOwnedSubject | null; closed: boolean;
+  /** Only for a `rovara-form-login/v1` account: what the signed-in context kept, and the request context that carries it. The state is secret. */
+  form: { state: FormLoginStorageState; requests: FormRequestContext } | null;
 };
+/** What a case's browser context is given: the cookies of the account's session and the local storage of the origins the sign-in visited. */
+export type BrowserSessionState = Readonly<{ cookies: readonly StorageCookie[]; localStorage: readonly Readonly<{ origin: string; entries: readonly Readonly<{ name: string; value: string }>[] }>[] }>;
+/** A local storage value shorter than this is a setting, not a token: it is not registered as a session secret. */
+const MIN_STORAGE_SECRET_LENGTH = 16;
 
 async function readBounded(response: Response): Promise<Uint8Array> {
   const declared = Number(response.headers.get("content-length"));
@@ -61,11 +68,18 @@ function parseJsonObject(bytes: Uint8Array, label: string): Record<string, unkno
 export type ExecutorSessionStore = ReturnType<typeof createExecutorSessionStore>;
 
 /**
- * Owns the per-case synthetic account sessions. The only login in M1.1 is the built-in `orders-auth/v1` profile: POST the
- * seeded credentials to `/api/login`, keep the `orders_session` cookie in memory, and send it on API requests or add it to
- * the owned browser context. The cookie value and the credentials never leave this object.
+ * Owns the per-case synthetic account sessions. Two logins exist. The built-in `orders-auth/v1` profile POSTs the seeded credentials to `/api/login`, keeps the
+ * `orders_session` cookie in memory, and sends it on API requests or adds it to the owned browser context. `rovara-form-login/v1` (Task 3.2) signs in through the
+ * application's own form in a fresh browser context, keeps that context's storage state for the case, and answers API requests through a request context that carries it.
+ * The cookie values and the credentials never leave this object: `registerSecret` is told every session value so that nothing the executor writes can carry one.
  */
-export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetchImpl?: typeof fetch }) {
+export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetchImpl?: typeof fetch;
+  /** The browser side of `rovara-form-login/v1`; without it an account that signs in through a form cannot be opened. */
+  formLogin?: FormLoginDriver;
+  /** Called with every secret a session creates (cookie values, token-like local storage values), before the session is used. */
+  registerSecret?: (value: string) => void;
+  /** Called with the profile of an account whose form login did not complete, whatever the cause. */
+  onLoginFailed?: (profileId: string) => void }) {
   const resolved = resolveE2EExecutorSuite(input.plan);
   const fetchImpl = input.fetchImpl ?? fetch;
   // Requests go to the compiled loopback origin, where the executor's forwarder serves the candidate.
@@ -94,9 +108,11 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     if (!account) throw new Error("no seeded account exists for this account profile");
     const contract = readE2EApplicationProjectContract(sourceSnapshot, raw.applicationId);
     const profile = contract?.accountProfiles.find((candidate) => candidate.profileId === raw.profileId);
-    if (!profile || profile.scope !== "synthetic-test" || profile.authProfileId !== "orders-auth/v1" || profile.identityProbeId !== "orders-identity/v1") {
-      throw new Error("only the built-in orders-auth/v1 synthetic account profile is supported");
+    if (!profile || profile.scope !== "synthetic-test" || profile.identityProbeId !== "orders-identity/v1"
+      || (profile.authProfileId !== "orders-auth/v1" && profile.authProfileId !== E2E_FORM_LOGIN_AUTH_PROFILE)) {
+      throw new Error("only the built-in orders-auth/v1 and the rovara-form-login/v1 synthetic account profiles are supported");
     }
+    if (profile.authProfileId === E2E_FORM_LOGIN_AUTH_PROFILE) return openForm({ ...raw, accountRef }, account, profile, signal);
     const operation = bounded(signal);
     const loginResponse = await fetchImpl(urlFor("/api/login"), { method: "POST", redirect: "manual", signal: operation,
       headers: { "content-type": "application/json" }, body: JSON.stringify({ email: account.email, password: account.password }) });
@@ -115,14 +131,58 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     const sessionRef = `rovara-session-${randomUUID()}`;
     sessions.set(sessionRef, { sessionRef, applicationId: raw.applicationId, profileId: raw.profileId, accountRef, token,
       accountIdDigest: sha(me.subjectId), observedAt: new Date().toISOString(), login: { status: loginResponse.status, role: String(loginRole) },
-      identity: { status: meResponse.status, subjectIdDigest: sha(me.subjectId), tenantId: me.tenantId, role: me.role }, subject: null, closed: false });
+      identity: { status: meResponse.status, subjectIdDigest: sha(me.subjectId), tenantId: me.tenantId, role: me.role }, subject: null, closed: false, form: null });
     return { sessionRef, accountIdDigest: sha(me.subjectId) };
+  }
+
+  /**
+   * `rovara-form-login/v1`: the form is the one the approved source declares for this profile (the plan carries the same, and a plan that differs is refused). The sign-in happens
+   * in a fresh browser context; what it kept is checked against the profile by asking the application who the session belongs to (`/api/me`, the same identity probe as
+   * `orders-auth/v1`), so a form that signs the viewer in as the owner, or in another tenant, gives no session. Any failure is a `FormLoginError` that names the profile and
+   * nothing the page or the driver said, and is reported to the host, which ends the run as `login-failed`.
+   */
+  async function openForm(raw: { applicationId: string; profileId: string; accountRef: E2ERuntimeAccountRef },
+    account: E2EExecutorPlan["accounts"][number], profile: { tenantRef: string; roleRef: string; login?: unknown }, signal: AbortSignal) {
+    if (!input.formLogin) throw new Error("this executor has no browser to sign a form login in with");
+    if (profile.login === undefined || account.login === undefined || canonicalJson(profile.login) !== canonicalJson(account.login)) {
+      throw new Error("the plan's login form differs from the one the approved source declares for this account profile");
+    }
+    const login = account.login;
+    const fail = (): never => { input.onLoginFailed?.(raw.profileId); throw new FormLoginError(raw.profileId); };
+    const operation = bounded(signal);
+    let requests: FormRequestContext | null = null;
+    try {
+      const signedIn = await input.formLogin.signIn({ origin, login, email: account.email, password: account.password, signal: operation });
+      // Told before anything else is done with them, so a failure further on cannot leave a cookie the executor does not know to scrub.
+      for (const cookie of signedIn.state.cookies) input.registerSecret?.(cookie.value);
+      for (const item of signedIn.state.origins) for (const entry of item.localStorage) if (entry.value.length >= MIN_STORAGE_SECRET_LENGTH) input.registerSecret?.(entry.value);
+      requests = await input.formLogin.requestContext({ origin, state: signedIn.state });
+      const meResponse = await requests.request({ method: "GET", path: "/api/me", signal: operation });
+      const me = parseJsonObject(meResponse.body, "identity response");
+      if (meResponse.status !== 200 || typeof me.subjectId !== "string" || typeof me.tenantId !== "string" || typeof me.role !== "string"
+        || me.role !== profile.roleRef || me.tenantId !== profile.tenantRef) throw new Error("the signed-in identity is not the account profile's");
+      const sessionRef = `rovara-session-${randomUUID()}`;
+      sessions.set(sessionRef, { sessionRef, applicationId: raw.applicationId, profileId: raw.profileId, accountRef: raw.accountRef, token: "",
+        accountIdDigest: sha(me.subjectId), observedAt: new Date().toISOString(), login: { status: signedIn.status, role: me.role },
+        identity: { status: meResponse.status, subjectIdDigest: sha(me.subjectId), tenantId: me.tenantId, role: me.role }, subject: null, closed: false,
+        form: { state: signedIn.state, requests } });
+      return { sessionRef, accountIdDigest: sha(me.subjectId) };
+    } catch {
+      await requests?.dispose().catch(() => undefined);
+      return fail();
+    }
   }
 
   async function close(sessionRef: string, signal: AbortSignal): Promise<{ confirmed: boolean }> {
     const session = sessions.get(sessionRef);
     if (!session) throw new Error("case session is unknown");
     if (session.closed) return { confirmed: true };
+    if (session.form !== null) {
+      // A form session has no logout the executor could know of: its cookies live in this request context and in the case's own context, both gone with the run's browser.
+      await session.form.requests.dispose().catch(() => undefined);
+      session.closed = true;
+      return { confirmed: true };
+    }
     const response = await fetchImpl(urlFor("/api/logout"), { method: "POST", redirect: "manual", signal,
       headers: { cookie: `${COOKIE_NAME}=${session.token}` } });
     await response.body?.cancel().catch(() => undefined);
@@ -133,6 +193,12 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
   async function request(raw: { sessionRef: string; origin: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; body?: unknown; requestId?: string }, signal: AbortSignal): Promise<E2EApiRuntimeResponse> {
     const session = must(raw.sessionRef);
     if (raw.origin !== origin) throw new Error("API request origin differs from the only origin an executor run may reach");
+    if (session.form !== null) {
+      urlFor(raw.path);
+      const answered = await session.form.requests.request({ method: raw.method, path: raw.path, ...(raw.body === undefined ? {} : { body: raw.body }), signal: bounded(signal) });
+      return { requestId: raw.requestId ?? `req-${randomUUID()}`, responseId: `res-${randomUUID()}`, method: raw.method, path: raw.path, status: answered.status,
+        body: answered.body, contentType: answered.contentType, origin, observedAt: new Date().toISOString() };
+    }
     const body = raw.body === undefined || raw.method === "GET" ? undefined : JSON.stringify(raw.body);
     const response = await fetchImpl(urlFor(raw.path), { method: raw.method, redirect: "manual", signal: bounded(signal),
       headers: { cookie: `${COOKIE_NAME}=${session.token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
@@ -146,7 +212,18 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     open, close, request,
     /** Only the owned browser port may ask for the cookie; it goes straight into a BrowserContext. */
     cookieFor(sessionRef: string): { name: string; value: string; origin: string } {
-      return { name: COOKIE_NAME, value: must(sessionRef).token, origin };
+      const session = must(sessionRef);
+      if (session.form !== null) throw new Error("a form-login session has a storage state, not the fixed orders cookie");
+      return { name: COOKIE_NAME, value: session.token, origin };
+    },
+    /** Only the owned browser port may ask for it; it goes straight into a BrowserContext. For `orders-auth/v1` this is the one fixed cookie. */
+    browserStateFor(sessionRef: string): BrowserSessionState {
+      const session = must(sessionRef);
+      if (session.form === null) {
+        return { cookies: [{ name: COOKIE_NAME, value: session.token, domain: new URL(origin).hostname, path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Strict" }], localStorage: [] };
+      }
+      return { cookies: session.form.state.cookies.map((cookie) => ({ ...cookie })),
+        localStorage: session.form.state.origins.filter((item) => item.localStorage.length > 0).map((item) => ({ origin: item.origin, entries: item.localStorage.map((entry) => ({ ...entry })) })) };
     },
     bindSubject(sessionRef: string, subject: E2EApplicationOwnedSubject): void { must(sessionRef).subject = subject; },
     fetchUrl: (path: string) => urlFor(path),
