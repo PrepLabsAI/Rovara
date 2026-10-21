@@ -264,14 +264,43 @@ describe("when the group cap is tight, the capture goes and the verdict inputs s
 // harvest window is measured to the start of that upload) and no group's captures can take another group's room.
 describe("a group's fixed share of the aggregate", () => {
   const MiB = 1024 * 1024;
-  it("is the group ceiling or an equal part of what the aggregate has beyond its own envelope, whichever is less", () => {
-    expect(groupEvidenceShare({ groupLimit: 8 * MiB, aggregateLimit: 24 * MiB, groupCount: 4 })).toBe(Math.floor(23 * MiB / 4));
-    expect(groupEvidenceShare({ groupLimit: 8 * MiB, aggregateLimit: 16 * MiB, groupCount: 2 })).toBe(Math.floor(15 * MiB / 2));
-    expect(groupEvidenceShare({ groupLimit: 8 * MiB, aggregateLimit: 24 * MiB, groupCount: 2 })).toBe(8 * MiB);
-    expect(groupEvidenceShare({ groupLimit: 8 * MiB, aggregateLimit: 8 * MiB, groupCount: 1 })).toBe(7 * MiB);
-    expect(groupEvidenceShare({ groupLimit: 3 * MiB, aggregateLimit: 24 * MiB, groupCount: 1 })).toBe(3 * MiB);
-    // However many groups, the shares together never pass what the aggregate can hold beside its own envelope.
-    for (const groupCount of [1, 2, 3, 4]) expect(groupEvidenceShare({ groupLimit: 8 * MiB, aggregateLimit: 24 * MiB, groupCount }) * groupCount).toBeLessThanOrEqual(23 * MiB);
+  /** What the worker computes up front: the aggregate is the 24 MiB ceiling or the sum of the group ceilings, whichever is less. */
+  const sharesOf = (groupLimits: number[]) => {
+    const aggregateLimit = Math.min(24 * MiB, groupLimits.reduce((sum, limit) => sum + limit, 0));
+    return { aggregateLimit, shares: groupLimits.map((groupLimit) => groupEvidenceShare({ groupLimit, groupLimits, aggregateLimit })) };
+  };
+
+  it("is proportional to the group's own ceiling, so an 8 MiB group next to a 1 MiB group keeps about 7 MiB for its verdict inputs, as the base did", () => {
+    const { shares } = sharesOf([8 * MiB, 1 * MiB]);
+    expect(shares[0]).toBe(Math.floor(8 * MiB * (9 * MiB - MiB) / (9 * MiB)));
+    expect(shares[0]!).toBeGreaterThan(7 * MiB);
+    expect(shares[1]!).toBeLessThanOrEqual(1 * MiB);
+    expect(shares[1]!).toBe(Math.floor(1 * MiB * (9 * MiB - MiB) / (9 * MiB)));
+  });
+
+  it("is the whole ceiling for a group that has the aggregate to itself or enough room, and never more than its ceiling", () => {
+    expect(sharesOf([3 * MiB]).shares).toEqual([2 * MiB]);
+    expect(sharesOf([8 * MiB]).shares).toEqual([7 * MiB]);
+    for (const limits of [[8 * MiB, 8 * MiB], [8 * MiB, 3 * MiB, 1 * MiB], [8 * MiB, 8 * MiB, 8 * MiB, 8 * MiB]]) {
+      const { shares } = sharesOf(limits);
+      shares.forEach((share, index) => expect(share).toBeLessThanOrEqual(limits[index]!));
+    }
+  });
+
+  it("gives four groups at the cap an equal part of what the aggregate holds beside its envelope", () => {
+    const { aggregateLimit, shares } = sharesOf([8 * MiB, 8 * MiB, 8 * MiB, 8 * MiB]);
+    expect(aggregateLimit).toBe(24 * MiB);
+    expect(shares).toEqual([5.75 * MiB, 5.75 * MiB, 5.75 * MiB, 5.75 * MiB].map(Math.floor));
+  });
+
+  it("always sums to the aggregate less its envelope, or less, whatever the groups' ceilings are", () => {
+    const cases = [[8 * MiB], [8 * MiB, 1 * MiB], [8 * MiB, 8 * MiB], [8 * MiB, 8 * MiB, 8 * MiB], [8 * MiB, 8 * MiB, 8 * MiB, 8 * MiB], [5_000_001, 7_777_777, 3_333_333, 8 * MiB],
+      [1, 2, 3], [8 * MiB, 8 * MiB, 8 * MiB, 1 * MiB]];
+    for (const limits of cases) {
+      const { aggregateLimit, shares } = sharesOf(limits);
+      expect(shares.reduce((sum, share) => sum + share, 0), JSON.stringify(limits)).toBeLessThanOrEqual(Math.max(0, aggregateLimit - MiB));
+      shares.forEach((share) => expect(share).toBeGreaterThanOrEqual(0));
+    }
   });
 });
 
@@ -322,6 +351,52 @@ describe("fitting one group into its share", () => {
     const last = fitGroupEvidence(candidate(50_000, noLog - 1, whole))!;
     expect(last.operator).toBeNull();
     expect(last.evidence.byteLength).toBe(plain(50_000));
+  });
+
+  it("works out the size of each shed step from the known lengths: it serializes the envelope a few times, not once per file or observation", () => {
+    const whole = operator(Array.from({ length: 48 }, (_, index) => 20_000 + index * 1_000), Array.from({ length: 30 }, (_, index) => 300 + index * 10), "h".repeat(500));
+    let calls = 0;
+    const counting = (verdict: number, share: number): GroupEvidenceCandidate => ({ limit: share, whole, build: (op) => { calls += 1; return candidate(verdict, 0, null).build(op); } });
+    // Room for the verdict inputs and a handful of the smallest files only: dozens of files and every observation have to go.
+    const share = plain(50_000) + 150_000;
+    const fitted = fitGroupEvidence(counting(50_000, share))!;
+    expect(fitted.evidence.byteLength).toBeLessThanOrEqual(share);
+    expect(fitted.operator!.captures!.files.length).toBeGreaterThan(0);
+    expect(fitted.operator!.captures!.files.length).toBeLessThan(48);
+    expect(calls).toBeLessThanOrEqual(4);
+    // And the answer is the one that shedding step by step, with the envelope serialized each time, gives.
+    const stepwise = (() => {
+      const names = [...whole.captures!.files].sort((a, b) => (b.bytes - a.bytes) || b.name.localeCompare(a.name)).map((file) => file.name);
+      for (let dropped = 0; dropped <= names.length; dropped += 1) {
+        const gone = new Set(names.slice(0, dropped));
+        const shaped: WorkerOperatorEvidence = { ...whole, captures: { artifacts: whole.captures!.artifacts.map((entry) => (whole.captures!.files.some((file) => file.sha256 === entry.sha256 && !gone.has(file.name)) ? entry : { ...entry, omitted: "budget" as const })),
+          files: whole.captures!.files.filter((file) => !gone.has(file.name)) } };
+        if (candidate(50_000, 0, null).build(shaped).byteLength <= share) return shaped;
+      }
+      return null;
+    })();
+    expect(stepwise).not.toBeNull();
+    expect(fitted.operator!.captures!.files.map((file) => file.name)).toEqual(stepwise!.captures!.files.map((file) => file.name));
+    expect(fitted.operator!.observations).toEqual(whole.observations);
+  });
+
+  it("answers the same through observations and the log head as stepwise shedding does, for many observations", () => {
+    const whole = operator([], Array.from({ length: 40 }, (_, index) => 3_000 + index * 777), "h".repeat(2000));
+    const full = candidate(50_000, 0, null).build(whole).byteLength;
+    let calls = 0;
+    for (const share of [plain(50_000) + 20_000, plain(50_000) + 60_000, full - 10, full + 1, plain(50_000) + 9_000]) {
+      calls = 0;
+      const fitted = fitGroupEvidence({ limit: share, whole, build: (op) => { calls += 1; return candidate(50_000, 0, null).build(op); } })!;
+      expect(fitted.evidence.byteLength).toBeLessThanOrEqual(share);
+      expect(calls).toBeLessThanOrEqual(4);
+      const nulls = fitted.operator === null ? 0 : fitted.operator.observations.filter((item) => item.contentBase64 === null).length;
+      // Whatever was shed was shed largest first: the kept observations are never larger than a dropped one.
+      if (fitted.operator !== null && nulls > 0 && nulls < 40) {
+        const keptMax = Math.max(...fitted.operator.observations.filter((item) => item.contentBase64 !== null).map((item) => item.byteLength));
+        const droppedMin = Math.min(...fitted.operator.observations.filter((item) => item.contentBase64 === null).map((item) => item.byteLength));
+        expect(keptMax).toBeLessThanOrEqual(droppedMin);
+      }
+    }
   });
 
   it("refuses a group whose verdict inputs alone do not fit its share, and nothing else", () => {

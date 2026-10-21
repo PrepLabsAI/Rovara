@@ -124,11 +124,15 @@ export function operatorEvidence(actualRun: unknown, qualified: boolean): Operat
 }
 
 /**
- * The most one group's evidence may take: its own ceiling, or an equal part of what the aggregate has beyond the room kept for its envelope, whichever is less. The group
- * count comes from the admission, so every group's share is known before any group runs, and the shares together can never pass the aggregate (Ruling CL).
+ * The most one group's evidence may take: its own ceiling's part of what the aggregate has beyond the room kept for its envelope, in proportion to the ceilings of all the
+ * admitted groups (Ruling CM). The ceilings come from the admission, so every group's share is known before any group runs; the shares together are at most that room
+ * (each is rounded down), so they can never pass the aggregate; and each is at most its own ceiling, so a group next to a small one keeps nearly its whole ceiling for
+ * its verdict inputs, as a first-come budget would have given it.
  */
-export function groupEvidenceShare(input: { groupLimit: number; aggregateLimit: number; groupCount: number }): number {
-  return Math.max(0, Math.min(input.groupLimit, Math.floor((input.aggregateLimit - AGGREGATE_ENVELOPE_RESERVE_BYTES) / Math.max(1, input.groupCount))));
+export function groupEvidenceShare(input: { groupLimit: number; groupLimits: readonly number[]; aggregateLimit: number }): number {
+  const total = input.groupLimits.reduce((sum, limit) => sum + limit, 0);
+  if (total <= 0) return 0;
+  return Math.max(0, Math.min(input.groupLimit, Math.floor(input.groupLimit * (input.aggregateLimit - AGGREGATE_ENVELOPE_RESERVE_BYTES) / total)));
 }
 
 /** One group's evidence as the fit sees it: the share it must stay within, its whole operator evidence, and how to serialize its group evidence with a given operator evidence. */
@@ -139,21 +143,29 @@ export type GroupEvidenceCandidate = {
 };
 export type GroupEvidenceAllocation = { operator: OperatorEvidence | null; evidence: Buffer };
 
+const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+
 /**
  * Fits one group's evidence into its share. The verdict inputs (the group evidence with no operator evidence) are never shed: if they alone do not fit, the result is null
  * and that group, and only that group, is UNKNOWN "evidence too large". Otherwise operator evidence is shed until it fits, one piece at a time, the largest first: first the
  * capture files (each stays listed as `budget`), then the bytes of the copied observations, then the executor log head, then all of it.
+ *
+ * The group evidence is serialized once with no operator evidence and once with all of it; what each shed step saves is worked out from the lengths of the pieces (base64
+ * text has no escapes, so its length is its size in JSON), and the answer is serialized once more to confirm it. If that check disagrees, shedding goes on, so the
+ * result is always one that was measured.
  */
 export function fitGroupEvidence(group: GroupEvidenceCandidate): GroupEvidenceAllocation | null {
   const plain = group.build(null);
   if (plain.byteLength > group.limit) return null;
   const whole = group.whole;
   if (whole === null) return { operator: null, evidence: plain };
-  const files = [...(whole.captures?.files ?? [])].sort((a, b) => (b.bytes - a.bytes) || b.name.localeCompare(a.name)).map((file) => file.name);
-  const observations = whole.observations.map((item, index) => ({ index, size: item.byteLength })).sort((a, b) => (b.size - a.size) || (b.index - a.index)).map((item) => item.index);
+  const full = group.build(whole);
+  if (full.byteLength <= group.limit) return { operator: whole, evidence: full };
+  const files = [...(whole.captures?.files ?? [])].sort((a, b) => (b.bytes - a.bytes) || b.name.localeCompare(a.name));
+  const observations = whole.observations.map((item, index) => ({ item, index })).sort((a, b) => (b.item.byteLength - a.item.byteLength) || (b.index - a.index));
   const shape = (droppedFiles: number, droppedObservations: number, logKept: boolean): OperatorEvidence => {
-    const gone = new Set(files.slice(0, droppedFiles));
-    const goneObservations = new Set(observations.slice(0, droppedObservations));
+    const gone = new Set(files.slice(0, droppedFiles).map((file) => file.name));
+    const goneObservations = new Set(observations.slice(0, droppedObservations).map((entry) => entry.index));
     const captures = whole.captures === null ? null : {
       artifacts: whole.captures.artifacts.map((entry) => {
         const stored = whole.captures!.files.some((file) => file.sha256 === entry.sha256 && !gone.has(file.name));
@@ -163,12 +175,30 @@ export function fitGroupEvidence(group: GroupEvidenceCandidate): GroupEvidenceAl
     return { ...whole, captures, executorLogHead: logKept ? whole.executorLogHead : null,
       observations: whole.observations.map((item, index) => (goneObservations.has(index) ? { ...item, contentBase64: null } : item)) };
   };
-  const steps: Array<[number, number, boolean]> = [];
-  for (let dropped = 0; dropped <= files.length; dropped += 1) steps.push([dropped, 0, true]);
-  for (let dropped = 1; dropped <= observations.length; dropped += 1) steps.push([files.length, dropped, true]);
-  steps.push([files.length, observations.length, false]);
-  for (const [droppedFiles, droppedObservations, logKept] of steps) {
-    const operator = shape(droppedFiles, droppedObservations, logKept);
+  // The size after each step, from the size before it: [files dropped, observations dropped, log kept] -> predicted bytes.
+  const steps: Array<{ state: [number, number, boolean]; size: number }> = [];
+  let size = full.byteLength;
+  let remainingFiles = files.length;
+  const listed = whole.captures?.artifacts ?? [];
+  files.forEach((file, index) => {
+    // The file leaves its array (with one comma, unless it is the last one left), and its capture entry gains `"omitted":"budget"` unless it already has a reason.
+    size -= jsonBytes({ ...file, base64: "" }) + file.base64.length + (remainingFiles > 1 ? 1 : 0);
+    remainingFiles -= 1;
+    const entry = listed.find((candidate) => candidate.sha256 === file.sha256);
+    if (entry !== undefined && entry.omitted === undefined) size += jsonBytes({ ...entry, omitted: "budget" }) - jsonBytes(entry);
+    steps.push({ state: [index + 1, 0, true], size });
+  });
+  if (files.length === 0) steps.push({ state: [0, 0, true], size });
+  observations.forEach(({ item }, index) => {
+    // The base64 text becomes `null`: its length and its two quotes go, four characters come.
+    if (item.contentBase64 !== null) size -= item.contentBase64.length + 2 - 4;
+    steps.push({ state: [files.length, index + 1, true], size });
+  });
+  if (whole.executorLogHead !== null) size -= jsonBytes(whole.executorLogHead) - 4;
+  steps.push({ state: [files.length, observations.length, false], size });
+  for (const { state, size: predicted } of steps) {
+    if (predicted > group.limit) continue;
+    const operator = shape(...state);
     const evidence = group.build(operator);
     if (evidence.byteLength <= group.limit) return { operator, evidence };
   }
@@ -305,7 +335,7 @@ export async function executeWorkflowE2EApplicationChecks(input: {
       // of a qualified group are in its collection (a verdict input); for any other group the report is in diagnostics.shardReports and the observations are in operatorEvidence.
       // Only a group whose verdict inputs alone do not fit its share loses all of it, and becomes UNKNOWN "evidence too large" with actual, diagnostics and operatorEvidence null.
       const limit = groupLimit(compiled);
-      const share = groupEvidenceShare({ groupLimit: limit, aggregateLimit, groupCount: validated.applicationSuites.length });
+      const share = groupEvidenceShare({ groupLimit: limit, groupLimits: validated.applicationSuites.map(groupLimit), aggregateLimit });
       const fitted = fitGroupEvidence({ limit: share, whole: wholeOperator, build: (operator) => envelope({ ...groupRun, operatorEvidence: operator }) });
       let uploaded: { groupRun: Record<string, unknown>; evidence: Buffer; succeeded: boolean };
       if (fitted !== null) uploaded = { groupRun: { ...groupRun, operatorEvidence: fitted.operator }, evidence: fitted.evidence, succeeded: qualification !== null && run.lifecycle.process.exitCode === 0 };

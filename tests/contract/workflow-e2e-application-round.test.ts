@@ -316,6 +316,12 @@ describe("uploading the evidence of an application round: group lookup, sizing a
       const aggregate = await round.upload(round.aggregateEnvelope([first.groupRun, second.groupRun]));
       await round.finishChecks(aggregate.response.body as { key: string; sha256: string });
       expect(e2eOf(round).qualifiedRound).toBeUndefined();
+      // The earlier group, and only it, is UNKNOWN, for the harvest window and for nothing else.
+      const reason = round.workflowNow().blockReason ?? "";
+      expect(reason).toMatch(/not received inside the original bounded post-close harvest window/);
+      expect(reason).toContain(round.groupIds[0]!);
+      expect(reason).not.toContain(round.groupIds[1]!);
+      expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
     });
 
     it("is not the time of the verification either: the same round verified 45 minutes later is the same verdict", async () => {
