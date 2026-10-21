@@ -917,7 +917,7 @@ const OPENROUTER_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:age
 // three model ids and the key (hidden), then the plan's confirm.
 const OPENROUTER_FIRST_RUN = [
   ...settingsScript({ email: ADMIN_EMAIL, owner: "acme", advanced: { modelProvider: "openrouter", alertEmail: "ops@example.com" } }),
-  "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4", OPENROUTER_KEY, true,
+  "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4.5", OPENROUTER_KEY, true,
 ];
 const OPENROUTER_FLAGS = ["--model-provider", "openrouter", "--orchestrator-model", "qwen/qwen3-coder", "--classifier-model", "qwen/qwen3-coder", "--worker-model", "qwen/qwen3-coder"];
 

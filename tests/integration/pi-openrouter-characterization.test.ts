@@ -48,14 +48,21 @@ const tool = { name: "read_file", label: "Read", description: "Read a file", par
 const PLACEHOLDER = "<TIMESTAMP>";
 const userContext = { systemPrompt: "Test", messages: [{ role: "user" as const, content: "hi", timestamp: 0 }] };
 // Pi stores wall-clock timestamps; every other field is pinned exactly. Ruling F (Pi 1.1+, additive): assistant and tool-result
-// messages also carry a measured durationMs; it is checked to be a number, then left out of the pins.
-const noTimes = (messages: readonly unknown[]) => JSON.parse(JSON.stringify(messages), (key: string, v: unknown) => {
-  if (key === "durationMs") {
-    if (typeof v !== "number") throw new Error("durationMs must be a number");
-    return undefined;
-  }
-  return key === "timestamp" ? PLACEHOLDER : v;
-}) as unknown[];
+// messages also carry a measured durationMs. Each one must be a number and `durations` must be the number the caller expects
+// (so a Pi that stops reporting it fails here), then it is left out of the pins.
+const noTimes = (messages: readonly unknown[], durations: number) => {
+  let seen = 0;
+  const parsed = JSON.parse(JSON.stringify(messages), (key: string, v: unknown) => {
+    if (key === "durationMs") {
+      if (typeof v !== "number") throw new Error("durationMs must be a number");
+      seen += 1;
+      return undefined;
+    }
+    return key === "timestamp" ? PLACEHOLDER : v;
+  }) as unknown[];
+  expect(seen).toBe(durations);
+  return parsed;
+};
 
 describe("OpenRouter custom provider, as pinned on Pi 0.85.1", () => {
   // Pi adds its OpenRouter attribution headers only while install telemetry is on, and PI_TELEMETRY wins over settings.
@@ -109,7 +116,7 @@ describe("OpenRouter custom provider, as pinned on Pi 0.85.1", () => {
       expect(await runOrchestratorTurn(session, "read it")).toBe("Done");
       // Ruling D (Pi 0.86+): the transcript starts with the system message that carries the prompt and tools (the temp
       // working directory reads <CWD>), and (Pi 0.99+) assistant messages carry the thinkingLevel they ran at.
-      expect(JSON.parse(JSON.stringify(noTimes(session.session.messages)).split(cwd).join("<CWD>"))).toEqual([{"role":"system","content":"","sections":{"preamble":"Test","cwd":"<cwd>\n<CWD>\n</cwd>"},"toolsAdded":[{"name":"read_file","description":"Read a file","parameters":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}}],"timestamp":"<TIMESTAMP>"},{"role":"user","content":[{"type":"text","text":"read it"}],"timestamp":"<TIMESTAMP>"},{"role":"assistant","content":[{"type":"text","text":"Reading."},{"type":"toolCall","id":"call_1","name":"read_file","arguments":{"path":"README.md"}}],"api":"openai-completions","provider":"openrouter","model":"anthropic/claude-sonnet-4.5","usage":{"input":10,"output":3,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":13,"cost":{"input":0.00003,"output":0.000045,"cacheRead":0,"cacheWrite":0,"total":0.00007500000000000001}},"stopReason":"toolUse","thinkingLevel":"medium","timestamp":"<TIMESTAMP>","responseId":"gen-tool","responseModel":"anthropic/claude-sonnet-4-20250514","rawStopReason":"tool_calls"},{"role":"toolResult","toolCallId":"call_1","toolName":"read_file","content":[{"type":"text","text":"file content"}],"details":{},"isError":false,"timestamp":"<TIMESTAMP>"},{"role":"assistant","content":[{"type":"text","text":"Done"}],"api":"openai-completions","provider":"openrouter","model":"anthropic/claude-sonnet-4.5","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":12,"cost":{"input":0.00003,"output":0.00003,"cacheRead":0,"cacheWrite":0,"total":0.00006}},"stopReason":"stop","thinkingLevel":"medium","timestamp":"<TIMESTAMP>","responseId":"gen-test","responseModel":"anthropic/claude-sonnet-4-20250514","rawStopReason":"stop"}]);
+      expect(JSON.parse(JSON.stringify(noTimes(session.session.messages, 3)).split(cwd).join("<CWD>"))).toEqual([{"role":"system","content":"","sections":{"preamble":"Test","cwd":"<cwd>\n<CWD>\n</cwd>"},"toolsAdded":[{"name":"read_file","description":"Read a file","parameters":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}}],"timestamp":"<TIMESTAMP>"},{"role":"user","content":[{"type":"text","text":"read it"}],"timestamp":"<TIMESTAMP>"},{"role":"assistant","content":[{"type":"text","text":"Reading."},{"type":"toolCall","id":"call_1","name":"read_file","arguments":{"path":"README.md"}}],"api":"openai-completions","provider":"openrouter","model":"anthropic/claude-sonnet-4.5","usage":{"input":10,"output":3,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":13,"cost":{"input":0.00003,"output":0.000045,"cacheRead":0,"cacheWrite":0,"total":0.00007500000000000001}},"stopReason":"toolUse","thinkingLevel":"medium","timestamp":"<TIMESTAMP>","responseId":"gen-tool","responseModel":"anthropic/claude-sonnet-4-20250514","rawStopReason":"tool_calls"},{"role":"toolResult","toolCallId":"call_1","toolName":"read_file","content":[{"type":"text","text":"file content"}],"details":{},"isError":false,"timestamp":"<TIMESTAMP>"},{"role":"assistant","content":[{"type":"text","text":"Done"}],"api":"openai-completions","provider":"openrouter","model":"anthropic/claude-sonnet-4.5","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":12,"cost":{"input":0.00003,"output":0.00003,"cacheRead":0,"cacheWrite":0,"total":0.00006}},"stopReason":"stop","thinkingLevel":"medium","timestamp":"<TIMESTAMP>","responseId":"gen-test","responseModel":"anthropic/claude-sonnet-4-20250514","rawStopReason":"stop"}]);
       // Volatile: sessionFile and sessionId are per-run; every other stats key is pinned.
       const stats = Object.fromEntries(Object.entries(session.session.getSessionStats()).filter(([key]) => key !== "sessionFile" && key !== "sessionId"));
       // Ruling D (Pi 0.86+): Pi's own totalMessages counts the system message entry too (4 -> 5); AgentX reads only tokens and cost here.
