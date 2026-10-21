@@ -34,7 +34,7 @@ export interface E2EModelRoute {
   inferenceProfileArn: string | null;
 }
 /** Replaced by the broker's route registry once Task 4.2 lands; until then head's route is this constant. */
-export const E2E_MODEL_ROUTE: E2EModelRoute = { routeId: "rovara-bedrock-haiku-4-5", modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0", inferenceProfileArn: null };
+export const E2E_MODEL_ROUTE: E2EModelRoute = { routeId: "rovara-e2e-default", modelId: "us.anthropic.claude-haiku-5-5", inferenceProfileArn: null };
 /** A route that is not approved is a warning until Task 4.9 approves it at setup; 4.9 flips this to "error". */
 const ROUTE_NOT_APPROVED_SEVERITY: Finding["severity"] = "warning";
 /** Converse is authorized by bedrock:InvokeModel and ConverseStream by bedrock:InvokeModelWithResponseStream (Bedrock API reference, Converse). */
@@ -516,8 +516,7 @@ function routeFindings(check: ModelRouteCheck): Finding[] {
   }
   const problem = modelAccessProblem(route, check.access);
   if (problem !== undefined) findings.push(finding("model-access-unverified", "error", problem));
-  const grant = routeGrantFinding(check.iam);
-  if (grant !== undefined) findings.push(grant);
+  findings.push(...routeGrantFindings(check.iam, route));
   return findings;
 }
 
@@ -566,43 +565,67 @@ const globMatches = (pattern: string, value: string, flags = ""): boolean =>
   new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`, flags).test(value);
 
 /**
- * Whether one statement applies to `action` on `resource`. A statement with a Condition is not evaluated here: an Allow with one never counts
- * as a grant (it errs toward alarm), and a Deny with one is not counted. A resource written as something this cannot resolve is skipped.
+ * Whether one statement applies to `action` on `resource`: yes, no, or maybe when it cannot be told. A Condition is not evaluated, and a
+ * resource written as something this cannot resolve (GetAtt, an import) has no text to match. An Allow that is conditional or unresolved
+ * never counts as a grant (it errs toward alarm). A Deny that is conditional or unresolved while its action matches is "maybe": it might
+ * block the call, so the caller must not report a pass.
  */
-function statementApplies(statement: PolicyStatement, action: string, resource: string, scope: IamScope): boolean {
-  if (statement.Condition !== undefined) return false;
+function statementMatch(statement: PolicyStatement, action: string, resource: string, scope: IamScope): "yes" | "no" | "maybe" {
   const actions = list(statement.NotAction ?? statement.Action).filter((value): value is string => typeof value === "string");
   const actionHit = actions.some((pattern) => globMatches(pattern, action, "i"));
-  if (statement.NotAction === undefined ? !actionHit : actionHit) return false;
+  if (statement.NotAction === undefined ? !actionHit : actionHit) return "no";
   const resolved = list(statement.NotResource ?? statement.Resource).map((value) => resolveText(value, scope));
   const resourceHit = resolved.some((pattern) => pattern !== undefined && globMatches(pattern, resource));
-  if (statement.NotResource === undefined) return resourceHit;
-  return resolved.every((pattern) => pattern !== undefined) && !resourceHit;
+  const resolvable = resolved.every((pattern) => pattern !== undefined);
+  // NotResource applies to everything its patterns do not name; with an unresolved pattern it cannot be told.
+  const resourceMatch: "yes" | "no" | "maybe" = statement.NotResource === undefined
+    ? (resourceHit ? "yes" : resolvable ? "no" : "maybe")
+    : (!resolvable ? "maybe" : resourceHit ? "no" : "yes");
+  if (resourceMatch === "no") return "no";
+  if (statement.Effect === "Allow") return resourceMatch === "yes" && statement.Condition === undefined ? "yes" : "no";
+  return resourceMatch === "yes" && statement.Condition === undefined ? "yes" : "maybe";
 }
 
-/** The iam-missing-grant of the worker instance role for the actions and ARNs the route invokes, or undefined when it holds them all. */
-function routeGrantFinding(iam: ModelRouteCheck["iam"]): Finding | undefined {
+/**
+ * The findings for the worker instance role against the actions and ARNs the route invokes: an iam-missing-grant when it lacks some, and a
+ * model-access-unverified when a conditional or unresolved Deny might block one it otherwise holds (that is unverifiable, never a pass).
+ */
+function routeGrantFindings(iam: ModelRouteCheck["iam"], route: E2EModelRoute): Finding[] {
   const sources = policySources(iam.foundationTemplate).filter((source) => source.roleLogicalIds.includes(iam.roleLogicalId));
   const statements = sources.flatMap((source) => source.statements);
-  const granted = (action: string, resource: string) =>
-    statements.some((statement) => statement.Effect === "Allow" && statementApplies(statement, action, resource, iam.scope))
-    && !statements.some((statement) => statement.Effect === "Deny" && statementApplies(statement, action, resource, iam.scope));
-  const lacking = iam.resources.map((resource) => ({ resource, actions: ROUTE_INVOKE_ACTIONS.filter((action) => !granted(action, resource)) })).filter((entry) => entry.actions.length > 0);
-  if (lacking.length === 0) return undefined;
-  const byActions = new Map<string, { actions: string[]; resources: string[] }>();
-  for (const entry of lacking) {
-    const key = entry.actions.join(",");
-    const group = byActions.get(key) ?? { actions: [...entry.actions], resources: [] };
-    group.resources.push(entry.resource);
-    byActions.set(key, group);
-  }
-  const holder = sources.find((source) => source.statements.some((statement) => statement.Sid === "BedrockModelInvocation")) ?? sources[0];
-  const policyLogicalId = holder?.policyLogicalId ?? `${iam.roleLogicalId}DefaultPolicy`;
-  return {
-    kind: "iam-missing-grant", severity: "error", subject: policyLogicalId, label: findingLabel(iam.roleLogicalId), roleLogicalId: iam.roleLogicalId, policyLogicalId,
-    statements: [...byActions.values()].map((group): PolicyStatement => ({ Effect: "Allow", Action: group.actions.length === 1 ? group.actions[0] : group.actions, Resource: group.resources })),
-    message: `${iam.roleLogicalId}, the worker instance role, lacks ${lacking.map((entry) => `${entry.actions.join(" and ")} on ${entry.resource}`).join("; ")}, which the e2e model route invokes`,
+  const verdict = (action: string, resource: string): "granted" | "missing" | "maybe-denied" => {
+    const matches = statements.map((statement) => ({ statement, match: statementMatch(statement, action, resource, iam.scope) }));
+    const allowed = matches.some(({ statement, match }) => statement.Effect === "Allow" && match === "yes");
+    if (!allowed || matches.some(({ statement, match }) => statement.Effect === "Deny" && match === "yes")) return "missing";
+    return matches.some(({ statement, match }) => statement.Effect === "Deny" && match === "maybe") ? "maybe-denied" : "granted";
   };
+  const checked = iam.resources.map((resource) => ({ resource, verdicts: ROUTE_INVOKE_ACTIONS.map((action) => ({ action, verdict: verdict(action, resource) })) }));
+  const findings: Finding[] = [];
+  const lacking = checked.map((entry) => ({ resource: entry.resource, actions: entry.verdicts.filter((item) => item.verdict === "missing").map((item) => item.action) })).filter((entry) => entry.actions.length > 0);
+  if (lacking.length > 0) {
+    const byActions = new Map<string, { actions: string[]; resources: string[] }>();
+    for (const entry of lacking) {
+      const key = entry.actions.join(",");
+      const group = byActions.get(key) ?? { actions: [...entry.actions], resources: [] };
+      group.resources.push(entry.resource);
+      byActions.set(key, group);
+    }
+    const holder = sources.find((source) => source.statements.some((statement) => statement.Sid === "BedrockModelInvocation")) ?? sources[0];
+    const policyLogicalId = holder?.policyLogicalId ?? `${iam.roleLogicalId}DefaultPolicy`;
+    findings.push({
+      kind: "iam-missing-grant", severity: "error", subject: policyLogicalId, label: findingLabel(iam.roleLogicalId), roleLogicalId: iam.roleLogicalId, policyLogicalId,
+      statements: [...byActions.values()].map((group): PolicyStatement => ({ Effect: "Allow", Action: group.actions.length === 1 ? group.actions[0] : group.actions, Resource: group.resources })),
+      message: `${iam.roleLogicalId}, the worker instance role, lacks ${lacking.map((entry) => `${entry.actions.join(" and ")} on ${entry.resource}`).join("; ")}, which the e2e model route invokes`,
+    });
+  }
+  const maybe = checked.filter((entry) => entry.verdicts.some((item) => item.verdict === "maybe-denied")).map((entry) => entry.resource);
+  if (maybe.length > 0) {
+    findings.push({
+      kind: "model-access-unverified", severity: "error", subject: route.routeId, label: route.routeId,
+      message: `whether ${iam.roleLogicalId}, the worker instance role, may invoke ${maybe.join("; ")} is unverifiable, which is not a pass: a Deny statement with a Condition or a resource this check cannot resolve might block it`,
+    });
+  }
+  return findings;
 }
 
 // ---------------------------------------------------------------------------------------------
