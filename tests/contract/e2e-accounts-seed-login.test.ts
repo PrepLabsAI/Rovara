@@ -46,10 +46,12 @@ describe("the account seed and login declarations", () => {
     expect(() => contractOf(ordersManifestWith((e2e) => { withGenericAccounts(e2e); delete (e2e.accountProfiles[0] as Record<string, unknown>).login; }))).toThrow(/login form is declared exactly for rovara-form-login\/v1/);
   });
 
-  it("lets the recipe state the size of the run's data volume (16 to 1024 MiB, whole numbers), only under the accounts-file seed profile, and covers it in the account digest", () => {
+  it("lets the recipe state the size of the run's data volume (16 to 512 MiB, whole numbers), only under the accounts-file seed profile, and covers it in the account digest", () => {
     const sized = (mib: unknown) => ordersManifestWith((e2e) => { withGenericAccounts(e2e); (e2e.recipe as unknown as Record<string, unknown>).dataSizeMiB = mib; });
     expect((contractOf(sized(64)).recipe as unknown as { dataSizeMiB: number }).dataSizeMiB).toBe(64);
-    for (const bad of [15, 1025, 64.5, "64"]) expect(() => contractOf(sized(bad)), String(bad)).toThrow();
+    expect((contractOf(sized(512)).recipe as unknown as { dataSizeMiB: number }).dataSizeMiB).toBe(512);
+    // The cap is 512 MiB until the live sizes are measured (N4): the volume is tmpfs, so every MiB is runner memory, next to the app, its seed and the executor.
+    for (const bad of [15, 513, 1024, 1025, 64.5, "64"]) expect(() => contractOf(sized(bad)), String(bad)).toThrow();
     expect(() => contractOf(ordersManifestWith((e2e) => { (e2e.recipe as unknown as Record<string, unknown>).dataSizeMiB = 64; }))).toThrow(/rovara-accounts-file\/v1/);
     for (const profile of generic.accountProfiles) expect(digestOf(contractOf(sized(64)), profile.profileId)).not.toBe(digestOf(generic, profile.profileId));
   });

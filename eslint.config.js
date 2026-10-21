@@ -13,6 +13,7 @@ export default tseslint.config(
       "packages/verifier/assets/qualification-app/**",
       "tests/fixtures/orders-web-starter/**",
       "tests/fixtures/e2e-accounts-app/**",
+      "tests/fixtures/e2e-inferred-web-app/**",
       "eslint.config.js",
     ],
   },

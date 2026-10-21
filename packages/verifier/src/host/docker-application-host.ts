@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, cp, lstat, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_DATA_VOLUME_DEFAULT_MIB, E2E_EXECUTOR_APP_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, readE2EApplicationProjectContract, redactText,
+import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_DATA_VOLUME_DEFAULT_MIB, E2E_EXECUTOR_APP_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, readE2EApplicationProjectContract, redactText,
   type E2EApplicationExecutionAdmission, type E2ECollection, type E2EExecutorAccount, type E2EExecutorPlan, type E2EFormLogin, type E2ELease, type E2ERunInput } from "@agentx/contracts";
 import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
@@ -84,6 +84,10 @@ const MAX_TAIL_BYTES = 64 * 1024;
 const APP_PORT = 4317;
 const BUILD_COPY_TIMEOUT_MS = 120_000;
 const ORDERS_SEED_PROFILE = "orders-seed/v1";
+/** The seed profile discovery gives an inferred launch recipe: it seeds nothing, since such an application has no accounts. Only an application with no project contract carries it. */
+const INFERRED_SEED_PROFILE = "synthetic-seed-v1";
+/** The service contract of an application with only an inferred launch recipe (Ruling AN): the host sets the port in PORT, and no origin is declared. */
+const inferredServiceContract = (): { portEnv: string; originBindings: { originRef: string; envName: string; contractPath?: string }[] } => ({ portEnv: "PORT", originBindings: [] });
 const ORDERS_AUTH_PROFILE = "orders-auth/v1";
 const SUPPORTED_SEED_PROFILES: readonly string[] = [ORDERS_SEED_PROFILE, E2E_ACCOUNTS_FILE_SEED_PROFILE];
 const SUPPORTED_AUTH_PROFILES: readonly string[] = [ORDERS_AUTH_PROFILE, E2E_FORM_LOGIN_AUTH_PROFILE];
@@ -229,25 +233,29 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   if (!approved) throw new Error("docker application host group has no approved recipe for its application");
   const recipe = approved.recipe;
   if (recipe.launch.kind !== "service") throw new Error("docker application host runs service recipes only");
-  if (!SUPPORTED_SEED_PROFILES.includes(recipe.seedProfileId)) throw new Error(`seed profile ${recipe.seedProfileId} is not supported`);
+  const sourceSnapshot = compiled.runtimeAdmission.sourceSnapshot;
+  const contract = readE2EApplicationProjectContract(sourceSnapshot, applicationId);
+  // An application with only an inferred launch recipe has no project contract (Ruling AZ): it has no accounts and runs signed-out cases only, under the seed profile discovery gave it.
+  if (contract === null ? recipe.seedProfileId !== INFERRED_SEED_PROFILE : !SUPPORTED_SEED_PROFILES.includes(recipe.seedProfileId)) throw new Error(`seed profile ${recipe.seedProfileId} is not supported`);
   if (recipe.seed !== undefined && recipe.seedProfileId !== E2E_ACCOUNTS_FILE_SEED_PROFILE) throw new Error(`a seed command belongs to the ${E2E_ACCOUNTS_FILE_SEED_PROFILE} seed profile`);
   /** True for `rovara-accounts-file/v1`: the host writes the accounts file and gives the seed and the app a per-run data volume. */
   const accountsFileSeed = recipe.seedProfileId === E2E_ACCOUNTS_FILE_SEED_PROFILE;
+  /** True for the built-in `orders-seed/v1`: the host writes `seed.json`. The inferred profile writes nothing. */
+  const ordersSeed = recipe.seedProfileId === ORDERS_SEED_PROFILE;
   const launch = recipe.launch;
-  const sourceSnapshot = compiled.runtimeAdmission.sourceSnapshot;
-  const contract = readE2EApplicationProjectContract(sourceSnapshot, applicationId);
-  if (!contract) throw new Error("docker application host application has no project contract");
   const profileIds = [...new Set(compiled.expectedCases.map((item) => item.accountProfileId))].sort();
-  const profiles = profileIds.map((profileId) => {
-    const profile = contract.accountProfiles.find((item) => item.profileId === profileId);
+  // The signed-out visitor is nobody: it gets no account, no email, no password and no seed record. Every other profile is a declared synthetic account of the project contract.
+  const profiles = profileIds.filter((profileId) => profileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID).map((profileId) => {
+    const profile = contract?.accountProfiles.find((item) => item.profileId === profileId);
     if (!profile || profile.scope !== "synthetic-test" || !SUPPORTED_AUTH_PROFILES.includes(profile.authProfileId)
       || (profile.authProfileId === E2E_FORM_LOGIN_AUTH_PROFILE) !== (profile.login !== undefined)) throw new Error(`account profile ${profileId} is not a supported synthetic account`);
     return profile;
   });
-  const portEnv = contract.service?.portEnv ?? "APP_PORT";
+  const service = contract === null ? inferredServiceContract() : contract.service;
+  const portEnv = service?.portEnv ?? "APP_PORT";
   // Every approved mock is served as the declared origin whose contract it stands for, and every other declared origin is the sinkhole's. A mock no origin claims cannot be placed: no run.
   const targetIds = new Set(compiled.expectedCases.map((item) => item.targetId));
-  const originPlan = planApplicationOrigins({ originBindings: contract.service?.originBindings ?? [], mocks: compiled.group.mocks.filter((mock) => targetIds.has(mock.requestedTargetId)) });
+  const originPlan = planApplicationOrigins({ originBindings: service?.originBindings ?? [], mocks: compiled.group.mocks.filter((mock) => targetIds.has(mock.requestedTargetId)) });
   if (originPlan.unplaced.length > 0) throw new Error("docker application host approved mock has no declared origin of its application");
 
   const seccompProfile = verifyExecutorSeccompProfile(deps.executorSeccompProfile);
@@ -486,13 +494,13 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       ...originPlan.mocked.flatMap((origin) => ["-e", `${origin.envName}=${mockOriginUrl(origin.originRef)}`]),
       ...originPlan.unbound.flatMap((origin) => ["-e", `${origin.envName}=${mockOriginUrl(SINKHOLE_ORIGIN_REF)}`]),
       "-e", `${portEnv}=${APP_PORT}`,
-      ...(accountsFileSeed ? ["-e", `ROVARA_ACCOUNTS_FILE=${ACCOUNTS_FILE_PATH}`, "-e", `ROVARA_DATA_DIR=${DATA_DIR}`] : ["-e", "ORDERS_TEST_SEED_FILE=/app/.owned/seed.json"]),
+      ...(accountsFileSeed ? ["-e", `ROVARA_ACCOUNTS_FILE=${ACCOUNTS_FILE_PATH}`, "-e", `ROVARA_DATA_DIR=${DATA_DIR}`] : ordersSeed ? ["-e", "ORDERS_TEST_SEED_FILE=/app/.owned/seed.json"] : []),
       ...BLANKED_ENV];
     if (accountsFileSeed) {
       // The data volume is a tmpfs, and Docker unmounts a tmpfs volume (its contents with it) when the last container using it stops. A keeper holds it open from before the seed until the
-      // run's resources are removed, so what the seed writes is still there when the app starts. It runs as the unprivileged user, with no network and no capability, and does nothing.
+      // run's resources are removed, so what the seed writes is still there when the app starts. It runs as the unprivileged user, with no network and no capability, mounts the volume read-only, and does nothing.
       const kept = await docker.run(["run", "-d", "--name", keeperName, "--pull=never", ...hardening(["--network", "none"]), "--read-only", ...limits("64m", "16", "0.1"), "--user", "1000:1000",
-        "--entrypoint", "sleep", "-v", `${dataVolume}:${DATA_DIR}`, ...BLANKED_ENV, deps.executorImage, "infinity"], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+        "--entrypoint", "sleep", "-v", `${dataVolume}:${DATA_DIR}:ro`, ...BLANKED_ENV, deps.executorImage, "infinity"], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
       if (kept.code !== 0 || !(await mockRunning(keeperName))) {
         appendBuildLog(`the data volume could not be held open for the seed: ${kept.stderr}${kept.stdout}\n`);
         return { kind: "unavailable", reason: signal.aborted ? stopReason() : "seed-failed" };
@@ -617,7 +625,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       }
       // One seed profile's file per run: the built-in profile's digests, or the accounts file with the credentials themselves (never in an argument or an environment variable).
       if (accountsFileSeed) await writeFile(join(dirs.owned, ACCOUNTS_FILE_NAME), JSON.stringify(run.accountsFile), { mode: 0o644 });
-      else await writeFile(join(dirs.owned, "seed.json"), JSON.stringify(run.seed), { mode: 0o644 });
+      else if (ordersSeed) await writeFile(join(dirs.owned, "seed.json"), JSON.stringify(run.seed), { mode: 0o644 });
       for (const [name, content] of Object.entries(deps.ownedFiles ?? {})) {
         if (!OWNED_FILE_NAME.test(name) || name === "seed.json" || name === ACCOUNTS_FILE_NAME) throw new Error(`owned file name ${name} is not allowed`);
         await writeFile(join(dirs.owned, name), content, { mode: 0o644 });

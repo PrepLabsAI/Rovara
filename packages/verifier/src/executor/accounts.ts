@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { E2E_EXECUTOR_COMPILED_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2ERuntimeAccountRefSchema, canonicalJson, readE2EApplicationProjectContract, type E2EExecutorPlan, type E2ERuntimeAccountRef } from "@agentx/contracts";
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_ANONYMOUS_SESSION_REF_PREFIX, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2ERuntimeAccountRefSchema, canonicalJson, e2eAnonymousAccountIdDigest,
+  e2eAnonymousRuntimeAccountRef, readE2EApplicationProjectContract, type E2EExecutorPlan, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import type { E2EApplicationOwnedSubject } from "../application-result-adapter.js";
 import type { E2EApiRuntimeResponse } from "../api-runtime.js";
 import type { ExecutorSessionFacts } from "./case-ledger.js";
-import { FormLoginError, isSessionCookieSecret, parseSetCookie, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
+import { FormLoginError, isSessionCookieSecret, isSessionStorageSecret, parseSetCookie, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
 import { resolveE2EExecutorSuite } from "./suite.js";
 
 const MAX_BODY_BYTES = 1_048_576;
@@ -15,13 +16,13 @@ type Session = {
   sessionRef: string; applicationId: string; profileId: string; accountRef: E2ERuntimeAccountRef; token: string;
   accountIdDigest: string; observedAt: string; login: ExecutorSessionFacts["login"]; identity: ExecutorSessionFacts["identity"];
   subject: E2EApplicationOwnedSubject | null; closed: boolean;
+  /** The signed-out visitor (`rovara-anonymous`): no login was made, no cookie exists, and nothing is signed out when the case closes. */
+  anonymous: boolean;
   /** Only for a `rovara-form-login/v1` account: what the signed-in context kept, and the request context that carries it. The state is secret. */
   form: { state: FormLoginStorageState; requests: FormRequestContext } | null;
 };
 /** What a case's browser context is given: the cookies of the account's session and the local storage of the origins the sign-in visited. */
 export type BrowserSessionState = Readonly<{ cookies: readonly StorageCookie[]; localStorage: readonly Readonly<{ origin: string; entries: readonly Readonly<{ name: string; value: string }>[] }>[] }>;
-/** A local storage value shorter than this is a setting, not a token: it is not registered as a session secret. */
-const MIN_STORAGE_SECRET_LENGTH = 16;
 
 async function readBounded(response: Response): Promise<Uint8Array> {
   const declared = Number(response.headers.get("content-length"));
@@ -123,11 +124,26 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     return session;
   };
 
+  /**
+   * The signed-out visitor (Ruling AZ): the case runs in a fresh browser context with no cookie and no storage, or sends API requests with no cookie, and nobody is signed in. The
+   * session is the sentinel one: its reference carries the anonymous prefix and a UUID of its own, its identity digest is the fixed one of the application, and it has no login and
+   * no identity to report. The reference it runs under must be the one the application fixes; a registered account's is not.
+   */
+  function openAnonymous(raw: { applicationId: string }, accountRef: E2ERuntimeAccountRef) {
+    if (canonicalJson(accountRef) !== canonicalJson(e2eAnonymousRuntimeAccountRef(raw.applicationId))) throw new Error("the anonymous profile runs under the fixed anonymous account reference only");
+    const sessionRef = `${E2E_ANONYMOUS_SESSION_REF_PREFIX}${randomUUID()}`;
+    const accountIdDigest = e2eAnonymousAccountIdDigest(raw.applicationId);
+    sessions.set(sessionRef, { sessionRef, applicationId: raw.applicationId, profileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, accountRef, token: "", accountIdDigest,
+      observedAt: new Date().toISOString(), login: null, identity: null, subject: null, closed: false, form: null, anonymous: true });
+    return { sessionRef, accountIdDigest };
+  }
+
   async function open(raw: { binding: unknown; applicationId: string; profileId: string; approvedAccountRef: unknown; origin: string }, signal: AbortSignal) {
     const accountRef = E2ERuntimeAccountRefSchema.parse(raw.approvedAccountRef);
     if (raw.origin !== origin || accountRef.applicationId !== raw.applicationId || accountRef.profileId !== raw.profileId) {
       throw new Error("account open is outside the exact admitted application origin and account");
     }
+    if (raw.profileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) return openAnonymous(raw, accountRef);
     const account = input.plan.accounts.find((candidate) => candidate.profileId === raw.profileId);
     if (!account) throw new Error("no seeded account exists for this account profile");
     const contract = readE2EApplicationProjectContract(sourceSnapshot, raw.applicationId);
@@ -155,7 +171,7 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     const sessionRef = `rovara-session-${randomUUID()}`;
     sessions.set(sessionRef, { sessionRef, applicationId: raw.applicationId, profileId: raw.profileId, accountRef, token,
       accountIdDigest: sha(me.subjectId), observedAt: new Date().toISOString(), login: { status: loginResponse.status, role: String(loginRole) },
-      identity: { status: meResponse.status, subjectIdDigest: sha(me.subjectId), tenantId: me.tenantId, role: me.role }, subject: null, closed: false, form: null });
+      identity: { status: meResponse.status, subjectIdDigest: sha(me.subjectId), tenantId: me.tenantId, role: me.role }, subject: null, closed: false, form: null, anonymous: false });
     return { sessionRef, accountIdDigest: sha(me.subjectId) };
   }
 
@@ -178,7 +194,7 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
       const signedIn = await formLogin.signIn({ origin, login, email: account.email, password: account.password, signal: operation });
       // Told before anything else is done with them, so a failure further on cannot leave a cookie the executor does not know to scrub. Only what looks like a secret: a consent flag is not.
       for (const cookie of signedIn.state.cookies) if (isSessionCookieSecret(cookie)) registerOnce(cookie.value);
-      for (const item of signedIn.state.origins) for (const entry of item.localStorage) if (entry.value.length >= MIN_STORAGE_SECRET_LENGTH) registerOnce(entry.value);
+      for (const item of signedIn.state.origins) for (const entry of item.localStorage) if (isSessionStorageSecret(entry.value)) registerOnce(entry.value);
       requests = await formLogin.requestContext({ origin, state: signedIn.state });
       const meResponse = await requests.request({ method: "GET", path: "/api/me", signal: operation });
       const me = parseJsonObject(meResponse.body, "identity response");
@@ -188,7 +204,7 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
       sessions.set(sessionRef, { sessionRef, applicationId: raw.applicationId, profileId: raw.profileId, accountRef: raw.accountRef, token: "",
         accountIdDigest: sha(me.subjectId), observedAt: new Date().toISOString(), login: { status: signedIn.status, role: me.role },
         identity: { status: meResponse.status, subjectIdDigest: sha(me.subjectId), tenantId: me.tenantId, role: me.role }, subject: null, closed: false,
-        form: { state: signedIn.state, requests } });
+        form: { state: signedIn.state, requests }, anonymous: false });
       return { sessionRef, accountIdDigest: sha(me.subjectId) };
     } catch {
       await requests?.dispose().catch(() => undefined);
@@ -200,6 +216,11 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     const session = sessions.get(sessionRef);
     if (!session) throw new Error("case session is unknown");
     if (session.closed) return { confirmed: true };
+    if (session.anonymous) {
+      // Nobody was signed in, so there is nothing to sign out.
+      session.closed = true;
+      return { confirmed: true };
+    }
     if (session.form !== null) {
       // A form session has no logout the executor could know of: its cookies live in this request context and in the case's own context, both gone with the run's browser.
       await session.form.requests.dispose().catch(() => undefined);
@@ -216,6 +237,15 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
   async function request(raw: { sessionRef: string; origin: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; body?: unknown; requestId?: string }, signal: AbortSignal): Promise<E2EApiRuntimeResponse> {
     const session = must(raw.sessionRef);
     if (raw.origin !== origin) throw new Error("API request origin differs from the only origin an executor run may reach");
+    if (session.anonymous) {
+      // No cookie at all: the request is the visitor's.
+      const body = raw.body === undefined || raw.method === "GET" ? undefined : JSON.stringify(raw.body);
+      const response = await fetchImpl(urlFor(raw.path), { method: raw.method, redirect: "manual", signal: bounded(signal),
+        ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body }) });
+      const bytes = await readBounded(response);
+      return { requestId: raw.requestId ?? `req-${randomUUID()}`, responseId: `res-${randomUUID()}`, method: raw.method, path: raw.path, status: response.status,
+        body: bytes, contentType: response.headers.get("content-type") ?? "application/octet-stream", origin, observedAt: new Date().toISOString() };
+    }
     if (session.form !== null) {
       urlFor(raw.path);
       const answered = await session.form.requests.request({ method: raw.method, path: raw.path, ...(raw.body === undefined ? {} : { body: raw.body }), signal: bounded(signal) });
@@ -238,12 +268,14 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     /** Only the owned browser port may ask for the cookie; it goes straight into a BrowserContext. */
     cookieFor(sessionRef: string): { name: string; value: string; origin: string } {
       const session = must(sessionRef);
+      if (session.anonymous) throw new Error("an anonymous session has no cookie");
       if (session.form !== null) throw new Error("a form-login session has a storage state, not the fixed orders cookie");
       return { name: COOKIE_NAME, value: session.token, origin };
     },
     /** Only the owned browser port may ask for it; it goes straight into a BrowserContext. For `orders-auth/v1` this is the one fixed cookie. */
     browserStateFor(sessionRef: string): BrowserSessionState {
       const session = must(sessionRef);
+      if (session.anonymous) return { cookies: [], localStorage: [] };
       if (session.form === null) {
         return { cookies: [{ name: COOKIE_NAME, value: session.token, domain: new URL(origin).hostname, path: "/", expires: -1, httpOnly: true, secure: false, sameSite: "Strict" }], localStorage: [] };
       }

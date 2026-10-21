@@ -27,8 +27,10 @@ export type ExecutorSessionFacts = Readonly<{
   sessionRef: string;
   accountIdDigest: string;
   observedAt: string;
-  login: Readonly<{ status: number; role: string }>;
-  identity: Readonly<{ status: number; subjectIdDigest: string; tenantId: string; role: string }>;
+  /** What the sign-in answered; null for the signed-out visitor (`rovara-anonymous`), which signs nobody in. */
+  login: Readonly<{ status: number; role: string }> | null;
+  /** Who the application says the session belongs to; null for the signed-out visitor, which has no identity. */
+  identity: Readonly<{ status: number; subjectIdDigest: string; tenantId: string; role: string }> | null;
   subject: E2EApplicationOwnedSubject;
 }>;
 export type ExecutorObservationSource = Readonly<{

@@ -10,7 +10,7 @@ import { createLinuxHost, type ProbeRun } from "./linux-runtime.js";
 
 export type AccountsProbeOptions = AccountsPlanOptions & Readonly<{
   /** A defect file name under tests/fixtures/e2e-accounts-app/defects, placed in the owned mount and named by ORDERS_TEST_DEFECT_FILE. */
-  defect?: "viewer-access.json" | "echo-session.json" | "echo-email.json" | "rotate-echo.json";
+  defect?: "viewer-access.json" | "echo-session.json" | "echo-email.json" | "rotate-echo.json" | "storage-echo.json";
   /** Extra environment for the app, through the recipe's start command. */
   appEnv?: Record<string, string>;
 }>;

@@ -6,7 +6,7 @@ import {
   E2EWorkflowAdmissionRefSchema, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
   WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, canonicalPlanJson, workflowSendBackOffered,
   WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey, readCanonicalPlan, portableOperationId, type E2EApplicationPlanIntent,
-  selectE2EApplicationExecutionPlan,
+  selectE2EApplicationExecutionPlan, e2eAnonymousRuntimeAccountRef,
   type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
@@ -29,7 +29,7 @@ import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broke
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { call, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
-import { NOW, PROFILE, apiSnapshot, approvedSetup, binding, contractSnapshot, csvScenario, inferredSnapshot, ordersContractManifest, planFixture, sha, shaCanonical, snapshotOf, webAndApiFixture, webApiRow,
+import { NOW, PROFILE, anonymousScenario, anonymousTargetOf, apiSnapshot, approvedSetup, binding, contractSnapshot, csvScenario, inferredSnapshot, ordersContractManifest, planFixture, sha, shaCanonical, snapshotOf, webAndApiFixture, webApiRow,
   type PlanInput } from "../support/e2e-application-plan-fixtures.js";
 
 
@@ -1750,4 +1750,98 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     });
   });
 
+});
+
+
+describe("anonymous scenarios and inferred-recipe apps (Ruling AZ)", () => {
+  const anonymousOnInferred = () => {
+    const targetId = anonymousTargetOf(inferredSnapshot);
+    return { targetId, scenario: anonymousScenario(targetId) };
+  };
+  const readyWeb = [{ kind: "web" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedSteps,
+    supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions }];
+
+  it("selects one application group with no unavailable criteria for a rovara-anonymous web scenario on an inferred target", () => {
+    const { targetId, scenario } = anonymousOnInferred();
+    const { plan: selected } = plan({ snapshot: inferredSnapshot, targetId, scenario });
+    expect(selected.unavailableCriteria).toEqual([]);
+    expect(selected.groups).toHaveLength(1);
+    expect(selected.groups[0]).toMatchObject({ mode: "real-runtime", runtimeProfileId: PROFILE, targetIds: [targetId] });
+    expect(selected.groups[0]?.expectedCases).toHaveLength(1);
+    expect(selected.groups[0]?.expectedCases[0]).toMatchObject({ accountProfileId: "rovara-anonymous", targetId });
+  });
+
+  it("keeps a signed-in scenario on the same inferred app unavailable with needs-project-contract", () => {
+    const { plan: selected } = plan({ snapshot: inferredSnapshot });
+    expect(selected.groups).toEqual([]);
+    expect(selected.unavailableCriteria).toEqual([{ criterionId: selected.criteria[0]!.criterionId, reason: "needs-project-contract" }]);
+  });
+
+  it("runs an anonymous scenario on a project-contract app too, as a variant of the same target", () => {
+    const targetId = anonymousTargetOf(contractSnapshot);
+    const { plan: selected } = plan({ snapshot: contractSnapshot, targetId, scenario: anonymousScenario(targetId) });
+    expect(selected.unavailableCriteria).toEqual([]);
+    expect(selected.groups[0]?.expectedCases[0]).toMatchObject({ accountProfileId: "rovara-anonymous" });
+  });
+
+  it("gives the anonymous case the account context of the fixed anonymous reference, not of a registered account", () => {
+    const { targetId, scenario } = anonymousOnInferred();
+    const { plan: selected } = plan({ snapshot: inferredSnapshot, targetId, scenario });
+    const other = plan({ snapshot: inferredSnapshot, targetId, scenario, accountRef: { definitionDigest: "2".repeat(64) } });
+    // A different reference is a different context, which is what makes the fixed reference the only one the case can be bound to.
+    expect(other.plan.groups[0]?.expectedCases[0]?.accountContextDigest).not.toBe(selected.groups[0]?.expectedCases[0]?.accountContextDigest);
+  });
+
+  it("offers the planner the anonymous target as executable with the fixed reference, and the inferred base target still as needs-project-contract", () => {
+    const { targetId } = anonymousOnInferred();
+    const setup = approvedSetup(inferredSnapshot, [{ kind: "web", profileId: PROFILE }]);
+    const result = buildFeatureE2EPlanningContext(setup.policy, inferredSnapshot, { origin: "approved-setup", preparedCommitSha: null, accountRegistry: [], readyRuntimes: readyWeb });
+    if (result.status !== "available") throw new Error(result.reason);
+    expect(result.unavailableReasons).toEqual([{ targetId: "web-1", reason: "needs-project-contract" }]);
+    expect(result.runtimeRefs?.map((ref) => [ref.targetId, ref.accountProfileId])).toEqual([["web-1", "synthetic"], [targetId, "rovara-anonymous"]]);
+    const application = result.applicationRefs![0]!.applicationId;
+    expect(result.runtimeAccountRefs).toEqual([e2eAnonymousRuntimeAccountRef(application)]);
+    expect(result.executableKinds).toMatchObject([{ kind: "web" }]);
+  });
+
+  it("tells the planner in the version 2 prompt that a rovara-anonymous target runs its scenario signed out, with no account", () => {
+    const setup = approvedSetup(inferredSnapshot, [{ kind: "web", profileId: PROFILE }]);
+    const context = buildFeatureE2EPlanningContext(setup.policy, inferredSnapshot, { origin: "approved-setup", preparedCommitSha: null, accountRegistry: [], readyRuntimes: readyWeb });
+    if (context.status !== "available") throw new Error(context.reason);
+    const prompt = planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context });
+    expect(prompt).toContain("Application E2E plan guidance (schemaVersion 2):");
+    expect(prompt).toMatch(/accountProfileId is rovara-anonymous.*signed out/);
+    expect(prompt).toContain('"accountProfileId":"rovara-anonymous"');
+  });
+
+  describe("approving the plan", () => {
+    it("accepts an anonymous scenario on an inferred target, pins the fixed reference, and needs no registered account", () => {
+      const { targetId, scenario } = anonymousOnInferred();
+      const result = evaluate({ snapshot: inferredSnapshot, targetId, scenario });
+      expect(result.ok, refusal(result)).toBe(true);
+      if (!result.ok) return;
+      const application = result.derivation.selectionInput.intent.applicationRuntimeRefs[0]!.applicationId;
+      expect(result.accountRefs).toEqual([e2eAnonymousRuntimeAccountRef(application)]);
+      expect(result.selection).toMatchObject({ executableTargetIds: [targetId], unavailableCriteria: [] });
+    });
+
+    it("refuses a signed-in scenario on an inferred target with needs-project-contract, and an anonymous one whose reference is not the fixed one", () => {
+      expect(refusal(evaluate({ snapshot: inferredSnapshot }))).toMatch(/needs-project-contract/);
+      const { targetId, scenario } = anonymousOnInferred();
+      expect(refusal(evaluate({ snapshot: inferredSnapshot, targetId, scenario, accountRef: { definitionDigest: "2".repeat(64) } }))).toMatch(/account/i);
+      expect(refusal(evaluate({ snapshot: inferredSnapshot, targetId, scenario, accountRef: { revision: 2 } }))).toMatch(/account/i);
+    });
+
+    it("approves it again after dispatch-time re-evaluation too (the fixed reference needs no pinned or registered row)", () => {
+      const { targetId, scenario } = anonymousOnInferred();
+      const fx = planFixture({ snapshot: inferredSnapshot, targetId, scenario });
+      const pinned = [fx.accountRef];
+      for (const mode of ["approve", "reapprove", "current"] as const) {
+        const result = evaluateApplicationPlanApproval({ intent: fx.intent, taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot: fx.snapshot, setupProposal: fx.setup.proposal,
+          setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW,
+          accounts: { entries: [], mode, pinned: mode === "current" ? pinned : [] } });
+        expect(result.ok, `${mode}: ${refusal(result)}`).toBe(true);
+      }
+    });
+  });
 });

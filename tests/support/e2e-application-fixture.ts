@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { E2EApplicationExecutionAdmissionSchema, canonicalJson, createCandidateManifest, e2eApplicationMetadataSourceRefs, e2eAppBuildManifestDigest,
+import { E2EApplicationExecutionAdmissionSchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, canonicalJson, e2eAnonymousRuntimeAccountRef, createCandidateManifest, e2eApplicationMetadataSourceRefs, e2eAppBuildManifestDigest,
   e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, E2EApplicationPlanIntentSchema,
   E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema, E2ERuntimeCapabilityDescriptorSchema,
   inspectE2ERepository, projectE2EApplicationPortableSelection, proposeE2ESetup, selectE2EApplicationExecutionPlan,
@@ -62,7 +62,9 @@ function registeredApiRuntime(profileId: string, now: number, supportsAgent = fa
 
 /** A source-derived, engine-less API group used only for offline collector conformance. */
 export function createCompiledApiApplicationFixture(options: { modelRoute?: { routeId: string; routeRevision: string }; hostManifestDigest?: string; now?: string; withApiMock?: boolean;
-  agentAfterRequest?: boolean } = {}): { compiled: E2ECompiledApplicationSuite; binding: ReturnType<typeof E2ERunBindingSchema.parse>;
+  agentAfterRequest?: boolean;
+  /** Plan the case on the application's implicit `rovara-anonymous` API variant, with the fixed anonymous account reference (Ruling AZ). */
+  anonymous?: boolean } = {}): { compiled: E2ECompiledApplicationSuite; binding: ReturnType<typeof E2ERunBindingSchema.parse>;
   admission: unknown;
   round: ReturnType<typeof E2ERoundSchema.parse>; snapshot: E2ESourceSnapshot; now: string } {
   const packageBytes = Buffer.from(JSON.stringify({ name: "service", scripts: { start: "node server.js" }, dependencies: { express: "1.0.0" } }));
@@ -87,7 +89,7 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
     treePaths: sourceFiles.map((item) => item.path).sort(), sources: sourceFiles.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
   const discovery = inspectE2ERepository(snapshot, candidate);
-  const target = discovery.inspection.proposedTargets.find((item) => item.kind === "api")!;
+  const target = discovery.inspection.proposedTargets.find((item) => item.kind === "api" && (item.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) === (options.anonymous === true))!;
   const application = discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
   const accountContext = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths)[0]!;
   const scenario = { scenarioId: "service-health", requirementId: "health-status", requestedTargetIds: [target.targetId], required: true,
@@ -98,7 +100,8 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
       : [{ kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: options.withApiMock ? { kind: "success" } : {} },
         ...(options.modelRoute ? [{ kind: "agent" as const, goal: "Inspect the service response without external effects", maxActions: 1 }] : [])],
     assertions: [{ kind: "http-status" as const, path: "/health", method: "GET" as const, equals: 200 }] };
-  const accountRef = { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "8".repeat(64) };
+  const accountRef = options.anonymous === true ? e2eAnonymousRuntimeAccountRef(application.applicationId)
+    : { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "8".repeat(64) };
   const nowMs = options.now ? Date.parse(options.now) : Date.now() + 30_000;
   if (!Number.isFinite(nowMs)) throw new Error("API conformance fixture admission time must be a finite timestamp");
   const now = new Date(nowMs).toISOString();
@@ -204,7 +207,7 @@ export function createCompiledTwoShardApiApplicationFixture(options: { now?: str
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
     treePaths: packageValues.map((item) => item.path).sort(), sources: packageValues.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
   const discovery = inspectE2ERepository(snapshot, candidate);
-  const targets = discovery.inspection.proposedTargets.filter((item) => item.kind === "api").sort((a, b) => a.targetId.localeCompare(b.targetId));
+  const targets = discovery.inspection.proposedTargets.filter((item) => item.kind === "api" && item.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID).sort((a, b) => a.targetId.localeCompare(b.targetId));
   if (targets.length !== 2) throw new Error("two-shard API fixture did not derive two independent source targets");
   const runtimeProfileId = "api-runtime";
   const runtime = registeredApiRuntime(runtimeProfileId, nowMs, true);
@@ -308,7 +311,7 @@ export function createPortableApplicationChildFixture() {
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
     treePaths: files.map((item) => item.path).sort(), sources: files.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
   const discovery = inspectE2ERepository(snapshot, candidate);
-  const target = discovery.inspection.proposedTargets.find((item) => item.kind === "api")!;
+  const target = discovery.inspection.proposedTargets.find((item) => item.kind === "api" && item.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID)!;
   const nativeTarget = discovery.inspection.proposedTargets.find((item) => item.kind === "mobile")!;
   const application = discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
   const nativeApplication = discovery.inspection.applications.find((item) => item.applicationId === nativeTarget.applicationId)!;

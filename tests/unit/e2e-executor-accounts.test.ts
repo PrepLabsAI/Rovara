@@ -3,11 +3,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_EXECUTOR_COMPILED_ORIGIN, readE2EApplicationProjectContract, type E2ERuntimeAccountRef } from "@agentx/contracts";
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_COMPILED_ORIGIN, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef, readE2EApplicationProjectContract, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import { createExecutorSessionStore, validateFormLogins } from "../../packages/verifier/src/executor/accounts.js";
 import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
 import { FormLoginError, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "../../packages/verifier/src/executor/form-login.js";
 import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
+import { createInferredExecutorPlan } from "../support/e2e-inferred-fixture.js";
 
 // Task 3.2: the executor's `rovara-form-login/v1`. The store signs each case's account in through the application's own form (a driver stands in for the browser here), keeps the
 // storage state for the case, answers API requests through a request context that carries its cookies, and checks that the session is the account the case is bound to.
@@ -239,6 +240,18 @@ describe("the executor's form login (rovara-form-login/v1)", () => {
       expect(secrets.some((value) => value.startsWith("tok-p"))).toBe(true);
       for (const word of ["1", "true", "accepted", "dark", "abc12", "en-US"]) expect(secrets).not.toContain(word);
     });
+
+    it("counts an HttpOnly cookie of 8 to 15 characters only when it mixes letters and digits, so a plain word or number that a framework made HttpOnly is not scrubbed from reports (N1)", async () => {
+      const secrets = await registered([
+        { name: "consent", value: "accepted", httpOnly: true }, { name: "mode", value: "AllowAnalytics", httpOnly: true }, { name: "count", value: "123456789012", httpOnly: true },
+        { name: "locale", value: "en-US-latin", httpOnly: true }, { name: "mixed_8", value: "abcd1234", httpOnly: true }, { name: "mixed_15", value: "Zz9-aa_bb-cc-dd", httpOnly: true },
+        { name: "digit_first", value: "9lives-cat", httpOnly: true },
+        // 16 characters or more is a secret whatever it holds, HttpOnly or not.
+        { name: "long_word", value: "acceptedallwordsonly", httpOnly: true }, { name: "long_plain_word", value: "anotherplainwordss" },
+      ]);
+      expect(secrets.filter((value) => !value.startsWith("tok-p")).sort()).toEqual(["9lives-cat", "Zz9-aa_bb-cc-dd", "abcd1234", "acceptedallwordsonly", "anotherplainwordss"].sort());
+      for (const word of ["accepted", "AllowAnalytics", "123456789012", "en-US-latin"]) expect(secrets).not.toContain(word);
+    });
   });
 
   describe("cookies the application replaces after the sign-in", () => {
@@ -267,5 +280,92 @@ describe("the executor refuses a form-login plan that does not match its source 
     expect(log).toContain("plan-invalid");
     expect(log).toContain("orders-owner");
     expect(log).not.toContain("waiting for");
+  });
+});
+
+
+// Task 3.3 (Ruling AZ): the signed-out visitor. The executor opens no session for it and no login is made: a fresh context with no cookies, bound to the fixed anonymous reference.
+describe("the anonymous profile in the executor (rovara-anonymous)", () => {
+  const anonymous = createInferredExecutorPlan();
+  const anonymousApplicationId = anonymous.compiled.originByApplicationId[0]!.applicationId;
+  const anonymousOpen = (overrides: { ref?: E2ERuntimeAccountRef; origin?: string } = {}) => ({ binding: {}, applicationId: anonymousApplicationId, profileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID,
+    approvedAccountRef: overrides.ref ?? e2eAnonymousRuntimeAccountRef(anonymousApplicationId), origin: overrides.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN });
+  const spy = () => {
+    const calls: { url: string; method: string; headers: Record<string, string> }[] = [];
+    const fetchImpl = (async (input: string | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), method: String(init?.method ?? "GET"), headers: Object.fromEntries(Object.entries((init?.headers ?? {}) as Record<string, string>)) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    return { calls, fetchImpl };
+  };
+
+  it("plans the case with no seeded account at all, on the fixed anonymous reference", () => {
+    expect(anonymous.plan.accounts).toEqual([]);
+    expect(anonymous.compiled.expectedCases.every((item) => item.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID)).toBe(true);
+    expect(anonymous.compiled.runtimeAdmissionContext.selectionInput.runtimeAccountRefs).toEqual([e2eAnonymousRuntimeAccountRef(anonymousApplicationId)]);
+  });
+
+  it("opens an anonymous session without any request to the application: the sentinel session, the fixed identity digest, nothing logged in", async () => {
+    const { calls, fetchImpl } = spy();
+    const store = createExecutorSessionStore({ plan: anonymous.plan, fetchImpl });
+    const opened = await store.open(anonymousOpen(), signal);
+    expect(calls).toEqual([]);
+    expect(opened.sessionRef).toMatch(/^rovara-anonymous-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    expect(opened.accountIdDigest).toBe(e2eAnonymousAccountIdDigest(anonymousApplicationId));
+    const facts = store.sessionFacts(opened.sessionRef, "service");
+    expect(facts).toMatchObject({ sessionRef: opened.sessionRef, accountIdDigest: opened.accountIdDigest, login: null, identity: null });
+    expect(facts.subject).toEqual({ kind: "service", processId: "candidate-app-container", origin: E2E_EXECUTOR_COMPILED_ORIGIN });
+  });
+
+  it("gives the browser context no cookie and no local storage, and refuses to hand out the orders cookie", async () => {
+    const store = createExecutorSessionStore({ plan: anonymous.plan, fetchImpl: spy().fetchImpl });
+    const { sessionRef } = await store.open(anonymousOpen(), signal);
+    expect(store.browserStateFor(sessionRef)).toEqual({ cookies: [], localStorage: [] });
+    expect(() => store.cookieFor(sessionRef)).toThrow();
+  });
+
+  it("sends an anonymous API request with no cookie, and closes without a logout", async () => {
+    const { calls, fetchImpl } = spy();
+    const store = createExecutorSessionStore({ plan: anonymous.plan, fetchImpl });
+    const { sessionRef } = await store.open(anonymousOpen(), signal);
+    const answered = await store.request({ sessionRef, origin: E2E_EXECUTOR_COMPILED_ORIGIN, method: "GET", path: "/api/admin/orders", requestId: "r1" }, signal);
+    expect(answered).toMatchObject({ requestId: "r1", status: 200, path: "/api/admin/orders" });
+    expect(calls).toHaveLength(1);
+    expect(Object.keys(calls[0]!.headers).map((name) => name.toLowerCase())).not.toContain("cookie");
+    await expect(store.close(sessionRef, signal)).resolves.toEqual({ confirmed: true });
+    await expect(store.close(sessionRef, signal)).resolves.toEqual({ confirmed: true });
+    expect(calls).toHaveLength(1);
+    await expect(store.request({ sessionRef, origin: E2E_EXECUTOR_COMPILED_ORIGIN, method: "GET", path: "/" }, signal)).rejects.toThrow();
+  });
+
+  it("gives every case a session of its own", async () => {
+    const store = createExecutorSessionStore({ plan: anonymous.plan, fetchImpl: spy().fetchImpl });
+    const first = await store.open(anonymousOpen(), signal);
+    const second = await store.open(anonymousOpen(), signal);
+    expect(second.sessionRef).not.toBe(first.sessionRef);
+    expect(second.accountIdDigest).toBe(first.accountIdDigest);
+  });
+
+  it("refuses an anonymous open outside the admitted application, origin and account reference, and a reference that is a registered account's", async () => {
+    const store = createExecutorSessionStore({ plan: anonymous.plan, fetchImpl: spy().fetchImpl });
+    await expect(store.open(anonymousOpen({ origin: "http://elsewhere.example" }), signal)).rejects.toThrow();
+    await expect(store.open(anonymousOpen({ ref: { ...e2eAnonymousRuntimeAccountRef(anonymousApplicationId), definitionDigest: "8".repeat(64) } }), signal)).rejects.toThrow();
+    await expect(store.open(anonymousOpen({ ref: { ...e2eAnonymousRuntimeAccountRef(anonymousApplicationId), revision: 2 } }), signal)).rejects.toThrow();
+    await expect(store.open({ ...anonymousOpen(), applicationId: "someone-else" }, signal)).rejects.toThrow();
+  });
+
+  it("does not let a signed-in profile borrow the anonymous path: an account profile with no seeded account is still refused", async () => {
+    const store = createExecutorSessionStore({ plan: anonymous.plan, fetchImpl: spy().fetchImpl });
+    await expect(store.open({ ...anonymousOpen(), profileId: "orders-owner", approvedAccountRef: { ...e2eAnonymousRuntimeAccountRef(anonymousApplicationId), profileId: "orders-owner" } }, signal)).rejects.toThrow();
+  });
+
+  it("is the same on a plan that carries both a signed-in account and the anonymous profile", async () => {
+    const { calls, fetchImpl } = spy();
+    const store = createExecutorSessionStore({ plan: fixture.plan, formLogin: fakeApplication().driver, fetchImpl });
+    // The accounts fixture's app has a project contract; the anonymous profile is not one of its declared accounts, and still needs no login.
+    const opened = await store.open({ binding: {}, applicationId, profileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, approvedAccountRef: e2eAnonymousRuntimeAccountRef(applicationId),
+      origin: E2E_EXECUTOR_COMPILED_ORIGIN }, signal);
+    expect(calls).toEqual([]);
+    expect(store.sessionFacts(opened.sessionRef, "service")).toMatchObject({ login: null, identity: null });
   });
 });

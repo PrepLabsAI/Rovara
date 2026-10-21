@@ -1,5 +1,9 @@
 // The page itself is rendered by the server for the signed-in account (see server.mjs); this script only signs in through the form and downloads the export.
 const byId = (id) => document.querySelector(`[data-testid="${id}"]`);
+// The storage-echo defect asks the page to keep a refresh token in local storage; without the defect the attribute is absent and nothing is stored.
+const refresh = byId("identity")?.dataset.refresh;
+if (refresh) localStorage.setItem("refresh_token", refresh);
+
 byId("login-submit")?.form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;

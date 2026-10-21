@@ -2,9 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { E2E_EXECUTOR_APP_ORIGIN, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
   E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
-  e2eAppBuildManifestDigest, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2ERepository, proposeE2ESetup,
+  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2ERepository, proposeE2ESetup,
   selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { compileE2EApplicationScenarios, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../application-build-source.js";
@@ -153,11 +153,18 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
    * Plans one scenario per listed account instead of the probe's single scenario, all in the same group (Task 3.2). The probe name still decides the target kind (`web-` or `api-`).
    * Every listed profile must be one of the app's account profiles with a target variant of that kind.
    */
-  accountScenarios?: readonly { accountProfileId: string; scenario(targetId: string): E2EScenario }[] }): WebApiProbePlan {
+  accountScenarios?: readonly { accountProfileId: string; scenario(targetId: string): E2EScenario }[];
+  /**
+   * Plans an app that has no `agentx.e2e` project contract (Task 3.3): `appRoot` holds its `package.json` and `package-lock.json` at the repository root, and discovery infers the
+   * launch recipe (`npm ci`, `npm start`, health on `/`). Its scenarios are `rovara-anonymous` ones, which need no account, so the plan carries none.
+   */
+  inferred?: boolean }): WebApiProbePlan {
   const kind = options.probe.startsWith("web-") ? "web" as const : "api" as const;
+  const inferred = options.inferred === true;
+  if (inferred && (options.recipeBuild || options.recipeStart || options.mock)) throw new Error("an inferred-recipe app has no recipe to edit and no mock to approve");
   const rawPackage = JSON.parse(readFileSync(join(options.appRoot, "package.json"), "utf8")) as { agentx: { e2e: { targetAccounts: { baseTargetId: string; profileId: string }[];
     recipe: { recipeDigest: string; build: unknown[]; launch: { start: Record<string, unknown> } } } } };
-  if (options.recipeBuild || options.recipeStart) {
+  if (!inferred && (options.recipeBuild || options.recipeStart)) {
     const recipe = rawPackage.agentx.e2e.recipe;
     const launch = options.recipeStart ? { ...recipe.launch, start: { ...recipe.launch.start, ...options.recipeStart } } : recipe.launch;
     const { recipeDigest: _digest, ...body } = { ...recipe, launch, build: options.recipeBuild ?? recipe.build };
@@ -165,26 +172,31 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     rawPackage.agentx.e2e.recipe = { ...body, recipeDigest: hash(canonicalJson(body)) };
   }
   // The qualification app lists its account variants on the web target only; an app that lists the API target's own variants keeps them.
-  if (kind === "api" && !rawPackage.agentx.e2e.targetAccounts.some((item) => item.baseTargetId === "api-1")) {
+  if (!inferred && kind === "api" && !rawPackage.agentx.e2e.targetAccounts.some((item) => item.baseTargetId === "api-1")) {
     rawPackage.agentx.e2e.targetAccounts = rawPackage.agentx.e2e.targetAccounts.map((item) => ({ ...item, baseTargetId: "api-1" }));
   }
-  const packagePath = kind === "web" ? "apps/orders/package.json" : "server/package.json";
+  const packagePath = inferred ? "package.json" : kind === "web" ? "apps/orders/package.json" : "server/package.json";
   const appDirectory = dirname(packagePath);
   // An origin's contract path is repository-relative; the app tree is the repository in the installed asset and sits in `appDirectory` in the plan's snapshot.
-  const service = (rawPackage.agentx.e2e as unknown as { service: { originBindings: { contractPath?: string }[] } }).service;
-  for (const binding of service.originBindings) if (binding.contractPath !== undefined) binding.contractPath = `${appDirectory}/${binding.contractPath}`;
+  if (!inferred) {
+    const service = (rawPackage.agentx.e2e as unknown as { service: { originBindings: { contractPath?: string }[] } }).service;
+    for (const binding of service.originBindings) if (binding.contractPath !== undefined) binding.contractPath = `${appDirectory}/${binding.contractPath}`;
+  }
   const packageBytes = Buffer.from(JSON.stringify(rawPackage));
   const mockFiles = options.mock ? [
     { path: `${appDirectory}/inventory/openapi.json`, bytes: readFileSync(join(options.appRoot, "inventory/openapi.json")) },
     { path: `${appDirectory}/e2e/mocks/inventory-v1.json`, bytes: readFileSync(join(options.appRoot, "e2e/mocks/inventory-v1.json")) },
   ] : [];
-  const sourceFiles = [{ path: packagePath, bytes: packageBytes }, ...mockFiles];
+  // An inferred recipe runs `npm ci`, so the snapshot carries the lockfile discovery looks for.
+  const lockFiles = inferred ? [{ path: "package-lock.json", bytes: readFileSync(join(options.appRoot, "package-lock.json")) }] : [];
+  const sourceFiles = [{ path: packagePath, bytes: packageBytes }, ...lockFiles, ...mockFiles];
   const treeSha = gitTreeSha(sourceFiles.map((item) => ({ path: item.path, mode: "100644", objectId: gitBlob(item.bytes) })));
   const candidate = createCandidateManifest([{ repositoryId: "fixture/orders", commitSha: "a".repeat(40), treeSha }]);
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
     treePaths: sourceFiles.map((item) => item.path).sort(), sources: sourceFiles.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
   const discovery = inspectE2ERepository(snapshot, candidate);
-  const accountProfileIds = options.accountScenarios?.map((item) => item.accountProfileId) ?? [options.role === "viewer" ? "orders-viewer" : "orders-owner"];
+  // One target per account profile; several scenarios of one account share it.
+  const accountProfileIds = [...new Set(options.accountScenarios?.map((item) => item.accountProfileId) ?? [options.role === "viewer" ? "orders-viewer" : "orders-owner"])];
   const targets = accountProfileIds.map((profileId) => {
     const found = discovery.inspection.proposedTargets.find((item) => item.kind === kind && item.accountProfileId === profileId);
     if (!found) throw new Error(`the app has no ${kind} target for account profile ${profileId}`);
@@ -193,12 +205,15 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const target = targets[0]!;
   const accountProfileId = accountProfileIds[0]!;
   const application = discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
-  const accountContext = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths)[0]!;
+  // The account context names the application's package manifest (an inferred app also has a lockfile among its metadata, which is not an application source path).
+  const metadataRefs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths);
+  const accountContext = metadataRefs.find((ref) => /(^|\/)package\.json$/.test(ref.path)) ?? metadataRefs[0]!;
   const scenarios = options.accountScenarios
-    ? options.accountScenarios.map((item, index) => item.scenario(targets[index]!.targetId))
+    ? options.accountScenarios.map((item) => item.scenario(targets[accountProfileIds.indexOf(item.accountProfileId)]!.targetId))
     : [scenarioFor(options.probe, target.targetId, accountProfileId)];
   const scenario = scenarios[0]!;
-  const accountRefs = accountProfileIds.map((profileId) => ({ applicationId: application.applicationId, profileId, revision: 1, definitionDigest: "8".repeat(64) }));
+  const accountRefs = accountProfileIds.map((profileId) => (profileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID ? e2eAnonymousRuntimeAccountRef(application.applicationId)
+    : { applicationId: application.applicationId, profileId, revision: 1, definitionDigest: "8".repeat(64) }));
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const runtimeProfileId = E2E_EXECUTOR_HOST_PROFILE_ID;
@@ -253,7 +268,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const output = { artifactId: "orders-build", sha256: "5".repeat(64), appId: application.applicationId, platform: kind };
   const buildBody = { schemaVersion: "e2e-app-build/v1" as const, candidateDigest: candidate.digest, applicationId: application.applicationId,
     repository: { repositoryId: "fixture/orders", commitSha: snapshot.commitSha, treeSha }, recipeDigest: application.recipe!.recipeDigest,
-    lockfileRefs: [], toolchainManifestDigest: "6".repeat(64), outputs: [output], createdAt: now };
+    lockfileRefs: e2eApplicationLockfileRefs(applicationApprovalBinding.applications.find((item) => item.applicationId === application.applicationId)!.sourceRefs), toolchainManifestDigest: "6".repeat(64), outputs: [output], createdAt: now };
   const build = { ...buildBody, manifestDigest: e2eAppBuildManifestDigest(buildBody) };
   const applicationBindings = new Map([[application.applicationId, { approval: applicationApprovalBinding, build,
     artifacts: [{ ...output, buildManifestDigest: build.manifestDigest }], buildSource }]]);
@@ -296,15 +311,16 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const admission = E2EApplicationExecutionAdmissionSchema.parse(JSON.parse(encodeE2EApplicationExecutionAdmission({ ...admissionBody,
     admissionDigest: hash(canonicalJson(admissionBody)) } as never)));
   const role = options.role ?? "owner";
-  const declaredProfiles = (rawPackage.agentx.e2e as unknown as { accountProfiles: { profileId: string; login?: unknown }[] }).accountProfiles;
-  const accounts = accountProfileIds.map((profileId) => ({ profileId, email: `rovara-${randomUUID()}@example.invalid`, password: `pw-${randomUUID()}-${randomUUID()}`,
+  const declaredProfiles = inferred ? [] : (rawPackage.agentx.e2e as unknown as { accountProfiles: { profileId: string; login?: unknown }[] }).accountProfiles;
+  // The anonymous profile is nobody: it has no email, no password and no seed record.
+  const accounts = accountProfileIds.filter((profileId) => profileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID).map((profileId) => ({ profileId, email: `rovara-${randomUUID()}@example.invalid`, password: `pw-${randomUUID()}-${randomUUID()}`,
     ...(declaredProfiles.find((item) => item.profileId === profileId)?.login === undefined ? {} : { login: declaredProfiles.find((item) => item.profileId === profileId)!.login }) }));
-  const { email, password } = accounts[0]!;
+  const { email, password } = accounts[0] ?? { email: "", password: "" };
   const plan = E2EExecutorPlanSchema.parse({ schemaVersion: "e2e-executor-plan/v1", runId: binding.runId, groupId: group.groupId, admission,
-    admissionDigest: admission.admissionDigest, app: { origin: E2E_EXECUTOR_APP_ORIGIN, health: { path: "/health", expectedStatus: 200, timeoutMs: options.healthTimeoutMs ?? 30_000 } },
+    admissionDigest: admission.admissionDigest, app: { origin: E2E_EXECUTOR_APP_ORIGIN, health: { path: inferred ? "/" : "/health", expectedStatus: 200, timeoutMs: options.healthTimeoutMs ?? 30_000 } },
     deadlineAt: Date.parse(binding.deadlineAt), accounts });
   return { plan, compiled, caseId: compiled.expectedCases[0]!.caseId, probe: options.probe, scenario, scenarios,
-    seed: { accounts: [{ email, passwordDigest: createHash("sha256").update(password, "utf8").digest("hex"), subjectId: `subject-${randomUUID()}`,
+    seed: { accounts: inferred ? [] : [{ email, passwordDigest: createHash("sha256").update(password, "utf8").digest("hex"), subjectId: `subject-${randomUUID()}`,
       tenantId: "tenant-a", role, displayName: role === "owner" ? "Orders Owner" : "Orders Viewer" }] },
     account: { email, password } };
 }

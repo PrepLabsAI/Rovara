@@ -10,6 +10,24 @@ import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js
 import { e2ePackageManifests, parseE2EPackageManifest } from "./e2e-package-manifests.js";
 
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
+/**
+ * The reserved account profile of the signed-out visitor (Ruling AZ). Every web and API target with a launch recipe offers it as an implicit variant; a project contract may not declare
+ * it. It is nobody: it has no registry row, no seeded account and no login, and its cases open no session. Its account reference is fixed by the application alone.
+ */
+export const E2E_ANONYMOUS_ACCOUNT_PROFILE_ID = "rovara-anonymous" as const;
+/** The identity digest every session of the anonymous profile reports: the digest of the fixed reference, which names the application and nothing else. */
+export function e2eAnonymousAccountIdDigest(applicationId: string): string {
+  return createHash("sha256").update(`rovara-anonymous/v1\0${applicationId}`, "utf8").digest("hex");
+}
+/** The account reference of the anonymous profile of one application: revision 1, and the digest of the fixed domain string and the application id. No registry holds it. */
+export function e2eAnonymousRuntimeAccountRef(applicationId: string): E2ERuntimeAccountRef {
+  return E2ERuntimeAccountRefSchema.parse({ applicationId, profileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, revision: 1, definitionDigest: e2eAnonymousAccountIdDigest(applicationId) });
+}
+/** The session reference of an anonymous case: the sentinel prefix and a UUID. It stands for no login; a case of any other profile never has one. */
+export const E2E_ANONYMOUS_SESSION_REF_PREFIX = "rovara-anonymous-" as const;
+export function isE2EAnonymousSessionRef(sessionRef: string): boolean {
+  return new RegExp(`^${E2E_ANONYMOUS_SESSION_REF_PREFIX}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`).test(sessionRef);
+}
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const boundedId = (max = 120) => z.string().trim().min(1).max(max);
 const profileSchema = z.object({ profileId: boundedId(), scope: z.enum(["synthetic-test", "external-test"]), authProfileId: boundedId(),
@@ -21,6 +39,11 @@ export const E2EApplicationProjectContractSchema = z.object({
   service: E2EApplicationServiceContractSchema.nullable(),
   accountProfiles: z.array(profileSchema).min(1).max(32), targetAccounts: z.array(z.object({ baseTargetId: boundedId(80), profileId: boundedId() }).strict()).max(12),
 }).strict().superRefine((value, context) => {
+  // The anonymous profile belongs to Rovara (Ruling AZ): every web and API target offers it, so no contract may declare it, list it or vary a target by it.
+  if (value.accountProfiles.some((item) => item.profileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) || value.recipe.accountProfileIds.includes(E2E_ANONYMOUS_ACCOUNT_PROFILE_ID)
+    || value.targetAccounts.some((item) => item.profileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID)) {
+    context.addIssue({ code: "custom", path: ["accountProfiles"], message: `reserved-account-profile: ${E2E_ANONYMOUS_ACCOUNT_PROFILE_ID} is offered by Rovara to every web and API target, and a project contract may not declare it` });
+  }
   const profiles = new Map(value.accountProfiles.map((item) => [item.profileId, item]));
   if (profiles.size !== value.accountProfiles.length) context.addIssue({ code: "custom", path: ["accountProfiles"], message: "application account profiles must be unique" });
   if (new Set(value.targetAccounts.map((item) => `${item.baseTargetId}\0${item.profileId}`)).size !== value.targetAccounts.length) context.addIssue({ code: "custom", path: ["targetAccounts"], message: "application account target variants must be unique" });
@@ -246,4 +269,28 @@ export function bindE2EApplicationAccountTargets(input: { contract: E2EApplicati
   }
   if (result.length > 12) throw new Error("application account variants exceed the target inventory limit");
   return result;
+}
+
+/** The target id of the implicit anonymous variant of a base target. It reads as its base, so a base always sorts before its variant. */
+export function e2eAnonymousTargetId(baseTargetId: string): string {
+  return `${baseTargetId}-anonymous`;
+}
+
+/**
+ * The base targets and the implicit `rovara-anonymous` variant of each web or API one (Ruling AZ), copied from the base and differing in the target id and the account profile
+ * only. A target that is already an anonymous variant gets none, and none is added for a base that already has one. The inventory holds 12 targets: `otherTargetCount` is how many
+ * the application has besides these bases (its source-declared account variants), and variants are added only while they all fit.
+ */
+export function bindE2EAnonymousAccountTargets(input: { applicationId: string; baseTargets: readonly E2ETarget[]; otherTargetCount?: number }): E2ETarget[] {
+  const result: E2ETarget[] = [...input.baseTargets];
+  const existing = new Set(result.map((target) => target.targetId));
+  const variants: E2ETarget[] = [];
+  for (const base of input.baseTargets) {
+    if (base.applicationId !== input.applicationId) throw new Error("application anonymous variant references a foreign base target");
+    if ((base.kind !== "web" && base.kind !== "api") || base.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) continue;
+    const variantId = e2eAnonymousTargetId(base.targetId);
+    if (existing.has(variantId)) continue;
+    variants.push(E2ETargetSchema.parse({ ...base, targetId: variantId, accountProfileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID }));
+  }
+  return result.length + variants.length + (input.otherTargetCount ?? 0) > 12 ? result : [...result, ...variants];
 }

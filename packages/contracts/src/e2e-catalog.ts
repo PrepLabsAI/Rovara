@@ -4,7 +4,7 @@ import {
   E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ERepositoryInspection, type E2ESetupProposal, type E2ETarget,
 } from "./e2e.js";
 import { canonicalJson } from "./canonical-json.js";
-import { bindE2EApplicationAccountTargets, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
+import { bindE2EAnonymousAccountTargets, bindE2EApplicationAccountTargets, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
 import { WEB_API_RUNTIME_PROFILE_ID } from "./e2e-web-api-qualification.js";
 import { e2ePackageManifests, e2eRunnerUnsafePath, parseE2EPackageManifest } from "./e2e-package-manifests.js";
@@ -358,10 +358,12 @@ export function verifyE2ESetupProposal(proposal: E2ESetupProposal, snapshot: Ver
   return verified;
 }
 
-const NODE_WEB_PORT = "4317";
 const NODE_LOCKFILES = ["package-lock.json", "npm-shrinkwrap.json"];
 
-/** `npm ci` plus an optional `npm run build`, then `npm start`, for a root package that has a start script and a lockfile; otherwise null. */
+/**
+ * `npm ci` plus an optional `npm run build`, then `npm start`, for a root package that has a start script and a lockfile; otherwise null. The recipe sets no port: the Docker host
+ * owns it (the synthesized service contract of an inferred recipe is `{ listenPort: 4317, portEnv: "PORT" }`), so it gives the app `PORT=4317` itself.
+ */
 function nodeServiceRecipe(manifest: unknown, treePaths: ReadonlySet<string>): E2EAppRecipe | null {
   if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) return null;
   const scripts = (manifest as { scripts?: unknown }).scripts;
@@ -371,7 +373,7 @@ function nodeServiceRecipe(manifest: unknown, treePaths: ReadonlySet<string>): E
   const command = (args: string[], timeoutMs: number) => ({ program: "npm", args, cwd: ".", timeoutMs, env: {} });
   const body = {
     schemaVersion: 1 as const, build: [command(["ci"], 300_000), ...(script("build") ? [command(["run", "build"], 300_000)] : [])],
-    launch: { kind: "service" as const, start: { ...command(["start"], 60_000), env: { PORT: NODE_WEB_PORT } }, health: { path: "/", expectedStatus: 200 } },
+    launch: { kind: "service" as const, start: command(["start"], 60_000), health: { path: "/", expectedStatus: 200 } },
     serviceProfileIds: [], seedProfileId: "synthetic-seed-v1", accountProfileIds: ["synthetic"], allowedOrigins: ["app-origin"],
   };
   return E2EAppRecipeSchema.parse({ ...body, recipeDigest: createHash("sha256").update(canonicalJson(body)).digest("hex") });
@@ -532,7 +534,8 @@ function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCand
         if (projectContract === null && !projectContractMalformed) missingInputs.push({ inputId: "recipe-choice-" + (applications.length + 1), targetIds: target ? [target.targetId] : [], kind: "runtime", disposition: "blocking", reason: "The repository declares both start and dev recipes; choose the intended application launch contract", sourcePaths: [manifest.path] });
       }
     }
-    let appTargets = target ? [target, ...additionalTargets] : [];
+    const baseTargets = target ? [target, ...additionalTargets] : [];
+    let appTargets = baseTargets;
     if (projectContract !== null) {
       try { appTargets = bindE2EApplicationAccountTargets({ contract: projectContract, applicationId: appId, baseTargets: appTargets }); }
       catch {
@@ -546,7 +549,11 @@ function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCand
       if (appTargets.length) missingInputs.push({ inputId: "native-runtime-" + (applications.length + 1), targetIds: appTargets.map((item) => item.targetId), kind: "runtime", disposition: "mock-substitutable", reason: `The ${kind} build and launch runtime profile is unavailable in this phase`, sourcePaths: runtimeSources.length ? runtimeSources : [manifest.path] });
     }
     if (recipe !== null) recipeOrigins.set(appId, projectContract !== null ? "project-contract" : recipeFromInference ? "inferred-node" : "start-script");
-    addApplication(appId, kind, sourcePaths, appTargets, recipe);
+    // Every web and API target with a launch recipe also offers the signed-out visitor (Ruling AZ), as an implicit variant of its own: an application with no project contract can run
+    // those scenarios and no others. The variants are proposed targets, but not portable-operation targets: a signed-out visitor invokes no package export.
+    const appProposedTargets = (kind === "web" || kind === "api") && recipe !== null
+      ? [...appTargets, ...bindE2EAnonymousAccountTargets({ applicationId: appId, baseTargets, otherTargetCount: appTargets.length - baseTargets.length }).slice(baseTargets.length)] : appTargets;
+    addApplication(appId, kind, sourcePaths, appProposedTargets, recipe);
     for (const dependency of packageDependencies) {
       const candidates = manifestsByName.get(dependency) ?? [];
       const spec = deps[dependency];

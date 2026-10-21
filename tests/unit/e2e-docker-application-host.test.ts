@@ -12,6 +12,7 @@ import { executorContainerArgs } from "../../packages/verifier/src/host/executor
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { createOrdersExecutorPlan, type OrdersExecutorFixture } from "../support/e2e-orders-executor-fixture.js";
 import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
+import { createInferredExecutorPlan } from "../support/e2e-inferred-fixture.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
 import { MOCK_UNMOCKED_RESPONSE_DIGEST, mockRequestDigest, mockResponseDigest } from "../../packages/verifier/src/executor/mock-server.js";
 
@@ -1063,6 +1064,9 @@ describe("docker application host: the recipe-declared account seed", () => {
     expect(keeper).toEqual(expect.arrayContaining(["-d", "--network", "none", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--user", "1000:1000", "--entrypoint", "sleep"]));
     expect(keeper).not.toContain("0:0");
     expect(keeper.slice(-2)).toEqual(["rovara-executor:test", "infinity"]);
+    // The keeper only holds the volume open, so it may not write to it: the mount is read-only (N4), while the seed's and the app's stay read-write.
+    expect(fake.mountsFor("datakeep")).toEqual([`rovara-data-${s.runId}:/data:ro`]);
+    for (const kind of ["seed", "app"] as const) expect(fake.mountsFor(kind)).not.toContain(`rovara-data-${s.runId}:/data:ro`);
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
   });
 
@@ -1189,5 +1193,69 @@ describe("docker application host: the recipe-declared account seed", () => {
     fake.volumesSurviveRemoval = true;
     const result = await runWith(s);
     expect(result.lifecycle.cleanup).not.toBe("confirmed");
+  });
+});
+
+
+// Task 3.3 (Ruling AZ): an application with only an inferred launch recipe (no agentx.e2e project contract) runs signed-out scenarios. The host synthesizes the service contract
+// `{ listenPort: 4317, portEnv: "PORT" }`, has no account to create, and the inferred seed profile (`synthetic-seed-v1`) seeds nothing.
+describe("docker application host: an inferred-recipe app and the anonymous profile", () => {
+  const mountSource = (args: string[], suffix: string): string => {
+    const mount = args.find((value, index) => args[index - 1] === "-v" && value.endsWith(suffix));
+    if (mount === undefined) throw new Error(`no mount ending ${suffix}`);
+    return mount.slice(0, -suffix.length);
+  };
+  const inferredSetup = async (fake: FakeDockerCli, options: Partial<Parameters<typeof setup>[0]> = {}) => {
+    const s = await setup({ fake, fixture: createInferredExecutorPlan(), ...options });
+    const seen: { planText: string; owned: string[] } = { planText: "", owned: [] };
+    fake.onExecutor = (outDir, args) => {
+      okOutput(s)(outDir);
+      seen.planText = readFileSync(mountSource(args, ":/run/rovara/plan.json:ro"), "utf8");
+      seen.owned = readdirSync(mountSource(fake.argsFor("app"), ":/app/.owned:ro"));
+    };
+    return { s, seen };
+  };
+  const rows = (fake: FakeDockerCli) => fake.calls.filter((args) => args[0] === "run");
+  const nameOf = (args: string[]) => args[args.indexOf("--name") + 1]!;
+
+  it("runs an app with no project contract: the recipe's own build and start commands, the port in PORT, and every container of the run removed", async () => {
+    const fake = new FakeDockerCli(); const { s } = await inferredSetup(fake);
+    const result = await runWith(s);
+    expect(result.unavailableReason, JSON.stringify(s.host.readDiagnostics(s.runId))).toBeNull();
+    const app = fake.argsFor("app");
+    expect(app.slice(app.indexOf("node:build-test"))).toEqual(["node:build-test", "npm", "start"]);
+    expect(app).toEqual(expect.arrayContaining(["-e", "PORT=4317"]));
+    expect(app).not.toContain("APP_PORT=4317");
+    // The source copy, then the recipe's `npm ci` in a build container of its own.
+    const commands = rows(fake).filter((args) => nameOf(args).startsWith("rovara-build-")).map((args) => args.slice(args.indexOf("node:build-test") + 1));
+    expect(commands).toHaveLength(2);
+    expect(commands[1]).toEqual(["npm", "ci"]);
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
+  it("creates no account, no seed, no data volume and no keeper: the plan has no accounts and the owned mount no seed file or accounts file", async () => {
+    const fake = new FakeDockerCli(); const { s, seen } = await inferredSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    expect(E2EExecutorPlanSchema.parse(JSON.parse(seen.planText)).accounts).toEqual([]);
+    expect(seen.owned).toEqual([]);
+    expect(() => fake.argsFor("seed")).toThrow();
+    expect(() => fake.argsFor("datakeep")).toThrow();
+    // (The stale-run sweep that starts every allocation only lists volumes.)
+    expect(fake.calls.filter((args) => args[0] === "volume").map((args) => args[1])).toEqual(["ls"]);
+    expect(fake.argsFor("app").join(" ")).not.toMatch(/ROVARA_ACCOUNTS_FILE|ROVARA_DATA_DIR|ORDERS_TEST_SEED_FILE|\/data/);
+  });
+
+  it("gives the app and the executor no AWS_, AGENTX_, TOKEN or SECRET variable and no docker socket, like any other app", async () => {
+    const fake = new FakeDockerCli(); const { s } = await inferredSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    for (const args of [fake.argsFor("app"), fake.argsFor("executor")]) expect(args.join(" ")).not.toMatch(/docker\.sock|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|(^| )-p /);
+  });
+
+  it("reports the anonymous profile as the only account profile of the run to the output hook, and puts no credential in the plan mount", async () => {
+    const fake = new FakeDockerCli(); const profiles: string[][] = [];
+    const { s, seen } = await inferredSetup(fake, { onRunOutput: async (run) => { profiles.push([...run.accountProfileIds]); } });
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    expect(profiles).toEqual([["rovara-anonymous"]]);
+    expect(seen.planText).not.toMatch(/"password"|"email"/);
   });
 });

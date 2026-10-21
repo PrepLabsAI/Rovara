@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, Ec2RuntimeBindingSchema, canonicalJson,
-  deriveE2ESyntheticRuntimeAccountRef, E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs, e2eRuntimeKindMatchesTarget, inspectE2ERepository, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract,
+  E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs, e2eRuntimeKindMatchesTarget, inspectE2ERepository, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract,
   type E2EApplicationPlanIntent, type E2EApplicationProjectContract, type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type E2ERuntimeAccountRef, type E2ERuntimeAvailability,
   type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
 } from "@agentx/contracts";
@@ -76,6 +76,12 @@ function pinAccountRef(input: { accounts: ApplicationAccountsInput; contract: E2
   const planned = matching(input.planRefs);
   if (planned.length !== 1) return { ok: false, scope: "plan", reason: `the plan has ${planned.length === 0 ? "no" : "more than one"} runtime account reference for ${what}; copy runtimeAccountRefs from the planning context` };
   const planRef = planned[0]!;
+  // The signed-out visitor has no registry row, no revision to move and no expiry: its reference is the one fixed by the application, in every mode (Ruling AZ).
+  if (profileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) {
+    const fixed = e2eAnonymousRuntimeAccountRef(applicationId);
+    return sameRef(planRef, fixed) ? { ok: true, ref: fixed }
+      : { ok: false, scope: "plan", reason: `the runtime account reference for ${what} is not the fixed anonymous reference; copy runtimeAccountRefs from the planning context` };
+  }
   const registered = accounts.entries.some((entry) => entry.definition.applicationId === applicationId && entry.definition.profileId === profileId);
   const latest = (): E2ERuntimeAccountRef => {
     if (input.contract === null) throw new E2EAccountRegistryError("account-not-registered", `no account definition is registered for ${what}: the application has no project contract in the approved source`);
@@ -233,13 +239,15 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
         }
       }
       if (application?.recipe === undefined || application.recipe === null) return refuse(`application ${ref.applicationId} has no launch recipe in the approved source`);
-      // The synthetic account authorizes nothing beyond what the approved project contract declares: its profile must be a declared synthetic test account.
+      // The synthetic account authorizes nothing beyond what the approved project contract declares: its profile must be a declared synthetic test account. The signed-out visitor
+      // is not an account and the contract may not declare it, so it is held to no contract at all (Ruling AZ): it runs on an inferred launch recipe too.
       const contract = readE2EApplicationProjectContract(input.snapshot, ref.applicationId);
-      if (contract !== null && contract.accountProfiles.find((profile) => profile.profileId === ref.accountProfileId)?.scope !== "synthetic-test") {
+      const anonymous = ref.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID;
+      if (!anonymous && contract !== null && contract.accountProfiles.find((profile) => profile.profileId === ref.accountProfileId)?.scope !== "synthetic-test") {
         return refuse(`account profile ${ref.accountProfileId} is not declared as a synthetic test account by the application's project contract`);
       }
       // Test accounts are registered from the approved project contract; an application with only an inferred launch recipe has none to run as.
-      if (contract === null) return refuse(`needs-project-contract: application ${ref.applicationId} has no project contract in the approved source, so target ${ref.targetId} has no registered test account to run application scenarios as`);
+      if (!anonymous && contract === null) return refuse(`needs-project-contract: application ${ref.applicationId} has no project contract in the approved source, so target ${ref.targetId} has no registered test account to run application scenarios as`);
       // The account the case runs as is the registry's (owner decision D5), found by this application and this account profile, exactly one of it.
       const pinned = pinAccountRef({ accounts: input.accounts, contract, applicationId: ref.applicationId, profileId: ref.accountProfileId,
         recipeDigest: application.recipe.recipeDigest, planRefs: intent.runtimeAccountRefs, now: input.now });

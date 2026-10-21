@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
-  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eApplicationAccountDefinitionDigest } from "@agentx/contracts";
+  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationAccountDefinitionDigest } from "@agentx/contracts";
 import { registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
@@ -9,7 +9,7 @@ import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } fr
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
 import { applicationIntentDigest, evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
-import { binding, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { anonymousScenario, anonymousTargetOf, binding, inferredSnapshot, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 
 afterEach(disposeRealCandidates);
 const candidateOf = createRealCandidate;
@@ -73,6 +73,32 @@ describe("the application admission built for a single-kind round", () => {
     expect(decoded).toMatchObject({ taskId: input.taskId, operationId: input.operationId, operationFence: 3, workflowRevision: 7 });
     expect(decoded.round).toMatchObject({ roundId: input.roundId, taskId: input.taskId, operationId: input.operationId, operationFence: 3, workflowRevision: 7 });
     expect(decoded.round.groupBindings.every((item) => item.candidateDigest === candidate.source.candidate.digest && item.planDigest === input.planDigest)).toBe(true);
+  });
+
+  it("admits the signed-out scenarios of an app with no project contract (Ruling AZ): the worker's decoder reads them back, bound to the fixed anonymous reference, with the lockfile in the build identity", async () => {
+    const target = anonymousTargetOf(inferredSnapshot);
+    const fx = planFixture({ snapshot: inferredSnapshot, targetId: target, scenario: anonymousScenario(target) });
+    // The candidate holds the very manifest and lockfile the setup was approved on, and the app itself.
+    const candidate = await candidateOf({ "package.json": inferredSnapshot.sources[0]!.bytes.toString(), "package-lock.json": "{}", "server.js": "// the app\n" });
+    const recorded = approvedSelection(fx, [webApiRow("web")], fx.snapshot, fx.intent, []);
+    const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+      runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: binding,
+      buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: [], recordedSelection: recorded };
+    const built = buildApplicationExecutionAdmission(input);
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    const validated = validateE2EApplicationExecutionAdmission(decoded);
+    expect(validated.applicationSuites).toHaveLength(1);
+    const application = fx.application.applicationId;
+    expect(recorded.accountRefs).toEqual([e2eAnonymousRuntimeAccountRef(application)]);
+    expect(validated.applicationSuites[0]!.expectedCases.map((item) => item.accountProfileId)).toEqual(["rovara-anonymous"]);
+    expect(validated.applicationSuites[0]!.expectedCases[0]!.targetId).toBe(target);
+    expect(decoded.selectionInput.runtimeAccountRefs).toEqual([e2eAnonymousRuntimeAccountRef(application)]);
+    // The inferred recipe carries `npm ci`, and the build identity names the lockfile it installs from.
+    const { approval, build } = decoded.applicationBindings[0]!.value;
+    expect(approval.applications[0]!.recipe.build.map((command) => [command.program, ...command.args])).toEqual([["npm", "ci"]]);
+    expect(build.lockfileRefs.map((ref) => ref.path)).toEqual(["package-lock.json"]);
+    expect(built.kind).toBe("web");
   });
 
   it("returns the per-group run ids and the admission digest that verification of the round needs", async () => {

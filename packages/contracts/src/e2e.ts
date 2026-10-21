@@ -266,9 +266,12 @@ const CommandRecipeSchema = z.object({ program: id(256), args: z.array(z.string(
   if (/(^|[/\\])(?:sh|bash|zsh|cmd|powershell|pwsh)(\.exe)?$/i.test(command.program) || command.args.some((arg) => /(^|\s)(?:\||&&|;|>|<|\$\(|`)/.test(arg))) context.addIssue({ code: "custom", message: "shell wrappers and shell-interpreted arguments are forbidden" });
 });
 export type E2ECommandRecipe = z.infer<typeof CommandRecipeSchema>;
-/** The smallest, largest and default size of the data volume a recipe may ask for, in MiB. */
+/**
+ * The smallest, largest and default size of the data volume a recipe may ask for, in MiB. The volume is a tmpfs, so every MiB of it is runner memory, next to the app container, its
+ * seed and the executor: two concurrent groups at the cap use 1 GiB of an 8 GiB `m6g.large`. The cap stays at 512 until the sizes real apps ask for are measured live.
+ */
 export const E2E_DATA_VOLUME_MIN_MIB = 16;
-export const E2E_DATA_VOLUME_MAX_MIB = 1024;
+export const E2E_DATA_VOLUME_MAX_MIB = 512;
 export const E2E_DATA_VOLUME_DEFAULT_MIB = 256;
 /** The longest a recipe's seed command may run (Task 3.2). */
 export const E2E_SEED_COMMAND_MAX_TIMEOUT_MS = 60_000;

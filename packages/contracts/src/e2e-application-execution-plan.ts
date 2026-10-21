@@ -14,7 +14,7 @@ import { E2EPortableApprovalBindingSchema, type E2EPortableApprovalBinding } fro
 import { E2ERegisteredRuntimeSchema, type E2ERegisteredRuntime } from "./e2e-runtime-registration.js";
 import { e2eRuntimeKindMatchesTarget, resolveE2ERuntimeReadiness } from "./e2e-runtime-capabilities.js";
 import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } from "./e2e-openapi-fixture.js";
-import { e2eApplicationRecipeIsProjectContract } from "./e2e-application-accounts.js";
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eApplicationRecipeIsProjectContract } from "./e2e-application-accounts.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const stableId = (prefix: string, value: unknown) => prefix + sha256(canonicalJson(value));
@@ -306,8 +306,10 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
       continue;
     }
     const gatedApplicationId = ref?.applicationId ?? intent.unavailableTargetRefs?.find((item) => item.targetId === targetId)?.applicationId;
-    // Keyed on the profile the owner approved for the target (a ref cannot name a qualified profile the target does not carry).
+    // Keyed on the profile the owner approved for the target (a ref cannot name a qualified profile the target does not carry). Only a signed-out visitor needs no project contract:
+    // it has no account to register, so an inferred launch recipe is enough to run its scenarios (Ruling AZ), and a signed-in scenario on the same application stays unavailable.
     if (gatedApplicationId !== undefined && (policyTarget.kind === "web" || policyTarget.kind === "api")
+      && policyTarget.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID
       && isE2EQualifiedRuntimeProfileId(policyTarget.runtimeProfileId) && !hasProjectContract(gatedApplicationId)) {
       unavailable.push({ criterionId, reason: NEEDS_PROJECT_CONTRACT_REASON });
       continue;

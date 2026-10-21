@@ -1,5 +1,5 @@
 import {
-  E2EApiMockFixtureSchema, canonicalJson, createE2EOpenApiFixtureDescriptor, e2eApplicationRecipeIsProjectContract, inspectE2EPortableSource,
+  E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2EApiMockFixtureSchema, canonicalJson, e2eAnonymousRuntimeAccountRef, createE2EOpenApiFixtureDescriptor, e2eApplicationRecipeIsProjectContract, inspectE2EPortableSource,
   inspectE2ERepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract, redactSecrets, verifyE2ESourceSnapshot,
   type E2EAppRecipe, type E2EApplicationProjectContract, type E2EPolicy, type E2ERuntimeAccountRef, type E2ESourceSnapshot,
 } from "@agentx/contracts";
@@ -43,7 +43,8 @@ export type FeatureE2EPlanningContext = {
 };
 
 /**
- * Why a target is not executable for application scenarios: the placeholder profile, no launch recipe, only an inferred recipe, a runtime that is not READY
+ * Why a target is not executable for application scenarios: the placeholder profile, no launch recipe, only an inferred recipe (for a target that runs as an account: the
+ * anonymous variant of a target runs on an inferred recipe), a runtime that is not READY
  * now, an application with no source-owned package or native project identity to bind its account and source references to, or an account with no usable registered
  * definition (`no-account-definition`: none was written when the setup was approved, or the latest has expired or is not what the approved contract says).
  */
@@ -154,6 +155,8 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     const accountRefFor = (applicationId: string, profileId: string): E2ERuntimeAccountRef | undefined => {
       const key = `${applicationId}\0${profileId}`;
       if (accountRefCache.has(key)) return accountRefCache.get(key);
+      // The signed-out visitor is nobody's account: its reference is fixed by the application, and no registry row stands behind it (Ruling AZ).
+      if (profileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) return e2eAnonymousRuntimeAccountRef(applicationId);
       let contract: E2EApplicationProjectContract | null;
       try { contract = readE2EApplicationProjectContract(snapshot, applicationId); } catch { contract = null; }
       let ref: E2ERuntimeAccountRef | undefined;
@@ -170,7 +173,9 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       if (identitylessApplicationIds.has(target.applicationId) && targetedApplicationIds.has(target.applicationId)) return "no-source-identity";
       if (application === undefined || isE2EPlaceholderRuntimeProfileId(profileId)) return "runtime-unavailable";
       if (application.recipe === null) return "no-launch-recipe";
-      if (isE2EQualifiedRuntimeProfileId(profileId) && !e2eApplicationRecipeIsProjectContract(snapshot, target.applicationId, application.recipe)) return "needs-project-contract";
+      // A signed-out visitor needs no registered account, so an inferred launch recipe is enough for it (Ruling AZ); every signed-in target still needs the project contract.
+      if (isE2EQualifiedRuntimeProfileId(profileId) && target.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID
+        && !e2eApplicationRecipeIsProjectContract(snapshot, target.applicationId, application.recipe)) return "needs-project-contract";
       if (readyRuntimeFor(target) === undefined) return isE2EQualifiedRuntimeProfileId(profileId) ? "runtime-not-ready" : "runtime-unavailable";
       return isE2EQualifiedRuntimeProfileId(profileId) && accountRefFor(target.applicationId, target.accountProfileId) === undefined ? "no-account-definition" : undefined;
     };

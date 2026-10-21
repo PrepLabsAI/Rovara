@@ -9,7 +9,7 @@ import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkerInvocationSchema, createCandidateManifest, canonicalJson, e2eApiSchemaComponentId, readE2EApplicationProjectContract, workflowSendBackOffered,
+  E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkerInvocationSchema, createCandidateManifest, canonicalJson, e2eAnonymousRuntimeAccountRef, e2eApiSchemaComponentId, readE2EApplicationProjectContract, workflowSendBackOffered,
   workspaceSessionKey, type E2EScenario, type E2ESourceSnapshot, type WorkerInvocation,
 } from "@agentx/contracts";
 import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
@@ -40,6 +40,7 @@ import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import type { binding as projectBinding} from "../support/e2e-application-plan-fixtures.js";
 import { PROFILE, shaCanonical, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 import { ACCOUNTS_APP_FILES, ACCOUNTS_FIXTURE_ROOT, webAccountScenarios } from "../support/e2e-accounts-fixture.js";
+import { INFERRED_APP_FILES, INFERRED_FIXTURE_ROOT, anonymousWebScenarios } from "../support/e2e-inferred-fixture.js";
 
 // M1.3 native journeys. Each case is a whole path of an application round on a real Docker host, gated like `m1-web-journey.test.ts`: it needs Docker and the executor image, so it runs
 // where the CI `linux-runtime` job provides them (ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE) and skips cleanly everywhere else. Locally, colima's Docker works too
@@ -709,6 +710,67 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     await nothingLeftBehind();
   }
 
+  /**
+   * Task 3.3 (Ruling AZ), whole: an application with no `agentx.e2e` project contract (a start script and a lockfile; Rovara infers `npm ci` and `npm start`) planned with two signed-out
+   * scenarios on the implicit `rovara-anonymous` variant of its web target. The base target of the same app stays unavailable with `needs-project-contract`, so a signed-in scenario
+   * could not run there. The anonymous cases have no account binding: one account context, the fixed anonymous reference, no seed and no data volume. The round is PASS, the task
+   * goes on to review, and publication has checks.
+   */
+  async function anonymousInferredJourney() {
+    let plannedRef: { applicationId: string; profileId: string; revision: number; definitionDigest: string } | undefined;
+    const journey = await startJourney({ fixtureRoot: INFERRED_FIXTURE_ROOT, planningFiles: ["package.json", "package-lock.json"], instructions: "Show every visitor a welcome page",
+      plan: (context) => {
+        const anonymous = context.targets.find((item) => item.kind === "web" && item.accountProfileId === "rovara-anonymous");
+        expect(anonymous, JSON.stringify(context.targets)).toBeDefined();
+        // The inferred app's own (signed-in) target is not executable, and the planner is told why; only its signed-out variant is.
+        expect(context.unavailableReasons, JSON.stringify(context)).toEqual([{ targetId: "web-1", reason: "needs-project-contract" }]);
+        const scenarios = [anonymousWebScenarios.welcome, anonymousWebScenarios.noAdmin].map((item) => item.scenario(anonymous!.targetId));
+        const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [anonymous!.targetId], portableOperationRefs: [], mockFixtureRefs: [],
+          accountContextRefs: context.accountContextRefs.filter((ref) => ref.applicationId === anonymous!.applicationId && ref.profileId === "rovara-anonymous"),
+          scenarios, semanticExportDeltas: [],
+          applicationRuntimeRefs: context.runtimeRefs!.filter((ref) => ref.targetId === anonymous!.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! })),
+          runtimeAccountRefs: context.runtimeAccountRefs!.filter((ref) => ref.applicationId === anonymous!.applicationId && ref.profileId === "rovara-anonymous"), unavailableTargetRefs: [] });
+        plannedRef = intent.runtimeAccountRefs[0];
+        const { portableOperationRefs: _portable, mockFixtureRefs: _mocks, unavailableTargetRefs: _unavailable, ...plannerIntent } = intent;
+        void _portable; void _mocks; void _unavailable;
+        return { title: "Welcome every visitor", claims: [{ id: "1", text: "A signed-out visitor sees the welcome page and no admin link." }], plannerIntent };
+      } });
+    const { root, harness, taskKey, faux, workflowNow, operationRows, runOperation, writePreparationManifest, completeReadiness, nothingLeftBehind } = journey;
+    expect(plannedRef, "the plan carries the fixed anonymous reference").toEqual(e2eAnonymousRuntimeAccountRef(plannedRef!.applicationId));
+    // The coder's candidate: the fixture app as it ships (the repository held only its manifest and lockfile).
+    const candidate = join(root, "candidate-inferred");
+    await mkdir(candidate, { recursive: true });
+    for (const file of INFERRED_APP_FILES) await cp(join(INFERRED_FIXTURE_ROOT, file), join(candidate, file), { recursive: true });
+    faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidate}/." repo/demo/` })]), fauxAssistantMessage("I added the welcome page.")]);
+    await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
+    const implemented = await runOperation("IMPLEMENT");
+    expect(implemented.operation.status, JSON.stringify(implemented.operation)).toBe("SUCCEEDED");
+    const candidateDigest = workflowNow().candidate!.digest;
+    await completeReadiness();
+    const checks = await runOperation("CHECKS");
+    expect(checks.operation.status, JSON.stringify({ operation: checks.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
+    expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "REVIEW" });
+    const e2e = workflowNow().e2e as { failedRound?: unknown; qualifiedRound?: { candidateDigest: string } };
+    expect(e2e.qualifiedRound).toMatchObject({ candidateDigest });
+    expect(e2e.failedRound).toBeUndefined();
+    type CaseResult = { caseId: string; status: string; accountContextId: string; assertionReceipts: Array<{ assertionIndex: number; status: string }> };
+    const cases = (checks.operation.workflowE2EGroupEvidenceRefs as Array<{ evidenceRef: { key: string } }>).flatMap((ref) =>
+      (JSON.parse(harness.s3.objects.get(ref.evidenceRef.key)!) as { groupRun: { collection: { result: { cases: CaseResult[] } } } }).groupRun.collection.result.cases);
+    expect(cases, "two scenarios, two cases, one group").toHaveLength(2);
+    expect(cases.every((item) => item.status === "passed" && item.assertionReceipts.every((receipt) => receipt.status === "passed"))).toBe(true);
+    // Both cases are the anonymous profile's: one account context, the one the fixed reference gives, since a signed-out visitor is nobody's account.
+    const contextId = `app-account-${createHash("sha256").update(canonicalJson([plannedRef!.applicationId, plannedRef!.profileId, plannedRef!.revision, plannedRef!.definitionDigest])).digest("hex")}`.slice(0, 120);
+    expect(cases.map((item) => item.accountContextId)).toEqual([contextId, contextId]);
+    const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+    const task = harness.db.get(taskKey.pk, taskKey.sk) as never;
+    const presentation = await brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, task, operationRows(() => true), "owner");
+    expect(presentation?.shared.e2e.status).toBe("PASS");
+    const publicationChecks = await brokerModule.loadWorkflowE2EPublicationChecks(harness.brokerInput as never, task, operationRows(() => true));
+    expect(publicationChecks?.length, "a passing signed-out round gives publication checks").toBeGreaterThan(0);
+    // The app has no seed, no account and no volume: nothing of it is left on the Docker host.
+    await nothingLeftBehind();
+  }
+
   it("mocked-origin: the round is PASS with the inventory origin served by its approved mock, named on the result as mockedOrigins [inventory-v1]", async () => {
     await inventoryJourney("mocked-origin");
   }, 600_000);
@@ -723,6 +785,10 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
 
   it("results: five scenarios on three states of the code show a row each with its account and kind, a failure with a screenshot and expected versus actual, the baseline apart, and a passing round publishes", async () => {
     await inventoryJourney("results");
+  }, 1_800_000);
+
+  it("anonymous-inferred: an app with no project contract runs two signed-out scenarios on its anonymous variant; the plan is approved, the round is PASS with no account binding, and publication has checks", async () => {
+    await anonymousInferredJourney();
   }, 1_800_000);
 
   it("accounts: three accounts in two tenants in one group; the viewer-access defect is FAILED and sent back, the fixed candidate is PASS, and no seeded credential is stored anywhere", async () => {

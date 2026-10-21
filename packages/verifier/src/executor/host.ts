@@ -13,7 +13,7 @@ import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStatePro
 import { isPinnedRovaraHttpEngine } from "../rovara-http-engine-descriptor.js";
 import { createExecutorSessionStore } from "./accounts.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
-import { createPlaywrightFormLoginDriver, isSessionCookieSecret, parseSetCookie } from "./form-login.js";
+import { createPlaywrightFormLoginDriver, isSessionCookieSecret, isSessionStorageSecret, parseSetCookie } from "./form-login.js";
 import { casePlanFor, resolveE2EExecutorSuite } from "./suite.js";
 
 export const E2E_EXECUTOR_CONTEXT_ENV = "ROVARA_E2E_EXECUTOR_CONTEXT" as const;
@@ -178,11 +178,18 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       return opened;
     },
     closeCaseSession: async (sessionRef: string, signal: AbortSignal) => {
-      // The cookies the case's browser holds at the end, whoever set them (the application's headers, or its scripts): any that look like secrets are registered, so a value the
-      // application replaced after the sign-in is scrubbed from what the parent writes and is caught by the out scan. Best effort: a closed page has nothing to ask.
+      // What the case's browser holds at the end, whoever put it there (the application's headers, or its scripts): any cookie, and any local storage value, that looks like a secret
+      // (the same rules the sign-in's were held to) is registered, so a value the application replaced or wrote after the sign-in is scrubbed from what the parent writes and is
+      // caught by the out scan. Best effort: a closed page has nothing to ask.
       const owned = ownedContexts.get(sessionRef);
       ownedContexts.delete(sessionRef);
-      if (owned) { try { for (const cookie of await owned.cookies()) if (isSessionCookieSecret(cookie)) registerSecret(cookie.value); } catch { /* the context is gone */ } }
+      if (owned) {
+        try {
+          const kept = await owned.storageState();
+          for (const cookie of kept.cookies) if (isSessionCookieSecret(cookie)) registerSecret(cookie.value);
+          for (const item of kept.origins) for (const entry of item.localStorage) if (isSessionStorageSecret(entry.value)) registerSecret(entry.value);
+        } catch { /* the context is gone */ }
+      }
       const result = await store.close(sessionRef, signal);
       if (result.confirmed && activeSessionRef === sessionRef) { activeSessionRef = null; activeCaseId = null; }
       return result;
@@ -216,8 +223,10 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       applyToOwnedBrowserContext: async (sessionRef: string, browserContext: BrowserContext) => {
         // The session's cookies (the fixed orders cookie, or what the form login's context kept) and the local storage that context kept.
         const state = store.browserStateFor(sessionRef);
-        // A form login's values were told to the ledger when it signed in. The fixed orders cookie only when screenshots are taken: it is then a secret the captures are scanned
-        // for. It is redacted wherever it appears as text and never refuses evidence.
+        // A form login's values were told to the ledger when it signed in. The fixed orders cookie is told to it here only when screenshots are taken: it is then a secret the
+        // captures are scanned for. Either way it is registered with the executor parent like any session cookie (this context's responses, and the cookie jar when the case
+        // closes), so the parent redacts it wherever it appears as text and a page that echoes it ends the run `credential-leak`; the orders-auth/v1 cookie is a session secret like
+        // the form login's, and qualification pins no probe that echoes it.
         if (screenshots) for (const cookie of state.cookies) fileLedger.registerSessionSecret(cookie.value);
         await browserContext.addCookies(state.cookies.map((cookie) => ({ ...cookie })));
         for (const item of state.localStorage) {

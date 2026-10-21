@@ -12,6 +12,9 @@ import {
   E2EApplicationProjectContractSchema,
   deriveE2EApplicationRuntimeAccountRef,
   bindE2EApplicationAccountTargets,
+  bindE2EAnonymousAccountTargets,
+  E2E_ANONYMOUS_ACCOUNT_PROFILE_ID,
+  e2eAnonymousRuntimeAccountRef,
   e2eApplicationAccountDefinitionDigest,
   e2eApplicationAccountTargetId,
   e2eSyntheticAccountContractDigest,
@@ -140,7 +143,7 @@ describe("source-owned application account contracts", () => {
     expect(app?.recipe).toEqual(value.agentx.e2e.recipe);
     expect(app?.sourcePaths).toContain("apps/orders/package.json");
     expect(found.proposedTargets.filter((target) => target.applicationId === "orders-app").map((target) => target.accountProfileId).sort())
-      .toEqual(["orders-owner", "orders-viewer", "synthetic"]);
+      .toEqual(["orders-owner", "orders-viewer", "rovara-anonymous", "synthetic"]);
 
     const absent = sourceSnapshot(null);
     const legacy = inspectE2ERepository(absent.snapshot, absent.candidate).inspection;
@@ -206,5 +209,68 @@ describe("source-owned application account contracts", () => {
       expect(inspection.applications[0]?.recipe).toBeNull();
       expect(inspection.missingInputs.some((input) => input.inputId.startsWith("application-project-contract-"))).toBe(false);
     });
+  });
+});
+
+describe("the reserved anonymous account profile (Ruling AZ)", () => {
+  const application = "orders-app";
+  const projectWith = (edit: (project: ProjectSource["agentx"]["e2e"]) => void) => {
+    const project = structuredClone(sourceProject(sourceSnapshot().snapshot.sources[0]!.bytes).agentx.e2e);
+    edit(project);
+    return project;
+  };
+
+  it("has the fixed account reference of the plan: revision 1 and a digest of the domain string and the application id, with no registry row behind it", () => {
+    expect(E2E_ANONYMOUS_ACCOUNT_PROFILE_ID).toBe("rovara-anonymous");
+    const ref = e2eAnonymousRuntimeAccountRef(application);
+    expect(ref).toEqual({ applicationId: application, profileId: "rovara-anonymous", revision: 1, definitionDigest: sha(`rovara-anonymous/v1\0${application}`) });
+    expect(e2eAnonymousRuntimeAccountRef("another-app").definitionDigest).not.toBe(ref.definitionDigest);
+  });
+
+  it("is refused when a contract declares it, in the account inventory, the recipe's list or a target variant, with the reserved-account-profile reason", () => {
+    const declared = projectWith((project) => {
+      project.accountProfiles.push({ ...project.accountProfiles[0]!, profileId: "rovara-anonymous" });
+      project.recipe = { ...project.recipe, accountProfileIds: [...project.recipe.accountProfileIds, "rovara-anonymous"] };
+    });
+    expect(() => E2EApplicationProjectContractSchema.parse(declared)).toThrow(/reserved-account-profile/);
+    const variant = projectWith((project) => { project.targetAccounts.push({ baseTargetId: "target-orders-web", profileId: "rovara-anonymous" }); });
+    expect(() => E2EApplicationProjectContractSchema.parse(variant)).toThrow(/reserved-account-profile/);
+    const listed = projectWith((project) => { project.recipe = { ...project.recipe, accountProfileIds: [...project.recipe.accountProfileIds, "rovara-anonymous"] }; });
+    expect(() => E2EApplicationProjectContractSchema.parse(listed)).toThrow(/reserved-account-profile/);
+    expect(() => E2EApplicationProjectContractSchema.parse(projectWith(() => undefined))).not.toThrow();
+  });
+
+  it("is offered by every web and API target through an implicit variant, copied from the base target, and by nothing else", () => {
+    const web = { targetId: "web-1", applicationId: application, runtimeProfileId: "web-phase-unavailable", accountProfileId: "synthetic", kind: "web" as const, browser: "chromium" as const, viewport: { width: 1280, height: 720 } };
+    const api = { targetId: "api-2", applicationId: application, runtimeProfileId: "api-phase-unavailable", accountProfileId: "synthetic", kind: "api" as const, protocol: "http" as const, originRef: "app-origin" };
+    const desktop = { targetId: "desktop-3", applicationId: application, runtimeProfileId: "electron-phase-unavailable", accountProfileId: "synthetic", kind: "desktop" as const, os: "linux" as const, driver: "electron" as const, appId: application };
+    const targets = bindE2EAnonymousAccountTargets({ applicationId: application, baseTargets: [web, api, desktop] });
+    expect(targets.slice(0, 3)).toEqual([web, api, desktop]);
+    expect(targets.slice(3)).toEqual([
+      { ...web, targetId: "web-1-anonymous", accountProfileId: "rovara-anonymous" },
+      { ...api, targetId: "api-2-anonymous", accountProfileId: "rovara-anonymous" },
+    ]);
+    // Asking twice adds nothing; a full inventory (12, counting the targets the application has besides its bases) keeps the targets it has.
+    expect(bindE2EAnonymousAccountTargets({ applicationId: application, baseTargets: targets })).toEqual(targets);
+    const full = Array.from({ length: 12 }, (_, index) => ({ ...web, targetId: `web-${index + 1}` }));
+    expect(bindE2EAnonymousAccountTargets({ applicationId: application, baseTargets: full })).toEqual(full);
+    expect(bindE2EAnonymousAccountTargets({ applicationId: application, baseTargets: [web], otherTargetCount: 11 })).toEqual([web]);
+    expect(bindE2EAnonymousAccountTargets({ applicationId: application, baseTargets: [web], otherTargetCount: 10 })).toHaveLength(2);
+    expect(() => bindE2EAnonymousAccountTargets({ applicationId: "another-app", baseTargets: [web] })).toThrow();
+  });
+
+  it("is proposed for an app with only an inferred launch recipe and for one with a project contract, and for an app with no launch recipe it is not", () => {
+    const inferredBytes = Buffer.from(JSON.stringify({ name: "shop-web", scripts: { start: "node server.js" } }));
+    const lockBytes = Buffer.from("{}");
+    const commitSha = "c".repeat(40); const treeSha = "d".repeat(40);
+    const candidate = createCandidateManifest([{ repositoryId: "repo", commitSha, treeSha }]);
+    const inferred = { candidate, commitSha, treeSha, treeComplete: true, treePaths: ["package-lock.json", "package.json"], sources: [
+      { path: "package.json", sha256: sha(inferredBytes.toString("utf8")), bytes: inferredBytes, kind: "blob" }, { path: "package-lock.json", sha256: sha("{}"), bytes: lockBytes, kind: "blob" }] } as E2ESourceSnapshot;
+    const found = inspectE2ERepository(inferred, candidate).inspection;
+    expect(found.applications[0]?.recipe).not.toBeNull();
+    expect(found.proposedTargets.map((target) => [target.targetId, target.kind, target.accountProfileId])).toEqual([
+      ["web-1", "web", "synthetic"], ["web-1-anonymous", "web", "rovara-anonymous"]]);
+    const bare = sourceSnapshot(null);
+    expect(inspectE2ERepository(bare.snapshot, bare.candidate).inspection.proposedTargets.map((target) => target.accountProfileId)).toEqual(["synthetic"]);
   });
 });

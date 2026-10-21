@@ -39,6 +39,8 @@ export function withTestPortableApproval<T extends E2EPlanSelectionInput>(input:
   const semanticApproval = { artifactId: "test-semantic-approval/v1", digest: sha256(canonicalJson({ planDigest: input.planDigest, candidateDigest: input.candidateDigest, operations: operations.map((item) => item.descriptorDigest), mockFixtures })) };
   const accountMap = new Map<string, E2ESyntheticAccountContext>();
   for (const target of discovered.inspection.proposedTargets) {
+    // A signed-out visitor invokes no package export, and the portable approval holds no account context for it.
+    if (target.accountProfileId === "rovara-anonymous") continue;
     const manifest = discovered.portableOperations.find((operation) => operation.applicationId === target.applicationId)?.manifestPath;
     const source = manifest ? sourceByPath.get(manifest) : undefined;
     if (!source) continue;
