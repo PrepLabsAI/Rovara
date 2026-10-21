@@ -1,4 +1,5 @@
 import { request } from "node:http";
+import { connect as connectSocket, type Socket } from "node:net";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,6 +57,7 @@ function post(body: unknown, options: { method?: string; path?: string; raw?: bo
   return new Promise((resolve, reject) => {
     const req = request({ socketPath, path: options.path ?? "/v1/generate", method: options.method ?? "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } }, (res) => {
       const chunks: Buffer[] = [];
+      res.on("error", reject);
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
         const text = Buffer.concat(chunks).toString("utf8");
@@ -85,6 +87,65 @@ async function start(invoke: E2EInvoke, extra: Record<string, unknown> = {}, def
 }
 
 const okInvoke = (calls: unknown[] = []): E2EInvoke => async (input) => { calls.push(input.call); return tapAnswer(); };
+
+describe("e2e model proxy: clients that go away", () => {
+  const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+  const head = (length: number) => `POST /v1/generate HTTP/1.1\r\nhost: proxy\r\ncontent-type: application/json\r\ncontent-length: ${length}\r\n\r\n`;
+
+  /** A raw client with an error handler of its own, so only the proxy's behaviour is under test. */
+  function rawClient(act: (socket: Socket) => void | Promise<void>): Promise<void> {
+    return new Promise((resolve) => {
+      const socket = connectSocket(socketPath);
+      socket.on("error", () => undefined);
+      socket.on("close", () => resolve());
+      socket.on("connect", () => { void Promise.resolve(act(socket)); });
+    });
+  }
+
+  it("never throws an uncaught error when a client hangs up mid-body, mid-call, or right after sending, and keeps serving", async () => {
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown) => { uncaught.push(error); };
+    process.on("uncaughtException", onUncaught);
+    process.on("unhandledRejection", onUncaught);
+    try {
+      let slow = false;
+      let entered: () => void = () => undefined;
+      const invoke: E2EInvoke = async () => { if (slow) { entered(); await wait(60); } return tapAnswer(); };
+      const { proxy } = await start(invoke);
+      const bodyFor = (callIndex: number) => JSON.stringify(channelRequest({ callIndex }));
+      const body = bodyFor(0);
+
+      // 1. Hangs up with part of the body sent.
+      await rawClient(async (socket) => { socket.write(head(Buffer.byteLength(body)) + body.slice(0, 40)); await wait(20); socket.destroy(); });
+      // 2. Hangs up half way through an oversized body, while the proxy is still reading.
+      await rawClient(async (socket) => { socket.write(head(400_000) + "x".repeat(150_000)); await wait(20); socket.destroy(); });
+      // 3. Sends a whole request and goes away while the call is in flight, so the answer meets a dead socket.
+      slow = true;
+      const inFlight = new Promise<void>((resolve) => { entered = resolve; });
+      const third = bodyFor(2);
+      await rawClient(async (socket) => { socket.write(head(Buffer.byteLength(third)) + third); await inFlight; socket.destroy(); });
+      await wait(120);
+      slow = false;
+      // 4. Half-closes right after sending and never reads the answer.
+      const fourth = bodyFor(3);
+      await rawClient(async (socket) => { socket.end(head(Buffer.byteLength(fourth)) + fourth); await wait(80); socket.destroy(); });
+
+      // The proxy still serves a well-behaved client, and still closes.
+      const reply = await post(channelRequest({ callIndex: 4 }));
+      expect(reply.body.result.status).toBe("ok");
+      const summary = await proxy.close();
+      expect(summary.receipts.map((item) => item.callIndex)).toEqual([0, 1, 2, 3, 4]);
+      // The call whose client left was still served and recorded; the receipt does not depend on anyone reading the answer.
+      expect(summary.receipts[2]!.outcome).toBe("ok");
+      expect(summary.receipts[4]!.outcome).toBe("ok");
+      await wait(50);
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off("uncaughtException", onUncaught);
+      process.off("unhandledRejection", onUncaught);
+    }
+  });
+});
 
 describe("e2e model proxy: socket", () => {
   it("listens on a socket with mode 0600 and unlinks it on close", async () => {

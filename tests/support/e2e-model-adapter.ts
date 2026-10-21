@@ -43,6 +43,7 @@ function exchange(socketPath: string, body: unknown, signal: AbortSignal | undef
   return new Promise((resolve, reject) => {
     const req = request({ socketPath, path: "/v1/generate", method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) }, ...(signal ? { signal } : {}) }, (res) => {
       const chunks: Buffer[] = [];
+      res.on("error", reject);
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); } catch (error) { reject(error instanceof Error ? error : new Error("unreadable channel answer")); } });
     });

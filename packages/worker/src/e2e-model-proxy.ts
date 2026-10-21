@@ -166,10 +166,14 @@ function readBody(req: IncomingMessage, limit: number): Promise<BodyRead> {
   });
 }
 
+/** Answers a client that may already have gone: a write to a destroyed socket is dropped, never thrown. */
 function send(res: ServerResponse, status: number, body: unknown, closeAfter = false): void {
-  const payload = Buffer.from(JSON.stringify(body), "utf8");
-  res.writeHead(status, { "content-type": "application/json", "content-length": payload.length, ...(closeAfter ? { connection: "close" } : {}) });
-  res.end(payload);
+  if (res.destroyed || res.writableEnded || res.socket?.destroyed === true) return;
+  try {
+    const payload = Buffer.from(JSON.stringify(body), "utf8");
+    res.writeHead(status, { "content-type": "application/json", "content-length": payload.length, ...(closeAfter ? { connection: "close" } : {}) });
+    res.end(payload);
+  } catch { /* The client is gone; the receipt was already written. */ }
 }
 
 export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise<E2EModelProxy> {
@@ -339,6 +343,9 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
   }
 
   const server: Server = createServer({ requestTimeout: 15_000, headersTimeout: 10_000, keepAliveTimeout: 1_000 }, (req, res) => {
+    // A client that hangs up mid-request or mid-answer ends a request or response with an error, which is not ours to throw.
+    req.on("error", () => undefined);
+    res.on("error", () => undefined);
     void (async () => {
       if (req.url !== "/v1/generate") { req.resume(); send(res, 404, { error: "not-found" }); return; }
       if (req.method !== "POST") { req.resume(); res.setHeader("allow", "POST"); send(res, 405, { error: "method-not-allowed" }); return; }
@@ -352,6 +359,10 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     })();
   });
 
+  // A connection that breaks (EPIPE or ECONNRESET on a write to a client that went away) is dropped, never an uncaught error.
+  server.on("connection", (socket) => { socket.on("error", () => undefined); });
+  server.on("clientError", (_error, socket) => { if (!socket.destroyed) socket.destroy(); });
+  server.on("error", () => undefined);
   // The socket lives in a directory only its owner can use, so there is no window in which another user could reach it
   // between bind and chmod, and no change to the process umask (which every other file the worker creates would share).
   const directory = dirname(socketPath);

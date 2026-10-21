@@ -174,8 +174,13 @@ export async function bedrockLoopback(respond: (request: { path: string; body: R
   const requests: BedrockLoopback["requests"] = [];
   const server: Http2Server = createHttp2Server();
   const sessions = new Set<ServerHttp2Session>();
-  server.on("session", (session) => { sessions.add(session); session.on("close", () => sessions.delete(session)); });
+  // A client that goes away while the fake is still writing (the SDK ends its session as soon as it has what it needs)
+  // makes the write fail with EPIPE. That is not a test failure, so no stream, session or server error may go unhandled.
+  server.on("session", (session) => { sessions.add(session); session.on("close", () => sessions.delete(session)); session.on("error", () => undefined); });
+  server.on("sessionError", () => undefined);
+  server.on("error", () => undefined);
   server.on("stream", (stream, headers) => {
+    stream.on("error", () => undefined);
     const chunks: Buffer[] = [];
     stream.on("data", (chunk: Buffer) => chunks.push(chunk));
     stream.on("end", () => {
