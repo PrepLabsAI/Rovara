@@ -1,4 +1,4 @@
-import { WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson, type E2EApplicationSelectionRecord } from "@agentx/contracts";
+import { WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson, type E2EApplicationSelectionRecord } from "@agentx/contracts";
 
 /**
  * A dispatch of an approved application round that must not happen, with the plain reason the owner sees. It is terminal for that dispatch: the
@@ -28,6 +28,13 @@ export class ApplicationPlanDefect extends ApplicationDispatchRefusal {
  */
 export function applicationRuntimeRefusal(reason: string): ApplicationDispatchRefusal {
   return new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}${shortLine(reason, 250)}`);
+}
+/**
+ * A test account the plan was approved with is not the registered one any more (a newer revision, an expired definition, a definition the approved contract no longer stands
+ * behind). Like a requalified runtime, it is fixed by approving the plan again, which one retry does: the block text begins with `WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX`.
+ */
+export function applicationAccountsRefusal(reason: string): ApplicationDispatchRefusal {
+  return new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX}${shortLine(reason, 330)}`);
 }
 /**
  * A refusal to dispatch an application round whose inputs are not usable (the candidate's build source, its manifest, the runtime inputs or the plan itself). The

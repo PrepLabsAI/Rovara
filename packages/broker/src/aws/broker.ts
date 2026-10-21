@@ -213,9 +213,10 @@ import {
   type E2EPolicy,
   type PlanApprovalRef,
   type E2EApplicationPlanIntent,
-  type E2EApplicationSelectionRecord,
+  type E2EApplicationSelectionRecord, type E2ERuntimeAccountRef,
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema,
   E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
+  WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   type E2EApplicationExecutionAdmission,
   type E2ERegisteredRuntime,
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
@@ -269,6 +270,8 @@ import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePl
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
 import { applicationRuntimeRowFences, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
+import { accountRegistryFences, readAccountRegistryEntries, writeSetupAccountDefinitions } from "./e2e-account-registry.js";
+import { E2EAccountRegistryError, type E2EAccountRegistryEntry } from "../e2e/application-account-registry.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import {
@@ -280,9 +283,9 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, PROJECT_RECORD_NEEDS_ADMIN, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
 import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
-import { applicationIntentDigest, applicationRoundIntent, evaluateApplicationPlanApproval, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
+import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval, type ApplicationAccountsInput, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
-import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
+import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
 import { applicationEvidenceLimits, verifyApplicationE2EEvidence } from "../e2e/application-evidence.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
@@ -1243,6 +1246,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const existing = await getItem<Record<string, unknown>>(dependencies, approvalKey);
         if (existing) {
           if (existing.ownerKey !== identity.ownerKey || existing.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
+          // A stored approval whose account definitions were not all written (the write failed after the decision was stored) is completed by the same call again.
+          if (approvalInput.decision === "approve") await writeSetupAccountDefinitions(dependencies, { projectId: approvalInput.projectName, snapshot, now: Date.now() });
           return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
         }
         await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: {
@@ -1251,6 +1256,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           repositoryUrl: artifact.repositoryUrl, identityMapping, decision: approvalInput.decision, approvedAt: new Date().toISOString(),
           policyDigest: createHash("sha256").update(canonicalJson(policy), "utf8").digest("hex"), policy, targetIds: proposal.targets.map(target => target.targetId),
         }, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
+        // Owner decision D5: approving a setup registers the synthetic test accounts its source contract declares (a new revision only where a definition changed).
+        if (approvalInput.decision === "approve") await writeSetupAccountDefinitions(dependencies, { projectId: approvalInput.projectName, snapshot, now: Date.now() });
         return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: false }, request.requestId);
       }
 
@@ -4104,7 +4111,9 @@ type ApplicationSelectionNow =
   | { ok: true; selection: E2EApplicationSelectionRecord; conditions: TransactItems;
     /** What the derivation read, for a caller that builds the admission from the same facts: the pinned policy, the approved setup and the READY rows. */
     inputs: { policy: E2EPolicy; setup: { snapshot: E2ESourceSnapshot; setupProposal: E2ESetupProposal; setupApproval: PlanApprovalRef }; rows: E2ERegisteredRuntime[];
-      runtimeCatalogId: string; runtimeBinding: ReturnType<typeof parseRuntimeBinding> } }
+      runtimeCatalogId: string; runtimeBinding: ReturnType<typeof parseRuntimeBinding>;
+      /** The registry rows of the plan's test accounts, as read for this derivation. */
+      accountEntries: E2EAccountRegistryEntry[] } }
   /** `unevaluable`: something it needs could not be read (try again later). `refused`: it read everything and the plan cannot run as approved. */
   | { ok: false; kind: "unevaluable" | "refused"; reason: string; scope?: ApplicationRefusalScope };
 
@@ -4114,7 +4123,7 @@ type ApplicationSelectionNow =
  * the transaction that uses the derivation commits. Plan approval records the result; dispatch derives it again and compares it with what was recorded.
  */
 async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, intent: E2EApplicationPlanIntent,
-  artifact: { id: string; sha256: string }): Promise<ApplicationSelectionNow> {
+  artifact: { id: string; sha256: string }, accounts: { mode: ApplicationAccountsInput["mode"]; pinned: readonly E2ERuntimeAccountRef[] }): Promise<ApplicationSelectionNow> {
   const unevaluable = (reason: string): ApplicationSelectionNow => ({ ok: false, kind: "unevaluable", reason });
   const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
   if (catalogId === undefined) return unevaluable("no runtime catalog is configured");
@@ -4135,14 +4144,25 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
     rows = await readProjectAdmittedE2ERuntimes({ runtimeCatalogId: catalogId, profileId: WEB_API_RUNTIME_PROFILE_ID, binding: parseRuntimeBinding(project.runtimeBinding), now,
       read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
   } catch { return unevaluable("the runtime catalog could not be read"); }
+  // The test accounts the plan's executable targets run as: the registry's rows for exactly those (application, account profile) pairs (Task 3.1).
+  const projectId = project.definition.name;
+  let accountEntries: E2EAccountRegistryEntry[];
+  try {
+    accountEntries = await readAccountRegistryEntries(dependencies, projectId, intent.applicationRuntimeRefs.map((ref) => ({ applicationId: ref.applicationId, profileId: ref.accountProfileId })));
+  } catch (error) {
+    if (error instanceof E2EAccountRegistryError) return { ok: false, kind: "refused", reason: error.message, scope: "accounts" };
+    return unevaluable("the test account registry could not be read");
+  }
   const evaluation = evaluateApplicationPlanApproval({ intent, taskId: task.taskId, artifact, snapshot: setup.snapshot, setupProposal: setup.setupProposal,
     setupApproval: setup.setupApproval, policy: policy.data, registeredRuntimes: rows, runtimeCatalogId: catalogId,
-    runtimeBinding: parseRuntimeBinding(project.runtimeBinding), now });
+    runtimeBinding: parseRuntimeBinding(project.runtimeBinding), now, accounts: { entries: accountEntries, mode: accounts.mode, pinned: accounts.pinned } });
   if (!evaluation.ok) return { ok: false, kind: "refused", reason: evaluation.reason, ...(evaluation.scope === undefined ? {} : { scope: evaluation.scope }) };
-  // The rows this derivation was made from must still be exactly those when the transaction commits.
-  const conditions: TransactItems = applicationRuntimeRowFences({ tableName: dependencies.tableName, rows, selected: evaluation.selection.runtimeRows });
+  // The rows and account pointers this derivation was made from must still be exactly those when the transaction commits.
+  const conditions: TransactItems = [...applicationRuntimeRowFences({ tableName: dependencies.tableName, rows, selected: evaluation.selection.runtimeRows }),
+    ...accountRegistryFences({ tableName: dependencies.tableName, projectId, refs: evaluation.accountRefs, entries: accountEntries })];
   return { ok: true, selection: evaluation.selection, conditions, inputs: { policy: policy.data,
-    setup: { snapshot: setup.snapshot, setupProposal: setup.setupProposal, setupApproval: setup.setupApproval }, rows, runtimeCatalogId: catalogId, runtimeBinding: parseRuntimeBinding(project.runtimeBinding) } };
+    setup: { snapshot: setup.snapshot, setupProposal: setup.setupProposal, setupApproval: setup.setupApproval }, rows, runtimeCatalogId: catalogId, runtimeBinding: parseRuntimeBinding(project.runtimeBinding),
+    accountEntries } };
 }
 
 /**
@@ -4151,12 +4171,16 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
  * Either way nothing is approved.
  */
 async function validateWorkflowE2EApplicationPlan(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, intent: E2EApplicationPlanIntent,
-  artifact: { id: string; sha256: string }): Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems }> {
-  const derived = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact);
+  artifact: { id: string; sha256: string }, options: { reapproval?: boolean } = {}): Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems }> {
+  // A first approval holds the plan's account refs to the registry's latest; a retry that approves the same plan again pins the latest instead (the plan keeps its refs).
+  const derived = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact, { mode: options.reapproval === true ? "reapprove" : "approve", pinned: [] });
   if (derived.ok) return { selection: derived.selection, conditions: derived.conditions };
   if (derived.kind === "unevaluable") {
     throw agentXError("RUNTIME_UNAVAILABLE",
       `the application E2E plan could not be checked for approval (${derived.reason}); nothing was approved. Keep this plan and approve it again once it can be checked, or request changes`);
+  }
+  if (derived.scope === "accounts") {
+    throw agentXError("CONFIG_INVALID", `the application E2E plan cannot be approved: ${derived.reason}. Request changes so the plan is written against the test accounts registered now, or ask an administrator to approve the project's setup again`);
   }
   throw agentXError("CONFIG_INVALID", `the application E2E plan cannot be approved: ${derived.reason}. Request changes to correct the plan, or approve it again once the runtime is ready`);
 }
@@ -4208,8 +4232,15 @@ async function codingPlanFeatureE2EContext(dependencies: AwsBrokerDependencies, 
         binding: parseRuntimeBinding(project.runtimeBinding), now: Date.now(), read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
     } catch { readyRuntimes = []; }
   }
+  // The planner is shown each target's account as the registry holds it now (Task 3.1). A registry that cannot be read leaves the targets without an account, so they are
+  // listed as unavailable rather than offered with a ref that approval would then refuse.
+  let accountRegistry: E2EAccountRegistryEntry[];
+  try {
+    accountRegistry = await readAccountRegistryEntries(dependencies, project.definition.name,
+      parsedPolicy.data.targets.map((target) => ({ applicationId: target.applicationId, profileId: target.accountProfileId })));
+  } catch { accountRegistry = []; }
   return buildFeatureE2EPlanningContext(parsedPolicy.data, snapshot, { origin: sourceOrigin,
-    preparedCommitSha: prepared?.baseCommitSha ?? null, readyRuntimes });
+    preparedCommitSha: prepared?.baseCommitSha ?? null, readyRuntimes, accountRegistry });
 }
 
 /** Whether the workspace belongs to a developer task with the gated workflow. */
@@ -5377,7 +5408,8 @@ export function workflowApplicationRouteDependencies(dependencies: AwsBrokerDepe
   return {
     workflowE2EPresentation: (input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }) => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
     workflowE2EPublicationChecks: (input: { task: DeveloperTaskRecord; operations: readonly unknown[] }) => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
-    validateWorkflowE2EApplicationPlan: (input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string } }) => validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact),
+    validateWorkflowE2EApplicationPlan: (input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string }; reapproval?: boolean }) =>
+      validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact, input.reapproval === true ? { reapproval: true } : {}),
     registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : (url: string) => dependencies.githubPullRequests.getRepositoryIdentity!(url),
     refreshTaskFeedback: (taskId: string) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
   };
@@ -6969,9 +7001,10 @@ export interface WorkflowE2EVerificationDiagnostic {
   authorityEvaluated?: true;
   /**
    * Why an application round's authority moved, when it was the runtime: `requalified` (the admitted row was replaced; the owner approves the plan again against the
-   * new row) or `unusable` (no ready row of that kind; an administrator qualifies the runtime again). The result callback words its block by it.
+   * new row) or `unusable` (no ready row of that kind; an administrator qualifies the runtime again). `accounts`: a test account the plan was approved with is not the
+   * registered one now (the owner approves the plan again). The result callback words its block by it.
    */
-  runtimeChange?: "requalified" | "unusable";
+  runtimeChange?: "requalified" | "unusable" | "accounts";
   /** Exact authority rows validated for this result, carried into the same task-state transaction. */
   authorityChecks?: Array<Record<string, unknown>>;
 }
@@ -7544,9 +7577,10 @@ export async function workflowE2EApplicationAuthorityIsValid(
     const parsedIntent = E2EApplicationPlanIntentSchema.safeParse(storedIntent);
     if (!parsedIntent.success) return reject("approved-plan-intent-is-not-readable");
     const intent = parsedIntent.data;
-    if (canonicalJson(applicationRoundIntent(intent)) !== canonicalJson(admission.intent)) return reject("approved-plan-is-not-the-admitted-intent");
     const recorded = E2EApplicationSelectionRecordSchema.safeParse(e2e.applicationSelection);
     if (!recorded.success) return reject("no-recorded-application-selection");
+    // The round ran with the account refs approval pinned, not the ones the stored plan was written with (they are the same until the plan is approved again).
+    if (canonicalJson(applicationRoundIntent(applicationIntentWithAccountRefs(intent, recorded.data.accountRefs))) !== canonicalJson(admission.intent)) return reject("approved-plan-is-not-the-admitted-intent");
     const projectAuthority = await loadCurrentProjectAuthority(dependencies, task, mark, reject);
     if (projectAuthority === undefined) return false;
     const { latestProject, setupApproval, catalogKey, policy } = projectAuthority;
@@ -7568,9 +7602,10 @@ export async function workflowE2EApplicationAuthorityIsValid(
       return reject("current-admission-runtime-plan-or-source-mismatch");
     }
     mark("current-runtime-rows");
-    const current = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact);
+    const current = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact, { mode: "current", pinned: recorded.data.accountRefs });
     if (!current.ok) {
       if (current.kind === "refused" && current.scope === "runtime" && diagnostic !== undefined) diagnostic.runtimeChange = "unusable";
+      if (current.kind === "refused" && current.scope === "accounts" && diagnostic !== undefined) diagnostic.runtimeChange = "accounts";
       return reject(`${current.kind === "unevaluable" ? "application-selection-unavailable" : "application-selection-refused"}: ${current.reason}`);
     }
     // The runtime rows the round was admitted on are the rows it is judged on: a row that is gone, not ready, or not exactly the admitted one was changed under the round.
@@ -9986,12 +10021,14 @@ async function requireApplicationSelectionStillCurrent(dependencies: AwsBrokerDe
   artifact: { id: string; sha256: string }): Promise<Extract<ApplicationSelectionNow, { ok: true }>> {
   const recorded = E2EApplicationSelectionRecordSchema.safeParse(task.workflow?.e2e?.applicationSelection);
   if (!recorded.success) throw applicationRoundRefusal("the approved plan has no recorded application selection");
-  const current = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact);
+  const current = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact, { mode: "current", pinned: recorded.data.accountRefs });
   if (!current.ok) {
     if (current.kind === "unevaluable") throw agentXError("RUNTIME_UNAVAILABLE", `the approved application selection could not be checked at dispatch (${current.reason})`);
-    // A plan that can never run as written goes back to planning; a runtime that cannot carry it asks for an administrator; any other change asks for the plan to be approved again.
+    // A plan that can never run as written goes back to planning; a runtime that cannot carry it asks for an administrator; a test account that moved on asks for the plan to be
+    // approved again (accounts-changed-reapprove); any other change asks for the plan to be approved again too.
     if (current.scope === "plan") throw new ApplicationPlanDefect(current.reason);
     if (current.scope === "runtime") throw applicationRuntimeRefusal(current.reason);
+    if (current.scope === "accounts") throw applicationAccountsRefusal(current.reason);
     throw new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}${current.reason}`);
   }
   const unchanged = applicationSelectionStillCurrent(recorded.data, current.selection);
@@ -10126,7 +10163,7 @@ async function startApplicationE2EChecksDispatch(
   const built = buildApplicationExecutionAdmission({ taskId: task.taskId, operationId, operationFence: workspace.fence + 1, workflowRevision: workflow.revision + 1, roundId: randomUUID(),
     runId: randomUUID, intent, artifact, snapshot, setupProposal: current.inputs.setup.setupProposal, setupApproval: current.inputs.setup.setupApproval, policy: current.inputs.policy,
     registeredRuntimes: current.inputs.rows, runtimeCatalogId: current.inputs.runtimeCatalogId, runtimeBinding: current.inputs.runtimeBinding,
-    buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored) }, planDigest, now: Date.now(), creatorAuthority,
+    buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored) }, planDigest, now: Date.now(), creatorAuthority, accountEntries: current.inputs.accountEntries,
     recordedSelection: E2EApplicationSelectionRecordSchema.parse(workflow.e2e?.applicationSelection) });
   const admissionRef = E2EWorkflowAdmissionRefSchema.parse({ schemaVersion: 1, kind: "application", taskId: task.taskId, workflowRevision: workflow.revision + 1, candidateDigest: candidate.digest,
     roundId: built.roundId, groupRunIds: built.groupRunIds, admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } });
@@ -10704,6 +10741,7 @@ async function completedWorkflowItems(
             verificationFailure = e2eDiagnostic.application === true && e2eDiagnostic.authorityEvaluated !== true && why !== undefined ? `admitted E2E evidence is incomplete or unknown (${why})`
               : e2eDiagnostic.runtimeChange === "requalified" && why !== undefined ? `${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}${why}`
               : e2eDiagnostic.runtimeChange === "unusable" && why !== undefined ? `${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}${why}`
+              : e2eDiagnostic.runtimeChange === "accounts" && why !== undefined ? `${WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX}${why}`
               : `current E2E authority snapshot could not be fenced at terminal persistence${why === undefined ? "" : ` (${why})`}`;
             throw new Error(verificationFailure);
           }

@@ -137,15 +137,56 @@ export type E2EApplicationAccountDefinition = z.infer<typeof E2EApplicationAccou
 export function e2eApplicationAccountDefinitionDigest(definition: E2EApplicationAccountDefinition): string {
   return sha(E2EApplicationAccountDefinitionSchema.parse(definition));
 }
+/** How long a synthetic account definition written at setup approval stays usable (owner decision D5). */
+export const E2E_SYNTHETIC_ACCOUNT_TTL_DAYS = 90;
+const SYNTHETIC_ACCOUNT_TTL_MS = E2E_SYNTHETIC_ACCOUNT_TTL_DAYS * 86_400_000;
+
+/** The pointer row of the registry: the newest revision of one account and the digest of the definition at that revision. */
+export const E2EApplicationAccountLatestSchema = z.object({
+  revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), definitionDigest: digest,
+}).strict();
+export type E2EApplicationAccountLatest = z.infer<typeof E2EApplicationAccountLatestSchema>;
+
+/**
+ * What a synthetic account definition binds to in the approved contract: the account's own declaration, the launch recipe without its account inventory, and the
+ * service contract. Another profile being added, removed or changed leaves it as it was, so a definition is written again only when its own account (or the launch
+ * recipe it runs under) changed. External-test definitions keep binding to the whole contract.
+ */
+export function e2eSyntheticAccountContractDigest(contractInput: E2EApplicationProjectContract, profileId: string): string {
+  const contract = E2EApplicationProjectContractSchema.parse(contractInput);
+  const profile = contract.accountProfiles.find((item) => item.profileId === profileId);
+  if (!profile) throw new Error("application account profile is not declared by the source contract");
+  const { recipeDigest: _recipeDigest, accountProfileIds: _accountProfileIds, ...recipe } = contract.recipe;
+  void _recipeDigest;
+  void _accountProfileIds;
+  return sha({ schemaVersion: "e2e-synthetic-account-contract/v1", profile, recipe, service: contract.service });
+}
+
+/**
+ * The definition the registry holds for a `synthetic-test` profile of the approved contract, as written at setup approval (owner decision D5): no credential and no
+ * connection, an expiry 90 days after `now`. The subject is derived from the account's identity, not chosen by anyone, so two profiles never share one.
+ */
+export function createE2ESyntheticAccountDefinition(input: { contract: E2EApplicationProjectContract; applicationId: string; profileId: string; revision: number; now: number }): E2EApplicationAccountDefinition {
+  const contract = E2EApplicationProjectContractSchema.parse(input.contract);
+  const profile = contract.accountProfiles.find((item) => item.profileId === input.profileId);
+  if (!profile || profile.scope !== "synthetic-test") throw new Error("only a profile the source contract declares as a synthetic test account has a synthetic definition");
+  return E2EApplicationAccountDefinitionSchema.parse({
+    schemaVersion: "e2e-application-account-definition/v1", applicationId: input.applicationId, profileId: profile.profileId, revision: input.revision,
+    contractDigest: e2eSyntheticAccountContractDigest(contract, profile.profileId), authProfileId: profile.authProfileId, seedProfileId: profile.seedProfileId,
+    subjectIdDigest: createHash("sha256").update(`rovara-synthetic-subject/v1\0${input.applicationId}\0${profile.profileId}`).digest("hex"),
+    tenantIdDigest: sha(profile.tenantRef), roleRef: profile.roleRef, credentialHandleId: null, connectionRef: null,
+    expiresAt: new Date(input.now + SYNTHETIC_ACCOUNT_TTL_MS).toISOString(),
+  });
+}
 export function deriveE2EApplicationRuntimeAccountRef(definitionInput: E2EApplicationAccountDefinition): E2ERuntimeAccountRef {
   const definition = E2EApplicationAccountDefinitionSchema.parse(definitionInput);
   return E2ERuntimeAccountRefSchema.parse({ applicationId: definition.applicationId, profileId: definition.profileId, revision: definition.revision,
     definitionDigest: e2eApplicationAccountDefinitionDigest(definition) });
 }
 /**
- * The account identity of a synthetic application account: one the host generates per run from the project's own recipe (Ruling C), so no
- * registered definition exists to read a revision or digest from. It is derived from the recipe alone, so the planning context can show it to
- * the planner and approval can recompute it; a different value in a plan is a claim about an account that does not exist.
+ * The M1.2 stand-in (Ruling AT): the account identity of a synthetic application account derived from the project's recipe alone, because no registered definition
+ * existed to read a revision or digest from. Owner decision D5 replaced it with the registry (`createE2ESyntheticAccountDefinition`, written when a setup is approved).
+ * It stays only so that a record approved under M1.2 can be read as it was: a new approval never accepts a ref equal to it.
  */
 export function deriveE2ESyntheticRuntimeAccountRef(input: { applicationId: string; accountProfileId: string; recipeDigest: string }): E2ERuntimeAccountRef {
   return E2ERuntimeAccountRefSchema.parse({ applicationId: input.applicationId, profileId: input.accountProfileId, revision: 1,
@@ -157,7 +198,7 @@ export function validateE2EApplicationAccountBinding(input: { contract: E2EAppli
   const definition = E2EApplicationAccountDefinitionSchema.parse(input.definition);
   const reference = E2ERuntimeAccountRefSchema.parse(input.expectedRef);
   const profile = contract.accountProfiles.find((item) => item.profileId === definition.profileId);
-  if (!profile || definition.contractDigest !== sha(contract) || definition.authProfileId !== profile.authProfileId
+  if (!profile || definition.contractDigest !== (profile.scope === "synthetic-test" ? e2eSyntheticAccountContractDigest(contract, profile.profileId) : sha(contract)) || definition.authProfileId !== profile.authProfileId
     || definition.seedProfileId !== profile.seedProfileId || definition.roleRef !== profile.roleRef
     || definition.applicationId.trim() === "" || definition.tenantIdDigest !== sha(profile.tenantRef) || definition.expiresAt <= input.now
     || (profile.scope === "external-test" && (definition.connectionRef === null || definition.credentialHandleId === null))
@@ -168,6 +209,19 @@ export function validateE2EApplicationAccountBinding(input: { contract: E2EAppli
   const derived = deriveE2EApplicationRuntimeAccountRef(definition);
   if (canonicalJson(reference) !== canonicalJson(derived)) throw new Error("application account reference is stale or differs from its protected definition");
   return derived;
+}
+
+/**
+ * The ref of a registered definition: the definition must be the one the account's latest pointer names, and it is held to the current approved contract (its
+ * contract digest, tenant, role and scope) and to its expiry at `now` (milliseconds). Every refusal is a throw; nothing is returned for a definition that is not current.
+ */
+export function resolveE2ELatestAccountRef(input: { contract: E2EApplicationProjectContract; definition: E2EApplicationAccountDefinition; latest: E2EApplicationAccountLatest; now: number }): E2ERuntimeAccountRef {
+  const definition = E2EApplicationAccountDefinitionSchema.parse(input.definition);
+  const latest = E2EApplicationAccountLatestSchema.parse(input.latest);
+  if (latest.revision !== definition.revision || latest.definitionDigest !== e2eApplicationAccountDefinitionDigest(definition)) {
+    throw new Error("application account definition is not the latest registered revision of its account");
+  }
+  return validateE2EApplicationAccountBinding({ contract: input.contract, definition, expectedRef: deriveE2EApplicationRuntimeAccountRef(definition), now: new Date(input.now).toISOString() });
 }
 
 export function bindE2EApplicationAccountTargets(input: { contract: E2EApplicationProjectContract; applicationId: string; baseTargets: readonly E2ETarget[] }): E2ETarget[] {

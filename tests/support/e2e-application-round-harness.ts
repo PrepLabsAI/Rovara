@@ -5,6 +5,7 @@ import {
 } from "@agentx/contracts";
 import { decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
+import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
@@ -76,11 +77,8 @@ const READY_API = { kind: "api" as const, profileId: PROFILE, supportedSteps: we
   supportedAssertions: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedAssertions };
 export const apiRowKey = e2eRegisteredRuntimeKey("catalog", PROFILE, "api");
 
-/**
- * Plans, approves and dispatches one application round, and returns the handles a test needs. The CHECKS operation it starts is the real one: its admission, round and
- * group run ids are the broker's own; `markRunning` is the only thing the missing worker would have done to it before it uploads.
- */
-export async function startApplicationRound(options: RoundOptions = {}) {
+/** Registers the project against its approved setup and writes the plan a planner would write, up to (not including) the owner's APPROVE. */
+async function prepareRound(options: RoundOptions = {}) {
   const applications = options.applications ?? 1;
   const accounts = options.accounts ?? [];
   if (accounts.length > 0 && applications !== 1) throw new Error("accounts need exactly one application");
@@ -113,7 +111,9 @@ export async function startApplicationRound(options: RoundOptions = {}) {
   await harness.finish(workspaceId, String(preparation.id), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: snapshot.commitSha }] } });
   const planning = operationRows((row) => row.workflowMode === "PLAN")[0]!;
 
-  const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_API] });
+  // The accounts the setup approval registered, as the broker shows them to the planner.
+  const accountRegistry = accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments"));
+  const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_API], accountRegistry });
   if (context.status !== "available") throw new Error(context.reason);
   const targets = context.targets.filter((item) => item.kind === "api" && (accounts.length === 0 || accounts.includes(item.accountProfileId)))
     .sort((left, right) => left.accountProfileId.localeCompare(right.accountProfileId) || left.targetId.localeCompare(right.targetId));
@@ -134,8 +134,28 @@ export async function startApplicationRound(options: RoundOptions = {}) {
 
   const workflowNow = () => (harness.db.get(taskKey.pk, taskKey.sk) as { workflow: { revision: number; stage: string; state: string; blockReason?: string; artifacts: Array<{ sha256: string }>;
     candidate?: { digest: string }; e2e?: Record<string, unknown> } }).workflow;
-  const approved = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: workflowNow().revision, decision: "APPROVE",
+  /** The owner's APPROVE of the written plan; a test that wants to change something before it (a registry row, say) calls it itself. */
+  const approve = () => harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: workflowNow().revision, decision: "APPROVE",
     reason: "Approve the exact application intent", artifactDigest: workflowNow().artifacts.at(-1)!.sha256 });
+  return { harness, snapshot, tree, taskId, taskKey, workspaceId, operationRows, workflowNow, approve, policy, intent, targets, projectBinding };
+}
+
+/**
+ * A round planned and waiting for the owner's APPROVE: for a test that changes something first (a registry row, say) and then approves (`approve`) or expects it refused.
+ */
+export async function prepareApplicationRound(options: RoundOptions = {}) {
+  const prepared = await prepareRound(options);
+  return { harness: prepared.harness as unknown as RoundBrokerHarness, taskId: prepared.taskId, workflowNow: prepared.workflowNow, approve: prepared.approve };
+}
+
+/**
+ * Plans, approves and dispatches one application round, and returns the handles a test needs. The CHECKS operation it starts is the real one: its admission, round and
+ * group run ids are the broker's own; `markRunning` is the only thing the missing worker would have done to it before it uploads.
+ */
+export async function startApplicationRound(options: RoundOptions = {}) {
+  const prepared = await prepareRound(options);
+  const { harness, snapshot, tree, taskId, taskKey, workspaceId, operationRows, workflowNow, policy, intent, targets, projectBinding } = prepared;
+  const approved = await prepared.approve();
   if (approved.status !== 200) throw new Error(`plan approval failed: ${JSON.stringify(approved.body)}`);
 
   // The candidate is a real commit whose tree holds the approved applications, exported the way the worker exports one at the end of an IMPLEMENT run.

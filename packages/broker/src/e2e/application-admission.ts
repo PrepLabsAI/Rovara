@@ -11,7 +11,8 @@ import {
   encodeE2EApplicationExecutionAdmission, validateE2EApplicationBuildSourceManifest, validateE2EApplicationExecutionAdmission, webApiApplicationLaunchTarget,
   type E2EApplicationCompilationContext,
 } from "@agentx/verifier";
-import { ApplicationPlanDefect, applicationRoundRefusal, applicationRuntimeRefusal } from "./application-dispatch-check.js";
+import { ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal } from "./application-dispatch-check.js";
+import type { E2EAccountRegistryEntry } from "./application-account-registry.js";
 import { BF_REASON, evaluateApplicationPlanApproval } from "./application-plan-approval.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -36,6 +37,8 @@ export type ApplicationAdmissionInput = Readonly<{
   runtimeCatalogId: string; runtimeBinding: Ec2RuntimeBinding;
   /** The candidate's exported build source: the manifest and the reference an admission carries (`candidateBuildSourceAdmissionReference`). */
   buildSource: { manifest: E2EApplicationBuildSourceManifest; reference: E2EApplicationBuildSourceRef };
+  /** The registry rows of the plan's test accounts, read for this dispatch. The round runs with the refs the approval pinned, and refuses if the registry no longer holds exactly them. */
+  accountEntries: readonly E2EAccountRegistryEntry[];
   /** What the Owner approved (`workflow.e2e.applicationSelection`): the selection derived here for the candidate must agree with it on targets, runtime rows and intent. */
   recordedSelection: E2EApplicationSelectionRecord;
   /** The plan identity of this round (its approved graph run, revision and actor), not the approval-time one. */
@@ -84,8 +87,11 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
 
   const evaluation = evaluateApplicationPlanApproval({ intent: input.intent, taskId: input.taskId, artifact: input.artifact, snapshot: input.snapshot, setupProposal: input.setupProposal,
     setupApproval: input.setupApproval, policy, registeredRuntimes: rows, runtimeCatalogId: input.runtimeCatalogId, runtimeBinding: input.runtimeBinding, now: input.now,
-    planDigest: input.planDigest });
-  if (!evaluation.ok) throw evaluation.scope === "runtime" ? applicationRuntimeRefusal(evaluation.reason) : evaluation.scope === "plan" ? new ApplicationPlanDefect(evaluation.reason) : refusal(evaluation.reason);
+    planDigest: input.planDigest, accounts: { entries: input.accountEntries, mode: "current", pinned: input.recordedSelection.accountRefs } });
+  if (!evaluation.ok) {
+    throw evaluation.scope === "runtime" ? applicationRuntimeRefusal(evaluation.reason) : evaluation.scope === "plan" ? new ApplicationPlanDefect(evaluation.reason)
+      : evaluation.scope === "accounts" ? applicationAccountsRefusal(evaluation.reason) : refusal(evaluation.reason);
+  }
   // The selection derived here, for the candidate and this round, must be the one the Owner approved on what decides what runs: the targets, the runtime rows and the intent.
   const approved = input.recordedSelection;
   const derived = evaluation.selection;

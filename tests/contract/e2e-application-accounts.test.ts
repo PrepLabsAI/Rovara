@@ -14,6 +14,7 @@ import {
   bindE2EApplicationAccountTargets,
   e2eApplicationAccountDefinitionDigest,
   e2eApplicationAccountTargetId,
+  e2eSyntheticAccountContractDigest,
   readE2EApplicationProjectContract,
   validateE2EApplicationAccountBinding,
 } from "../../packages/contracts/src/e2e-application-accounts.js";
@@ -96,7 +97,8 @@ describe("source-owned application account contracts", () => {
     const contract = sourceProject(sourceSnapshot().snapshot.sources[0]!.bytes).agentx.e2e;
     const definition = E2EApplicationAccountDefinitionSchema.parse({
       schemaVersion: "e2e-application-account-definition/v1", applicationId: "orders-app", profileId: "orders-owner", revision: 4,
-      contractDigest: sha(canonicalJson(contract)), authProfileId: "orders-auth/v1", seedProfileId: "orders-seed/v1",
+      // A synthetic account binds to its own slice of the contract (Task 3.1), so another profile changing does not move it; an external-test one to the whole contract.
+      contractDigest: e2eSyntheticAccountContractDigest(E2EApplicationProjectContractSchema.parse(contract), "orders-owner"), authProfileId: "orders-auth/v1", seedProfileId: "orders-seed/v1",
       subjectIdDigest: sha("orders-owner"), tenantIdDigest: sha(canonicalJson("tenant-a")), roleRef: "owner", credentialHandleId: "credential/orders-owner",
       connectionRef: null, expiresAt: "2027-01-01T00:00:00.000Z",
     });
@@ -106,6 +108,8 @@ describe("source-owned application account contracts", () => {
     expect(validateE2EApplicationAccountBinding({ contract, definition, expectedRef, now: "2026-10-17T12:00:00.000Z" })).toEqual(expectedRef);
     expect(() => validateE2EApplicationAccountBinding({ contract, definition: { ...definition, revision: 5 }, expectedRef, now: "2026-10-17T12:00:00.000Z" })).toThrow();
     expect(() => validateE2EApplicationAccountBinding({ contract, definition, expectedRef, now: "2027-01-01T00:00:00.000Z" })).toThrow();
+    const wholeContract = { ...definition, contractDigest: sha(canonicalJson(contract)) };
+    expect(() => validateE2EApplicationAccountBinding({ contract, definition: wholeContract, expectedRef: deriveE2EApplicationRuntimeAccountRef(wholeContract), now: "2026-10-17T12:00:00.000Z" })).toThrow();
     expect(() => E2EApplicationAccountDefinitionSchema.parse({ ...definition, password: "must-never-be-stored" })).toThrow();
   });
 

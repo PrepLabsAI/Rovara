@@ -12,6 +12,7 @@ import {
   type E2EScenario, type E2ESourceSnapshot, type WorkerInvocation,
 } from "@agentx/contracts";
 import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
+import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator } from "../../packages/broker/src/aws/dispatcher.js";
@@ -157,7 +158,8 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     const planning = operationRows((row) => row.workflowMode === "PLAN")[0]!;
     const readyWeb = { kind: "web" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedSteps,
       supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions };
-    const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [readyWeb] });
+    const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [readyWeb],
+      accountRegistry: accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments")) });
     if (context.status !== "available") throw new Error(context.reason);
     const targetOf = (profileId: string) => context.targets.find((item) => item.kind === "web" && item.accountProfileId === profileId);
     const target = targetOf("orders-owner");

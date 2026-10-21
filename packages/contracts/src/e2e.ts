@@ -190,6 +190,12 @@ export const E2EApplicationSelectionRecordSchema = z.object({
   unavailableCriteria: z.array(z.object({ criterionId: id(120), reason: id(500) }).strict()).max(64),
   runtimeRows: z.array(z.object({ kind: z.enum(["web", "api"]), profileId: id(120), runtimeCatalogId: id(120), catalogRevision: positiveInt, generation: positiveInt,
     bindingDigest: digest, capabilityDigest: digest, expiresAt: id(40) }).strict()).max(2),
+  /**
+   * The account refs the approval pinned, one per executable (application, account profile): the registry's latest at approval (owner decision D5). Dispatch and
+   * verification re-read the registry and refuse any other (`accounts-changed-reapprove`). A record approved under M1.2 has none: its plan's refs are the
+   * recipe-derived stand-ins, which are read as they are.
+   */
+  accountRefs: z.array(z.object({ applicationId: id(120), profileId: id(120), revision: positiveInt, definitionDigest: digest }).strict()).max(12).default([]),
   evaluatedAt: id(40),
 }).strict();
 export type E2EApplicationSelectionRecord = z.infer<typeof E2EApplicationSelectionRecordSchema>;

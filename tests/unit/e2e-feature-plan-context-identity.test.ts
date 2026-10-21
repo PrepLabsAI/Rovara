@@ -7,6 +7,7 @@ import { buildFeatureE2EPlanningContext, describeFeatureE2EExecutableKinds } fro
 import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { registryFor } from "../support/e2e-account-registry-fixtures.js";
 
 const sha = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 const candidate = createCandidateManifest([{ repositoryId: "ordinary-orders", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
@@ -75,7 +76,7 @@ describe("a qualified-profile policy with an identity-less target beside a ready
   const policy: E2EPolicy = { ...policyFor(setup.targets), baselineScenarioIds: [] };
   const apiCaps = webApiRuntimeCapabilities("api", "a".repeat(64));
   const ready = [{ kind: "api" as const, profileId: WEB_API_RUNTIME_PROFILE_ID, supportedSteps: apiCaps.supportedSteps, supportedAssertions: apiCaps.supportedAssertions }];
-  const context = buildFeatureE2EPlanningContext(policy, snapshot, { ...approvedSetup, readyRuntimes: ready });
+  const context = buildFeatureE2EPlanningContext(policy, snapshot, { ...approvedSetup, readyRuntimes: ready, accountRegistry: registryFor(snapshot) });
   if (context.status !== "available") throw new Error(context.reason);
   const identityless = context.unavailableReasons?.find((item) => item.reason === "no-source-identity")?.targetId;
   const readyTarget = context.runtimeRefs?.find((item) => !context.unavailableReasons?.some((reason) => reason.targetId === item.targetId))?.targetId;
@@ -122,7 +123,7 @@ describe("a qualified-profile policy with an identity-less target beside a ready
     const result = evaluateApplicationPlanApproval({ intent, taskId: "task-1", artifact: { id: "plan", sha256: "1".repeat(64) }, snapshot, setupProposal: setup,
       setupApproval: { artifactId: "setup", digest: "2".repeat(64) }, policy, registeredRuntimes: [webApiRow("api")], runtimeCatalogId: "catalog",
       runtimeBinding: { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" },
-      now: Date.now() });
+      now: Date.now(), accounts: { entries: registryFor(snapshot), mode: "approve", pinned: [] } });
     expect(result.ok).toBe(false);
     // With a READY api row the refusal cannot be the runtime's: it is the target's own missing identity.
     expect(result.ok).toBe(false);
