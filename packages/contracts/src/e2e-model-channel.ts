@@ -318,7 +318,20 @@ export function e2eModelReceiptAdmissibleForRound(receipt: E2EModelReceipt, roun
 
 export type E2EStepModelAccounting =
   | { ok: true; okCalls: number; totalCalls: number }
-  | { ok: false; code: "receipt-malformed" | "receipt-not-admissible" | "receipt-identity-mismatch" | "receipt-index-gap" | "receipt-order" | "over-step-budget" | "report-calls-mismatch" };
+  | { ok: false; code: "receipt-malformed" | "receipt-not-admissible" | "receipt-identity-mismatch" | "receipt-duplicate-id" | "receipt-index-gap" | "receipt-order" | "over-step-budget" | "budget-refused" | "report-calls-mismatch" };
+
+/** A limit from the caller, clamped to the owner's cap. Anything that is not a non-negative integer counts as 0, so a bad number fails closed. */
+const clampLimit = (value: unknown, cap: number): number => (typeof value === "number" && Number.isInteger(value) && value >= 0 ? Math.min(value, cap) : 0);
+
+function parseReceipts(raw: readonly unknown[]): E2EModelReceipt[] | null {
+  const receipts: E2EModelReceipt[] = [];
+  for (const item of raw) {
+    const parsed = E2EModelReceiptSchema.safeParse(item);
+    if (!parsed.success) return null;
+    receipts.push(parsed.data);
+  }
+  return receipts;
+}
 
 /**
  * The relation between one agent step's e2e report and the worker's receipts for it:
@@ -327,34 +340,36 @@ export type E2EStepModelAccounting =
  *   `ok` receipt, so `okReceipts === reportModelCalls`;
  * - every other receipt (provider error, timeout, budget, refusal, invalid output: a request that was refused,
  *   failed or re-sent, which e2e does not count) must have a non-`ok` outcome;
- * - all receipts count toward the step's call budget, whatever their outcome;
- * - the worker's per-step indexes are `0..n-1` with no gap or duplicate and start times that do not go backwards, so a
- *   dropped or added receipt shows;
- * - every receipt belongs to this run, case, step and route revision, and a scripted receipt only counts in a
- *   qualification round.
+ * - all receipts count toward the step's call budget, whatever their outcome. The limit is clamped to 8+4, whatever
+ *   the caller passes. Receipts the worker refused for budget (outcome `budget`) are the worker enforcing the limit, so
+ *   they do not count as an overrun: they surface as `budget-refused` (Task 4.4 maps it to the same code as the
+ *   budget-exhausted outcome), while more than the limit of other receipts is `over-step-budget` (a worker bug);
+ * - the worker's per-step indexes are `0..n-1` with no gap or duplicate and start times that do not go backwards, and
+ *   no receipt id repeats, so a dropped or added receipt shows;
+ * - every receipt belongs to this run, case, step and route revision, and was made by the route's provider and model;
+ *   a scripted receipt only counts in a qualification round.
  */
 export function checkE2EStepModelAccounting(input: {
   roundScope: E2ERoundScope;
-  identity: { runId: string; caseId: string; stepIndex: number; routeId: string; routeRevision: string };
+  identity: { runId: string; caseId: string; stepIndex: number; routeId: string; routeRevision: string; provider: E2EModelReceipt["provider"]; modelId: string };
   reportModelCalls: number;
   receipts: readonly unknown[];
   maxModelCallsPerStep: number;
 }): E2EStepModelAccounting {
-  const receipts: E2EModelReceipt[] = [];
-  for (const raw of input.receipts) {
-    const parsed = E2EModelReceiptSchema.safeParse(raw);
-    if (!parsed.success) return { ok: false, code: "receipt-malformed" };
-    receipts.push(parsed.data);
-  }
+  const receipts = parseReceipts(input.receipts);
+  if (receipts === null) return { ok: false, code: "receipt-malformed" };
+  const { identity } = input;
   for (const item of receipts) {
     if (!e2eModelReceiptAdmissibleForRound(item, input.roundScope).ok) return { ok: false, code: "receipt-not-admissible" };
-    const { identity } = input;
-    if (item.runId !== identity.runId || item.caseId !== identity.caseId || item.stepIndex !== identity.stepIndex || item.routeId !== identity.routeId || item.routeRevision !== identity.routeRevision) return { ok: false, code: "receipt-identity-mismatch" };
+    if (item.runId !== identity.runId || item.caseId !== identity.caseId || item.stepIndex !== identity.stepIndex || item.routeId !== identity.routeId
+      || item.routeRevision !== identity.routeRevision || item.provider !== identity.provider || item.modelId !== identity.modelId) return { ok: false, code: "receipt-identity-mismatch" };
   }
-  if (receipts.length > input.maxModelCallsPerStep) return { ok: false, code: "over-step-budget" };
+  if (new Set(receipts.map((item) => item.receiptId)).size !== receipts.length) return { ok: false, code: "receipt-duplicate-id" };
   const ordered = [...receipts].sort((left, right) => left.callIndex - right.callIndex);
   if (ordered.some((item, index) => item.callIndex !== index)) return { ok: false, code: "receipt-index-gap" };
   if (ordered.some((item, index) => index > 0 && Date.parse(item.startedAt) < Date.parse(ordered[index - 1]!.startedAt))) return { ok: false, code: "receipt-order" };
+  if (ordered.filter((item) => item.outcome !== "budget").length > clampLimit(input.maxModelCallsPerStep, MAX_STEP_CALLS)) return { ok: false, code: "over-step-budget" };
+  if (ordered.some((item) => item.outcome === "budget")) return { ok: false, code: "budget-refused" };
   const okCalls = ordered.filter((item) => item.outcome === "ok").length;
   if (okCalls !== input.reportModelCalls) return { ok: false, code: "report-calls-mismatch" };
   return { ok: true, okCalls, totalCalls: ordered.length };
@@ -362,20 +377,23 @@ export function checkE2EStepModelAccounting(input: {
 
 export type E2EGroupModelBudget =
   | { ok: true; totalCalls: number; inputTokens: number; agentSteps: number }
-  | { ok: false; code: "receipt-malformed" | "over-group-budget" };
+  | { ok: false; code: "receipt-malformed" | "over-group-budget" | "budget-refused" };
 
-/** Every receipt of a group, whatever its outcome, counts against the group's call, token and agent-step caps. */
+/**
+ * Every receipt of a group, whatever its outcome, counts against the group's call, token and agent-step caps. The
+ * limits are clamped to the owner's caps. As for a step, receipts refused for budget surface as `budget-refused`.
+ */
 export function checkE2EGroupModelBudget(input: { receipts: readonly unknown[]; budgets: Pick<E2EModelRouteBudgets, "maxModelCallsPerGroup" | "maxInputTokensPerGroup" | "maxAgentStepsPerGroup"> }): E2EGroupModelBudget {
-  const receipts: E2EModelReceipt[] = [];
-  for (const raw of input.receipts) {
-    const parsed = E2EModelReceiptSchema.safeParse(raw);
-    if (!parsed.success) return { ok: false, code: "receipt-malformed" };
-    receipts.push(parsed.data);
-  }
-  const inputTokens = receipts.reduce((total, item) => total + item.inputTokens, 0);
-  const agentSteps = new Set(receipts.map((item) => `${item.caseId}\0${item.stepIndex}`)).size;
+  const receipts = parseReceipts(input.receipts);
+  if (receipts === null) return { ok: false, code: "receipt-malformed" };
+  const counted = receipts.filter((item) => item.outcome !== "budget");
+  const inputTokens = counted.reduce((total, item) => total + item.inputTokens, 0);
+  const agentSteps = new Set(counted.map((item) => `${item.caseId}\0${item.stepIndex}`)).size;
   const { budgets } = input;
-  if (receipts.length > budgets.maxModelCallsPerGroup || inputTokens > budgets.maxInputTokensPerGroup || agentSteps > budgets.maxAgentStepsPerGroup) return { ok: false, code: "over-group-budget" };
+  if (counted.length > clampLimit(budgets.maxModelCallsPerGroup, caps.maxModelCallsPerGroup)
+    || inputTokens > clampLimit(budgets.maxInputTokensPerGroup, caps.maxInputTokensPerGroup)
+    || agentSteps > clampLimit(budgets.maxAgentStepsPerGroup, caps.maxAgentStepsPerGroup)) return { ok: false, code: "over-group-budget" };
+  if (counted.length !== receipts.length) return { ok: false, code: "budget-refused" };
   return { ok: true, totalCalls: receipts.length, inputTokens, agentSteps };
 }
 
@@ -398,6 +416,14 @@ export function e2eAgentValueDigest(key: string, value: string): string {
   return createHmac("sha256", Buffer.from(valueKey.parse(key), "hex")).update(value, "utf8").digest("hex");
 }
 
+/**
+ * A public name for a run's value key, recorded in the ledger: HMAC of a constant under the key. It lets the verifier
+ * refuse a ledger written under another run's key without knowing any typed value, and it does not reveal the key.
+ */
+export function e2eAgentValueKeyId(key: string): string {
+  return createHmac("sha256", Buffer.from(valueKey.parse(key), "hex")).update("rovara-agent-value-key-id/v1", "utf8").digest("hex");
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Action ledger
 // ---------------------------------------------------------------------------------------------------------------------
@@ -414,7 +440,7 @@ const appRelativePath = z.string().max(512).regex(/^\/(?!\/)[^\s\\?#]*$/);
 const ledgerAction = z.object({
   tool: ledgerToolName,
   node: ledgerNode.nullable(),
-  /** `e2eAgentValueDigest` of the typed value, key, option label or scroll direction. */
+  /** `e2eAgentValueDigest` of the typed value, key, option label or scroll direction. Required for every tool but `tap` and `navigate`. */
   valueDigest: digest.nullable(),
   /** The typed value itself, recorded only when it is text of the approved goal; checked by `parseVerifiedE2EAgentActionLedger`. */
   valueLiteral: z.string().min(1).max(256).nullable(),
@@ -426,7 +452,7 @@ const ledgerAction = z.object({
   const nodeRequired = action.tool === "tap" || action.tool === "type" || action.tool === "press" || action.tool === "select";
   if (nodeRequired && action.node === null) issue("node", `${action.tool} acts on a node`);
   if (action.tool === "navigate" && action.node !== null) issue("node", "navigate acts on no node");
-  const valueRequired = action.tool === "type" || action.tool === "press" || action.tool === "select";
+  const valueRequired = action.tool === "type" || action.tool === "press" || action.tool === "select" || action.tool === "scroll";
   if (valueRequired && action.valueDigest === null) issue("valueDigest", `${action.tool} records a value digest`);
   if ((action.tool === "tap" || action.tool === "navigate") && action.valueDigest !== null) issue("valueDigest", `${action.tool} carries no value`);
   if (action.tool === "navigate" && action.url === null) issue("url", "navigate records its app-relative target");
@@ -462,6 +488,11 @@ const ledgerStep = z.object({
  */
 export const E2EAgentActionLedgerSchema = z.object({
   schemaVersion: z.literal(E2E_AGENT_ACTIONS_SCHEMA_VERSION),
+  /** The run and case the ledger was written for; verification checks them against the caller's expected identity. */
+  runId: z.string().uuid(),
+  caseId: id(160),
+  /** `e2eAgentValueKeyId` of the run's value key, so a ledger written under another run's key is refused. */
+  valueKeyId: digest,
   steps: z.array(ledgerStep).max(caps.maxAgentStepsPerGroup),
 }).strict().superRefine((ledger, context) => {
   if (new Set(ledger.steps.map((step) => step.stepIndex)).size !== ledger.steps.length) context.addIssue({ code: "custom", path: ["steps"], message: "step indexes must be unique" });
@@ -487,18 +518,22 @@ function deepFreeze<T>(value: T): T {
 }
 
 /**
- * The one way to read a ledger from the executor. It checks the structure, then against the approved goals (keyed by
- * step index) and the run's value key:
+ * The one way to read a ledger from the executor. It checks the structure, then against the expected run and case, the
+ * approved goals (keyed by step index) and the run's value key:
+ * - the ledger's `runId`, `caseId` and `valueKeyId` are this run's, so a ledger from another run or key is refused (a
+ *   typed value's digest with no literal can only be checked later, by the trace review, but it is at least bound to this key);
  * - the ledger's step indexes equal the goal map's keys exactly (a missing or extra step fails);
  * - each `goalDigest` is the SHA-256 of the approved goal text;
  * - each `valueDigest` that has a literal is the keyed digest of that literal, and the literal is text of the goal.
  * The failure reason names positions only, never a recorded value.
  */
-export function parseVerifiedE2EAgentActionLedger(raw: unknown, context: { goals: ReadonlyMap<number, string>; valueKey: string }): { ok: true; ledger: VerifiedE2EAgentActionLedger } | { ok: false; reason: string } {
+export function parseVerifiedE2EAgentActionLedger(raw: unknown, context: { goals: ReadonlyMap<number, string>; valueKey: string; runId: string; caseId: string }): { ok: true; ledger: VerifiedE2EAgentActionLedger } | { ok: false; reason: string } {
   if (!valueKey.safeParse(context.valueKey).success) return { ok: false, reason: "the run value key is not a 32-byte hex key" };
   const parsed = E2EAgentActionLedgerSchema.safeParse(raw);
   if (!parsed.success) return { ok: false, reason: `ledger is malformed at ${parsed.error.issues.map((item) => item.path.join(".") || "(root)").slice(0, 8).join(", ")}` };
   const ledger = parsed.data;
+  if (ledger.runId !== context.runId || ledger.caseId !== context.caseId) return { ok: false, reason: "ledger belongs to another run or case" };
+  if (ledger.valueKeyId !== e2eAgentValueKeyId(context.valueKey)) return { ok: false, reason: "ledger was written under another run's value key" };
   const have = ledger.steps.map((step) => step.stepIndex).sort((left, right) => left - right);
   const want = [...context.goals.keys()].sort((left, right) => left - right);
   if (have.length !== want.length || have.some((index, position) => index !== want[position])) return { ok: false, reason: "ledger steps are not exactly the approved agent steps" };
@@ -514,6 +549,31 @@ export function parseVerifiedE2EAgentActionLedger(raw: unknown, context: { goals
   const frozen = deepFreeze(ledger) as VerifiedE2EAgentActionLedger;
   verifiedLedgers.add(frozen);
   return { ok: true, ledger: frozen };
+}
+
+export type LedgerReceiptCheck =
+  | { ok: true }
+  | { ok: false; code: "ledger-not-verified" | "receipt-malformed" | "ledger-receipt-unknown" | "ledger-receipt-duplicate" };
+
+/**
+ * Every receipt id in the ledger must be a receipt the worker wrote for the ledger's run, case and the same step, and
+ * no receipt id may appear twice, in the ledger or among the worker's receipts. The executor writes the ledger, so
+ * this is what ties its `receiptIds` to the worker-owned record.
+ */
+export function crossCheckE2EAgentLedgerReceipts(ledger: VerifiedE2EAgentActionLedger, workerReceipts: readonly unknown[]): LedgerReceiptCheck {
+  if (!isVerifiedE2EAgentActionLedger(ledger)) return { ok: false, code: "ledger-not-verified" };
+  const receipts = parseReceipts(workerReceipts);
+  if (receipts === null) return { ok: false, code: "receipt-malformed" };
+  if (new Set(receipts.map((item) => item.receiptId)).size !== receipts.length) return { ok: false, code: "ledger-receipt-duplicate" };
+  const claimed = ledger.steps.flatMap((step) => step.receiptIds);
+  if (new Set(claimed).size !== claimed.length) return { ok: false, code: "ledger-receipt-duplicate" };
+  for (const step of ledger.steps) {
+    for (const receiptId of step.receiptIds) {
+      const found = receipts.find((item) => item.receiptId === receiptId);
+      if (found === undefined || found.runId !== ledger.runId || found.caseId !== ledger.caseId || found.stepIndex !== step.stepIndex) return { ok: false, code: "ledger-receipt-unknown" };
+    }
+  }
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -536,7 +596,7 @@ export const E2E_AGENT_TRACE_MAX_BYTES = 1_048_576;
 
 export type CapturedTraceReview =
   | { keep: true; binding: E2EAgentTraceBinding }
-  | { keep: false; reason: "credential-scan-hit" | "trace-malformed" | "trace-too-large" | "trace-ledger-mismatch" };
+  | { keep: false; reason: "ledger-not-verified" | "credential-scan-hit" | "trace-malformed" | "trace-too-large" | "trace-ledger-mismatch" };
 
 type Rec = Record<string, unknown>;
 const isRec = (value: unknown): value is Rec => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -561,7 +621,7 @@ function actionMatches(traced: Rec, action: VerifiedE2EAgentActionLedger["steps"
     case "type": return targetMatches(traced["target"], action.node) && keyed(traced["value"], action.valueDigest);
     case "select": return targetMatches(traced["target"], action.node) && keyed(traced["value"], action.valueDigest);
     case "press": return targetMatches(traced["target"], action.node) && keyed(traced["key"], action.valueDigest);
-    case "scroll": return targetMatches(traced["target"], action.node) && (action.valueDigest === null || keyed(traced["direction"], action.valueDigest));
+    case "scroll": return targetMatches(traced["target"], action.node) && keyed(traced["direction"], action.valueDigest);
     case "navigate": return pathOf(traced["url"]) === action.url;
   }
 }
@@ -574,10 +634,12 @@ function actionMatches(traced: Rec, action: VerifiedE2EAgentActionLedger["steps"
  * A kept trace must match the verified ledger one action at a time: e2e records only committed actions, so the trace
  * actions are the ledger's `ok` actions in order, with the same kind, the same target (role, name, test id) and the same
  * keyed value digest. The returned binding (trace digest, ledger digest, action count) goes into the PASS evidence.
- * `credentialScanHit` is the worker's scan of the trace bytes, which carry typed values verbatim.
+ * `credentialScanHit` is the worker's scan of the trace bytes, which carry typed values verbatim. The run and case of the
+ * binding come from the verified ledger, and the ledger must be a verified one at run time.
  */
-export function reviewCapturedE2EAgentTrace(input: { stepIndex: number; trace: unknown; ledger: VerifiedE2EAgentActionLedger; valueKey: string; credentialScanHit: boolean; runId: string; caseId: string }): CapturedTraceReview {
+export function reviewCapturedE2EAgentTrace(input: { stepIndex: number; trace: unknown; ledger: VerifiedE2EAgentActionLedger; valueKey: string; credentialScanHit: boolean }): CapturedTraceReview {
   try {
+    if (!isVerifiedE2EAgentActionLedger(input.ledger)) return { keep: false, reason: "ledger-not-verified" };
     if (input.credentialScanHit) return { keep: false, reason: "credential-scan-hit" };
     const serialized = JSON.stringify(input.trace);
     if (serialized === undefined) return { keep: false, reason: "trace-malformed" };
@@ -590,7 +652,7 @@ export function reviewCapturedE2EAgentTrace(input: { stepIndex: number; trace: u
     if (committed.length !== traced.length) return { keep: false, reason: "trace-ledger-mismatch" };
     if (committed.some((action, index) => !actionMatches(traced[index]!, action, input.valueKey))) return { keep: false, reason: "trace-ledger-mismatch" };
     const binding = E2EAgentTraceBindingSchema.parse({
-      schemaVersion: "rovara-agent-trace/v1", runId: input.runId, caseId: input.caseId, stepIndex: input.stepIndex,
+      schemaVersion: "rovara-agent-trace/v1", runId: input.ledger.runId, caseId: input.ledger.caseId, stepIndex: input.stepIndex,
       traceSha256: sha256(canonicalJson(input.trace)), ledgerSha256: sha256(canonicalJson(input.ledger)), actionCount: committed.length,
     });
     return { keep: true, binding };

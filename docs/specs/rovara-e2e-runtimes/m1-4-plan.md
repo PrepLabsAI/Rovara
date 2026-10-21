@@ -110,6 +110,7 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 **Interfaces:**
 - `E2EModelRouteDefinitionSchema`, `E2EModelChannelRequestSchema` (`{ schemaVersion: "rovara-e2e-model-channel/v1", runId, caseId, stepIndex, callIndex, call }`; `call` is the bounded subset of the AI SDK v4 `doGenerate` options that e2e 0.20.0 sends: prompt messages, tools, toolChoice, maxOutputTokens), `E2EModelChannelResponseSchema`, `E2EModelReceiptSchema`, `E2EAgentActionLedgerSchema`, with the bounds in Global Constraints.
 - `e2eModelRouteRevision(definition) = "r" + n + "-" + sha256(canonicalJson(parsed))[0:12]`.
+- Also exported for the later tasks: `e2eModelRouteInvokedIdentifier`, `e2eModelReceiptAdmissibleForRound`, `checkE2EStepModelAccounting` and `checkE2EGroupModelBudget` (the receipt relation and budget clamp), `parseVerifiedE2EAgentActionLedger` with `VerifiedE2EAgentActionLedger` and `isVerifiedE2EAgentActionLedger`, `crossCheckE2EAgentLedgerReceipts`, `reviewCapturedE2EAgentTrace` with `E2EAgentTraceBindingSchema`, and the keyed digests `e2eAgentValueDigest`, `e2eAgentValueKeyId` and `generateE2EAgentValueKey`.
 - The Ruling answers, with file and line references into `node_modules/e2e/dist`:
   - (a) the exact `doGenerate` options and result shape the built-in agent uses;
   - (b) how to pin the toolset and disable pixel tools and `vision`;
@@ -192,7 +193,7 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 ### Task 4.3: Executor model channel and the agent step driver
 
 **Files:**
-- Modify: `packages/verifier/src/host/docker-application-host.ts` (create `<workspace>/model`, mount the socket into the executor only), `packages/verifier/src/executor/host.ts` and `executor/entry.ts` (`modelFactory`: an `agentx-e2e` v4 model over the socket), `packages/verifier/src/web-runtime.ts` (`:271` `case "agent"` → `agent.act`; the download trigger includes agent steps; the action ledger), `packages/verifier/src/executor/run.ts`, `packages/verifier/src/executor/redact.ts`
+- Modify: `packages/verifier/src/host/docker-application-host.ts` (create `<workspace>/model`, mount the socket into the executor only), `packages/verifier/src/executor/host.ts` and `executor/entry.ts` (`modelFactory`: an `agentx-e2e` v4 model over the socket; the capture-only `cache.store` of M4-A), `packages/verifier/src/web-runtime.ts` (`:271` `case "agent"` → `agent.act`; the download trigger includes agent steps; the action ledger), `packages/verifier/src/executor/run.ts`, `packages/verifier/src/executor/redact.ts`
 - Modify: `packages/worker/src/workflow-e2e-application-checks.ts` (start and close the proxy per group, pass `modelProxyRef` and the credential set)
 - Test: `tests/unit/e2e-docker-application-host.test.ts`, `tests/unit/e2e-executor-agent.test.ts` (new), `tests/linux/e2e-agent.test.ts` (new), `tests/e2e/m1-4-journeys.test.ts` (cases `agent-renamed-export`, `agent-wrong-action`, `agent-model-outage`)
 
@@ -203,11 +204,13 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
   - the first download is the evidence;
   - a second one is UNKNOWN `ambiguous-download`;
   - none is UNKNOWN `agent-no-download`.
-- The ledger is written after each action, so a crash still leaves the actions recorded up to that point.
+- The ledger is written after each action, so a crash still leaves the actions recorded up to that point. It carries `runId`, `caseId` and `valueKeyId`, and its typed-value digests are HMACs under the per-run key (`e2eAgentValueDigest`).
+- Capture store (M4-A): a round with an agent step runs with `cache: { mode: "read-write", store: captureStore }` instead of `cache: "off"`. `captureStore.read` always returns a miss (so a candidate round never replays), `write` keeps the `ActionTrace`, and `delete` does nothing. After each agent step the worker runs `reviewCapturedE2EAgentTrace` (credential scan, match against the verified ledger). A kept trace's binding goes into the PASS evidence; a discarded trace only loses the replay input and never fails the round.
 
 - [ ] **Step 1: Write the failing tests.**
   - unit: the executor arguments contain the socket mount and no `AWS_`, `AGENTX_`, `TOKEN`, `SECRET`, `bedrock` or `amazonaws`. The app and mock arguments contain no `model` mount. A `modelRoute: null` run has no mount.
   - unit: the ledger records the node's role, name and testId for each action, and digests a typed value that doesn't appear in the goal.
+  - unit: the capture store's `read` always misses, its `write` keeps the trace, and a credential-scan hit discards the trace and leaves the round's verdict unchanged.
   - Linux (scripted double; the M1.4 fixture with `export-csv` renamed to `download-orders` and the label "Download orders"): the goal "Export the orders as a CSV file" downloads the CSV, and the `csv` assertion passes.
   - Linux: a double that declares done without acting gives UNKNOWN `agent-no-download`.
   - Linux: a double that clicks "Download invoices" (a decoy) gives a deterministic `csv` mismatch, which is FAILED (D3).
@@ -238,7 +241,9 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 | no download, or more than one, for a `csv` case | n/a | UNKNOWN `agent-no-download` or `ambiguous-download` |
 | receipt `refused-credential-match` | any | UNKNOWN `model-prompt-credential-match` |
 | receipt `budget` (group or day) | any | UNKNOWN `model-route-budget-exhausted` |
-| report calls ≠ worker receipts; a receipt route ≠ admission; a transcript digest ≠ receipt; actions > `maxActions`; ledger missing | any | UNKNOWN `model-receipts-mismatch` |
+| the receipt relation fails (`checkE2EStepModelAccounting`: ok receipts ≠ `metrics.modelCalls`, receipts beyond 8+4 that are not `budget` refusals, a missing or repeated receipt index or id, a receipt of another route, provider, model, run, case or step); a ledger receipt id that is not a worker receipt of that run, case and step (`crossCheckE2EAgentLedgerReceipts`); a ledger that is not a `VerifiedE2EAgentActionLedger`; a transcript digest ≠ receipt; actions > `maxActions`; ledger missing | any | UNKNOWN `model-receipts-mismatch` |
+| `budget-refused` from the accounting checker (a `budget` receipt in the step) | any | UNKNOWN `model-route-budget-exhausted` |
+| ledger step `verdict` other than `concluded` | any | UNKNOWN `agent-navigation-incomplete` |
 
 - The act verdict `passed` alone never sets PASSED. An act `failed` never sets FAILED.
 - Display v2 gains, per scenario, `agentNavigation?: { steps: [{ goal ≤ 120, actedOn: [{ role, name ≤ 60 }] ≤ 8, stop }], modelCalls, routeId }`. Readers built before M1.4 ignore it.
@@ -277,7 +282,7 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 
 **Files:**
 - Modify: `packages/broker/src/aws/broker.ts` (an operator-triggered `purpose: "replay"` round for a verified round), `packages/broker/src/aws/developer-tasks.ts` (replay is recorded apart from candidate rounds)
-- Modify: `packages/verifier/src/application-scenarios.ts` and `application-templates.ts` (a replay config: `cache: "read-only"` with a Rovara store, `modelRoute: null`), `packages/verifier/src/executor/host.ts` (a read-only cache store built from the verified ledger)
+- Modify: `packages/verifier/src/application-scenarios.ts` and `application-templates.ts` (a replay config: `cache: { mode: "read-only", store: replayStore }`, `modelRoute: null`, an executor with no model), `packages/verifier/src/executor/host.ts` (a read-only cache store that serves the captured `ActionTrace` whose digest is in the PASS round's evidence manifest; the ledger is the audit view and is not turned into a cache entry, per M4-A)
 - Create: `scripts/e2e-replay-round.ts --env agentxlivetest123 --task <id> --round <id>` (an admin route; read-only for verdicts)
 - Test: `tests/contract/workflow-e2e-replay-round.test.ts` (new), `tests/linux/e2e-agent-replay.test.ts`, `tests/e2e/m1-4-journeys.test.ts` (case `agent-replay`)
 
@@ -292,6 +297,8 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
   - a verified PASS round replays with `reproduced: true` and no socket in the executor arguments;
   - a ledger edited after verification is refused (its digest is bound to the verified evidence);
   - a replay FAILED leaves publication unchanged;
+  - trace binding: a trace is used only when its digest is in the evidence manifest of a round whose Rovara verdict is PASS (a trace captured in an UNKNOWN or FAILED round is never replayed), and a trace that does not match the verified ledger one action at a time is discarded at capture (`reviewCapturedE2EAgentTrace`), so `reproduced: false` with no effect on any verdict;
+  - the replay reads the ledger only through `parseVerifiedE2EAgentActionLedger` and requires the `VerifiedE2EAgentActionLedger` type;
   - journey `agent-replay`.
 - [ ] **Step 2: Run them and confirm FAIL. Implement. Run them again and confirm PASS.**
 - [ ] **Step 3: Commit** `feat(e2e): audit replay of verified agent rounds without model calls`. **Deploy** (`--check`).

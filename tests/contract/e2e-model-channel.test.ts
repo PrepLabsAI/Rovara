@@ -14,8 +14,10 @@ import {
   E2EModelReceiptSchema,
   E2EModelRouteDefinitionSchema,
   checkE2EGroupModelBudget,
+  crossCheckE2EAgentLedgerReceipts,
   checkE2EStepModelAccounting,
   e2eAgentValueDigest,
+  e2eAgentValueKeyId,
   e2eModelReceiptAdmissibleForRound,
   e2eModelRouteInvokedIdentifier,
   e2eModelRouteRevision,
@@ -29,6 +31,7 @@ import {
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
 const RUN_ID = "7f1c2a4e-5b6d-4c8e-9f01-23456789abcd";
 const KEY = "ab".repeat(32);
+const CASE_ID = "case-orders-export";
 const hmac = (value: string) => e2eAgentValueDigest(KEY, value);
 const D = E2E_MODEL_ROUTE_DEFAULT_BUDGETS;
 const PROFILE_ARN = "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-haiku-5-5";
@@ -88,10 +91,11 @@ function ledgerStep(overrides: Record<string, unknown> = {}) {
   return { stepIndex: 1, goalDigest: sha(GOAL), verdict: "concluded", actions: [ledgerAction()], stopCode: null, receiptIds: ["rcpt-0001"], ...overrides };
 }
 function ledger(overrides: Record<string, unknown> = {}) {
-  return { schemaVersion: "rovara-agent-actions/v1", steps: [ledgerStep()], ...overrides };
+  return { schemaVersion: "rovara-agent-actions/v1", runId: RUN_ID, caseId: CASE_ID, valueKeyId: e2eAgentValueKeyId(KEY), steps: [ledgerStep()], ...overrides };
 }
 const goals = (map: Record<number, string> = { 1: GOAL }) => new Map(Object.entries(map).map(([key, value]) => [Number(key), value]));
-const verify = (raw: unknown, map: Record<number, string> = { 1: GOAL }, valueKey = KEY) => parseVerifiedE2EAgentActionLedger(raw, { goals: goals(map), valueKey });
+const verify = (raw: unknown, map: Record<number, string> = { 1: GOAL }, valueKey = KEY, expected: { runId: string; caseId: string } = { runId: RUN_ID, caseId: CASE_ID }) =>
+  parseVerifiedE2EAgentActionLedger(raw, { goals: goals(map), valueKey, ...expected });
 function verified(raw: unknown = ledger(), map: Record<number, string> = { 1: GOAL }): VerifiedE2EAgentActionLedger {
   const result = verify(raw, map);
   if (!result.ok) throw new Error(result.reason);
@@ -376,7 +380,7 @@ describe("e2e model receipt", () => {
 });
 
 describe("step model-call accounting (report calls against worker receipts)", () => {
-  const identity = { runId: RUN_ID, caseId: "case-orders-export", stepIndex: 1, routeId: "e2e-act-haiku", routeRevision: "r1-0123456789ab" };
+  const identity = { runId: RUN_ID, caseId: "case-orders-export", stepIndex: 1, routeId: "e2e-act-haiku", routeRevision: "r1-0123456789ab", provider: "amazon-bedrock" as const, modelId: "us.anthropic.claude-haiku-5-5" };
   const check = (receipts: unknown[], reportModelCalls: number, roundScope: "standard" | "qualification" = "standard", maxModelCallsPerStep = 12) =>
     checkE2EStepModelAccounting({ roundScope, identity, reportModelCalls, receipts, maxModelCallsPerStep });
 
@@ -417,10 +421,34 @@ describe("step model-call accounting (report calls against worker receipts)", ()
 
   it("refuses a scripted receipt outside a qualification round", () => {
     const scripted = [receiptAt(0, { provider: "rovara-scripted", routeId: "rovara-scripted/v1", modelId: "scripted-v1" })];
-    const scriptedIdentity = { ...identity, routeId: "rovara-scripted/v1" };
+    const scriptedIdentity = { ...identity, routeId: "rovara-scripted/v1", provider: "rovara-scripted" as const, modelId: "scripted-v1" };
     const run = (roundScope: "standard" | "qualification") => checkE2EStepModelAccounting({ roundScope, identity: scriptedIdentity, reportModelCalls: 1, receipts: scripted, maxModelCallsPerStep: 12 });
     expect(run("standard")).toMatchObject({ ok: false, code: "receipt-not-admissible" });
     expect(run("qualification")).toEqual({ ok: true, okCalls: 1, totalCalls: 1 });
+  });
+
+  it("clamps the step limit to the D2 cap of 8+4, whatever the caller passes", () => {
+    const thirteen = Array.from({ length: 13 }, (_, index) => receiptAt(index, failedCall));
+    expect(check(thirteen, 0, "standard", 99)).toMatchObject({ ok: false, code: "over-step-budget" });
+    expect(check(thirteen.slice(0, 12), 0, "standard", 99)).toEqual({ ok: true, okCalls: 0, totalCalls: 12 });
+    for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+      expect(check([receiptAt(0)], 1, "standard", bad), String(bad)).toMatchObject({ ok: false, code: "over-step-budget" });
+    }
+  });
+
+  it("classifies a refused-budget receipt as the budget outcome, not as an over-budget step", () => {
+    const refusal = { outcome: "budget", responseSha256: null, inputTokens: 0, outputTokens: 0, latencyMs: 0 };
+    const twelveThenRefused = [...Array.from({ length: 12 }, (_, index) => receiptAt(index, failedCall)), receiptAt(12, refusal)];
+    expect(check(twelveThenRefused, 0)).toMatchObject({ ok: false, code: "budget-refused" });
+    expect(check([receiptAt(0), receiptAt(1, refusal)], 1)).toMatchObject({ ok: false, code: "budget-refused" });
+    const thirteenWorkerSent = Array.from({ length: 13 }, (_, index) => receiptAt(index, failedCall));
+    expect(check(thirteenWorkerSent, 0)).toMatchObject({ ok: false, code: "over-step-budget" });
+  });
+
+  it("compares the receipt's provider and model to the route, and refuses a repeated receipt id", () => {
+    expect(check([receiptAt(0, { modelId: "us.anthropic.claude-sonnet-4-6" })], 1)).toMatchObject({ ok: false, code: "receipt-identity-mismatch" });
+    expect(check([receiptAt(0, { provider: "rovara-scripted", routeId: "rovara-scripted/v1" })], 1, "qualification")).toMatchObject({ ok: false });
+    expect(check([receiptAt(0), receiptAt(1, { receiptId: "rcpt-0000" })], 2)).toMatchObject({ ok: false, code: "receipt-duplicate-id" });
   });
 
   it("checks the group budget over every receipt of the group, ok or not", () => {
@@ -433,6 +461,14 @@ describe("step model-call accounting (report calls against worker receipts)", ()
     expect(checkE2EGroupModelBudget({ receipts: [...withStep(1, 8, { inputTokens: 32_000 }), ...withStep(2, 4, { inputTokens: 32_000 })], budgets })).toMatchObject({ ok: true });
     expect(checkE2EGroupModelBudget({ receipts: [...withStep(1, 3)], budgets: { ...budgets, maxModelCallsPerGroup: 2 } })).toMatchObject({ ok: false, code: "over-group-budget" });
     expect(checkE2EGroupModelBudget({ receipts: [{ nope: 1 }], budgets })).toMatchObject({ ok: false, code: "receipt-malformed" });
+    const loose = { maxModelCallsPerGroup: 99, maxInputTokensPerGroup: 99_999_999, maxAgentStepsPerGroup: 99 };
+    const atCaps = [...withStep(1, 12), ...withStep(2, 12), ...withStep(3, 12)];
+    expect(checkE2EGroupModelBudget({ receipts: atCaps, budgets: loose })).toMatchObject({ ok: true });
+    expect(checkE2EGroupModelBudget({ receipts: [...atCaps, ...withStep(4, 1)], budgets: loose })).toMatchObject({ ok: false, code: "over-group-budget" });
+    expect(checkE2EGroupModelBudget({ receipts: [...withStep(1, 5, { inputTokens: 32_000 }), ...withStep(2, 8, { inputTokens: 32_000 })], budgets: loose })).toMatchObject({ ok: false, code: "over-group-budget" });
+    expect(checkE2EGroupModelBudget({ receipts: withStep(1, 1), budgets: { ...budgets, maxModelCallsPerGroup: Number.NaN } })).toMatchObject({ ok: false, code: "over-group-budget" });
+    const refusal = { outcome: "budget", responseSha256: null, inputTokens: 0, outputTokens: 0, latencyMs: 0 };
+    expect(checkE2EGroupModelBudget({ receipts: [...withStep(1, 2), ...withStep(2, 1, refusal)], budgets })).toMatchObject({ ok: false, code: "budget-refused" });
   });
 });
 
@@ -469,6 +505,31 @@ describe("e2e agent action ledger", () => {
     // @ts-expect-error a plain parse must not satisfy a reader that requires a verified ledger
     const rejected: VerifiedE2EAgentActionLedger = plain;
     expect(rejected).toBe(plain);
+  });
+
+  it("binds the ledger to its run and case: a ledger from another run or case fails", () => {
+    expect(verify(ledger(), { 1: GOAL }, KEY, { runId: "11111111-2222-4333-8444-555555555555", caseId: CASE_ID }).ok).toBe(false);
+    expect(verify(ledger(), { 1: GOAL }, KEY, { runId: RUN_ID, caseId: "other-case" }).ok).toBe(false);
+    expect(verify(ledger({ runId: "11111111-2222-4333-8444-555555555555" })).ok).toBe(false);
+    expect(E2EAgentActionLedgerSchema.safeParse({ ...ledger(), runId: undefined }).success).toBe(false);
+  });
+
+  it("refuses a typed digest written under another run's key, even with no literal (the replayed-ledger probe)", () => {
+    const foreignKey = "cd".repeat(32);
+    const typedForeign = ledgerAction({ tool: "type", node: { role: "textbox", name: "File name", testId: null }, valueDigest: e2eAgentValueDigest(foreignKey, "whatever") });
+    const foreignLedger = ledger({ valueKeyId: e2eAgentValueKeyId(foreignKey), steps: [ledgerStep({ actions: [typedForeign], receiptIds: [] })] });
+    expect(verify(foreignLedger).ok).toBe(false);
+    expect(verify(foreignLedger, { 1: GOAL }, foreignKey).ok).toBe(true);
+    expect(e2eAgentValueKeyId(KEY)).toMatch(/^[a-f0-9]{64}$/);
+    expect(e2eAgentValueKeyId(KEY)).not.toBe(KEY);
+    expect(e2eAgentValueKeyId(KEY)).not.toBe(e2eAgentValueKeyId(foreignKey));
+    expect(verify(ledger({ valueKeyId: sha(KEY) })).ok).toBe(false);
+  });
+
+  it("refuses a scroll that records no direction digest", () => {
+    const withAction = (action: unknown) => ledger({ steps: [ledgerStep({ actions: [action], receiptIds: [] })] });
+    expect(E2EAgentActionLedgerSchema.safeParse(withAction(ledgerAction({ tool: "scroll", node: null, valueDigest: null }))).success).toBe(false);
+    expect(E2EAgentActionLedgerSchema.safeParse(withAction(ledgerAction({ tool: "scroll", node: null, valueDigest: hmac("down") }))).success).toBe(true);
   });
 
   it("accepts a typed value as a keyed digest, with the literal only when it is the goal's own text", () => {
@@ -572,6 +633,43 @@ describe("e2e agent action ledger", () => {
   });
 });
 
+describe("ledger receipts against the worker's receipts", () => {
+  const twoStepGoals = { 1: GOAL, 2: "Another goal" };
+  const stepTwo = ledgerStep({ stepIndex: 2, goalDigest: sha("Another goal"), receiptIds: ["rcpt-2-0"] });
+  const twoStepLedger = () => verified(ledger({ steps: [ledgerStep({ receiptIds: ["rcpt-0001", "rcpt-0002"] }), stepTwo] }), twoStepGoals);
+  const workerReceipts = () => [
+    receiptAt(0, { receiptId: "rcpt-0001" }), receiptAt(1, { receiptId: "rcpt-0002" }), receiptAt(0, { receiptId: "rcpt-2-0", stepIndex: 2 }),
+    receiptAt(2, { receiptId: "rcpt-extra", outcome: "provider-error", responseSha256: null, outputTokens: 0 }),
+  ];
+
+  it("accepts a ledger whose receipt ids are all worker receipts of its run, case and step", () => {
+    expect(crossCheckE2EAgentLedgerReceipts(twoStepLedger(), workerReceipts())).toEqual({ ok: true });
+  });
+
+  it("refuses a receipt id the worker never wrote, or one from another step, run or case", () => {
+    const unknown = verified(ledger({ steps: [ledgerStep({ receiptIds: ["rcpt-0001", "rcpt-made-up"] })] }));
+    expect(crossCheckE2EAgentLedgerReceipts(unknown, workerReceipts())).toMatchObject({ ok: false, code: "ledger-receipt-unknown" });
+    const wrongStep = verified(ledger({ steps: [ledgerStep({ receiptIds: ["rcpt-2-0"] })] }));
+    expect(crossCheckE2EAgentLedgerReceipts(wrongStep, workerReceipts())).toMatchObject({ ok: false, code: "ledger-receipt-unknown" });
+    for (const overrides of [{ runId: "11111111-2222-4333-8444-555555555555" }, { caseId: "other-case" }]) {
+      const foreign = workerReceipts().map((item) => ({ ...item, ...overrides }));
+      expect(crossCheckE2EAgentLedgerReceipts(twoStepLedger(), foreign), JSON.stringify(overrides)).toMatchObject({ ok: false, code: "ledger-receipt-unknown" });
+    }
+    expect(crossCheckE2EAgentLedgerReceipts(twoStepLedger(), [{ nope: 1 }])).toMatchObject({ ok: false, code: "receipt-malformed" });
+  });
+
+  it("refuses a receipt id used twice in the ledger, or twice among the worker's receipts", () => {
+    const twice = verified(ledger({ steps: [ledgerStep({ receiptIds: ["rcpt-0001"] }), ledgerStep({ stepIndex: 2, goalDigest: sha("Another goal"), receiptIds: ["rcpt-0001"] })] }), twoStepGoals);
+    expect(crossCheckE2EAgentLedgerReceipts(twice, workerReceipts())).toMatchObject({ ok: false, code: "ledger-receipt-duplicate" });
+    expect(crossCheckE2EAgentLedgerReceipts(twoStepLedger(), [...workerReceipts(), receiptAt(3, { receiptId: "rcpt-0001" })])).toMatchObject({ ok: false, code: "ledger-receipt-duplicate" });
+  });
+
+  it("requires a verified ledger at run time", () => {
+    const plain = E2EAgentActionLedgerSchema.parse(ledger()) as unknown as VerifiedE2EAgentActionLedger;
+    expect(crossCheckE2EAgentLedgerReceipts(plain, workerReceipts())).toMatchObject({ ok: false, code: "ledger-not-verified" });
+  });
+});
+
 describe("captured ActionTrace review (M4-A trace bound to the verified ledger)", () => {
   const typed = ledgerAction({ tool: "type", node: { role: "textbox", name: "File name", testId: "file-name" }, valueDigest: hmac("orders.csv"), valueLiteral: "orders.csv" });
   const pressed = ledgerAction({ tool: "press", node: { role: "textbox", name: "File name", testId: "file-name" }, valueDigest: hmac("Enter") });
@@ -591,7 +689,7 @@ describe("captured ActionTrace review (M4-A trace bound to the verified ledger)"
   ];
   const trace = (overrides: Record<string, unknown> = {}) => ({ actions: traceActions(), executor: { name: "rovara" }, summary: "s", ...overrides });
   const review = (input: Partial<Parameters<typeof reviewCapturedE2EAgentTrace>[0]> = {}) =>
-    reviewCapturedE2EAgentTrace({ stepIndex: 1, trace: trace(), ledger: value(), valueKey: KEY, credentialScanHit: false, runId: RUN_ID, caseId: "case-orders-export", ...input });
+    reviewCapturedE2EAgentTrace({ stepIndex: 1, trace: trace(), ledger: value(), valueKey: KEY, credentialScanHit: false, ...input });
 
   it("keeps a trace that matches the ledger action by action, and returns the digest binding for the PASS evidence", () => {
     const result = review();
@@ -636,6 +734,17 @@ describe("captured ActionTrace review (M4-A trace bound to the verified ledger)"
     const onlyFailed = verified(ledger({ steps: [ledgerStep({ actions: [failedTap], receiptIds: [] })] }));
     expect(review({ ledger: onlyFailed, trace: trace({ actions: [] }) }).keep).toBe(true);
     expect(review({ ledger: onlyFailed }).keep).toBe(false);
+  });
+
+  it("takes the run and case of the binding from the ledger, and requires the verified ledger at run time", () => {
+    const otherIds = { runId: "11111111-2222-4333-8444-555555555555", caseId: "case-b" };
+    const parsedOther = verify(ledger({ ...otherIds, steps: [ledgerStep({ actions, receiptIds: [] })] }), { 1: GOAL }, KEY, otherIds);
+    if (!parsedOther.ok) throw new Error(parsedOther.reason);
+    const result = review({ ledger: parsedOther.ledger });
+    expect(result.keep && result.binding).toMatchObject({ runId: "11111111-2222-4333-8444-555555555555", caseId: "case-b" });
+    const plain = E2EAgentActionLedgerSchema.parse(ledger({ steps: [ledgerStep({ actions, receiptIds: [] })] })) as unknown as VerifiedE2EAgentActionLedger;
+    expect(review({ ledger: plain })).toEqual({ keep: false, reason: "ledger-not-verified" });
+    expect(review({ ledger: structuredClone(value()) })).toEqual({ keep: false, reason: "ledger-not-verified" });
   });
 
   it("discards the trace on a credential-scan hit, however well it matches, and never fails the round", () => {
