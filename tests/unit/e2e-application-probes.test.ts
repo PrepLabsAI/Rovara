@@ -82,4 +82,15 @@ describe("source fixture auth and causal behaviors", () => {
     expect((await dependencyDefect.handle({ method: "GET", url: "/api/inventory/status", headers: { cookie: dependencyCookie } })).status).toBe(502);
     expect(requestedPath).toBe("/internal/admin");
   });
+
+  it("answers the raw egress check only for a signed-in account, 200 when the address was reached and 503 when it was not", async () => {
+    const { createOrdersApplication } = await import(serverUrl) as { createOrdersApplication: (input: unknown) => { handle(request: unknown): Promise<{ status: number; headers: Record<string, string>; body: string }>; sessionCount(): number } };
+    const build = (probeRawEgress?: () => Promise<boolean>) => createOrdersApplication({ seed, orders: readJson(ordersPath), defect: null, ...(probeRawEgress ? { probeRawEgress } : {}) });
+    const reached = build(async () => true); const blocked = build(async () => false); const failing = build(async () => { throw new Error("ENETUNREACH"); });
+    expect((await reached.handle({ method: "GET", url: "/api/egress/raw", headers: {} })).status).toBe(401);
+    for (const [app, status] of [[reached, 200], [blocked, 503], [failing, 503], [build(), 503]] as const) {
+      const signedIn = cookie(await login(app, "owner@example.test", "owner-pass"));
+      expect((await app.handle({ method: "GET", url: "/api/egress/raw", headers: { cookie: signedIn } })).status).toBe(status);
+    }
+  });
 });

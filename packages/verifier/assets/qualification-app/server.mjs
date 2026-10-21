@@ -61,7 +61,7 @@ function withOptionalExternals(html) {
   return result;
 }
 
-export function createOrdersApplication({ seed, orders, defect: rawDefect = null, fetchDependency = async () => ({ status: 200, body: { healthy: true } }) }) {
+export function createOrdersApplication({ seed, orders, defect: rawDefect = null, fetchDependency = async () => ({ status: 200, body: { healthy: true } }), probeRawEgress = async () => false }) {
   if (!seed || !Array.isArray(seed.accounts) || seed.accounts.length < 1 || seed.accounts.length > 32
     || !Array.isArray(orders?.orders) || !orders.state) throw new Error("orders application requires the owned seed and fixture records");
   const accountEmails = new Set(); const subjectIds = new Set();
@@ -164,6 +164,11 @@ export function createOrdersApplication({ seed, orders, defect: rawDefect = null
       const shown = stock === null ? "unavailable" : String(stock.status ?? "unavailable").replace(/[^A-Za-z0-9 _-]/g, "");
       return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body: `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Inventory</title></head><body><main><h1>Inventory</h1><p data-testid="inventory-status">${shown}</p></main></body></html>` };
     }
+    if (method === "GET" && url.pathname === "/api/egress/raw") {
+      if (!accountFor(request)) return json(401, { error: "authentication required" });
+      // Dials an address, not a name, so no resolver is involved: 200 only when something answered, which a run with a wall around it can never show.
+      return (await probeRawEgress().catch(() => false)) ? json(200, { reached: true }) : json(503, { reached: false });
+    }
     return json(404, { error: "not found" });
   }
   return Object.freeze({ handle, sessionCount: () => sessions.size });
@@ -181,6 +186,13 @@ export function startOrdersServer() {
   const seed = readOptionalJson(process.env.ORDERS_TEST_SEED_FILE);
   const defect = readOptionalJson(process.env.ORDERS_TEST_DEFECT_FILE);
   const app = createOrdersApplication({ seed, orders: fixtureOrders, defect,
+    // `FIXTURE_RAW_EGRESS_URL` lets an egress test aim the app at an IP literal; any HTTP answer at all counts as reached.
+    probeRawEgress: async () => {
+      const target = process.env.FIXTURE_RAW_EGRESS_URL;
+      if (!target) return false;
+      await fetch(target, { signal: AbortSignal.timeout(3_000), redirect: "manual" });
+      return true;
+    },
     fetchDependency: async (originRef, path) => {
       // `INVENTORY_ORIGIN` is set by the host to this run's own mock (or sinkhole); `FIXTURE_INVENTORY_ORIGIN` lets an egress test aim the app at an outside host.
       const origin = process.env.FIXTURE_INVENTORY_ORIGIN ?? process.env.INVENTORY_ORIGIN;

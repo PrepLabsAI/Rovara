@@ -3,7 +3,7 @@ import { readFile, readdir, stat, writeFile, mkdtemp, rm } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WEB_API_REQUIRED_PROBES, WebApiRuntimeInstallProposalSchema, canonicalJson, evaluateWebApiProbeObservation, webApiProbeAssetManifestPath } from "../../packages/contracts/src/index.js";
+import { WEB_API_REQUIRED_PROBES, WebApiRuntimeInstallProposalSchema, canonicalJson, evaluateWebApiProbeObservation, webApiProbeAssetManifestPath, type WebApiProbeObservation } from "../../packages/contracts/src/index.js";
 import { WebApiQualificationRejected, assertRuntimeInstallationHostIdentity, qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
 import { main as qualificationCli, webApiProbeRunnerConfig } from "../../packages/verifier/src/install-qualification-cli.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
@@ -50,7 +50,7 @@ describe("web/API runtime qualification", () => {
     expect([...assets.keys()]).toEqual(WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId));
   });
 
-  it.each([
+  const negativeThatPassed: [string, Partial<WebApiProbeObservation>][] = [
     ["web-csv-negative-v1", { collectorStatus: "PASS" as const, failedAssertionKinds: [] }],
     ["web-egress-denial-v1", { collectorStatus: "PASS" as const, failedAssertionKinds: [], blockedHosts: [] }],
     ["api-egress-denial-v1", { collectorStatus: "PASS" as const, failedAssertionKinds: [] }],
@@ -59,19 +59,36 @@ describe("web/API runtime qualification", () => {
     ["web-unmocked-call-v1", { collectorStatus: "PASS" as const, failedAssertionKinds: [], unmockedCalls: { sinkhole: 1, mocked: 0 } }],
     ["build-imds-denial-v1", { collectorStatus: "PASS" as const, runUnavailableReason: null, buildExitCode: null }],
     ["build-lateral-denial-v1", { collectorStatus: "PASS" as const, runUnavailableReason: null, buildExitCode: null }],
-  ])("rejects a negative probe that passed: %s", async (probeId, observation) => {
+  ];
+  it.each(negativeThatPassed)("rejects a negative probe that passed: %s", async (probeId, observation) => {
     const error = await rejection(qualify({ [probeId]: observation }));
     expect(error).toBeInstanceOf(WebApiQualificationRejected);
     expect(error.message).toContain(`negative-probe-passed:${probeId}`);
   });
+  // The qualifier reaches the oracle through the built contracts package; this goes to the oracle in src, so a stale build cannot hide a loosened oracle.
+  it.each(negativeThatPassed)("the oracle in src rejects a negative probe that passed: %s", (probeId, observation) => {
+    expect(evaluateWebApiProbeObservation(probeId, { ...goodWebApiObservation(probeId), ...observation })).toEqual({ ok: false, reason: `negative-probe-passed:${probeId}` });
+  });
 
-  it.each([
+  const failedForAnotherCause: [string, Partial<WebApiProbeObservation>][] = [
     ["web-csv-negative-v1", { failedAssertionKinds: ["text"] }],
     ["web-csv-negative-v1", { collectorStatus: null, runUnavailableReason: "app-exited", failedAssertionKinds: [] }],
     ["web-egress-denial-v1", { blockedHosts: ["fonts.example.com"] }],
     ["web-egress-denial-v1", { collectorStatus: null, runUnavailableReason: "app-exited", failedAssertionKinds: [], blockedHosts: [] }],
+    // The name must reach the sinkhole (UNKNOWN, one call) while the IP literal stays unreachable (the http-status assertion fails): a different mix is a different cause.
     ["api-egress-denial-v1", { failedAssertionKinds: ["json"] }],
-    ["api-egress-denial-v1", { collectorStatus: "UNKNOWN" as const, failedAssertionKinds: [] }],
+    ["api-egress-denial-v1", { failedAssertionKinds: ["http-status", "json"] }],
+    // The IP literal was reached: the assertion held, so the raw wall is missing even though the name was sinkholed.
+    ["api-egress-denial-v1", { failedAssertionKinds: [] }],
+    // The old outcome: the name never reached the sinkhole, so the app's resolver is not pointed at it.
+    ["api-egress-denial-v1", { collectorStatus: "FAILED" as const, failedAssertionKinds: ["http-status"], unmockedCalls: { sinkhole: 0, mocked: 0 } }],
+    ["api-egress-denial-v1", { unmockedCalls: { sinkhole: 0, mocked: 0 } }],
+    ["api-egress-denial-v1", { unmockedCalls: { sinkhole: 2, mocked: 0 } }],
+    ["api-egress-denial-v1", { unmockedCalls: { sinkhole: 1, mocked: 1 } }],
+    ["api-egress-denial-v1", { mockConsumptions: { success: 1, refusal: 0, invalidData: 0 } }],
+    ["api-egress-denial-v1", { runReason: "application-evidence-floor-unmet" }],
+    ["api-egress-denial-v1", { runReason: undefined }],
+    ["api-egress-denial-v1", { collectorStatus: null, runUnavailableReason: "app-exited", failedAssertionKinds: [], unmockedCalls: { sinkhole: 1, mocked: 0 } }],
     // Any other cause rejects: a failed assertion, an unavailable run, no recorded call, a call to a mock rather than the sinkhole, or more than the one line.
     ["web-unmocked-call-v1", { collectorStatus: "FAILED" as const, failedAssertionKinds: ["text"] }],
     ["web-unmocked-call-v1", { collectorStatus: null, runUnavailableReason: "app-exited", failedAssertionKinds: [], unmockedCalls: { sinkhole: 0, mocked: 0 } }],
@@ -90,9 +107,16 @@ describe("web/API runtime qualification", () => {
     ["build-lateral-denial-v1", { buildExitCode: 0 }],
     ["build-lateral-denial-v1", { buildExitCode: 3 }],
     ["build-lateral-denial-v1", { runUnavailableReason: "app-exited" }],
-  ])("rejects an expected failure that failed for another cause: %s %j", async (probeId, observation) => {
+  ];
+  it.each(failedForAnotherCause)("rejects an expected failure that failed for another cause: %s %j", async (probeId, observation) => {
     const error = await rejection(qualify({ [probeId]: observation }));
     expect(error.message).toContain(`probe-wrong-cause:${probeId}`);
+  });
+  it.each(failedForAnotherCause)("the oracle in src rejects an expected failure that failed for another cause: %s %j", (probeId, observation) => {
+    expect(evaluateWebApiProbeObservation(probeId, { ...goodWebApiObservation(probeId), ...observation })).toEqual({ ok: false, reason: `probe-wrong-cause:${probeId}` });
+  });
+  it("the oracle in src accepts each expected failure exactly as recorded", () => {
+    for (const probe of WEB_API_REQUIRED_PROBES) expect(evaluateWebApiProbeObservation(probe.probeId, goodWebApiObservation(probe.probeId)), probe.probeId).toEqual({ ok: true });
   });
 
   it.each(["web-csv-positive-v1", "api-state-positive-v1", "app-host-denial-v1", "chromium-sandbox-v1", "web-mock-origin-v1"])("rejects a positive probe the collector did not pass: %s", async (probeId) => {
@@ -257,13 +281,24 @@ describe("web/API probe assets", () => {
     expect([asset.kind, asset.polarity]).toEqual(["web", "negative"]);
     // The reason the evaluator holds the run to is the asset's own.
     const pin = WEB_API_REQUIRED_PROBES.find((probe) => probe.probeId === "web-unmocked-call-v1")!;
-    expect(pin.cause).toEqual({ kind: "unmocked-external-call", reason: (asset.probe.oracle as { expectedReason: string }).expectedReason });
+    expect(pin.cause).toEqual({ kind: "unmocked-external-call", reason: (asset.probe.oracle as { expectedReason: string }).expectedReason, failedAssertionKinds: [] });
   });
 
-  it("pins eleven probes, two of them the mock probes, each a web probe that pins the mock facts it must show", () => {
+  it("pins the API egress probe as UNKNOWN for the sinkholed name with the IP literal call still failing its assertion, and keeps its asset", () => {
+    const pin = WEB_API_REQUIRED_PROBES.find((probe) => probe.probeId === "api-egress-denial-v1")!;
+    expect([pin.kind, pin.expectedOutcome, pin.mock]).toEqual(["api", "EXPECTED_FAILURE", true]);
+    // The sinkholed name makes the case UNKNOWN; the failed http-status assertion, on a request that dials an IP literal, is what proves that wall holds.
+    expect(pin.cause).toEqual({ kind: "unmocked-external-call", reason: "unmocked-external-call", failedAssertionKinds: ["http-status"] });
+    // The asset still describes what the probe is about, a protected network denial; its expected outcome is the pin's, which the asset schema has no field for on an API probe.
+    const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "api-egress-denial-v1")!;
+    expect([asset.kind, asset.polarity, asset.probe.oracle.kind]).toEqual(["api", "negative", "protected-network-denial"]);
+    expect(asset.assetDigest).toBe(pin.assetDigest);
+  });
+
+  it("pins eleven probes, three of them showing mock facts: the two mock probes and the API egress probe", () => {
     expect(WEB_API_REQUIRED_PROBES).toHaveLength(11);
     expect(WEB_API_REQUIRED_PROBES.filter((probe) => probe.mock === true).map((probe) => [probe.probeId, probe.kind, probe.expectedOutcome])).toEqual([
-      ["web-mock-origin-v1", "web", "PASS"], ["web-unmocked-call-v1", "web", "EXPECTED_FAILURE"]]);
+      ["api-egress-denial-v1", "api", "EXPECTED_FAILURE"], ["web-mock-origin-v1", "web", "PASS"], ["web-unmocked-call-v1", "web", "EXPECTED_FAILURE"]]);
   });
 
   it("defines the IMDS denial probe as the pinned fetch with a short timeout and expects exit 7", () => {

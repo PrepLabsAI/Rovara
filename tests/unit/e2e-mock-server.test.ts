@@ -24,13 +24,14 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-async function start(options: { fixture?: E2EApiMockFixture | null; maxLines?: number; maxConnections?: number; connectionGraceMs?: number } = {}) {
+async function start(options: { fixture?: E2EApiMockFixture | null; maxLines?: number; maxConnections?: number; connectionGraceMs?: number; connectionCeilingMs?: number } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "mock-server-"));
   roots.push(dir);
   const ledgerPath = join(dir, "inventory-v1.jsonl");
   const server = await startMockServer({ fixture: options.fixture === undefined ? fixture : options.fixture, ledgerPath, host: "127.0.0.1", port: 0,
     ...(options.maxLines === undefined ? {} : { maxLines: options.maxLines }), ...(options.maxConnections === undefined ? {} : { maxConnections: options.maxConnections }),
-    ...(options.connectionGraceMs === undefined ? {} : { connectionGraceMs: options.connectionGraceMs }) });
+    ...(options.connectionGraceMs === undefined ? {} : { connectionGraceMs: options.connectionGraceMs }),
+    ...(options.connectionCeilingMs === undefined ? {} : { connectionCeilingMs: options.connectionCeilingMs }) });
   closers.push(server.close);
   const get = async (path: string, init: RequestInit = {}) => {
     const response = await fetch(`http://127.0.0.1:${server.port}${path}`, init);
@@ -235,13 +236,62 @@ describe("every connection to a mock or the sinkhole is recorded, parsed or not"
     expect(unmatched(await mock.lines())).toHaveLength(1);
   });
 
-  it("records each connection past the connection cap as an unmatched call instead of dropping it silently", async () => {
-    const mock = await start({ maxConnections: 1, connectionGraceMs: 10_000 });
-    const held = rawConnection(mock.server.port, null, 2_500);
+  it("records each connection past the connection cap as a dropped call instead of dropping it silently", async () => {
+    // The held connection stays open and silent for longer than the wait below and has a grace far past it, so it writes no line of its own while the test looks:
+    // the only line there can be is the one the `drop` handler writes for the connection the server refuses.
+    const mock = await start({ maxConnections: 1, connectionGraceMs: 60_000 });
+    const held = rawConnection(mock.server.port, null, 4_000);
     await new Promise((done) => setTimeout(done, 200));
     await rawConnection(mock.server.port, null, 500);
-    expect(await until(async () => unmatched(await mock.lines()).length >= 1)).toBe(true);
+    expect(await until(async () => (await mock.lines()).some((line) => line.method === "DROPPED"))).toBe(true);
+    const seen = await mock.lines();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ method: "DROPPED", variantId: null, status: 599, remoteAddress: "127.0.0.1" });
     await held;
+  });
+
+  it("does not record a request that is already in the socket as an unparsed connection when the event loop stalls past the grace", async () => {
+    const mock = await start({ connectionGraceMs: 100 });
+    const socket = connect(mock.server.port, "127.0.0.1");
+    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+    // The server has accepted the connection and started its grace timer.
+    await new Promise((done) => setTimeout(done, 30));
+    // Block this loop (the server's too) in the check phase for longer than the grace: the next turn of the loop runs the due timer before it reads the waiting bytes.
+    await new Promise<void>((resolve) => setImmediate(() => {
+      socket.write("GET /v1/stock?orderId=a1 HTTP/1.1\r\nhost: mock\r\nconnection: close\r\n\r\n");
+      for (const end = Date.now() + 300; Date.now() < end;) { /* a stall */ }
+      resolve();
+    }));
+    const answer = await new Promise<string>((resolve) => { let text = ""; socket.on("data", (chunk) => { text += String(chunk); }); socket.on("close", () => resolve(text)); });
+    expect(answer).toContain("200");
+    await new Promise((done) => setTimeout(done, 300));
+    const lines = await mock.lines();
+    expect(lines.map((line) => [line.method, line.variantId, line.status])).toEqual([["GET", "success", 200]]);
+  });
+
+  it("keeps waiting while bytes keep arriving, and records the connection once they stop", async () => {
+    const mock = await start({ connectionGraceMs: 300 });
+    const socket = connect(mock.server.port, "127.0.0.1");
+    socket.on("error", () => undefined);
+    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+    // A header that is not finished, sent in pieces: each piece is inside the grace of the one before it.
+    for (const piece of ["GET /v1/stock?orderId=a1 HT", "TP/1.1\r\n", "host: m", "ock\r\n"]) { socket.write(piece); await new Promise((done) => setTimeout(done, 150)); }
+    expect(await mock.lines()).toEqual([]);
+    expect(await until(async () => unmatched(await mock.lines()).length === 1)).toBe(true);
+    socket.destroy();
+  });
+
+  it("records a connection that keeps sending without ever finishing a request once the ceiling is reached", async () => {
+    const mock = await start({ connectionGraceMs: 150, connectionCeilingMs: 500 });
+    const socket = connect(mock.server.port, "127.0.0.1");
+    socket.on("error", () => undefined);
+    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+    // A valid start of a request whose last header never ends: the parser waits for more, and so does the mock until the ceiling.
+    socket.write("GET /v1/stock?orderId=a1 HTTP/1.1\r\nhost: mock\r\nx-slow: ");
+    const trickle = setInterval(() => { socket.write("1"); }, 50);
+    expect(await until(async () => unmatched(await mock.lines()).length === 1)).toBe(true);
+    clearInterval(trickle);
+    socket.destroy();
   });
 });
 

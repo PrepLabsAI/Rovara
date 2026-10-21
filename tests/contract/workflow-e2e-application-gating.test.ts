@@ -13,7 +13,7 @@ import { e2eApplicationPrivateTransferMaxBytes } from "@agentx/verifier";
 // raw evidence. Every group here is genuinely collected by the real collector from a real probe admission.
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const PASSING = { probe: "api-egress-denial-v1", observed: { kind: "http-status", status: 200 } } as const;
+const PASSING = { probe: "api-status-mismatch-v1", observed: { kind: "http-status", status: 503 } } as const;
 const FAILING = { probe: "api-status-mismatch-v1", observed: { kind: "http-status", status: 200 } } as const;
 
 type Round = Awaited<ReturnType<typeof roundOf>>;

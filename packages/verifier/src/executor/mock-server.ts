@@ -86,8 +86,10 @@ export type MockServerOptions = Readonly<{
   /** Test seams. */
   maxLines?: number;
   maxConnections?: number;
-  /** How long a connection may stay open without a parsed request before it is recorded as one. */
+  /** How long a connection may stay quiet (no byte received) without a parsed request before it is recorded as one. */
   connectionGraceMs?: number;
+  /** The longest a connection may stay open without having become a request before it is recorded, however steadily it sends; default three times the grace. */
+  connectionCeilingMs?: number;
   now?: () => Date;
   /** Called once when the ledger cannot be written; the server has already stopped answering. The entry point exits the process. */
   onFatal?: (error: unknown) => void;
@@ -95,6 +97,12 @@ export type MockServerOptions = Readonly<{
 
 export type RunningMockServer = Readonly<{ server: Server; servers: readonly Server[]; port: number; ports: readonly number[]; close(): Promise<void> }>;
 
+/**
+ * How long a connection may be quiet, without having become a request, before it is recorded as an unparsed call (and, at three times this, however much it sends).
+ * A connection is also recorded when it closes. The host stops a mock with `docker kill` before it reads the ledger, so the one gap is a connection still open and unparsed at
+ * that moment: it is within 1 s of its last byte and 3 s of its opening, so only a connection the app opened in the last seconds before the executor finished can be lost, and it never
+ * parsed as a request, so it was never answered.
+ */
 const CONNECTION_GRACE_MS = 1_000;
 type SocketState = { parsed: boolean; recorded: boolean };
 /** The address a connection came from, as the host compares it with the application container's. */
@@ -109,6 +117,7 @@ export async function startMockServer(options: MockServerOptions): Promise<Runni
   const fixture = options.fixture === null ? null : parseMockFixture(options.fixture);
   const maxLines = options.maxLines ?? MOCK_LEDGER_MAX_LINES;
   const grace = options.connectionGraceMs ?? CONNECTION_GRACE_MS;
+  const ceilingMs = options.connectionCeilingMs ?? grace * 3;
   const now = options.now ?? (() => new Date());
   const fd = openSync(options.ledgerPath, "a", 0o644);
   let lines = 0;
@@ -184,9 +193,14 @@ export async function startMockServer(options: MockServerOptions): Promise<Runni
     server.maxHeadersCount = 64;
     server.on("connection", (socket: Socket) => {
       states.set(socket, { parsed: false, recorded: false });
-      const timer = setTimeout(() => unparsed(socket, "UNPARSED"), grace);
-      timer.unref();
-      socket.once("close", () => { clearTimeout(timer); unparsed(socket, "UNPARSED"); });
+      // The connection is a call that never became a request when it has been quiet for the grace after its last byte, or has been open for the ceiling whatever it sends.
+      // The check is made after the loop has read what is waiting: a stall that outlasts the timer must not turn a request already in the socket into an unparsed call.
+      const fire = (): void => { setImmediate(() => unparsed(socket, "UNPARSED")); };
+      const quiet = setTimeout(fire, grace);
+      const ceiling = setTimeout(fire, ceilingMs);
+      quiet.unref(); ceiling.unref();
+      socket.on("data", () => { quiet.refresh(); });
+      socket.once("close", () => { clearTimeout(quiet); clearTimeout(ceiling); unparsed(socket, "UNPARSED"); });
       socket.on("error", () => undefined);
     });
     // Anything the HTTP parser refuses (TLS, h2c, a malformed or oversized request) is a call, not a silence.

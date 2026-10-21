@@ -18,8 +18,12 @@ type ExpectedFailureCause =
   | Readonly<{ kind: "assertion"; assertionKind: "csv" | "http-status" }>
   | Readonly<{ kind: "blocked-host"; host: string }>
   | Readonly<{ kind: "build-failed" }>
-  /** The case is UNKNOWN because the app called an origin no approved mock matched: here, exactly one call, to the sinkhole. */
-  | Readonly<{ kind: "unmocked-external-call"; /** The reason the run must give; it is the `expectedReason` of the probe's installed asset, and a test keeps the two equal. */ reason: string }>;
+  /**
+   * The case is UNKNOWN because the app called an origin no approved mock matched: here, exactly one call, to the sinkhole. `failedAssertionKinds` is the exact list of assertion kinds that
+   * must also have failed: none for the probe whose every assertion holds, and `http-status` for the API egress probe, whose failed assertion proves that the IP literal it dialed was blocked.
+   */
+  | Readonly<{ kind: "unmocked-external-call"; /** The reason the run must give; for a web probe it is the `expectedReason` of the installed asset, and a test keeps the two equal. */ reason: string;
+    failedAssertionKinds: readonly string[] }>;
 type RequiredProbe = Readonly<{ probeId: string; /** sha256 of the installed probe asset file; a test keeps it equal to the shipped bytes. */ assetDigest: string; kind: "web" | "api" | "build"; expectedOutcome: "PASS" | "EXPECTED_FAILURE"; cause: ExpectedFailureCause | null;
   /** sha256 of the canonical scenario the probe runs through the real collector; null for the build probe. A test recomputes it from the production plan builder. */
   scenarioDigest: string | null;
@@ -41,12 +45,13 @@ const requiredProbes: RequiredProbe[] = [
   { probeId: "web-csv-negative-v1", assetDigest: "91b591d3551262a6f8800e530ae502b9ed02e7066411194b0d9bfdc8aa079d14", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "csv" }, bundleDigest: "7469c1ac56ae5f5453d41d8c66a6f5e5be07a921530268e0976f22165b8652d8", scenarioDigest: "a7cd24dfbb78f5760995b3d8ac1a977a422ccf7d5601cfbaaafd6e0f8201cf5e", buildCommandDigest: null },
   { probeId: "web-egress-denial-v1", assetDigest: "a7e28d356365d736b8b1251344df6ca89194ea78ebd2ea977790bc03d9cf9e19", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "blocked-host", host: "probe.example.com" }, bundleDigest: "3554e2486a31a410d70bba007270ee12160fb043a29f7c6587250ea6f99ad88f", scenarioDigest: "8f823b398850bad62569c6744e255576129fc2616edcb0be8aa616c2491e37e0", buildCommandDigest: null },
   { probeId: "api-state-positive-v1", assetDigest: "5fa681bbcf60bdcbee9804d8bfe9bbd56c60d6a35925b5f9e929c42d9773cbc7", kind: "api", expectedOutcome: "PASS", cause: null, bundleDigest: "033b193aaa1ab0ed459770bf2a91141b33b5c247d6e23ec713630a0f95b74dc4", scenarioDigest: "fd333864038602a5788fbca3324f27f3e2d38cee12b4c8de3b5a0385fc4097dc", buildCommandDigest: null },
-  // The app, not the browser, makes this request, so the executor cannot record the blocked host; the dependency check fails instead.
-  { probeId: "api-egress-denial-v1", assetDigest: "ccfebb5c1e33d3f5a5d80d99cb51d42b29f2c6bd02ad76f81a746684276ade47", kind: "api", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "http-status" }, bundleDigest: "da196373fe0a42577122bf6f37f90371195fc631dda6cb2bf31279d68f261f71", scenarioDigest: "f44a7c49ba550068840d67e45a431575751e83bd254bbd2c53b9159ab7696975", buildCommandDigest: null },
+  // The app, not the browser, makes these requests, so the executor cannot record a blocked host. It asks for an inventory by a name nothing in the run serves, which the app's resolver sends to
+  // the sinkhole (UNKNOWN `unmocked-external-call`, one recorded call), and it dials an IP literal, which only the wall can stop: the failed `http-status` assertion on that call is the proof.
+  { probeId: "api-egress-denial-v1", assetDigest: "ccfebb5c1e33d3f5a5d80d99cb51d42b29f2c6bd02ad76f81a746684276ade47", kind: "api", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "unmocked-external-call", reason: "unmocked-external-call", failedAssertionKinds: ["http-status"] }, bundleDigest: "988fe2770742f42f9f9c147b84545811d46ad1c9e7e77d6737edb9ee718ce8e6", scenarioDigest: "a9b22a914cd5d7df6aaa398715b171d0115001cf0b0a85ab804d72c1af823d25", buildCommandDigest: null, mock: true },
   // M1.3: the app reads its inventory from an approved in-network mock of the declared origin. The probe passes only when the collector shows exactly one `success` consumption and no unmocked call.
   { probeId: "web-mock-origin-v1", assetDigest: "2db0bc780233991363864e2005919346c67e5dab966653dd1c81846032757d59", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "730b2a838689d74e7afba14485abdce51e63ad32e7266efb48e73fd62d6a7640", scenarioDigest: "3d0ed85074fc791112186c4624deb2a15f16ba8eda23c1ad9caad96261095cf9", buildCommandDigest: null, mock: true },
   // M1.3: the app calls its inventory origin, which has no approved mock, so the call lands in the sinkhole. The case is UNKNOWN (never PASS, never FAILED) with exactly one recorded sinkhole call.
-  { probeId: "web-unmocked-call-v1", assetDigest: "2e575d450f022985921b166df12a9c585bdf64d4abe97cd7260c3e95b78acbcf", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "unmocked-external-call", reason: "unmocked-external-call" }, bundleDigest: "730b2a838689d74e7afba14485abdce51e63ad32e7266efb48e73fd62d6a7640", scenarioDigest: "3d0ed85074fc791112186c4624deb2a15f16ba8eda23c1ad9caad96261095cf9", buildCommandDigest: null, mock: true },
+  { probeId: "web-unmocked-call-v1", assetDigest: "2e575d450f022985921b166df12a9c585bdf64d4abe97cd7260c3e95b78acbcf", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "unmocked-external-call", reason: "unmocked-external-call", failedAssertionKinds: [] }, bundleDigest: "730b2a838689d74e7afba14485abdce51e63ad32e7266efb48e73fd62d6a7640", scenarioDigest: "3d0ed85074fc791112186c4624deb2a15f16ba8eda23c1ad9caad96261095cf9", buildCommandDigest: null, mock: true },
   { probeId: "build-imds-denial-v1", assetDigest: "c6494ae44cf33f9824944dfe6606d82ac6c3a0240e355508d03785361adc23ac", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" }, bundleDigest: null, scenarioDigest: null, buildCommandDigest: "e8c2c552f1e011563ceeb18fc08bc03dd5e51a142a2e1e6e9327d8422ac4f6cd" },
   // The build container may reach the internet and nothing else: the gateway (the host) and a private address both time out, which a firewall DROP does and a missing rule does not.
   { probeId: "build-lateral-denial-v1", assetDigest: "6dea07ac3b128be2226c988534c1c5fbb6715939dc77dbd8302156307c33a755", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" }, bundleDigest: null, scenarioDigest: null, buildCommandDigest: "03b9465809bcef8d6bfeb409a89e68b618275e1ed3a19201018e9f9cd9e74c9e" },
@@ -65,7 +70,7 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 /** Where the qualification app (the fixture every probe runs against) sits in the installed-runtime manifest, which therefore proves its installed bytes. */
 export const WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX = "packages/verifier/assets/qualification-app/" as const;
 /** The digest of the installed qualification app tree; a test keeps it equal to the shipped files. */
-export const WEB_API_QUALIFICATION_APP_TREE_DIGEST = "59adbe884b6e3ceaa32723a8c3def5e36516e9c6d246309ecba140803f7a09a9";
+export const WEB_API_QUALIFICATION_APP_TREE_DIGEST = "2e698a8666056c0875b61e180cbccfc1fcb6da60fc90f30f11f57615e6cac236";
 /** The digest of a file tree given as app-relative paths and file digests, independent of listing order. */
 export function webApiQualificationAppTreeDigest(files: readonly Readonly<{ path: string; sha256: string }>[]): string {
   const sorted = files.map((file) => ({ path: file.path, sha256: file.sha256 })).sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
@@ -164,8 +169,8 @@ export function evaluateWebApiProbeObservation(probeId: string, observationInput
   const cause = probe.cause!;
   const wrongCause = { ok: false as const, reason: `probe-wrong-cause:${probeId}` };
   if (cause.kind === "unmocked-external-call") {
-    // UNKNOWN for the pinned reason, with the run itself available, every assertion held (a failed one is a different cause), one call recorded in the sinkhole and nothing else served or refused.
-    return observation.collectorStatus === "UNKNOWN" && observation.runUnavailableReason === null && observation.failedAssertionKinds.length === 0 && observation.runReason === cause.reason
+    // UNKNOWN for the pinned reason, with the run itself available, exactly the pinned assertions failed (none, or a different list, is a different cause), one call recorded in the sinkhole and nothing else served or refused.
+    return observation.collectorStatus === "UNKNOWN" && observation.runUnavailableReason === null && sameList(observation.failedAssertionKinds, cause.failedAssertionKinds) && observation.runReason === cause.reason
       && unmocked !== undefined && unmocked.sinkhole === 1 && unmocked.mocked === 0 && noConsumption ? { ok: true } : wrongCause;
   }
   if (cause.kind === "assertion") {

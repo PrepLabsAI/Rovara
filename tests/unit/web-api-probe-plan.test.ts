@@ -52,11 +52,19 @@ describe("the production web/API probe plan", () => {
     expect(createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot }).plan.runId).not.toBe(runId);
   });
 
+  it("asks the api egress probe for the sinkholed name and then the IP literal, and asserts only that the IP literal was reached", () => {
+    const { scenario } = createWebApiProbePlan({ probe: "api-egress-denial-v1", appRoot });
+    expect(scenario.steps).toMatchObject([{ kind: "request", path: "/api/inventory/status" }, { kind: "request", path: "/api/egress/raw" }]);
+    expect(scenario.assertions).toMatchObject([{ kind: "http-status", path: "/api/egress/raw", equals: 200 }]);
+  });
+
   it("drives the negative web probe with the seeded defect and the egress probes with the outside host", () => {
     expect(webApiProbeDriver("web-csv-negative-v1")).toMatchObject({ probe: "web-csv-positive-v1", defect: "extra-order.json" });
     expect(webApiProbeDriver("web-egress-denial-v1").appEnv).toEqual({ FIXTURE_EGRESS_PROBE_URL: "https://probe.example.com/ping" });
     // The host gives every declared origin (INVENTORY_ORIGIN) a container of the run, so the outside host is aimed at through the app's own egress-test variable.
-    expect(webApiProbeDriver("api-egress-denial-v1").appEnv).toEqual({ FIXTURE_INVENTORY_ORIGIN: "https://probe.example.com" });
+    // It also aims the app at an IP literal, which no name resolution can reach, so the raw wall is judged apart from the sinkholed name.
+    expect(webApiProbeDriver("api-egress-denial-v1").appEnv).toEqual({ FIXTURE_INVENTORY_ORIGIN: "https://probe.example.com", FIXTURE_RAW_EGRESS_URL: "http://1.1.1.1/" });
+    expect(webApiProbeDriver("api-egress-denial-v1").mock).not.toBe(true);
     expect(() => webApiProbeDriver("unknown-v1")).toThrow("no probe plan");
     expect(join(appRoot, "defects", "extra-order.json")).toContain("qualification-app");
   });

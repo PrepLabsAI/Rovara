@@ -51,7 +51,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const byId = new Map(proposal.probes.map((probe) => [probe.probeId, probe.observation]));
     expect(byId.get("web-csv-negative-v1")).toMatchObject({ collectorStatus: "FAILED", failedAssertionKinds: ["csv"] });
     expect(byId.get("web-egress-denial-v1")!.blockedHosts).toContain("probe.example.com");
-    expect(byId.get("api-egress-denial-v1")).toMatchObject({ collectorStatus: "FAILED", failedAssertionKinds: ["http-status"] });
+    // The name resolves to the sinkhole, which records the call (UNKNOWN, one call); the IP literal is stopped by the wall, so its assertion fails.
+    expect(byId.get("api-egress-denial-v1")).toMatchObject({ collectorStatus: "UNKNOWN", failedAssertionKinds: ["http-status"], runReason: "unmocked-external-call", unmockedCalls: { sinkhole: 1, mocked: 0 } });
     expect(byId.get("build-imds-denial-v1")).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
     expect(byId.get("build-lateral-denial-v1")).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
     // The app of this probe only starts, so the run only passes, when its connection to the host timed out.

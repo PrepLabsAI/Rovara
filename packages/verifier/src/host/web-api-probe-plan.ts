@@ -81,9 +81,12 @@ function scenarioFor(probe: WebApiProbeName, targetId: string, accountProfileId:
       assertions: [{ kind: "http-status" as const, path: "/health", method: "GET" as const, equals: 503 }] };
   }
   if (probe === "api-egress-denial-v1") {
-    // The app's dependency check must reach an outside host to answer 200, which an egress-denied run can never do.
-    return { ...common, scenarioId: probe, steps: [{ kind: "request" as const, requestId: "inventory", path: "/api/inventory/status", method: "GET" as const, body: {} }],
-      assertions: [{ kind: "http-status" as const, path: "/api/inventory/status", method: "GET" as const, equals: 200 }] };
+    // Two outside calls by the app. The first asks for its inventory by a name nothing in the run serves: the app's resolver sends that name to the sinkhole, which records the call,
+    // so the run is UNKNOWN `unmocked-external-call`. The second dials an IP literal, which no resolver touches, so only the wall around the run can stop it; the assertion claims it
+    // was reached, which a run with a wall can never show, so a failed `http-status` is the proof that the raw wall holds.
+    return { ...common, scenarioId: probe, steps: [{ kind: "request" as const, requestId: "inventory", path: "/api/inventory/status", method: "GET" as const, body: {} },
+      { kind: "request" as const, requestId: "raw-egress", path: "/api/egress/raw", method: "GET" as const, body: {} }],
+      assertions: [{ kind: "http-status" as const, path: "/api/egress/raw", method: "GET" as const, equals: 200 }] };
   }
   return { ...common, scenarioId: probe, steps: [{ kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: {} }],
     assertions: [{ kind: "state" as const, probeId: "api-state-positive/v1", equals: { orders: "ready", version: 1 }, pollTimeoutMs: 5_000 }] };
@@ -286,6 +289,8 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
 
 /** The outside host the egress probes try to reach; the qualification oracle requires exactly this one to be recorded as blocked. */
 export const WEB_API_EGRESS_PROBE_HOST = "probe.example.com";
+/** The IP literal the API egress probe dials besides that host: a public address that answers plain HTTP, so only a wall can make the call fail. */
+export const WEB_API_RAW_EGRESS_PROBE_URL = "http://1.1.1.1/";
 type BuildCommand = { program: string; args: string[]; cwd: string; timeoutMs: number; env: Record<string, string> };
 /** How one required qualification probe is driven through the qualification app; the oracle in contracts judges the outcome, not this table. */
 export type WebApiProbeDriver = Readonly<{ probe: WebApiProbeName; /** A defect file under the app's defects directory, placed in the owned mount. */ defect: string | null;
@@ -301,7 +306,7 @@ export function webApiProbeDriver(probeId: string): WebApiProbeDriver {
     case "web-csv-negative-v1": return { probe: "web-csv-positive-v1", defect: "extra-order.json", appEnv: {}, recipeBuild: null, startArgs: null };
     case "web-egress-denial-v1": return { probe: "web-egress-denial-v1", defect: null, appEnv: { FIXTURE_EGRESS_PROBE_URL: `https://${WEB_API_EGRESS_PROBE_HOST}/ping` }, recipeBuild: null, startArgs: null };
     case "api-state-positive-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null };
-    case "api-egress-denial-v1": return { probe: "api-egress-denial-v1", defect: null, appEnv: { FIXTURE_INVENTORY_ORIGIN: `https://${WEB_API_EGRESS_PROBE_HOST}` }, recipeBuild: null, startArgs: null };
+    case "api-egress-denial-v1": return { probe: "api-egress-denial-v1", defect: null, appEnv: { FIXTURE_INVENTORY_ORIGIN: `https://${WEB_API_EGRESS_PROBE_HOST}`, FIXTURE_RAW_EGRESS_URL: WEB_API_RAW_EGRESS_PROBE_URL }, recipeBuild: null, startArgs: null };
     // The inventory origin is declared, and the plan approves its mock: the page's request reaches the app, which reads one order's stock from the mock, once.
     case "web-mock-origin-v1": return { probe: "web-inventory-status-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null, mock: true };
     // The same page and the same assertion with no approved mock, against an app that hides a failed dependency behind the answer the page expects: every assertion can hold,
