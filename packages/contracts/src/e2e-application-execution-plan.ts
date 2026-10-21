@@ -15,6 +15,7 @@ import { E2ERegisteredRuntimeSchema, type E2ERegisteredRuntime } from "./e2e-run
 import { e2eRuntimeKindMatchesTarget, resolveE2ERuntimeReadiness } from "./e2e-runtime-capabilities.js";
 import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } from "./e2e-openapi-fixture.js";
 import { e2eApplicationRecipeIsProjectContract } from "./e2e-application-accounts.js";
+import { E2E_AGENT_APPROVAL_REFUSALS, E2E_AGENT_UNAVAILABLE_REASONS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS } from "./e2e-model-channel.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const stableId = (prefix: string, value: unknown) => prefix + sha256(canonicalJson(value));
@@ -40,8 +41,6 @@ export type E2EApplicationPortableProjection = {
   bundle: E2EScenarioBundle;
 };
 
-/** Why an agent-navigation scenario has no executable case yet: the qualified web/API runtime declares no `agent` step support. */
-export const AGENT_STEPS_UNAVAILABLE_REASON = "agent-steps-arrive-in-m1.4";
 /** Why a web/API target whose launch recipe is only inferred (no agentx.e2e project contract) has no executable case yet. */
 export const NEEDS_PROJECT_CONTRACT_REASON = "needs-project-contract";
 
@@ -293,10 +292,16 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
     // A profile registers one row per target kind (web and api), so the row is matched by profile and by the target's kind.
     const runtime = ref === undefined ? undefined : input.registeredRuntimes.find((item) => item.profileId === ref.runtimeProfileId
       && e2eRuntimeKindMatchesTarget({ ...policyTarget, runtimeProfileId: ref.runtimeProfileId }, item.capabilities));
-    // Agent navigation is executable only on a runtime whose registered descriptor declares it; the qualified web/API runtime does not until M1.4.
-    if (scenario.steps.some((step) => step.kind === "agent") && runtime?.capabilities.supportedSteps.includes("agent") !== true) {
-      unavailable.push({ criterionId, reason: AGENT_STEPS_UNAVAILABLE_REASON });
-      continue;
+    // Agent navigation is executable only when the READY descriptor declares `agent` and the project's policy pins an approved model route. It is also web-only, which approval judges
+    // (`agent-steps-web-only`, in `evaluateApplicationPlanApproval`), because only a web runtime's descriptor ever declares `agent`.
+    // The route being the installation's latest is judged where the registry is read (planning and dispatch), never here: this selection is pure and re-derived by the worker.
+    if (scenario.steps.some((step) => step.kind === "agent")) {
+      const reason = runtime?.capabilities.supportedSteps.includes("agent") !== true ? E2E_AGENT_UNAVAILABLE_REASONS.runtimeNotQualified
+        : policy.modelRouteRevision === null ? E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved : undefined;
+      if (reason !== undefined) {
+        unavailable.push({ criterionId, reason });
+        continue;
+      }
     }
     const gatedApplicationId = ref?.applicationId ?? intent.unavailableTargetRefs?.find((item) => item.targetId === targetId)?.applicationId;
     // Keyed on the profile the owner approved for the target (a ref cannot name a qualified profile the target does not carry).
@@ -372,6 +377,11 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
       const groupCases = selected.flatMap((targetId) => realCasesByTarget.get(targetId) ?? []);
       if (groupCases.length === 0) continue;
       if (groupCases.length > 64) throw new Error("application execution group exceeds the 64-case limit");
+      // The owner's D2 cap: at most three agent steps in one group, whatever scenarios hold them.
+      const agentStepsInGroup = groupCases.reduce((total, item) => total + (intent.scenarios.find((scenario) => scenario.scenarioId === item.scenarioId)?.steps.filter((step) => step.kind === "agent").length ?? 0), 0);
+      if (agentStepsInGroup > E2E_MODEL_ROUTE_DEFAULT_BUDGETS.maxAgentStepsPerGroup) {
+        throw new Error(`${E2E_AGENT_APPROVAL_REFUSALS.overGroupLimit}: a group may have at most ${E2E_MODEL_ROUTE_DEFAULT_BUDGETS.maxAgentStepsPerGroup} agent steps (this one has ${agentStepsInGroup})`);
+      }
       const profile = realTargetProfiles.get(selected[0]!)!;
       const groupId = stableId("group-", ["real-application", groupKey, selected]);
       const groupMocks: E2EMockSpec[] = selected.flatMap((targetId) => approvedMocks

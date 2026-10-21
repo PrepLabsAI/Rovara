@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { Command } from "commander";
 import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { E2EPolicy } from "@agentx/contracts";
+import { E2EPolicySchema, type E2EPolicy } from "@agentx/contracts";
 import { inspectE2ERepository, proposeE2ESetup } from "../../packages/broker/src/e2e/discovery.js";
 import { loadProjectConfig } from "../../packages/cli/src/config.js";
 import { firstProjectStep } from "../../packages/cli/src/init/finish-steps.js";
@@ -93,6 +93,60 @@ describe("agentx project add (FR-040)", () => {
     expect(definition.e2e).toEqual(policy);
     expect(prompter.asked.some((question) => question.startsWith("Setup command") || question.startsWith("Test command"))).toBe(false);
     expect(prompter.asked.filter((question) => question.startsWith("Use this project setup plan?")).length).toBe(1);
+  });
+
+  describe("AI navigation consent (D5, M1.4 Task 4.2)", () => {
+    const SENTENCE = "AI navigation: Anthropic `claude-haiku-5-5`; at most 8 actions per step; checks decide";
+    /** The control plane's proposal, as an installation with an AI navigation route would answer it: the policy pins a revision and the response says what it is. */
+    async function pinned(options: { sentence?: unknown; pin?: boolean } = {}) {
+      const plane = fakeControlPlane();
+      const bytes = Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } }));
+      const { proposal, policy, snapshot, repositories } = await sourceBackedSetup(bytes);
+      const pinnedPolicy = E2EPolicySchema.parse({ ...policy, modelRouteRevision: options.pin === false ? null : "r1-0123456789ab" });
+      const base = services(plane, repositories);
+      const wrapped = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+        const response = await plane.fetch(url, init);
+        const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+        if (path !== "/v1/admin/projects/setup-proposals") return response;
+        const body = await response.json() as Record<string, unknown>;
+        const stored = plane.setupProposals.get(String(body.proposalSha256))!;
+        plane.setupProposals.set(String(body.proposalSha256), { ...stored, policy: pinnedPolicy });
+        return new Response(JSON.stringify({ ...body, policy: pinnedPolicy, ...(options.sentence === undefined ? {} : { aiNavigation: options.sentence }) }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch };
+      return { plane, wrapped, proposal, policy: pinnedPolicy, snapshot };
+    }
+
+    it("shows the administrator the AI navigation sentence, in the output and in the one confirmation they answer", async () => {
+      const { plane, wrapped, proposal, policy, snapshot } = await pinned({ sentence: SENTENCE });
+      const lines: string[] = [];
+      const prompter = scriptedPrompter(["acme/payments-api", "", true]);
+      await addProject({ env: "staging", session, githubToken: "ghs_x", prompter, write: (line) => lines.push(line), services: wrapped, flags: {}, e2eSetup: { proposal, policy, snapshot } });
+      expect(lines.join("\n")).toContain(SENTENCE);
+      const confirmation = prompter.asked.filter((question) => question.startsWith("Use this project setup plan?"));
+      expect(confirmation).toHaveLength(1);
+      expect(confirmation[0]).toContain(SENTENCE);
+      expect(plane.requests.some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(true);
+    });
+
+    it("does not ask for approval of a setup whose policy pins a route that the response does not describe", async () => {
+      const { plane, wrapped, proposal, policy, snapshot } = await pinned();
+      const lines: string[] = [];
+      await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: (line) => lines.push(line), services: wrapped,
+        flags: { setupCommand: "npm ci", testCommand: "npm test" } });
+      expect(plane.requests.some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(false);
+      expect(lines.join("\n")).toContain("source-backed proposal was malformed or unbound");
+      void proposal; void policy; void snapshot;
+    });
+
+    it("says that AI navigation steps will not run when the setup pins no route", async () => {
+      const plane = fakeControlPlane();
+      const bytes = Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } }));
+      const { proposal, policy, snapshot, repositories } = await sourceBackedSetup(bytes);
+      const lines: string[] = [];
+      await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: (line) => lines.push(line), services: services(plane, repositories),
+        flags: {}, e2eSetup: { proposal, policy, snapshot } });
+      expect(lines.join("\n")).toMatch(/AI navigation steps will not run/);
+    });
   });
 
   it("does not register E2E enablement when the single setup-plan confirmation is declined", async () => {

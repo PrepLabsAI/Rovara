@@ -6,6 +6,7 @@ import { redactText } from "./redaction.js";
 import { e2eApplicationUpstreamTestIdFromIdentity, e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
 import { copyBoundedE2EJsonArrayItems } from "./e2e-safe-data.js";
 import { E2ECallableSelectorSchema } from "./e2e-portable.js";
+import { E2E_AGENT_APPROVAL_REFUSALS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS } from "./e2e-model-channel.js";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const id = (max = 120) => z.string().trim().min(1).max(max);
@@ -239,7 +240,9 @@ export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;
  * kind and admission schemaVersion disagree.
  */
 export const E2EWorkflowAdmissionRefSchema = z.object({
-  schemaVersion: z.literal(1), kind: z.literal("application").optional(), taskId: z.string().uuid(), workflowRevision: positiveInt,
+  schemaVersion: z.literal(1), kind: z.literal("application").optional(),
+  /** True when a group of the round has an `agent` step: the dispatcher then hands the round only to a worker that lists `task.workflowE2EAgentSteps.v1` (M1.4). */
+  agentSteps: z.literal(true).optional(), taskId: z.string().uuid(), workflowRevision: positiveInt,
   candidateDigest: digest, roundId: z.string().uuid(), groupRunIds: z.array(z.string().uuid()).min(1).max(4).refine((values) => new Set(values).size === values.length), admissionRef: z.object({
     key: z.string().regex(/^workflow-e2e-admissions\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest,
     byteLength: positiveInt.max(24 * 1024 * 1024),
@@ -370,7 +373,16 @@ export function validateE2EScenarioBundleForPolicy(bundle: unknown, policy: unkn
       if (target.kind === "api" && scenario.steps.some((step) => ["navigate", "fill", "click", "launch-app", "tap", "swipe", "deep-link", "restart-app", "set-permission", "choose-file"].includes(step.kind))) throw new Error(`UI scenario steps are incompatible with API target ${requestedTargetId}`);
     }
   }
-  if (parsedPolicy.modelRouteRevision === null && parsedBundle.scenarios.some((scenario) => scenario.steps.some((step) => step.kind === "agent"))) throw new Error("agent steps require an approved model route revision");
+  // An `agent` step only navigates; its verdict is never a case verdict (M1.4). Whether the policy has an approved route is not judged here: a scenario with an agent step but no route is
+  // unavailable (`agent-route-not-approved`), which the execution plan decides, so the same plan becomes executable once the route is approved.
+  const budgets = E2E_MODEL_ROUTE_DEFAULT_BUDGETS;
+  for (const scenario of parsedBundle.scenarios) {
+    const agentSteps = scenario.steps.filter((step): step is Extract<E2EStep, { kind: "agent" }> => step.kind === "agent");
+    if (agentSteps.some((step) => step.maxActions > budgets.maxActionsPerStep)) throw new Error(`${E2E_AGENT_APPROVAL_REFUSALS.overBudget}: an agent step may take at most ${budgets.maxActionsPerStep} actions (scenario ${scenario.scenarioId})`);
+    if (agentSteps.length > budgets.maxAgentStepsPerGroup) throw new Error(`${E2E_AGENT_APPROVAL_REFUSALS.overGroupLimit}: a scenario may have at most ${budgets.maxAgentStepsPerGroup} agent steps (scenario ${scenario.scenarioId})`);
+    // Checks decide: an agent scenario needs a deterministic assertion after its last agent step. `E2EScenarioSchema` already requires at least one assertion, and assertions
+    // run after all steps, so no separate refusal is needed here.
+  }
   return parsedBundle;
 }
 

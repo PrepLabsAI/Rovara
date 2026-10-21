@@ -232,8 +232,13 @@ describe("application execution plan selection", () => {
       runtimeAvailability: [{ targetId: web.targetId, profileId: runtimeRef.runtimeProfileId, connection: "connected" as const,
         approval: "approved" as const, qualification: "qualified" as const, authorizationRevision: "web-auth-r1" }] };
     const agentIntent = E2EApplicationPlanIntentSchema.parse({ ...intent, scenarios: [agentScenario, portableScenario, nativeScenario] });
-    expect(() => selectE2EApplicationExecutionPlan({ ...input, policy: { ...policy, modelRouteRevision: null },
-      intent: agentIntent, scenarios: agentIntent.scenarios, intentDigest: hash(canonicalJson(agentIntent)) })).toThrow(/agent steps require an approved model route revision/);
+    // With no approved route an agent step is unavailable, never a thrown refusal and never executable (Task 4.2).
+    const withoutRoute = selectE2EApplicationExecutionPlan({ ...input, policy: { ...policy, modelRouteRevision: null },
+      intent: agentIntent, scenarios: agentIntent.scenarios, intentDigest: hash(canonicalJson(agentIntent)) });
+    const agentCriterion = withoutRoute.criteria.find((item) => item.scenarioId === agentScenario.scenarioId)!;
+    expect(withoutRoute.unavailableCriteria.find((item) => item.criterionId === agentCriterion.criterionId)?.reason).toBe("agent-runtime-not-qualified");
+    expect(agentCriterion.expectedCaseIds).toEqual([]);
+    expect(withoutRoute.groups.flatMap((item) => item.expectedCases).some((item) => item.scenarioId === agentScenario.scenarioId)).toBe(false);
     const ready = selectE2EApplicationExecutionPlan(readyInput);
     expect(ready.criteria.find((item) => item.scenarioId === "web-ui")?.expectedCaseIds).toHaveLength(1);
     expect(ready.groups.find((item) => item.mode === "real-runtime")?.expectedCases[0]?.upstreamTestId)

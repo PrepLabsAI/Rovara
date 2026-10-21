@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
+  E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, validateE2EAppBuildBinding,
   type E2ECreatorAuthority, type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
   type E2EApplicationLaunchTarget, type E2EApplicationPlanIntent, type E2EAppArtifactRef, type E2EAppBuildManifest, type E2ERegisteredRuntime, type E2ERound,
@@ -198,9 +198,12 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
       originByApplicationId: [...new Set(members.map((target) => target.applicationId))].sort().map((applicationId) => ({ applicationId, origin: E2E_EXECUTOR_COMPILED_ORIGIN })) };
   }).sort((left, right) => (left.groupId < right.groupId ? -1 : 1));
 
+  // The route the project's policy pinned at setup approval (Task 4.2). The run binding carries the same revision, so a pinned policy always has route metadata; whether this round
+  // starts a model channel is a matter of whether any group has an agent step (Task 4.3), and whether the route is still the installation's was checked before this admission.
+  const modelRoute = selection.policy.modelRouteRevision === null ? null : { routeId: E2E_DEFAULT_MODEL_ROUTE_ID, routeRevision: selection.policy.modelRouteRevision };
   const context: E2EApplicationCompilationContext = { selectionInput: selection, executionPlan: plan, bundle: derivation.bundle,
     applicationBindings: new Map(applicationBindings.map((item) => [item.key, item.value])), runtimeBindings: new Map(runtimeBindings.map((item) => [item.key, item.value])),
-    launchTargets, modelRoute: null, cliHostsByProfile: new Map(cliHosts.map((item) => [item.profileId, item.descriptor])),
+    launchTargets, modelRoute, cliHostsByProfile: new Map(cliHosts.map((item) => [item.profileId, item.descriptor])),
     preparedEnvironmentsByGroup: new Map(preparedEnvironments.map(({ groupId, ...facts }) => [groupId, facts])) };
 
   const policyDigest = e2ePolicyDigest(selection.policy);
@@ -233,7 +236,7 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     workflowRevision: input.workflowRevision, candidateDigest: candidate.digest, candidateCommitSha: input.snapshot.commitSha, candidateTreeSha: input.snapshot.treeSha,
     sourceSnapshot: wire, intent: selection.intent, intentDigest: selection.intentDigest, selectionInput: { ...selection, sourceSnapshot: wire },
     applicationApprovalBinding: approval, applicationBindings, runtimeBindings, launchTargets: [...launchTargets].sort((left, right) => (left.targetId < right.targetId ? -1 : 1)),
-    modelRoute: null, cliHosts, preparedEnvironments, policy: selection.policy, bundle: derivation.bundle, executionPlan: plan,
+    modelRoute, cliHosts, preparedEnvironments, policy: selection.policy, bundle: derivation.bundle, executionPlan: plan,
     ...(input.creatorAuthority === undefined ? {} : { creatorAuthority: input.creatorAuthority }), portableProjection: null, round,
     groups: groupRuns.map((item) => item.admitted).sort((left, right) => (left.outerBinding.groupId < right.outerBinding.groupId ? -1 : 1)) };
   let bytes: Buffer;

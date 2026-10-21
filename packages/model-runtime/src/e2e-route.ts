@@ -87,15 +87,20 @@ export interface E2EDayBudget {
   reserve(inputTokens: number, limits: E2EDayLimits): E2EDayReservation | null | Promise<E2EDayReservation | null>;
 }
 export interface E2EDayReservation {
-  /** Settles the reservation with the tokens the provider reported. Not called when the spend is unknown, which keeps the reservation. */
+  /**
+   * Settles the reservation of a call that was sent, with the tokens charged for it. The call stays counted and the tokens are trued up to the amount, an overrun in full.
+   * Not called when the spend is unknown, which keeps the reservation. A sent call that reports zero input tokens is charged the reserved bound by the route, never zero.
+   */
   settle(actualInputTokens: number): void | Promise<void>;
+  /** Gives back the whole reservation, both its tokens and its call count, for a call that was never sent (a refusal or a failure before any request went out). */
+  release(): void | Promise<void>;
 }
 
 export interface InMemoryE2EDayBudget extends E2EDayBudget {
   snapshot(): { usedInputTokens: number; usedCalls: number };
 }
 
-/** A day budget held in memory: the test double, and a single-process fallback. The broker-backed one is Task 4.2's. */
+/** A day budget held in memory: the test double. The broker-backed one is `createBrokerE2EDayBudget` (Task 4.2), which a worker route uses. */
 export function createInMemoryE2EDayBudget(input: { usedInputTokens?: number; usedCalls?: number } = {}): InMemoryE2EDayBudget {
   let usedInputTokens = input.usedInputTokens ?? 0;
   let usedCalls = input.usedCalls ?? 0;
@@ -104,8 +109,12 @@ export function createInMemoryE2EDayBudget(input: { usedInputTokens?: number; us
       if (usedCalls + 1 > limits.maxCalls || usedInputTokens + inputTokens > limits.maxInputTokens) return null;
       usedCalls += 1;
       usedInputTokens += inputTokens;
-      let settled = false;
-      return { settle(actual) { if (settled) return; settled = true; usedInputTokens += actual - inputTokens; } };
+      let done = false;
+      return {
+        settle(actual) { if (done) return; done = true; usedInputTokens += actual - inputTokens; },
+        // A call that was never sent gives back its call count as well as its tokens.
+        release() { if (done) return; done = true; usedCalls -= 1; usedInputTokens -= inputTokens; },
+      };
     },
     snapshot: () => ({ usedInputTokens, usedCalls }),
   };
@@ -243,7 +252,8 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
     if (typeof output !== "object" || output === null) return { ...bad("the provider returned no answer", { inputTokens: reserved, outputTokens: 0 }), usageMissing: true };
     const usage = output.usage as { inputTokens?: unknown; outputTokens?: unknown } | undefined;
     const isCount = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 0;
-    if (usage === undefined || usage === null || !isCount(usage.inputTokens) || !isCount(usage.outputTokens)) {
+    // A call that was sent and reports no input tokens is not free: its usage is unusable and the reserved bound is charged (a call never sent is released, not settled).
+    if (usage === undefined || usage === null || !isCount(usage.inputTokens) || usage.inputTokens === 0 || !isCount(usage.outputTokens)) {
       return { ...bad("the provider reported no usable usage; the reserved bound is counted", { inputTokens: reserved, outputTokens: 0 }), usageMissing: true };
     }
     const tokens = { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
@@ -349,28 +359,30 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
     }
     const latencyMs = Math.max(0, now() - startedAtMs);
 
-    type Extra = { usageMissing?: true; served?: { model: string | null; upstream: string | null }; providerPayloadSha256?: string };
+    type Extra = { neverSent?: true; usageMissing?: true; served?: { model: string | null; upstream: string | null }; providerPayloadSha256?: string };
     const finish = async (outcome: E2EModelReceipt["outcome"], result: E2EModelChannelResult, tokens: { inputTokens: number; outputTokens: number }, responseSha256: string | null, spendKnown: boolean, extra: Extra = {}): Promise<E2EModelGenerateOutcome> => {
       const carried = { ...(extra.usageMissing === true ? { usageMissing: true as const } : {}), ...(extra.providerPayloadSha256 === undefined ? {} : { providerPayloadSha256: extra.providerPayloadSha256 }) };
-      if (spendKnown) {
-        try { await reservation?.settle(tokens.inputTokens); }
+      // A call that was sent is charged what the provider reported, but never zero: a sent call that reports no input tokens costs the reserved bound and keeps its call count.
+      const charged = extra.neverSent === true ? 0 : spendKnown && tokens.inputTokens === 0 ? reserved : tokens.inputTokens;
+      if (extra.neverSent === true || spendKnown) {
+        try { await (extra.neverSent === true ? reservation?.release() : reservation?.settle(charged)); }
         catch {
           const receipt = receiptFor(identity, receiptId, { startedAtMs, outcome: "provider-error", ...tokens, latencyMs, promptSha256, responseSha256: null, ...(extra.served === undefined ? {} : { served: extra.served }) });
-          return { result: { status: "error", code: "provider-error", message: "the project's daily model budget could not be settled" }, receipt, chargedInputTokens: tokens.inputTokens, ...carried };
+          return { result: { status: "error", code: "provider-error", message: "the project's daily model budget could not be settled" }, receipt, chargedInputTokens: charged, ...carried };
         }
       }
       const receipt = receiptFor(identity, receiptId, { startedAtMs, outcome, ...tokens, latencyMs, promptSha256, responseSha256, ...(extra.served === undefined ? {} : { served: extra.served }) });
-      return { result, receipt, chargedInputTokens: tokens.inputTokens, ...carried };
+      return { result, receipt, chargedInputTokens: charged, ...carried };
     };
 
     if (failed || output === undefined) {
       if (failure instanceof E2EPayloadRefusedError || (failure as { name?: unknown } | undefined)?.name === "E2EPayloadRefusedError") {
         // Nothing was sent, so nothing was spent: the reservation is released.
-        return finish("refused-credential-match", { status: "error", code: "refused-credential-match", message: "model-prompt-credential-match: the provider payload carried a seeded credential or credential-shaped text" }, { inputTokens: 0, outputTokens: 0 }, null, true);
+        return finish("refused-credential-match", { status: "error", code: "refused-credential-match", message: "model-prompt-credential-match: the provider payload carried a seeded credential or credential-shaped text" }, { inputTokens: 0, outputTokens: 0 }, null, true, { neverSent: true });
       }
       // A failure before any request went out (a setup, guard, mismatch or shaping refusal) spent nothing: charge 0 and release the reservation.
       if ((failure as { requestNotSent?: unknown } | undefined)?.requestNotSent === true && !timedOut) {
-        return finish("provider-error", { status: "error", code: "provider-error", message: describeProviderFailure(failure) }, { inputTokens: 0, outputTokens: 0 }, null, true);
+        return finish("provider-error", { status: "error", code: "provider-error", message: describeProviderFailure(failure) }, { inputTokens: 0, outputTokens: 0 }, null, true, { neverSent: true });
       }
       if (timedOut) return finish("timeout", { status: "error", code: "timeout", message: "the model call exceeded its time limit" }, { inputTokens: reserved, outputTokens: 0 }, null, false);
       const cancelled = controller.signal.aborted;

@@ -186,6 +186,24 @@ export function e2eModelRouteInvokedIdentifier(definition: E2EModelRouteDefiniti
   return definition.inferenceProfileArn ?? definition.modelId;
 }
 
+/** The id of the one route an installation's e2e agent steps use. Head's deploy check pins the same literal (`E2E_MODEL_ROUTE` in scripts/test-deploy-check.ts). */
+export const E2E_DEFAULT_MODEL_ROUTE_ID = "rovara-e2e-default" as const;
+/** The worker feature string a worker lists on /ping once it can run `agent` steps (Task 4.3 enables it). */
+export const E2E_AGENT_STEPS_FEATURE = "task.workflowE2EAgentSteps.v1" as const;
+/** Why an `agent` step has no executable case: the three readiness reasons, in the order they are judged. */
+export const E2E_AGENT_UNAVAILABLE_REASONS = Object.freeze({
+  runtimeNotQualified: "agent-runtime-not-qualified",
+  routeNotApproved: "agent-route-not-approved",
+  webOnly: "agent-steps-web-only",
+} as const);
+/** The refusals approval gives an `agent` step (and the group that holds it) that breaks the owner's D2 caps. A scenario's deterministic assertion after its last agent step is structural: `E2EScenarioSchema` requires one. */
+export const E2E_AGENT_APPROVAL_REFUSALS = Object.freeze({
+  overBudget: "agent-step-over-budget",
+  overGroupLimit: "agent-steps-over-group-limit",
+} as const);
+/** The code the owner sees when the installation's AI navigation settings changed after the route was approved. */
+export const E2E_MODEL_ROUTE_CHANGED_REAPPROVE = "model-route-changed-reapprove" as const;
+
 /** `"r" + revision + "-" + sha256(canonicalJson(parsed))[0:12]`. Computed from the parsed form, so key order and padding never matter. */
 export function e2eModelRouteRevision(definition: unknown): string {
   const parsed = E2EModelRouteDefinitionSchema.parse(definition);

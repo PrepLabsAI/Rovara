@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { E2EWorkflowAdmissionRef } from "@agentx/contracts";
-import { createWorkflowE2EAdmissionSchemaReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
+import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionSchemaReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const referenceFor = (bytes: Buffer, override: Partial<E2EWorkflowAdmissionRef["admissionRef"]> = {}): E2EWorkflowAdmissionRef => ({ schemaVersion: 1, taskId: "11111111-1111-4111-8111-111111111111",
@@ -27,5 +27,25 @@ describe("the admission schema reader the dispatcher uses", () => {
     await expect(createWorkflowE2EAdmissionSchemaReader({ s3: s3Returning("not json"), bucket: "b" })(referenceFor(notJson))).resolves.toBeUndefined();
     const noSchema = Buffer.from(JSON.stringify({ schemaVersion: 4 }));
     await expect(createWorkflowE2EAdmissionSchemaReader({ s3: s3Returning(noSchema.toString("utf8")), bucket: "b" })(referenceFor(noSchema))).resolves.toBeUndefined();
+  });
+});
+
+describe("the admission agent-steps reader the dispatcher uses", () => {
+  const admissionWith = (steps: Array<{ kind: string }>) => Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-application-admission/v1", bundle: { scenarios: [{ steps: [{ kind: "navigate" }] }, { steps }] } }));
+  const read = (bytes: Buffer, override: Partial<E2EWorkflowAdmissionRef["admissionRef"]> = {}) =>
+    createWorkflowE2EAdmissionAgentStepsReader({ s3: s3Returning(bytes.toString("utf8")), bucket: "b" })(referenceFor(bytes, override));
+
+  it("answers whether any scenario of the stored bundle has an agent step", async () => {
+    await expect(read(admissionWith([{ kind: "click" }, { kind: "agent" }]))).resolves.toBe(true);
+    await expect(read(admissionWith([{ kind: "click" }]))).resolves.toBe(false);
+  });
+
+  it("answers undefined for an object that is missing, changed, the wrong size, or has no scenario bundle", async () => {
+    const bytes = admissionWith([{ kind: "agent" }]);
+    await expect(createWorkflowE2EAdmissionAgentStepsReader({ s3: s3Returning(new Error("NoSuchKey")), bucket: "b" })(referenceFor(bytes))).resolves.toBeUndefined();
+    await expect(read(bytes, { byteLength: bytes.byteLength + 1 })).resolves.toBeUndefined();
+    await expect(read(bytes, { sha256: "0".repeat(64) })).resolves.toBeUndefined();
+    await expect(read(Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-application-admission/v1" })))).resolves.toBeUndefined();
+    await expect(read(Buffer.from("not json"))).resolves.toBeUndefined();
   });
 });

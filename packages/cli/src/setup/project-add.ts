@@ -304,7 +304,7 @@ async function setupRequest(session: AdminSession, fetchImplementation: typeof f
   return result as Record<string, unknown>;
 }
 
-function validateSetupProposalResponse(value: Record<string, unknown>): { proposal: E2ESetupProposal; policy: E2EPolicy; proposalRef: string; proposalSha256: string } {
+function validateSetupProposalResponse(value: Record<string, unknown>): { proposal: E2ESetupProposal; policy: E2EPolicy; proposalRef: string; proposalSha256: string; aiNavigation: string | null } {
   const proposal = E2ESetupProposalSchema.parse(value.proposal);
   const policy = E2EPolicySchema.parse(value.policy);
   if (typeof value.proposalRef !== "string" || !/^project-setup-proposals\/[a-f0-9]{64}\/[a-f0-9]{64}\.json$/.test(value.proposalRef)
@@ -314,7 +314,11 @@ function validateSetupProposalResponse(value: Record<string, unknown>): { propos
     || proposal.targets.some((target) => !policy.targets.some((configured) => JSON.stringify(configured) === JSON.stringify(target)))) {
     throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an unbound source-backed setup proposal");
   }
-  return { proposal, policy, proposalRef: value.proposalRef, proposalSha256: value.proposalSha256 };
+  // D5: approving a setup that pins an AI navigation route is the administrator's consent to that provider and model, so the response must say what the route is. A policy that
+  // pins one without the sentence is not shown for approval at all (it is treated as malformed), and a sentence is shown only for a policy that pins a route.
+  const sentence = typeof value.aiNavigation === "string" ? value.aiNavigation.replace(/[\p{Cc}\p{Cf}]+/gu, " ").trim().slice(0, 400) : "";
+  if (policy.modelRouteRevision !== null && sentence === "") throw agentXError("RUNTIME_UNAVAILABLE", "control plane pinned an AI navigation route without saying which");
+  return { proposal, policy, proposalRef: value.proposalRef, proposalSha256: value.proposalSha256, aiNavigation: policy.modelRouteRevision === null || sentence === "" ? null : sentence };
 }
 
 /** What this rerun asks for that the existing project does not have. Only the answers given are
@@ -445,8 +449,10 @@ export async function addProject(input: {
     const mockSummary = setupProposal.missingInputs.filter((item) => item.disposition === "mock-substitutable").map((item) => item.kind).join(", ") || "none detected";
     const blockerSummary = setupProposal.missingInputs.filter((item) => item.disposition === "blocking").map((item) => item.reason).join("; ") || "none";
     input.write(setupProposal.missingInputs.length === 0 ? "Detected source-backed E2E setup." : "Detected source-backed E2E setup with unresolved inputs: " + blockerSummary);
+    const aiNavigationSummary = trustedSetup.aiNavigation ?? "AI navigation steps will not run: this installation has no usable model route for them (it needs a configured model provider with its key), so only deterministic checks run";
+    input.write(aiNavigationSummary);
     const commandSummary = "setup: " + setup.map(commandLine).join("; ") + "; readiness: " + readiness.map(commandLine).join("; ");
-    e2eAccepted = await prompter.confirm("Use this project setup plan? (" + commandSummary + "; targets: " + targetSummary + "; mock substitutions: " + mockSummary + "; unresolved inputs: " + blockerSummary + ")", { defaultValue: true });
+    e2eAccepted = await prompter.confirm("Use this project setup plan? (" + commandSummary + "; targets: " + targetSummary + "; mock substitutions: " + mockSummary + "; unresolved inputs: " + blockerSummary + "; " + aiNavigationSummary + ")", { defaultValue: true });
     if (!e2eAccepted) { setup = []; readiness = []; }
     const decision = e2eAccepted ? "approve" : "decline";
     const approval = await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-approvals", {
