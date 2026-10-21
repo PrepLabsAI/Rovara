@@ -381,7 +381,8 @@ export function iamEvaluationNotes(headTemplate: CheckTemplate, deployedTemplate
   const roles = [...new Set([...attaching(headTemplate), ...attaching(deployedTemplate)])].sort();
   return [
     "IAM note: the grants are compared as policy documents, template against template. A role's ManagedPolicyArns and PermissionsBoundary, resource policies and out-of-band edits to the deployed roles are not evaluated.",
-    ...(roles.length === 0 ? [] : [`IAM note: these roles attach managed policies or a permissions boundary, so a change there is not seen: ${roles.join(", ")}`]),
+    // Most Lambda roles attach the basic execution policy, so the list is bounded.
+    ...(roles.length === 0 ? [] : [`IAM note: ${roles.length} role(s) attach managed policies or a permissions boundary, so a change there is not seen: ${roles.slice(0, 5).join(", ")}${roles.length > 5 ? `, and ${roles.length - 5} more` : ""}`]),
   ];
 }
 function list(value: unknown): unknown[] {

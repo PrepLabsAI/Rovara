@@ -777,6 +777,14 @@ describe("IAM drift: ARN spellings and the evaluation note (Task 3.0 clean-ups)"
       expect(notes).toContain("BrokerServiceRole1938BCC9");
       expect(iamEvaluationNotes(template(), template()).join("\n")).not.toContain("SessionsStepsServiceRole5DDD9E37");
     });
+
+    it("bounds the list of roles, because nearly every Lambda role attaches the basic execution policy", () => {
+      const many = { Resources: Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`Role${index}`, { Type: "AWS::IAM::Role", Properties: { ManagedPolicyArns: ["arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"] } }])) } as CfnTemplate;
+      const note = iamEvaluationNotes(many, many)[1] ?? "";
+      expect(note).toContain("9 role(s)");
+      expect(note).toContain("and 4 more");
+      expect(note).not.toContain("Role8");
+    });
   });
 });
 
