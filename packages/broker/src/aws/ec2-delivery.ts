@@ -1,4 +1,5 @@
 import {
+  E2E_AGENT_STEPS_FEATURE,
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
   WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED,
   agentXError,
@@ -228,6 +229,7 @@ async function forWorker(
   const carriesApplicationPlans = invocation.kind === "task" && (invocation.payload.workflowE2EPlanVersion !== undefined || asksForApplicationPlan(invocation.payload.prompt)
     || invocation.payload.workflowReviewPlan?.e2eIntent?.schemaVersion === 2);
   const carriesApplicationAdmission = invocation.kind === "task" && invocation.payload.workflowE2EAdmission?.kind === "application";
+  const carriesAgentSteps = invocation.kind === "task" && invocation.payload.workflowE2EAdmission?.agentSteps === true;
   const carriesReportChecks = invocation.kind === "publish" && invocation.payload.reportChecks !== undefined;
   const carriesCandidateTree = invocation.kind === "publish" && invocation.payload.candidateTreeSha !== undefined;
   const carriesPublicationMode = invocation.kind === "publish" && invocation.payload.publicationMode !== undefined;
@@ -236,7 +238,7 @@ async function forWorker(
   const carriesPullRequestUpdate = invocation.kind === "maintain" && invocation.payload.workflowCandidateTreeSha !== undefined;
   const carriesChatGpt = invocation.kind === "task" && invocation.payload.chatgpt !== undefined;
   const carriesProjectSetupSmoke = invocation.kind === "project-setup-smoke";
-  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesApplicationPlans && !carriesApplicationAdmission && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
+  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesApplicationPlans && !carriesApplicationAdmission && !carriesAgentSteps && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -267,6 +269,10 @@ async function forWorker(
   // sent one (and never a trimmed one): the attempt fails with this reason instead (Ruling BQ, mixed fleet).
   if (carriesApplicationAdmission && !features.includes("task.workflowE2EApplicationChecks")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "browser and API verification needs a worker that runs application admissions (it must list task.workflowE2EApplicationChecks); this worker predates it or has no executor image on its host, so no application round was sent to it");
+  }
+  // A round with AI navigation steps needs the model channel only a worker that lists the feature has, and the steps are never trimmed away: the attempt fails with this reason instead.
+  if (carriesAgentSteps && !features.includes(E2E_AGENT_STEPS_FEATURE)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "This worker can't run AI navigation steps yet; retry once it restarts");
   }
   if (carriesProjectSetupSmoke && !features.includes("project.setupSmoke")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "project setup smoke requires a worker that implements project.setupSmoke");

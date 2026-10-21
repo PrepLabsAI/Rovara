@@ -6,7 +6,7 @@ import {
   E2EWorkflowAdmissionRefSchema, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
   WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, canonicalPlanJson, workflowSendBackOffered,
   WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey, readCanonicalPlan, portableOperationId, type E2EApplicationPlanIntent,
-  selectE2EApplicationExecutionPlan,
+  selectE2EApplicationExecutionPlan, E2EScenarioSchema, validateE2EScenarioBundleForPolicy,
   type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
@@ -64,12 +64,71 @@ describe("browser and API scenarios on a qualified runtime profile", () => {
     expect(selected.criteria[0]?.expectedCaseIds).toEqual([]);
   });
 
-  it("keeps an agent step unavailable until M1.4", () => {
-    const agent: E2EScenario = { ...csvScenario, scenarioId: "agent-orders",
-      steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] };
-    const { plan: selected } = plan({ scenario: agent, modelRouteRevision: "route-v1" });
-    expect(selected.groups).toEqual([]);
-    expect(selected.unavailableCriteria).toEqual([{ criterionId: selected.criteria[0]!.criterionId, reason: "agent-steps-arrive-in-m1.4" }]);
+  describe("an agent step is executable only on a qualified web runtime, with an approved route", () => {
+    const agentScenario = (steps: E2EScenario["steps"] = [{ kind: "agent", goal: "open the orders page", maxActions: 3 }]): E2EScenario => ({ ...csvScenario, scenarioId: "agent-orders",
+      steps, assertions: [{ kind: "visible", testId: "orders", equals: true }] });
+    const withAgentSupport = (kind: "web" | "api" = "web") => webApiRow(kind, {}, (value) => ({ ...value, supportedSteps: [...value.supportedSteps, "agent" as const] }));
+
+    it("stays unavailable with agent-runtime-not-qualified while the READY descriptor declares no agent support", () => {
+      const { plan: selected } = plan({ scenario: agentScenario(), modelRouteRevision: "r1-0123456789ab" });
+      expect(selected.groups).toEqual([]);
+      expect(selected.unavailableCriteria).toEqual([{ criterionId: selected.criteria[0]!.criterionId, reason: "agent-runtime-not-qualified" }]);
+    });
+
+    it("stays unavailable with agent-route-not-approved while the project policy has no route", () => {
+      const { plan: selected } = plan({ scenario: agentScenario(), registeredRuntimes: [withAgentSupport()] });
+      expect(selected.groups).toEqual([]);
+      expect(selected.unavailableCriteria).toEqual([{ criterionId: selected.criteria[0]!.criterionId, reason: "agent-route-not-approved" }]);
+    });
+
+    it("is one application group with nothing unavailable when the descriptor supports agent and the policy pins a route", () => {
+      const { plan: selected } = plan({ scenario: agentScenario(), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" });
+      expect(selected.unavailableCriteria).toEqual([]);
+      expect(selected.groups).toHaveLength(1);
+      expect(selected.groups[0]).toMatchObject({ mode: "real-runtime", runtimeProfileId: PROFILE, targetIds: ["web-1"] });
+    });
+
+    it("binds the route revision into the case identity, so another route is another case", () => {
+      const one = plan({ scenario: agentScenario(), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" }).plan;
+      const two = plan({ scenario: agentScenario(), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r2-ba9876543210" }).plan;
+      expect(one.groups[0]!.expectedCases[0]!.caseId).not.toBe(two.groups[0]!.expectedCases[0]!.caseId);
+    });
+
+    it("is refused at approval with agent-steps-web-only on an API target, even when its descriptor claims agent support", () => {
+      const apiAgent: E2EScenario = { ...agentScenario(), requestedTargetIds: ["api-1"], steps: [{ kind: "agent", goal: "call the orders endpoint", maxActions: 3 }],
+        assertions: [{ kind: "http-status", path: "/api/orders", method: "GET", equals: 200 }] };
+      const fixture = planFixture({ snapshot: apiSnapshot, targetId: "api-1", scenario: apiAgent, setupReady: [{ kind: "api", profileId: PROFILE }], modelRouteRevision: "r1-0123456789ab" });
+      const result = evaluateApplicationPlanApproval({ intent: fixture.intent, taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) },
+        snapshot: fixture.snapshot, setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy,
+        registeredRuntimes: [webApiRow("web"), withAgentSupport("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW,
+        accounts: { entries: fixture.registry, mode: "approve", pinned: [] } });
+      expect(result).toMatchObject({ ok: false, scope: "plan" });
+      expect(!result.ok && result.reason).toMatch(/^agent-steps-web-only: scenario agent-orders/);
+    });
+
+    it("leaves a plan with no agent step exactly as it was", () => {
+      const without = plan({ registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" }).plan;
+      expect(without.unavailableCriteria).toEqual([]);
+      expect(without.groups).toHaveLength(1);
+    });
+
+    it("refuses at approval an agent step that asks for more than 8 actions", () => {
+      expect(() => plan({ scenario: agentScenario([{ kind: "agent", goal: "open the orders page", maxActions: 9 }]), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" }))
+        .toThrow(/agent-step-over-budget/);
+      expect(() => plan({ scenario: agentScenario([{ kind: "agent", goal: "open the orders page", maxActions: 8 }]), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" })).not.toThrow();
+    });
+
+    it("refuses at approval a group of more than 3 agent steps", () => {
+      const step = { kind: "agent" as const, goal: "open the orders page", maxActions: 2 };
+      expect(() => plan({ scenario: agentScenario([step, step, step, step]), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" })).toThrow(/agent-steps-over-group-limit/);
+      expect(() => plan({ scenario: agentScenario([step, step, step]), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" })).not.toThrow();
+    });
+
+    it("refuses an agent scenario with no deterministic assertion after its last agent step", () => {
+      expect(() => E2EScenarioSchema.parse({ ...agentScenario(), assertions: [] })).toThrow();
+      expect(() => validateE2EScenarioBundleForPolicy({ schemaVersion: 1, planDigest: "1".repeat(64), templateVersion: "t", scenarios: [{ ...agentScenario(), assertions: [] }], bundleDigest: "0".repeat(64) },
+        planFixture({}).policy)).toThrow();
+    });
   });
 
   it("admits an API scenario with a status and a json assertion on the READY api row", () => {
@@ -174,8 +233,8 @@ describe("approving a plan that carries an application intent", () => {
       ["the row is parked", { registeredRuntimes: [webApiRow("web", { state: "UNAVAILABLE" })] }, /not READY/i],
       ["the descriptor does not support a step the scenario uses", { registeredRuntimes: [webApiRow("web", {}, (value) => ({ ...value,
         supportedSteps: value.supportedSteps.filter((step) => step !== "click") }))] }, /not ready|unsupported|capabilit/i],
-      ["the scenario has an agent step", { modelRouteRevision: "route-v1", scenario: { ...csvScenario, scenarioId: "agent-orders",
-        steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] } }, /agent-steps-arrive-in-m1\.4/],
+      ["the scenario has an agent step and the descriptor declares no agent support", { modelRouteRevision: "r1-0123456789ab", scenario: { ...csvScenario, scenarioId: "agent-orders",
+        steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] } }, /agent-runtime-not-qualified/],
       ["the launch recipe is only inferred, without a project contract", { snapshot: inferredSnapshot }, /needs-project-contract/],
       ["the target is approved on the phase-unavailable profile but the plan names the qualified one", { setupReady: [], planRuntimeProfileId: PROFILE }, /runtime profile/i],
       ["the plan names a runtime profile the target does not carry", { planRuntimeProfileId: "foreign-runtime-profile" }, /runtime profile/i],
@@ -415,11 +474,26 @@ describe("planning context for a qualified web target", () => {
     expect(offered[0]).not.toContain("agent");
   });
 
-  it("never offers agent steps, even when a registered descriptor lists them", () => {
-    const text = describeFeatureE2EExecutableKinds({ targets: [{ targetId: "web-1", applicationId: "app", kind: "web", accountProfileId: "synthetic" }],
-      unavailableTargetRefs: [], executableKinds: [{ kind: "web", steps: ["navigate", "agent", "click"], assertions: ["visible"] }] });
-    expect(text).toContain("steps navigate, click;");
-    expect(text.split("\n").filter((line) => line.startsWith("- web targets"))[0]).not.toContain("agent");
+  it("offers agent steps only for a web target whose project has an approved, current route, and says how to use them (Task 4.2)", () => {
+    const readyWithAgent = [{ ...ready[0]!, supportedSteps: [...ready[0]!.supportedSteps, "agent" as const] }];
+    const build = (agentRouteApproved?: boolean) => {
+      const setup = approvedSetup(contractSnapshot, [{ kind: "web", profileId: PROFILE }], ["web-1"]);
+      const result = buildFeatureE2EPlanningContext(setup.policy, contractSnapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: readyWithAgent,
+        accountRegistry: registryFor(contractSnapshot), ...(agentRouteApproved === undefined ? {} : { agentRouteApproved }) });
+      if (result.status !== "available") throw new Error(result.reason);
+      return result;
+    };
+    // A registered descriptor that lists agent is not enough: without an approved, current route the planner is told agent steps are unavailable.
+    for (const withheld of [build(), build(false)]) {
+      expect(withheld.executableKinds![0]!.steps).not.toContain("agent");
+      expect(describeFeatureE2EExecutableKinds(withheld)).toContain("Do not use `agent` steps; they stay unavailable.");
+    }
+    const offered = build(true);
+    expect(offered.executableKinds![0]!.steps).toContain("agent");
+    const text = describeFeatureE2EExecutableKinds(offered);
+    expect(text.split("\n").filter((line) => line.startsWith("- web targets"))[0]).toContain("agent");
+    expect(text).toMatch(/Use deterministic steps where test IDs are known and stable/);
+    expect(text).not.toContain("Do not use `agent` steps");
   });
 
   it("puts the same target in the unavailable list while its runtime is not READY now", () => {
@@ -686,8 +760,21 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     it("when a scenario uses an agent step", async () => {
       const planned = await plannedWithApplicationIntent({ scenarios: (target) => [{ ...csvScenario, scenarioId: "agent-orders", requestedTargetIds: [target.targetId],
         accountProfileId: target.accountProfileId, steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] }] });
-      // The pinned policy has no model route, so the agent step is refused outright (with a route it waits as agent-steps-arrive-in-m1.4; see the evaluation cases).
-      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /agent steps require an approved model route/i);
+      // The READY descriptor declares no agent support yet (Task 4.5), so the plan lists a target as executable whose scenario cannot run (it needs the route as well; see the evaluation cases).
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /agent-runtime-not-qualified/i);
+    });
+
+    it("when an agent step asks for more than 8 actions (agent-step-over-budget)", async () => {
+      const planned = await plannedWithApplicationIntent({ scenarios: (target) => [{ ...csvScenario, scenarioId: "agent-orders", requestedTargetIds: [target.targetId],
+        accountProfileId: target.accountProfileId, steps: [{ kind: "agent", goal: "open the orders page", maxActions: 9 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] }] });
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /agent-step-over-budget/);
+    });
+
+    it("when a scenario has more than 3 agent steps (agent-steps-over-group-limit)", async () => {
+      const step = { kind: "agent" as const, goal: "open the orders page", maxActions: 2 };
+      const planned = await plannedWithApplicationIntent({ scenarios: (target) => [{ ...csvScenario, scenarioId: "agent-orders", requestedTargetIds: [target.targetId],
+        accountProfileId: target.accountProfileId, steps: [step, step, step, step], assertions: [{ kind: "visible", testId: "orders", equals: true }] }] });
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /agent-steps-over-group-limit/);
     });
 
     it("when the plan's account reference is not the registered account's (the M1.2 stand-in and any forged ref alike)", async () => {

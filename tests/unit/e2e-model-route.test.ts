@@ -23,6 +23,26 @@ function routeWith(invoke: E2EInvoke, definition = bedrockRoute(), extra: Partia
   return createGovernedE2EModelRoute(definition, { invoke, now: () => (clock += 5), dayBudget: createInMemoryE2EDayBudget(), ...extra });
 }
 
+describe("the in-memory day budget settles a call that was never sent like the broker's does", () => {
+  it("releases both the tokens and the call count at settle(0), and only the tokens' difference otherwise", async () => {
+    const budget = createInMemoryE2EDayBudget();
+    const sent = (await budget.reserve(2_000, { maxInputTokens: 10_000, maxCalls: 5 }))!;
+    const unsent = (await budget.reserve(3_000, { maxInputTokens: 10_000, maxCalls: 5 }))!;
+    await unsent.settle(0);
+    expect(budget.snapshot()).toEqual({ usedInputTokens: 2_000, usedCalls: 1 });
+    await sent.settle(900);
+    expect(budget.snapshot()).toEqual({ usedInputTokens: 900, usedCalls: 1 });
+  });
+
+  it("leaves nothing spent after a credential refusal through the route", async () => {
+    const dayBudget = createInMemoryE2EDayBudget();
+    const route = routeWith(async () => { throw new E2EPayloadRefusedError(); }, bedrockRoute(), { dayBudget });
+    const { receipt } = await route.generate(channelRequest());
+    expect(receipt.outcome).toBe("refused-credential-match");
+    expect(dayBudget.snapshot()).toEqual({ usedInputTokens: 0, usedCalls: 0 });
+  });
+});
+
 describe("governed e2e model route: the call it makes", () => {
   it("invokes the pinned model with provider-default sampling, thinking off and the route's output cap, and writes a valid receipt", async () => {
     const seen: E2EInvokeInput[] = [];

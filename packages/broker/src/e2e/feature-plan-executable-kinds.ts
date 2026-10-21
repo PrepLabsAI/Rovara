@@ -2,7 +2,7 @@ import type { FeatureE2EPlanningContext, FeatureE2EPlanningContextResult } from 
 
 /**
  * Prompt text naming which step and assertion kinds the planner may use for the executable targets (empty when none is executable).
- * Agent steps are never offered: they stay unavailable until M1.4.
+ * Agent steps are listed only when the project's approved AI navigation route is the installation's latest and a web runtime declares them (Task 4.2).
  */
 export function describeFeatureE2EExecutableKinds(context: Pick<FeatureE2EPlanningContext, "targets" | "unavailableTargetRefs" | "unavailableReasons" | "executableKinds">): string {
   const kinds = context.executableKinds ?? [];
@@ -12,8 +12,11 @@ export function describeFeatureE2EExecutableKinds(context: Pick<FeatureE2EPlanni
   const executable = (kind: string) => context.targets.filter((target) => target.kind === kind && !unavailable.has(target.targetId)).map((target) => target.targetId);
   return [
     "Targets in runtimeRefs that are not in unavailableTargetRefs can run real browser or API scenarios. For those targets only, a scenario may use exactly these kinds:",
-    ...kinds.map((item) => `- ${item.kind} targets (${executable(item.kind).join(", ")}): steps ${item.steps.filter((step) => step !== "agent").join(", ")}; assertions ${item.assertions.join(", ")}.`),
-    "Do not use `agent` steps; they stay unavailable. A target in unavailableTargetRefs cannot run application scenarios (unavailableReasons says why): list it there instead of proposing executable scenarios for it.",
+    ...kinds.map((item) => `- ${item.kind} targets (${executable(item.kind).join(", ")}): steps ${item.steps.join(", ")}; assertions ${item.assertions.join(", ")}.`),
+    kinds.some((item) => item.steps.includes("agent"))
+      ? "Use deterministic steps where test IDs are known and stable. Use an `agent` step only for UI the request changes, or where no test ID is approved, and make its goal name the outcome (for example \"Export the orders as a CSV file\"), not a selector. An agent step only navigates: it takes at most 8 actions, a group runs at most 3 agent steps, and every scenario with an agent step needs deterministic assertions after it, because the checks decide the result."
+      : "Do not use `agent` steps; they stay unavailable.",
+    "A target in unavailableTargetRefs cannot run application scenarios (unavailableReasons says why): list it there instead of proposing executable scenarios for it.",
     "A target whose unavailableReasons entry is no-source-identity has no source-owned application identity, so it has no entry in runtimeRefs or unavailableTargetRefs: give it no scenario and do not name it in the plan.",
   ].join("\n");
 }

@@ -108,6 +108,8 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
   accountRegistry?: readonly E2EAccountRegistryEntry[];
   /** The clock the registered definitions' expiry is judged by (milliseconds); the current time when omitted. */
   now?: number;
+  /** True when the project's policy pins an AI navigation route that is the installation's latest (Task 4.2). `agent` steps are offered to the planner only then, and only for web targets. */
+  agentRouteApproved?: boolean;
 } = {}): FeatureE2EPlanningContextResult {
   try {
     const sourceOrigin = identity.origin ?? "prepared-commit";
@@ -191,7 +193,7 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     });
     const executableKinds = (["web", "api"] as const).flatMap((kind) => {
       const ready = targets.filter((target) => target.kind === kind && unavailableReason(target) === undefined).map(readyRuntimeFor)[0];
-      return ready === undefined ? [] : [{ kind, steps: ready.supportedSteps.filter((step) => step !== "agent"), assertions: [...ready.supportedAssertions] }];
+      return ready === undefined ? [] : [{ kind, steps: ready.supportedSteps.filter((step) => step !== "agent" || (identity.agentRouteApproved === true && kind === "web")), assertions: [...ready.supportedAssertions] }];
     });
     // The refs the plan copies are the registry's latest, one per (application, account profile): an owner and a viewer of one application each get their own.
     const runtimeAccountRefs = runtimeRefs.flatMap((ref) => {

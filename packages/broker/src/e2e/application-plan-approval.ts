@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, Ec2RuntimeBindingSchema, canonicalJson,
+  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, E2E_AGENT_UNAVAILABLE_REASONS, Ec2RuntimeBindingSchema, canonicalJson,
   deriveE2ESyntheticRuntimeAccountRef, E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs, e2eRuntimeKindMatchesTarget, inspectE2ERepository, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract,
   type E2EApplicationPlanIntent, type E2EApplicationProjectContract, type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type E2ERuntimeAccountRef, type E2ERuntimeAvailability,
   type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
@@ -185,6 +185,11 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     if (mixed !== undefined) return refuse(`scenario ${mixed.scenarioId} cannot mix portable and application steps`, "plan");
     const applicationScenarios = fullIntent.scenarios.filter((scenario) => !isPortableScenario(scenario));
     if (applicationScenarios.length === 0) return refuse("the plan has no application scenario, so it is a portable plan: use schemaVersion 1", "plan");
+    // M1.4: AI navigation steps run on web targets only. The selection leaves a scenario unavailable when no descriptor declares `agent`; a plan that puts one on any other target is
+    // refused outright, since no corrected runtime would make it run.
+    const agentOffWeb = applicationScenarios.find((scenario) => scenario.steps.some((step) => step.kind === "agent")
+      && scenario.requestedTargetIds.some((targetId) => policy.targets.find((target) => target.targetId === targetId)?.kind !== "web"));
+    if (agentOffWeb !== undefined) return refuse(`${E2E_AGENT_UNAVAILABLE_REASONS.webOnly}: scenario ${agentOffWeb.scenarioId} uses an agent step on a target that is not a web target; AI navigation steps run on web targets only`, "plan");
     // Ruling BE: one CHECKS operation carries one admission, and an application admission runs no portable child group, so a version 2 plan carries no
     // portable criteria in M1.2 (mixed rounds wait for M1.3). Nothing is dropped silently: the plan is refused and the owner asks for the plan to be corrected.
     const portableScenarios = fullIntent.scenarios.filter((scenario) => isPortableScenario(scenario));

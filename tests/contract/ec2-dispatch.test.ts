@@ -489,6 +489,29 @@ describe("ec2-ebs delivery", () => {
         expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
       });
 
+      it("never sends a round with AI navigation steps to a worker that does not list task.workflowE2EAgentSteps.v1, and says why (M1.4 Task 4.2)", async () => {
+        const record = checks(admission({ kind: "application", agentSteps: true }));
+        const noAgents = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"] });
+        const refusal = await noAgents.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+        expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+        expect(refusal?.message).toContain("This worker can't run AI navigation steps yet; retry once it restarts");
+        expect(noAgents.post).not.toHaveBeenCalled();
+      });
+
+      it("hands a round with AI navigation steps, unchanged, to a worker that lists the agent-steps feature", async () => {
+        const ref = admission({ kind: "application", agentSteps: true });
+        const record = checks(ref);
+        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"] });
+        expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+        expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
+      });
+
+      it("does not ask for the agent-steps feature when no group has an agent step", async () => {
+        const record = checks(admission({ kind: "application" }));
+        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"] });
+        expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      });
+
       it("still hands a portable admission to a worker that predates application CHECKS", async () => {
         const ref = admission();
         const record = checks(ref);

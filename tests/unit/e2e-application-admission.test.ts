@@ -136,6 +136,16 @@ describe("the application admission built for a single-kind round", () => {
     expect(decoded.modelRoute).toBeNull();
   });
 
+  it("carries the route the project's policy pinned (Task 4.2), identical in the run binding, and the worker's own validator accepts it", async () => {
+    const fx = planFixture({});
+    const { input } = await inputs({ policy: { ...fx.policy, modelRouteRevision: "r1-0123456789ab" } });
+    const built = buildApplicationExecutionAdmission(input);
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    expect(decoded.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: "r1-0123456789ab" });
+    expect(decoded.groups.every((group) => group.outerBinding.modelRouteRevision === "r1-0123456789ab")).toBe(true);
+    expect(() => validateE2EApplicationExecutionAdmission(decoded)).not.toThrow();
+  });
+
   it("passes the verifier only the READY row of the kind in use (Ruling BF), so a profile's web and api rows are never ambiguous", async () => {
     const { input } = await inputs({ registeredRuntimes: [webApiRow("web"), webApiRow("api")] });
     const decoded = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission(input).bytes);

@@ -87,7 +87,11 @@ export interface E2EDayBudget {
   reserve(inputTokens: number, limits: E2EDayLimits): E2EDayReservation | null | Promise<E2EDayReservation | null>;
 }
 export interface E2EDayReservation {
-  /** Settles the reservation with the tokens the provider reported. Not called when the spend is unknown, which keeps the reservation. */
+  /**
+   * Settles the reservation with the tokens the provider reported. Not called when the spend is unknown, which keeps the reservation.
+   * `settle(0)` says the call was never sent (a refusal or a failure before any request went out): it releases both the reserved tokens and the call count.
+   * A positive amount keeps the call and trues the tokens up to that amount, an overrun in full.
+   */
   settle(actualInputTokens: number): void | Promise<void>;
 }
 
@@ -95,7 +99,7 @@ export interface InMemoryE2EDayBudget extends E2EDayBudget {
   snapshot(): { usedInputTokens: number; usedCalls: number };
 }
 
-/** A day budget held in memory: the test double, and a single-process fallback. The broker-backed one is Task 4.2's. */
+/** A day budget held in memory: the test double. The broker-backed one is `createBrokerE2EDayBudget` (Task 4.2), which a worker route uses. */
 export function createInMemoryE2EDayBudget(input: { usedInputTokens?: number; usedCalls?: number } = {}): InMemoryE2EDayBudget {
   let usedInputTokens = input.usedInputTokens ?? 0;
   let usedCalls = input.usedCalls ?? 0;
@@ -105,7 +109,13 @@ export function createInMemoryE2EDayBudget(input: { usedInputTokens?: number; us
       usedCalls += 1;
       usedInputTokens += inputTokens;
       let settled = false;
-      return { settle(actual) { if (settled) return; settled = true; usedInputTokens += actual - inputTokens; } };
+      return { settle(actual) {
+        if (settled) return;
+        settled = true;
+        // A call that was never sent releases its call count as well as its tokens (settle(0)).
+        if (actual === 0) usedCalls -= 1;
+        usedInputTokens += actual - inputTokens;
+      } };
     },
     snapshot: () => ({ usedInputTokens, usedCalls }),
   };
