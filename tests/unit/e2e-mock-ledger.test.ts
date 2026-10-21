@@ -162,6 +162,26 @@ describe("keeping run credentials out of what the mocks recorded", () => {
       ["unmatched", "GET", MOCK_LEDGER_WITHHELD, null], ["unmatched", "GET", MOCK_LEDGER_WITHHELD, null], ["unmatched", "POST", "/plain", null], ["unmatched", "GET", "/a", MOCK_LEDGER_WITHHELD]]);
   });
 
+  const percentEncoded = (value: string) => [...Buffer.from(value, "utf8")].map((byte) => `%${byte.toString(16).toUpperCase().padStart(2, "0")}`).join("");
+  it.each([
+    ["fully percent-encoded with a malformed escape elsewhere in the path", `/${percentEncoded(PASSWORD)}/%ZZ`],
+    ["fully percent-encoded behind a lone percent sign", `/%/${percentEncoded(PASSWORD)}`],
+    ["double percent-encoded", `/${percentEncoded(PASSWORD).replace(/%/g, "%25")}`],
+    ["triple percent-encoded in lower case", `/${percentEncoded(PASSWORD).replace(/%/g, "%25").replace(/%/g, "%25").toLowerCase()}`],
+    ["the email fully percent-encoded with a malformed escape", `/x?u=${percentEncoded(EMAIL)}&v=%G1`],
+  ])("withholds a credential that is %s", (_name, path) => {
+    const ledger = withhold(sink(line(10, "GET", path, null)));
+    expect(ledger.lines.map((item) => [item.kind, item.line.path])).toEqual([["unmatched", MOCK_LEDGER_WITHHELD]]);
+  });
+
+  it("decodes only well-formed escapes and stops after a bounded number of passes", () => {
+    // Five layers of encoding are past the cap of four passes, so the check never loops on a hostile value; such a path is a residual like any other reversible encoding.
+    let deep = percentEncoded(PASSWORD);
+    for (let layer = 1; layer < 6; layer += 1) deep = deep.replace(/%/g, "%25");
+    expect(withhold(sink(line(10, "GET", `/${deep}`, null))).lines[0]!.line.path).toBe(`/${deep}`);
+    expect(withhold(sink(line(20, "GET", "/100%-done?q=%ZZ+a", null))).lines[0]!.line.path).toBe("/100%-done?q=%ZZ+a");
+  });
+
   it("leaves a ledger without a credential exactly as it was, consumptions included", () => {
     const parsed = mocked(matched("success", 10), unmatched(20));
     expect(withhold(parsed)).toEqual(parsed);

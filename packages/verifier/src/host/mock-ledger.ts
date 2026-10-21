@@ -57,22 +57,46 @@ export function parseMockLedger(input: Readonly<{ origin: string; componentId: s
   return Object.freeze({ origin: input.origin, componentId: input.componentId, inputField: input.fixture?.inputField ?? null, lines: Object.freeze(lines), malformed, overflowed });
 }
 
+/** The most percent-decoding passes a recorded field gets before it is checked for a credential: enough for layered encoding, bounded so a hostile value cannot loop. */
+const MAX_PERCENT_DECODE_PASSES = 4;
+const hexValue = (byte: number): number => (byte >= 0x30 && byte <= 0x39 ? byte - 0x30 : byte >= 0x41 && byte <= 0x46 ? byte - 0x37 : byte >= 0x61 && byte <= 0x66 ? byte - 0x57 : -1);
+/** One pass of form decoding over bytes that never throws: a valid `%XX` becomes its byte, any other `%` stays as it is, and `+` becomes a space. */
+function percentDecodeTolerant(bytes: Buffer): Buffer {
+  const out: number[] = [];
+  for (let index = 0; index < bytes.length; index += 1) {
+    const byte = bytes[index]!;
+    if (byte === 0x25 && index + 2 < bytes.length && hexValue(bytes[index + 1]!) >= 0 && hexValue(bytes[index + 2]!) >= 0) {
+      out.push(hexValue(bytes[index + 1]!) * 16 + hexValue(bytes[index + 2]!)); index += 2;
+    } else out.push(byte === 0x2b ? 0x20 : byte);
+  }
+  return Buffer.from(out);
+}
+
 /** What replaces a ledger field that carried a run credential. */
 export const MOCK_LEDGER_WITHHELD = "[credential]";
 
 /**
  * Keeps run credentials out of what the mocks recorded. The app sees the run's passwords when the executor signs in through its form, and a mock records the method, path and
  * input of every call verbatim, so a hostile app could carry one into the unmocked-call evidence and the display (`http://mock-unbound:8080/<password>`). Each field that the
- * run's credential check matches, as recorded or percent-decoded, is replaced by a fixed marker. The call itself is never dropped: a line that carried a credential is always
- * an unmatched call (a consumption is never made of withheld text), so its case stays UNKNOWN `unmocked-external-call`.
+ * run's credential check matches, as recorded or after any of up to four tolerant percent-decoding passes (so a malformed escape elsewhere, or double encoding, does not
+ * hide it), is replaced by a fixed marker. The call itself is never dropped: a line that carried a credential is always an unmatched call (a consumption is never made of
+ * withheld text), so its case stays UNKNOWN `unmocked-external-call`.
+ *
+ * This is substring matching, like the app-log and capture redaction, so it is not a guarantee: a credential split across calls, written in hex, reversed, or in any other
+ * reversible encoding (or encoded more than four times) is not recognized. The impact is low because each credential is random, per run, and for a throwaway account.
  */
 export function withholdMockLedgerCredentials(ledger: ParsedMockLedger, containsCredential: (bytes: Uint8Array) => boolean): ParsedMockLedger {
   const carries = (value: string | null): boolean => {
     if (value === null || value.length === 0) return false;
-    if (containsCredential(Buffer.from(value, "utf8"))) return true;
-    let decoded: string;
-    try { decoded = decodeURIComponent(value.replace(/\+/g, " ")); } catch { return false; }
-    return decoded !== value && containsCredential(Buffer.from(decoded, "utf8"));
+    let current: Buffer = Buffer.from(value, "utf8");
+    if (containsCredential(current)) return true;
+    for (let pass = 0; pass < MAX_PERCENT_DECODE_PASSES; pass += 1) {
+      const next = percentDecodeTolerant(current);
+      if (next.equals(current)) return false;
+      if (containsCredential(next)) return true;
+      current = next;
+    }
+    return false;
   };
   const lines = ledger.lines.map((entry): ConsumptionLine | UnmatchedLine => {
     const { line } = entry;
