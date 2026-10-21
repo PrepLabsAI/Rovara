@@ -8,7 +8,9 @@
 // control-plane Lambdas not on head's code (by provenance: the deployed S3Key names the commit, and git says whether anything the
 // bundle comes from changed since), IAM grants and environment variables head needs that the deployed stack lacks, READY catalog rows
 // about to expire, a qualified runner and worker that match this build (including the agent-steps feature), and the e2e model route
-// (approval, Bedrock model access through read-only control-plane calls, the worker role's invoke grants; no model is invoked). `--apply` of Lambda code runs the IAM and environment parts
+// for the installation's provider, read from its `worker-model-provider` SSM setting (approval; for Bedrock, model access and agreement
+// through read-only control-plane calls and the worker role's invoke grants; for Anthropic, OpenAI or OpenRouter, the secret ARN setting
+// and the worker role's grant on it). No model is invoked and no secret is read. `--apply` of Lambda code runs the IAM and environment parts
 // first and refuses on a gap (stale code is expected before a deploy); it never applies IAM or stack changes itself.
 // Without --apply it prints the plan and exits 0 (it only reads: DescribeStacks for the current
 // parameters). With --apply it runs the plan. The plan reproduces the P0 TEST procedure: every
@@ -39,7 +41,9 @@ import {
 import { GetFunctionConfigurationCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { build as bundle } from "esbuild";
 import { CDK_CONSTRUCT_IDS, cdkAppArguments } from "../packages/cli/src/deploy/cdk-engine.js";
-import { environmentStackName } from "../packages/contracts/src/environments.js";
+import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
+import { KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, isKeyedModelProvider, type ModelProvider } from "../packages/contracts/src/model-providers.js";
+import { WORKER_SETTING_PARAMETERS } from "../packages/contracts/src/session.js";
 import { WEB_API_RUNTIME_PROFILE_ID } from "../packages/contracts/src/e2e-web-api-qualification.js";
 import {
   Runner,
@@ -57,11 +61,13 @@ import {
 } from "./release-common.js";
 import { deterministicZip } from "./release/zip.js";
 import {
-  E2E_MODEL_ROUTE,
+  E2E_MODEL_ROUTE_ID,
+  deriveE2EModelRoute,
   evaluateEnvironmentDrift,
   evaluateIamDrift,
   evaluateTestDeployCheck,
   formatFindings,
+  iamEvaluationNotes,
   lambdaRoleIds,
   parseDeployedCodeKey,
   parseRunnerStatus,
@@ -75,6 +81,7 @@ import {
   type ModelAvailabilityFact,
   type ModelRouteCheck,
   type RunnerFacts,
+  type SettingFact,
 } from "./test-deploy-check.js";
 
 /**
@@ -1081,13 +1088,38 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
 }
 
 // ---------------------------------------------------------------------------------------------
-// --check: the read-only gatherer. Every AWS call below is a read (get-template, describe-*, get-function, get-role, a DynamoDB
-// query and an S3 get-object); the head synth and build are injected so the unit tests run without either.
+// --check: the read-only gatherer. Every AWS call below is one of CHECK_READ_VERBS, and the reader refuses any other before it reaches
+// the CLI: cloudformation describe-stacks, get-template and list-stack-resources; lambda get-function; dynamodb query and scan (COUNT);
+// ec2 describe-instances; iam get-role; s3api get-object; bedrock get-inference-profile and get-foundation-model-availability; and
+// ssm get-parameter (no decryption). The head synth and build are injected so the unit tests run without either.
 // ---------------------------------------------------------------------------------------------
 
 /** The catalog rows' key: the profile the web/API runtime registers its web and API rows under. */
 const CATALOG_PROFILE_PREFIX = `PROFILE#${WEB_API_RUNTIME_PROFILE_ID}#`;
 const CATALOG_ID_VARIABLE = "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID";
+
+/** The only AWS verbs `--check` runs, as `<service> <operation>`. Every one reads; no secret, no KMS, no model invocation. */
+export const CHECK_READ_VERBS: ReadonlySet<string> = new Set([
+  "cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources",
+  "lambda get-function",
+  "dynamodb query", "dynamodb scan",
+  "ec2 describe-instances",
+  "iam get-role",
+  "s3api get-object",
+  "bedrock get-inference-profile", "bedrock get-foundation-model-availability",
+  "ssm get-parameter",
+]);
+
+/** The reader the check gathers through: it refuses any verb outside CHECK_READ_VERBS, so a later edit cannot add a write or a secret read by accident. */
+export function readOnlyAws(runner: AwsReader): AwsReader {
+  return {
+    aws(args: readonly string[], allowFailure?: boolean) {
+      const verb = `${args[0] ?? ""} ${args[1] ?? ""}`;
+      if (!CHECK_READ_VERBS.has(verb)) throw new Error(`test-deploy --check is read-only and "aws ${verb.trim()}" is not a read it runs`);
+      return runner.aws(args, allowFailure);
+    },
+  };
+}
 
 export interface CheckReaders {
   runner: AwsReader;
@@ -1100,8 +1132,6 @@ export interface CheckReaders {
   headRevision: string;
   /** Whether any of `paths` differs between `revision` and head; undefined when git cannot tell. */
   changedSince: (revision: string, paths: readonly string[]) => boolean | undefined;
-  /** The e2e model route head pins; E2E_MODEL_ROUTE unless given. */
-  route?: E2EModelRoute;
 }
 
 type CheckFacts = Omit<Parameters<typeof evaluateTestDeployCheck>[0], "now">;
@@ -1183,7 +1213,6 @@ const failureText = (stderr: string): string => stderr.trim().split("\n").filter
 
 /** `us.`, `eu.`, `apac.` and the other geography prefixes of a system-defined cross-region inference profile id; a foundation model id has none. */
 const INFERENCE_PROFILE_ID = /^(us|us-gov|eu|apac|global|jp|au|ca)\./;
-const isInferenceProfile = (route: E2EModelRoute): boolean => route.inferenceProfileArn !== null || INFERENCE_PROFILE_ID.test(route.modelId);
 
 /**
  * Whether Bedrock lists the route's model for this account and region, from two control-plane reads: get-inference-profile (for a profile:
@@ -1200,19 +1229,14 @@ function readModelAccess(readers: CheckReaders, route: E2EModelRoute): { access:
     // A model or profile Bedrock does not know is a definite answer; anything else (AccessDenied, throttling, no network) leaves it unknown.
     return { failure: /ResourceNotFound|ValidationException/.test(text) && !/AccessDenied/.test(text) ? { state: "not-found", detail: text } : { state: "unverifiable", reason: text } };
   };
-  let profileStatus: string | undefined;
-  let profileArn: string | undefined;
-  let modelArns: string[] = [];
-  let modelIds = [route.modelId];
-  if (isInferenceProfile(route)) {
-    const profile = read(["bedrock", "get-inference-profile", "--inference-profile-identifier", route.inferenceProfileArn ?? route.modelId]);
-    if ("failure" in profile) return { access: profile.failure, profileArn: undefined, modelArns: [] };
-    profileStatus = typeof profile.value.status === "string" ? profile.value.status : "UNKNOWN";
-    profileArn = typeof profile.value.inferenceProfileArn === "string" ? profile.value.inferenceProfileArn : undefined;
-    modelArns = (Array.isArray(profile.value.models) ? profile.value.models : [])
-      .flatMap((entry) => typeof (entry as { modelArn?: unknown }).modelArn === "string" ? [(entry as { modelArn: string }).modelArn] : []);
-    modelIds = [...new Set(modelArns.map((arn) => arn.slice(arn.indexOf("foundation-model/") + "foundation-model/".length)).filter((id) => id !== ""))];
-  }
+  // The e2e default on Bedrock is always a geography inference profile (a test pins that): its status, and the foundation models in every Region it routes to.
+  const profile = read(["bedrock", "get-inference-profile", "--inference-profile-identifier", route.modelId]);
+  if ("failure" in profile) return { access: profile.failure, profileArn: undefined, modelArns: [] };
+  const profileStatus = typeof profile.value.status === "string" ? profile.value.status : "UNKNOWN";
+  const profileArn = typeof profile.value.inferenceProfileArn === "string" ? profile.value.inferenceProfileArn : undefined;
+  const modelArns = (Array.isArray(profile.value.models) ? profile.value.models : [])
+    .flatMap((entry) => typeof (entry as { modelArn?: unknown }).modelArn === "string" ? [(entry as { modelArn: string }).modelArn] : []);
+  const modelIds = [...new Set(modelArns.map((arn) => arn.slice(arn.indexOf("foundation-model/") + "foundation-model/".length)).filter((id) => id !== ""))];
   const models: ModelAvailabilityFact[] = [];
   for (const modelId of modelIds) {
     const availability = read(["bedrock", "get-foundation-model-availability", "--model-id", modelId]);
@@ -1231,37 +1255,75 @@ function readModelAccess(readers: CheckReaders, route: E2EModelRoute): { access:
  * Whether the broker's route registry holds the route. Task 4.2 keeps `E2E_MODEL_ROUTE_LATEST#<routeId>` rows in the state table under the
  * project's partition key, and the check does not know the project, so it counts rows by sort key with a filtered scan (read-only).
  */
-function readRouteApproval(readers: CheckReaders, table: string, route: E2EModelRoute): ModelRouteCheck["approval"] {
+function readRouteApproval(readers: CheckReaders, table: string, routeId: string): ModelRouteCheck["approval"] {
   const result = readers.runner.aws([
     "dynamodb", "scan", "--table-name", table, "--select", "COUNT",
-    "--filter-expression", "sk = :sk", "--expression-attribute-values", JSON.stringify({ ":sk": { S: `E2E_MODEL_ROUTE_LATEST#${route.routeId}` } }),
+    "--filter-expression", "sk = :sk", "--expression-attribute-values", JSON.stringify({ ":sk": { S: `E2E_MODEL_ROUTE_LATEST#${routeId}` } }),
     "--region", readers.region, "--output", "json",
   ], true);
   if (result.status !== 0) return { unreadable: failureText(result.stderr) };
   return { approved: ((JSON.parse(result.stdout) as { Count?: number }).Count ?? 0) > 0 };
 }
 
-/** The route's checks: approval, Bedrock access (reads only) and the worker instance role in the deployed foundation stack. */
-function readModelRoute(readers: CheckReaders, input: { table: string; foundationStack: string; roleArn: string }): ModelRouteCheck {
-  const route = readers.route ?? E2E_MODEL_ROUTE;
+/**
+ * One worker setting from SSM (`/agentx/<env>/<name>`), through `ssm get-parameter` without decryption: these settings hold an id or an ARN,
+ * never a secret. A parameter that does not exist reads as no value; a denied or failed read is unverifiable, never a pass.
+ */
+function readWorkerSetting(readers: CheckReaders, name: string): SettingFact {
+  const result = readers.runner.aws(["ssm", "get-parameter", "--name", `${environmentSettingsPrefix(readers.env)}${name}`, "--region", readers.region, "--output", "json"], true);
+  if (result.status === 0) {
+    const value = (JSON.parse(result.stdout) as { Parameter?: { Value?: unknown } }).Parameter?.Value;
+    return { state: "read", value: typeof value === "string" ? value : undefined };
+  }
+  const text = failureText(result.stderr);
+  return /ParameterNotFound/.test(text) && !/AccessDenied/.test(text) ? { state: "read", value: undefined } : { state: "unverifiable", reason: text };
+}
+
+/** The route's checks, for the installation's provider: approval, and either Bedrock (reads only) or the keyed provider's secret ARN, with the worker instance role's grants. */
+function readModelRoute(readers: CheckReaders, input: { table: string; foundationStack: string; roleArn: string; controlPlaneTemplate: CfnTemplate; controlPlaneParameters: Record<string, string> }): ModelRouteCheck {
+  const approval = (routeId: string) => readRouteApproval(readers, input.table, routeId);
+  const providerSetting = readWorkerSetting(readers, WORKER_SETTING_PARAMETERS.modelProvider);
+  if (providerSetting.state === "unverifiable") return { provider: { state: "unverifiable", reason: `worker-model-provider could not be read: ${providerSetting.reason}` }, approval: approval(E2E_MODEL_ROUTE_ID) };
+  const provider = providerSetting.value?.trim();
+  if (provider === undefined || !(MODEL_PROVIDERS as readonly string[]).includes(provider)) {
+    return { provider: { state: "unverifiable", reason: provider === undefined ? "the worker-model-provider setting does not exist" : `worker-model-provider is ${JSON.stringify(provider)}, which is not one of ${MODEL_PROVIDERS.join(", ")}` }, approval: approval(E2E_MODEL_ROUTE_ID) };
+  }
+  const route = deriveE2EModelRoute(provider as ModelProvider);
   const foundationTemplate = deployedTemplateOf(readers.runner, readers.region, input.foundationStack);
   const output = (foundationTemplate as { Outputs?: Record<string, { Value?: { "Fn::GetAtt"?: unknown } }> }).Outputs?.Ec2WorkerInstanceRoleArn?.Value?.["Fn::GetAtt"];
   const roleLogicalId = Array.isArray(output) && typeof output[0] === "string" ? output[0] : undefined;
   if (roleLogicalId === undefined) throw new Error(`${input.foundationStack}'s Ec2WorkerInstanceRoleArn output is not a GetAtt of a role, so the worker instance role cannot be found in its template`);
   const [, partition = "aws", , , accountId = ""] = input.roleArn.split(":");
+  const roleName = input.roleArn.slice(input.roleArn.lastIndexOf("/") + 1);
+  if (isKeyedModelProvider(route.provider)) {
+    const { workerSetting } = KEYED_MODEL_PROVIDERS[route.provider];
+    return {
+      provider: { state: "known", route }, approval: approval(route.routeId),
+      keyed: {
+        secretArn: readWorkerSetting(readers, WORKER_SETTING_PARAMETERS[workerSetting]),
+        ...(route.provider === "openrouter" ? { openRouterProviders: readWorkerSetting(readers, WORKER_SETTING_PARAMETERS.openRouterProviders) } : {}),
+        iam: {
+          foundationTemplate, roleLogicalId, roleName, controlPlaneTemplate: input.controlPlaneTemplate,
+          scope: { partition, region: readers.region, accountId, parameters: input.controlPlaneParameters },
+        },
+      },
+    };
+  }
   const scope = { partition, region: readers.region, accountId };
   const { access, profileArn, modelArns } = readModelAccess(readers, route);
-  // What the route invokes: the profile (when it uses one) and each foundation model behind it. Without Bedrock's answer, the profile's own ARN and the model in this region.
-  const profileResource = isInferenceProfile(route) ? [route.inferenceProfileArn ?? profileArn ?? `arn:${partition}:bedrock:${readers.region}:${accountId}:inference-profile/${route.modelId}`] : [];
+  // What the route invokes: the profile (when it uses one) and each foundation model behind it, in every Region the profile routes to.
+  // Without Bedrock's answer, the profile's own ARN and the model in this region.
+  const profileResource = [profileArn ?? `arn:${partition}:bedrock:${readers.region}:${accountId}:inference-profile/${route.modelId}`];
   const modelResources = modelArns.length > 0 ? modelArns : [`arn:${partition}:bedrock:${readers.region}::foundation-model/${route.modelId.replace(INFERENCE_PROFILE_ID, "")}`];
   return {
-    route, access, approval: readRouteApproval(readers, input.table, route),
-    iam: { foundationTemplate, roleLogicalId, resources: [...new Set([...profileResource, ...modelResources])], scope },
+    provider: { state: "known", route }, approval: approval(route.routeId),
+    bedrock: { access, iam: { foundationTemplate, roleLogicalId, resources: [...new Set([...profileResource, ...modelResources])], scope } },
   };
 }
 
 /** Everything `evaluateTestDeployCheck` needs but the time, read from the live installation and the head build. */
-export async function gatherCheckFacts(readers: CheckReaders): Promise<{ facts: CheckFacts; notes: string[] }> {
+export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts: CheckFacts; notes: string[] }> {
+  const readers: CheckReaders = { ...unchecked, runner: readOnlyAws(unchecked.runner) };
   const stacks = resolveTestStacks(readers.env);
   const controlPlane = describeStack(readers.runner, readers.region, stacks["control-plane"]);
   const deployedTemplate = deployedTemplateOf(readers.runner, readers.region, stacks["control-plane"]);
@@ -1272,9 +1334,12 @@ export async function gatherCheckFacts(readers: CheckReaders): Promise<{ facts: 
   const web = catalog.find((row) => row.sk.endsWith("#web"));
   const runner = readRunnerFacts(readers, { bucket: stackOutput(controlPlane, "ArtifactBucketName"), foundationStack: environmentStackName(readers.env, "foundation"), endpoint: web?.endpoint, deployedExecutorImage });
   const foundationStack = environmentStackName(readers.env, "foundation");
+  const controlPlaneParameters: Record<string, string> = {};
+  for (const parameter of controlPlane.Parameters ?? []) if (parameter.ParameterKey) controlPlaneParameters[parameter.ParameterKey] = parameter.ParameterValue ?? "";
   const modelRoute = readModelRoute(readers, {
     table: stackOutput(controlPlane, "StateTableName"), foundationStack,
     roleArn: stackOutput(describeStack(readers.runner, readers.region, foundationStack), "Ec2WorkerInstanceRoleArn"),
+    controlPlaneTemplate: deployedTemplate, controlPlaneParameters,
   });
   const lambdaCodeShas = deployedCodeShas(readers, stacks["control-plane"]);
   const built = await readers.builtZips();
@@ -1287,9 +1352,10 @@ export async function gatherCheckFacts(readers: CheckReaders): Promise<{ facts: 
     const provenance = parseDeployedCodeKey(typeof key === "string" ? key : undefined, logicalId, deployedSha);
     if ("revision" in provenance) inputsChanged[logicalId] = readers.changedSince(provenance.revision, built.sources[logicalId] ?? []);
   }
+  const headTemplate = readers.headTemplate();
   return {
     facts: {
-      headTemplate: readers.headTemplate(),
+      headTemplate,
       deployedTemplate,
       lambdaCodeShas,
       builtZipShas: built.shas,
@@ -1299,7 +1365,7 @@ export async function gatherCheckFacts(readers: CheckReaders): Promise<{ facts: 
       runnerFacts: runner.facts,
       modelRoute,
     },
-    notes: runner.notes,
+    notes: [...runner.notes, ...iamEvaluationNotes(headTemplate, deployedTemplate)],
   };
 }
 
@@ -1383,8 +1449,8 @@ export function checkExitCode(argv: readonly string[], error: unknown): number {
 
 /** The machine-readable report of a check. */
 export function checkReport(result: CheckResult, notes: readonly string[], context: { env: string; revision: string }) {
-  const errors = result.findings.filter((finding) => finding.severity === "error").length;
-  return { ok: result.ok, env: context.env, revision: context.revision, errors, warnings: result.findings.length - errors, findings: result.findings, notes: [...notes] };
+  const count = (severity: Finding["severity"]) => result.findings.filter((finding) => finding.severity === severity).length;
+  return { ok: result.ok, env: context.env, revision: context.revision, errors: count("error"), warnings: count("warning"), infos: count("info"), findings: result.findings, notes: [...notes] };
 }
 
 /** `--check`: gathers the facts read-only, prints every finding, and fails when one is an error. */

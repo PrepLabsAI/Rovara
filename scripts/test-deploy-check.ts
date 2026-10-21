@@ -3,7 +3,14 @@
 // Four classes of problem were found only live in the M1.2 demo, and this finds each of them from facts a read-only gatherer
 // collects: control-plane Lambdas left on old code, an IAM grant head needs that the deployed role lacks, READY catalog rows that
 // expired or changed state, and a runner or worker that does not match this build. Nothing here reads or writes anything.
+//
+// M1.4 adds the e2e agent's model route, which follows the installation's provider (amendment A1): Bedrock through the worker's
+// instance role, or Anthropic, OpenAI or OpenRouter through the provider key's Secrets Manager ARN. Nothing here calls a model, and
+// nothing reads a secret: a key's validity and a customer-managed KMS key are reported as unverifiable (owner decision O6).
+import { KEYED_MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN, isKeyedModelProvider, type KeyedModelProvider, type ModelProvider } from "../packages/contracts/src/model-providers.js";
 import { WORKER_INVOCATION_FEATURES } from "../packages/contracts/src/protocol.js";
+import { listPricesPerMillion } from "../packages/model-runtime/src/catalog.js";
+import { DEFAULT_E2E_AGENT_MODELS, requireKeyedModel } from "../packages/model-runtime/src/config.js";
 
 /** A CloudFormation template as far as the check reads it. Structurally the same as test-deploy's `CfnTemplate`. */
 export interface CheckTemplate {
@@ -15,26 +22,37 @@ export type FindingKind =
   | "stale-lambda"
   | "iam-missing-grant"
   | "iam-extra-grant"
+  | "iam-explicit-deny"
   | "lambda-env-missing"
   | "catalog-not-ready"
   | "catalog-expiring"
   | "runner-image-mismatch"
   | "worker-feature-missing"
   | "model-route-not-approved"
-  | "model-access-unverified";
+  | "model-access-unverified"
+  | "model-agreement-missing"
+  | "model-not-in-catalog"
+  | "model-route-secret-missing"
+  | "model-route-openrouter-allowlist"
+  | "model-route-alias-refused"
+  | "model-route-third-party-processor";
 
 /** The worker feature string for `agent` steps (M1.4). A running worker must list it on /ping before an agent step can be dispatched to it. */
 export const AGENT_STEPS_FEATURE = "task.workflowE2EAgentSteps.v1";
 
-/** The e2e model route as head pins it (decision D1): Bedrock through the worker's instance role, no fallback. */
+/** The e2e model route as head pins it (decision D1, amendment A1): the installation's provider and that provider's small model, no fallback. */
 export interface E2EModelRoute {
   routeId: string;
+  provider: ModelProvider;
   modelId: string;
-  /** An application inference profile ARN when the route uses one; null for a model or system-defined profile id. */
-  inferenceProfileArn: string | null;
 }
-/** Replaced by the broker's route registry once Task 4.2 lands; until then head's route is this constant. */
-export const E2E_MODEL_ROUTE: E2EModelRoute = { routeId: "rovara-e2e-default", modelId: "us.anthropic.claude-haiku-5-5", inferenceProfileArn: null };
+export const E2E_MODEL_ROUTE_ID = "rovara-e2e-default";
+/** The route for an installation on `provider`: the model is `DEFAULT_E2E_AGENT_MODELS[provider]`, which the worker pins at setup approval. */
+export function deriveE2EModelRoute(provider: ModelProvider): E2EModelRoute {
+  return { routeId: E2E_MODEL_ROUTE_ID, provider, modelId: DEFAULT_E2E_AGENT_MODELS[provider] };
+}
+/** TEST's route: TEST runs Bedrock. The gatherer derives the real one from the installation's `worker-model-provider` setting. */
+export const E2E_MODEL_ROUTE: E2EModelRoute = deriveE2EModelRoute("amazon-bedrock");
 /** A route that is not approved is a warning until Task 4.9 approves it at setup; 4.9 flips this to "error". */
 const ROUTE_NOT_APPROVED_SEVERITY: Finding["severity"] = "warning";
 /** Converse is authorized by bedrock:InvokeModel and ConverseStream by bedrock:InvokeModelWithResponseStream (Bedrock API reference, Converse). */
@@ -52,8 +70,8 @@ export interface PolicyStatement {
 
 export interface Finding {
   kind: FindingKind;
-  /** A warning never fails the check. */
-  severity: "error" | "warning";
+  /** A warning never fails the check, and information (`info`) only tells what a read-only check cannot see. */
+  severity: "error" | "warning" | "info";
   /** What it is about: a logical ID, a catalog row key or `runner`. */
   subject: string;
   /** The subject without CDK's hash, for people. */
@@ -128,18 +146,56 @@ export type ModelAccessFacts =
   /** Bedrock answered. `profileStatus` is set when the route names an inference profile; `models` are the foundation models behind it (or the model itself). */
   | { state: "checked"; profileStatus?: string | undefined; models: ModelAvailabilityFact[] };
 
-export interface ModelRouteCheck {
-  route: E2EModelRoute;
-  /** Whether the broker's registry holds an approved revision of the route; `unreadable` when it could not be asked. */
-  approval: { approved: boolean } | { unreadable: string };
+/** A SSM worker setting as read: its value (undefined when the parameter does not exist), or why it could not be read. */
+export type SettingFact = { state: "read"; value: string | undefined } | { state: "unverifiable"; reason: string };
+
+/** The deployed IAM scope of a template: the pseudo parameters, and the stack's own parameter values for the control-plane template's Refs. */
+export interface IamScope {
+  partition: string;
+  region: string;
+  accountId: string;
+  parameters?: Readonly<Record<string, string>> | undefined;
+}
+
+/** The installation's provider as its `worker-model-provider` setting says, and so the route derived from it; or why it could not be read. */
+export type RouteProviderFacts = { state: "known"; route: E2EModelRoute } | { state: "unverifiable"; reason: string };
+
+/** amazon-bedrock: what Bedrock's control plane says about the route's model, and the worker role's grants (from the deployed foundation stack's template). */
+export interface BedrockRouteFacts {
   access: ModelAccessFacts;
-  /** The worker instance role's grants (from the deployed foundation stack's template) against the ARNs the route invokes. */
+  /** The worker instance role's grants against the ARNs the route invokes: the inference profile and the foundation model in every Region it routes to. */
   iam: {
     foundationTemplate: CheckTemplate;
     roleLogicalId: string;
     resources: readonly string[];
-    scope: { partition: string; region: string; accountId: string };
+    scope: IamScope;
   };
+}
+
+/** anthropic, openai, openrouter: the secret ARN setting, and the worker role's grants on it. Never the secret. */
+export interface KeyedRouteFacts {
+  secretArn: SettingFact;
+  /** openrouter only: `worker-openrouter-providers`, the allowlist of upstream providers. */
+  openRouterProviders?: SettingFact | undefined;
+  iam: {
+    foundationTemplate: CheckTemplate;
+    /** The worker instance role in the foundation template, and its name as the deployed control-plane stack attaches policies to it. */
+    roleLogicalId: string;
+    roleName: string;
+    /** The deployed control-plane template, which holds the `<constructPrefix>SecretRead` policies, and the stack's parameters for its Refs (in `scope`). */
+    controlPlaneTemplate: CheckTemplate;
+    scope: IamScope;
+  };
+}
+
+export interface ModelRouteCheck {
+  provider: RouteProviderFacts;
+  /** Whether the broker's registry holds an approved revision of the route; `unreadable` when it could not be asked. */
+  approval: { approved: boolean } | { unreadable: string };
+  /** Present for amazon-bedrock. */
+  bedrock?: BedrockRouteFacts | undefined;
+  /** Present for a keyed provider. */
+  keyed?: KeyedRouteFacts | undefined;
 }
 
 export interface CheckResult {
@@ -232,15 +288,103 @@ function staleLambdas(input: CheckInput): Finding[] {
  * and the hash of a Lambda version resource (which follows the code). Keys are sorted, so two spellings of one value are equal.
  */
 function canonical(node: unknown): string {
-  return JSON.stringify(sorted(node));
+  return JSON.stringify(sorted(node, true));
 }
-function sorted(node: unknown): unknown {
-  if (Array.isArray(node)) return node.map(sorted);
+/** The same without ARN-spelling normalization: what a person reads in a message. */
+function plain(node: unknown): string {
+  return JSON.stringify(sorted(node, false));
+}
+function sorted(node: unknown, normalize: boolean): unknown {
+  const arn = normalize ? normalizedArn(node) : undefined;
+  if (arn !== undefined) return arn;
+  if (Array.isArray(node)) return node.map((item) => sorted(item, normalize));
   if (node !== null && typeof node === "object") {
-    return Object.fromEntries(Object.entries(node).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, sorted(value)]));
+    return Object.fromEntries(Object.entries(node).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => [key, sorted(value, normalize)]));
   }
-  if (typeof node === "string") return node.replace(/AssetParameters[0-9a-f]{64}/g, "AssetParameters<hash>").replace(/(CurrentVersion)[0-9A-Fa-f]{40}/g, "$1<hash>");
+  if (typeof node === "string") return scrub(node);
   return node;
+}
+const scrub = (text: string): string => text.replace(/AssetParameters[0-9a-f]{64}/g, "AssetParameters<hash>").replace(/(CurrentVersion)[0-9A-Fa-f]{40}/g, "$1<hash>");
+
+// ARN spellings. Head (`cdk synth`) and the deployed stack (the legacy synthesizer) can spell one ARN differently, and that gave
+// false iam-missing-grant/iam-extra-grant pairs that blocked --apply until a person read them (Task 3.0, review m1). Only the comparison
+// key is normalized, never the statements a Tier 3 request prints. Spellings that cannot be proven equal stay different: GetAtt Arn
+// against a joined ARN, and a literal versioned function ARN.
+type Part = string | { Ref: string } | Record<string, unknown>;
+const PARTITION_REF = { Ref: "AWS::Partition" };
+
+/** Fn::Sub as parts: `${AWS::Region}` and `${LogicalId}` are Refs and `${LogicalId.Attr}` a GetAtt; the array form and `${!escapes}` are left alone. */
+function subParts(text: string): Part[] | undefined {
+  if (text.includes("${!")) return undefined;
+  const parts: Part[] = [];
+  let last = 0;
+  for (const match of text.matchAll(/\$\{([^}]+)\}/g)) {
+    parts.push(text.slice(last, match.index));
+    const [name = "", ...attribute] = match[1]?.split(".") ?? [];
+    parts.push(attribute.length === 0 ? { Ref: name } : { "Fn::GetAtt": [name, attribute.join(".")] });
+    last = (match.index ?? 0) + match[0].length;
+  }
+  parts.push(text.slice(last));
+  return parts;
+}
+
+/** A Fn::Join or Fn::Sub as a flat list of parts (nested joins and subs flattened), or undefined for anything else. */
+function flatParts(node: unknown): Part[] | undefined {
+  if (node === null || typeof node !== "object" || Array.isArray(node)) return undefined;
+  const keys = Object.keys(node);
+  if (keys.length !== 1) return undefined;
+  const sub = (node as { "Fn::Sub"?: unknown })["Fn::Sub"];
+  if (typeof sub === "string") return subParts(sub)?.flatMap((part) => flatParts(part) ?? [part]);
+  const join = (node as { "Fn::Join"?: unknown })["Fn::Join"];
+  if (!Array.isArray(join) || typeof join[0] !== "string" || !Array.isArray(join[1])) return undefined;
+  const [delimiter, items] = join as [string, unknown[]];
+  return items.flatMap((item, index): Part[] => {
+    const inner = flatParts(item);
+    const parts: Part[] = inner ?? [item as Part];
+    return index === 0 || delimiter === "" ? parts : [delimiter, ...parts];
+  });
+}
+
+function mergeStrings(parts: readonly Part[]): Part[] {
+  const merged: Part[] = [];
+  for (const part of parts) {
+    const previous = merged[merged.length - 1];
+    if (typeof part === "string" && typeof previous === "string") merged[merged.length - 1] = previous + part;
+    else if (typeof part !== "string" || part !== "") merged.push(part);
+  }
+  return merged;
+}
+
+/** The canonical form of an ARN-like value: one flat Fn::Join of merged literals and intrinsics, with a literal `arn:aws:` written as `arn:` + Ref AWS::Partition. */
+function normalizedArn(node: unknown): unknown {
+  let parts: Part[] | undefined;
+  if (typeof node === "string") {
+    if (!node.startsWith("arn:aws:")) return undefined;
+    parts = [node];
+  } else parts = flatParts(node);
+  if (parts === undefined) return undefined;
+  let merged = mergeStrings(parts);
+  const [first, ...rest] = merged;
+  if (typeof first === "string" && first.startsWith("arn:aws:")) merged = mergeStrings(["arn:", PARTITION_REF, `:${first.slice("arn:aws:".length)}`, ...rest]);
+  if (merged.length === 1 && typeof merged[0] === "string") return scrub(merged[0]);
+  return { "Fn::Join": ["", merged.map((part) => (typeof part === "string" ? scrub(part) : sorted(part, true)))] };
+}
+
+/**
+ * What the IAM comparison does not evaluate, for the check's notes. It compares policy documents template against template, so a role's
+ * ManagedPolicyArns and PermissionsBoundary, resource policies (Lambda permissions, bucket and key policies) and out-of-band edits are
+ * invisible to it (Task 3.0, review m1). The roles that attach managed policies or a boundary are named, because a change there is missed.
+ */
+export function iamEvaluationNotes(headTemplate: CheckTemplate, deployedTemplate: CheckTemplate): string[] {
+  const attaching = (template: CheckTemplate): string[] => Object.entries(template.Resources ?? {})
+    .filter(([, resource]) => resource.Type === "AWS::IAM::Role" && (list(resource.Properties?.ManagedPolicyArns).length > 0 || resource.Properties?.PermissionsBoundary !== undefined))
+    .map(([logicalId]) => logicalId);
+  const roles = [...new Set([...attaching(headTemplate), ...attaching(deployedTemplate)])].sort();
+  return [
+    "IAM note: the grants are compared as policy documents, template against template. A role's ManagedPolicyArns and PermissionsBoundary, resource policies and out-of-band edits to the deployed roles are not evaluated.",
+    // Most Lambda roles attach the basic execution policy, so the list is bounded.
+    ...(roles.length === 0 ? [] : [`IAM note: ${roles.length} role(s) attach managed policies or a permissions boundary, so a change there is not seen: ${roles.slice(0, 5).join(", ")}${roles.length > 5 ? `, and ${roles.length - 5} more` : ""}`]),
+  ];
 }
 function list(value: unknown): unknown[] {
   return value === undefined ? [] : Array.isArray(value) ? value : [value];
@@ -363,7 +507,7 @@ export function evaluateIamDrift(headTemplate: CheckTemplate, deployedTemplate: 
       const statements = statementsFor(grants);
       findings.push({
         kind: "iam-missing-grant", severity: "error", subject: policyLogicalId, label: findingLabel(roleLogicalId), roleLogicalId, policyLogicalId, statements,
-        message: `${policyLogicalId} of ${roleLogicalId} lacks ${grants.length} grant(s) head needs: ${grants.map((grant) => `${canonical(grant.action)} on ${canonical(grant.resource)}`).join("; ")}`,
+        message: `${policyLogicalId} of ${roleLogicalId} lacks ${grants.length} grant(s) head needs: ${grants.map((grant) => `${plain(grant.action)} on ${plain(grant.resource)}`).join("; ")}`,
       });
     }
   }
@@ -374,7 +518,7 @@ export function evaluateIamDrift(headTemplate: CheckTemplate, deployedTemplate: 
       const grants = extra.filter((grant) => grant.policyLogicalId === policyLogicalId);
       findings.push({
         kind: "iam-extra-grant", severity: "warning", subject: policyLogicalId, label: findingLabel(roleLogicalId), roleLogicalId, policyLogicalId, statements: statementsFor(grants),
-        message: `${policyLogicalId} of ${roleLogicalId} holds ${grants.length} grant(s) head no longer has: ${grants.map((grant) => `${canonical(grant.action)} on ${canonical(grant.resource)}`).join("; ")}`,
+        message: `${policyLogicalId} of ${roleLogicalId} holds ${grants.length} grant(s) head no longer has: ${grants.map((grant) => `${plain(grant.action)} on ${plain(grant.resource)}`).join("; ")}`,
       });
     }
   }
@@ -501,28 +645,72 @@ function runnerFindings(facts: RunnerFacts | undefined): Finding[] {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The e2e model route (M1.4): approval, Bedrock access and the worker role's grants. All from reads; nothing invokes a model.
+// The e2e model route (M1.4, amendment A1): approval, then what the installation's provider needs. All from reads; nothing invokes a model
+// and nothing reads a secret.
 // ---------------------------------------------------------------------------------------------
 
+type Maker = (kind: FindingKind, severity: Finding["severity"], message: string) => Finding;
+
 function routeFindings(check: ModelRouteCheck): Finding[] {
-  const { route } = check;
-  const finding = (kind: "model-route-not-approved" | "model-access-unverified", severity: Finding["severity"], message: string): Finding =>
-    ({ kind, severity, subject: route.routeId, label: route.routeId, message });
+  const finding: Maker = (kind, severity, message) => ({ kind, severity, subject: E2E_MODEL_ROUTE_ID, label: E2E_MODEL_ROUTE_ID, message });
   const findings: Finding[] = [];
+  const known = check.provider.state === "known" ? check.provider.route : undefined;
+  const routeText = known === undefined ? `route ${E2E_MODEL_ROUTE_ID}` : `route ${E2E_MODEL_ROUTE_ID} (${known.provider} ${known.modelId})`;
   if ("unreadable" in check.approval) {
-    findings.push(finding("model-route-not-approved", ROUTE_NOT_APPROVED_SEVERITY, `route ${route.routeId} has no readable approval, so it cannot be called approved: ${check.approval.unreadable}`));
+    findings.push(finding("model-route-not-approved", ROUTE_NOT_APPROVED_SEVERITY, `${routeText} has no readable approval, so it cannot be called approved: ${check.approval.unreadable}`));
   } else if (!check.approval.approved) {
-    findings.push(finding("model-route-not-approved", ROUTE_NOT_APPROVED_SEVERITY, `route ${route.routeId} (${route.modelId}) has no approved revision in the broker's route registry; agent steps stay unavailable until setup approves it`));
+    findings.push(finding("model-route-not-approved", ROUTE_NOT_APPROVED_SEVERITY, `${routeText} has no approved revision in the broker's route registry; agent steps stay unavailable until setup approves it`));
   }
-  const problem = modelAccessProblem(route, check.access);
-  if (problem !== undefined) findings.push(finding("model-access-unverified", "error", problem));
-  findings.push(...routeGrantFindings(check.iam, route));
+  if (check.provider.state === "unverifiable") {
+    findings.push(finding("model-access-unverified", "error", `the installation's model provider is unverifiable, which is not a pass: ${check.provider.reason}`));
+    return findings;
+  }
+  const { route } = check.provider;
+  // An OpenRouter alias is refused on its own finding; asking the catalog about it would only repeat that.
+  const alias = route.provider === "openrouter" && isOpenRouterAlias(route.modelId);
+  const catalog = alias ? undefined : catalogProblem(route);
+  if (catalog !== undefined) findings.push(finding("model-not-in-catalog", "error", catalog));
+  if (route.provider === "amazon-bedrock") {
+    if (check.bedrock === undefined) findings.push(finding("model-access-unverified", "error", `Bedrock's answer for ${route.modelId} was not gathered, which is not a pass`));
+    else findings.push(...bedrockFindings(route, check.bedrock, finding));
+  } else if (check.keyed === undefined) {
+    findings.push(finding("model-access-unverified", "error", `the ${KEYED_MODEL_PROVIDERS[route.provider].label} secret setting and the worker role's grants were not gathered, which is not a pass`));
+  } else {
+    findings.push(...keyedFindings(route, route.provider, check.keyed, finding));
+  }
   return findings;
 }
 
-/** Why the route's model cannot be called as available in this account and region, or undefined when Bedrock says it is. */
+/** A router alias, not a model: `~` aliases (`~anthropic/claude-haiku-latest`) and `openrouter/` routers (`openrouter/auto`). Pi's catalog refuses both. */
+const isOpenRouterAlias = (modelId: string): boolean => modelId.startsWith("~") || modelId.startsWith("openrouter/");
+
+/** Why the pinned pi catalog does not know the route's default model, or undefined when it does. */
+function catalogProblem(route: E2EModelRoute): string | undefined {
+  const text = `${route.provider} model ${route.modelId} is not in the installed pi catalog, so the e2e agent cannot be routed to it; update AgentX or choose another default`;
+  try {
+    if (isKeyedModelProvider(route.provider)) requireKeyedModel(route.provider, route.modelId);
+    else if (listPricesPerMillion({ provider: route.provider, modelId: route.modelId }) === undefined) return text;
+    return undefined;
+  } catch {
+    return text;
+  }
+}
+
+// ---- amazon-bedrock ----
+
+function bedrockFindings(route: E2EModelRoute, bedrock: BedrockRouteFacts, finding: Maker): Finding[] {
+  const findings: Finding[] = [];
+  const problem = modelAccessProblem(route, bedrock.access);
+  if (problem !== undefined) findings.push(finding("model-access-unverified", "error", problem));
+  const agreement = agreementProblem(bedrock.access);
+  if (agreement !== undefined) findings.push(finding("model-agreement-missing", "error", agreement));
+  findings.push(...routeGrantFindings(bedrock.iam, route));
+  return findings;
+}
+
+/** Why the route's model cannot be called as available in this account and region, or undefined when Bedrock says it is. The agreement is judged apart (M4-U). */
 function modelAccessProblem(route: E2EModelRoute, access: ModelAccessFacts): string | undefined {
-  const model = route.inferenceProfileArn ?? route.modelId;
+  const model = route.modelId;
   if (access.state === "unverifiable") return `model ${model} is unverifiable here, which is not a pass: ${access.reason}`;
   if (access.state === "not-found") return `model ${model} is not listed as available in this account and region: ${access.detail}`;
   const problems: string[] = [];
@@ -533,73 +721,44 @@ function modelAccessProblem(route: E2EModelRoute, access: ModelAccessFacts): str
     if (model.authorizationStatus !== "AUTHORIZED") bad.push(`authorization ${model.authorizationStatus ?? "unknown"}`);
     if (model.entitlementAvailability !== "AVAILABLE") bad.push(`entitlement ${model.entitlementAvailability ?? "unknown"}`);
     if (model.regionAvailability !== "AVAILABLE") bad.push(`region availability ${model.regionAvailability ?? "unknown"}`);
-    // NOT_AVAILABLE can mean the model needs no agreement; only a pending or failed one blocks.
-    if (model.agreementStatus === "PENDING" || model.agreementStatus === "ERROR") bad.push(`agreement ${model.agreementStatus}`);
     if (bad.length > 0) problems.push(`${model.modelId}: ${bad.join(", ")}`);
   }
   return problems.length === 0 ? undefined : `model ${model} is not available to this account: ${problems.join("; ")}`;
 }
 
-type IamScope = ModelRouteCheck["iam"]["scope"];
-
-/** The text of an ARN or action value, with the pseudo parameters of the deployed template filled in; undefined for anything else (GetAtt, an imported value). */
-function resolveText(node: unknown, scope: IamScope): string | undefined {
-  const pseudo: Record<string, string> = { "AWS::Partition": scope.partition, "AWS::Region": scope.region, "AWS::AccountId": scope.accountId };
-  if (typeof node === "string") return node;
-  if (node === null || typeof node !== "object") return undefined;
-  const intrinsic = node as { Ref?: unknown; "Fn::Join"?: unknown; "Fn::Sub"?: unknown };
-  if (typeof intrinsic.Ref === "string") return pseudo[intrinsic.Ref];
-  const join = intrinsic["Fn::Join"];
-  if (Array.isArray(join) && typeof join[0] === "string" && Array.isArray(join[1])) {
-    const parts = join[1].map((part) => resolveText(part, scope));
-    return parts.every((part) => part !== undefined) ? parts.join(join[0]) : undefined;
-  }
-  if (typeof intrinsic["Fn::Sub"] === "string") {
-    const text = intrinsic["Fn::Sub"].replace(/\$\{(AWS::[A-Za-z]+)\}/g, (whole, name: string) => pseudo[name] ?? whole);
-    return text.includes("${") ? undefined : text;
-  }
-  return undefined;
+/**
+ * Ruling M4-U: the agreement must be AVAILABLE. Live TEST showed anthropic.claude-haiku-5-5 AUTHORIZED, entitled and available in the
+ * Region, yet an invocation was denied because agreementAvailability.status was NOT_AVAILABLE. Any other status (PENDING, ERROR, NOT_AVAILABLE,
+ * or none reported) is an error, which overrides the earlier review's "do not tighten".
+ */
+function agreementProblem(access: ModelAccessFacts): string | undefined {
+  if (access.state !== "checked") return undefined;
+  const problems = access.models.filter((model) => model.agreementStatus !== "AVAILABLE")
+    .map((model) => `${model.modelId}: agreement ${model.agreementStatus ?? "unknown"}`);
+  return problems.length === 0 ? undefined
+    : `the model agreement is not AVAILABLE, so Bedrock denies invocation even though the model reads as authorized (${problems.join("; ")}); accept the model's agreement in this account first`;
 }
 
-const globMatches = (pattern: string, value: string, flags = ""): boolean =>
-  new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`, flags).test(value);
+type IamVerdict = "granted" | "missing" | "denied" | "maybe-denied";
 
-/**
- * Whether one statement applies to `action` on `resource`: yes, no, or maybe when it cannot be told. A Condition is not evaluated, and a
- * resource written as something this cannot resolve (GetAtt, an import) has no text to match. An Allow that is conditional or unresolved
- * never counts as a grant (it errs toward alarm). A Deny that is conditional or unresolved while its action matches is "maybe": it might
- * block the call, so the caller must not report a pass.
- */
-function statementMatch(statement: PolicyStatement, action: string, resource: string, scope: IamScope): "yes" | "no" | "maybe" {
-  const actions = list(statement.NotAction ?? statement.Action).filter((value): value is string => typeof value === "string");
-  const actionHit = actions.some((pattern) => globMatches(pattern, action, "i"));
-  if (statement.NotAction === undefined ? !actionHit : actionHit) return "no";
-  const resolved = list(statement.NotResource ?? statement.Resource).map((value) => resolveText(value, scope));
-  const resourceHit = resolved.some((pattern) => pattern !== undefined && globMatches(pattern, resource));
-  const resolvable = resolved.every((pattern) => pattern !== undefined);
-  // NotResource applies to everything its patterns do not name; with an unresolved pattern it cannot be told.
-  const resourceMatch: "yes" | "no" | "maybe" = statement.NotResource === undefined
-    ? (resourceHit ? "yes" : resolvable ? "no" : "maybe")
-    : (!resolvable ? "maybe" : resourceHit ? "no" : "yes");
-  if (resourceMatch === "no") return "no";
-  if (statement.Effect === "Allow") return resourceMatch === "yes" && statement.Condition === undefined ? "yes" : "no";
-  return resourceMatch === "yes" && statement.Condition === undefined ? "yes" : "maybe";
+/** Whether the statements allow `action` on `resource`: a definite Deny, no matching Allow, a Deny that might match, or granted. */
+function iamVerdict(statements: readonly PolicyStatement[], action: string, resource: string, scope: IamScope): IamVerdict {
+  const classified = statements.map((statement) => classifyStatement(statement, action, resource, scope));
+  if (classified.some(({ effect, match }) => effect === "deny" && match === "yes")) return "denied";
+  if (!classified.some(({ effect, match }) => effect === "allow" && match === "yes")) return "missing";
+  return classified.some(({ effect, match }) => effect === "deny" && match === "maybe") ? "maybe-denied" : "granted";
 }
 
 /**
  * The findings for the worker instance role against the actions and ARNs the route invokes: an iam-missing-grant when it lacks some, and a
  * model-access-unverified when a conditional or unresolved Deny might block one it otherwise holds (that is unverifiable, never a pass).
+ * Both actions are needed on the inference profile and on the foundation model in every Region it routes to: pi streams through
+ * ConverseStream, which bedrock:InvokeModelWithResponseStream authorizes.
  */
-function routeGrantFindings(iam: ModelRouteCheck["iam"], route: E2EModelRoute): Finding[] {
+function routeGrantFindings(iam: BedrockRouteFacts["iam"], route: E2EModelRoute): Finding[] {
   const sources = policySources(iam.foundationTemplate).filter((source) => source.roleLogicalIds.includes(iam.roleLogicalId));
   const statements = sources.flatMap((source) => source.statements);
-  const verdict = (action: string, resource: string): "granted" | "missing" | "maybe-denied" => {
-    const matches = statements.map((statement) => ({ statement, match: statementMatch(statement, action, resource, iam.scope) }));
-    const allowed = matches.some(({ statement, match }) => statement.Effect === "Allow" && match === "yes");
-    if (!allowed || matches.some(({ statement, match }) => statement.Effect === "Deny" && match === "yes")) return "missing";
-    return matches.some(({ statement, match }) => statement.Effect === "Deny" && match === "maybe") ? "maybe-denied" : "granted";
-  };
-  const checked = iam.resources.map((resource) => ({ resource, verdicts: ROUTE_INVOKE_ACTIONS.map((action) => ({ action, verdict: verdict(action, resource) })) }));
+  const checked = iam.resources.map((resource) => ({ resource, verdicts: ROUTE_INVOKE_ACTIONS.map((action) => ({ action, verdict: iamVerdict(statements, action, resource, iam.scope) })) }));
   const findings: Finding[] = [];
   const lacking = checked.map((entry) => ({ resource: entry.resource, actions: entry.verdicts.filter((item) => item.verdict === "missing").map((item) => item.action) })).filter((entry) => entry.actions.length > 0);
   if (lacking.length > 0) {
@@ -618,14 +777,218 @@ function routeGrantFindings(iam: ModelRouteCheck["iam"], route: E2EModelRoute): 
       message: `${iam.roleLogicalId}, the worker instance role, lacks ${lacking.map((entry) => `${entry.actions.join(" and ")} on ${entry.resource}`).join("; ")}, which the e2e model route invokes`,
     });
   }
+  const denied = checked.flatMap((entry) => entry.verdicts.filter((item) => item.verdict === "denied").map((item) => `${item.action} on ${entry.resource}`));
+  if (denied.length > 0) {
+    findings.push({
+      kind: "iam-explicit-deny", severity: "error", subject: iam.roleLogicalId, label: findingLabel(iam.roleLogicalId), roleLogicalId: iam.roleLogicalId,
+      message: `${iam.roleLogicalId}, the worker instance role, is explicitly denied ${denied.join("; ")} by a Deny statement in its policies; adding an Allow cannot override a Deny, so remove or narrow the Deny (route ${route.modelId})`,
+    });
+  }
   const maybe = checked.filter((entry) => entry.verdicts.some((item) => item.verdict === "maybe-denied")).map((entry) => entry.resource);
   if (maybe.length > 0) {
     findings.push({
-      kind: "model-access-unverified", severity: "error", subject: route.routeId, label: route.routeId,
-      message: `whether ${iam.roleLogicalId}, the worker instance role, may invoke ${maybe.join("; ")} is unverifiable, which is not a pass: a Deny statement with a Condition or a resource this check cannot resolve might block it`,
+      kind: "model-access-unverified", severity: "error", subject: E2E_MODEL_ROUTE_ID, label: E2E_MODEL_ROUTE_ID,
+      message: `whether ${iam.roleLogicalId}, the worker instance role, may invoke ${maybe.join("; ")} is unverifiable, which is not a pass: a Deny statement with a Condition or a resource this check cannot resolve might block it (route ${route.modelId})`,
     });
   }
   return findings;
+}
+
+// ---- anthropic, openai, openrouter ----
+
+/** A worker setting that holds nothing: the stack writes "none" for an unset optional value. */
+const settingUnset = (value: string | undefined): boolean => value === undefined || value.trim() === "" || value === "none";
+
+function keyedFindings(route: E2EModelRoute, provider: KeyedModelProvider, keyed: KeyedRouteFacts, finding: Maker): Finding[] {
+  const { label, constructPrefix } = KEYED_MODEL_PROVIDERS[provider];
+  const findings: Finding[] = [];
+  const secret = keyed.secretArn;
+  if (secret.state === "unverifiable") {
+    findings.push(finding("model-access-unverified", "error", `whether the ${label} secret ARN is set is unverifiable, which is not a pass: ${secret.reason}`));
+  } else if (settingUnset(secret.value)) {
+    findings.push(finding("model-route-secret-missing", "error", `the ${label} secret ARN setting is not set, so the e2e agent has no key to call ${route.modelId} with`));
+  } else if (secret.value === undefined || secret.value.length > SECRET_ARN_MAX_LENGTH || !SECRET_ARN_PATTERN.test(secret.value)) {
+    // The setting is never echoed: a malformed value might be a key pasted in place of its ARN.
+    findings.push(finding("model-route-secret-missing", "error", `the ${label} secret ARN setting is not a well-formed Secrets Manager secret ARN, so the e2e agent has no key to call ${route.modelId} with`));
+  } else {
+    findings.push(...secretGrantFindings(keyed.iam, secret.value, constructPrefix, label));
+  }
+  if (provider === "openrouter") findings.push(...openRouterFindings(route, keyed, finding));
+  findings.push(
+    finding("model-access-unverified", "info", `whether the ${label} key is valid and has credit cannot be checked without a model call, which this check never makes; it shows at the model canary, or at runtime as UNKNOWN model-unavailable`),
+    finding("model-access-unverified", "info", `a granted verdict covers only the policy statements in the deployed templates; still unverifiable are the role's managed policies, permissions boundaries, service control policies (SCPs), the ${label} secret's resource policy, and a customer-managed KMS key (kms:Decrypt), none of which can be evaluated from the ARN alone: this check reads no secret metadata or value (owner O6)`),
+  );
+  return findings;
+}
+
+/** The control-plane template's policies that apply to the worker role (by the name the stack attaches them to), skipping a policy whose condition is off or unknown. */
+function controlPlaneWorkerPolicies(template: CheckTemplate, roleName: string, scope: IamScope): Array<{ policyLogicalId: string; statements: PolicyStatement[] }> {
+  const conditions = (template.Conditions ?? {}) as Record<string, unknown>;
+  return Object.entries(template.Resources ?? {}).flatMap(([logicalId, resource]) => {
+    if (resource.Type !== "AWS::IAM::Policy" && resource.Type !== "AWS::IAM::ManagedPolicy") return [];
+    const enabled = typeof resource.Condition === "string" ? conditionHolds({ Condition: resource.Condition }, conditions, scope) : true;
+    if (enabled === false) return [];
+    const roles = list(resource.Properties?.Roles).map((value) => resolveText(value, scope));
+    if (!roles.includes(roleName)) return [];
+    const statements = list((resource.Properties?.PolicyDocument as { Statement?: unknown } | undefined)?.Statement) as PolicyStatement[];
+    if (enabled === true) return [{ policyLogicalId: logicalId, statements }];
+    // The condition cannot be resolved: an Allow of the policy grants nothing, but a Deny of it might block the call (M4-AB).
+    return [{ policyLogicalId: logicalId, statements: statements.filter((statement) => statement?.Effect !== "Allow").map((statement) => ({ ...statement, Condition: { unresolvedPolicyCondition: resource.Condition } })) }];
+  });
+}
+
+/** CloudFormation conditions as far as the read policies use them (Fn::Not, Fn::Equals, Fn::And, Fn::Or, Condition); undefined when it cannot be told. */
+function conditionHolds(expression: unknown, conditions: Record<string, unknown>, scope: IamScope, depth = 0): boolean | undefined {
+  if (depth > 8 || expression === null || typeof expression !== "object") return undefined;
+  const node = expression as Record<string, unknown>;
+  if (typeof node.Condition === "string") return conditionHolds(conditions[node.Condition], conditions, scope, depth + 1);
+  const operands = (key: string) => (Array.isArray(node[key]) ? node[key] as unknown[] : undefined);
+  const not = operands("Fn::Not");
+  if (not?.length === 1) { const value = conditionHolds(not[0], conditions, scope, depth + 1); return value === undefined ? undefined : !value; }
+  const equals = operands("Fn::Equals");
+  if (equals?.length === 2) {
+    const [left, right] = equals.map((operand) => resolveText(operand, scope));
+    return left === undefined || right === undefined ? undefined : left === right;
+  }
+  for (const [key, all] of [["Fn::And", true], ["Fn::Or", false]] as const) {
+    const items = operands(key);
+    if (items === undefined) continue;
+    const values = items.map((item) => conditionHolds(item, conditions, scope, depth + 1));
+    if (values.some((value) => value === !all)) return !all;
+    return values.every((value) => value === all) ? all : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The worker instance role must be allowed secretsmanager:GetSecretValue on the secret's ARN by the statements the deployed templates give it:
+ * the foundation stack's policies on the role, and the control-plane stack's `<constructPrefix>SecretRead` policy (attached to the role by name,
+ * and enabled only while the stack's ARN parameter is not empty). It is a static read of templates; no secret is touched.
+ */
+function secretGrantFindings(iam: KeyedRouteFacts["iam"], arn: string, constructPrefix: string, label: string): Finding[] {
+  const foundation = policySources(iam.foundationTemplate).filter((source) => source.roleLogicalIds.includes(iam.roleLogicalId));
+  const control = controlPlaneWorkerPolicies(iam.controlPlaneTemplate, iam.roleName, iam.scope);
+  const statements = [...foundation.flatMap((source) => source.statements), ...control.flatMap((policy) => policy.statements)];
+  const verdict = iamVerdict(statements, "secretsmanager:GetSecretValue", arn, iam.scope);
+  if (verdict === "granted") return [];
+  if (verdict === "denied") {
+    return [{
+      kind: "iam-explicit-deny", severity: "error", subject: iam.roleLogicalId, label: findingLabel(iam.roleLogicalId), roleLogicalId: iam.roleLogicalId,
+      message: `${iam.roleLogicalId}, the worker instance role, is explicitly denied secretsmanager:GetSecretValue on ${arn}, the ${label} key the e2e model route reads, by a Deny statement in its policies; adding an Allow cannot override a Deny, so remove or narrow the Deny`,
+    }];
+  }
+  if (verdict === "maybe-denied") {
+    return [{
+      kind: "model-access-unverified", severity: "error", subject: E2E_MODEL_ROUTE_ID, label: E2E_MODEL_ROUTE_ID,
+      message: `whether ${iam.roleLogicalId}, the worker instance role, may read the ${label} secret ${arn} is unverifiable, which is not a pass: a Deny statement with a Condition or a resource this check cannot resolve might block it`,
+    }];
+  }
+  const policyLogicalId = `${constructPrefix}SecretRead`;
+  return [{
+    kind: "iam-missing-grant", severity: "error", subject: policyLogicalId, label: findingLabel(iam.roleLogicalId), roleLogicalId: iam.roleLogicalId, policyLogicalId,
+    statements: [{ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: [arn] }],
+    message: `${iam.roleLogicalId}, the worker instance role, is not allowed secretsmanager:GetSecretValue on ${arn}, the ${label} key the e2e model route reads (${constructPrefix}SecretRead is missing, disabled, or on another role)`,
+  }];
+}
+
+function openRouterFindings(route: E2EModelRoute, keyed: KeyedRouteFacts, finding: Maker): Finding[] {
+  const findings: Finding[] = [];
+  if (isOpenRouterAlias(route.modelId)) {
+    findings.push(finding("model-route-alias-refused", "error", `${route.modelId} is a router alias, not a model: the route must pin a specific model ID`));
+  } else {
+    const upstream = route.modelId.includes("/") ? route.modelId.slice(0, route.modelId.indexOf("/")) : undefined;
+    const providers = keyed.openRouterProviders;
+    if (providers?.state === "unverifiable") {
+      findings.push(finding("model-access-unverified", "error", `whether the OpenRouter provider allowlist excludes ${upstream ?? "the model's upstream"} is unverifiable, which is not a pass: ${providers.reason}`));
+    } else if (upstream !== undefined && providers !== undefined && !settingUnset(providers.value)) {
+      const allowed = (providers.value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+      if (!allowed.some((entry) => entry === upstream || entry.startsWith(`${upstream}/`))) {
+        findings.push(finding("model-route-openrouter-allowlist", "error", `worker-openrouter-providers is set to ${allowed.join(",")}, which excludes ${upstream}, the upstream of ${route.modelId}; OpenRouter would find no provider for it (no fallbacks are allowed)`));
+      }
+    }
+  }
+  findings.push(finding("model-route-third-party-processor", "warning", "OpenRouter is a third-party data processor: the agent's redacted synthetic page text goes through it (data collection deny, no fallbacks and required parameters are pinned by the route); decision D8's consent must cover it, and the default model stays provisional until a canary records the model OpenRouter serves (owner O4, O5)"));
+  return findings;
+}
+
+
+/**
+ * The text of an ARN, role or action value, with the pseudo parameters of the deployed template and the stack's own parameter values filled
+ * in; undefined for anything else (GetAtt, an imported value, a Ref to a resource).
+ */
+function resolveText(node: unknown, scope: IamScope): string | undefined {
+  const pseudo: Record<string, string | undefined> = { "AWS::Partition": scope.partition, "AWS::Region": scope.region, "AWS::AccountId": scope.accountId };
+  if (typeof node === "string") return node;
+  if (node === null || typeof node !== "object") return undefined;
+  const intrinsic = node as { Ref?: unknown; "Fn::Join"?: unknown; "Fn::Sub"?: unknown; "Fn::Select"?: unknown; "Fn::Split"?: unknown };
+  if (typeof intrinsic.Ref === "string") return pseudo[intrinsic.Ref] ?? scope.parameters?.[intrinsic.Ref];
+  const select = intrinsic["Fn::Select"];
+  if (Array.isArray(select) && select.length === 2) {
+    const index = Number(typeof select[0] === "object" ? resolveText(select[0], scope) : select[0]);
+    const items = resolveList(select[1], scope);
+    return Number.isInteger(index) && items !== undefined ? items[index] : undefined;
+  }
+  const join = intrinsic["Fn::Join"];
+  if (Array.isArray(join) && typeof join[0] === "string" && Array.isArray(join[1])) {
+    const parts = join[1].map((part) => resolveText(part, scope));
+    return parts.every((part) => part !== undefined) ? parts.join(join[0]) : undefined;
+  }
+  if (typeof intrinsic["Fn::Sub"] === "string") {
+    const text = intrinsic["Fn::Sub"].replace(/\$\{(AWS::[A-Za-z]+)\}/g, (whole, name: string) => pseudo[name] ?? whole);
+    return text.includes("${") ? undefined : text;
+  }
+  return undefined;
+}
+
+/** A list value: a literal list of resolvable texts, or Fn::Split of a resolvable text. */
+function resolveList(node: unknown, scope: IamScope): string[] | undefined {
+  if (Array.isArray(node)) {
+    const items = node.map((item) => resolveText(item, scope));
+    return items.every((item) => item !== undefined) ? items : undefined;
+  }
+  const split = (node as { "Fn::Split"?: unknown } | null)?.["Fn::Split"];
+  if (Array.isArray(split) && typeof split[0] === "string") {
+    const text = resolveText(split[1], scope);
+    return text === undefined ? undefined : text.split(split[0]);
+  }
+  return undefined;
+}
+
+const globMatches = (pattern: string, value: string, flags = ""): boolean =>
+  new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`, flags).test(value);
+
+/**
+ * What one statement does to `action` on `resource`: its effect, and whether it applies (yes, no, or maybe when it cannot be told).
+ * A Condition is not evaluated, and a resource written as something this cannot resolve (GetAtt, an import) has no text to match.
+ * An Allow that is conditional or unresolved never counts as a grant (it errs toward alarm). A Deny that is conditional or unresolved
+ * while its action matches is "maybe": it might block the call, so the caller must not report a pass.
+ *
+ * Ruling M4-AB: every shape this cannot parse is a maybe-Deny, never a skipped statement. That is a statement whose Effect is not
+ * literally "Allow" or "Deny" (a statement wrapped in Fn::If has none) and a Deny whose Action or NotAction has an entry that is not a
+ * string. An Allow with a non-string NotAction entry grants nothing (the entry might exclude the action).
+ */
+function classifyStatement(statement: PolicyStatement, action: string, resource: string, scope: IamScope): { effect: "allow" | "deny"; match: "yes" | "no" | "maybe" } {
+  if (statement === null || typeof statement !== "object" || (statement.Effect !== "Allow" && statement.Effect !== "Deny")) return { effect: "deny", match: "maybe" };
+  const effect = statement.Effect === "Allow" ? "allow" : "deny";
+  const patterns = list(statement.NotAction ?? statement.Action);
+  const actions = patterns.filter((value): value is string => typeof value === "string");
+  const unparsedAction = actions.length !== patterns.length;
+  const actionHit = actions.some((pattern) => globMatches(pattern, action, "i"));
+  let actionMatch: "yes" | "no" | "maybe";
+  if (statement.NotAction === undefined) actionMatch = actionHit ? "yes" : unparsedAction ? "maybe" : "no";
+  else actionMatch = unparsedAction ? "maybe" : actionHit ? "no" : "yes";
+  if (actionMatch === "no") return { effect, match: "no" };
+  const resolved = list(statement.NotResource ?? statement.Resource).map((value) => resolveText(value, scope));
+  const resourceHit = resolved.some((pattern) => pattern !== undefined && globMatches(pattern, resource));
+  const resolvable = resolved.every((pattern) => pattern !== undefined);
+  // NotResource applies to everything its patterns do not name; with an unresolved pattern it cannot be told.
+  const resourceMatch: "yes" | "no" | "maybe" = statement.NotResource === undefined
+    ? (resourceHit ? "yes" : resolvable ? "no" : "maybe")
+    : (!resolvable ? "maybe" : resourceHit ? "no" : "yes");
+  if (resourceMatch === "no") return { effect, match: "no" };
+  const definite = actionMatch === "yes" && resourceMatch === "yes" && statement.Condition === undefined;
+  if (effect === "allow") return { effect, match: definite ? "yes" : "no" };
+  return { effect, match: definite ? "yes" : "maybe" };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -634,10 +997,11 @@ function routeGrantFindings(iam: ModelRouteCheck["iam"], route: E2EModelRoute): 
 
 export function formatFindings(findings: readonly Finding[]): string {
   if (findings.length === 0) return "TEST deploy check: no findings.";
-  const ordered = [...findings].sort((a, b) => Number(b.severity === "error") - Number(a.severity === "error"));
-  const errors = findings.filter((finding) => finding.severity === "error").length;
+  const rank: Record<Finding["severity"], number> = { error: 0, warning: 1, info: 2 };
+  const ordered = [...findings].sort((a, b) => rank[a.severity] - rank[b.severity]);
+  const count = (severity: Finding["severity"]) => findings.filter((finding) => finding.severity === severity).length;
   return [
-    `TEST deploy check: ${errors} error(s), ${findings.length - errors} warning(s)`,
+    `TEST deploy check: ${count("error")} error(s), ${count("warning")} warning(s)${count("info") > 0 ? `, ${count("info")} info` : ""}`,
     ...ordered.map((finding) => `  ${finding.severity} ${finding.kind} ${finding.label}: ${finding.message}`),
   ].join("\n");
 }
