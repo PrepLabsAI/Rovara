@@ -67,6 +67,10 @@ function post(body: unknown, options: { method?: string; path?: string; raw?: bo
       });
     });
     req.on("error", reject);
+    // The proxy answers an oversized body (413) as soon as it has read it. On Linux the client's last write can then
+    // complete after the server has closed, and the socket reports EPIPE or ECONNRESET. The answer is what the test
+    // reads, so that is an acceptable end for the write and must not be an unhandled error.
+    req.on("socket", (socket) => { socket.on("error", () => undefined); });
     req.end(payload);
   });
 }

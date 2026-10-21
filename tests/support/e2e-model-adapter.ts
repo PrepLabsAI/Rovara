@@ -48,6 +48,7 @@ function exchange(socketPath: string, body: unknown, signal: AbortSignal | undef
       res.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); } catch (error) { reject(error instanceof Error ? error : new Error("unreadable channel answer")); } });
     });
     req.on("error", reject);
+    req.on("socket", (socket) => { socket.on("error", () => undefined); });
     req.end(payload);
   });
 }
