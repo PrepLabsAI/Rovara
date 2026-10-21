@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EApplicationExecutionAdmission, type E2EExecutionPlan, type E2ERound,
-  type E2EQualifiedResult } from "@agentx/contracts";
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EApplicationExecutionAdmission, type E2EDisplayScenario,
+  type E2EExecutionPlan, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
 import { createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
   e2eApplicationAggregateRunUsage, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
   type E2ECompiledApplicationSuite } from "@agentx/verifier";
+import { buildScenarioRows, readCaptureScreenshots, type DisplayArtifact, type DisplayGroupInput } from "./application-display.js";
 import { combineE2EVerdicts, type E2EVerdict } from "./verdict.js";
 
 /** What the broker itself knows about the CHECKS operation and the admission it signed. None of it comes from the worker. */
@@ -27,6 +28,11 @@ export type ApplicationEvidenceInput = Readonly<{
   receivedAt: ReadonlyMap<string, string>;
   /** How the CHECKS operation ended, as recorded or as it is being recorded. Only a SUCCEEDED operation can be PASS. */
   terminalStatus: "SUCCEEDED" | "FAILED" | undefined;
+  /**
+   * What the round is for. A `baseline` round (the unchanged code, for information only) shows a screenshot on every row; its display is the same derivation, and it is
+   * never read as a verdict by anything that gates.
+   */
+  purpose?: "candidate" | "baseline";
 }>;
 
 /**
@@ -51,6 +57,11 @@ export type ApplicationEvidenceVerification = Readonly<{
   groups: readonly ApplicationGroupVerification[];
   /** The broker's own projection of every group it re-collected, for display; never read as a verdict. */
   results: readonly E2EQualifiedResult[];
+  /**
+   * The per-scenario rows and the screenshots behind them, derived from the verification above and from nothing the worker says about itself (see application-display.ts).
+   * Present once the admission verified. Display only: it is never read as a verdict.
+   */
+  display?: Readonly<{ scenarios: readonly E2EDisplayScenario[]; artifacts: readonly DisplayArtifact[] }>;
 }>;
 
 type Json = Record<string, unknown>;
@@ -100,6 +111,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
 
     const groups: ApplicationGroupVerification[] = [];
     const results: E2EQualifiedResult[] = [];
+    const displayGroups: Array<{ runId: string; group: Omit<DisplayGroupInput, "result"> }> = [];
     for (const suite of validated.applicationSuites) {
       const groupAdmission = admission.groups.find((group) => group.outerBinding.groupId === suite.group.groupId);
       if (groupAdmission === undefined || groupAdmission.protocol !== "trusted-e2e-application/v1") refuse("an application group is not admitted");
@@ -108,8 +120,12 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       const planGroup = plan.groups.find((group) => group.groupId === binding.groupId);
       if (!same(roundBinding, binding) || planGroup === undefined) refuse("a group binding differs from the admitted round or plan");
       const envelope = input.groupEvidence.get(binding.runId);
+      // The group's cases and approved scenarios, which the rows of the display are built over (application-display.ts).
+      const displayBase = { cases: binding.expectedCases.map((item) => ({ caseId: item.caseId, scenarioId: item.scenarioId, targetId: item.targetId, accountProfileId: item.accountProfileId })),
+        scenarios: new Map(suite.bundle.scenarios.map((scenario) => [scenario.scenarioId, { assertions: scenario.assertions }] as const)) };
       if (envelope === undefined) {
         groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: "UNKNOWN", reason: "no result was accepted for this group" });
+        displayGroups.push({ runId: binding.runId, group: { ...displayBase, verdict: "UNKNOWN", reason: "no result was accepted for this group", observed: new Map(), screenshots: new Map() } });
         continue;
       }
       const groupRun = readGroupEnvelope(envelope, admission, subject, planGroup, binding);
@@ -117,6 +133,8 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       const verified = requalifyGroup({ suite, groupRun, binding, round: admission.round, receivedAt: input.receivedAt.get(binding.runId) });
       groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: verified.verdict, reason: verified.reason });
       if (verified.result !== undefined) results.push(verified.result);
+      displayGroups.push({ runId: binding.runId, group: { ...displayBase, verdict: verified.verdict, reason: verified.reason, observed: verified.observed ?? new Map(),
+        screenshots: readCaptureScreenshots(groupRun.operatorEvidence, new Set(binding.expectedCases.map((item) => item.caseId))) } });
     }
     if (aggregateRuns !== undefined && !same([...aggregateRuns.keys()].sort(), [...runIds].sort())) refuse("the aggregate does not cover the admitted groups exactly once");
 
@@ -126,20 +144,33 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     const authoritative = aggregateRuns !== undefined && input.terminalStatus === "SUCCEEDED";
     const shown = authoritative ? results : results.map((result): E2EQualifiedResult => ({ ...result, status: "unavailable", reason: "application-round-not-complete" }));
     const reasonOf = (verdict: E2EVerdict) => groups.filter((group) => group.verdict === verdict).map((group) => `${group.groupId}: ${group.reason}`).join("; ");
+    // The rows are held to the same rule as the verdict: shown only for a round the broker accepted whole, and never able to change what the verdict decided.
+    const display = displayOf({ plan, authoritative, purpose: input.purpose ?? "candidate", groups: displayGroups, shown });
     if (aggregateRuns === undefined) {
-      return { verdict: "UNKNOWN", reason: "the round's aggregate evidence has not been accepted, so no group result is authoritative", plan, round, groups, results: shown };
+      return { verdict: "UNKNOWN", reason: "the round's aggregate evidence has not been accepted, so no group result is authoritative", plan, round, groups, results: shown, ...display };
     }
-    if (combined === "FAILED") return { verdict: "FAILED", reason: reasonOf("FAILED"), plan, round, groups, results: shown };
-    if (combined !== "PASS") return { verdict: "UNKNOWN", reason: reasonOf("UNKNOWN"), plan, round, groups, results: shown };
+    if (combined === "FAILED") return { verdict: "FAILED", reason: reasonOf("FAILED"), plan, round, groups, results: shown, ...display };
+    if (combined !== "PASS") return { verdict: "UNKNOWN", reason: reasonOf("UNKNOWN"), plan, round, groups, results: shown, ...display };
     if (input.terminalStatus !== "SUCCEEDED") {
-      return { verdict: "UNKNOWN", reason: input.terminalStatus === undefined ? "the CHECKS operation has not ended" : "the CHECKS operation did not end successfully", plan, round, groups, results: shown };
+      return { verdict: "UNKNOWN", reason: input.terminalStatus === undefined ? "the CHECKS operation has not ended" : "the CHECKS operation did not end successfully", plan, round, groups, results: shown, ...display };
     }
-    if (!e2ePlanHasCompleteRequiredCriteria(plan)) return { verdict: "UNKNOWN", reason: "a required criterion has no executable scenario", plan, round, groups, results: shown };
-    return { verdict: "PASS", reason: "every admitted application group was independently re-collected as passing", plan, round, groups, results: shown };
+    if (!e2ePlanHasCompleteRequiredCriteria(plan)) return { verdict: "UNKNOWN", reason: "a required criterion has no executable scenario", plan, round, groups, results: shown, ...display };
+    return { verdict: "PASS", reason: "every admitted application group was independently re-collected as passing", plan, round, groups, results: shown, ...display };
   } catch (error) {
     const reason = error instanceof Unverifiable ? error.message : `the evidence could not be verified (${error instanceof Error ? error.name : "unknown"})`;
     return { verdict: "UNKNOWN", reason, ...(plan === undefined ? {} : { plan }), ...(round === undefined ? {} : { round }), groups: [], results: [] };
   }
+}
+
+/** The display of a verified round, or nothing: a failure to build rows never changes the verdict they sit beside. */
+function displayOf(input: { plan: E2EExecutionPlan; authoritative: boolean; purpose: "candidate" | "baseline"; shown: readonly E2EQualifiedResult[];
+  groups: ReadonlyArray<{ runId: string; group: Omit<DisplayGroupInput, "result"> }> }): { display: NonNullable<ApplicationEvidenceVerification["display"]> } | Record<string, never> {
+  try {
+    const targetKinds = new Map(input.plan.effectiveTargets.flatMap((target) => (target.kind === "web" || target.kind === "api" ? [[target.targetId, target.kind] as const] : [])));
+    const built = buildScenarioRows({ authoritative: input.authoritative, attach: input.purpose === "baseline" ? "all" : "failed-or-incomplete", targetKinds,
+      groups: input.groups.map(({ runId, group }) => ({ ...group, result: input.shown.find((result) => result.binding.runId === runId) })) });
+    return { display: built };
+  } catch { return {}; }
 }
 
 function readAggregate(aggregate: unknown, admission: ReturnType<typeof decodeE2EApplicationExecutionAdmission>, subject: ApplicationEvidenceSubject): Map<string, Json> | undefined {
@@ -170,7 +201,19 @@ function readGroupEnvelope(envelope: unknown, admission: ReturnType<typeof decod
   return groupRun;
 }
 
-type Requalified = { verdict: E2EVerdict; reason: string; result?: E2EQualifiedResult };
+type Requalified = { verdict: E2EVerdict; reason: string; result?: E2EQualifiedResult; observed?: ReadonlyMap<string, ObservedAssertion[]> };
+type ObservedAssertion = { assertionIndex: number; outcome: string; value: unknown };
+
+/** The value and outcome each case's assertions had, from the group's collection (see the note where it is read: only a collection the qualifier accepted may be read). */
+function observedAssertions(collection: Json): Map<string, ObservedAssertion[]> {
+  const observed = new Map<string, ObservedAssertion[]>();
+  for (const capture of Array.isArray(collection.applicationCaptures) ? collection.applicationCaptures as unknown[] : []) {
+    if (!isObject(capture) || typeof capture.caseId !== "string" || !Array.isArray(capture.assertions)) continue;
+    observed.set(capture.caseId, (capture.assertions as unknown[]).flatMap((assertion) => isObject(assertion) && Number.isInteger(assertion.index) && typeof assertion.outcome === "string"
+      ? [{ assertionIndex: assertion.index as number, outcome: assertion.outcome, value: assertion.value }] : []));
+  }
+  return observed;
+}
 
 export type ExpectedAssertionAsset = Readonly<{ caseId: string; assertionIndex: number; kind: "state-probe"; id: string; manifestDigest: string; sha256: string; byteLength: number }>;
 type SuiteAssertions = Readonly<{ expectedCases: readonly { caseId: string; scenarioId: string }[];
@@ -268,15 +311,18 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
       assertionAssets: inputs.assertionAssets as never, governedModelReceipts: [], ownedClosedAt: inputs.ownedClosedAt });
     const qualification = qualifyE2EApplicationCollection(oracle, { ...collection, receivedAt: new Date(receivedAt).toISOString() } as never);
     const promoted = qualification.result === null ? undefined : { ...qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted" as const };
-    if (qualification.status !== "PASS") return { verdict: qualification.status, reason: qualification.reason.slice(0, OWNER_REASON_MAX_CHARS), ...(promoted === undefined ? {} : { result: promoted }) };
+    // What the assertions observed is read only from a collection the qualifier carried through to a result: it checked every captured value against the raw observation bytes
+    // it re-derived the value from, and refuses the whole group on any difference. A group without a result shows no observed value.
+    const observed = promoted === undefined ? undefined : observedAssertions(collection);
+    if (qualification.status !== "PASS") return { verdict: qualification.status, reason: qualification.reason.slice(0, OWNER_REASON_MAX_CHARS), ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }) };
     // A pass also needs the host's own lifecycle to say the run ended cleanly: confirmed cleanup, no timeout or abort, a zero exit code, and no unavailable reason.
     const lifecycle = isObject(groupRun.lifecycle) ? groupRun.lifecycle : undefined;
     const processResult = isObject(lifecycle?.process) ? lifecycle.process : undefined;
     if (lifecycle?.cleanup !== "confirmed" || processResult?.exitCode !== 0 || processResult.timedOut !== false || processResult.aborted !== false || groupRun.unavailableReason !== null) {
       return { verdict: "UNKNOWN", reason: "the group's lifecycle does not confirm a clean, successful run",
-        ...(promoted === undefined ? {} : { result: { ...promoted, status: "unavailable", reason: "application-lifecycle-unconfirmed" } }) };
+        ...(promoted === undefined ? {} : { result: { ...promoted, status: "unavailable", reason: "application-lifecycle-unconfirmed" } }), ...(observed === undefined ? {} : { observed }) };
     }
-    return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }) };
+    return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }) };
   } catch (error) {
     return unknown(error instanceof Error && error.message !== "" ? error.message.slice(0, OWNER_REASON_MAX_CHARS) : "the group's evidence could not be requalified");
   }

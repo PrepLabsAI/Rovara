@@ -15,10 +15,10 @@ import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import type { PageCommentView } from "./plan-page/comments.js";
 import type { PlanAnchor } from "./plan-page/render-plan.js";
-import { CSRF_COOKIE, SESSION_COOKIE, csrfCookie, isCsrfToken, parseCookie, safeResponse, type WebResponse } from "./web-session.js";
+import { CSRF_COOKIE, PRIVATE_HEADERS, SESSION_COOKIE, csrfCookie, isCsrfToken, parseCookie, safeResponse, type WebResponse } from "./web-session.js";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|retry|people|people/role|people/take-ownership|people/requests/(${UUID})(/confirm)?)$`, "i");
+export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|retry|people|people/role|people/take-ownership|people/requests/(${UUID})(/confirm)?|e2e/artifacts/([0-9a-f]{64}))$`, "i");
 /** Any path under the task page's API, known or not: it is the API's to answer, never the PR feedback page's. */
 export const TASK_PAGE_API_PREFIX = new RegExp(`^/review/(${UUID})/task/api(/|$)`, "i");
 
@@ -100,6 +100,11 @@ export interface TaskWebApiDependencies {
   decide(caller: DeveloperCaller, taskId: string, input: PageDecisionInput): Promise<{ revision: number }>;
   /** Retries a blocked application round (the owner only; any other block is refused) and answers the new revision. Without it, the retry path is not found. */
   retryApplicationRound?(caller: DeveloperCaller, taskId: string, input: PageRetryInput): Promise<{ revision: number }>;
+  /**
+   * The screenshot behind a row of the task's results (M1.3 Task 3.7), by its SHA-256: undefined for a digest the task's current display does not name. It must refuse a caller
+   * who may not read the task (the page's own access rule) with an error carrying the code TASK_NOT_FOUND, TASK_ACCESS_DENIED, FORBIDDEN or NOT_FOUND. Without it the path is not found.
+   */
+  readE2EArtifact?(caller: DeveloperCaller, taskId: string, sha256: string): Promise<{ contentType: "image/jpeg"; bytes: Uint8Array } | undefined>;
   getPeople?(caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView>;
   proposePeopleRole?(caller: DeveloperCaller, taskId: string, input: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
   proposeOwnership?(caller: DeveloperCaller, taskId: string, input: TaskPeopleTakeOwnershipRequest): Promise<TaskPeopleChangeResult>;
@@ -139,6 +144,31 @@ function refusalResponse(error: unknown): WebResponse {
   return json(503, { error: "unavailable", message: "AgentX couldn't do that right now. Try again shortly." });
 }
 
+const FORBIDDEN = { error: "forbidden", message: "You don't have access to this task." };
+
+/**
+ * A screenshot behind a row of the task's results. The session was checked by the caller of this; the reader's right to the task is checked again here, by the dependency, on
+ * every request. Anyone who may not read the task is told 403 (for a task that does not exist as well, so the answer confirms nothing); a digest the task's current display does
+ * not name is 404. The object streams with the type the display recorded, privately cached for five minutes, as an attachment-free image no page can run: a locked-down
+ * policy, no sniffing, no framing.
+ */
+async function e2eArtifactResponse(deps: TaskWebApiDependencies, caller: DeveloperCaller, taskId: string, sha256: string): Promise<WebResponse> {
+  if (deps.readE2EArtifact === undefined || !/^[a-f0-9]{64}$/u.test(sha256)) return json(404, { error: "not_found" });
+  let found: Awaited<ReturnType<NonNullable<TaskWebApiDependencies["readE2EArtifact"]>>>;
+  try {
+    found = await deps.readE2EArtifact(caller, taskId, sha256);
+  } catch (error) {
+    const { code } = (error ?? {}) as { code?: unknown };
+    return typeof code === "string" && HIDDEN.has(code) ? json(403, FORBIDDEN) : json(503, { error: "unavailable", message: "AgentX couldn't do that right now. Try again shortly." });
+  }
+  if (found === undefined) return json(404, { error: "not_found" });
+  const { pragma: _pragma, ...headers } = PRIVATE_HEADERS;
+  void _pragma;
+  return { statusCode: 200, isBase64Encoded: true, body: Buffer.from(found.bytes).toString("base64"),
+    headers: { ...headers, "content-type": found.contentType, "cache-control": "private, max-age=300", "content-disposition": "inline",
+      "content-security-policy": "default-src 'none'; sandbox; frame-ancestors 'none'" } };
+}
+
 /** Whether the body is JSON by its declared type: `application/json`, with or without parameters. */
 const isJson = (contentType: string | undefined) => contentType !== undefined && /^application\/json\s*(;|$)/i.test(contentType.trim());
 
@@ -156,12 +186,13 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
     const commentId = route[3]?.toLowerCase();
     const peopleRequestId = route[5]?.toLowerCase();
     // `comments/<ID>/edit` and `comments/<ID>/delete` are the comments endpoint, for that comment.
-    const endpoint = commentId === undefined ? route[2]!.toLowerCase() : "comments";
+    const artifactSha256 = route[7];
+    const endpoint = artifactSha256 !== undefined ? "e2e/artifacts" : commentId === undefined ? route[2]!.toLowerCase() : "comments";
     const action = route[4]?.toLowerCase();
     const peopleConfirm = route[6] !== undefined;
     const method = request.method.toUpperCase();
     // `state` is read, `comments` is read (GET) and written (POST), everything else is written.
-    const allowed = endpoint === "state" || endpoint === "people" || (peopleRequestId !== undefined && !peopleConfirm)
+    const allowed = endpoint === "state" || endpoint === "people" || endpoint === "e2e/artifacts" || (peopleRequestId !== undefined && !peopleConfirm)
       ? ["GET"] : endpoint === "comments" && commentId === undefined ? ["GET", "POST"] : ["POST"];
     if (!allowed.includes(method)) {
       const refused = json(405, { error: "method_not_allowed" });
@@ -170,6 +201,7 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
     }
     try {
       if (method === "GET") {
+        if (endpoint === "e2e/artifacts") return e2eArtifactResponse(deps, caller, taskId, artifactSha256!);
         if (endpoint === "people") {
           if (deps.getPeople === undefined) return json(404, { error: "not_found" });
           return json(200, await deps.getPeople(caller, taskId));

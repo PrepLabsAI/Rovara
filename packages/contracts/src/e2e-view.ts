@@ -11,6 +11,49 @@ const MAX_E2E_SHARED_VIEW_CARRIER_BYTES = (MAX_E2E_SHARED_VIEW_RESULT_ROWS + 3) 
 export const E2ESharedViewSchema = z.object({ schemaVersion: z.literal(1), setup: E2ESharedSetupViewSchema, e2e: z.object({ status: z.enum(["UNKNOWN", "FAILED", "PASS"]), label: z.string(), executionPlanDigest: z.string().nullable(), expectedGroups: z.number().int().nonnegative(), receivedGroups: z.number().int().nonnegative(), executedCases: z.number().int().nonnegative(), qualifiedCriteria: z.number().int().nonnegative(), requiredCriteria: z.number().int().nonnegative(), unavailableCriteria: z.number().int().nonnegative(), optionalUnavailableCriteria: z.number().int().nonnegative(), mockedComponentIds: z.array(z.string()).max(200), observedMockedComponentIds: z.array(z.string()).max(200), unexercisedBehaviors: z.array(z.string()).max(256), policyPresence: z.enum(["present", "absent"]), workflowPhase: z.string().max(120).nullable(), requiredUnexercisedCriteriaIds: z.array(z.string()).max(64) }).strict(), actions: z.array(z.enum(["review-setup", "retry-run", "connect-runtime"])).max(3) }).strict();
 export type E2ESharedView = z.infer<typeof E2ESharedViewSchema>;
 
+// ---------------------------------------------------------------------------------------------
+// Display schema v2 (M1.3 Task 3.7): one row per scenario of a browser and API round, derived by the broker from the evidence it verified itself.
+// ---------------------------------------------------------------------------------------------
+
+const displaySha256 = z.string().regex(/^[a-f0-9]{64}$/);
+/** The account a row ran as: its profile id, never an email. */
+const displayAccountLabel = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,59}$/);
+/** The kinds of approved assertion a row can say it failed on. */
+export const E2E_DISPLAY_ASSERTION_KINDS = ["text", "visible", "csv", "http-status", "json", "state", "file"] as const;
+/** A kept screenshot is at most this large (the executor's own bound), so a row can never point at a bigger object. */
+export const E2E_DISPLAY_SCREENSHOT_MAX_BYTES = 524_288;
+
+export const E2EDisplayScenarioSchema = z.object({
+  scenarioId: z.string().min(1).max(120),
+  title: z.string().min(1).max(120),
+  kind: z.enum(["web", "api"]),
+  accountLabel: displayAccountLabel,
+  status: z.enum(["PASSED", "FAILED", "UNKNOWN"]),
+  reason: z.string().min(1).max(300).optional(),
+  failedAssertion: z.object({ kind: z.enum(E2E_DISPLAY_ASSERTION_KINDS), expected: z.string().max(200), actual: z.string().max(200) }).strict().optional(),
+  /** A screenshot is the only artifact kept: traces are not captured (Ruling CJ), so there is no `traceRef`. */
+  screenshotRef: z.object({ sha256: displaySha256, bytes: z.number().int().positive().max(E2E_DISPLAY_SCREENSHOT_MAX_BYTES), contentType: z.literal("image/jpeg") }).strict().optional(),
+  mockedOrigins: z.array(z.string().min(1).max(200)).max(32),
+}).strict().superRefine((row, context) => {
+  if (row.failedAssertion !== undefined && row.status !== "FAILED") context.addIssue({ code: "custom", path: ["failedAssertion"], message: "only a failed row has a failed assertion" });
+});
+export type E2EDisplayScenario = z.infer<typeof E2EDisplayScenarioSchema>;
+
+/** The informational round on the unchanged code: `UNAVAILABLE` is "it could not be run" and holds no rows. It is never a candidate round and never gates anything. */
+export const E2EDisplayBaselineSchema = z.object({
+  status: z.enum(["PASSED", "FAILED", "UNKNOWN", "UNAVAILABLE"]),
+  scenarios: z.array(E2EDisplayScenarioSchema).max(64),
+}).strict().superRefine((baseline, context) => {
+  if (baseline.status === "UNAVAILABLE" && baseline.scenarios.length > 0) context.addIssue({ code: "custom", path: ["scenarios"], message: "a baseline that could not run has no rows" });
+});
+export type E2EDisplayBaseline = z.infer<typeof E2EDisplayBaselineSchema>;
+
+export const E2EScenarioResultsSchema = z.object({
+  scenarios: z.array(E2EDisplayScenarioSchema).max(64),
+  baseline: E2EDisplayBaselineSchema.optional(),
+}).strict();
+export type E2EScenarioResults = z.infer<typeof E2EScenarioResultsSchema>;
+
 /** Pure read projection. It consumes the entire plan, authoritative current round, and accepted group results. */
 export function buildE2ESharedView(input: { plan: unknown; currentRound: unknown; results: readonly unknown[]; setup: unknown; actor: "owner" | "viewer"; control?: { policyPresent: boolean; workflowPhase: string | null; ownerActionProposals: readonly ("review-setup" | "retry-run" | "connect-runtime")[] } }): E2ESharedView {
   const fallbackSetup = { status: "unavailable" as const, selectedTargetIds: [], executionPlanDigest: null, blockingInputIds: [], mockSubstitutableInputIds: [] };

@@ -71,6 +71,8 @@ export type RoundOptions = {
   storedIntent?: "planner" | "normalized";
   /** Account profiles of the one application's project contract, each with its own target and scenario (needs `applications` of 1). Without it, the application has one account. */
   accounts?: readonly string[];
+  /** Spread into the broker's dependencies last (a baseline runner, say). */
+  brokerExtra?: Record<string, unknown>;
 };
 
 const READY_API = { kind: "api" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedSteps,
@@ -84,7 +86,7 @@ async function prepareRound(options: RoundOptions = {}) {
   if (accounts.length > 0 && applications !== 1) throw new Error("accounts need exactly one application");
   const { snapshot, tree } = apiApplicationsSnapshot(applications, accounts);
   const capture = async () => snapshot;
-  const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+  const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...options.brokerExtra } });
   const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
   const projectBinding = projectRow().runtimeBinding as typeof binding;
   harness.db.set({ ...apiRowKey, ...webApiRow("api"), binding: projectBinding, bindingDigest: shaCanonical(projectBinding) });
