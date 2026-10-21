@@ -368,6 +368,10 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
         // Nothing was sent, so nothing was spent: the reservation is released.
         return finish("refused-credential-match", { status: "error", code: "refused-credential-match", message: "model-prompt-credential-match: the provider payload carried a seeded credential or credential-shaped text" }, { inputTokens: 0, outputTokens: 0 }, null, true);
       }
+      // A failure before any request went out (a setup, guard, mismatch or shaping refusal) spent nothing: charge 0 and release the reservation.
+      if ((failure as { requestNotSent?: unknown } | undefined)?.requestNotSent === true && !timedOut) {
+        return finish("provider-error", { status: "error", code: "provider-error", message: describeProviderFailure(failure) }, { inputTokens: 0, outputTokens: 0 }, null, true);
+      }
       if (timedOut) return finish("timeout", { status: "error", code: "timeout", message: "the model call exceeded its time limit" }, { inputTokens: reserved, outputTokens: 0 }, null, false);
       const cancelled = controller.signal.aborted;
       // A call that failed after the provider began to answer may have been billed: charge the reserved bound, as for a timeout.

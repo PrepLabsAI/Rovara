@@ -46,11 +46,8 @@ export interface E2EProviderInvokeDependencies {
   fetch?: typeof fetch;
 }
 
-/**
- * Loopback overrides for tests only. They are the third argument of `buildE2EProviderInvoke`, which the package does
- * not export; `createE2EProviderInvoke` takes no such argument, and the only caller of the test factory is a test.
- */
-export interface E2EProviderInvokeTesting { bedrockEndpoint?: string; providerEnv?: Record<string, string> }
+/** Loopback overrides for tests only: the third argument of the private builder, reached only through `createE2EProviderInvokeForTesting`. */
+interface E2EProviderInvokeTesting { bedrockEndpoint?: string; providerEnv?: Record<string, string> }
 
 /** An invoke that also names the secret values it holds, so the proxy can add them to its credential scan, and the Bedrock endpoint it names. */
 export type E2EProviderInvoke = E2EInvoke & { readonly secrets: readonly string[]; readonly endpoint?: string };
@@ -59,6 +56,13 @@ type ProviderError = Error & { status?: number; mayHaveBeenBilled?: boolean };
 
 const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 const zeroUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+
+/** An error raised before any request went out: the route charges nothing for it and releases the day reservation. */
+function notSent<T>(error: T): T {
+  const target = (typeof error === "object" && error !== null ? error : new Error(String(error))) as T & { requestNotSent?: boolean };
+  target.requestNotSent = true;
+  return target;
+}
 
 function providerError(message: string, extra: { status?: number; mayHaveBeenBilled?: boolean } = {}): ProviderError {
   return Object.assign(new Error(message), extra);
@@ -69,7 +73,7 @@ function providerError(message: string, extra: { status?: number; mayHaveBeenBil
 // ---------------------------------------------------------------------------------------------------------------------
 
 /** What a call saw: the status of a failed response, whether a 2xx response arrived, and the served model. */
-interface Observed { status?: number; accepted?: boolean; model?: string; upstream?: string }
+interface Observed { status?: number; accepted?: boolean; responses?: number; model?: string; upstream?: string }
 
 /** Observes only the serving model and the router's upstream provider, and the status of a failed response; never a body. */
 function observingFetch(transport: typeof fetch, observed: Observed): typeof fetch {
@@ -250,8 +254,16 @@ export function createE2EProviderInvoke(definition: E2EModelRouteDefinition, dep
   return buildE2EProviderInvoke(definition, dependencies, undefined);
 }
 
-/** The factory behind `createE2EProviderInvoke`; its third argument is for the test-only factory and is not exported from the package. */
-export async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition, dependencies: E2EProviderInvokeDependencies, testing: E2EProviderInvokeTesting | undefined): Promise<E2EProviderInvoke> {
+/**
+ * The test-only factory: it can point Bedrock at a loopback endpoint and give pi-ai provider-scoped environment values.
+ * Only `e2e-provider-invoke-testing.ts` re-exports it, and a test asserts that no other source mentions it. The builder
+ * behind both factories is not exported from this module.
+ */
+export function createE2EProviderInvokeForTesting(definition: E2EModelRouteDefinition, dependencies: E2EProviderInvokeDependencies, testing: E2EProviderInvokeTesting): Promise<E2EProviderInvoke> {
+  return buildE2EProviderInvoke(definition, dependencies, testing);
+}
+
+async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition, dependencies: E2EProviderInvokeDependencies, testing: E2EProviderInvokeTesting | undefined): Promise<E2EProviderInvoke> {
   if (definition.provider === "rovara-scripted") throw new Error("a scripted route has no provider to call");
   const provider = definition.provider;
   const readSecret = dependencies.readSecret;
@@ -284,9 +296,9 @@ export async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition
   }
 
   const invoke = async (input: E2EInvokeInput): Promise<E2EInvokeOutput> => {
-    if (setupFailure !== undefined) throw setupFailure as Error;
+    if (setupFailure !== undefined) throw notSent(setupFailure) as Error;
     // pi-ai and the AWS SDK read the real process environment on every call, and so does this guard.
-    assertE2EEnvironmentCannotRedirect(dependencies.environment);
+    try { assertE2EEnvironmentCannotRedirect(dependencies.environment); } catch (error) { throw notSent(error) as Error; }
     const activeModel = model as Model<Api>;
     // The adapters are given a controller of this call's own, so a failed first response can end the call.
     const attempt = new AbortController();
@@ -298,7 +310,9 @@ export async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition
     let payloadSha256: string | undefined;
     // pi-ai catches an error thrown by the payload hook and turns it into a failed stream, so the hook keeps its own error.
     let hookFailure: unknown;
-    const context = normalizeContext(toPiContext(input.call, activeModel, provider));
+    let refusal: (Error & { $metadata?: { attempts?: number } }) | undefined;
+    let context: ReturnType<typeof normalizeContext>;
+    try { context = normalizeContext(toPiContext(input.call, activeModel, provider)); } catch (error) { throw notSent(error) as Error; }
     const common = {
       signal: attempt.signal,
       maxRetries: 0,
@@ -328,8 +342,14 @@ export async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition
           // response passes here, inside the SDK's retry loop. Throwing a plain error for a failed response makes the loop
           // classify it as a client error and stop (aborting the signal here instead leaves the loop hanging; Step 0).
           onResponse: (response: { status: number }) => {
-                if (response.status >= 400) { observed.status = response.status; throw new Error("the provider refused the call"); }
-                observed.accepted = true;
+            observed.responses = (observed.responses ?? 0) + 1;
+            if (response.status >= 400) {
+              observed.status = response.status;
+              // The SDK's retry loop records how many attempts it made on the error it throws.
+              refusal = new Error("the provider refused the call");
+              throw refusal;
+            }
+            observed.accepted = true;
           },
         });
       } else {
@@ -355,13 +375,16 @@ export async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition
     }
 
     // A payload the proxy's last check refused never left: surface that, not a generic failure.
-    if (hookFailure !== undefined) throw hookFailure as Error;
+    if (hookFailure !== undefined) throw (payloadSha256 === undefined ? notSent(hookFailure) : hookFailure) as Error;
     if (final.stopReason === "error" || final.stopReason === "aborted") {
       const status = observed.status;
       // The call may have been billed unless the provider refused it with an HTTP status: anything that was accepted (a 2xx
       // response, even one cut before its first delta) or that went out and got no response at all (a dropped connection,
       // which the AWS SDK may also have retried) is charged the reserved bound.
-      const billed = sawContent || final.usage.input > 0 || observed.accepted === true || (payloadSha256 !== undefined && status === undefined);
+      // An attempt that went out and got no response at all (dropped before the one that was answered) may have been processed.
+      const attempts = refusal?.$metadata?.attempts;
+      const unansweredAttempt = attempts !== undefined && attempts > (observed.responses ?? 0);
+      const billed = unansweredAttempt || sawContent || final.usage.input > 0 || observed.accepted === true || (payloadSha256 !== undefined && status === undefined);
       if (input.signal.aborted && status === undefined) throw providerError("the model call was stopped", { mayHaveBeenBilled: billed });
       throw providerError("the provider call failed", { ...(status === undefined ? {} : { status }), mayHaveBeenBilled: billed });
     }

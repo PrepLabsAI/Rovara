@@ -9,6 +9,9 @@ import { KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type E2EModel
  * leaks into the call. Explicit options (region from the route definition, base URL, the key from Secrets Manager) pin
  * everything else.
  *
+ * `PI_CACHE_RETENTION` is deliberately not listed: every deployed worker sets it for the coding agent, and every e2e call
+ * passes `cacheRetention: "none"`, which the adapters honour before they read the environment.
+ *
  * An unset or empty variable is no setting (pi-ai treats an empty value as absent). `AWS_MAX_ATTEMPTS` is allowed only
  * as `1`, which cannot add a retry.
  */
@@ -20,7 +23,7 @@ export const E2E_REDIRECTING_ENVIRONMENT_VARIABLES: readonly string[] = [
   "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
   "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_EC2_METADATA_SERVICE_ENDPOINT",
   "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "NODE_USE_ENV_PROXY",
-  "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS", "PI_CACHE_RETENTION",
+  "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS",
 ];
 
 /** The redirecting variables set in `environment`, once each, in a stable order. */
@@ -50,12 +53,14 @@ export function assertE2EEnvironmentCannotRedirect(environment?: NodeJS.ProcessE
  * worker secret-ARN setting. A stale or forged definition therefore cannot reach a provider the owner did not choose.
  * The scripted route calls no provider and is exempt.
  */
-export function assertE2ERouteMatchesInstallation(definition: Pick<E2EModelRouteDefinition, "provider" | "secretArn">, environment: NodeJS.ProcessEnv = process.env): void {
+export function assertE2ERouteMatchesInstallation(definition: Pick<E2EModelRouteDefinition, "provider" | "secretArn">, callerEnvironment: NodeJS.ProcessEnv = {}): void {
   if (definition.provider === "rovara-scripted") return;
+  // The real process environment decides; a caller's environment can add a setting the process lacks, never replace one it has.
+  const setting = (name: string): string => ((process.env[name] ?? "") !== "" ? process.env[name]! : (callerEnvironment[name] ?? ""));
   const reapprove = (why: string) => agentXError("RUNTIME_UNAVAILABLE", `model-route-changed-reapprove: ${why}; the AI navigation settings changed, so the checks need approving again`);
-  const installed = (environment["AGENTX_MODEL_PROVIDER"] ?? "") || "amazon-bedrock";
+  const installed = setting("AGENTX_MODEL_PROVIDER") || "amazon-bedrock";
   if (installed !== definition.provider) throw reapprove("the route's provider is not this worker's provider");
   if (!isKeyedModelProvider(definition.provider)) return;
-  const secret = environment[KEYED_MODEL_PROVIDERS[definition.provider].secretArnVariable] ?? "";
+  const secret = setting(KEYED_MODEL_PROVIDERS[definition.provider].secretArnVariable);
   if (secret === "" || secret !== definition.secretArn) throw reapprove("the route's provider secret is not this worker's provider secret");
 }

@@ -183,7 +183,7 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
   // The process environment is always checked, whatever environment the caller passes (see assertE2EEnvironmentCannotRedirect).
   if (definition.provider !== "rovara-scripted") {
     assertE2EEnvironmentCannotRedirect(options.environment);
-    assertE2ERouteMatchesInstallation(definition, options.environment ?? process.env);
+    assertE2ERouteMatchesInstallation(definition, options.environment);
   }
   const budgets = effectiveBudgets(definition.budgets, options.budgets);
   // The provider key the route's invoke holds is a secret the model must never see.

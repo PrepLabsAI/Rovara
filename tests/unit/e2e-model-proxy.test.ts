@@ -520,6 +520,19 @@ describe("e2e model proxy: the provider layer (amendment A1)", () => {
     proxies.push(proxy);
   });
 
+  it("N1: starts and serves a call on a worker that has PI_CACHE_RETENTION set, as every deployed worker does", async () => {
+    vi.stubEnv("PI_CACHE_RETENTION", "long");
+    const { proxy } = await start(okInvoke());
+    expect((await post(channelRequest())).body.result.status).toBe("ok");
+    await proxy.close();
+  });
+
+  it("N2: the proxy checks the route against the process environment's settings, not only the caller's", async () => {
+    vi.stubEnv("AGENTX_MODEL_PROVIDER", "openrouter");
+    const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
+    await expect(startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: CREDENTIALS, evidence: new Sink(), deadlineAt: Date.now() + 60_000, environment: { AGENTX_MODEL_PROVIDER: "amazon-bedrock" } })).rejects.toThrow(/model-route-changed-reapprove/);
+  });
+
   it("R3: refuses to start on a redirecting process environment whatever environment it is given", async () => {
     const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke: okInvoke(), now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
     vi.stubEnv("HTTPS_PROXY", "http://proxy.example.test:3128");

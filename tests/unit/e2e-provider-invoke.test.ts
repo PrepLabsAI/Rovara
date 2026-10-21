@@ -6,6 +6,7 @@ import { E2EPayloadRefusedError, createGovernedE2EModelRoute, createInMemoryE2ED
 import * as modelRuntime from "../../packages/model-runtime/src/index.js";
 import { createE2EProviderInvoke } from "../../packages/model-runtime/src/e2e-provider-invoke.js";
 import { createE2EProviderInvokeForTesting } from "../../packages/model-runtime/src/e2e-provider-invoke-testing.js";
+import * as invokeModule from "../../packages/model-runtime/src/e2e-provider-invoke.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { PROVIDER_KEY, SECRET_ARN, TOOLS, bedrockRoute, call, channelRequest, installationEnvironment, keyedRoute } from "../support/e2e-model-fixtures.js";
 import {
@@ -397,12 +398,14 @@ describe("fix round 2 (re-review of amendment A1)", () => {
     expect(JSON.stringify(manifest.exports)).not.toMatch(/e2e-provider-invoke/);
     const { readdirSync, statSync } = await import("node:fs");
     const offenders: string[] = [];
+    const mentions = /e2e-provider-invoke-testing|createE2EProviderInvokeForTesting|buildE2EProviderInvoke|E2EProviderInvokeTesting/;
+    const allowed = ["e2e-provider-invoke-testing.ts", "e2e-provider-invoke.ts"];
     const walk = (dir: string) => {
       for (const name of readdirSync(dir)) {
         if (name === "node_modules" || name === "dist") continue;
         const path = `${dir}/${name}`;
         if (statSync(path).isDirectory()) walk(path);
-        else if (/\.ts$/.test(name) && !name.includes("e2e-provider-invoke-testing") && /e2e-provider-invoke-testing/.test(readFileSync(path, "utf8"))) offenders.push(path);
+        else if (/\.ts$/.test(name) && !allowed.includes(name) && mentions.test(readFileSync(path, "utf8"))) offenders.push(path);
       }
     };
     for (const pkg of readdirSync(new URL("../../packages", import.meta.url).pathname)) {
@@ -410,5 +413,76 @@ describe("fix round 2 (re-review of amendment A1)", () => {
       if (statSync(src, { throwIfNoEntry: false })?.isDirectory()) walk(src);
     }
     expect(offenders).toEqual([]);
+  });
+
+  it("N3: the builder is not exported from its module; the test factory is the one way in, re-exported by the test module alone", () => {
+    expect(Object.keys(invokeModule).sort()).toEqual(["createE2EProviderInvoke", "createE2EProviderInvokeForTesting"]);
+    const main = readFileSync(new URL("../../packages/model-runtime/src/e2e-provider-invoke.ts", import.meta.url), "utf8");
+    expect(main).not.toMatch(/export (?:async )?function build|export interface E2EProviderInvokeTesting|export type E2EProviderInvokeTesting/);
+    const testing = readFileSync(new URL("../../packages/model-runtime/src/e2e-provider-invoke-testing.ts", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(testing.trim()).toBe('export { createE2EProviderInvokeForTesting } from "./e2e-provider-invoke.js";');
+  });
+
+  it("N1: a worker with PI_CACHE_RETENTION set (as every deployed worker has it) serves a call, and no cache point is sent", async () => {
+    vi.stubEnv("PI_CACHE_RETENTION", "long");
+    const definition = keyedRoute("anthropic");
+    const fake = fakeFetch(() => anthropicSse({ model: definition.modelId, tool: TAP }));
+    const keyed = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret, fetch: fake.fetch });
+    expect((await viaRoute(keyed, definition)).result.status).toBe("ok");
+    expect(fake.requests[0]!.bodyText).not.toContain("cache_control");
+    const viaBedrock = await bedrockInvoke(() => ({ status: 200, body: bedrockStreamBody({ tool: TAP }) }));
+    expect((await viaRoute(viaBedrock)).result.status).toBe("ok");
+    expect(JSON.stringify(loopback!.requests[0]!.body)).not.toContain("cachePoint");
+  });
+
+  it("N2: a route is checked against the process environment's settings, whatever environment the invoke is given", async () => {
+    vi.stubEnv("AGENTX_MODEL_PROVIDER", "openrouter");
+    const onBedrock = await createE2EProviderInvoke(bedrock, { environment: installationEnvironment(bedrock) });
+    await expect(onBedrock(input(bedrock))).rejects.toThrow(/model-route-changed-reapprove/);
+  });
+
+  it("N4: a dropped first attempt followed by a 429 on the retry still charges the bound", async () => {
+    const invoke = await bedrockInvoke((_request, count) => (count === 1 ? { status: 200, body: "", drop: true } : { status: 429, body: JSON.stringify({ message: "x" }), errorType: "ThrottlingException" }));
+    const { receipt, chargedInputTokens } = await viaRoute(invoke);
+    expect(loopback!.requests).toHaveLength(2);
+    expect(receipt.outcome).toBe("provider-error");
+    expect(receipt.inputTokens).toBeGreaterThan(500);
+    expect(chargedInputTokens).toBe(receipt.inputTokens);
+  });
+
+  it("N4: a setup, guard, mismatch or credential refusal sent nothing, so it charges 0 and releases the day reservation", async () => {
+    const days: Array<ReturnType<typeof createInMemoryE2EDayBudget>> = [];
+    const route = (invoke: Awaited<ReturnType<typeof createE2EProviderInvoke>>, definition: E2EModelRouteDefinition) => {
+      const dayBudget = createInMemoryE2EDayBudget();
+      days.push(dayBudget);
+      return createGovernedE2EModelRoute(definition, { invoke, now: Date.now, dayBudget }).generate(channelRequest());
+    };
+    const keyedDefinition = keyedRoute("anthropic");
+    const fake = fakeFetch(() => anthropicSse({ model: keyedDefinition.modelId, tool: TAP }));
+    const outcomes = [
+      // a missing provider secret (setup)
+      await route(await createE2EProviderInvoke(keyedDefinition, { environment: installationEnvironment(keyedDefinition), readSecret: async () => undefined, fetch: fake.fetch }), keyedDefinition),
+      // a route that is not the installation's (mismatch)
+      await route(await createE2EProviderInvoke(keyedDefinition, { environment: { AGENTX_MODEL_PROVIDER: "openai" }, readSecret, fetch: fake.fetch }), keyedDefinition),
+    ];
+    // a redirecting environment (guard)
+    const guarded = await createE2EProviderInvoke(keyedDefinition, { environment: installationEnvironment(keyedDefinition), readSecret, fetch: fake.fetch });
+    vi.stubEnv("HTTPS_PROXY", "http://proxy.example.test:3128");
+    outcomes.push(await route(guarded, keyedDefinition));
+    vi.stubEnv("HTTPS_PROXY", undefined);
+    for (const [index, outcome] of outcomes.entries()) {
+      expect(outcome.result, String(index)).toMatchObject({ status: "error", code: "provider-error" });
+      expect(outcome.receipt.inputTokens, String(index)).toBe(0);
+      expect(outcome.chargedInputTokens, String(index)).toBe(0);
+      expect(days[index]!.snapshot().usedInputTokens, String(index)).toBe(0);
+    }
+    expect(fake.requests).toHaveLength(0);
+    // a payload the credential scan refused
+    const dayBudget = createInMemoryE2EDayBudget();
+    const scanned = await createE2EProviderInvoke(keyedDefinition, { environment: installationEnvironment(keyedDefinition), readSecret, fetch: fake.fetch });
+    const refused = await createGovernedE2EModelRoute(keyedDefinition, { invoke: scanned, now: Date.now, dayBudget }).generate(channelRequest(), { inspectPayload: () => { throw new E2EPayloadRefusedError(); } });
+    expect(refused.result).toMatchObject({ code: "refused-credential-match" });
+    expect(dayBudget.snapshot().usedInputTokens).toBe(0);
+    expect(fake.requests).toHaveLength(0);
   });
 });

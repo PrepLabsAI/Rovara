@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import { KEYED_MODEL_PROVIDERS } from "../../packages/contracts/src/model-providers.js";
 import { E2E_REDIRECTING_ENVIRONMENT_VARIABLES } from "../../packages/model-runtime/src/e2e-environment-guard.js";
 
 /**
@@ -8,5 +9,6 @@ import { E2E_REDIRECTING_ENVIRONMENT_VARIABLES } from "../../packages/model-runt
  * empty AWS_ENDPOINT_URL as an endpoint.
  */
 export function cleanRedirectingEnvironment(): void {
-  for (const name of [...E2E_REDIRECTING_ENVIRONMENT_VARIABLES, "AWS_MAX_ATTEMPTS", "AWS_ROLE_ARN"]) vi.stubEnv(name, undefined);
+  const settings = ["AGENTX_MODEL_PROVIDER", ...Object.values(KEYED_MODEL_PROVIDERS).map((entry) => entry.secretArnVariable)];
+  for (const name of [...E2E_REDIRECTING_ENVIRONMENT_VARIABLES, "AWS_MAX_ATTEMPTS", "AWS_ROLE_ARN", ...settings]) vi.stubEnv(name, undefined);
 }

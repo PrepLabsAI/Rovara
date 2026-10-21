@@ -387,6 +387,19 @@ describe("governed e2e model route: served model and payload (amendment A1)", ()
     expect(unbilled.receipt.inputTokens).toBe(0);
   });
 
+  it("N4: a failure before any request was sent charges nothing and releases the day reservation; a failure after one keeps it", async () => {
+    const dayBudget = createInMemoryE2EDayBudget();
+    const notSent = routeWith(async () => { throw Object.assign(new Error("route mismatch"), { requestNotSent: true }); }, bedrockRoute(), { dayBudget });
+    const outcome = await notSent.generate(channelRequest());
+    expect(outcome.result).toMatchObject({ status: "error", code: "provider-error" });
+    expect(outcome.receipt).toMatchObject({ outcome: "provider-error", inputTokens: 0 });
+    expect(outcome.chargedInputTokens).toBe(0);
+    expect(dayBudget.snapshot().usedInputTokens).toBe(0);
+    const sent = createInMemoryE2EDayBudget();
+    await routeWith(async () => { throw new Error("went out and failed"); }, bedrockRoute(), { dayBudget: sent }).generate(channelRequest());
+    expect(sent.snapshot().usedInputTokens).toBeGreaterThan(500);
+  });
+
   it("offers the secrets its invoke holds, so the proxy can add them to the credential scan", () => {
     const invoke = Object.assign(async () => tapAnswer(), { secrets: ["sk-ant-api03-held-in-memory-1234"] });
     expect(routeWith(invoke).secretValues).toEqual(["sk-ant-api03-held-in-memory-1234"]);
