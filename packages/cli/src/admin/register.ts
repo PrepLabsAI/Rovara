@@ -61,9 +61,14 @@ export async function registerProject(
     definition: ProjectDefinition;
     runtimeBinding: ProjectRuntimeBinding;
     setupApproval?: { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" };
+    /** An instance administrator who does not administer an existing project takes it over only by asking, with a reason; the control plane records it. */
+    takeOwnership?: { reason: string };
   },
   fetchImplementation: typeof fetch = fetch,
 ): Promise<unknown> {
+  if (options.takeOwnership !== undefined && options.takeOwnership.reason.trim() === "") {
+    throw agentXError("CONFIG_INVALID", "--take-ownership needs --ownership-reason <why>; the takeover is recorded with who took the project over, when, and why");
+  }
   const definition = ProjectDefinitionSchema.parse(options.definition);
   WorkspaceDeploymentModeSchema.parse(options.runtimeBinding.deploymentMode);
   Ec2RuntimeBindingSchema.parse(options.runtimeBinding);
@@ -74,7 +79,10 @@ export async function registerProject(
       "content-type": "application/json",
     },
     // Asks the control plane to check each connector with its vendor; older control planes ignore it.
-    body: JSON.stringify({ definition, runtimeBinding: options.runtimeBinding, preflight: true, ...(options.setupApproval === undefined ? {} : { setupApproval: options.setupApproval }) }),
+    body: JSON.stringify({
+      definition, runtimeBinding: options.runtimeBinding, preflight: true, ...(options.setupApproval === undefined ? {} : { setupApproval: options.setupApproval }),
+      ...(options.takeOwnership === undefined ? {} : { takeOwnership: true, takeOwnershipReason: options.takeOwnership.reason.trim() }),
+    }),
   });
   const { ok, status, body } = await readJsonResponse(response);
   if (!ok) {
