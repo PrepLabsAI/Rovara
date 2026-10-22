@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { chmodSync, realpathSync } from "node:fs";
 import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -68,9 +68,22 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     const appCopy = join(base, "app");
     for (const file of ORDERS_M14_APP_FILES) await cp(join(ORDERS_M14_ROOT, file), join(appCopy, file), { recursive: true });
     const outputs: Array<{ actual: Record<string, unknown> | null }> = [];
+    const hosts: Array<ReturnType<typeof createDockerApplicationHost>> = [];
     const config = { executorImage: EXECUTOR_IMAGE, buildImage: ciImage("node-build", WEB_API_BUILD_IMAGE), runRoot } satisfies WorkflowE2EApplicationRuntimeConfig;
     const application: WorkflowE2EApplicationRuntime = { runRoot, git,
-      createHost: (input) => createDockerApplicationHost({ ...workflowE2EApplicationHostDeps(config, createProcessDockerCli(), () => Date.now(), { ...input, candidateSourceDir: appCopy }) }),
+      createHost: (input) => {
+        const deps = workflowE2EApplicationHostDeps(config, createProcessDockerCli(), () => Date.now(), { ...input, candidateSourceDir: appCopy });
+        const channel = deps.modelChannel;
+        // The worker hands the socket to the executor's user (1000) only when it runs as root, as the EC2 worker does; a CI runner is not root, so the journey opens the socket file to
+        // every local user for this run, as tests/support/linux-agent.ts does (the socket sits in a 0700 directory of the run that nothing else can enter).
+        const host = createDockerApplicationHost({ ...deps, ...(channel === undefined ? {} : { modelChannel: { async open(open) {
+          const session = await channel.open(open);
+          chmodSync(open.socketPath, 0o666);
+          return session;
+        } } }) });
+        hosts.push(host);
+        return host;
+      },
       // The collector's verdict is Task 4.4's; what the host handed it is what these journeys read.
       collect: ((input: { actual: Record<string, unknown> | null }) => { outputs.push({ actual: input.actual });
         return { collection: { marker: "journey" }, oracle: {}, unavailableReason: null, qualification: { status: "PASS", reason: "all cases passed", runId: null, rawReportSha256: null, result: null } }; }) as never };
@@ -91,12 +104,16 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     const agent = (outputs[0]?.actual as { executorEvidence?: { agent?: { ledgers: Array<{ caseDirectory: string; bytes: Uint8Array }>; dropped: number } } } | null | undefined)?.executorEvidence?.agent;
     const ledgerBytes = agent?.ledgers.find((item) => item.caseDirectory === agentCaseDirectoryName(caseId))?.bytes;
     const ledger = ledgerBytes === undefined ? null : E2EAgentActionLedgerSchema.parse(JSON.parse(Buffer.from(ledgerBytes).toString("utf8")));
-    return { fixture, result, closed, sent, caseId, ledger, agent, outputs, saved, runId: admission.groups[0]!.outerBinding.runId, steps: e2eApplicationGroupAgentSteps(fixture.compiled) };
+    const runId = admission.groups[0]!.outerBinding.runId;
+    // Everything a failing journey left to explain it: the worker's result and the host's logs.
+    const why = (() => { const logs = hosts[0]?.readDiagnostics(runId);
+      return `result: ${JSON.stringify(result).slice(0, 2000)}\nbuild log: ${logs?.buildLogTail || "(empty)"}\napp log: ${logs?.appLogTail || "(empty)"}\nexecutor log: ${logs?.executorLogTail || "(empty)"}`; })();
+    return { fixture, result, closed, sent, caseId, ledger, agent, outputs, saved, runId, why, steps: e2eApplicationGroupAgentSteps(fixture.compiled) };
   }
 
   it("agent-renamed-export: the worker opens the channel, the goal finds 'Download orders', the executor captures one download and the ledger and receipts agree", async () => {
     const j = await journey([{ kind: "tap", name: /Download orders/ }, { kind: "done" }]);
-    expect(j.result.processStatus).toBe("SUCCEEDED");
+    expect(j.result.processStatus, j.why).toBe("SUCCEEDED");
     expect(j.steps).toEqual([{ caseId: j.caseId, stepIndex: 1 }]);
     expect(j.ledger, "the host handed the executor's ledger back as operator evidence").not.toBeNull();
     const step = j.ledger!.steps[0]!;
@@ -114,7 +131,8 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
 
   it("agent-wrong-action: the model taps the decoy 'Download invoices'; the ledger says so and the executor completes the run with failures", async () => {
     const j = await journey([{ kind: "tap", name: /Download invoices/ }, { kind: "done" }]);
-    expect(j.result.processStatus).toBe("FAILED");
+    expect(j.result.processStatus, j.why).toBe("FAILED");
+    expect(j.ledger, j.why).not.toBeNull();
     const step = j.ledger!.steps[0]!;
     expect(step.verdict).toBe("concluded");
     expect(step.actions.map((action) => [action.tool, action.outcome, action.node?.testId])).toEqual([["tap", "ok", "download-invoices"]]);
@@ -123,7 +141,8 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
 
   it("agent-model-outage: the provider fails; the receipt is provider-error, the ledger verdict is failed with MODEL_PROVIDER_FAILED, and nothing was downloaded", async () => {
     const j = await journey([{ kind: "fail", message: "provider down" }]);
-    expect(j.result.processStatus).toBe("FAILED");
+    expect(j.result.processStatus, j.why).toBe("FAILED");
+    expect(j.ledger, j.why).not.toBeNull();
     const step = j.ledger!.steps[0]!;
     expect(step).toMatchObject({ verdict: "failed", stopCode: "MODEL_PROVIDER_FAILED", actions: [] });
     expect(j.closed[0]).toMatchObject({ receipts: 1, outcomes: { "provider-error": 1 } });
