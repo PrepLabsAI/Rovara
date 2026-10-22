@@ -263,4 +263,9 @@ export type E2EApplicationCompilationContext = Readonly<{
   modelRoute: null | { routeId: string; routeRevision: string };
   cliHostsByProfile: ReadonlyMap<string, E2EApplicationCliHostDescriptor>;
   preparedEnvironmentsByGroup: ReadonlyMap<string, E2EApplicationPreparedGroupFacts>;
+  /**
+   * Set only by the worker's validator, for an admission the control plane wrote before Task 4.3a: a route-pinned policy's round with no agent step was admitted with the policy's own
+   * limits for its shards, not the model-free ones. The compiler then keeps those limits, so the shard digests the admission was written with still match.
+   */
+  policyLimitsForModelFreeShards?: true;
 }>;

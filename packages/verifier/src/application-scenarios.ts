@@ -159,7 +159,7 @@ function snapshotDigest(snapshot: E2ESourceSnapshot): string {
   return hash.digest("hex");
 }
 function selectedContextCopy(input: unknown): E2EApplicationCompilationContext {
-  const context = ordinaryRecord(input, ["selectionInput", "executionPlan", "bundle", "applicationBindings", "runtimeBindings", "launchTargets", "modelRoute", "cliHostsByProfile", "preparedEnvironmentsByGroup"], "application compilation context");
+  const context = ordinaryRecord(input, ["selectionInput", "executionPlan", "bundle", "applicationBindings", "runtimeBindings", "launchTargets", "modelRoute", "cliHostsByProfile", "preparedEnvironmentsByGroup", "policyLimitsForModelFreeShards"], "application compilation context");
   const selectionRaw = ordinaryRecord(context.selectionInput, ["candidateDigest", "expectedCandidate", "sourceSnapshot", "planDigest", "policy", "scenarios", "selectedTargetIds", "sandboxAvailability", "runtimeAvailability", "portableApprovalBinding", "approvedSemanticApproval", "mockableComponents", "intent", "intentDigest", "setupProposal", "setupApproval", "applicationApprovalBinding", "registeredRuntimes", "runtimeAccountRefs", "now"], "application selection input");
   const selectionInput = { ...selectionRaw, expectedCandidate: bounded(selectionRaw.expectedCandidate, 262_144), sourceSnapshot: snapshotCopy(selectionRaw.sourceSnapshot),
     policy: bounded(selectionRaw.policy), scenarios: bounded(selectionRaw.scenarios), selectedTargetIds: bounded(selectionRaw.selectedTargetIds),
@@ -184,7 +184,8 @@ function selectedContextCopy(input: unknown): E2EApplicationCompilationContext {
   const preparedEnvironmentsByGroup = mapCopy(context.preparedEnvironmentsByGroup, 4, "application prepared environments", (raw) => E2EApplicationPreparedGroupFactsSchema.parse(bounded(raw)));
   const modelRoute = applicationModelRouteSchema.parse(bounded(context.modelRoute));
   return { selectionInput, executionPlan: E2EExecutionPlanSchema.parse(bounded(context.executionPlan)), bundle: E2EScenarioBundleSchema.parse(bounded(context.bundle)),
-    applicationBindings, runtimeBindings, launchTargets, modelRoute, cliHostsByProfile, preparedEnvironmentsByGroup };
+    applicationBindings, runtimeBindings, launchTargets, modelRoute, cliHostsByProfile, preparedEnvironmentsByGroup,
+    ...(context.policyLimitsForModelFreeShards === true ? { policyLimitsForModelFreeShards: true as const } : {}) };
 }
 
 function identityPlatform(target: E2EExecutionPlan["effectiveTargets"][number]): string {
@@ -362,8 +363,8 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
     const caseScenarios = scenarios.filter((scenario) => expectedCases.some((item) => item.scenarioId === scenario.scenarioId));
     const groupUsesModel = caseScenarios.some((scenario) => scenario.steps.some((step) => step.kind === "agent"));
     // A project that pinned an AI navigation route has policy limits sized for agent steps; a shard with no agent step runs under the model-free limits instead (Task 4.3a).
-    // A policy that pinned no route keeps the limits it was approved with.
-    const limits = context.selectionInput.policy.modelRouteRevision === null ? context.selectionInput.policy.limits : e2eEffectiveRoundLimits(context.selectionInput.policy.limits, groupUsesModel);
+    // A policy that pinned no route keeps the limits it was approved with, and so does an admission written before this rule (the validator says so in the context).
+    const limits = context.selectionInput.policy.modelRouteRevision === null || context.policyLimitsForModelFreeShards === true ? context.selectionInput.policy.limits : e2eEffectiveRoundLimits(context.selectionInput.policy.limits, groupUsesModel);
     const timeoutMs = Math.min(...expectedCases.map(() => limits.caseTimeoutMs), limits.runTimeoutMs);
     const modelRoute = groupUsesModel ? context.modelRoute : null;
     if (groupUsesModel && (!modelRoute || modelRoute.routeRevision !== context.selectionInput.policy.modelRouteRevision)) throw new Error("agent-bearing application group has no exact approved model route metadata");
@@ -416,7 +417,8 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
   const assertionDigest = sha256(canonicalJson([...assertionBindings].sort(([a], [b]) => a.localeCompare(b))));
   const contextDigest = sha256(canonicalJson({ selectionInput: { ...context.selectionInput, sourceSnapshot: undefined }, executionPlan: context.executionPlan,
     bundle: context.bundle, applicationBindings: [...context.applicationBindings], runtimeBindings: [...context.runtimeBindings], launchTargets: context.launchTargets,
-    modelRoute: context.modelRoute, cliHostsByProfile: [...context.cliHostsByProfile], preparedEnvironmentsByGroup: [...context.preparedEnvironmentsByGroup] }));
+    modelRoute: context.modelRoute, cliHostsByProfile: [...context.cliHostsByProfile], preparedEnvironmentsByGroup: [...context.preparedEnvironmentsByGroup],
+    policyLimitsForModelFreeShards: context.policyLimitsForModelFreeShards }));
   const snapshot = context.selectionInput.sourceSnapshot;
   const runtimeAdmission = Object.freeze({ schemaVersion: "e2e-application-compiled-admission/v1" as const,
     expectedCandidate: context.selectionInput.expectedCandidate, sourceSnapshot: snapshot, sourceSnapshotDigest: snapshotDigest(snapshot), contextDigest,
@@ -637,8 +639,14 @@ export function validateE2EApplicationExecutionAdmission(admissionInput: unknown
   const launchTargets = admission.launchTargets;
   const cliHostsByProfile = new Map(admission.cliHosts.map(({ profileId, descriptor }) => [profileId, descriptor]));
   const preparedEnvironmentsByGroup = new Map(admission.preparedEnvironments.map(({ groupId, ...facts }) => [groupId, facts]));
+  // Rollout (checklist 3): before Task 4.3a the control plane admitted a route-pinned policy's round with no agent step under the policy's own limits, for the round and for its shards.
+  // Such an admission says so itself: its round carries exactly the policy's limits, where one written now carries the model-free ones. It keeps validating on the shard limits it was
+  // written with. An admission with an agent step never ran before this task, and a round whose limits differ from the policy's gets no allowance.
+  const olderAdmission = admission.policy.modelRouteRevision !== null && canonicalJson(admission.round.limits) === canonicalJson(admission.policy.limits)
+    && !bundle.scenarios.some((scenario) => scenario.steps.some((step) => step.kind === "agent"));
   const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets,
-    modelRoute: admission.modelRoute, cliHostsByProfile, preparedEnvironmentsByGroup } as E2EApplicationCompilationContext;
+    modelRoute: admission.modelRoute, cliHostsByProfile, preparedEnvironmentsByGroup,
+    ...(olderAdmission ? { policyLimitsForModelFreeShards: true as const } : {}) } as E2EApplicationCompilationContext;
   const runnableApplicationGroups = executionPlan.groups.filter((group) => group.mode === "real-runtime" || group.mode === "hybrid");
   const appAdmissions = admission.groups.filter((group) => group.protocol === "trusted-e2e-application/v1");
   const portableAdmissions = admission.groups.filter((group) => group.protocol === "trusted-e2e/v1");

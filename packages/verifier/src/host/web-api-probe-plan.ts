@@ -4,9 +4,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
   E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
-  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
+  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimits, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
   selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
-import { compileE2EApplicationScenarios, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
+import { compileE2EApplicationScenarios, e2eApplicationGroupUsesModel, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../application-build-source.js";
 import { loadWebApiQualificationProbeAssets } from "../application-runtime-probes.js";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../rovara-http-engine-descriptor.js";
@@ -289,14 +289,17 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     preparedEnvironmentsByGroup: new Map([[group.groupId, { preparedEnvironmentDigest, originByApplicationId: [{ applicationId: application.applicationId, origin: WEB_API_PROBE_APP_ORIGIN }] }]]) };
   const compiled = compileE2EApplicationScenarios({ context, groupId: group.groupId });
   const roundId = randomUUID();
+  // As the control plane admits a round: a route-pinned policy's round with no agent step runs under the model-free limits, and its deadline fits them (Task 4.3a).
+  const roundLimits = options.modelRoute === undefined ? policy.limits : e2eEffectiveRoundLimits(policy.limits, e2eApplicationGroupUsesModel(compiled));
+  const deadlineSpanMs = options.deadlineMs ?? Math.min(300_000, roundLimits.runTimeoutMs);
   const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId: options.runId ?? randomUUID(), roundId, taskId: options.taskId ?? "task-orders", operationId: randomUUID(), operationFence: 1,
     workflowRevision: 1, groupId: group.groupId, executionPlanDigest: executionPlan.digest, executionMode: group.mode, mockManifestDigest: group.mockManifestDigest,
     authorizationRevision: "orders-auth-r1", candidateDigest: candidate.digest, planDigest, policyDigest: e2ePolicyDigest(policy), bundleDigest: bundle.bundleDigest,
     appBuildDigest: hash(canonicalJson(compiled.inventory)), environmentDigest: preparedEnvironmentDigest, runtimeManifestDigest: runtime.manifestDigest,
-    modelRouteRevision: options.modelRoute?.routeRevision ?? null, expectedCases: compiled.expectedCases, admittedAt: now, deadlineAt: new Date(nowMs + (options.deadlineMs ?? 300_000)).toISOString() });
+    modelRouteRevision: options.modelRoute?.routeRevision ?? null, expectedCases: compiled.expectedCases, admittedAt: now, deadlineAt: new Date(nowMs + deadlineSpanMs).toISOString() });
   const round = E2ERoundSchema.parse({ schemaVersion: 1, roundId, taskId: binding.taskId, operationId: binding.operationId, operationFence: binding.operationFence,
     workflowRevision: binding.workflowRevision, executionPlanDigest: executionPlan.digest, admittedAt: now, deadlineAt: binding.deadlineAt,
-    limits: policy.limits, groupBindings: [binding] });
+    limits: roundLimits, groupBindings: [binding] });
   const sourceSnapshotWire = { candidate: snapshot.candidate, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, treeComplete: true as const,
     treePaths: snapshot.treePaths, sources: snapshot.sources.map((item) => ({ path: item.path, sha256: item.sha256,
       bytesBase64: Buffer.from(item.bytes).toString("base64"), kind: "blob" as const })) };

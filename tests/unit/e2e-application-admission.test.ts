@@ -486,6 +486,38 @@ describe("a baseline round's admission on a project whose policy pins a model ro
     expect(e2eApplicationGroupUsesModel(mixed)).toBe(true);
   });
 
+  // Checklist 3: an admission the control plane wrote before Task 4.3a (tests/fixtures/admission-before-task-4-3a.json, written by the code at the commit before step 8 of Task 4.3a: a
+  // route-pinned policy with agent-sized limits, a round with no agent step) was admitted with the policy's limits for its round and its shards. The new worker still validates it.
+  describe("an admission written before Task 4.3a", () => {
+    const stored = () => readFileSync(new URL("../fixtures/admission-before-task-4-3a.json", import.meta.url));
+
+    it("is a route-pinned no-agent round under the policy's own (agent-sized) limits, and the worker's validator still accepts it", () => {
+      const decoded = decodeE2EApplicationExecutionAdmission(stored());
+      expect(decoded.policy.modelRouteRevision).toBe(ROUTE);
+      expect(decoded.round.limits).toEqual(ROUTE_LIMITS);
+      expect(decoded.round.limits).not.toEqual(E2E_MODEL_FREE_LIMITS);
+      expect(agentScenarioIds(decoded)).toEqual([]);
+      const validated = validateE2EApplicationExecutionAdmission(decoded);
+      expect(validated.applicationSuites).toHaveLength(1);
+    });
+
+    it("is refused when its round no longer says it ran under the policy's limits (the allowance is for admissions that did, not a way around the model-free limits)", () => {
+      const { admissionDigest: _digest, ...body } = JSON.parse(stored().toString("utf8")) as { round: { limits: { caseTimeoutMs: number } }; admissionDigest: string };
+      void _digest;
+      // A round that ran under narrower limits than its policy (still within it) is not the older shape: its shards are compiled under the current rule and no longer match.
+      body.round.limits = { ...body.round.limits, caseTimeoutMs: body.round.limits.caseTimeoutMs - 1 };
+      // Sealed again, so the refusal is the shard comparison and not the digest.
+      const resealed = { ...body, admissionDigest: createHash("sha256").update(canonicalJson(body)).digest("hex") };
+      expect(() => validateE2EApplicationExecutionAdmission(resealed)).toThrow(/differs from fresh shard compilation/);
+    });
+
+    it("is not what the current control plane writes: a candidate round of the same plan carries the model-free limits and validates too (the positive control)", async () => {
+      const built = (await routed({ baseline: false, plan: "plain" }))();
+      expect(built.admission.round.limits).toEqual(E2E_MODEL_FREE_LIMITS);
+      expect(() => validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(built.bytes))).not.toThrow();
+    });
+  });
+
   it("the baseline round carries modelRoute null and group bindings with modelRouteRevision null, the worker's validator accepts it, it has no agent scenario, and its round limits are the model-free limits (case 13)", async () => {
     for (const plan of ["plain", "mixed"] as const) {
       const built = (await routed({ baseline: true, plan }))();
