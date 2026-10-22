@@ -3,6 +3,7 @@ import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { E2EApplicationExecutionAdmissionSchema } from "./e2e-application-execution.js";
 import { E2EFormLoginSchema } from "./e2e.js";
+import { E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH } from "./e2e-model-channel.js";
 
 /** The only application an executor run may reach: the candidate app's alias on the per-run internal network. */
 export const E2E_EXECUTOR_APP_ORIGIN = "http://app:4317" as const;
@@ -59,12 +60,26 @@ export const E2EExecutorPlanSchema = z.object({
   }).strict(),
   deadlineAt: z.number().int().positive(),
   accounts: z.array(E2EExecutorAccountSchema).max(E2E_EXECUTOR_MAX_ACCOUNTS),
+  /**
+   * Present only for a group that has an `agent` step: the worker's model socket, mounted into this executor container alone, and the route it serves. The route must be
+   * the one the admission pins. An executor built before this field refuses the plan (the schema is strict), so a mixed fleet fails cleanly.
+   */
+  modelChannel: z.object({
+    protocol: z.literal(E2E_MODEL_CHANNEL_SCHEMA_VERSION),
+    socketPath: z.literal(E2E_MODEL_CHANNEL_SOCKET_PATH),
+    routeId: z.string().min(1).max(120),
+    routeRevision: z.string().min(1).max(120),
+  }).strict().optional(),
 }).strict().superRefine((plan, context) => {
   if (plan.admission.admissionDigest !== plan.admissionDigest || e2eExecutorAdmissionDigest(plan.admission) !== plan.admissionDigest) {
     context.addIssue({ code: "custom", path: ["admissionDigest"], message: "executor plan admission digest does not bind its admission" });
   }
   if (!plan.admission.groups.some((group) => group.outerBinding.groupId === plan.groupId && group.outerBinding.runId === plan.runId)) {
     context.addIssue({ code: "custom", path: ["groupId"], message: "executor plan group and run are not in its admission" });
+  }
+  if (plan.modelChannel !== undefined
+    && (plan.admission.modelRoute === null || plan.admission.modelRoute.routeId !== plan.modelChannel.routeId || plan.admission.modelRoute.routeRevision !== plan.modelChannel.routeRevision)) {
+    context.addIssue({ code: "custom", path: ["modelChannel"], message: "executor plan model channel is not the route its admission pins" });
   }
   if (new Set(plan.accounts.map((account) => account.profileId)).size !== plan.accounts.length) {
     context.addIssue({ code: "custom", path: ["accounts"], message: "executor plan accounts must have unique profiles" });
