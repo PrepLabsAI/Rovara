@@ -215,6 +215,24 @@ describe("test 16: a replay never gates", () => {
     expect(round.workflowNow().state).toBe("BLOCKED");
   });
 
+  it("serves the replay's admission to its running operation while the workflow is somewhere else, and refuses it once the record no longer says this operation is the replay's started round", async () => {
+    const { round, operationId, sourceRoundId } = await replayOperation();
+    const capability = String((round.harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0]!.invocation as { callbackCapability: string }).callbackCapability);
+    const ref = round.harness.db.get(`WORKSPACE#${round.workspaceId}`, `OPERATION#${operationId}`)!.workflowE2EAdmission as { admissionRef: { sha256: string } };
+    const read = () => call(round.harness.handler, { method: "POST", path: `/v1/internal/workspaces/${round.workspaceId}/operations/${operationId}/e2e-admission`,
+      headers: { "x-agentx-callback-capability": capability }, body: { stage: "read", offset: 0, sha256: ref.admissionRef.sha256 } });
+    const served = await read();
+    expect(served.status, JSON.stringify(served.body)).toBe(200);
+    const stored = round.harness.db.get(key(round, sourceRoundId).pk, key(round, sourceRoundId).sk)!;
+    for (const edit of [{ state: "UNAVAILABLE", reason: "timed-out" }, { operationId: "someone-else" }, { admissionSha256: "9".repeat(64) }, { roundId: randomUUID() }]) {
+      round.harness.db.set({ ...stored, ...edit });
+      expect((await read()).status, JSON.stringify(edit)).toBe(409);
+    }
+    round.harness.db.set(stored);
+    round.harness.db.set({ ...(round.taskNow()), closedAt: new Date().toISOString() });
+    expect((await read()).status).toBe(409);
+  });
+
   it("a replay lost before it reached the worker (the outbox gave up) blocks nothing, even when the workflow looks as if it were running it", async () => {
     const { round, operationId, sourceRoundId } = await replayOperation({ looksCurrent: true });
     const op = round.harness.db.get(`WORKSPACE#${round.workspaceId}`, `OPERATION#${operationId}`)!;

@@ -31,6 +31,7 @@ import { cliRuntimeBinding, registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
 import { setTaskShareMode } from "./admin/task-share-mode.js";
+import { showTaskE2EReplays, startTaskE2EReplay } from "./admin/task-e2e-replay.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
 import { batchResultsOutput, evalBatchShowText, evalBatchStartText, fetchEvalBatchResults, showEvalBatch, startEvalBatch, stopEvalBatch } from "./admin/eval-batch.js";
@@ -943,6 +944,32 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const globals = globalOptions(command);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       const result = await setTaskShareMode({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, taskId: options.task, mode: options.mode }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
+
+  // M1.4 Task 4.6b: the audit replay of a task's qualified AI-navigated round (no model; recorded apart from the task, which it never changes).
+  const taskE2EReplay = adminTask.command("e2e-replay").description("replay a task's verified AI-navigated round with no model, for an audit; the result never changes the task");
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  taskE2EReplay.command("start")
+    .description("start a replay of the task's qualified round (refused when it left no recording, is not PASS now, or one is already running)")
+    .requiredOption("--task <task-id>", "the task")
+    .requiredOption("--round <round-id>", "the task's qualified round")
+    .action(async (options: { task: string; round: string }, command: Command) => {
+      if (!uuidPattern.test(options.task) || !uuidPattern.test(options.round)) throw agentXError("CONFIG_INVALID", "--task and --round must be IDs, such as 44444444-4444-4444-8444-444444444444");
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await startTaskE2EReplay({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, taskId: options.task, roundId: options.round }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
+  taskE2EReplay.command("show")
+    .description("read the record of each replay attempt of a task's round")
+    .requiredOption("--task <task-id>", "the task")
+    .option("--round <round-id>", "the round (default: the task's qualified round)")
+    .action(async (options: { task: string; round?: string }, command: Command) => {
+      if (!uuidPattern.test(options.task) || (options.round !== undefined && !uuidPattern.test(options.round))) throw agentXError("CONFIG_INVALID", "--task and --round must be IDs, such as 44444444-4444-4444-8444-444444444444");
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await showTaskE2EReplays({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, taskId: options.task, ...(options.round === undefined ? {} : { roundId: options.round }) }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
     });
 
