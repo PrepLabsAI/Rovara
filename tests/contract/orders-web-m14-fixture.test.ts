@@ -296,7 +296,7 @@ describe("publisher --variant m14", () => {
     expect(parsePublishArguments(["--repo", "o/n"]).variant).toBeUndefined();
     expect(() => parsePublishArguments(["--repo", "o/n", "--variant", "m99"])).toThrow(/unknown variant/);
     expect(() => parsePublishArguments(["--repo", "o/n", "--variant"])).toThrow(/--variant/);
-    expect(Object.keys(FIXTURE_VARIANTS).sort()).toEqual(["m14", "starter"]);
+    expect(Object.keys(FIXTURE_VARIANTS).sort()).toEqual(["m13", "m14", "starter"]);
   });
 
   it("dry-runs the committed m14 files with the baseline file list", () => {

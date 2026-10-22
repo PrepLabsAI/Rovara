@@ -1,0 +1,377 @@
+diff --git a/README.baseline.md b/README.baseline.md
+new file mode 100644
+index 0000000..70ff218
+--- /dev/null
++++ b/README.baseline.md
+@@ -0,0 +1,51 @@
++# Orders web fixture
++
++A small Node HTTP application for exercising browser and API checks. It has no runtime dependencies.
++
++## The orders page
++
++`GET /` serves a single page with:
++
++- a sign-in form (email, password) and a signed-in identity line (display name and role);
++- the signed-in tenant's orders table, one row per order, with an inventory column;
++- an owner-only button that downloads the tenant's orders as a CSV file (viewers do not see it);
++- an orders state panel and an access-error line.
++
++## API
++
++- `GET /health` returns `{"status":"ready"}`.
++- `POST /api/login`, `POST /api/logout` manage a cookie session.
++- `GET /api/me` returns the signed-in subject, tenant, role and display name.
++- `GET /api/orders/state` returns the orders state record.
++- `GET /api/tenants/:tenantId/orders` lists that tenant's orders with their inventory status; other tenants are refused with 403.
++- `GET /api/orders.csv?from&to` (owners only, others get 403) downloads the tenant's orders as CSV with the columns `id,customer,total,state,inventory`. `from` and `to` are optional `YYYY-MM-DD` dates. Cells that start with `=`, `+`, `-`, `@`, tab or carriage return are prefixed with a quote.
++- `GET /api/inventory/status` checks the inventory dependency health.
++
++## Inventory
++
++`inventory/openapi.json` describes the one inventory operation the application calls: `GET /v1/stock?orderId=<id>` (`200 { status: "in-stock" | "low" | "out" }`, `404 { error }`). The application reads the service address from `INVENTORY_ORIGIN`; any answer that is not a well-formed stock status shows as `unavailable`. `e2e/mocks/inventory-v1.json` is a mock of that service.
++
++## Running
++
++```sh
++node --test
++ROVARA_ACCOUNTS_FILE=accounts.json ROVARA_DATA_DIR=.owned node scripts/seed.mjs
++ROVARA_DATA_DIR=.owned INVENTORY_ORIGIN=http://localhost:4400 APP_PORT=4317 node server.mjs
++```
++
++## Accounts
++
++The repository contains no accounts or passwords. `scripts/seed.mjs` builds the application's user records at run time. It reads the accounts file named by `ROVARA_ACCOUNTS_FILE`, writes `users.json` to the directory named by `ROVARA_DATA_DIR`, and stores only a sha256 digest of each password. The application reads those records when it starts. Never commit `.owned/` (it is in `.gitignore`).
++
++Accounts file shape (placeholder values):
++
++```json
++{
++  "schemaVersion": "rovara-accounts/v1",
++  "accounts": [
++    { "profileId": "orders-owner", "email": "kzr41@a.example", "password": "change-me", "tenantRef": "tenant-a", "roleRef": "owner" }
++  ]
++}
++```
++
++The tests in `test/` build the application with their own in-test accounts.
+diff --git a/README.md b/README.md
+index 52fcc80..dc92c38 100644
+--- a/README.md
++++ b/README.md
+@@ -1,33 +1,44 @@
+ # Orders web fixture
+ 
+-A small Node HTTP application for exercising browser and API checks. It has no runtime dependencies.
++A small Node HTTP application used by Rovara to exercise browser and API checks. It has no runtime dependencies.
++
++## Two variants of one application
++
++This directory is the **local Linux fixture** of Rovara M1.4. The same sources also produce the **live baseline** that is published as the `main` branch of the fixture repository.
++
++| | local Linux fixture | live baseline |
++| --- | --- | --- |
++| Owner download button | `data-testid="download-orders"`, label "Download orders" | `data-testid="export-csv"`, label "Export CSV" |
++| Decoy | `data-testid="download-invoices"`, label "Download invoices" (downloads a different CSV from `GET /api/invoices.csv`) | none |
++| Used for | Rovara's own tests of the AI browser-test agent, where the button has to be found by its meaning | the live demo, where a coding agent is asked to rename the button |
++
++The live baseline is the reference state after the M1.3 demo: viewers are refused, each tenant sees only its own orders, and the orders table and CSV carry an inventory column. The decoy is not added live, so the demo keeps one clear goal.
++
++The live baseline is generated from this directory by `scripts/fixtures/publish-web-fixture.ts --variant m14`. It renames the button back, removes the decoy markup, the `/api/invoices.csv` route (the lines between the `fixture-variant:local-only` markers in `server.mjs`) and `test/invoices.test.mjs`. It refuses to publish if one of those edits no longer matches exactly once.
+ 
+ ## The orders page
+ 
+ `GET /` serves a single page with:
+ 
+-- a sign-in form (`email`, `password`, `login-submit`) and a signed-in identity line (`identity`: display name and role; the account email is never rendered). After a sign-in the form is cleared and hidden;
+-- the signed-in tenant's orders table (`orders-table`), one row per order (`order-row-<id>`), with the columns order, customer, total and state;
+-- an export button (`export-csv`) that downloads the tenant's orders as a CSV file, with a status line (`orders-export-status`);
+-- an orders state panel and an access-error line (`orders-access-error`).
++- a sign-in form (email, password) and a signed-in identity line (display name and role; the account email is never rendered);
++- the signed-in tenant's orders table (`data-testid="orders-table"`, one `order-row-<id>` per order) with an inventory column;
++- the owner-only download buttons described above, hidden for a viewer;
++- an orders state panel and an access-error line.
+ 
+ ## API
+ 
+ - `GET /health` returns `{"status":"ready"}`.
+ - `POST /api/login`, `POST /api/logout` manage a cookie session.
+-- `GET /api/me` returns the signed-in `subjectId`, `tenantId` and `role` (and the display name).
++- `GET /api/me` returns the signed-in subject, tenant, role and display name.
+ - `GET /api/orders/state` returns the orders state record.
+-- `GET /api/tenants/:tenantId/orders` lists that tenant's orders; other tenants are refused with 403.
+-- `GET /api/orders.csv?from&to` downloads the signed-in tenant's orders as CSV with the columns `id,customer,total,state`. `from` and `to` are optional `YYYY-MM-DD` dates. Cells that start with `=`, `+`, `-`, `@`, tab or carriage return are prefixed with a quote, and cells with a separator are quoted.
+-- `GET /api/inventory/status` checks the inventory service.
+-
+-## Export access
+-
+-Every signed-in account sees the export button and can download the export, viewers included. The export is not limited by role.
++- `GET /api/tenants/:tenantId/orders` lists that tenant's orders with their inventory status; other tenants are refused with 403.
++- `GET /api/orders.csv?from&to` (owner only, viewers get 403) downloads the tenant's orders as CSV: `id,customer,total,state,inventory`. `from` and `to` are optional `YYYY-MM-DD` dates. Cells that start with `=`, `+`, `-`, `@`, tab or carriage return are prefixed with a quote.
++- `GET /api/invoices.csv` (owner only; local Linux fixture only) downloads a different CSV: `invoice,customer,amount,status`.
++- `GET /api/inventory/status` checks the inventory dependency health.
+ 
+-## Inventory service
++## Inventory
+ 
+-`inventory/openapi.json` describes the one operation of the inventory service: `GET /v1/stock?orderId=<id>` (`200 { status: "in-stock" | "low" | "out" }`, `404 { error }`). The application reads the service address from `INVENTORY_ORIGIN`; the orders table and the export do not use it yet. `e2e/mocks/inventory-v1.json` is a mock of that service (`a1` in stock, `a2` unknown, `b1` malformed).
++`inventory/openapi.json` describes the one inventory operation, `GET /v1/stock?orderId=<id>` (`200 { status: "in-stock" | "low" | "out" }`, `404 { error }`). The application reads the service from `INVENTORY_ORIGIN`; any answer that is not a well-formed stock status shows as `unavailable`. `e2e/mocks/inventory-v1.json` is the mock (`a1` in-stock, `a2` unknown, `b1` malformed).
+ 
+ ## Running
+ 
+diff --git a/server.mjs b/server.mjs
+index 11ad33f..46d850b 100644
+--- a/server.mjs
++++ b/server.mjs
+@@ -17,6 +17,7 @@ const tableCsv = (header, rows) => [header, ...rows].map((row) => row.map(csvCel
+ const csvResponse = (filename, body) => ({ status: 200, headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="${filename}"` }, body });
+ const cookieValue = (header, name) => String(header ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
+ const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
++const STOCK_STATUSES = new Set(["in-stock", "low", "out"]);
+ const DAY = /^\d{4}-\d{2}-\d{2}$/;
+ const validDay = (value) => DAY.test(value) && new Date(`${value}T00:00:00Z`).toISOString().startsWith(value);
+ 
+@@ -38,17 +39,36 @@ export function createOrdersApplication({ seed, orders, fetchDependency = async
+     const token = cookieValue(request.headers?.cookie, "orders_session");
+     return token ? sessions.get(token) ?? null : null;
+   }
+-  const tenantOrders = (account) => orders.orders.filter((item) => item.tenantId === account.tenantId);
+-  // The page is rendered for the signed-in account, so it is complete when it loads: its display name and role (never its email), its tenant's orders and the export button.
+-  // A visitor who is not signed in gets the sign-in form and nothing else.
+-  function renderPage(account) {
+-    const section = account === null
+-      ? '<form id="login"><label>Email <input data-testid="email" name="email" autocomplete="username"></label><label>Password <input data-testid="password" name="password" type="password" autocomplete="current-password"></label><button data-testid="login-submit" type="submit">Sign in</button></form>'
+-      : `<p data-testid="identity">${escapeHtml(`${account.displayName} (${account.role})`)}</p>`
+-        + '<div data-testid="owner-actions"><button data-testid="export-csv" data-download="/api/orders.csv" data-filename="orders.csv" data-done="Orders exported" type="button">Export CSV</button></div>'
+-        + '<table data-testid="orders-table"><thead><tr><th>Order</th><th>Customer</th><th>Total</th><th>State</th></tr></thead><tbody>'
+-        + tenantOrders(account).map((row) => `<tr data-testid="order-row-${escapeHtml(row.id)}">${[row.id, row.customer, row.total, row.state].map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("")
++  // The inventory service answers one order at a time. Anything but a well-formed stock status reads as "unavailable".
++  async function stockStatus(orderId, request) {
++    try {
++      const result = await fetchDependency("inventory-v1", `/v1/stock?orderId=${encodeURIComponent(orderId)}`, request);
++      const status = result.body?.status;
++      return result.status === 200 && STOCK_STATUSES.has(status) ? status : "unavailable";
++    } catch { return "unavailable"; }
++  }
++  async function tenantOrders(account, request) {
++    const own = orders.orders.filter((item) => item.tenantId === account.tenantId);
++    const inventory = await Promise.all(own.map((item) => stockStatus(item.id, request)));
++    return own.map((item, index) => ({ ...item, inventory: inventory[index] }));
++  }
++  // The page is rendered for the signed-in account, so it is complete when it loads: its display name and role (never its email), its tenant's orders with their inventory
++  // status and the owner's download buttons (a viewer gets none). A visitor who is not signed in gets the sign-in form and nothing else.
++  async function renderPage(account, request) {
++    let section;
++    if (account === null) {
++      section = '<form id="login"><label>Email <input data-testid="email" name="email" autocomplete="username"></label><label>Password <input data-testid="password" name="password" type="password" autocomplete="current-password"></label><button data-testid="login-submit" type="submit">Sign in</button></form>';
++    } else {
++      const rows = await tenantOrders(account, request);
++      const buttons = account.role === "owner"
++        ? '<button data-testid="download-orders" data-download="/api/orders.csv" data-filename="orders.csv" data-done="Orders exported" type="button">Download orders</button>'
++          + '<button data-testid="download-invoices" data-download="/api/invoices.csv" data-filename="invoices.csv" data-done="Invoices exported" type="button">Download invoices</button>'
++        : "";
++      section = `<p data-testid="identity">${escapeHtml(`${account.displayName} (${account.role})`)}</p><div data-testid="owner-actions">${buttons}</div>`
++        + '<table data-testid="orders-table"><thead><tr><th>Order</th><th>Customer</th><th>Total</th><th>State</th><th>Inventory</th></tr></thead><tbody>'
++        + rows.map((row) => `<tr data-testid="order-row-${escapeHtml(row.id)}">${[row.id, row.customer, row.total, row.state, row.inventory].map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`).join("")
+         + "</tbody></table>";
++    }
+     return readFileSync(join(root, "public/index.html"), "utf8").replace("<!--ACCOUNT-->", () => section);
+   }
+   async function handle(request) {
+@@ -59,7 +79,7 @@ export function createOrdersApplication({ seed, orders, fetchDependency = async
+     if (url.origin !== "http://owned.invalid" || url.hash) return json(400, { error: "canonical path required" });
+     if (url.search && !(method === "GET" && url.pathname === "/api/orders.csv")) return json(400, { error: "canonical path required" });
+     if (method === "GET" && staticFiles.has(url.pathname)) return { status: 200, headers: { "content-type": url.pathname.endsWith(".js") ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" }, body: readFileSync(join(root, staticFiles.get(url.pathname)), "utf8") };
+-    if (method === "GET" && url.pathname === "/") return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body: renderPage(accountFor(request)) };
++    if (method === "GET" && url.pathname === "/") return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body: await renderPage(accountFor(request), request) };
+     if (method === "GET" && url.pathname === "/health") return json(200, { status: "ready" });
+     if (method === "POST" && url.pathname === "/api/login") {
+       const body = request.body;
+@@ -86,13 +106,23 @@ export function createOrdersApplication({ seed, orders, fetchDependency = async
+     if (method === "GET" && url.pathname === "/api/orders.csv") {
+       const account = accountFor(request);
+       if (!account) return json(401, { error: "authentication required" });
++      if (account.role !== "owner") return json(403, { error: "owner role required" });
+       const keys = [...url.searchParams.keys()];
+       const from = url.searchParams.get("from"); const to = url.searchParams.get("to");
+       if (keys.some((key) => key !== "from" && key !== "to") || new Set(keys).size !== keys.length
+         || (from !== null && !validDay(from)) || (to !== null && !validDay(to))) return json(400, { error: "from and to must be dates" });
+-      const rows = tenantOrders(account).filter((item) => (from === null || item.placedOn >= from) && (to === null || item.placedOn <= to));
+-      return csvResponse("orders.csv", tableCsv(["id", "customer", "total", "state"], rows.map((row) => [row.id, row.customer, row.total, row.state])));
++      const rows = (await tenantOrders(account, request)).filter((item) => (from === null || item.placedOn >= from) && (to === null || item.placedOn <= to));
++      return csvResponse("orders.csv", tableCsv(["id", "customer", "total", "state", "inventory"], rows.map((row) => [row.id, row.customer, row.total, row.state, row.inventory])));
++    }
++    // fixture-variant:local-only:begin
++    if (method === "GET" && url.pathname === "/api/invoices.csv") {
++      const account = accountFor(request);
++      if (!account) return json(401, { error: "authentication required" });
++      if (account.role !== "owner") return json(403, { error: "owner role required" });
++      const rows = orders.orders.filter((item) => item.tenantId === account.tenantId);
++      return csvResponse("invoices.csv", tableCsv(["invoice", "customer", "amount", "status"], rows.map((row) => [`inv-${row.id}`, row.customer, row.total, "paid"])));
+     }
++    // fixture-variant:local-only:end
+     if (method === "GET" && url.pathname === "/api/orders/state") {
+       const account = accountFor(request);
+       if (!account) return json(401, { error: "authentication required" });
+@@ -103,7 +133,7 @@ export function createOrdersApplication({ seed, orders, fetchDependency = async
+       const account = accountFor(request);
+       if (!account) return json(401, { error: "authentication required" });
+       if (tenantPath[1] !== account.tenantId) return json(403, { error: "tenant access refused" });
+-      return json(200, { orders: tenantOrders(account).map(({ id, customer, total, state }) => ({ id, customer, total, state })) });
++      return json(200, { orders: (await tenantOrders(account, request)).map(({ id, customer, total, state, inventory }) => ({ id, customer, total, state, inventory })) });
+     }
+     if (method === "GET" && url.pathname === "/api/inventory/status") {
+       const account = accountFor(request);
+diff --git a/test/invoices.test.mjs b/test/invoices.test.mjs
+new file mode 100644
+index 0000000..d63ea87
+--- /dev/null
++++ b/test/invoices.test.mjs
+@@ -0,0 +1,39 @@
++// Local Linux fixture only: the decoy invoices download. The live baseline does not carry this file or the route.
++import assert from "node:assert/strict";
++import { createHash } from "node:crypto";
++import { readFileSync } from "node:fs";
++import { test } from "node:test";
++import { fileURLToPath } from "node:url";
++import { createOrdersApplication } from "../server.mjs";
++
++const digest = (value) => createHash("sha256").update(value, "utf8").digest("hex");
++const orders = JSON.parse(readFileSync(fileURLToPath(new URL("../fixtures/orders.json", import.meta.url)), "utf8"));
++const seed = {
++  accounts: [
++    { email: "kzr41@a.example", passwordDigest: digest("pw-first"), subjectId: "subject-1", tenantId: "tenant-a", role: "owner", displayName: "Owner A" },
++    { email: "mvd58@a.example", passwordDigest: digest("pw-second"), subjectId: "subject-2", tenantId: "tenant-a", role: "viewer", displayName: "Viewer A" },
++  ],
++};
++
++async function login(app, email, password) {
++  const response = await app.handle({ method: "POST", url: "/api/login", headers: {}, body: { email, password } });
++  return { cookie: String(response.headers["set-cookie"] ?? "").split(";")[0] };
++}
++
++test("the invoices download is a different CSV from the orders download", async () => {
++  const app = createOrdersApplication({ seed, orders });
++  const headers = await login(app, "kzr41@a.example", "pw-first");
++  const invoices = await app.handle({ method: "GET", url: "/api/invoices.csv", headers });
++  const ordersCsv = await app.handle({ method: "GET", url: "/api/orders.csv", headers });
++  assert.equal(invoices.status, 200);
++  assert.match(invoices.headers["content-disposition"], /invoices\.csv/);
++  assert.equal(invoices.body, "invoice,customer,amount,status\r\ninv-a1,Ada,12.5,paid\r\ninv-a2,Grace,23,paid\r\n");
++  assert.notEqual(invoices.body, ordersCsv.body);
++});
++
++test("a viewer cannot download invoices", async () => {
++  const app = createOrdersApplication({ seed, orders });
++  const headers = await login(app, "mvd58@a.example", "pw-second");
++  assert.equal((await app.handle({ method: "GET", url: "/api/invoices.csv", headers })).status, 403);
++  assert.equal((await app.handle({ method: "GET", url: "/api/invoices.csv", headers: {} })).status, 401);
++});
+diff --git a/test/orders.test.mjs b/test/orders.test.mjs
+index 549f3c0..f7fffba 100644
+--- a/test/orders.test.mjs
++++ b/test/orders.test.mjs
+@@ -16,7 +16,20 @@ const seed = {
+   ],
+ };
+ const passwords = { "kzr41@a.example": "pw-first", "mvd58@a.example": "pw-second", "jxp23@b.example": "pw-third" };
+-const application = () => createOrdersApplication({ seed, orders });
++
++// The inventory service as its contract describes it: a1 is in stock, a2 is unknown, b1 answers with a malformed status.
++async function inventory(originRef, path) {
++  const url = new URL(path, "http://inventory.invalid");
++  if (originRef !== "inventory-v1") return { status: 599, body: {} };
++  if (url.pathname === "/health") return { status: 200, body: { healthy: true } };
++  if (url.pathname !== "/v1/stock") return { status: 599, body: {} };
++  const orderId = url.searchParams.get("orderId");
++  if (orderId === "a1") return { status: 200, body: { status: "in-stock" } };
++  if (orderId === "a2") return { status: 404, body: { error: "unknown order" } };
++  if (orderId === "b1") return { status: 200, body: { status: 7 } };
++  return { status: 599, body: {} };
++}
++const application = () => createOrdersApplication({ seed, orders, fetchDependency: inventory });
+ 
+ async function login(app, email) {
+   const response = await app.handle({ method: "POST", url: "/api/login", headers: {}, body: { email, password: passwords[email] } });
+@@ -45,28 +58,31 @@ test("wrong password is refused", async () => {
+   assert.equal(response.status, 401);
+ });
+ 
+-test("an owner downloads their tenant's orders", async () => {
++test("an owner downloads their tenant's orders with the inventory column", async () => {
+   const app = application();
+   const { headers } = await login(app, "kzr41@a.example");
+   const response = await app.handle({ method: "GET", url: "/api/orders.csv", headers });
+   assert.equal(response.status, 200);
+   assert.match(response.headers["content-type"], /^text\/csv/);
+-  assert.equal(response.body, "id,customer,total,state\r\na1,Ada,12.5,ready\r\na2,Grace,23,ready\r\n");
++  assert.equal(response.body, "id,customer,total,state,inventory\r\na1,Ada,12.5,ready,in-stock\r\na2,Grace,23,ready,unavailable\r\n");
+ });
+ 
+-test("the download needs a session", async () => {
+-  assert.equal((await application().handle({ method: "GET", url: "/api/orders.csv", headers: {} })).status, 401);
++test("a viewer cannot download orders", async () => {
++  const app = application();
++  const { headers } = await login(app, "mvd58@a.example");
++  assert.equal((await app.handle({ method: "GET", url: "/api/orders.csv", headers })).status, 403);
++  assert.equal((await app.handle({ method: "GET", url: "/api/orders.csv", headers: {} })).status, 401);
+ });
+ 
+ test("each tenant only ever sees its own orders", async () => {
+   const app = application();
+-  const { headers: first } = await login(app, "mvd58@a.example");
+-  assert.equal((await app.handle({ method: "GET", url: "/api/tenants/tenant-b/orders", headers: first })).status, 403);
+-  const own = await app.handle({ method: "GET", url: "/api/tenants/tenant-a/orders", headers: first });
+-  assert.deepEqual(JSON.parse(own.body).orders.map((order) => order.id), ["a1", "a2"]);
++  const { headers: viewer } = await login(app, "mvd58@a.example");
++  assert.equal((await app.handle({ method: "GET", url: "/api/tenants/tenant-b/orders", headers: viewer })).status, 403);
++  const own = await app.handle({ method: "GET", url: "/api/tenants/tenant-a/orders", headers: viewer });
++  assert.deepEqual(JSON.parse(own.body).orders.map((order) => [order.id, order.inventory]), [["a1", "in-stock"], ["a2", "unavailable"]]);
+   const { headers: other } = await login(app, "jxp23@b.example");
+   const csv = await app.handle({ method: "GET", url: "/api/orders.csv", headers: other });
+-  assert.equal(csv.body, "id,customer,total,state\r\nb1,Lin,99,ready\r\n");
++  assert.equal(csv.body, "id,customer,total,state,inventory\r\nb1,Lin,99,ready,unavailable\r\n");
+   assert.ok(!csv.body.includes("Ada"));
+ });
+ 
+@@ -75,12 +91,12 @@ test("the orders CSV neutralizes formulas and filters by date", async () => {
+     { id: "a1", tenantId: "tenant-a", customer: "=1+1", total: 1, state: "ready", placedOn: "2026-09-01" },
+     { id: "a2", tenantId: "tenant-a", customer: "Grace", total: 2, state: "ready", placedOn: "2026-09-02" },
+   ] };
+-  const app = createOrdersApplication({ seed, orders: hostile });
++  const app = createOrdersApplication({ seed, orders: hostile, fetchDependency: inventory });
+   const { headers } = await login(app, "kzr41@a.example");
+   const all = await app.handle({ method: "GET", url: "/api/orders.csv", headers });
+   assert.ok(all.body.includes("a1,'=1+1,"));
+   const day = await app.handle({ method: "GET", url: "/api/orders.csv?from=2026-09-02&to=2026-09-02", headers });
+-  assert.equal(day.body, "id,customer,total,state\r\na2,Grace,2,ready\r\n");
++  assert.equal(day.body, "id,customer,total,state,inventory\r\na2,Grace,2,ready,unavailable\r\n");
+   assert.equal((await app.handle({ method: "GET", url: "/api/orders.csv?from=yesterday", headers })).status, 400);
+ });
+ 
+@@ -89,15 +105,15 @@ test("orders endpoints require a session", async () => {
+   assert.equal(response.status, 401);
+ });
+ 
+-test("the page is rendered for the signed-in account: identity, export button and its tenant's rows", async () => {
++test("the page is rendered for the signed-in account: an owner gets the download buttons and the inventory column, a viewer gets no button", async () => {
+   const app = application();
+-  const visitor = await app.handle({ method: "GET", url: "/", headers: {} });
+-  assert.match(visitor.body, /data-testid="login-submit"/);
+-  assert.doesNotMatch(visitor.body, /data-testid="(identity|export-csv|orders-table)"/);
+-  const { headers } = await login(app, "mvd58@a.example");
+-  const page = (await app.handle({ method: "GET", url: "/", headers })).body;
+-  assert.match(page, /<p data-testid="identity">Viewer A \(viewer\)<\/p>/);
+-  assert.match(page, /data-testid="export-csv"/);
+-  assert.match(page, /data-testid="order-row-a1"/);
+-  assert.doesNotMatch(page, /order-row-b1|mvd58|inventory/i);
++  const { headers: owner } = await login(app, "kzr41@a.example");
++  const ownerPage = (await app.handle({ method: "GET", url: "/", headers: owner })).body;
++  assert.match(ownerPage, /data-testid="download-orders"/);
++  assert.match(ownerPage, /<td>in-stock<\/td>/);
++  assert.doesNotMatch(ownerPage, /order-row-b1|kzr41/);
++  const { headers: viewer } = await login(app, "mvd58@a.example");
++  const viewerPage = (await app.handle({ method: "GET", url: "/", headers: viewer })).body;
++  assert.doesNotMatch(viewerPage, /data-testid="download-(orders|invoices)"/);
++  assert.match(viewerPage, /data-testid="orders-table"/);
+ });

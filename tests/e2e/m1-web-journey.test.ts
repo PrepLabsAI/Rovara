@@ -148,7 +148,10 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     expect(approval.status, JSON.stringify(approval.body)).toBe(200);
     const definition = projectRow().definition as Record<string, unknown> & { revision: number };
     const registration = await call(harness.handler, { method: "POST", path: "/v1/admin/projects", user: admin,
-      body: { definition: { ...definition, revision: definition.revision + 1, e2e: proposalResponse.body.policy }, runtimeBinding: projectRow().runtimeBinding, setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
+      // The baseline round (M1.3 Task 3.7b) is on by default and runs right after the coding run, as the first CHECKS operation. This journey's base commit holds the project contract only
+      // (the app arrives with the candidate), so a baseline here would run on a repository with no app and be this journey's "round 1". Its round accounting is explicit: no baseline.
+      body: { definition: { ...definition, revision: definition.revision + 1, e2e: proposalResponse.body.policy,
+        developerTasks: { ...((definition as { developerTasks?: object }).developerTasks ?? {}), e2eBaselineRound: false } }, runtimeBinding: projectRow().runtimeBinding, setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
     expect(registration.status, JSON.stringify(registration.body)).toBe(201);
     const policy = E2EPolicySchema.parse(proposalResponse.body.policy);
 

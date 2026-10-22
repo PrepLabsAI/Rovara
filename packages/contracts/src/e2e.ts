@@ -247,7 +247,18 @@ export const E2EWorkflowAdmissionRefSchema = z.object({
     key: z.string().regex(/^workflow-e2e-admissions\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest,
     byteLength: positiveInt.max(24 * 1024 * 1024),
   }).strict(),
-}).strict();
+  /**
+   * M1.3 Task 3.7b: a baseline round (the approved scenarios on the unchanged code, for information only) says so here, with the base commit it runs and the attempt, and the
+   * admission it names signs the same. A reference without these is a candidate round's. Only an application round can be a baseline.
+   */
+  purpose: z.literal("baseline").optional(), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(), attempt: positiveInt.optional(),
+}).strict().superRefine((reference, context) => {
+  const baseline = reference.purpose === "baseline";
+  if (baseline !== (reference.baseCommitSha !== undefined) || baseline !== (reference.attempt !== undefined)) {
+    context.addIssue({ code: "custom", path: ["purpose"], message: "a baseline reference carries its base commit and attempt, and only a baseline reference does" });
+  }
+  if (baseline && reference.kind !== "application") context.addIssue({ code: "custom", path: ["kind"], message: "only an application round can be a baseline" });
+});
 export type E2EWorkflowAdmissionRef = z.infer<typeof E2EWorkflowAdmissionRefSchema>;
 /**
  * What an application round's evidence may weigh (Ruling BV): the worker refuses to upload more (the group is UNKNOWN, "evidence too large"), the broker accepts and reads no more.
@@ -269,9 +280,12 @@ const CommandRecipeSchema = z.object({ program: id(256), args: z.array(z.string(
   if (/(^|[/\\])(?:sh|bash|zsh|cmd|powershell|pwsh)(\.exe)?$/i.test(command.program) || command.args.some((arg) => /(^|\s)(?:\||&&|;|>|<|\$\(|`)/.test(arg))) context.addIssue({ code: "custom", message: "shell wrappers and shell-interpreted arguments are forbidden" });
 });
 export type E2ECommandRecipe = z.infer<typeof CommandRecipeSchema>;
-/** The smallest, largest and default size of the data volume a recipe may ask for, in MiB. */
+/**
+ * The smallest, largest and default size of the data volume a recipe may ask for, in MiB. The volume is a tmpfs, so every MiB of it is runner memory, next to the app container, its
+ * seed and the executor: two concurrent groups at the cap use 1 GiB of an 8 GiB `m6g.large`. The cap stays at 512 until the sizes real apps ask for are measured live.
+ */
 export const E2E_DATA_VOLUME_MIN_MIB = 16;
-export const E2E_DATA_VOLUME_MAX_MIB = 1024;
+export const E2E_DATA_VOLUME_MAX_MIB = 512;
 export const E2E_DATA_VOLUME_DEFAULT_MIB = 256;
 /** The longest a recipe's seed command may run (Task 3.2). */
 export const E2E_SEED_COMMAND_MAX_TIMEOUT_MS = 60_000;

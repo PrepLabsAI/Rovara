@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
-  E2EApplicationPlanIntentSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
-  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup,
+  E2EApplicationPlanIntentSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
+  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, inspectE2EApplicationRepository, withE2EAnonymousTargets, e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
@@ -59,6 +59,17 @@ export const csvScenario: E2EScenario = { scenarioId: "export-csv", requirementI
   steps: [{ kind: "navigate", path: "/orders" }, { kind: "click", testId: "export-csv" }],
   assertions: [{ kind: "csv", downloadName: "orders.csv", columns: ["id", "total"], rows: [["1", "10"]] }] };
 
+/** The id of the implicit `rovara-anonymous` variant of the snapshot's first web or API target (Ruling AZ); every web/API target with a launch recipe offers one. */
+export function anonymousTargetOf(snapshot: E2ESourceSnapshot, kind: "web" | "api" = "web"): string {
+  const found = inspectE2EApplicationRepository(snapshot, snapshot.candidate).inspection.proposedTargets.find((item) => item.kind === kind && item.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID);
+  if (found === undefined) throw new Error(`the snapshot proposes no anonymous ${kind} target`);
+  return found.targetId;
+}
+/** A signed-out visitor's scenario: the page's welcome marker is visible and the owner-only export button is not. */
+export const anonymousScenario = (targetId: string): E2EScenario => ({ scenarioId: "signed-out-visitor", requirementId: "signed-out-access", requestedTargetIds: [targetId], required: true,
+  accountProfileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, minimumEvidence: "runtime", requiredRealComponentIds: [],
+  steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "welcome", equals: true }] });
+
 export type Ready = ReadonlyArray<{ kind: "web" | "api"; profileId: string }>;
 /** Approved setup proposal and the project policy derived from it, exactly as the setup-proposals route builds them. */
 export function approvedSetup(snapshot: E2ESourceSnapshot, readyProfiles: Ready, onlyTargetIds?: readonly string[]) {
@@ -80,7 +91,8 @@ export function planFixture(input: PlanInput) {
   const snapshot = input.snapshot ?? contractSnapshot;
   const scenario = input.scenario ?? csvScenario;
   const setup = approvedSetup(snapshot, input.setupReady ?? [{ kind: "web", profileId: PROFILE }]);
-  const target = setup.proposal.targets.find((item) => item.targetId === (input.targetId ?? "web-1"))!;
+  // The stored proposal and policy hold the base targets; the signed-out variants are derived from them, as every reader derives them.
+  const target = withE2EAnonymousTargets(setup.proposal.targets, inspectE2EApplicationRepository(snapshot, snapshot.candidate).anonymous).find((item) => item.targetId === (input.targetId ?? "web-1"))!;
   const application = setup.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
   const refs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths)
     .map((ref) => (input.sourceSha === undefined ? ref : { ...ref, sha256: input.sourceSha }));
@@ -88,7 +100,8 @@ export function planFixture(input: PlanInput) {
   // The account is the registry's: the revision-1 definition a setup approval of this source would have written (a source with no project contract has none).
   const registry: E2EAccountRegistryEntry[] = registryFor(snapshot, NOW);
   const registered = registry.find((entry) => entry.definition.applicationId === application.applicationId && entry.definition.profileId === target.accountProfileId);
-  const accountRef = { ...(registered !== undefined ? deriveE2EApplicationRuntimeAccountRef(registered.definition)
+  const accountRef = { ...(target.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID ? e2eAnonymousRuntimeAccountRef(application.applicationId)
+    : registered !== undefined ? deriveE2EApplicationRuntimeAccountRef(registered.definition)
     : application.recipe === null ? { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "2".repeat(64) }
       : deriveE2ESyntheticRuntimeAccountRef({ applicationId: application.applicationId, accountProfileId: target.accountProfileId, recipeDigest: application.recipe.recipeDigest })), ...input.accountRef };
   const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [], mockFixtureRefs: [],

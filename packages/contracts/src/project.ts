@@ -277,6 +277,11 @@ export const DeveloperTaskPolicySchema = z
     channelMembersMayUse: z.boolean().default(true),
     /** Project-approved extra checks task owners may select for the native workflow. */
     optionalWorkflowChecks: z.array(WorkflowOptionalCheckSchema).max(20).optional(),
+    /**
+     * M1.3 Task 3.7b (owner decision D2): the informational baseline round, the approved browser and API scenarios run once on the unchanged code when a plan is approved. On unless
+     * this is false. It lives here, not in the E2E policy, because that policy is bound by digest to the approved setup, and a switch that needed the setup approved again would not be one.
+     */
+    e2eBaselineRound: z.boolean().optional(),
   })
   .strict()
   .superRefine((policy, context) => {

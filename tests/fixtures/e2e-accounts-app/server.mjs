@@ -20,7 +20,7 @@ function readDefect() {
   const absolute = resolve(path);
   if (!absolute.startsWith(`${root}/.owned/`)) throw new Error("the defect file must be under the owned mount");
   const value = JSON.parse(readFileSync(absolute, "utf8"));
-  const known = { "viewer-access/v1": "allow-viewer-export", "echo-session/v1": "show-session-token", "echo-email/v1": "show-account-email", "rotate-echo/v1": "rotate-session-and-show-it" };
+  const known = { "viewer-access/v1": "allow-viewer-export", "echo-session/v1": "show-session-token", "echo-email/v1": "show-account-email", "rotate-echo/v1": "rotate-session-and-show-it", "storage-echo/v1": "write-token-to-storage-and-show-it" };
   if (known[value?.defectId] !== value?.mutation) throw new Error("unknown defect");
   return value;
 }
@@ -28,7 +28,7 @@ function readDefect() {
 export function createApplication({ users, orders, defect = null }) {
   const sessions = new Map();
   // The two echo defects are a careless page: it prints the session token, or the account's email, where only the name and role belong.
-  const identityText = (token, account) => `${account.displayName} (${account.role})${defect?.defectId === "echo-session/v1" || defect?.defectId === "rotate-echo/v1" ? ` ${token}` : defect?.defectId === "echo-email/v1" ? ` ${account.email}` : ""}`;
+  const identityText = (token, account) => `${account.displayName} (${account.role})${defect?.defectId === "echo-session/v1" || defect?.defectId === "rotate-echo/v1" || defect?.defectId === "storage-echo/v1" ? ` ${token}` : defect?.defectId === "echo-email/v1" ? ` ${account.email}` : ""}`;
   const canExport = (account) => account.role === "owner" || (defect?.defectId === "viewer-access/v1" && account.role === "viewer");
   const tokenOf = (request) => cookieValue(request.headers?.cookie, "sid");
   const accountFor = (request) => { const token = tokenOf(request); return token ? sessions.get(token) ?? null : null; };
@@ -44,9 +44,11 @@ export function createApplication({ users, orders, defect = null }) {
       // The rotate-echo defect: the app swaps the session cookie for a new one on every page (the old one stays valid) and prints the new one, as a careless app that rotates sessions might.
       let rotated = null;
       if (account !== null && defect?.defectId === "rotate-echo/v1") { rotated = randomBytes(32).toString("base64url"); sessions.set(rotated, account); }
+      // The storage-echo defect: the page keeps a fresh token in local storage on every load (a refresh token the app issues while the case runs) and prints it, as a careless app might.
+      const refresh = account !== null && defect?.defectId === "storage-echo/v1" ? randomBytes(24).toString("base64url") : null;
       const section = account === null
         ? '<form id="login"><label>Email <input data-testid="email" name="email" autocomplete="username"></label><label>Password <input data-testid="password" name="password" type="password" autocomplete="current-password"></label><button data-testid="login-submit" type="submit">Sign in</button></form>'
-        : `<p data-testid="identity">${escapeHtml(identityText(rotated ?? tokenOf(request), account))}</p>${canExport(account) ? '<button data-testid="export-csv" type="button">Export orders CSV</button>' : ""}`
+        : `<p data-testid="identity"${refresh === null ? "" : ` data-refresh="${escapeHtml(refresh)}"`}>${escapeHtml(identityText(refresh ?? rotated ?? tokenOf(request), account))}</p>${canExport(account) ? '<button data-testid="export-csv" type="button">Export orders CSV</button>' : ""}`
           + `<table data-testid="orders-table"><tbody>${rowsOf(account).map((row) => `<tr data-testid="order-row-${escapeHtml(row.id)}"><td>${[row.id, row.customer, row.total, row.state].map((value) => escapeHtml(String(value))).join("</td><td>")}</td></tr>`).join("")}</tbody></table>`;
       return { status: 200, headers: { "content-type": "text/html; charset=utf-8", ...(rotated === null ? {} : { "set-cookie": `sid=${rotated}; HttpOnly; SameSite=Strict; Path=/` }) }, body: readFileSync(join(root, "public/index.html"), "utf8").replace("<!--ACCOUNT-->", section) };
     }

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { E2E_EXECUTOR_HOST_MODULE_PATH } from "../../packages/verifier/src/executor/host-registry.js";
-import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { runE2EExecutorSerially as runE2EExecutor } from "../support/executor-run-lock.js";
 import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
 import { startAccountsApp, type AccountsAppProcess } from "../support/accounts-app-process.js";
 import { allOutputText, caseStatusesAll as caseStatuses, observations, resultOf } from "../support/e2e-executor-output.js";
@@ -21,7 +21,7 @@ const dirs: string[] = []; const apps: AccountsAppProcess[] = [];
 afterEach(async () => { await Promise.all(apps.splice(0).map((app) => app.stop())); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 type AccountsOptions = NonNullable<Parameters<typeof createAccountsExecutorPlan>[0]>;
-async function runAccounts(options: { defect?: "viewer-access.json" | "echo-session.json" | "echo-email.json" | "rotate-echo.json"; api?: boolean; web?: AccountsOptions["web"] } = {}) {
+async function runAccounts(options: { defect?: "viewer-access.json" | "echo-session.json" | "echo-email.json" | "rotate-echo.json" | "storage-echo.json"; api?: boolean; web?: AccountsOptions["web"] } = {}) {
   const fixture = createAccountsExecutorPlan({ healthTimeoutMs: 20_000, ...(options.api ? { api: true } : {}), ...(options.web ? { web: options.web } : {}) });
   const app = await startAccountsApp(fixture, options.defect ? { defect: options.defect } : {}); apps.push(app);
   const dir = realpathSync(await mkdtemp(join(tmpdir(), "accounts-run-"))); dirs.push(dir);
@@ -113,6 +113,13 @@ describe.runIf(runnable)("the executor against an app that signs in through its 
 
   it("registers the session cookie an application swaps in after the login: a page that prints the rotated cookie ends the run credential-leak", async () => {
     const { out, result } = await runAccounts({ defect: "rotate-echo.json", web: ["ownerIdentity"] });
+    expect(result, executorLog(out)).toEqual({ exitCode: 2, reason: "credential-leak" });
+    expect(executorLog(out)).toMatch(/removed an output file that carried an account credential or a session value: observations\/ev-/);
+    expect(allOutputText(out)).not.toMatch(/\(owner\) [A-Za-z0-9_-]{30,}/);
+  }, 300_000);
+
+  it("registers a token the page keeps in local storage while the case runs (N3): a page that prints it ends the run credential-leak, though no cookie carries it", async () => {
+    const { out, result } = await runAccounts({ defect: "storage-echo.json", web: ["ownerIdentity"] });
     expect(result, executorLog(out)).toEqual({ exitCode: 2, reason: "credential-leak" });
     expect(executorLog(out)).toMatch(/removed an output file that carried an account credential or a session value: observations\/ev-/);
     expect(allOutputText(out)).not.toMatch(/\(owner\) [A-Za-z0-9_-]{30,}/);

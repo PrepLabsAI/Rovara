@@ -1,0 +1,8 @@
+{
+  "name": "e2e-inferred-web-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Task 3.3 fixture: a web app with a start script and a lockfile and no agentx.e2e project contract, so Rovara infers its launch recipe (npm ci, npm start) and can run signed-out scenarios against it.",
+  "type": "module",
+  "scripts": { "start": "node server.mjs" }
+}

@@ -8,13 +8,13 @@ import { E2EExecutionPlanSchema, E2EPolicySchema, E2ERuntimeAvailabilitySchema, 
   E2EApiMockFixtureSchema, e2eExecutionPlanDigest, e2eScenarioBundleDigest, validateE2EScenarioBundleForPolicy,
   type E2EExpectedCase, type E2EExecutionPlan, type E2EMockSpec, type E2EScenario, type E2EScenarioBundle, type E2ESetupProposal } from "./e2e.js";
 import { e2eApplicationUpstreamTestIdFromIdentity, e2eCaseIdFromIdentity } from "./e2e-case-identity.js";
-import { e2eTargetSourceIdentity, inspectE2ERepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId } from "./e2e-catalog.js";
+import { e2eTargetSourceIdentity, inspectE2EApplicationRepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, withE2EAnonymousTargets } from "./e2e-catalog.js";
 import { verifyE2ESourceSnapshot } from "./e2e-source.js";
 import { E2EPortableApprovalBindingSchema, type E2EPortableApprovalBinding } from "./e2e-portable.js";
 import { E2ERegisteredRuntimeSchema, type E2ERegisteredRuntime } from "./e2e-runtime-registration.js";
 import { e2eRuntimeKindMatchesTarget, resolveE2ERuntimeReadiness } from "./e2e-runtime-capabilities.js";
 import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } from "./e2e-openapi-fixture.js";
-import { e2eApplicationRecipeIsProjectContract } from "./e2e-application-accounts.js";
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eApplicationRecipeIsProjectContract } from "./e2e-application-accounts.js";
 import { E2E_AGENT_APPROVAL_REFUSALS, E2E_AGENT_UNAVAILABLE_REASONS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS } from "./e2e-model-channel.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -53,7 +53,7 @@ function operationStep(scenario: E2EScenario): { operationId: string; kind: "inv
   return undefined;
 }
 function deriveApprovedApplicationMocks(input: E2EApplicationPlanSelectionInput,
-  discovered: ReturnType<typeof inspectE2ERepository>): NonNullable<E2EPlanSelectionInput["mockableComponents"]> {
+  discovered: ReturnType<typeof inspectE2EApplicationRepository>): NonNullable<E2EPlanSelectionInput["mockableComponents"]> {
   return (input.intent.mockFixtureRefs ?? []).map((reference) => {
     const target = discovered.inspection.proposedTargets.find((candidate) => candidate.targetId === reference.requestedTargetId);
     const edge = target === undefined ? undefined : discovered.inspection.dependencyEdges.find((candidate) => candidate.fromApplicationId === target.applicationId
@@ -89,10 +89,10 @@ function portablePairs(input: E2EApplicationPlanSelectionInput): Set<string> {
 
 function validateFullInput(input: E2EApplicationPlanSelectionInput): {
   intent: E2EApplicationPlanIntent; policy: ReturnType<typeof E2EPolicySchema.parse>; setupProposal: E2ESetupProposal;
-  discovered: ReturnType<typeof inspectE2ERepository>;
+  discovered: ReturnType<typeof inspectE2EApplicationRepository>;
 } {
   const intent = E2EApplicationPlanIntentSchema.parse(input.intent);
-  const policy = E2EPolicySchema.parse(input.policy);
+  const parsedPolicy = E2EPolicySchema.parse(input.policy);
   const setupProposal = E2ESetupProposalSchema.parse(input.setupProposal);
   input.runtimeAvailability.forEach((record) => E2ERuntimeAvailabilitySchema.parse(record));
   if (new Set(input.runtimeAvailability.map((record) => `${record.targetId}\0${record.profileId}`)).size !== input.runtimeAvailability.length) {
@@ -107,6 +107,10 @@ function validateFullInput(input: E2EApplicationPlanSelectionInput): {
   if (!/^[a-f0-9]{64}$/.test(input.planDigest) || !/^[a-f0-9]{64}$/.test(input.candidateDigest)
     || input.expectedCandidate.digest !== input.candidateDigest || input.sourceSnapshot.candidate.digest !== input.candidateDigest) throw new Error("application candidate or full plan identity is invalid");
   verifyE2ESourceSnapshot(input.sourceSnapshot, input.expectedCandidate);
+  const discovered = inspectE2EApplicationRepository(input.sourceSnapshot, input.expectedCandidate);
+  // The policy and the setup proposal hold the base targets (stored before the signed-out variants existed, or without them); the variants are derived from those bases here and in
+  // every other reader, so nothing stored has to change.
+  const policy = { ...parsedPolicy, targets: withE2EAnonymousTargets(parsedPolicy.targets, discovered.anonymous) };
   if (!same(intent.scenarios, input.scenarios)) throw new Error("application selection scenarios differ from the complete approved intent");
   const fullBundleBody = { schemaVersion: 1 as const, planDigest: input.planDigest, templateVersion: "trusted-e2e-application/v1",
     scenarios: intent.scenarios, bundleDigest: "0".repeat(64) };
@@ -118,7 +122,6 @@ function validateFullInput(input: E2EApplicationPlanSelectionInput): {
   if (sha256(canonicalJson(setupProposal)) !== input.setupApproval.digest) throw new Error("setup approval does not bind the canonical proposal");
   if (setupProposal.state !== "proposed") throw new Error("approved setup proposal still has unresolved blocking inputs");
   if (!same(intent.runtimeAccountRefs, input.runtimeAccountRefs)) throw new Error("runtime account revisions differ from the complete approved intent");
-  const discovered = inspectE2ERepository(input.sourceSnapshot, input.expectedCandidate);
   const derivedMocks = deriveApprovedApplicationMocks({ ...input, intent }, discovered);
   const suppliedMocks = input.mockableComponents ?? [];
   const sortedCanonical = (items: readonly unknown[]) => [...items].sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
@@ -126,7 +129,7 @@ function validateFullInput(input: E2EApplicationPlanSelectionInput): {
     throw new Error("application source-backed mock selections do not exactly match the full approved intent and protected source");
   }
   const sourceTargets = new Map(discovered.inspection.proposedTargets.map((target) => [target.targetId, target]));
-  const setupTargets = new Map(setupProposal.targets.map((target) => [target.targetId, target]));
+  const setupTargets = new Map(withE2EAnonymousTargets(setupProposal.targets, discovered.anonymous).map((target) => [target.targetId, target]));
   const setupApplications = new Map(setupProposal.applications.map((application) => [application.applicationId, application]));
   const scenarioIds = new Set(intent.scenarios.map((scenario) => scenario.scenarioId));
   if (policy.baselineScenarioIds.some((id) => !scenarioIds.has(id))) throw new Error("complete approved baseline inventory is missing from application intent");
@@ -311,8 +314,10 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
       continue;
     }
     const gatedApplicationId = ref?.applicationId ?? intent.unavailableTargetRefs?.find((item) => item.targetId === targetId)?.applicationId;
-    // Keyed on the profile the owner approved for the target (a ref cannot name a qualified profile the target does not carry).
+    // Keyed on the profile the owner approved for the target (a ref cannot name a qualified profile the target does not carry). Only a signed-out visitor needs no project contract:
+    // it has no account to register, so an inferred launch recipe is enough to run its scenarios (Ruling AZ), and a signed-in scenario on the same application stays unavailable.
     if (gatedApplicationId !== undefined && (policyTarget.kind === "web" || policyTarget.kind === "api")
+      && policyTarget.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID
       && isE2EQualifiedRuntimeProfileId(policyTarget.runtimeProfileId) && !hasProjectContract(gatedApplicationId)) {
       unavailable.push({ criterionId, reason: NEEDS_PROJECT_CONTRACT_REASON });
       continue;

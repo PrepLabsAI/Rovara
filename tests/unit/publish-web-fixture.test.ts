@@ -2,13 +2,18 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assertStarterClean,
+  backupBranchName,
   buildPublishPlan,
   FIXTURE_COMMIT_MESSAGE,
+  FIXTURE_VARIANTS,
   listStarterFiles,
   parsePublishArguments,
+  publish,
+  readVariantFiles,
+  renderFixtureVariant,
   run,
   STARTER_DIRECTORY,
 } from "../../scripts/fixtures/publish-web-fixture.js";
@@ -122,5 +127,132 @@ describe("parsePublishArguments and dry run", () => {
     write(root, `${STARTER_DIRECTORY}/.owned/seed.json`);
     expect(() => run(["--repo", "owner/name", "--dry-run"], () => undefined, root)).toThrow(/uncommitted or untracked/);
     expect(() => run(["--repo", "owner/name"], () => undefined, root)).toThrow(/uncommitted or untracked/);
+  });
+});
+
+const M13 = "tests/fixtures/orders-web-m13";
+
+describe("variants", () => {
+  it("knows the starter, m13 and m14 and rejects anything else", () => {
+    expect(Object.keys(FIXTURE_VARIANTS).sort()).toEqual(["m13", "m14", "starter"]);
+    expect(parsePublishArguments(["--repo", "o/n", "--variant", "m13"]).variant).toBe("m13");
+    expect(parsePublishArguments(["--repo", "o/n"]).variant).toBeUndefined();
+    expect(() => parsePublishArguments(["--repo", "o/n", "--variant", "m99"])).toThrow(/unknown variant/);
+    expect(() => parsePublishArguments(["--repo", "o/n", "--variant"])).toThrow(/--variant/);
+    expect(() => renderFixtureVariant("constructor", new Map())).toThrow(/unknown variant/);
+  });
+
+  it("dry-runs the m13 variant from its committed directory: the file list is printed and nothing is changed", () => {
+    const root = repository([], ["seed.txt"]);
+    for (const file of ["server.mjs", "scripts/seed.mjs", "defects/a.json", "node_modules/p/i.js", ".github/workflows/ci.yml"]) write(root, `${M13}/${file}`);
+    git(root, "add", "-A");
+    git(root, "commit", "--quiet", "-m", "m13");
+    const before = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" });
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
+    const lines: string[] = [];
+    expect(run(["--repo", "owner/name", "--variant", "m13", "--dry-run", "--force-reseed"], (line) => lines.push(line), root)).toBe(0);
+    expect(lines[0]).toContain(M13);
+    expect(lines[0]).toContain("variant m13");
+    expect(lines.slice(1, 4)).toEqual(["  .github/workflows/ci.yml", "  scripts/seed.mjs", "  server.mjs"]);
+    expect(lines[4]).toContain("backup/pre-m13-");
+    expect(lines).toHaveLength(5);
+    expect(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" })).toBe(before);
+    expect(execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" })).toBe(head);
+    expect(readVariantFiles(root, "m13").size).toBe(3);
+  });
+
+  it("does not mention a backup in a dry run without --force-reseed", () => {
+    const root = repository([], ["seed.txt"]);
+    write(root, `${M13}/server.mjs`);
+    git(root, "add", "-A");
+    git(root, "commit", "--quiet", "-m", "m13");
+    const lines: string[] = [];
+    run(["--repo", "owner/name", "--variant", "m13", "--dry-run"], (line) => lines.push(line), root);
+    expect(lines).toHaveLength(2);
+  });
+});
+
+describe("backup branch before a force-reseed", () => {
+  const files = new Map([["README.md", "new readme\n"], ["server.mjs", "new server\n"]]);
+  const at = (): Date => new Date("2026-10-21T15:30:45.678Z");
+  // The script commits with the ambient git identity; CI runners have none configured.
+  beforeEach(() => {
+    for (const role of ["AUTHOR", "COMMITTER"]) {
+      vi.stubEnv(`GIT_${role}_NAME`, "test");
+      vi.stubEnv(`GIT_${role}_EMAIL`, "test@example.test");
+    }
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  /** A bare remote whose main already has two commits, like the live fixture repository. Returns its path and the main sha. */
+  function remote(): { path: string; main: string } {
+    const path = mkdtempSync(join(tmpdir(), "fixture-remote-"));
+    temporary.push(path);
+    execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", path], { stdio: "pipe" });
+    const work = mkdtempSync(join(tmpdir(), "fixture-seed-"));
+    temporary.push(work);
+    git(work, "init", "--quiet", "-b", "main");
+    write(work, "old.txt");
+    git(work, "add", "-A");
+    git(work, "commit", "--quiet", "-m", "first");
+    write(work, "older.txt");
+    git(work, "add", "-A");
+    git(work, "commit", "--quiet", "-m", "second");
+    git(work, "push", "--quiet", path, "main:main");
+    return { path, main: execFileSync("git", ["rev-parse", "HEAD"], { cwd: work, encoding: "utf8" }).trim() };
+  }
+  const refs = (path: string): Map<string, string> => new Map(execFileSync("git", ["for-each-ref", "--format=%(refname) %(objectname)"], { cwd: path, encoding: "utf8" })
+    .trim().split("\n").filter(Boolean).map((line) => [line.split(" ")[0]!, line.split(" ")[1]!]));
+
+  it("names the backup by variant and a UTC timestamp", () => {
+    expect(backupBranchName("m13", at())).toBe("backup/pre-m13-20261021T153045Z");
+    expect(backupBranchName("starter", new Date("2027-01-02T03:04:05.000Z"))).toBe("backup/pre-starter-20270102T030405Z");
+  });
+
+  it("saves the current main as backup/pre-<variant>-<timestamp> and then adds the seed commit on top of it", () => {
+    const { path, main } = remote();
+    const result = publish({ repo: "owner/name", dryRun: false, forceReseed: true, variant: "m13" }, files, { remoteUrl: path, now: at });
+    expect(result.mode).toBe("reseed");
+    expect(result.backupBranch).toBe("backup/pre-m13-20261021T153045Z");
+    const heads = refs(path);
+    expect(heads.get("refs/heads/backup/pre-m13-20261021T153045Z")).toBe(main);
+    const newMain = heads.get("refs/heads/main")!;
+    expect(newMain).not.toBe(main);
+    expect(execFileSync("git", ["rev-parse", `${newMain}^`], { cwd: path, encoding: "utf8" }).trim()).toBe(main);
+    expect(execFileSync("git", ["ls-tree", "-r", "--name-only", newMain], { cwd: path, encoding: "utf8" }).trim().split("\n")).toEqual(["README.md", "server.mjs"]);
+  });
+
+  it("creates no backup when the remote is empty (a first seed)", () => {
+    const path = mkdtempSync(join(tmpdir(), "fixture-empty-"));
+    temporary.push(path);
+    execFileSync("git", ["init", "--quiet", "--bare", "-b", "main", path], { stdio: "pipe" });
+    const result = publish({ repo: "owner/name", dryRun: false, forceReseed: false, variant: "m13" }, files, { remoteUrl: path, now: at });
+    expect(result.mode).toBe("seed");
+    expect(result.backupBranch).toBeNull();
+    expect([...refs(path).keys()]).toEqual(["refs/heads/main"]);
+  });
+
+  it("refuses a remote with commits without --force-reseed and changes nothing", () => {
+    const { path, main } = remote();
+    expect(() => publish({ repo: "owner/name", dryRun: false, forceReseed: false, variant: "m13" }, files, { remoteUrl: path, now: at })).toThrow(/force-reseed/);
+    expect([...refs(path)]).toEqual([["refs/heads/main", main]]);
+  });
+
+  it("does not touch main when the backup branch cannot be created", () => {
+    const { path, main } = remote();
+    // A branch named "backup" blocks every "backup/..." name on the remote.
+    execFileSync("git", ["update-ref", "refs/heads/backup", main], { cwd: path });
+    expect(() => publish({ repo: "owner/name", dryRun: false, forceReseed: true, variant: "m13" }, files, { remoteUrl: path, now: at })).toThrow();
+    expect(refs(path).get("refs/heads/main")).toBe(main);
+    expect([...refs(path).keys()].sort()).toEqual(["refs/heads/backup", "refs/heads/main"]);
+  });
+
+  it("never overwrites an existing backup of the same name", () => {
+    const { path, main } = remote();
+    publish({ repo: "owner/name", dryRun: false, forceReseed: true, variant: "m13" }, files, { remoteUrl: path, now: at });
+    const afterFirst = refs(path).get("refs/heads/main")!;
+    expect(() => publish({ repo: "owner/name", dryRun: false, forceReseed: true, variant: "m13" }, files, { remoteUrl: path, now: at })).toThrow();
+    expect(refs(path).get("refs/heads/backup/pre-m13-20261021T153045Z")).toBe(main);
+    expect(refs(path).get("refs/heads/main")).toBe(afterFirst);
   });
 });

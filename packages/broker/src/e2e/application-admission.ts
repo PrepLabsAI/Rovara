@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
-  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, validateE2EAppBuildBinding,
+  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, inspectE2EApplicationRepository, validateE2EAppBuildBinding, withE2EAnonymousTargets,
   type E2ECreatorAuthority, type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
   type E2EApplicationLaunchTarget, type E2EApplicationPlanIntent, type E2EAppArtifactRef, type E2EAppBuildManifest, type E2ERegisteredRuntime, type E2ERound,
   type E2EApplicationSelectionRecord, type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
@@ -45,6 +45,11 @@ export type ApplicationAdmissionInput = Readonly<{
   planDigest: string;
   /** The creator's access as the broker proved it now; the admission keeps it so verification can refuse a grant re-issued or a role changed during the round. */
   creatorAuthority?: E2ECreatorAuthority;
+  /**
+   * M1.3 Task 3.7b: set for a baseline round (the approved scenarios on the unchanged code, for information only), whose snapshot and build source are the task's base commit's.
+   * The admission signs the purpose, the base commit and the attempt, so it can be nothing but a baseline.
+   */
+  baseline?: { baseCommitSha: string; attempt: number };
   now: number;
 }>;
 
@@ -59,6 +64,8 @@ export type ApplicationAdmission = Readonly<{
   groupRunIds: string[];
   /** The one runtime kind of the round. */
   kind: "web" | "api";
+  /** What a baseline round signed (purpose, base commit, attempt); absent for a candidate round. */
+  baseline?: { purpose: "baseline"; baseCommitSha: string; attempt: number };
 }>;
 
 const refusal = applicationRoundRefusal;
@@ -74,7 +81,16 @@ const failure = (error: unknown) => (error instanceof Error ? error.message : "u
  * the setup was approved is refused ("replan"). Only the READY row of the plan's one runtime kind goes into the admission.
  */
 export function buildApplicationExecutionAdmission(input: ApplicationAdmissionInput): ApplicationAdmission {
-  const policy = (() => { try { return E2EPolicySchema.parse(input.policy); } catch (error) { throw refusal(`the pinned project policy is not valid: ${failure(error)}`); } })();
+  // The pinned policy holds the base targets; each qualified base web or API target also offers the signed-out visitor, derived here from the candidate's discovery (Ruling AZ).
+  const policy = (() => {
+    try {
+      const stored = E2EPolicySchema.parse(input.policy);
+      // Ruling CX: a baseline round never runs agent steps. Its policy is the model-free projection of the pinned one, so its selection leaves agent scenarios unavailable
+      // (`agent-route-not-approved`), and its admission carries `modelRoute: null` and group bindings with `modelRouteRevision: null`. A candidate round keeps the pinned route.
+      const routed = input.baseline === undefined ? stored : { ...stored, modelRouteRevision: null };
+      return { ...routed, targets: withE2EAnonymousTargets(routed.targets, inspectE2EApplicationRepository(input.snapshot, input.snapshot.candidate).anonymous) };
+    } catch (error) { throw refusal(`the pinned project policy is not valid: ${failure(error)}`); }
+  })();
   const refs = input.intent.applicationRuntimeRefs;
   if (refs.length === 0) throw new ApplicationPlanDefect("the approved plan has no target that can run application scenarios, so there is nothing to run");
 
@@ -140,6 +156,11 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     validateE2EApplicationBuildSourceManifest({ manifest, reference, expectedCandidate: candidate, inspectionSnapshot: input.snapshot });
   } catch (error) { throw refusal(`the exported build source did not validate: ${failure(error)}`); }
 
+  // A baseline builds from its base commit and nothing else: the commit it signs is the commit of the source it is built from.
+  if (input.baseline !== undefined && input.baseline.baseCommitSha !== input.snapshot.commitSha) {
+    throw refusal("the base commit of the baseline round is not the commit of the source it would be built from");
+  }
+  const signedBaseline = input.baseline === undefined ? undefined : { purpose: "baseline" as const, baseCommitSha: input.baseline.baseCommitSha, attempt: input.baseline.attempt };
   const admittedAtMs = input.now;
   const admittedAt = new Date(admittedAtMs).toISOString();
   const spanMs = Math.min(policy.limits.runTimeoutMs, E2E_HARD_LIMITS.runTimeoutMs);
@@ -237,7 +258,7 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     sourceSnapshot: wire, intent: selection.intent, intentDigest: selection.intentDigest, selectionInput: { ...selection, sourceSnapshot: wire },
     applicationApprovalBinding: approval, applicationBindings, runtimeBindings, launchTargets: [...launchTargets].sort((left, right) => (left.targetId < right.targetId ? -1 : 1)),
     modelRoute, cliHosts, preparedEnvironments, policy: selection.policy, bundle: derivation.bundle, executionPlan: plan,
-    ...(input.creatorAuthority === undefined ? {} : { creatorAuthority: input.creatorAuthority }), portableProjection: null, round,
+    ...(input.creatorAuthority === undefined ? {} : { creatorAuthority: input.creatorAuthority }), ...(signedBaseline === undefined ? {} : { baseline: signedBaseline }), portableProjection: null, round,
     groups: groupRuns.map((item) => item.admitted).sort((left, right) => (left.outerBinding.groupId < right.outerBinding.groupId ? -1 : 1)) };
   let bytes: Buffer;
   let admission: E2EApplicationExecutionAdmission;
@@ -248,5 +269,5 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     validateE2EApplicationExecutionAdmission(admission);
   } catch (error) { throw refusal(`the admission could not be built within its limits or did not validate: ${failure(error)}`); }
   return { admission, bytes, sha256: sha256(bytes), admissionDigest: admission.admissionDigest, roundId: input.roundId,
-    groupRunIds: round.groupBindings.map((binding) => binding.runId), kind };
+    groupRunIds: round.groupBindings.map((binding) => binding.runId), kind, ...(signedBaseline === undefined ? {} : { baseline: signedBaseline }) };
 }

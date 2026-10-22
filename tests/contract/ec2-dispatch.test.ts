@@ -613,6 +613,61 @@ describe("ec2-ebs delivery", () => {
       it("is advertised by the worker's own /ping feature list", () => {
         expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EApplicationChecks");
       });
+
+      describe("baseline rounds (Task 3.7b)", () => {
+        const baselineRef = () => admission({ kind: "application", purpose: "baseline", baseCommitSha: "c".repeat(40), attempt: 1 });
+        const applicationOnly = [...checksFeatures, "task.workflowE2EApplicationChecks"];
+        const withBaseline = [...applicationOnly, "task.workflowE2EBaselineChecks"];
+
+        it("never sends a baseline admission to a worker that runs application admissions but not baseline rounds, and says why", async () => {
+          const record = checks(baselineRef());
+          const older = delivery({ workerFeatures: async () => applicationOnly });
+          const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+          expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+          expect(refusal?.message).toContain("task.workflowE2EBaselineChecks");
+          expect(refusal?.message).toMatch(/baseline/i);
+          expect(older.post).not.toHaveBeenCalled();
+        });
+
+        it("hands a baseline admission, unchanged, to a worker that lists the feature, and a candidate admission still goes to one that lists only application CHECKS", async () => {
+          const ref = baselineRef();
+          const record = checks(ref);
+          const capable = delivery({ workerFeatures: async () => withBaseline });
+          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
+          const candidate = checks(admission({ kind: "application" }));
+          const older = delivery({ workerFeatures: async () => applicationOnly });
+          expect(await older.deliver(candidate, candidate.invocation)).toBe("DELIVERED");
+        });
+
+        it("fails closed for a baseline admission when the worker cannot be asked which features it lists", async () => {
+          const record = checks(baselineRef());
+          const failing = delivery({ workerFeatures: async () => { throw new Error("ping down"); } });
+          await expect(failing.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+          expect(failing.post).not.toHaveBeenCalled();
+        });
+
+        it("asks a coding run to export the unchanged code only of a worker that can, and otherwise delivers the run without the request (a baseline never stops the coding)", async () => {
+          const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+          const record = taskRecord({ workflowMode: "IMPLEMENT", workflowE2EBaselineSource: true });
+          // The executor image is not on the host, so the application and baseline CHECKS features are withheld; the export needs the repository alone (review 3.7b finding 5).
+          const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowE2EBaselineSource"] });
+          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(capable.post)).toMatchObject({ workflowMode: "IMPLEMENT", workflowE2EBaselineSource: true });
+          const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowE2EBaselineChecks"] });
+          expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(older.post)).not.toHaveProperty("workflowE2EBaselineSource");
+          expect(postedPayload(older.post)).toMatchObject({ workflowMode: "IMPLEMENT" });
+          expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+            event: "dispatch.baseline_source_omitted", reason: "worker-lacks-feature", operationId: record.operationId }));
+          log.mockRestore();
+        });
+
+        it("is advertised by the worker's own /ping feature list", () => {
+          expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EBaselineChecks");
+          expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EBaselineSource");
+        });
+      });
     });
 
     it("refuses to downgrade a version 2 application plan when no applicationPlanNotNegotiated recorder is wired, instead of posting a run the operation record still calls version 2 (2.2b N4)", async () => {

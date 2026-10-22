@@ -30,6 +30,7 @@ import type { FeedbackApprovalAuthorizer, FeedbackBundleReader } from "./callbac
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
 import { candidateUnchangedSinceBase, commitCandidateWorktree, readCandidateRepositories, readCommittedCandidateSourceExport, type CandidateRepositoryInput, type CommittedCandidateSourceExport } from "./verification/candidate.js";
 import { exportCandidateBuildSourceInScratch, type CandidateBuildSourceExport } from "./e2e-build-source-export.js";
+import { exportBaselineSource, type BaselineSourceExport } from "./baseline-source-export.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
@@ -58,6 +59,8 @@ export interface TaskInvocationResult {
   workflowCandidateSourceExport?: CommittedCandidateSourceExport;
   /** The build source manifest of that export (or why there is none), uploaded on its own request after the export and stripped from the terminal result. */
   workflowCandidateBuildSource?: CandidateBuildSourceExport;
+  /** M1.3 Task 3.7b: the unchanged code (the task's base commit) the coding run was asked to export for the baseline round, uploaded on its own request and stripped from the terminal result. */
+  workflowBaselineSource?: BaselineSourceExport;
   /** Repository identities captured when the final successful check round ended. */
   workflowCheckCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   workflowReviews?: WorkflowReviewReport[];
@@ -215,7 +218,9 @@ export async function runTaskInvocation(
         readAdmission: (offset) => dependencies.workflowE2EAdmissionReader!(invocation.payload.workflowE2EAdmission!, offset) }))) {
         throw agentXError("CONFIG_INVALID", NO_PROJECT_CHECK);
       }
-      await events.append("progress", { message: "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
+      await events.append("progress", { message: invocation.payload.workflowE2EAdmission?.purpose === "baseline"
+        ? "AgentX is running the approved browser and API checks once on the code as the task started, for information only. It has no code-editing tools and decides nothing about the change."
+        : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
       const runners = dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
@@ -806,6 +811,12 @@ export async function runTaskInvocation(
         workflowCandidateBuildSource = await exportCandidateBuildSourceInScratch({ signal: verificationStop.signal, candidate: workflowCandidateSourceExport.candidate,
           repositoryRoot: workflowRepositories.find((repository) => repository.repositoryId === exportedRepository?.repositoryId)?.directory ?? "" });
       }
+      // The unchanged code, for the baseline round of an approved application plan (owner decision D2), only when the broker asked for it. It never decides the export: a base that cannot
+      // be exported is reported with its reason, and only the operation's own cancellation throws.
+      let workflowBaselineSource: BaselineSourceExport | undefined;
+      if (invocation.payload.workflowE2EBaselineSource === true && workflowCandidateSourceExport !== undefined) {
+        workflowBaselineSource = await exportBaselineSource({ signal: verificationStop.signal, repositories: workflowRepositories });
+      }
       if (workflowDependencies !== undefined) {
         if (workflowCandidateRepositories === undefined) throw agentXError("OPERATION_INTERRUPTED", "the final work breakdown candidate could not be recorded");
         const terminalByItem = new Map((workflowDependencies.resumeProgress ?? []).map((progress) => [progress.itemId, progress] as const));
@@ -840,6 +851,7 @@ export async function runTaskInvocation(
         ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
         ...(workflowCandidateSourceExport === undefined ? {} : { workflowCandidateSourceExport }),
         ...(workflowCandidateBuildSource === undefined ? {} : { workflowCandidateBuildSource }),
+        ...(workflowBaselineSource === undefined ? {} : { workflowBaselineSource }),
         ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }),
         ...(workflowCandidateRepositories === undefined || reportedChecksCandidate === undefined ? {} : { workflowCheckCandidateRepositories: reportedChecksCandidate }),
       };

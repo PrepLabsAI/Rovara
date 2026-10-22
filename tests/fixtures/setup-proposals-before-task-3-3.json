@@ -1,0 +1,196 @@
+{
+  "inferred-web-app": {
+    "files": [
+      "package.json",
+      "package-lock.json"
+    ],
+    "proposal": {
+      "candidateDigest": "6e82d5ac5a19e551180c8e480efa87080f85f852042907fb9c7017bbf4572150",
+      "applications": [
+        {
+          "applicationId": "e2e-inferred-web-app",
+          "kind": "web",
+          "sourcePaths": [
+            "package.json"
+          ],
+          "recipe": {
+            "schemaVersion": 1,
+            "recipeDigest": "41a32212e34e0cfe66432ebecae31f5791b91adc04e445b609613e28fa596d5c",
+            "build": [
+              {
+                "program": "npm",
+                "args": [
+                  "ci"
+                ],
+                "cwd": ".",
+                "timeoutMs": 300000,
+                "env": {}
+              }
+            ],
+            "launch": {
+              "kind": "service",
+              "start": {
+                "program": "npm",
+                "args": [
+                  "start"
+                ],
+                "cwd": ".",
+                "timeoutMs": 60000,
+                "env": {
+                  "PORT": "4317"
+                }
+              },
+              "health": {
+                "path": "/",
+                "expectedStatus": 200
+              }
+            },
+            "serviceProfileIds": [],
+            "seedProfileId": "synthetic-seed-v1",
+            "accountProfileIds": [
+              "synthetic"
+            ],
+            "allowedOrigins": [
+              "app-origin"
+            ]
+          }
+        }
+      ],
+      "targets": [
+        {
+          "targetId": "web-1",
+          "applicationId": "e2e-inferred-web-app",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "synthetic",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        }
+      ],
+      "dependencyEdges": [],
+      "scenarios": [],
+      "sources": [
+        {
+          "path": "package-lock.json",
+          "sha256": "61696756c5896aedb213afdc8474badf3894b1ec0ed1da3964abd1073e8424bb"
+        },
+        {
+          "path": "package.json",
+          "sha256": "a5b55d956032115f3abf2282d77850ad9870c6640162bd1b778e4d96e5259a83"
+        }
+      ],
+      "missingInputs": [],
+      "state": "proposed"
+    },
+    "setupApproval": {
+      "artifactId": "setup",
+      "digest": "09cde2057a3a488ad1ddba12831d9a3fa6a1034b799827c7ac664dc71e466a45"
+    }
+  },
+  "orders-contract-app": {
+    "files": [
+      "package.json"
+    ],
+    "proposal": {
+      "candidateDigest": "6e82d5ac5a19e551180c8e480efa87080f85f852042907fb9c7017bbf4572150",
+      "applications": [
+        {
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "kind": "web",
+          "sourcePaths": [
+            "package.json"
+          ],
+          "recipe": {
+            "schemaVersion": 1,
+            "recipeDigest": "22fe496a0adedb28849e2fce400eea3a84ee0d6c884ec3337a9b8819a7c038cb",
+            "build": [],
+            "launch": {
+              "kind": "service",
+              "start": {
+                "program": "node",
+                "args": [
+                  "server.mjs"
+                ],
+                "cwd": ".",
+                "timeoutMs": 60000,
+                "env": {}
+              },
+              "health": {
+                "path": "/health",
+                "expectedStatus": 200
+              }
+            },
+            "serviceProfileIds": [
+              "node-http/v1"
+            ],
+            "seedProfileId": "orders-seed/v1",
+            "accountProfileIds": [
+              "synthetic",
+              "orders-owner",
+              "orders-viewer"
+            ],
+            "allowedOrigins": [
+              "orders-api",
+              "inventory-v1"
+            ]
+          }
+        }
+      ],
+      "targets": [
+        {
+          "targetId": "account-target-7dc6348785daa3646ac5d7512108805be2999520b2feae05b668205fca951a31",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "orders-owner",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "account-target-e828813cd9893dc26005fe799f6fbd2b405833299150c7e4604e60fe81315151",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "orders-viewer",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "web-1",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "synthetic",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        }
+      ],
+      "dependencyEdges": [],
+      "scenarios": [],
+      "sources": [
+        {
+          "path": "package.json",
+          "sha256": "aa3ef8e70854b0ce69504dcadc3e20fa978d3f8114026623aeb477e934069e1d"
+        }
+      ],
+      "missingInputs": [],
+      "state": "proposed"
+    },
+    "setupApproval": {
+      "artifactId": "setup",
+      "digest": "bfbd5b71840fa180ae3926decdca4c7fba39752be7129ec8e189c2c165731acc"
+    }
+  }
+}

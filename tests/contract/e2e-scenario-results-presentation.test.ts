@@ -160,3 +160,24 @@ describe("the rows on the task page", () => {
     expect(renderE2EScenarioRowsHtml({ scenarios: [] }, { artifactPath })).toBe("");
   });
 });
+
+// F8 (Ruling CY): the signed-out visitor is not an account, so the page and Slack call it what it is. A stored row still holds the profile id, which its schema and older readers expect.
+describe("the signed-out visitor", () => {
+  const visitor = row({ scenarioId: "signed-out-visitor", title: "Signed out visitor", status: "FAILED", reason: "expected hidden, was visible", accountLabel: "rovara-anonymous" });
+
+  it("keeps the profile id in the stored row and shows 'Signed-out visitor' on the page and in Slack", () => {
+    expect(E2EScenarioResultsSchema.safeParse(results({ scenarios: [visitor] })).success).toBe(true);
+    const page = renderE2EScenarioRowsHtml(results({ scenarios: [visitor] }), { artifactPath });
+    expect(page).toContain("Signed-out visitor");
+    expect(page).not.toContain("rovara-anonymous");
+    const slack = textOf(renderE2EScenarioSlackBlocks(results({ scenarios: [visitor] }), { taskPageUrl: URL_OF_PAGE }));
+    expect(slack).toContain("(Signed-out visitor)");
+    expect(slack).not.toContain("rovara-anonymous");
+  });
+
+  it("leaves an account's label as it was", () => {
+    const page = renderE2EScenarioRowsHtml(results({ scenarios: [row({ accountLabel: "orders-owner" })] }), { artifactPath });
+    expect(page).toContain("orders-owner");
+    expect(page).not.toContain("Signed-out visitor");
+  });
+});

@@ -49,6 +49,8 @@ const MAX_CANDIDATE_SOURCE_FILE_BYTES = 512 * 1024;
 export async function readCommittedCandidateSourceExport(
   inputs: readonly CandidateRepositoryInput[],
   identities: readonly CandidateRepositoryIdentity[],
+  /** M1.3 Task 3.7b: read this commit (the task's base) instead of HEAD; the identities must name it. */
+  options: { atCommit?: string } = {},
 ): Promise<CommittedCandidateSourceExport> {
   if (inputs.length === 0 || inputs.length !== identities.length || inputs.length > 32) {
     throw new Error("committed candidate source inputs are incomplete");
@@ -63,7 +65,7 @@ export async function readCommittedCandidateSourceExport(
     const directory = resolve(input.directory);
     // Git runs in a worker-owned throwaway repository that borrows only the candidate's objects (see isolated-git.ts), with no replace objects.
     const { treePaths, sources } = await withIsolatedGit(directory, "read", async (git) => {
-      const commit = (await git.text(["rev-parse", "--verify", `${await git.headCommit()}^{commit}`], { index: "none" })).trim();
+      const commit = (await git.text(["rev-parse", "--verify", `${options.atCommit ?? await git.headCommit()}^{commit}`], { index: "none" })).trim();
       const tree = (await git.text(["rev-parse", "--verify", `${commit}^{tree}`], { index: "none" })).trim();
       if (commit !== identity.commitSha || tree !== identity.treeSha || (input.baseCommitSha !== undefined && identity.baseCommitSha !== input.baseCommitSha)) {
         throw new Error("committed source does not match the final candidate identity");

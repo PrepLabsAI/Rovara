@@ -88,6 +88,12 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
   try {
     if (sha256(input.admissionBytes) !== input.subject.admissionSha256) refuse("the stored admission does not match its content address");
     const admission = decodeE2EApplicationExecutionAdmission(input.admissionBytes);
+    // M1.3 Task 3.7b: a baseline round is signed as one. It is read only as a baseline and a candidate round only as a candidate's, so evidence of the unchanged code can never become
+    // a verdict on the candidate, whatever else about the operation is true.
+    const signedPurpose = admission.baseline === undefined ? "candidate" : "baseline";
+    if (signedPurpose !== (input.purpose ?? "candidate")) {
+      refuse(signedPurpose === "baseline" ? "the admission is a baseline round (the unchanged code), not a candidate round" : "the admission is a candidate round, not a baseline round (the purpose differs)");
+    }
     const subject = input.subject;
     // A repeated outer run id is refused by validateE2EApplicationExecutionAdmission, which ties each outer binding to the round's own bindings (whose run ids
     // the round schema keeps unique), so equal sets of run ids are equal lists.

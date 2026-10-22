@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { types } from "node:util";
 import { z } from "zod";
-import { canonicalJson, copyBoundedE2EJsonData, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema,
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, canonicalJson, copyBoundedE2EJsonData, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema,
   E2EExpectedCaseSchema, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAssertionSchema,
-  E2EScenarioSchema, E2ERuntimeAccountRefSchema, E2EAppArtifactRefSchema, E2EMockSpecSchema, readE2EApplicationProjectContract, type E2EApplicationEvidenceRef, type E2ECaseCoverage, type E2EQualifiedResult,
+  E2EScenarioSchema, E2ERuntimeAccountRefSchema, E2EAppArtifactRefSchema, E2EMockSpecSchema, isE2EAnonymousSessionRef, readE2EApplicationProjectContract, type E2EApplicationEvidenceRef, type E2ECaseCoverage, type E2EQualifiedResult,
   type E2ERound, type E2ERunBinding, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import { E2E_REPORT_MAX_BYTES, E2E_APP_RPC_FRAME_MAX_BYTES, e2ePrivateTransferMaxBytes, type E2EStructuralQualification } from "./result-adapter.js";
 import { parseE2EApplicationReport, type E2EApplicationReport } from "./application-report-schema.js";
@@ -87,6 +87,12 @@ export const E2EApplicationAccountIdentityProjectionSchema = z.object({ ...ident
   schemaVersion: z.literal("e2e-application-account-identity/v1"), accountRef: E2ERuntimeAccountRefSchema,
   sessionRef: id(256), accountIdDigest: sha }).strict();
 export type E2EApplicationAccountIdentityProjection = z.infer<typeof E2EApplicationAccountIdentityProjectionSchema>;
+/**
+ * What the executor recorded as the source of an anonymous case's account identity (Ruling AZ): the sentinel session and no login and no identity at all. A signed-in case's source
+ * carries a login and an identity; an anonymous case claiming either has claimed a session, and is refused.
+ */
+const anonymousAccountSourceSchema = z.object({ schemaVersion: z.literal("e2e-executor-account-observation/v1"), caseId: id(160), accountRef: E2ERuntimeAccountRefSchema,
+  sessionRef: id(256), accountIdDigest: sha, observedAt: utc, login: z.null(), identity: z.null() }).strict();
 export const E2EApplicationSubjectIdentityProjectionSchema = z.object({ ...identityProjectionCommon,
   schemaVersion: z.literal("e2e-application-subject-identity/v1"), subject: E2EApplicationOwnedSubjectSchema }).strict();
 export type E2EApplicationSubjectIdentityProjection = z.infer<typeof E2EApplicationSubjectIdentityProjectionSchema>;
@@ -1367,6 +1373,22 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
         || Date.parse(accountProjection.observedAt) > Date.parse(capture.observedAt)
         || Date.parse(subjectProjection.observedAt) > Date.parse(capture.observedAt)) {
         throw new Error("raw account or subject identity projection differs from the exact protected case, lifecycle, producer, session, or owned subject");
+      }
+      // The signed-out visitor has no account binding (Ruling AZ): its case runs under the reference the application fixes, with the sentinel session and the fixed identity digest, and
+      // its recorded source shows no login and no identity. A case of any other profile never has the sentinel session.
+      if (expected.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) {
+        const fixedRef = e2eAnonymousRuntimeAccountRef(facts.applicationId);
+        const source = proofById.get(accountProjection.sourceReceiptRef.artifactId);
+        if (!source || evidenceKey(source.ref) !== evidenceKey(accountProjection.sourceReceiptRef)) throw new Error("anonymous case account source is missing from retained raw proof");
+        const recorded = parseCanonicalFrame(source, anonymousAccountSourceSchema, "anonymous account source");
+        if (canonicalJson(facts.accountRef) !== canonicalJson(fixedRef) || canonicalJson(protectedBinding.accountRef) !== canonicalJson(fixedRef)
+          || !isE2EAnonymousSessionRef(protectedBinding.sessionRef) || protectedBinding.accountIdDigest !== e2eAnonymousAccountIdDigest(facts.applicationId)
+          || recorded.caseId !== expected.caseId || canonicalJson(recorded.accountRef) !== canonicalJson(fixedRef) || recorded.sessionRef !== protectedBinding.sessionRef
+          || recorded.accountIdDigest !== protectedBinding.accountIdDigest) {
+          throw new Error("an anonymous case claims an account binding: it must have the fixed anonymous reference, the sentinel session and identity digest, and no login or identity");
+        }
+      } else if (isE2EAnonymousSessionRef(protectedBinding.sessionRef)) {
+        throw new Error("a case of an account profile claims the anonymous session");
       }
       if (!caseIsBound || !report || capture.shardId !== report.shardId || capture.upstreamRunId !== report.runId
         || capture.cleanup !== "confirmed" || capture.assertions.length !== expected.assertionDigests.length

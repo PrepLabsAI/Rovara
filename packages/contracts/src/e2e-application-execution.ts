@@ -207,6 +207,11 @@ export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: 
   policy: E2EPolicySchema, bundle: E2EScenarioBundleSchema, executionPlan: E2EExecutionPlanSchema,
   /** The creator's access when the round was admitted (the broker's own proof); absent only from admissions the broker did not build. Verification requires it. */
   creatorAuthority: E2ECreatorAuthoritySchema.optional(),
+  /**
+   * M1.3 Task 3.7b: signed into a baseline round (the approved scenarios on the unchanged code, for information only) and absent from every candidate round. The commit it names is
+   * the commit the round builds from, so a baseline admission can only be about the base.
+   */
+  baseline: z.object({ purpose: z.literal("baseline"), baseCommitSha: sha1, attempt: z.number().int().positive() }).strict().optional(),
   portableProjection: E2EApplicationPortableProjectionSchema.nullable(), round: E2ERoundSchema,
   groups: z.array(E2EApplicationGroupAdmissionSchema).max(4), admissionDigest: sha256,
 }).strict().superRefine((admission, context) => {
@@ -216,6 +221,9 @@ export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: 
   if (admission.candidateCommitSha !== admission.sourceSnapshot.commitSha || admission.candidateTreeSha !== admission.sourceSnapshot.treeSha
     || admission.candidateCommitSha !== admission.selectionInput.sourceSnapshot.commitSha || admission.candidateTreeSha !== admission.selectionInput.sourceSnapshot.treeSha) {
     context.addIssue({ code: "custom", path: ["candidateCommitSha"], message: "candidate commit and tree must be the exact commit and tree of the admitted source snapshot" });
+  }
+  if (admission.baseline !== undefined && admission.baseline.baseCommitSha !== admission.candidateCommitSha) {
+    context.addIssue({ code: "custom", path: ["baseline", "baseCommitSha"], message: "a baseline round builds from its base commit and nothing else" });
   }
   const portableSelection = admission.portableProjection?.selectionInput as { sourceSnapshot?: z.infer<typeof sourceSnapshotWireSchema> } | undefined;
   const wireSources = [admission.sourceSnapshot, admission.selectionInput.sourceSnapshot,
