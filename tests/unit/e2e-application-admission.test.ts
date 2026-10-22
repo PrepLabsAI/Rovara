@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
+import { type E2EScenario, E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
   deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, E2ESetupProposalSchema, createCandidateManifest, inspectE2ERepository, proposeE2ESetup, verifyE2ESetupProposal } from "@agentx/contracts";
 import { registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
@@ -10,7 +10,8 @@ import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } fr
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
 import { applicationIntentDigest, evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
-import { PROFILE, anonymousScenario, anonymousTargetOf, binding, inferredSnapshot, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { PROFILE, anonymousScenario, anonymousTargetOf, binding, csvScenario, inferredSnapshot, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { createWorkflowE2EAdmissionAgentStepsReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
 
 afterEach(disposeRealCandidates);
 const candidateOf = createRealCandidate;
@@ -432,5 +433,53 @@ describe("setup proposals stored before Task 3.3", () => {
     const admitted = decoded.selectionInput.policy.targets;
     expect(admitted.map((target) => target.targetId)).toEqual([...policy.targets.map((target) => target.targetId), "web-1-anonymous"]);
     expect(admitted.find((target) => target.targetId === "web-1-anonymous")).toMatchObject({ accountProfileId: "rovara-anonymous", runtimeProfileId: PROFILE });
+  });
+});
+
+// Ruling CX (the M1.3 -> M1.4 merge): a baseline round never runs agent steps and carries no model route, even where the project's policy pins one; a candidate round keeps it.
+describe("a baseline round's admission on a project whose policy pins a model route", () => {
+  const ROUTE = "r1-0123456789ab";
+  const agentScenario: E2EScenario = { ...csvScenario, scenarioId: "agent-orders", steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }],
+    assertions: [{ kind: "visible", testId: "orders", equals: true }] };
+  const agentRow = () => webApiRow("web", {}, (value) => ({ ...value, supportedSteps: [...value.supportedSteps, "agent" as const] }));
+  async function routed(options: { baseline: boolean; agent?: boolean }) {
+    const fx = planFixture({ modelRouteRevision: ROUTE, ...(options.agent === true ? { extraScenarios: [agentScenario] } : {}) });
+    const candidate = await candidateOf(ordersTree);
+    const rows = [agentRow()];
+    const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+      runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding,
+      buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection(fx, rows),
+      ...(options.baseline ? { baseline: { baseCommitSha: candidate.snapshot.commitSha, attempt: 1 } } : {}) };
+    return () => buildApplicationExecutionAdmission(input);
+  }
+  const agentStepsOf = (built: ReturnType<typeof buildApplicationExecutionAdmission>) => createWorkflowE2EAdmissionAgentStepsReader({
+    s3: { send: async () => ({ Body: { transformToString: async () => built.bytes.toString("utf8") } }) }, bucket: "b" })({ schemaVersion: 1, kind: "application",
+    taskId: "11111111-1111-4111-8111-111111111111", workflowRevision: 7, candidateDigest: built.admission.candidateDigest, roundId: built.roundId, groupRunIds: built.groupRunIds,
+    admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } });
+
+  it("the candidate round carries the pinned route, and with an agent step its reference must say agentSteps (the positive controls)", async () => {
+    const decoded = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false }))().bytes);
+    expect(decoded.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: ROUTE });
+    expect(decoded.round.groupBindings.every((item) => item.modelRouteRevision === ROUTE)).toBe(true);
+    const withAgent = (await routed({ baseline: false, agent: true }))();
+    expect(decodeE2EApplicationExecutionAdmission(withAgent.bytes).executionPlan.unavailableCriteria).toEqual([]);
+    await expect(agentStepsOf(withAgent)).resolves.toBe(true);
+  });
+
+  it("the baseline round carries modelRoute null and group bindings with modelRouteRevision null, the worker's validator accepts it, and it has no agent step (agentSteps false)", async () => {
+    const built = (await routed({ baseline: true }))();
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    expect(decoded.baseline).toMatchObject({ purpose: "baseline" });
+    expect(decoded.modelRoute).toBeNull();
+    expect(decoded.policy.modelRouteRevision).toBeNull();
+    expect(decoded.round.groupBindings.length).toBeGreaterThan(0);
+    expect(decoded.round.groupBindings.every((item) => item.modelRouteRevision === null)).toBe(true);
+    expect(() => validateE2EApplicationExecutionAdmission(decoded)).not.toThrow();
+    await expect(agentStepsOf(built)).resolves.toBe(false);
+  });
+
+  it("a baseline of a plan with an agent step is refused with agent-route-not-approved: it never runs the agent step (the baseline is then unavailable, and never gates)", async () => {
+    expect(refusalOf(await routed({ baseline: true, agent: true }))).toMatch(/scenario agent-orders on target web-1: agent-route-not-approved/);
   });
 });

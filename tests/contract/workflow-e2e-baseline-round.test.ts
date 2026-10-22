@@ -8,6 +8,7 @@ import { SHOT, SHOT_SHA } from "../support/e2e-scenario-results.js";
 import { randomUUID } from "node:crypto";
 import { MAYA } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
+import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
 
 // M1.3 Task 3.7b, owner decision D2 (Review Focus 6 and the 3.7 review's findings F1, F3, F8, F9): when an application plan is approved, the approved scenarios run once on the
 // UNCHANGED code, in a round of their own, for information only. It has its own admission (purpose and base commit signed), its own callbacks and its own completion path, writes
@@ -498,5 +499,19 @@ describe("the baseline admission is a real admission of the unchanged code", () 
     expect(decoded.candidateCommitSha).toBe(round.real.baseline!.baseCommitSha);
     expect(decoded.candidateDigest).not.toBe(round.candidate.digest);
     expect(operations(round).filter((row) => row.workflowMode === "CHECKS")).toHaveLength(1);
+  });
+});
+
+// Ruling CX (the M1.3 -> M1.4 merge): on a project whose setup approval pinned an AI navigation route, the baseline round still carries no route and no agent steps.
+describe("the baseline round on a project whose policy pins a model route", () => {
+  it("is admitted with modelRoute null, group bindings with modelRouteRevision null, and a reference with no agentSteps", async () => {
+    const round = await startApplicationRound({ baseline: "source", brokerExtra: { e2eAgentInstallation: async () => ({ provider: "anthropic", secretArn: SECRET_ARN }) } });
+    expect(round.policy.modelRouteRevision).toMatch(/^r1-[a-f0-9]{12}$/);
+    expect(round.admissionRef.purpose).toBe("baseline");
+    expect(round.admissionRef.agentSteps).toBeUndefined();
+    const decoded = decodeE2EApplicationExecutionAdmission(round.admissionBytes);
+    expect(decoded.modelRoute).toBeNull();
+    expect(decoded.round.groupBindings.every((binding) => binding.modelRouteRevision === null)).toBe(true);
+    expect((round.operationNow().workflowE2EAdmission as { agentSteps?: unknown }).agentSteps).toBeUndefined();
   });
 });
