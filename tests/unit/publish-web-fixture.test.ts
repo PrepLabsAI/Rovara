@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assertStarterClean,
   backupBranchName,
@@ -175,6 +175,14 @@ describe("variants", () => {
 describe("backup branch before a force-reseed", () => {
   const files = new Map([["README.md", "new readme\n"], ["server.mjs", "new server\n"]]);
   const at = (): Date => new Date("2026-10-21T15:30:45.678Z");
+  // The script commits with the ambient git identity; CI runners have none configured.
+  beforeEach(() => {
+    for (const role of ["AUTHOR", "COMMITTER"]) {
+      vi.stubEnv(`GIT_${role}_NAME`, "test");
+      vi.stubEnv(`GIT_${role}_EMAIL`, "test@example.test");
+    }
+  });
+  afterEach(() => { vi.unstubAllEnvs(); });
 
   /** A bare remote whose main already has two commits, like the live fixture repository. Returns its path and the main sha. */
   function remote(): { path: string; main: string } {
