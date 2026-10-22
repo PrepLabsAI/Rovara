@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join, sep } from "node:path";
@@ -14,8 +14,8 @@ import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStatePro
 import { isPinnedRovaraHttpEngine } from "../rovara-http-engine-descriptor.js";
 import { createExecutorSessionStore } from "./accounts.js";
 import { createRovaraE2EAgentExecutor } from "./agent-executor.js";
-import { createE2EAgentCaptureStore } from "./agent-capture-store.js";
-import { E2E_AGENT_EVIDENCE_DIR, createE2EAgentLedgerWriter, type E2EAgentLedgerWriter } from "./agent-ledger.js";
+import { createE2EAgentCaptureStore, persistE2EAgentTrace } from "./agent-capture-store.js";
+import { createE2EAgentLedgerWriter, type E2EAgentLedgerWriter } from "./agent-ledger.js";
 import { createE2EAgentModelAdapter } from "./agent-model-adapter.js";
 import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
 import { createE2EModelChannelClient } from "./model-channel.js";
@@ -195,12 +195,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     const origin = declaration.originByApplicationId.find((item) => item.applicationId === launchContext.selectedTarget.applicationId)?.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN;
     const store = createE2EAgentCaptureStore({
       scan: (bytes) => agentRedactor.contains(bytes),
-      persist: (keyHash, bytes) => {
-        // The recording is named by a digest of its key, which is derived from the step's instruction, never from a value.
-        const directory = join(context.outDir, E2E_AGENT_EVIDENCE_DIR, "traces");
-        mkdirSync(directory, { recursive: true, mode: 0o755 });
-        writeFileSync(join(directory, `trace-${sha(keyHash).slice(0, 16)}.json`), bytes, { mode: 0o644 });
-      },
+      persist: (keyHash, bytes) => persistE2EAgentTrace(context.outDir, keyHash, bytes),
     });
     const executor = createRovaraE2EAgentExecutor({ position: () => current.position, ledger: () => current.ledger, origin: () => origin });
     const runStep: E2EWebAgentPorts["runStep"] = async (request) => {

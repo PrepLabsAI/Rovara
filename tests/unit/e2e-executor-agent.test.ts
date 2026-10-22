@@ -10,7 +10,8 @@ import { E2EAgentActionLedgerSchema, e2eAgentValueDigest, e2eAgentValueKeyId, ge
   type E2EModelChannelClient, type E2EModelChannelRequest, type E2EModelChannelResponse } from "@agentx/contracts";
 import { createRovaraE2EAgentExecutor, appRelativePath, elideSupersededScreens, parseScreen, parseScreenLine, E2E_AGENT_MESSAGES_SOFT_BUDGET_BYTES } from "../../packages/verifier/src/executor/agent-executor.js";
 import { createE2EAgentLedgerWriter, E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "../../packages/verifier/src/executor/agent-ledger.js";
-import { createE2EAgentCaptureStore } from "../../packages/verifier/src/executor/agent-capture-store.js";
+import { agentTraceFilePath, createE2EAgentCaptureStore, persistE2EAgentTrace } from "../../packages/verifier/src/executor/agent-capture-store.js";
+import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { createE2EAgentModelAdapter, E2EAgentModelError } from "../../packages/verifier/src/executor/agent-model-adapter.js";
 import { createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
 import { createScriptedE2EInvoke } from "../../packages/worker/src/e2e-model-scripted.js";
@@ -305,6 +306,41 @@ describe("the capture-only cache store (Task 4.3b, test case 3)", () => {
   });
 });
 
+describe("the capture-only store with the host's credential scan and file hook (Task 4.3b, test case 3)", () => {
+  const PASSWORD = "pw-Zk39-very-secret-value";
+  const account = { profileId: "orders-owner", email: "rovara-owner-a1b2c3@example.test", password: PASSWORD };
+
+  it("writes a clean trace to agent/traces under a name that comes from a digest of its key, and nothing else is written", async () => {
+    const outDir = temp();
+    const redactor = createCredentialRedactor([account]);
+    const store = createE2EAgentCaptureStore({ scan: (bytes) => redactor.contains(bytes), persist: (keyHash, bytes) => persistE2EAgentTrace(outDir, keyHash, bytes) });
+    const keyHash = "k".repeat(64);
+    expect(await store.write(keyHash, { actions: [{ name: "tap" }] })).toBeDefined();
+    const path = agentTraceFilePath(outDir, keyHash);
+    expect(path).toMatch(/\/agent\/traces\/trace-[a-f0-9]{16}\.json$/);
+    expect(path).not.toContain("kkkk");
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ actions: [{ name: "tap" }] });
+  });
+
+  it("drops a trace that carries an account password (also as base64) or a session value learned later: no file, no held trace, the verdict inputs untouched", async () => {
+    const outDir = temp();
+    const redactor = createCredentialRedactor([account]);
+    const store = createE2EAgentCaptureStore({ scan: (bytes) => redactor.contains(bytes), persist: (keyHash, bytes) => persistE2EAgentTrace(outDir, keyHash, bytes) });
+    expect(await store.write("a".repeat(64), { actions: [{ name: "type", value: PASSWORD }] })).toBeUndefined();
+    expect(await store.write("b".repeat(64), { actions: [{ name: "type", value: Buffer.from(PASSWORD).toString("base64") }] })).toBeUndefined();
+    redactor.addSessionSecret("session-cookie-value-123456");
+    expect(await store.write("c".repeat(64), { actions: [{ name: "type", value: "session-cookie-value-123456" }] })).toBeUndefined();
+    expect(store.taken()).toEqual([]);
+    expect(existsSync(agentTraceFilePath(outDir, "a".repeat(64)))).toBe(false);
+    expect(existsSync(agentTraceFilePath(outDir, "c".repeat(64)))).toBe(false);
+    // A clean trace is still taken afterwards (the scan is per trace), and a failing hook loses the file and nothing more.
+    const failing = createE2EAgentCaptureStore({ persist: () => { throw new Error("disk full"); } });
+    expect(await failing.write("d".repeat(64), { actions: [] })).toBeDefined();
+    expect(failing.taken()).toHaveLength(1);
+    expect(await store.write("e".repeat(64), { actions: [] })).toBeDefined();
+  });
+});
+
 describe("the model adapter (Task 4.3b, test case 4)", () => {
   it("maps a channel error answer to a plain Error that is not retryable, naming only the code, and keeps its receipt id", async () => {
     const { client } = scriptedClient(["error"]);
@@ -372,4 +408,3 @@ describe("the model adapter (Task 4.3b, test case 4)", () => {
   }, 90_000);
 });
 
-void existsSync;

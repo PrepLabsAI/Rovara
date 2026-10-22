@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseVerifiedE2EAgentActionLedger, e2eAgentValueKeyId } from "@agentx/contracts";
@@ -41,6 +41,22 @@ describe.runIf(agentRunnable)("the agent step end to end, on this machine", () =
     const everything = allOutputText(r.out);
     expect(everything).not.toContain(r.valueKey);
     for (const account of r.fixture.plan.accounts) { expect(everything).not.toContain(account.password); expect(everything).not.toContain(account.email); }
+  }, 300_000);
+
+  it("the report's agent step agrees with the ledger and the receipts (metrics, the one engine event with no node id), and the capture store is not fed: a known gap of Ruling M4-A", async () => {
+    const r = await run({ script: [{ kind: "tap", name: /Download orders/ }, { kind: "done" }] });
+    expect(r.result.exitCode, executorLog(r.out)).toBe(0);
+    const raw = JSON.parse(readFileSync(join(r.out, "report.json"), "utf8")) as { run: { results: Array<{ attempts: Array<{ steps: Array<Record<string, unknown>> }> }> } };
+    const step = raw.run.results[0]!.attempts[0]!.steps.find((item) => item["kind"] === "agent")!;
+    // What Task 4.4 holds the ledger and the receipts to: one call per ok receipt, one action per ledger action.
+    expect(step["metrics"]).toMatchObject({ modelCalls: r.receipts.filter((receipt) => receipt.outcome === "ok").length, actionSteps: r.readLedger()!.steps[0]!.actions.length });
+    expect(step["model"]).toMatchObject({ provider: "agentx-e2e", model: "rovara-scripted/v1", adapterVersion: "executor/rovara-e2e-agent@1" });
+    expect((step["events"] as Array<{ kind: string; detail?: string }>).filter((event) => event.kind === "engine").map((event) => event.detail)).toEqual(['tap button "Download orders"']);
+    // KNOWN GAP (Ruling M4-A): the pinned runner writes a recording only when a deterministic verification step that STARTS AFTER the agent step passed, and Rovara's approved assertions
+    // are nested steps that open first and wrap the whole case (`runInsideAssertionSteps`), so none does: the recording is "unconfirmed", nothing reaches the store and no
+    // agent/traces file exists. Task 4.6 (replay) must make the assertion steps start after the agent step; when it does, this expectation changes to a kept recording.
+    expect(step["cache"]).toMatchObject({ mode: "missed", write: "unconfirmed" });
+    expect(existsSync(join(r.out, "agent", "traces"))).toBe(false);
   }, 300_000);
 
   it("a model that is done without acting leaves no download: the executor records agent-no-download on the step and on the unavailable csv assertion", async () => {

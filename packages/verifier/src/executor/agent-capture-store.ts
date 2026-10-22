@@ -1,4 +1,8 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { E2E_AGENT_TRACE_MAX_BYTES } from "@agentx/contracts";
+import { E2E_AGENT_EVIDENCE_DIR } from "./evidence-paths.js";
 
 /**
  * The capture-only replay cache store of a round with an agent step (Ruling M4-A, Task 4.3b).
@@ -21,6 +25,16 @@ export interface E2EAgentCaptureStore {
 
 /** More recordings than a group can have steps; anything past this is refused instead of held. */
 const MAX_HELD_TRACES = 16;
+
+/** Where a kept recording is written: named by a digest of its cache key, which is derived from the step's instruction, never from a value. */
+export const agentTraceFilePath = (outDir: string, keyHash: string): string => join(outDir, E2E_AGENT_EVIDENCE_DIR, "traces", `trace-${createHash("sha256").update(keyHash, "utf8").digest("hex").slice(0, 16)}.json`);
+
+/** Writes a clean recording to the out directory (the `persist` hook of the store). */
+export function persistE2EAgentTrace(outDir: string, keyHash: string, bytes: Uint8Array): void {
+  const path = agentTraceFilePath(outDir, keyHash);
+  mkdirSync(join(outDir, E2E_AGENT_EVIDENCE_DIR, "traces"), { recursive: true, mode: 0o755 });
+  writeFileSync(path, bytes, { mode: 0o644 });
+}
 
 export interface E2EAgentCaptureStoreOptions {
   /** Whether the bytes of a trace carry a credential (an account's, or a session value). A trace that does is not kept. */
