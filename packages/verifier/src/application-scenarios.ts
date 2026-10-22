@@ -6,7 +6,7 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationBuildSourceManifestS
   E2EApplicationPreparedGroupFactsSchema, E2EAppArtifactRefSchema, E2EAppBuildManifestSchema,
   E2EApplicationPlanIntentSchema, E2EExecutionPlanSchema, E2ERuntimeCapabilityDescriptorSchema, E2EScenarioBundleSchema,
   E2ERegisteredRuntimeSchema, canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes,
-  e2eAppBuildManifestDigest, e2ePolicyDigest, e2eScenarioBundleDigest, selectE2EApplicationExecutionPlan,
+  e2eAppBuildManifestDigest, e2eEffectiveRoundLimits, e2ePolicyDigest, e2eScenarioBundleDigest, selectE2EApplicationExecutionPlan,
   projectE2EApplicationPortableSelection, validateE2EAppBuildBinding, verifyE2ESourceSnapshot, E2EApplicationPortableProjectionSchema,
   E2EApplicationExecutionAdmissionSchema, E2EApplicationGroupAdmissionSchema, E2ERoundSchema, E2ERunBindingSchema,
   type CandidateManifest, type E2EApplicationApprovalBinding, type E2EApplicationBuildSourceManifest,
@@ -360,8 +360,11 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
     if (expectedCases.length === 0) throw new Error("application target shard has no exact assigned cases");
     const ids = new Set(expectedCases.map((item) => item.caseId));
     const caseScenarios = scenarios.filter((scenario) => expectedCases.some((item) => item.scenarioId === scenario.scenarioId));
-    const timeoutMs = Math.min(...expectedCases.map(() => context.selectionInput.policy.limits.caseTimeoutMs), context.selectionInput.policy.limits.runTimeoutMs);
     const groupUsesModel = caseScenarios.some((scenario) => scenario.steps.some((step) => step.kind === "agent"));
+    // A project that pinned an AI navigation route has policy limits sized for agent steps; a shard with no agent step runs under the model-free limits instead (Task 4.3a).
+    // A policy that pinned no route keeps the limits it was approved with.
+    const limits = context.selectionInput.policy.modelRouteRevision === null ? context.selectionInput.policy.limits : e2eEffectiveRoundLimits(context.selectionInput.policy.limits, groupUsesModel);
+    const timeoutMs = Math.min(...expectedCases.map(() => limits.caseTimeoutMs), limits.runTimeoutMs);
     const modelRoute = groupUsesModel ? context.modelRoute : null;
     if (groupUsesModel && (!modelRoute || modelRoute.routeRevision !== context.selectionInput.policy.modelRouteRevision)) throw new Error("agent-bearing application group has no exact approved model route metadata");
     const tests = renderE2EApplicationGeneratedTest({ cases: expectedCases, scenarios: caseScenarios, timeoutMs, assertionsByCase: assertionBindings });
@@ -425,6 +428,20 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
     shards: Object.freeze(shards), expectedCases: Object.freeze(expectedCases), selectionPacketPath: `shards/${shards[0]!.shardId}/${E2E_APPLICATION_SELECTION_PACKET_PATH}`,
     applicationBindings: context.applicationBindings, runtimeBindings: context.runtimeBindings,
     assertionBindings, runtimeAdmissionContext: context, runtimeAdmission });
+}
+
+/**
+ * The `agent` steps of a compiled group, as the model channel names them: for each expected case, every step of its scenario whose kind is `agent`, by the step's index in
+ * the scenario's steps. The worker holds the executor's step markers to exactly these, and a group with none runs with no model channel at all.
+ */
+export function e2eApplicationGroupAgentSteps(compiled: Pick<E2ECompiledApplicationSuite, "bundle" | "expectedCases">): Array<{ caseId: string; stepIndex: number }> {
+  const stepsOf = new Map(compiled.bundle.scenarios.map((scenario) => [scenario.scenarioId, scenario.steps]));
+  return compiled.expectedCases.flatMap((expected) => (stepsOf.get(expected.scenarioId) ?? []).flatMap((step, stepIndex) => (step.kind === "agent" ? [{ caseId: expected.caseId, stepIndex }] : [])));
+}
+
+/** Whether any case of the group has an `agent` step: the one question that decides whether the group gets a model channel. */
+export function e2eApplicationGroupUsesModel(compiled: Pick<E2ECompiledApplicationSuite, "bundle" | "expectedCases">): boolean {
+  return e2eApplicationGroupAgentSteps(compiled).length > 0;
 }
 
 export function compileE2EApplicationScenarios(input: { context: E2EApplicationCompilationContext; groupId: string }): E2ECompiledApplicationSuite {

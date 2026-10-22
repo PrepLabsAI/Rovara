@@ -8,6 +8,16 @@ import { WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_PLAN
  */
 export class ApplicationDispatchRefusal extends Error {}
 
+/**
+ * A baseline round (the approved scenarios on the unchanged code, for information only) that has nothing left to run, because every scenario of the plan has an AI navigation
+ * step and a baseline never runs those (Ruling DD). It is not a refusal of the plan and gates nothing: the baseline is only recorded as one that was skipped, with this reason.
+ */
+export const BASELINE_AGENT_STEPS_ONLY_REASON = "agent-steps-only" as const;
+export class ApplicationBaselineSkipped extends Error {
+  readonly reason = BASELINE_AGENT_STEPS_ONLY_REASON;
+  constructor() { super("every scenario of the plan has an AI navigation step, which a baseline round never runs, so there is nothing to run on the unchanged code"); this.name = "ApplicationBaselineSkipped"; }
+}
+
 const ROUND_REFUSAL_REASON_MAX_CHARS = 380;
 const shortLine = (reason: string, max: number) => {
   const line = reason.replace(/\p{Cc}+/gu, " ").replace(/\s+/gu, " ").trim();

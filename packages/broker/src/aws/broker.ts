@@ -234,7 +234,7 @@ import type { DisplayArtifact } from "../e2e/application-display.js";
 import { loadStoredScenarioResults, loadWorkflowE2EArtifact as loadStoredWorkflowE2EArtifact, resultsWithStoredArtifacts, storeWorkflowE2EArtifacts } from "./workflow-e2e-artifacts.js";
 import { BaselineSourceBodySchema, BaselineSourceWireSchema, StoredBaselineSourceSchema, assessBaselineSource, parseBaselineExport, type ReadyBaselineSource, type StoredBaselineSource } from "./baseline-source.js";
 import {
-  E2E_BASELINE_ATTEMPT, E2E_BASELINE_PURPOSE, E2E_BASELINE_RUN_GRACE_MS, baselineStartItem, markWorkflowE2EBaselineUnavailable, projectE2EBaselineWanted, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord,
+  E2E_BASELINE_ATTEMPT, E2E_BASELINE_PURPOSE, E2E_BASELINE_RUN_GRACE_MS, baselineStartFailureReason, baselineStartItem, markWorkflowE2EBaselineUnavailable, projectE2EBaselineWanted, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord,
   recordWorkflowE2EBaseline, requestWorkflowE2EBaselineRound, verifyBaselineEvidence, type BaselineRecord, type BaselineUnavailableReason,
 } from "./workflow-e2e-baseline.js";
 import type { AuthenticatedIdentity } from "../auth.js";
@@ -10916,8 +10916,10 @@ async function startBaselineApplicationRound(
     return outcome === "STALE" ? "GO" : "WAIT";
   } catch (error) {
     // The candidate goes on: its own dispatch makes the same checks and, for a plan that cannot run, blocks the workflow with the reason. The baseline only says it could not be checked.
-    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_not_started", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }));
-    return unavailable(error instanceof ApplicationDispatchRefusal || error instanceof ApplicationPlanDefect ? "refused" : "start-failed");
+    // A plan that is only AI navigation scenarios has nothing to run on the unchanged code (Ruling DD): that is said as its own reason, and it gates nothing.
+    const reason = baselineStartFailureReason(error);
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_not_started", taskId: task.taskId, reason, errorName: error instanceof Error ? error.name : "unknown" }));
+    return unavailable(reason);
   }
 }
 
