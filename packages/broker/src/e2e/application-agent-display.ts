@@ -11,6 +11,8 @@ import { displayText } from "./application-display.js";
  * What a block holds: the approved goal (the owner wrote it), the role and name of the page elements the model acted on, how each step ended, the number of model calls and the route.
  * It never holds a typed value, a key, an option label, a scroll direction, a test id, a digest or anything the model wrote. A `type` action is named by its element (role and name, the label the
  * page gives it) and the kind of action, never by what was typed; a navigation is named by its app-relative path. `modelCalls` counts the receipts the verified ledger names.
+ * An element whose name contains one of the run's seeded credentials (`seededCredentials`, matched case-insensitively) keeps its role and is shown under a fixed placeholder name, whatever
+ * action it took: a page can echo a password into a label, and the label is not ours to print.
  */
 
 /** The ledger's directory name under `agent/`, as the executor files it (`agentCaseDirectoryName` in the verifier): the first 16 hex of the SHA-256 of the case id. */
@@ -20,6 +22,8 @@ const LEDGER_MAX_BYTES = 65_536;
 const MAX_STEPS = 3;
 const MAX_ACTED_ON = 8;
 const ELEMENT_NAME_LIMIT = 60;
+/** What an element's name is shown as when it holds one of the run's seeded credentials; the role is kept. */
+const CREDENTIAL_NAME_PLACEHOLDER = "[hidden]";
 
 type AssertionKind = (typeof E2E_DISPLAY_ASSERTION_KINDS)[number];
 
@@ -30,6 +34,8 @@ export function agentNavigationOf(input: {
   /** The worker's receipts for this case. */
   receipts: readonly E2EModelReceipt[];
   routeId: string;
+  /** The run's seeded credentials: an element name holding one is shown as a fixed placeholder. */
+  seededCredentials?: readonly string[];
   /** The kinds of approved assertion of the scenario, which decide the row. */
   decidedBy: readonly AssertionKind[];
 }): E2EDisplayAgentNavigation | undefined {
@@ -41,6 +47,8 @@ export function agentNavigationOf(input: {
       .map((step) => (typeof step === "object" && step !== null ? (step as { stepIndex?: unknown }).stepIndex : undefined)));
     const goals = new Map(input.agentSteps.filter((step) => have.has(step.declaredStepIndex)).map((step) => [step.declaredStepIndex, step.goal] as const));
     if (goals.size === 0) return undefined;
+    const credentials = (input.seededCredentials ?? []).filter((value) => value !== "").map((value) => value.toLowerCase());
+    const elementName = (name: string): string => (credentials.some((credential) => name.toLowerCase().includes(credential)) ? CREDENTIAL_NAME_PLACEHOLDER : displayText(name, ELEMENT_NAME_LIMIT));
     const verified = parseVerifiedE2EAgentActionLedger(raw, { goals, valueKey: input.valueKey, runId: input.runId, caseId: input.caseId });
     if (!verified.ok) return undefined;
     if (!crossCheckE2EAgentLedgerReceipts(verified.ledger, input.receipts).ok) return undefined;
@@ -50,7 +58,7 @@ export function agentNavigationOf(input: {
         if (action.outcome !== "ok") continue;
         // A navigation has no element: it is named by its app-relative path (no query, no fragment). Any other action is named by its element's role and name; a scroll with no element is not named.
         const target = action.tool === "navigate" ? (action.url === null ? undefined : { role: "page", name: displayText(action.url, ELEMENT_NAME_LIMIT) })
-          : action.node === null ? undefined : { role: action.node.role, name: displayText(action.node.name, ELEMENT_NAME_LIMIT) };
+          : action.node === null ? undefined : { role: action.node.role, name: elementName(action.node.name) };
         if (target === undefined || target.name === "") continue;
         const previous = actedOn.at(-1);
         if (previous !== undefined && previous.role === target.role && previous.name === target.name && previous.did === action.tool) continue;

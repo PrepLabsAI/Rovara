@@ -157,14 +157,18 @@ describe("test 29: nothing the model typed reaches a row, the page, Slack or the
   const EMAIL_LOCAL = "maya.owner";
   it("holds none of the typed values, their digests, the run's key, a seeded password or an email", () => {
     const receipts = [receipt(1, 0), receipt(1, 1)];
-    const actions = [typed(null), typed("ada"), action({ tool: "type", node: { role: "textbox", name: "Secret field", testId: "password" }, valueDigest: e2eAgentValueDigest(KEY, PASSWORD), valueLiteral: null }),
+    // The seeded password is also the accessible name of a `type` node and of a `tap` node, under a PASS row and under an UNKNOWN row.
+    const named = (tool: string) => action({ tool, node: { role: tool === "type" ? "textbox" : "button", name: `Field ${PASSWORD}`, testId: null }, valueDigest: tool === "type" ? e2eAgentValueDigest(KEY, "x") : null });
+    const actions = [named("type"), named("tap"), typed(null), typed("ada"), action({ tool: "type", node: { role: "textbox", name: "Secret field", testId: "password" }, valueDigest: e2eAgentValueDigest(KEY, PASSWORD), valueLiteral: null }),
       action({ tool: "select", node: { role: "combobox", name: "Sort", testId: null }, valueDigest: e2eAgentValueDigest(KEY, "newest-first"), valueLiteral: null }),
       action({ tool: "press", node: { role: "textbox", name: "Search", testId: null }, valueDigest: e2eAgentValueDigest(KEY, "Enter"), valueLiteral: null }), action()];
-    const block = agentNavigationOf(input({ receipts, steps: [{ stepIndex: 1, goal: GOAL, receipts, actions }] }))!;
+    const block = agentNavigationOf({ ...input({ receipts, steps: [{ stepIndex: 1, goal: GOAL, receipts, actions }] }), seededCredentials: [PASSWORD] })!;
     expect(block).toBeDefined();
+    expect(block.steps[0]!.actedOn[0]).toEqual({ role: "textbox", name: "[hidden]", did: "type" });
     const digests = actions.map((item) => (item as { valueDigest: string | null }).valueDigest).filter((digest): digest is string => digest !== null);
     expect(digests.length).toBeGreaterThanOrEqual(4);
-    const rows = [row({ scenarioId: "owner-export-ai", title: "Owner export ai", agentNavigation: block })];
+    const rows = [row({ scenarioId: "owner-export-ai", title: "Owner export ai", agentNavigation: block }),
+      row({ scenarioId: "owner-export-ai-unknown", title: "Owner export ai unknown", status: "UNKNOWN", agentNavigation: block })];
     const stored = scrubScenarioResults({ scenarios: rows })!;
     expect(E2EScenarioResultsSchema.safeParse(stored).success).toBe(true);
     const display = createWorkflowE2EDisplayObject({ ownerKey: "owner", workspaceId: "workspace", capturedAt: "2026-10-22T12:00:00.000Z", scenarioResults: { scenarios: rows },
