@@ -64,7 +64,7 @@ export { prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment } from 
 export type { E2EApplicationPreparationInputs, E2EApplicationEnvironmentPorts } from "./application-services.js";
 export { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRuns, dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest, dockerOwnedCleanupReceipt,
   e2eRunNetworks, ROVARA_RUN_LABEL, ROVARA_CREATED_LABEL, STALE_RUN_SWEEP_AGE_MS, DEFAULT_DEADLINE_GRACE_MS, WEB_API_BUILD_IMAGE } from "./host/docker-application-host.js";
-export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, DockerApplicationUnavailableReason, DockerBuildResult } from "./host/docker-application-host.js";
+export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, DockerApplicationModelChannel, DockerApplicationUnavailableReason, DockerBuildResult } from "./host/docker-application-host.js";
 export { executorContainerArgs } from "./host/executor-container.js";
 export { installedExecutorSeccompProfilePath, verifyExecutorSeccompProfile } from "./host/executor-seccomp.js";
 export { deriveWebApiProbeObservation, verifyWebApiProbeRecord, type WebApiProbeDerivation } from "./web-api-probe-evidence.js";
