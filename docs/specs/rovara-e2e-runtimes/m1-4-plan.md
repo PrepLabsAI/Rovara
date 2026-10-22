@@ -379,7 +379,7 @@ Everything in the M1 and M1.3 Global Constraints still applies (containers, labe
 
 **Pass criteria** (all required):
 1. **Approval.** The plan is approved with an `agent` step. The page shows the route ID and revision 1, and the badge text "checks decide".
-2. **Baseline round on the unchanged code** (M1.3 D2). `owner-export-ai` is PASS: the agent finds "Export CSV". `owner-toolbar-button` is FAILED (`expected visible, was hidden`). This shows the same goal working before and after the rename.
+2. **Baseline round on the unchanged code** (M1.3 D2). `owner-export-ai` is not run: a baseline skips AI navigation steps (Ruling CX, confirmed by the owner 2026-10-22), so it never calls the model. `owner-toolbar-button` is FAILED (`expected visible, was hidden`). The AI goal is judged on the candidate only (criterion 3).
 3. **Candidate round, broker-verified PASS** for every required scenario:
    - the page shows "AI-navigated: the model clicked 'Download orders'; the CSV check decided";
    - receipts ≤ 9 calls for the step, every receipt `ok`, and the receipt route equal to the admission;
