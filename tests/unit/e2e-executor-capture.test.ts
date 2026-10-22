@@ -16,7 +16,7 @@ import * as webRuntime from "../../packages/verifier/src/web-runtime.js";
 import { webApiApplicationLaunchTarget } from "../../packages/verifier/src/web-api-launch-target.js";
 import { validateE2EApplicationLaunchTarget } from "../../packages/verifier/src/application-scenarios.js";
 import { E2E_EXECUTOR_HOST_MODULE_PATH } from "../../packages/verifier/src/executor/host-registry.js";
-import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { runE2EExecutorSerially as runE2EExecutor } from "../support/executor-run-lock.js";
 import { webApiRow, PROFILE } from "../support/e2e-application-plan-fixtures.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 import { fakeChromium } from "../support/fake-chromium.js";

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
-  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eApplicationAccountDefinitionDigest } from "@agentx/contracts";
+  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, E2ESetupProposalSchema, createCandidateManifest, inspectE2ERepository, proposeE2ESetup, verifyE2ESetupProposal } from "@agentx/contracts";
 import { registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
@@ -9,7 +10,7 @@ import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } fr
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
 import { applicationIntentDigest, evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
-import { binding, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { PROFILE, anonymousScenario, anonymousTargetOf, binding, inferredSnapshot, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 
 afterEach(disposeRealCandidates);
 const candidateOf = createRealCandidate;
@@ -73,6 +74,32 @@ describe("the application admission built for a single-kind round", () => {
     expect(decoded).toMatchObject({ taskId: input.taskId, operationId: input.operationId, operationFence: 3, workflowRevision: 7 });
     expect(decoded.round).toMatchObject({ roundId: input.roundId, taskId: input.taskId, operationId: input.operationId, operationFence: 3, workflowRevision: 7 });
     expect(decoded.round.groupBindings.every((item) => item.candidateDigest === candidate.source.candidate.digest && item.planDigest === input.planDigest)).toBe(true);
+  });
+
+  it("admits the signed-out scenarios of an app with no project contract (Ruling AZ): the worker's decoder reads them back, bound to the fixed anonymous reference, with the lockfile in the build identity", async () => {
+    const target = anonymousTargetOf(inferredSnapshot);
+    const fx = planFixture({ snapshot: inferredSnapshot, targetId: target, scenario: anonymousScenario(target) });
+    // The candidate holds the very manifest and lockfile the setup was approved on, and the app itself.
+    const candidate = await candidateOf({ "package.json": inferredSnapshot.sources[0]!.bytes.toString(), "package-lock.json": "{}", "server.js": "// the app\n" });
+    const recorded = approvedSelection(fx, [webApiRow("web")], fx.snapshot, fx.intent, []);
+    const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+      runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: binding,
+      buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: [], recordedSelection: recorded };
+    const built = buildApplicationExecutionAdmission(input);
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    const validated = validateE2EApplicationExecutionAdmission(decoded);
+    expect(validated.applicationSuites).toHaveLength(1);
+    const application = fx.application.applicationId;
+    expect(recorded.accountRefs).toEqual([e2eAnonymousRuntimeAccountRef(application)]);
+    expect(validated.applicationSuites[0]!.expectedCases.map((item) => item.accountProfileId)).toEqual(["rovara-anonymous"]);
+    expect(validated.applicationSuites[0]!.expectedCases[0]!.targetId).toBe(target);
+    expect(decoded.selectionInput.runtimeAccountRefs).toEqual([e2eAnonymousRuntimeAccountRef(application)]);
+    // The inferred recipe carries `npm ci`, and the build identity names the lockfile it installs from.
+    const { approval, build } = decoded.applicationBindings[0]!.value;
+    expect(approval.applications[0]!.recipe.build.map((command) => [command.program, ...command.args])).toEqual([["npm", "ci"]]);
+    expect(build.lockfileRefs.map((ref) => ref.path)).toEqual(["package-lock.json"]);
+    expect(built.kind).toBe("web");
   });
 
   it("returns the per-group run ids and the admission digest that verification of the round needs", async () => {
@@ -352,5 +379,48 @@ describe("the builder refuses with a specific reason, never a portable fallback"
     const built = buildApplicationExecutionAdmission(input);
     const { admissionDigest, ...body } = built.admission;
     expect(admissionDigest).toBe(shaCanonical(body));
+  });
+});
+
+// Ruling CY (review F1): a setup proposal stored before the signed-out variants existed (`tests/fixtures/setup-proposals-before-task-3-3.json`, written by the code at ccee79e1 over
+// the fixture apps) keeps verifying and keeps dispatching. The variants are derived from the base targets whenever targets are read; none is stored.
+describe("setup proposals stored before Task 3.3", () => {
+  type Stored = { files: string[]; proposal: unknown; setupApproval: { artifactId: string; digest: string } };
+  const stored = JSON.parse(readFileSync(new URL("../fixtures/setup-proposals-before-task-3-3.json", import.meta.url), "utf8")) as Record<"inferred-web-app" | "orders-contract-app", Stored>;
+  const rootOf = { "inferred-web-app": "../fixtures/e2e-inferred-web-app/", "orders-contract-app": "../fixtures/e2e-web-api-app/" } as const;
+  const snapshotFor = (name: keyof typeof stored) => {
+    const candidate = createCandidateManifest([{ repositoryId: "example/demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
+    const sources = stored[name].files.map((path) => { const bytes = readFileSync(new URL(`${rootOf[name]}${path}`, import.meta.url)); return { path, bytes, sha256: createHash("sha256").update(bytes).digest("hex"), kind: "blob" as const }; });
+    return { candidate, commitSha: "a".repeat(40), treeSha: "b".repeat(40), treeComplete: true as const, treePaths: sources.map((item) => item.path).sort(), sources };
+  };
+
+  it.each(["inferred-web-app", "orders-contract-app"] as const)("verifies unchanged for the %s fixture, and the proposal made now is the stored one, byte for byte", (name) => {
+    const snapshot = snapshotFor(name);
+    const proposal = E2ESetupProposalSchema.parse(stored[name].proposal);
+    expect(verifyE2ESetupProposal(proposal, snapshot, snapshot.candidate)).toEqual(proposal);
+    expect(stored[name].setupApproval.digest).toBe(createHash("sha256").update(canonicalJson(proposal)).digest("hex"));
+    // The proposal made now holds the base targets alone and the recipe it always had.
+    const made = proposeE2ESetup({ inspection: inspectE2ERepository(snapshot, snapshot.candidate).inspection, snapshot, expectedCandidate: snapshot.candidate, readyProfiles: [{ kind: "web", profileId: PROFILE }] });
+    expect(canonicalJson(made)).toBe(canonicalJson(proposal));
+    expect(proposal.targets.map((target) => target.accountProfileId)).not.toContain("rovara-anonymous");
+  });
+
+  it("keeps an already-approved plan approvable and dispatchable on the stored proposal and the policy built from it", async () => {
+    const proposal = E2ESetupProposalSchema.parse(stored["orders-contract-app"].proposal);
+    const fx = planFixture({});
+    const policy = { ...fx.policy, targets: proposal.targets };
+    const setupApproval = stored["orders-contract-app"].setupApproval;
+    const approved = evaluateApplicationPlanApproval({ intent: fx.intent, taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: fx.snapshot,
+      setupProposal: proposal, setupApproval, policy, registeredRuntimes: [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now(),
+      accounts: { entries: fx.registry, mode: "approve", pinned: [] } });
+    if (!approved.ok) throw new Error(approved.reason);
+    const { input } = await inputs({ setupProposal: proposal, setupApproval, policy, recordedSelection: approved.selection });
+    const decoded = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission(input).bytes);
+    expect(validateE2EApplicationExecutionAdmission(decoded).applicationSuites).toHaveLength(1);
+    // The stored policy has no variant; the admission's carries the one derived from the base, on the base's runtime profile.
+    expect(policy.targets.map((target) => target.accountProfileId)).not.toContain("rovara-anonymous");
+    const admitted = decoded.selectionInput.policy.targets;
+    expect(admitted.map((target) => target.targetId)).toEqual([...policy.targets.map((target) => target.targetId), "web-1-anonymous"]);
+    expect(admitted.find((target) => target.targetId === "web-1-anonymous")).toMatchObject({ accountProfileId: "rovara-anonymous", runtimeProfileId: PROFILE });
   });
 });

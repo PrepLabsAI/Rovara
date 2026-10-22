@@ -119,7 +119,7 @@ export class FakeDockerCli implements DockerCli {
     if (!found) throw new Error(`no docker call starts with "${prefix}"`);
     return found;
   }
-  mountsFor(kind: "app" | "executor" | "seed"): string[] {
+  mountsFor(kind: "app" | "executor" | "seed" | "datakeep"): string[] {
     const args = this.argsFor(kind);
     return args.flatMap((value, index) => (args[index - 1] === "-v" ? [value] : []));
   }

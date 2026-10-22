@@ -6,7 +6,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { runE2EExecutorSerially as runE2EExecutor } from "../support/executor-run-lock.js";
 import { listChromiumProcesses } from "../../packages/verifier/src/executor/chromium-sandbox.js";
 import { launchLocalChromium } from "../../packages/verifier/src/executor/local-browser.js";
 import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput } from "../../packages/verifier/src/host/executor-readback.js";

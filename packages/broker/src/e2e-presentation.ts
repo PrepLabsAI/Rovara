@@ -1,5 +1,5 @@
 import type { E2EDisplayBaseline, E2EDisplayScenario, E2EScenarioResults, E2ESharedView } from "../../contracts/src/e2e-view.js";
-import { displayText, summarizeScenarios } from "./e2e/application-display.js";
+import { accountDisplayName, displayText, summarizeScenarios } from "./e2e/application-display.js";
 
 const LIST_LIMIT = 8;
 const SCOPE_NOTE = "Portable source and mock checks are scoped evidence. Browser, native, live-service, authentication, and internal-callable behavior remain unverified unless separately qualified.";
@@ -144,7 +144,7 @@ function rowSentence(row: E2EDisplayScenario): string {
   const title = displayText(row.title, 120);
   const reason = row.reason === undefined ? "" : displayText(row.reason, 300);
   const word = row.status === "PASSED" ? "passed" : row.status === "FAILED" ? "failed" : "incomplete";
-  return `${title} — ${word}${reason === "" ? "" : `: ${reason}`} (${displayText(row.accountLabel, 60)})`;
+  return `${title} — ${word}${reason === "" ? "" : `: ${reason}`} (${displayText(accountDisplayName(row.accountLabel), 60)})`;
 }
 
 /** What the unchanged code did, in a sentence for the page and Slack. Information only: it never says anything about the change itself. */
@@ -183,7 +183,7 @@ function rowsTable(rows: readonly E2EDisplayScenario[], rowAttribute: string, ar
     const details = [reason, badges, shot].filter((part) => part !== "").join(" ");
     const status = row.status === "PASSED" ? "Passed" : row.status === "FAILED" ? "Failed" : "Incomplete";
     return `<tr ${rowAttribute}="${html(displayText(row.scenarioId, 120))}" data-status="${row.status}"><td>${html(displayText(row.title, 120))} <span class="muted">(${row.kind === "web" ? "Browser" : "API"})</span></td>`
-      + `<td>${status}</td><td>${html(displayText(row.accountLabel, 60))}</td><td>${details}</td></tr>`;
+      + `<td>${status}</td><td>${html(displayText(accountDisplayName(row.accountLabel), 60))}</td><td>${details}</td></tr>`;
   }).join("");
   return `<table class="e2e-rows"><thead><tr><th scope="col">Check</th><th scope="col">Result</th><th scope="col">Account</th><th scope="col">Details</th></tr></thead><tbody>${body}</tbody></table>`;
 }

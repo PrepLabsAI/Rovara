@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { E2EApplicationExecutionAdmissionSchema, canonicalJson, createCandidateManifest, e2eApplicationMetadataSourceRefs, e2eAppBuildManifestDigest,
+import { E2EApplicationExecutionAdmissionSchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eApplicationLockfileRefs, canonicalJson, e2eAnonymousRuntimeAccountRef, createCandidateManifest, e2eApplicationMetadataSourceRefs, e2eAppBuildManifestDigest,
   e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, E2EApplicationPlanIntentSchema,
   E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema, E2ERuntimeCapabilityDescriptorSchema,
-  inspectE2ERepository, projectE2EApplicationPortableSelection, proposeE2ESetup, selectE2EApplicationExecutionPlan,
+  inspectE2EApplicationRepository, inspectE2ERepository, projectE2EApplicationPortableSelection, withE2EAnonymousTargets, proposeE2ESetup, selectE2EApplicationExecutionPlan,
   type E2EPolicy, type E2ESourceSnapshot } from "@agentx/contracts";
 import { deriveE2EApplicationApprovalBinding } from "../../packages/broker/src/e2e/application-plan-binding.js";
 import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
@@ -62,7 +62,9 @@ function registeredApiRuntime(profileId: string, now: number, supportsAgent = fa
 
 /** A source-derived, engine-less API group used only for offline collector conformance. */
 export function createCompiledApiApplicationFixture(options: { modelRoute?: { routeId: string; routeRevision: string }; hostManifestDigest?: string; now?: string; withApiMock?: boolean;
-  agentAfterRequest?: boolean } = {}): { compiled: E2ECompiledApplicationSuite; binding: ReturnType<typeof E2ERunBindingSchema.parse>;
+  agentAfterRequest?: boolean;
+  /** Plan the case on the application's implicit `rovara-anonymous` API variant, with the fixed anonymous account reference (Ruling AZ). */
+  anonymous?: boolean } = {}): { compiled: E2ECompiledApplicationSuite; binding: ReturnType<typeof E2ERunBindingSchema.parse>;
   admission: unknown;
   round: ReturnType<typeof E2ERoundSchema.parse>; snapshot: E2ESourceSnapshot; now: string } {
   const packageBytes = Buffer.from(JSON.stringify({ name: "service", scripts: { start: "node server.js" }, dependencies: { express: "1.0.0" } }));
@@ -79,7 +81,8 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
       { id: "invalid-data" as const, inputValue: "invalid", status: 200, body: { healthy: "invalid" } },
     ] };
   const fixtureBytes = Buffer.from(canonicalJson(apiFixture));
-  const sourceFiles = [{ path: "apps/service/package.json", bytes: packageBytes },
+  // A signed-out case runs on the recipe discovery infers from a root package with a start script and a lockfile (the start-script fallback is not offered a visitor).
+  const sourceFiles = [...(options.anonymous === true ? [{ path: "package.json", bytes: packageBytes }, { path: "package-lock.json", bytes: Buffer.from("{}") }] : [{ path: "apps/service/package.json", bytes: packageBytes }]),
     ...(options.withApiMock ? [{ path: "apps/service/openapi.json", bytes: openApiBytes }, { path: "apps/service/e2e-fixture.json", bytes: fixtureBytes }] : [])];
   const treeEntries = sourceFiles.map((item) => ({ path: item.path, mode: "100644", objectId: gitBlob(item.bytes) }));
   const treeSha = gitTreeSha(treeEntries);
@@ -87,9 +90,11 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
     treePaths: sourceFiles.map((item) => item.path).sort(), sources: sourceFiles.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
   const discovery = inspectE2ERepository(snapshot, candidate);
-  const target = discovery.inspection.proposedTargets.find((item) => item.kind === "api")!;
+  // The setup proposal is made from the plain discovery; the application path also reads each base target's signed-out variant, derived from the base.
+  const policyTargets = withE2EAnonymousTargets(discovery.inspection.proposedTargets, inspectE2EApplicationRepository(snapshot, candidate).anonymous);
+  const target = policyTargets.find((item) => item.kind === "api" && (item.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) === (options.anonymous === true))!;
   const application = discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
-  const accountContext = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths)[0]!;
+  const accountContext = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths).find((ref) => ref.path.endsWith("package.json"))!;
   const scenario = { scenarioId: "service-health", requirementId: "health-status", requestedTargetIds: [target.targetId], required: true,
     accountProfileId: target.accountProfileId, minimumEvidence: "runtime" as const, requiredRealComponentIds: [],
     steps: options.modelRoute && !options.agentAfterRequest
@@ -98,7 +103,8 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
       : [{ kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: options.withApiMock ? { kind: "success" } : {} },
         ...(options.modelRoute ? [{ kind: "agent" as const, goal: "Inspect the service response without external effects", maxActions: 1 }] : [])],
     assertions: [{ kind: "http-status" as const, path: "/health", method: "GET" as const, equals: 200 }] };
-  const accountRef = { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "8".repeat(64) };
+  const accountRef = options.anonymous === true ? e2eAnonymousRuntimeAccountRef(application.applicationId)
+    : { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "8".repeat(64) };
   const nowMs = options.now ? Date.parse(options.now) : Date.now() + 30_000;
   if (!Number.isFinite(nowMs)) throw new Error("API conformance fixture admission time must be a finite timestamp");
   const now = new Date(nowMs).toISOString();
@@ -117,7 +123,7 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
   const applicationApprovalBinding = deriveE2EApplicationApprovalBinding({ preparedSnapshot: snapshot, intent, artifactId: semanticApproval.artifactId,
     artifactSha256: semanticApproval.digest, planDigest, setupProposal, setupApproval });
   const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [scenario.scenarioId],
-    targets: discovery.inspection.proposedTargets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: options.modelRoute?.routeRevision ?? null,
+    targets: policyTargets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: options.modelRoute?.routeRevision ?? null,
     capture: { screenshots: false, traces: false, video: false, downloads: false },
     limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
       maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
@@ -146,7 +152,7 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
   const output = { artifactId: "api-build", sha256: "5".repeat(64), appId: application.applicationId, platform: "api" as const };
   const buildBody = { schemaVersion: "e2e-app-build/v1" as const, candidateDigest: candidate.digest, applicationId: application.applicationId,
     repository: { repositoryId: "fixture/api", commitSha: snapshot.commitSha, treeSha }, recipeDigest: application.recipe!.recipeDigest,
-    lockfileRefs: [], toolchainManifestDigest: "6".repeat(64), outputs: [output], createdAt: now };
+    lockfileRefs: e2eApplicationLockfileRefs(applicationApprovalBinding.applications.find((item) => item.applicationId === application.applicationId)!.sourceRefs), toolchainManifestDigest: "6".repeat(64), outputs: [output], createdAt: now };
   const build = { ...buildBody, manifestDigest: e2eAppBuildManifestDigest(buildBody) };
   const applicationBindings = new Map([[application.applicationId, { approval: applicationApprovalBinding, build,
     artifacts: [{ ...output, buildManifestDigest: build.manifestDigest }], buildSource }]]);
@@ -204,7 +210,7 @@ export function createCompiledTwoShardApiApplicationFixture(options: { now?: str
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
     treePaths: packageValues.map((item) => item.path).sort(), sources: packageValues.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
   const discovery = inspectE2ERepository(snapshot, candidate);
-  const targets = discovery.inspection.proposedTargets.filter((item) => item.kind === "api").sort((a, b) => a.targetId.localeCompare(b.targetId));
+  const targets = discovery.inspection.proposedTargets.filter((item) => item.kind === "api" && item.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID).sort((a, b) => a.targetId.localeCompare(b.targetId));
   if (targets.length !== 2) throw new Error("two-shard API fixture did not derive two independent source targets");
   const runtimeProfileId = "api-runtime";
   const runtime = registeredApiRuntime(runtimeProfileId, nowMs, true);
@@ -308,7 +314,7 @@ export function createPortableApplicationChildFixture() {
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
     treePaths: files.map((item) => item.path).sort(), sources: files.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
   const discovery = inspectE2ERepository(snapshot, candidate);
-  const target = discovery.inspection.proposedTargets.find((item) => item.kind === "api")!;
+  const target = discovery.inspection.proposedTargets.find((item) => item.kind === "api" && item.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID)!;
   const nativeTarget = discovery.inspection.proposedTargets.find((item) => item.kind === "mobile")!;
   const application = discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
   const nativeApplication = discovery.inspection.applications.find((item) => item.applicationId === nativeTarget.applicationId)!;

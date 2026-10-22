@@ -1,20 +1,30 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { createPlaywrightFormLoginDriver, isSessionCookieSecret, parseSetCookie } from "../../packages/verifier/src/executor/form-login.js";
+import { createPlaywrightFormLoginDriver, isSessionCookieSecret, isSessionStorageSecret, parseSetCookie } from "../../packages/verifier/src/executor/form-login.js";
 
 const signal = new AbortController().signal;
 const servers: Server[] = [];
 afterEach(async () => { await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); }))); });
 
 describe("which cookies are session secrets", () => {
-  it("takes 16 characters or more, or HttpOnly and 8 or more, and nothing shorter", () => {
+  it("takes 16 characters or more, or HttpOnly and 8 to 15 that mix letters and digits, and nothing shorter or plainer (N1)", () => {
     const secret = (value: string, httpOnly = false) => isSessionCookieSecret({ value, httpOnly });
     expect(secret("0123456789abcdef")).toBe(true);
     expect(secret("0123456789abcde")).toBe(false);
-    expect(secret("abcdefgh", true)).toBe(true);
-    expect(secret("abcdefg", true)).toBe(false);
+    expect(secret("abcd1234", true)).toBe(true);
+    expect(secret("abcd123", true)).toBe(false);
     for (const word of ["", "1", "true", "accepted", "dark", "en-US"]) expect(secret(word), word).toBe(false);
-    expect(secret("accepted", true)).toBe(true);
+    // An HttpOnly cookie that is a plain word or a plain number (some frameworks make every server cookie HttpOnly) is a setting, not a session id.
+    for (const plain of ["accepted", "AcceptedWord", "123456789", "en-US-latin"]) expect(secret(plain, true), plain).toBe(false);
+    // Sixteen characters are a secret whatever they hold, HttpOnly or not.
+    expect(secret("acceptedwordsonly")).toBe(true);
+    expect(secret("acceptedwordsonly", true)).toBe(true);
+  });
+
+  it("takes a local storage value of 16 characters or more, and nothing shorter (N3)", () => {
+    expect(isSessionStorageSecret("0123456789abcdef")).toBe(true);
+    expect(isSessionStorageSecret("0123456789abcde")).toBe(false);
+    expect(isSessionStorageSecret("dark")).toBe(false);
   });
 });
 
