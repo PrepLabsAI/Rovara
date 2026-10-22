@@ -84,7 +84,10 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     scratch.push(dir);
     const candidateSourceDir = join(dir, "candidate");
     await cp(ORDERS_FIXTURE_ROOT, candidateSourceDir, { recursive: true });
-    const runRoot = join(dir, "runs");
+    // A short run root: the model socket path (<runRoot>/<runId>/model/model.sock) must fit a unix socket's 103 bytes, and a CI runner's tmpdir is far deeper than the worker's.
+    // The production root is bounded by tests/unit/worker-e2e-application-runtime.test.ts.
+    const runRoot = realpathSync(await mkdtemp("/tmp/rvm-"));
+    scratch.push(runRoot);
     // The production host over the derived image: the mount, the walls, the cleanup and the plan are the host's own.
     const host = createDockerApplicationHost({ docker: createProcessDockerCli(), executorImage: TEST_IMAGE, buildImage: APP_NODE_IMAGE, runRoot, now: () => Date.now(),
       admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir, modelChannel: { async open(input) {

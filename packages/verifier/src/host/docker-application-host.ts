@@ -81,7 +81,9 @@ export const DEFAULT_DEADLINE_GRACE_MS = 15_000;
 export const WEB_API_BUILD_IMAGE = "public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5";
 const ADMIN_TIMEOUT_MS = 30_000;
 /** The longest model socket path the host accepts: the smaller of the two platforms' unix socket limits, so a test on a Mac binds what a Linux worker does. */
-const MODEL_SOCKET_PATH_MAX_BYTES = 103;
+export const MODEL_SOCKET_PATH_MAX_BYTES = 103;
+/** Where the worker's proxy listens for a run: `<runRoot>/<runId>/model/model.sock`. The host and the tests that bound the production run root share this one layout. */
+export function e2eModelSocketPath(runRoot: string, runId: string): string { return join(runRoot, runId, "model", "model.sock"); }
 const MAX_TAIL_BYTES = 64 * 1024;
 const APP_PORT = 4317;
 const BUILD_COPY_TIMEOUT_MS = 120_000;
@@ -297,7 +299,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const dirs = { app: join(workspace, "app"), owned: join(workspace, "owned"), out: join(workspace, "out"), plan: join(workspace, "plan.json"),
     mock: join(workspace, "mock"), mockOut: join(workspace, "mock-out"), resolv: join(workspace, "resolv.conf"), model: join(workspace, "model") };
   /** Where the worker's proxy listens for this run; only the executor container gets it, at `E2E_MODEL_CHANNEL_SOCKET_PATH`. */
-  const modelSocket = join(dirs.model, "model.sock");
+  const modelSocket = e2eModelSocketPath(deps.runRoot, runId);
   // A unix socket path is limited to 107 bytes on Linux and 103 on macOS. The worker's run root leaves this one 97, so a deeper root is a configuration error to say at once, not an
   // address the proxy fails to bind in the middle of a run.
   if (usesModel && Buffer.byteLength(modelSocket) > MODEL_SOCKET_PATH_MAX_BYTES) throw new Error("docker application host run root is too deep for the model socket path");

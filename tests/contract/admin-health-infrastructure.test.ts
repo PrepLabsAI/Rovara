@@ -113,6 +113,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/aws/workflow-merge-recovery.ts",
       // The AI navigation day-budget rows (M1.4 Task 4.2) expire on it: one tiny row per project per UTC day.
       "packages/broker/src/e2e/model-route-registry.ts",
+      // The worker's callback for those day-budget rows (M1.4 Task 4.3a) writes the day's row and one reservation row per model call; both expire on it at the end of their UTC day.
+      "packages/broker/src/e2e/model-budget-endpoint.ts",
       // The baseline round's record (M1.3 Task 3.7b, owner decision D4): it expires 30 days after it was last written.
       "packages/broker/src/aws/workflow-e2e-baseline.ts",
     ]);

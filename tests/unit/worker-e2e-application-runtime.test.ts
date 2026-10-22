@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OperationJournal, createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/index.js";
-import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/docker-application-host.js";
+import { MODEL_SOCKET_PATH_MAX_BYTES, WEB_API_BUILD_IMAGE, e2eModelSocketPath } from "../../packages/verifier/src/host/docker-application-host.js";
 import { createApplicationChecksFeatureMonitor, createWorkflowE2EApplicationRuntime, workflowE2EApplicationChecksAvailability, workflowE2EApplicationHostDeps, workflowE2EApplicationRuntimeConfig } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
@@ -19,6 +19,15 @@ describe("worker application runtime configuration", () => {
   it("takes the executor image from EXECUTOR_IMAGE, the build image from the pin and a shared run root from the host profile", () => {
     expect(workflowE2EApplicationRuntimeConfig({ EXECUTOR_IMAGE: image }, "linux", "arm64"))
       .toEqual({ executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: "/mnt/agentx-runtime/candidates/web-api-runs" });
+  });
+
+  it("leaves the model socket path of a production run within the unix socket limit (a deeper run root fails here, not in a run)", () => {
+    // The EC2 runner is linux/arm64; group run ids are UUIDs (contracts/e2e.ts), the longest the host's run id pattern allows being 64 characters.
+    const { runRoot } = workflowE2EApplicationRuntimeConfig({ EXECUTOR_IMAGE: image }, "linux", "arm64");
+    const uuid = "11111111-1111-4111-8111-111111111111";
+    expect(Buffer.byteLength(e2eModelSocketPath(runRoot, uuid))).toBeLessThanOrEqual(MODEL_SOCKET_PATH_MAX_BYTES);
+    // The layout is the one the host binds: <runRoot>/<runId>/model/model.sock.
+    expect(e2eModelSocketPath(runRoot, uuid)).toBe(`${runRoot}/${uuid}/model/model.sock`);
   });
 
   it.each([{}, { EXECUTOR_IMAGE: "" }, { EXECUTOR_IMAGE: "  " }, { EXECUTOR_IMAGE: "--privileged" }, { EXECUTOR_IMAGE: "two words" }])("refuses to run without a usable executor image (%j)", (environment) => {
