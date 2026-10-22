@@ -47,8 +47,11 @@ describe("the three agent qualification probes (Task 4.5)", () => {
   it("pins each agent probe's asset, scenario and bundle; the three run one scenario under one bundle", () => {
     const agent = WEB_API_REQUIRED_PROBES.slice(11);
     for (const probe of agent) expect([probe.probeId, probe.assetDigest, probe.scenarioDigest, probe.bundleDigest, probe.buildCommandDigest]).toEqual([probe.probeId, expect.stringMatching(/^[a-f0-9]{64}$/), expect.stringMatching(/^[a-f0-9]{64}$/), expect.stringMatching(/^[a-f0-9]{64}$/), null]);
-    expect(new Set(agent.map((probe) => probe.scenarioDigest)).size).toBe(1);
-    expect(new Set(agent.map((probe) => probe.bundleDigest)).size).toBe(1);
+    // The scripted and wrong-action probes run one scenario under one bundle; the isolation probe ends on the guard's page, so its scenario and bundle are its own.
+    expect(agent[0]!.scenarioDigest).toBe(agent[1]!.scenarioDigest);
+    expect(agent[0]!.bundleDigest).toBe(agent[1]!.bundleDigest);
+    expect(agent[2]!.scenarioDigest).not.toBe(agent[0]!.scenarioDigest);
+    expect(agent[2]!.bundleDigest).not.toBe(agent[0]!.bundleDigest);
     expect(new Set(WEB_API_REQUIRED_PROBES.map((probe) => probe.assetDigest)).size).toBe(14);
   });
 
@@ -60,6 +63,9 @@ describe("the three agent qualification probes (Task 4.5)", () => {
       ["no agent facts", { ...passing(), agent: undefined }],
       ["the collector did not pass", { ...passing(), collectorStatus: "UNKNOWN" }],
       ["a failed assertion", { ...passing(), collectorStatus: "FAILED", failedAssertionKinds: ["csv"] }],
+      // The isolation probe's marker (the guard's in-request checks) is a visible assertion: without it the probe is not accepted.
+      ["the guard's marker not visible (no in-request check ran)", { ...passing(), collectorStatus: "FAILED", failedAssertionKinds: ["visible"] }],
+      ["a request the executor had blocked", { ...passing(), blockedHosts: ["probe.example.com"] }],
       ["the run was unavailable (the app did not start)", { ...passing(), collectorStatus: null, runUnavailableReason: "app-exited" }],
       ["another route", passing({ routeId: "rovara-e2e-default" })],
       ["no route", passing({ routeId: null })],
@@ -100,6 +106,7 @@ describe("the three agent qualification probes (Task 4.5)", () => {
       ["no case reason at all", noDownload({ caseReasons: [] })],
       ["the code twice", noDownload({ caseReasons: ["agent-no-download", "agent-no-download"] })],
       ["a failed assertion beside the code", noDownload({}, { failedAssertionKinds: ["csv"] })],
+      ["a request the executor had blocked", noDownload({}, { blockedHosts: ["probe.example.com"] })],
       ["the run unavailable", noDownload({}, { collectorStatus: null, runUnavailableReason: "app-exited" })],
       ["a download", noDownload({ downloads: 1 })],
       ["extra receipts: two ok receipts", noDownload({ receipts: 2, okReceipts: 2 })],

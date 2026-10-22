@@ -1,7 +1,7 @@
 import { request } from "node:http";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_ROUTE } from "../../packages/contracts/src/index.js";
 import type { WebApiProbeModelChannelRequest } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { createScriptedQualificationModelChannel } from "../../packages/worker/src/e2e-qualification-model-channel.js";
@@ -95,8 +95,13 @@ describe("the scripted model channel of the agent qualification probes", () => {
     expect(WEB_API_AGENT_PROBE_GOAL).toBe("Export the orders as a CSV file");
     const factory = await installedScriptedModelChannelFactory();
     expect(typeof factory).toBe("function");
-    // A worker build that is not there, or does not export the factory, gives none: the agent probes then do not run.
-    expect(await installedScriptedModelChannelFactory(new URL("file:///nonexistent/e2e-qualification-model-channel.js"))).toBeUndefined();
-    expect(await installedScriptedModelChannelFactory(new URL("../../packages/worker/dist/e2e-model-scripted.js", import.meta.url))).toBeUndefined();
+    // A worker build that is not there, or does not export the factory, gives none: the agent probes then do not run. Each says so in the log with a fixed, path-free code.
+    const written: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: string) => { written.push(String(chunk)); return true; }) as never);
+    try {
+      expect(await installedScriptedModelChannelFactory(new URL("file:///nonexistent/e2e-qualification-model-channel.js"))).toBeUndefined();
+      expect(await installedScriptedModelChannelFactory(new URL("../../packages/worker/dist/e2e-model-scripted.js", import.meta.url))).toBeUndefined();
+    } finally { spy.mockRestore(); }
+    expect(written).toEqual(["worker-scripted-channel-missing\n", "worker-scripted-channel-invalid\n"]);
   });
 });

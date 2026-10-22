@@ -40,10 +40,12 @@ export function webApiProbeRunnerConfig(environment: NodeJS.ProcessEnv, platform
  * the `agent` capability is never listed without them.
  */
 export async function installedScriptedModelChannelFactory(workerBuild = new URL("../../worker/dist/e2e-qualification-model-channel.js", import.meta.url)): Promise<WebApiProbeModelChannelFactory | undefined> {
-  try {
-    const loaded = await import(workerBuild.href) as { createScriptedQualificationModelChannel?: unknown };
-    return typeof loaded.createScriptedQualificationModelChannel === "function" ? loaded.createScriptedQualificationModelChannel as WebApiProbeModelChannelFactory : undefined;
-  } catch { return undefined; }
+  // A fixed, path-free code goes to the qualification log, so a missing or broken module shows as such at the first real run and not only as `probe-run-failed`.
+  let loaded: { createScriptedQualificationModelChannel?: unknown };
+  try { loaded = await import(workerBuild.href) as typeof loaded; } catch { process.stderr.write("worker-scripted-channel-missing\n"); return undefined; }
+  if (typeof loaded.createScriptedQualificationModelChannel === "function") return loaded.createScriptedQualificationModelChannel as WebApiProbeModelChannelFactory;
+  process.stderr.write("worker-scripted-channel-invalid\n");
+  return undefined;
 }
 
 export type QualificationCliDeps = Readonly<{

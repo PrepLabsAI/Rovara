@@ -59,12 +59,11 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
 
   describe("the isolation guard, run as the app container runs it", () => {
     const script = webApiAgentIsolationGuardArgs()[2]!;
-    /** The pinned guard, with the start of the app replaced by a marker, and the port it tries replaced by the stand-in's. */
-    const guardArgs = (port: number) => ["--input-type=module", "-e", substituteGuard(script, [["import('./server.mjs').then(m=>m.startOrdersServer())", "console.log('STARTED')"], ["port:8080", `port:${String(port)}`]])];
-    async function runGuard(network: string, socket: string | null, port: number) {
-      const mount = socket === null ? [] : ["-v", `${socket}:/run/rovara/model.sock:ro`];
-      return docker("run", "--rm", "--pull=never", "--network", network, "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000", ...mount, APP_NODE_IMAGE, "node", ...guardArgs(port));
-    }
+    /** The pinned guard, with the port it tries replaced by the stand-in's; the app it starts is a one-line server beside it that logs STARTED. */
+    const guardArgs = (port: number) => ["--input-type=module", "-e", substituteGuard(script, [["port:8080", `port:${String(port)}`]])];
+    const fakeApp = "import{createServer}from'node:http';export function startOrdersServer(){const s=createServer((q,r)=>r.end('app'));s.listen(4317,'0.0.0.0',()=>console.log('STARTED'));return s}\n";
+    const names: string[] = [];
+    afterAll(async () => { for (const name of names.splice(0)) await docker("rm", "-f", name); });
     async function network(kind: "walled" | "plain"): Promise<string> {
       const nets = e2eRunNetworks(`guard-${String(Date.now())}-${kind}`);
       networks.push(nets.internal);
@@ -74,31 +73,73 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(created.code, created.stderr).toBe(0);
       return nets.internal;
     }
-
-    it("starts the app behind the wall when no socket is visible, and does not start it when the model socket is visible, though nothing else changed", async () => {
+    /** Starts the guard as the app container's command, detached, and returns its name. */
+    async function startContainer(net: string, socket: string | null, port: number): Promise<string> {
       const dir = await mkdtemp("/tmp/rvgd-");
+      cleanups.push(() => rm(dir, { recursive: true, force: true }));
+      writeFileSync(join(dir, "server.mjs"), fakeApp);
+      chmodSync(dir, 0o755); chmodSync(join(dir, "server.mjs"), 0o644);
+      const name = `rovara-guard-${String(Date.now())}-${String(names.length)}`;
+      names.push(name);
+      const mount = socket === null ? [] : ["-v", `${socket}:/run/rovara/model.sock:ro`];
+      const started = await docker("run", "-d", "--pull=never", "--name", name, "--network", net, "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000", "-v", `${dir}:/g:ro`, "-w", "/g", ...mount,
+        APP_NODE_IMAGE, "node", ...guardArgs(port));
+      expect(started.code, started.stderr).toBe(0);
+      return name;
+    }
+    const state = async (name: string) => {
+      const inspect = (await docker("inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", name)).stdout.trim().split(" ");
+      return { status: inspect[0] ?? "", exitCode: Number(inspect[1] ?? "-1"), started: (await docker("logs", name)).stdout.includes("STARTED") };
+    };
+    /** Polls until the container has exited, or until `ms` have passed. */
+    async function settle(name: string, ms: number, until: (s: Awaited<ReturnType<typeof state>>) => boolean = (s) => s.status === "exited") {
+      const deadline = Date.now() + ms;
+      let current = await state(name);
+      while (!until(current) && Date.now() < deadline) { await new Promise((resolve) => setTimeout(resolve, 400)); current = await state(name); }
+      return current;
+    }
+
+    it("starts the app behind the wall when no socket is visible and keeps it up, and does not start it when the model socket is visible from the start", async () => {
+      const dir = await mkdtemp("/tmp/rvgs-");
       cleanups.push(() => rm(dir, { recursive: true, force: true }));
       const socket = join(dir, "model.sock");
       writeFileSync(socket, "");
       chmodSync(socket, 0o666);
       const walled = await network("walled");
       const port = workerStandIn?.port ?? 8080;
-      const clear = await runGuard(walled, null, port);
-      expect({ code: clear.code, started: clear.stdout.includes("STARTED") }, clear.stderr).toEqual({ code: 0, started: true });
-      const visible = await runGuard(walled, socket, port);
-      expect({ code: visible.code, started: visible.stdout.includes("STARTED") }, visible.stderr).toEqual({ code: 3, started: false });
+      const clear = await startContainer(walled, null, port);
+      const up = await settle(clear, 60_000, (s) => s.started || s.status === "exited");
+      expect({ status: up.status, started: up.started }).toEqual({ status: "running", started: true });
+      // The checks that repeat do not end an app that nothing reaches the model from.
+      await new Promise((resolve) => setTimeout(resolve, 4_000));
+      expect((await state(clear)).status).toBe("running");
+      const visible = await startContainer(walled, socket, port);
+      const refused = await settle(visible, 60_000);
+      expect({ status: refused.status, exitCode: refused.exitCode, started: refused.started }).toEqual({ status: "exited", exitCode: 3, started: false });
+    }, 300_000);
+
+    it("ends the app when the model socket appears after the app started (the host opens the channel after it starts the app)", async () => {
+      const walled = await network("walled");
+      const name = await startContainer(walled, null, workerStandIn?.port ?? 8080);
+      const up = await settle(name, 60_000, (s) => s.started || s.status === "exited");
+      expect({ status: up.status, started: up.started }).toEqual({ status: "running", started: true });
+      // As root in the app's own container (no capability needed in a directory it owns), the late mount: the socket appears where the guard looks.
+      const mounted = await docker("exec", "--user", "0", name, "sh", "-c", "mkdir -p /run/rovara && touch /run/rovara/model.sock");
+      expect(mounted.code, mounted.stderr).toBe(0);
+      const ended = await settle(name, 30_000);
+      expect({ status: ended.status, exitCode: ended.exitCode }).toEqual({ status: "exited", exitCode: 3 });
     }, 300_000);
 
     it("does not start the app when the gateway on the port answers, which is what a missing wall looks like (control: the same network kind without the wall)", async () => {
       const server = await listenOnAllAddresses();
       try {
         const plain = await network("plain");
-        const open = await runGuard(plain, null, server.port);
-        expect({ code: open.code, started: open.stdout.includes("STARTED") }, open.stderr).toEqual({ code: 3, started: false });
+        const open = await settle(await startContainer(plain, null, server.port), 60_000);
+        expect({ status: open.status, exitCode: open.exitCode, started: open.started }).toEqual({ status: "exited", exitCode: 3, started: false });
         // Behind the wall the same listener is unreachable, so the guard lets the app start.
         const walled = await network("walled");
-        const closed = await runGuard(walled, null, server.port);
-        expect({ code: closed.code, started: closed.stdout.includes("STARTED") }, closed.stderr).toEqual({ code: 0, started: true });
+        const closed = await settle(await startContainer(walled, null, server.port), 60_000, (s) => s.started || s.status === "exited");
+        expect({ status: closed.status, started: closed.started }).toEqual({ status: "running", started: true });
       } finally { server.server.close(); }
     }, 300_000);
   });

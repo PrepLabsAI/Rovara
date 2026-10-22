@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_MAX_ACTIONS, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, WEB_API_AGENT_GUARD_MARKER_TESTID, WEB_API_AGENT_GUARD_PAGE_PATH, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_MAX_ACTIONS, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
   E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimits, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
   selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
@@ -43,7 +43,7 @@ function gitTreeSha(entries: readonly { path: string; mode: string; objectId: st
 export const WEB_API_PROBE_APP_ORIGIN = E2E_EXECUTOR_COMPILED_ORIGIN;
 
 /** The scenarios a probe runs. Each is an ordinary source-style scenario that the real compiler turns into a CLI suite. */
-export type WebApiProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1" | "api-status-mismatch-v1" | "api-egress-denial-v1" | "web-inventory-status-v1" | "web-inventory-csv-v1" | "web-agent-v1";
+export type WebApiProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1" | "api-status-mismatch-v1" | "api-egress-denial-v1" | "web-inventory-status-v1" | "web-inventory-csv-v1" | "web-agent-v1" | "web-agent-isolation-v1";
 /** The CSV the positive probe expects, from the installed probe asset (the same bytes the pinned asset digest covers). */
 function csvOracle(): { columns: string[]; rows: string[][] } {
   const oracle = loadWebApiQualificationProbeAssets().find((asset) => asset.probeId === "web-csv-positive-v1")!.probe.oracle;
@@ -65,6 +65,14 @@ function scenarioFor(probe: WebApiProbeName, targetId: string, accountProfileId:
     const oracle = csvOracle();
     return { ...common, scenarioId: probe, steps: [{ kind: "navigate" as const, path: "/" }, { kind: "agent" as const, goal: WEB_API_AGENT_PROBE_GOAL, maxActions: WEB_API_AGENT_PROBE_MAX_ACTIONS }],
       assertions: [{ kind: "csv" as const, downloadName: "orders.csv", columns: oracle.columns, rows: oracle.rows }] };
+  }
+  if (probe === "web-agent-isolation-v1") {
+    // The scripted run, then the guard's own page: the app's start guard serves it, with a marker only once it has checked an earlier request before answering it. The step runs after the
+    // AI-navigated one, which runs with the model channel open, so the assertion holds only if the guard's in-request checks ran in that window (fix round 1, review I1).
+    const oracle = csvOracle();
+    return { ...common, scenarioId: probe, steps: [{ kind: "navigate" as const, path: "/" }, { kind: "agent" as const, goal: WEB_API_AGENT_PROBE_GOAL, maxActions: WEB_API_AGENT_PROBE_MAX_ACTIONS },
+      { kind: "navigate" as const, path: WEB_API_AGENT_GUARD_PAGE_PATH }],
+      assertions: [{ kind: "csv" as const, downloadName: "orders.csv", columns: oracle.columns, rows: oracle.rows }, { kind: "visible" as const, testId: WEB_API_AGENT_GUARD_MARKER_TESTID, equals: true }] };
   }
   if (probe === "web-egress-denial-v1") {
     // The page tries to reach an outside host; the scenario claims it succeeded, which an egress-denied run can never show.
@@ -386,7 +394,7 @@ export function webApiProbeDriver(probeId: string): WebApiProbeDriver {
     // The double concludes at once without acting, so no file is downloaded: the case is UNKNOWN `agent-no-download`.
     case "web-agent-wrong-action-v1": return { probe: "web-agent-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null, agent: { script: webApiAgentProbeScript(probeId) } };
     // The scripted run again, with the app started behind a guard that tries every path to the model while the channel is open for the executor (the asset's start command).
-    case "web-agent-app-isolation-v1": return { probe: "web-agent-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAgentIsolationGuardArgs(), agent: { script: webApiAgentProbeScript(probeId) } };
+    case "web-agent-app-isolation-v1": return { probe: "web-agent-isolation-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAgentIsolationGuardArgs(), agent: { script: webApiAgentProbeScript(probeId) } };
     case "app-host-denial-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAppStartGuardArgs() };
     default: throw new Error(`no probe plan for ${probeId}`);
   }

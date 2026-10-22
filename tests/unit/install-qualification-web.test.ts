@@ -168,6 +168,13 @@ describe("web/API runtime qualification", () => {
     expect((await rejection(qualify({ [probeId]: { agent: undefined } }))).message).toContain(`positive-probe-failed:${probeId}`);
   });
 
+  it("rejects the isolation probe when the guard's marker is not visible (no in-request check ran with the channel open), and when the guard ended the app (a model path appeared)", async () => {
+    const probeId = "web-agent-app-isolation-v1";
+    expect((await rejection(qualify({ [probeId]: { collectorStatus: "FAILED", failedAssertionKinds: ["visible"] } }))).message).toContain(`positive-probe-failed:${probeId}`);
+    expect((await rejection(qualify({ [probeId]: { collectorStatus: null, runUnavailableReason: "app-exited", failedAssertionKinds: [] } }))).message).toContain(`positive-probe-failed:${probeId}`);
+    expect((await rejection(qualify({ [probeId]: { blockedHosts: ["probe.example.com"] } }))).message).toContain(`positive-probe-failed:${probeId}`);
+  });
+
   it.each(["web-agent-scripted-v1", "web-agent-wrong-action-v1", "web-agent-app-isolation-v1"])("fails closed when %s could not run (no model channel, no executor): no proposal, the other probes still judged", async (probeId) => {
     const error = await rejection(qualify({ [probeId]: new Error("no model channel to run the probe"), "web-csv-negative-v1": { collectorStatus: "PASS", failedAssertionKinds: [] } }));
     expect((error as WebApiQualificationRejected).reasons).toEqual(["negative-probe-passed:web-csv-negative-v1", `probe-run-failed:${probeId}`]);

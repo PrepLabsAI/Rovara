@@ -23,6 +23,12 @@ export const WEB_API_AGENT_PROBE_LIMITS = Object.freeze({ runTimeoutMs: 1_200_00
 /** The goal of the one AI-navigated step every agent probe runs, and its bound on actions. The scripted double is keyed by this goal's digest; the probe assets pin it too. */
 export const WEB_API_AGENT_PROBE_GOAL = "Export the orders as a CSV file";
 export const WEB_API_AGENT_PROBE_MAX_ACTIONS = 4;
+/**
+ * The page the isolation probe's guard serves itself, and the marker it carries once the guard has checked an earlier request before answering it. The probe's last step loads the page
+ * and asserts the marker is visible, after the AI-navigated step (which runs with the model channel open), so the probe passes only if the guard's in-request checks ran.
+ */
+export const WEB_API_AGENT_GUARD_PAGE_PATH = "/__rovara-guard";
+export const WEB_API_AGENT_GUARD_MARKER_TESTID = "guard-in-request-checks";
 
 /** What a probe must show for it to count as its expected failure; anything else is a different failure. */
 type ExpectedFailureCause =
@@ -81,15 +87,17 @@ const requiredProbes: RequiredProbe[] = [
   // namespace of their own), and the executor refuses to run a case in a browser that does not show it, so a `--no-sandbox` runner fails this probe. It runs the CSV scenario.
   { probeId: "chromium-sandbox-v1", assetDigest: "e27ceecc03c241669c31cd91dca1088a62d2e47cecadf9eca0b8e2abe44284de", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "7469c1ac56ae5f5453d41d8c66a6f5e5be07a921530268e0976f22165b8652d8", scenarioDigest: "a7cd24dfbb78f5760995b3d8ac1a977a422ccf7d5601cfbaaafd6e0f8201cf5e", buildCommandDigest: null, chromiumSandbox: true },
   // M1.4 Task 4.5: three scripted-model probes of AI navigation. All run the CSV export as an agent step ("Export the orders as a CSV file") against the same app, under the scripted
-  // route, so they share one scenario and one bundle. The scripted double taps the button the goal does not name, or concludes without acting.
+  // route, so the scripted and wrong-action probes share one scenario and one bundle (the isolation probe adds the guard's page as a last step). The scripted double taps the button the goal does not name, or concludes without acting.
   { probeId: "web-agent-scripted-v1", assetDigest: "a3d89fd815a62edde8d7158fffe5005714dde457700a815beb7e162eac516a89", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "16b5bc8973ef966ff24c43ff50ee034d359bd986bc267a71613f028d5f3899e4", scenarioDigest: "a855f45a9439b1a4af9850f2363cd7051d2ad19fad6dc1962f79d682c6c934ad",
     buildCommandDigest: null, agent: { receipts: 2, verifiedReceipts: 2, downloads: 1, caseReasons: [] } },
   // The double concludes at once without acting: no download, so the case is UNKNOWN `agent-no-download`. A different cause, even a different UNKNOWN, is not this probe's outcome.
   { probeId: "web-agent-wrong-action-v1", assetDigest: "43fd4060986488dc59f3c0da6e55f04550ad078236dd937c64e03abef86fc295", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "agent-unknown", code: "agent-no-download" },
     bundleDigest: "16b5bc8973ef966ff24c43ff50ee034d359bd986bc267a71613f028d5f3899e4", scenarioDigest: "a855f45a9439b1a4af9850f2363cd7051d2ad19fad6dc1962f79d682c6c934ad", buildCommandDigest: null, agent: { receipts: 1, verifiedReceipts: 0, downloads: 0, caseReasons: ["agent-no-download"] } },
-  // The app starts behind a guard that looks for the model socket and tries `model-proxy:8080` and the gateway on 8080, and starts only if every attempt fails, while the model channel is open
-  // for the executor. The run passes only if the app started, so a pass proves the app cannot reach the model.
-  { probeId: "web-agent-app-isolation-v1", assetDigest: "d22646689c7932f1cc7954c62905c5e8dd4e3cfd7c42aa6841ff2133a3123cf3", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "16b5bc8973ef966ff24c43ff50ee034d359bd986bc267a71613f028d5f3899e4", scenarioDigest: "a855f45a9439b1a4af9850f2363cd7051d2ad19fad6dc1962f79d682c6c934ad",
+  // The app starts behind a guard that looks for the model socket and tries `model-proxy:8080` and the gateway on 8080, and starts only if every attempt fails. The host starts the app before it
+  // opens the model channel, so the guard goes on checking for the app's whole life: on a short interval (a socket mounted later ends the app) and before it answers each request. The last
+  // step of the case loads the guard's own page, after the AI-navigated step, and asserts the marker the guard puts there once an earlier request was checked: the probe passes only if the
+  // app started, stayed up while the executor drove it with the channel open, and the in-request checks ran. The `model-proxy` leg proves the name leads nowhere but the run's sinkhole.
+  { probeId: "web-agent-app-isolation-v1", assetDigest: "f383a9b102cd3d88d5377cbe4902b21b5a11ae1a960d7c93ba162fb2707bad4d", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "33716f10c5b021ec2845cc4e1fd8ab9d097ab897a066f2e8f23338d958dfd572", scenarioDigest: "efa380e5702e62cbbbd35acaff53f0a5766114368fa65183513485a43389d506",
     buildCommandDigest: null, agent: { receipts: 2, verifiedReceipts: 2, downloads: 1, caseReasons: [] } },
 ];
 export const WEB_API_REQUIRED_PROBES: readonly RequiredProbe[] = Object.freeze(requiredProbes.map((probe) => Object.freeze(probe)));
@@ -207,7 +215,7 @@ export function evaluateWebApiProbeObservation(probeId: string, observationInput
   const agentPin = probe.agent;
   const agentFacts = observation.agent;
   // An agent probe shows exactly the pinned AI navigation: the scripted route, every receipt ok, the receipts and downloads and case reasons pinned, and no call that no mock matched.
-  const agentAsPinned = agentPin !== undefined && agentFacts !== undefined && agentFacts.routeId === WEB_API_AGENT_PROBE_ROUTE.routeId
+  const agentAsPinned = agentPin !== undefined && agentFacts !== undefined && observation.blockedHosts.length === 0 && agentFacts.routeId === WEB_API_AGENT_PROBE_ROUTE.routeId
     && agentFacts.receipts === agentPin.receipts && agentFacts.okReceipts === agentPin.receipts && agentFacts.verifiedReceipts === agentPin.verifiedReceipts
     && agentFacts.downloads === agentPin.downloads && sameList(agentFacts.caseReasons, agentPin.caseReasons)
     && agentFacts.unmockedCalls.sinkhole === 0 && agentFacts.unmockedCalls.mocked === 0;

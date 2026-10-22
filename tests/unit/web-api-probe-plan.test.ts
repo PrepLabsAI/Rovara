@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_IDS, WEB_API_AGENT_PROBE_LIMITS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, canonicalJson, e2eModelRouteRevision, webApiProbeRunId } from "../../packages/contracts/src/index.js";
+import { WEB_API_AGENT_GUARD_MARKER_TESTID, WEB_API_AGENT_GUARD_PAGE_PATH, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_IDS, WEB_API_AGENT_PROBE_LIMITS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, canonicalJson, e2eModelRouteRevision, webApiProbeRunId } from "../../packages/contracts/src/index.js";
 import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel } from "../../packages/verifier/src/application-scenarios.js";
@@ -91,8 +91,10 @@ describe("the plan of the agent qualification probes (Task 4.5)", () => {
 
   it.each([...WEB_API_AGENT_PROBE_IDS])("%s runs one AI-navigated step under the scripted route in the policy, the admission, the binding and the round", (probeId) => {
     const { plan, compiled, scenario } = agentPlan(probeId);
-    expect(scenario.steps).toEqual([{ kind: "navigate", path: "/" }, { kind: "agent", goal: WEB_API_AGENT_PROBE_GOAL, maxActions: 4 }]);
-    expect(scenario.assertions).toMatchObject([{ kind: "csv", downloadName: "orders.csv" }]);
+    const isolation = probeId === "web-agent-app-isolation-v1";
+    // The isolation probe ends on the guard's own page, after the AI-navigated step: it passes only if the guard's in-request checks ran with the channel open (fix round 1, I1).
+    expect(scenario.steps).toEqual([{ kind: "navigate", path: "/" }, { kind: "agent", goal: WEB_API_AGENT_PROBE_GOAL, maxActions: 4 }, ...(isolation ? [{ kind: "navigate", path: WEB_API_AGENT_GUARD_PAGE_PATH }] : [])]);
+    expect(scenario.assertions).toMatchObject([{ kind: "csv", downloadName: "orders.csv" }, ...(isolation ? [{ kind: "visible", testId: WEB_API_AGENT_GUARD_MARKER_TESTID, equals: true }] : [])]);
     expect(e2eApplicationGroupUsesModel(compiled)).toBe(true);
     expect(e2eApplicationGroupAgentSteps(compiled)).toEqual([{ caseId: compiled.expectedCases[0]!.caseId, stepIndex: 1 }]);
     expect(plan.admission.modelRoute).toEqual(WEB_API_AGENT_PROBE_ROUTE);
@@ -108,10 +110,10 @@ describe("the plan of the agent qualification probes (Task 4.5)", () => {
     expect(() => agentPlan("web-agent-scripted-v1")).not.toThrow();
   });
 
-  it("runs the three probes through one scenario, differing in the script and in how the app starts; no other probe gets a model", () => {
+  it("runs the scripted and wrong-action probes through one scenario and the isolation probe through that scenario plus the guard's page, differing in the script and in how the app starts; no other probe gets a model", () => {
     const drivers = WEB_API_AGENT_PROBE_IDS.map((probeId) => [probeId, webApiProbeDriver(probeId)] as const);
-    expect(new Set(drivers.map(([, driver]) => driver.probe))).toEqual(new Set(["web-agent-v1"]));
-    expect(new Set(WEB_API_AGENT_PROBE_IDS.map((probeId) => canonicalJson(agentPlan(probeId).scenario))).size).toBe(1);
+    expect(drivers.map(([, driver]) => driver.probe)).toEqual(["web-agent-v1", "web-agent-v1", "web-agent-isolation-v1"]);
+    expect(new Set(WEB_API_AGENT_PROBE_IDS.map((probeId) => canonicalJson(agentPlan(probeId).scenario))).size).toBe(2);
     expect(drivers.map(([probeId, driver]) => [probeId, driver.agent?.script.length, driver.startArgs === null])).toEqual([["web-agent-scripted-v1", 2, true], ["web-agent-wrong-action-v1", 1, true], ["web-agent-app-isolation-v1", 2, false]]);
     expect(webApiProbeDriver("web-agent-app-isolation-v1").startArgs).toEqual(webApiAgentIsolationGuardArgs());
     for (const probe of WEB_API_REQUIRED_PROBES.slice(0, 11)) expect(webApiProbeDriver(probe.probeId).agent, probe.probeId).toBeUndefined();
