@@ -39,6 +39,8 @@ export type { E2EApplicationProducer, E2EApplicationProofBytes, E2EApplicationSu
   E2EApplicationMockConsumption, E2EApplicationCollection, E2EApplicationCollectionOracle, E2EApplicationGroupResultEnvelope, E2EApplicationMockSummary,
   E2EApplicationQualification, E2EApplicationUnmockedCall } from "./application-result-adapter.js";
 export { collectE2EApplicationRun } from "./application-collection.js";
+export { evaluateE2EAgentCase, E2EAgentModelEvidenceSchema, E2E_AGENT_UNKNOWN_CODES, E2E_AGENT_LEDGER_MAX_BYTES, E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION } from "./application-agent-result.js";
+export type { E2EAgentModelEvidence, E2EAgentUnknownCode, E2EAgentCaseVerdict, E2EAgentCaseInput, E2EAgentCaseResult, E2EAgentTranscriptDigest } from "./application-agent-result.js";
 export type { E2EActualApplicationRun, E2EActualApplicationShard } from "./application-collection.js";
 export { runIsolatedE2EApplication } from "./application-runtime.js";
 export type { E2EApplicationRuntimePorts, E2EIsolatedApplicationRun } from "./application-runtime.js";
@@ -64,6 +66,7 @@ export { prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment } from 
 export type { E2EApplicationPreparationInputs, E2EApplicationEnvironmentPorts } from "./application-services.js";
 export { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRuns, dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest, dockerOwnedCleanupReceipt,
   e2eRunNetworks, e2eModelSocketPath, MODEL_SOCKET_PATH_MAX_BYTES, ROVARA_RUN_LABEL, ROVARA_CREATED_LABEL, STALE_RUN_SWEEP_AGE_MS, DEFAULT_DEADLINE_GRACE_MS, WEB_API_BUILD_IMAGE } from "./host/docker-application-host.js";
+export { E2EModelChannelClosedSchema, buildE2EAgentModelEvidence, type E2EModelChannelClosed } from "./host/agent-model-evidence.js";
 export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, DockerApplicationModelChannel, DockerApplicationUnavailableReason, DockerBuildResult } from "./host/docker-application-host.js";
 export { executorContainerArgs } from "./host/executor-container.js";
 export { installedExecutorSeccompProfilePath, verifyExecutorSeccompProfile } from "./host/executor-seccomp.js";
