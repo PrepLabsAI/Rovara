@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import {
   E2EModelRouteDefinitionSchema, E2E_AGENT_UNAVAILABLE_REASONS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
-  E2E_MODEL_SCRIPTED_ROUTE_PREFIX, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, SECRET_ARN_PATTERN, e2eModelRouteRevision, e2eModelRouteRevisionNumber, isKeyedModelProvider,
+  E2E_MODEL_SCRIPTED_ROUTE_PREFIX, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, SECRET_ARN_PATTERN, canonicalJson, e2eModelRouteRevision, e2eModelRouteRevisionNumber, isKeyedModelProvider,
   type E2EModelRouteDefinition, type ModelProvider,
 } from "@agentx/contracts";
 
@@ -69,6 +70,16 @@ export function deriveE2EAgentRoute(installation: E2EAgentInstallation, revision
     budgets: { ...E2E_MODEL_ROUTE_DEFAULT_BUDGETS }, promptProtocol: "e2e-0.20.0-act/v1", sampling: "provider-default", thinking: "off", effort: modelProvider === "openai" ? null : "low", vision: false,
   });
   return parsed.success ? { status: "available", definition: parsed.data } : unavailable(`the installation's settings do not make a valid route: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+}
+
+/**
+ * The digest of what the route is, apart from its revision number: equal digests are the same route. The broker keys approvals and the canary row
+ * (`E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest>`) by it, and the worker's model canary (Task 4.9) reports the digest of the route it called.
+ */
+export function e2eAgentRouteDefinitionDigest(definition: E2EModelRouteDefinition): string {
+  const parsed = E2EModelRouteDefinitionSchema.parse(definition);
+  const withoutRevision = Object.fromEntries(Object.entries(parsed).filter(([key]) => key !== "revision"));
+  return createHash("sha256").update(canonicalJson(withoutRevision), "utf8").digest("hex");
 }
 
 /**

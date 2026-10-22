@@ -5,7 +5,7 @@ import {
   INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, canonicalJson, indexExpiresAt, e2eModelRouteRevision, e2eModelRouteRevisionNumber, isKeyedModelProvider,
   type E2EModelRouteDefinition, type ModelProvider,
 } from "@agentx/contracts";
-import { deriveE2EAgentRoute, type E2EAgentInstallation, type DerivedE2EAgentRoute } from "@agentx/model-runtime/e2e-route-derive";
+import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest, type E2EAgentInstallation, type DerivedE2EAgentRoute } from "@agentx/model-runtime/e2e-route-derive";
 import type { E2EDayBudget, E2EDayLimits, E2EDayReservation } from "@agentx/model-runtime";
 
 // The route derivation moved to model-runtime (`./e2e-route-derive`), so the worker derives the very same route; the broker keeps its names for it.
@@ -131,12 +131,9 @@ export function e2eAgentRoutePolicyLimits(budgets: E2EModelRouteDefinition["budg
   };
 }
 
-/** The digest of what the route is, apart from its revision number: equal digests are the same route, so approval writes a new revision only when it changes. */
-export function e2eAgentRouteDefinitionDigest(definition: E2EModelRouteDefinition): string {
-  const parsed = E2EModelRouteDefinitionSchema.parse(definition);
-  const withoutRevision = Object.fromEntries(Object.entries(parsed).filter(([key]) => key !== "revision"));
-  return createHash("sha256").update(canonicalJson(withoutRevision), "utf8").digest("hex");
-}
+/** The digest of what the route is, apart from its revision number: equal digests are the same route, so approval writes a new revision only when it changes. It lives in
+ * model-runtime's derive module so the worker's model canary (Task 4.9) computes the very digest the canary row is keyed by. */
+export { e2eAgentRouteDefinitionDigest };
 
 const LABELS: Record<ModelProvider, string> = { "amazon-bedrock": "Amazon Bedrock", openrouter: "OpenRouter", anthropic: "Anthropic", openai: "OpenAI" };
 
