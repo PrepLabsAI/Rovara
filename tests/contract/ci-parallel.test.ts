@@ -67,6 +67,12 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(generic.run).toContain("--exclude tests/linux/e2e-model-channel.test.ts");
     // Task 4.3b: the agent step tests (twenty real runs of one case among them) have a step of their own, so the generic step does not run them a second time.
     expect(generic.run).toContain("--exclude tests/linux/e2e-agent.test.ts");
+    // Task 4.5: the three agent qualification probes (real runs of the scripted model behind the production probe runner) have a step of their own as well.
+    expect(generic.run).toContain("--exclude tests/linux/e2e-agent-probes.test.ts");
+    const agentProbes = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/e2e-agent-probes.test.ts") && candidate !== generic)!;
+    expect(agentProbes.run).toBe("npx vitest run tests/linux/e2e-agent-probes.test.ts");
+    expect(agentProbes.name).toMatch(/Agent qualification probes/);
+    expect(agentProbes.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
     const agent = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/e2e-agent.test.ts") && candidate !== generic)!;
     expect(agent.run).toBe("npx vitest run tests/linux/e2e-agent.test.ts");
     expect(agent.name).toMatch(/Agent steps/);
