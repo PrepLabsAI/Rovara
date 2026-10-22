@@ -32,6 +32,7 @@ import { postWorkerTerminalResult } from "../../packages/worker/src/terminal-cal
 import { workflowE2EApplicationHostDeps, type WorkflowE2EApplicationRuntimeConfig } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/docker-application-host.js";
+import { ciImage } from "../support/ci-images.js";
 import { call } from "../support/slack-broker.js";
 import { collectOnThisHost } from "../support/linux-web-api-probes.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
@@ -214,7 +215,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     let hostCredentialScan: ((bytes: Uint8Array) => boolean) | undefined;
     const applicationRuntime: WorkflowE2EApplicationRuntime = { runRoot, collect: collectLikeTheWorker,
       createHost: (hostInput) => {
-        const hostDeps = workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: WEB_API_BUILD_IMAGE, runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
+        const hostDeps = workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: ciImage("node-build", WEB_API_BUILD_IMAGE), runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
           observed(createProcessDockerCli(), (args) => { for (const value of args) if (value.startsWith("rovara.run=")) seenRuns.add(value.slice("rovara.run=".length)); journeyInput.observeDocker?.(args); }), () => Date.now(), hostInput);
         return createDockerApplicationHost({ ...hostDeps, onRunOutput: async (run) => { hostCredentialScan = (bytes) => run.containsCredential(bytes); await hostDeps.onRunOutput?.(run); } });
       } };

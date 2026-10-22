@@ -6,10 +6,11 @@ import { runIsolatedE2EApplication, type E2EIsolatedApplicationRun } from "../..
 import { createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { webApiProbeRunInput } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
+import { ciImage } from "./ci-images.js";
 import { ORDERS_FIXTURE_ROOT, createOrdersExecutorPlan, type OrdersExecutorFixture, type OrdersProbeName } from "./e2e-orders-executor-fixture.js";
 
-/** The same pinned base the executor image is built from; the fixture app needs nothing but Node. */
-export const APP_NODE_IMAGE = WEB_API_BUILD_IMAGE;
+/** The same pinned base the executor image is built from; the fixture app needs nothing but Node. In CI it is the local alias of the image `scripts/ci-images.ts` pulled from the GHCR mirror, by the same digest. */
+export const APP_NODE_IMAGE = ciImage("node-build", WEB_API_BUILD_IMAGE);
 export const EXECUTOR_IMAGE = process.env.ROVARA_EXECUTOR_IMAGE ?? "rovara-e2e-executor:ci";
 
 /** What every Linux test hands the production host: a real Docker, the two images, and a throwaway run root. */

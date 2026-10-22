@@ -3,6 +3,8 @@ import type { Server } from "node:net";
 import { webApiAppStartGuardArgs } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 import { e2eRunNetworks } from "../../packages/verifier/src/host/docker-application-host.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
+import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
+import { ensureLocalImage } from "../support/ci-images.js";
 import { APP_NODE_IMAGE, createLinuxHost, linuxRunInput, removeProbeDirs, runProbe } from "../support/linux-runtime.js";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
 import { assertFirewallInstalled, docker, listenOnAllAddresses, reachScript, runNodeIn, startRoutedPrivateServer } from "../support/linux-network-walls.js";
@@ -14,8 +16,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   const networks: string[] = [];
   beforeAll(async () => {
     await assertFirewallInstalled();
-    const pulled = await docker("pull", APP_NODE_IMAGE);
-    if (pulled.code !== 0) throw new Error(`could not pull the build image: ${pulled.stderr}`);
+    // The CI job already pulled the build image from the GHCR mirror; only a machine without it pulls (with a bounded retry), and the digest is checked either way.
+    await ensureLocalImage(APP_NODE_IMAGE, WEB_API_BUILD_IMAGE);
     host = await listenOnAllAddresses();
   }, 300_000);
   afterAll(async () => {

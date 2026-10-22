@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { evaluateWebApiProbeObservation } from "../../packages/contracts/src/index.js";
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { WEB_API_BUILD_IMAGE, createWebApiProbeRunner } from "../../packages/verifier/src/host/web-api-probe-runner.js";
+import { ciImage, ensureLocalImage } from "../support/ci-images.js";
 import { DOCKER_25_DIND_IMAGE, startDind, type Dind } from "../support/linux-dind.js";
 import { EXECUTOR_IMAGE } from "../support/linux-runtime.js";
 import { collectOnThisHost } from "../support/linux-web-api-probes.js";
@@ -13,6 +14,8 @@ import { webApiChallenge } from "../support/web-api-qualification.js";
 // server (the run's sinkhole) is on the same network. CI's own daemon is newer and forwards, so everything else in tests/linux passes there while a Docker 25 runner fails
 // `api-egress-denial-v1`. This file starts a Docker 25 daemon of its own (Docker-in-Docker, its own network namespace) and runs the production host against it. It runs where the other
 // Linux tests run (ROVARA_DOCKER=1, with the executor image provided), and needs a Docker that can start a privileged container; elsewhere it skips.
+const DIND_IMAGE = ciImage("docker-dind", DOCKER_25_DIND_IMAGE);
+const BUILD_IMAGE = ciImage("node-build", WEB_API_BUILD_IMAGE);
 describe.runIf(process.env.ROVARA_DOCKER === "1")("the production Docker host on a Docker 25 daemon", () => {
   let root = "";
   let dind: Dind;
@@ -27,16 +30,19 @@ describe.runIf(process.env.ROVARA_DOCKER === "1")("the production Docker host on
     await mkdir(runRoot, { recursive: true });
     await mkdir(evidenceRoot, { mode: 0o700 });
     await chmod(evidenceRoot, 0o700);
-    dind = await startDind(DOCKER_25_DIND_IMAGE, [{ path: root }, { path: dirname(installedExecutorSeccompProfilePath()), readOnly: true }]);
+    // Nothing inside the dind daemon pulls from a registry: the runner pulled the dind image and the build image once (from the GHCR mirror, by digest; see scripts/ci-images.ts) and the
+    // build image is copied in from the outer daemon. Each is checked against its pinned digest first.
+    await ensureLocalImage(DIND_IMAGE, DOCKER_25_DIND_IMAGE);
+    dind = await startDind(DIND_IMAGE, [{ path: root }, { path: dirname(installedExecutorSeccompProfilePath()), readOnly: true }]);
     await dind.load(EXECUTOR_IMAGE);
-    await dind.docker("pull", "--quiet", WEB_API_BUILD_IMAGE);
+    await dind.load(BUILD_IMAGE, WEB_API_BUILD_IMAGE);
   }, 900_000);
   afterAll(async () => {
     await dind?.stop();
     await rm(root, { recursive: true, force: true }).catch(() => undefined);
   }, 120_000);
 
-  const runner = () => createWebApiProbeRunner({ docker: dind.cli, executorImage: EXECUTOR_IMAGE, buildImage: WEB_API_BUILD_IMAGE, runRoot, evidenceRoot, challenge: webApiChallenge(Date.now()), collect: collectOnThisHost });
+  const runner = () => createWebApiProbeRunner({ docker: dind.cli, executorImage: EXECUTOR_IMAGE, buildImage: BUILD_IMAGE, runRoot, evidenceRoot, challenge: webApiChallenge(Date.now()), collect: collectOnThisHost });
 
   it("is a Docker 25 daemon", () => {
     expect(dind.version).toMatch(/^25\./);

@@ -8,6 +8,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
+# Read-only by default; a job that needs more says so itself (linux-runtime reads packages, live-aws mints an OIDC token).
+permissions:
+  contents: read
+
 # Pushing to a pull request again supersedes its run in progress. A manual run is never cancelled.
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
@@ -115,11 +119,19 @@ jobs:
   # builds the pinned browser executor image, smoke-tests it with no network, then runs tests/linux against
   # it. Docker's bridge networks on the runner can reach the cloud metadata service; the first step drops
   # that traffic so the containment tests see what a locked-down host shows.
+  #
+  # Public registries rate-limit the shared runners' anonymous pulls (`toomanyrequests: Rate exceeded`), so this job pulls each public image once, from the GHCR
+  # mirror (.github/ci-images.json, copied digest for digest by the Mirror CI images workflow), with GITHUB_TOKEN and no cloud credentials. The upstream registry is
+  # the fallback only when the mirror copy is missing, and every pull retries with backoff. Everything after that uses the local copy: the executor image is built
+  # from it, the tests use it, and the Docker 25 (dind) daemon is loaded from the runner's daemon with docker save | docker load and never pulls.
   linux-runtime:
     needs: scope
     if: needs.scope.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -144,8 +156,20 @@ jobs:
           # CI runner only: production runners (Amazon Linux 2023) have no AppArmor userns restriction.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "no AppArmor userns restriction on this kernel"
           sysctl user.max_user_namespaces
+      # A failed login (for example a pull request from a fork, whose token cannot read packages) only means the mirror is skipped.
+      - name: Log in to the GHCR image mirror (read-only)
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin || echo "::warning::GHCR login failed; images will come from their upstream registries"
+      # Exports ROVARA_CI_IMAGE_NODE_BUILD and ROVARA_CI_IMAGE_DOCKER_DIND (local aliases of the digest-pinned images) to the steps below.
+      - name: Pull the pinned public images (GHCR mirror first)
+        run: node scripts/ci-images.ts pull --github-env
+      # The Dockerfile's FROM lines name the pinned upstream image; the build uses a copy whose FROM lines name the local alias of the very same digest, so it pulls nothing.
       - name: Build the executor image
-        run: docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci .
+        run: |
+          node scripts/ci-images.ts verify node-build
+          node scripts/ci-images.ts dockerfile environments/e2e-executor/Dockerfile "$RUNNER_TEMP/e2e-executor.Dockerfile"
+          docker build -f "$RUNNER_TEMP/e2e-executor.Dockerfile" -t rovara-e2e-executor:ci .
       - run: npm ci
       # The packages import each other through their built output.
       - run: npm run build
