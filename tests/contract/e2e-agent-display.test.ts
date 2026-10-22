@@ -288,6 +288,13 @@ describe("test 30 (BASEREASON): what the unchanged code did, when AI-navigated c
     for (const added of ["1 AI-navigated check is not run on the unchanged code.", "Not run before the change: Owner export ai", "Owner export ai"]) expect(WORDS.test(added), added).toBe(false);
   });
 
+  it("escapes a skipped title on the page, so a stored title can't carry markup", () => {
+    const value = results({ baseline: { status: "PASSED", scenarios: [row()], skippedAiScenarios: [{ scenarioId: "a", title: "<script>alert(1)</script> & more" }] } });
+    const raw = renderE2EScenarioRowsHtml(value, { artifactPath });
+    expect(raw).not.toContain("<script>");
+    expect(raw).toContain("<li>&lt;script&gt;alert(1)&lt;/script&gt; &amp; more</li>");
+  });
+
   it("counts several skipped checks in the plural and bounds the list it prints", () => {
     const many = Array.from({ length: 12 }, (_, index) => ({ scenarioId: `ai-${index}`, title: `AI check ${index}` }));
     const value = results({ baseline: { status: "FAILED", scenarios: [row({ status: "FAILED" })], skippedAiScenarios: many } });

@@ -56,7 +56,7 @@ describe("agentNavigationOf", () => {
     const receipts = [receipt(1, 0), receipt(2, 0), receipt(3, 0), receipt(4, 0)];
     const many = Array.from({ length: 8 }, (_, index) => action({ node: { role: "button", name: `Button ${index}`, testId: null } }));
     const steps: Spec[] = [
-      { stepIndex: 1, goal: "one", receipts: [receipts[0]!], actions: [action({ outcome: "action-failed" }), action(), action(), ...many] },
+      { stepIndex: 1, goal: "one", receipts: [receipts[0]!], actions: [action({ outcome: "action-failed", node: { role: "button", name: "Broken button", testId: null } }), action(), action(), ...many] },
       { stepIndex: 2, goal: "two", receipts: [receipts[1]!] }, { stepIndex: 3, goal: "three", receipts: [receipts[2]!] }, { stepIndex: 4, goal: "four", receipts: [receipts[3]!] },
     ];
     const block = agentNavigationOf(input({ receipts, steps, agentSteps: steps.map((step) => ({ declaredStepIndex: step.stepIndex, goal: step.goal })) }));
@@ -67,12 +67,13 @@ describe("agentNavigationOf", () => {
     const receipts = [receipt(1, 0), receipt(2, 0), receipt(3, 0)];
     const many = Array.from({ length: 5 }, (_, index) => action({ node: { role: "button", name: `Button ${index}`, testId: null } }));
     const steps: Spec[] = [
-      { stepIndex: 1, goal: "one", receipts: [receipts[0]!], actions: [action({ outcome: "action-failed" }), action(), action(), ...many] },
+      { stepIndex: 1, goal: "one", receipts: [receipts[0]!], actions: [action({ outcome: "action-failed", node: { role: "button", name: "Broken button", testId: null } }), action(), action(), ...many] },
       { stepIndex: 2, goal: "two", receipts: [receipts[1]!] }, { stepIndex: 3, goal: "three", receipts: [receipts[2]!] },
     ];
     const block = agentNavigationOf(input({ receipts, steps, agentSteps: steps.map((step) => ({ declaredStepIndex: step.stepIndex, goal: step.goal })) }))!;
     expect(block.steps).toHaveLength(3);
     expect(block.steps[0]!.actedOn.map((node) => node.name)).toEqual(["Download orders", "Button 0", "Button 1", "Button 2", "Button 3", "Button 4"]);
+    expect(JSON.stringify(block)).not.toContain("Broken button");
   });
 
   it("says how a step ended as the ledger recorded it", () => {
