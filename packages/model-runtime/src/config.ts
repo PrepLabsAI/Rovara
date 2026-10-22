@@ -1,5 +1,5 @@
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { KEYED_MODEL_PROVIDERS, SECRET_ARN_PATTERN, agentXError, type KeyedModelProvider, type ModelProvider } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, SECRET_ARN_PATTERN, agentXError, type KeyedModelProvider } from "@agentx/contracts";
 import { catalogModel } from "./catalog.js";
 
 export type ModelRole = "worker" | "orchestrator" | "classifier";
@@ -15,19 +15,8 @@ export const DEFAULT_DIRECT_MODELS = {
   openai: { worker: "gpt-5.4", orchestrator: "gpt-5.4", classifier: "gpt-5.4-mini" },
 } as const satisfies Record<Exclude<KeyedModelProvider, "openrouter">, Record<ModelRole, string>>;
 
-/**
- * The small model the AI browser-test agent uses on each provider, pinned in its route at setup approval (amendment A1).
- * It is a separate choice from every coding role and is not a `ModelRole`: a role's default can fall back to Bedrock,
- * and the e2e route never falls back. The OpenRouter id is provisional until a canary on an OpenRouter installation
- * records the model OpenRouter reports serving it (owner item O5). A test fails if the pinned pi catalog lacks any of them.
- */
-// A default model must show agreement AVAILABLE in `test-deploy --check` (ruling M4-U): a model with no agreement reports NOT_AVAILABLE and fails it.
-export const DEFAULT_E2E_AGENT_MODELS = {
-  "amazon-bedrock": "us.anthropic.claude-haiku-5-5",
-  anthropic: "claude-haiku-5-5",
-  openrouter: "anthropic/claude-haiku-5.5",
-  openai: "gpt-5.4-mini",
-} as const satisfies Record<ModelProvider, string>;
+// The small model the AI browser-test agent uses on each provider lives with the route derivation (it is read without pi-ai there).
+export { DEFAULT_E2E_AGENT_MODELS } from "./e2e-route-derive.js";
 
 /** A keyed provider's secret is not configured, does not exist, or is empty: the one case that falls back to Bedrock. */
 export class MissingProviderSecret extends Error {

@@ -1,10 +1,13 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { E2EModelRouteDefinition } from "../../packages/contracts/src/e2e-model-channel.js";
 import { MissingProviderSecret } from "../../packages/model-runtime/src/config.js";
 import { E2EPayloadRefusedError, createGovernedE2EModelRoute, createInMemoryE2EDayBudget, type E2EInvokeInput } from "../../packages/model-runtime/src/e2e-route.js";
 import * as modelRuntime from "../../packages/model-runtime/src/index.js";
 import { createE2EProviderInvoke } from "../../packages/model-runtime/src/e2e-provider-invoke.js";
+import { assertE2ESharedAwsConfigCannotRedirect } from "../../packages/model-runtime/src/e2e-environment-guard.js";
 import { createE2EProviderInvokeForTesting } from "../../packages/model-runtime/src/e2e-provider-invoke-testing.js";
 import * as invokeModule from "../../packages/model-runtime/src/e2e-provider-invoke.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
@@ -484,5 +487,66 @@ describe("fix round 2 (re-review of amendment A1)", () => {
     expect(refused.result).toMatchObject({ code: "refused-credential-match" });
     expect(dayBudget.snapshot().usedInputTokens).toBe(0);
     expect(fake.requests).toHaveLength(0);
+  });
+});
+
+// Task 4.3a, test case 3 (and Ruling DB-11): the shared AWS files of the worker's user can redirect or re-authenticate the call, and the environment guard cannot see them.
+describe("the shared AWS files guard (assertE2ESharedAwsConfigCannotRedirect)", () => {
+  const homes: string[] = [];
+  afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
+  function home(files: { config?: string; credentials?: string }): string {
+    const dir = mkdtempSync(join(tmpdir(), "rovara-aws-home-"));
+    homes.push(dir);
+    mkdirSync(join(dir, ".aws"));
+    if (files.config !== undefined) writeFileSync(join(dir, ".aws", "config"), files.config);
+    if (files.credentials !== undefined) writeFileSync(join(dir, ".aws", "credentials"), files.credentials);
+    return dir;
+  }
+  const refusal = (homedir: string) => { try { assertE2ESharedAwsConfigCannotRedirect({ homedir }); return undefined; } catch (error) { return error instanceof Error ? error.message : String(error); } };
+
+  it("passes with no file, an empty one, and a region-only profile (positive controls)", () => {
+    expect(() => assertE2ESharedAwsConfigCannotRedirect({ homedir: mkdtempSync(join(tmpdir(), "rovara-aws-empty-")) })).not.toThrow();
+    expect(refusal(home({}))).toBeUndefined();
+    expect(refusal(home({ config: "[default]\nregion = us-east-1\nmax_attempts = 1\n" }))).toBeUndefined();
+    expect(refusal(home({ config: "# a comment\n[profile other]\nregion = eu-west-1\n", credentials: "[other]\naws_access_key_id = AKIAOTHERPROFILE0000\n" }))).toBeUndefined();
+  });
+
+  it("refuses endpoint_url in a profile and in a services section, naming the key and never the value", () => {
+    const profile = refusal(home({ config: "[profile bedrock]\nendpoint_url = https://evil.example.invalid/ENDPOINTVALUE\n" }));
+    expect(profile).toMatch(/endpoint_url/);
+    expect(profile).not.toContain("evil.example.invalid");
+    expect(profile).not.toContain("ENDPOINTVALUE");
+    const services = refusal(home({ config: "[services redirect]\nbedrock-runtime =\n  endpoint_url = http://127.0.0.1:9999\n" }));
+    expect(services).toMatch(/endpoint_url/);
+    expect(services).not.toContain("9999");
+  });
+
+  it("refuses max_attempts other than 1 and passes max_attempts = 1", () => {
+    const three = refusal(home({ config: "[default]\nmax_attempts = 3\n" }));
+    expect(three).toMatch(/max_attempts/);
+    expect(three).not.toMatch(/= 3|\b3\b/);
+    expect(refusal(home({ config: "[default]\nmax_attempts = 1\n" }))).toBeUndefined();
+  });
+
+  it("refuses a [default] credentials entry with aws_access_key_id, credential_process or sso_*, naming the key and never the value (Ruling DB-11)", () => {
+    const key = refusal(home({ credentials: "[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = SECRETSECRETSECRET\n" }));
+    expect(key).toMatch(/aws_access_key_id/);
+    expect(key).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(key).not.toContain("SECRETSECRET");
+    const process = refusal(home({ credentials: "[default]\ncredential_process = /usr/local/bin/get-creds --token TOKENVALUE\n" }));
+    expect(process).toMatch(/credential_process/);
+    expect(process).not.toContain("TOKENVALUE");
+    const sso = refusal(home({ credentials: "[default]\nsso_session = my-sso\n" }));
+    expect(sso).toMatch(/sso_\*/);
+    expect(sso).not.toContain("my-sso");
+    expect(refusal(home({ credentials: "[default]\nregion = us-east-1\n" }))).toBeUndefined();
+  });
+
+  it("refuses a credential source in the config's [default] profile, and a file that exists but cannot be read", () => {
+    expect(refusal(home({ config: "[default]\nsso_start_url = https://example.invalid/start\n" }))).toMatch(/sso_\*/);
+    expect(refusal(home({ config: "[profile default]\ncredential_process = x\n" }))).toMatch(/credential_process/);
+    const unreadable = () => assertE2ESharedAwsConfigCannotRedirect({ homedir: "/nowhere", readFile: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } });
+    expect(unreadable).toThrow(/cannot be read/);
+    expect(() => assertE2ESharedAwsConfigCannotRedirect({ homedir: "/nowhere", readFile: () => undefined })).not.toThrow();
   });
 });
