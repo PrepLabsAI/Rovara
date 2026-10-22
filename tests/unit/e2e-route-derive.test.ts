@@ -122,10 +122,10 @@ describe("the broker and the worker derive the same route", () => {
 });
 
 describe("the route derivation module", () => {
-  it("imports nothing but contracts, so the broker that loads its subpath never loads pi-ai", () => {
+  it("imports nothing but contracts (and node:crypto for the route digest), so the broker that loads its subpath never loads pi-ai", () => {
     const source = readFileSync(new URL("../../packages/model-runtime/src/e2e-route-derive.ts", import.meta.url), "utf8");
     const specifiers = [...source.matchAll(/^\s*(?:import|export)[^"']*from\s+["']([^"']+)["']/gm)].map((match) => match[1]);
-    expect(specifiers).toEqual(["@agentx/contracts"]);
+    expect(specifiers).toEqual(["node:crypto", "@agentx/contracts"]);
     expect((JSON.parse(readFileSync(new URL("../../packages/model-runtime/package.json", import.meta.url), "utf8")) as { exports: Record<string, string> }).exports["./e2e-route-derive"]).toBe("./dist/e2e-route-derive.js");
   });
 });

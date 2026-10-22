@@ -23,7 +23,7 @@ describe("AgentX executable command surface", () => {
     expect(subcommands(program, "loop")).toEqual(["init", "add", "enroll", "remove", "start", "stop", "status", "run", "do", "quick", "full", "review", "contribute", "check", "mcp"]);
     expect(subcommands(program, "chatgpt")).toEqual(["connect", "status", "disconnect"]);
     expect(subcommands(program, "mcp")).toEqual(["install"]);
-    expect(subcommands(program, "project")).toEqual(["add"]);
+    expect(subcommands(program, "project")).toEqual(["add", "setup-approve"]);
     expect(subcommands(program, "channel")).toEqual(["add"]);
     expect(subcommands(program, "connector")).toEqual(["add"]);
     expect(subcommands(program, "alerts")).toEqual(["test"]);
