@@ -6,7 +6,7 @@ import {
   type E2EModelDayBudgetRequest,
   type E2EModelDayBudgetResponse,
 } from "@agentx/contracts";
-import type { E2EDayBudget, E2EDayLimits, E2EDayReservation } from "@agentx/model-runtime";
+import type { E2EDayLimits } from "@agentx/model-runtime";
 
 /**
  * The worker's side of the project's day budget (M1.4 Task 4.3a, Ruling DB-8). The worker has no DynamoDB access, so each reserve, settle and release is a callback to the
@@ -36,7 +36,17 @@ class BudgetUnavailable extends Error {
   constructor() { super("the project's daily model budget could not be reached"); this.name = "E2EModelBudgetUnavailable"; }
 }
 
-export function createE2EModelDayBudgetClient(options: E2EModelDayBudgetClientOptions): E2EDayBudget {
+/** One reservation against the project's day, as the broker callback keeps it: every stage is asynchronous (an `E2EDayReservation`, which allows both). */
+export interface E2EModelDayBudgetReservation {
+  settle(actualInputTokens: number): Promise<void>;
+  release(): Promise<void>;
+}
+/** The day budget over the broker callback (an `E2EDayBudget` whose `reserve` is always asynchronous). */
+export interface E2EModelDayBudgetClient {
+  reserve(inputTokens: number, limits: E2EDayLimits): Promise<E2EModelDayBudgetReservation | null>;
+}
+
+export function createE2EModelDayBudgetClient(options: E2EModelDayBudgetClientOptions): E2EModelDayBudgetClient {
   const timeoutMs = options.timeoutMs ?? E2E_MODEL_BUDGET_TIMEOUT_MS;
   const newReservationId = options.newReservationId ?? randomUUID;
 
@@ -73,7 +83,7 @@ export function createE2EModelDayBudgetClient(options: E2EModelDayBudgetClientOp
   }
 
   return {
-    async reserve(inputTokens: number, _limits: E2EDayLimits): Promise<E2EDayReservation | null> {
+    async reserve(inputTokens: number, _limits: E2EDayLimits): Promise<E2EModelDayBudgetReservation | null> {
       void _limits;
       if (!Number.isSafeInteger(inputTokens) || inputTokens < 1 || inputTokens > E2E_MODEL_BUDGET_MAX_CALL_TOKENS) throw new BudgetUnavailable();
       const reservationId = newReservationId();

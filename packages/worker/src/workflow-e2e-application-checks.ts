@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_HARD_LIMITS, canonicalJson, type E2ECollection, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_HARD_LIMITS, canonicalJson, type E2ECollection, type E2EModelDayBudgetRequest, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
   type WorkerInvocation } from "@agentx/contracts";
 import { resolveE2EAgentRouteForAdmission, type E2EInvoke } from "@agentx/model-runtime";
 import { collectE2EApplicationRun, decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, e2eApplicationPrivateTransferMaxBytes, runIsolatedE2EApplication,
-  validateE2EApplicationExecutionAdmission, type DockerApplicationHost, type E2ECompiledApplicationSuite } from "@agentx/verifier";
+  validateE2EApplicationExecutionAdmission, type DockerApplicationHost, type DockerApplicationModelChannel, type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { createE2EModelDayBudgetClient } from "./e2e-model-day-budget-client.js";
 import { createE2EModelEvidenceCollector, openE2EModelChannelSession, type E2EModelChannelSession } from "./e2e-model-channel-session.js";
 import { runWithConcurrency } from "./bounded-concurrency.js";
@@ -39,7 +39,7 @@ export type WorkflowE2EApplicationRuntime = Readonly<{
   /** Builds the one Docker application host a group runs on (one run per host). It must use the supplied admission, group and staged source as they are. */
   createHost(input: { admission: E2EApplicationExecutionAdmission; groupId: string; candidateSourceDir: string;
     /** Present only for a group that has an `agent` step: the worker's model channel for that group (Task 4.3a). */
-    modelChannel?: NonNullable<Parameters<typeof import("@agentx/verifier").createDockerApplicationHost>[0]["modelChannel"]> }): DockerApplicationHost;
+    modelChannel?: DockerApplicationModelChannel }): DockerApplicationHost;
   /** Default: the `git` and `tar` on this machine. */
   git?: CandidateGit;
   /** Default: the application collector. */
@@ -218,7 +218,7 @@ export function fitGroupEvidence(group: GroupEvidenceCandidate): GroupEvidenceAl
  * model.
  */
 export type WorkflowE2EModelChannelDependencies = Readonly<{
-  budget(body: import("@agentx/contracts").E2EModelDayBudgetRequest, signal: AbortSignal): Promise<unknown>;
+  budget(body: E2EModelDayBudgetRequest, signal: AbortSignal): Promise<unknown>;
   environment?: NodeJS.ProcessEnv;
   policyScope?: "standard" | "qualification";
   /** The scripted model double, for CI and qualification; a scripted route has no other provider. */
@@ -333,7 +333,7 @@ export async function executeWorkflowE2EApplicationChecks(input: {
      * session from the group's own agent steps, the run's own credentials and a day budget that charges through the broker, and keeps its receipts for the group.
      */
     const modelChannelFor = (compiled: E2ECompiledApplicationSuite, groupRunId: string):
-      { ok: true; port: NonNullable<Parameters<WorkflowE2EApplicationRuntime["createHost"]>[0]["modelChannel"]> } | { ok: false; code: string } => {
+      { ok: true; port: DockerApplicationModelChannel } | { ok: false; code: string } => {
       const route = admission.modelRoute;
       const dependencies = input.modelChannel;
       if (route === null || dependencies === undefined) return { ok: false, code: "agent-route-not-approved" };

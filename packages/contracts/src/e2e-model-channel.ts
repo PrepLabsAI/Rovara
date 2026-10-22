@@ -9,7 +9,8 @@ import { MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN } from "./mo
  *
  * Four records, all strict and all bounded:
  * - the route definition the broker pins at setup approval (its digest is the route revision);
- * - the channel request and response the executor exchanges with the worker over the Unix socket;
+ * - the channel request and response the executor exchanges with the worker over the Unix socket (`POST /v1/generate`), and the step markers it sends beside them (`POST /v1/step`,
+ *   Task 4.3a) to say which agent step is running; the worker's day budget callback (`e2e-model-budget`) is in the last section;
  * - the receipt the worker writes for every call (the executor never writes one);
  * - the action ledger kept for every agent step, so a round can be audited and replayed without the model.
  *

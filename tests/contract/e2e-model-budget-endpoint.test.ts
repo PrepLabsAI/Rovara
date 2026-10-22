@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS, type E2EModelDayBudgetRequest } from "@agentx/contracts";
 import { handleE2EModelBudgetCallback, type E2EModelBudgetDependencies, type E2EModelBudgetOperation } from "../../packages/broker/src/e2e/model-budget-endpoint.js";
 import { e2eModelBudgetKey, e2eModelBudgetReservationKey, isTransientAwsFault } from "../../packages/broker/src/e2e/model-route-registry.js";
@@ -27,7 +26,7 @@ function fixture(overrides: { operation?: Partial<E2EModelBudgetOperation>; task
   if (overrides.task !== null) db.set({ pk: `DEVTASK#${TASK}`, sk: "META", entityType: "DEVTASK", workspaceId: "ws-1", project: "payments", ...overrides.task });
   const operation: E2EModelBudgetOperation = { id: "op-1", workspaceId: "ws-1", kind: "task", workflowMode: "CHECKS", status: "RUNNING",
     workflowE2EAdmission: { taskId: TASK, groupRunIds: [GROUP], agentSteps: true }, ...overrides.operation };
-  const dependencies: E2EModelBudgetDependencies = { documentClient: { send: db.send } as unknown as DynamoDBDocumentClient, tableName: TABLE, now: () => NOW };
+  const dependencies: E2EModelBudgetDependencies = { documentClient: { send: db.send }, tableName: TABLE, now: () => NOW };
   const call = (body: unknown, as: E2EModelBudgetOperation = operation) => handleE2EModelBudgetCallback(dependencies, as, body);
   return { db, operation, dependencies, call };
 }
@@ -258,7 +257,7 @@ describe("through the broker's callback route", () => {
   it("a claim without e2e-model-budget gets CALLBACK_FORBIDDEN: the capability a round with no AI navigation step is issued does not carry it", async () => {
     const round = await startApplicationRound();
     round.markRunning();
-    const response = await route(round, round.operationId, round.capabilityFor(round.operationId), reserveBody(randomUUID(), 1_000, round.admissionRef.groupRunIds[0]!));
+    const response = await route(round, round.operationId, round.capabilityFor(round.operationId), reserveBody(randomUUID(), 1_000, round.admissionRef.groupRunIds[0]));
     expect(response.body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
     expect(JSON.stringify(response.body)).toMatch(/does not allow e2e-model-budget/);
     expect(round.harness.db.find((item) => String(item.sk).startsWith("E2E_MODEL_BUDGET"))).toEqual([]);
@@ -270,7 +269,7 @@ describe("through the broker's callback route", () => {
     const key = (round.harness.brokerInput as { callbackSigningKey: string });
     const operation = round.operationNow() as { fence: number };
     const capability = issueCapability(key, round.workspaceId, round.operationId, operation.fence, false, false, false, false, false, true, true);
-    const response = await route(round, round.operationId, capability, reserveBody(randomUUID(), 1_000, round.admissionRef.groupRunIds[0]!));
+    const response = await route(round, round.operationId, capability, reserveBody(randomUUID(), 1_000, round.admissionRef.groupRunIds[0]));
     expect(response.body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
     expect(JSON.stringify(response.body)).toMatch(/AI navigation steps/);
     expect(round.harness.db.find((item) => String(item.sk).startsWith("E2E_MODEL_BUDGET"))).toEqual([]);

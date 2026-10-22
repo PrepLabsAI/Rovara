@@ -135,7 +135,7 @@ describe("the client against a counted fake socket", () => {
     await client().beginStep(position);
     await client().endStep(position);
     expect(seen.map((item) => [item.method, item.url])).toEqual([["POST", "/v1/step"], ["POST", "/v1/step"], ["POST", "/v1/step"]]);
-    expect(seen.map((item) => JSON.parse(item.body))).toEqual([
+    expect(seen.map((item) => JSON.parse(item.body) as unknown)).toEqual([
       { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "begin", caseId: CASE_ID, stepIndex: 0, cookieValues: ["session=abcdef123456"] },
       { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "begin", caseId: CASE_ID, stepIndex: 0 },
       { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "end", caseId: CASE_ID, stepIndex: 0 },

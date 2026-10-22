@@ -546,14 +546,16 @@ describe("workflow E2E application rounds: the model channel", () => {
 
   it("the worker logs only counts when a channel closes: never a prompt, an answer or a credential", async () => {
     const lines: string[] = [];
+    let groupRunId: string | undefined;
     const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
     try {
       const s = await setup({ route: SCRIPTED, agent: true });
+      groupRunId = s.runId;
       s.fake.onExecutor = s.okOutput;
       await s.run({ modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment, invoke: async () => { throw new Error("not called"); } } });
     } finally { log.mockRestore(); }
     const closedLine = lines.find((line) => line.includes("workflow.e2e_model_channel_closed"));
-    expect(JSON.parse(closedLine!)).toEqual({ component: "worker", event: "workflow.e2e_model_channel_closed", groupRunId: expect.any(String), receipts: 0, outcomes: {},
+    expect(JSON.parse(closedLine!)).toEqual({ component: "worker", event: "workflow.e2e_model_channel_closed", groupRunId, receipts: 0, outcomes: {},
       droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 0 });
   });
 });
