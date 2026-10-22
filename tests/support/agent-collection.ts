@@ -1,6 +1,6 @@
 import { dockerOwnedResourceInventory, assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput, type DockerCollectionInputs,
   type ExecutorOutputSnapshot } from "../../packages/verifier/src/host/executor-readback.js";
-import { buildE2EAgentModelEvidence } from "../../packages/verifier/src/host/agent-model-evidence.js";
+import { agentTraceGroupOf, buildE2EAgentModelEvidence } from "../../packages/verifier/src/host/agent-model-evidence.js";
 import { resolveE2EExecutorSuite } from "../../packages/verifier/src/executor/suite.js";
 import type { E2EApplicationCollectionResult } from "../../packages/verifier/src/application-result-adapter.js";
 import type { E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
@@ -27,7 +27,7 @@ export async function assembleAgentRun(run: AgentRun) {
   const actual = assembleExecutorActualRun({ snapshot, compiled: resolved.suite, binding: resolved.binding, cleanup, evidenceDirectory: "/out" });
   const base = assembleDockerCollectionInputs({ snapshot, binding: resolved.binding, cleanup });
   // What the Docker host adds for a group with an agent step.
-  const agentModel = buildE2EAgentModelEvidence({ closed: run.closed, valueKey: run.valueKey, agent: snapshot.executorEvidence.agent });
+  const agentModel = buildE2EAgentModelEvidence({ closed: run.closed, valueKey: run.valueKey, agent: snapshot.executorEvidence.agent, group: agentTraceGroupOf(resolved.suite, resolved.binding.runId) });
   const inputs: DockerCollectionInputs = { ...base, agentModel };
   return { run, snapshot, plan, resolved, cleanup, actual, inputs, agentModel };
 }

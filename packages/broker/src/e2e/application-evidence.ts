@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_DISPLAY_ASSERTION_KINDS, canonicalJson, e2eModelRouteRevision, e2ePlanHasCompleteRequiredCriteria,
-  type E2EApplicationExecutionAdmission, type E2EDisplayAgentNavigation, type E2EDisplayScenario, type E2EExecutionPlan, type E2EModelRouteDefinition, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
-import { E2EAgentModelEvidenceSchema, createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
+import { E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_DISPLAY_ASSERTION_KINDS, canonicalJson, e2eModelRouteRevision, e2ePlanHasCompleteRequiredCriteria,
+  type E2EAgentTraceBinding, type E2EApplicationExecutionAdmission, type E2EDisplayAgentNavigation, type E2EDisplayScenario, type E2EExecutionPlan, type E2EModelRouteDefinition, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
+import { E2EAgentModelEvidenceSchema, E2E_AGENT_TRACE_BASE64_MAX, createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
   E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, e2eApplicationAggregateRunUsage, e2eApplicationGroupUsesModel, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
-  type E2EAgentModelEvidence, type E2ECompiledApplicationSuite } from "@agentx/verifier";
+  reviewAgentTraceFile, verifiedAgentCaseLedger, type E2EAgentModelEvidence, type E2EAgentTraceCase, type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { readAdmittedE2EModelRoute } from "./model-route-registry.js";
 import { buildScenarioRows, readCaptureScreenshots, type DisplayArtifact, type DisplayGroupInput } from "./application-display.js";
 import { agentCaseDirectory, agentNavigationOf } from "./application-agent-display.js";
@@ -75,6 +75,12 @@ export async function modelRouteForAdmission(read: (key: { pk: string; sk: strin
   catch { return { unavailable: "model-route-registry-unavailable" }; }
 }
 
+/**
+ * A recording of a passed AI navigation step that the broker reviewed again against the ledger it verified (Task 4.6a, CAPTURE46): the step it is for, its binding and the file's bytes.
+ * Present only on a round the broker decided is PASS, so a replay (Task 4.6b) can use it only then.
+ */
+export type VerifiedAgentTrace = Readonly<{ runId: string; caseId: string; stepIndex: number; keyHash: string; binding: E2EAgentTraceBinding; bytes: Uint8Array }>;
+
 export type ApplicationGroupVerification = Readonly<{ runId: string; groupId: string; verdict: E2EVerdict; reason: string }>;
 export type ApplicationEvidenceVerification = Readonly<{
   verdict: E2EVerdict; reason: string;
@@ -88,6 +94,11 @@ export type ApplicationEvidenceVerification = Readonly<{
    * Present once the admission verified. Display only: it is never read as a verdict.
    */
   display?: Readonly<{ scenarios: readonly E2EDisplayScenario[]; artifacts: readonly DisplayArtifact[] }>;
+  /**
+   * The recordings of the round's AI navigation steps that the broker's own review kept, in a fixed order. Present only when the round's verdict is PASS (empty for a round with no
+   * recording); a recording that fails review is left out and changes nothing else about the verdict.
+   */
+  agentTraces?: readonly VerifiedAgentTrace[];
 }>;
 
 type Json = Record<string, unknown>;
@@ -142,6 +153,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     for (const runId of input.groupEvidence.keys()) if (!runIds.includes(runId)) refuse("group evidence names a run outside the admission");
 
     const groups: ApplicationGroupVerification[] = [];
+    const agentTraces: VerifiedAgentTrace[] = [];
     const results: E2EQualifiedResult[] = [];
     const displayGroups: Array<{ runId: string; group: Omit<DisplayGroupInput, "result"> }> = [];
     for (const suite of validated.applicationSuites) {
@@ -165,6 +177,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       const verified = requalifyGroup({ suite, groupRun, binding, round: admission.round, receivedAt: input.receivedAt.get(binding.runId), modelRouteDefinition: input.modelRouteDefinition });
       groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: verified.verdict, reason: verified.reason });
       if (verified.result !== undefined) results.push(verified.result);
+      if (verified.verdict === "PASS" && verified.agentTraces !== undefined) agentTraces.push(...verified.agentTraces);
       displayGroups.push({ runId: binding.runId, group: { ...displayBase, verdict: verified.verdict, reason: verified.reason, observed: verified.observed ?? new Map(),
         screenshots: readCaptureScreenshots(groupRun.operatorEvidence, new Set(binding.expectedCases.map((item) => item.caseId))), agentNavigation: verified.agentNavigation } });
     }
@@ -187,7 +200,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       return { verdict: "UNKNOWN", reason: input.terminalStatus === undefined ? "the CHECKS operation has not ended" : "the CHECKS operation did not end successfully", plan, round, groups, results: shown, ...display };
     }
     if (!e2ePlanHasCompleteRequiredCriteria(plan)) return { verdict: "UNKNOWN", reason: "a required criterion has no executable scenario", plan, round, groups, results: shown, ...display };
-    return { verdict: "PASS", reason: "every admitted application group was independently re-collected as passing", plan, round, groups, results: shown, ...display };
+    return { verdict: "PASS", reason: "every admitted application group was independently re-collected as passing", plan, round, groups, results: shown, ...display, agentTraces };
   } catch (error) {
     const reason = error instanceof Unverifiable ? error.message : `the evidence could not be verified (${error instanceof Error ? error.name : "unknown"})`;
     return { verdict: "UNKNOWN", reason, ...(plan === undefined ? {} : { plan }), ...(round === undefined ? {} : { round }), groups: [], results: [] };
@@ -233,7 +246,7 @@ function readGroupEnvelope(envelope: unknown, admission: ReturnType<typeof decod
   return groupRun;
 }
 
-type Requalified = { verdict: E2EVerdict; reason: string; result?: E2EQualifiedResult; observed?: ReadonlyMap<string, ObservedAssertion[]>;
+type Requalified = { verdict: E2EVerdict; reason: string; result?: E2EQualifiedResult; agentTraces?: readonly VerifiedAgentTrace[]; observed?: ReadonlyMap<string, ObservedAssertion[]>;
   /** How the AI navigated each case the broker decided on its assertions, from the verified action ledger (Task 4.4b); absent for a group with no AI navigation step. */
   agentNavigation?: ReadonlyMap<string, E2EDisplayAgentNavigation> };
 type ObservedAssertion = { assertionIndex: number; outcome: string; value: unknown };
@@ -285,6 +298,49 @@ function safeAgentNavigations(input: Parameters<typeof agentNavigations>[0]): Ma
   catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_agent_navigation_dropped", errorName: error instanceof Error ? error.name : "unknown" }));
     return undefined;
+  }
+}
+
+/**
+ * The recordings a group uploaded that pass the broker's own review (Task 4.6a): each one is a file of the contract's shape and size, for a step of a case whose ledger the broker
+ * verified (held to this run, the case, the approved goals and the run's key), mapped to that step by its own provenance, matching the ledger one action at a time, and bound by the
+ * very binding the upload claims. Everything else is left out. Only a group the broker decided is PASS is asked, and what this returns never changes that.
+ */
+function reviewedAgentTraces(input: { suite: E2ECompiledApplicationSuite; binding: ApplicationEvidenceBinding; evidence: E2EAgentModelEvidence }): VerifiedAgentTrace[] {
+  const uploads = input.evidence.traces ?? [];
+  if (uploads.length === 0) return [];
+  const cases: E2EAgentTraceCase[] = [];
+  for (const expected of input.binding.expectedCases) {
+    const scenario = input.suite.bundle.scenarios.find((item) => item.scenarioId === expected.scenarioId);
+    const steps = scenario === undefined ? [] : scenario.steps.flatMap((step, stepIndex) => (step.kind === "agent" ? [{ stepIndex, goal: step.goal }] : []));
+    if (steps.length === 0) continue;
+    const entry = input.evidence.ledgers.find((item) => item.caseDirectory === agentCaseDirectory(expected.caseId));
+    const decoded = entry === undefined ? undefined : Buffer.from(entry.bytesBase64, "base64");
+    const ledgerBytes = entry === undefined || decoded === undefined || decoded.toString("base64") !== entry.bytesBase64 || sha256(decoded) !== entry.sha256 ? null : new Uint8Array(decoded);
+    cases.push({ caseId: expected.caseId, steps, ledger: verifiedAgentCaseLedger({ ledgerBytes, valueKey: input.evidence.valueKey, runId: input.binding.runId, caseId: expected.caseId, steps }) });
+  }
+  const kept = new Map<string, VerifiedAgentTrace>();
+  const twice = new Set<string>();
+  for (const upload of uploads) {
+    if (upload.traceBase64.length > E2E_AGENT_TRACE_BASE64_MAX) continue;
+    const bytes = Buffer.from(upload.traceBase64, "base64");
+    if (bytes.toString("base64") !== upload.traceBase64 || bytes.byteLength > E2E_AGENT_TRACE_FILE_MAX_BYTES) continue;
+    const review = reviewAgentTraceFile({ bytes: new Uint8Array(bytes), cases, valueKey: input.evidence.valueKey, expect: { caseDirectory: upload.caseDirectory, stepIndex: upload.stepIndex, keyHash: upload.keyHash } });
+    if (!review.keep || !same(review.binding, upload.binding) || review.binding.runId !== input.binding.runId) continue;
+    const key = `${review.caseId}:${review.stepIndex}`;
+    if (kept.has(key)) { twice.add(key); continue; }
+    kept.set(key, { runId: input.binding.runId, caseId: review.caseId, stepIndex: review.stepIndex, keyHash: review.keyHash, binding: review.binding, bytes: new Uint8Array(bytes) });
+  }
+  return [...kept.entries()].filter(([key]) => !twice.has(key)).map(([, trace]) => trace)
+    .sort((left, right) => (left.caseId === right.caseId ? left.stepIndex - right.stepIndex : left.caseId.localeCompare(right.caseId)));
+}
+
+/** `reviewedAgentTraces` for the verdict's path: a fault while reviewing drops the recordings and leaves what the verifier decided exactly as it is. */
+function safeReviewedAgentTraces(input: Parameters<typeof reviewedAgentTraces>[0]): VerifiedAgentTrace[] {
+  try { return reviewedAgentTraces(input); }
+  catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_agent_traces_dropped", errorName: error instanceof Error ? error.name : "unknown" }));
+    return [];
   }
 }
 
@@ -427,7 +483,8 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
       return { verdict: "UNKNOWN", reason: "the group's lifecycle does not confirm a clean, successful run",
         ...(promoted === undefined ? {} : { result: { ...promoted, status: "unavailable", reason: "application-lifecycle-unconfirmed" } }), ...(observed === undefined ? {} : { observed }) };
     }
-    return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }), ...shownNavigation };
+    const traces = agentModel.evidence === undefined ? [] : safeReviewedAgentTraces({ suite, binding, evidence: agentModel.evidence });
+    return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }), ...shownNavigation, agentTraces: traces };
   } catch (error) {
     // A schema refusal says what it refused (the first issue's own words), never the whole issue list.
     const said = error instanceof Error && error.name === "ZodError" ? (error as { issues?: Array<{ message?: string }> }).issues?.[0]?.message : error instanceof Error ? error.message : undefined;

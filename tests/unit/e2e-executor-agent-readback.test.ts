@@ -54,12 +54,16 @@ describe("reading an agent step's files back into the snapshot", () => {
     expect(agent.dropped).toBe(1);
   });
 
-  it("bounds a ledger at 256 KiB and a recording at 1 MiB, and holds sixteen recordings at most", async () => {
-    const files: Record<string, string> = { [`agent/${CASE_DIR}/agent-actions.json`]: "x".repeat(256 * 1024 + 1), "agent/traces/trace-ffffffffffffffff.json": "y".repeat(1_048_577) };
+  it("bounds a ledger at 256 KiB and a recording at 128 KiB (the contract's file ceiling), and holds three recordings at most (a group's agent step cap, Task 4.6a)", async () => {
+    const oversize = (await snapshotExecutorOutput(await outDirWith({ [`agent/${CASE_DIR}/agent-actions.json`]: "x".repeat(256 * 1024 + 1), "agent/traces/trace-ffffffffffffffff.json": "y".repeat(131_073),
+      "agent/traces/trace-eeeeeeeeeeeeeeee.json": "y".repeat(131_072) }), result, options)).executorEvidence.agent!;
+    expect(oversize.ledgers).toEqual([]);
+    expect(oversize.traces.map((item) => item.name)).toEqual(["trace-eeeeeeeeeeeeeeee.json"]);
+    expect(oversize.dropped).toBe(2);
+    const files: Record<string, string> = {};
     for (let index = 0; index < 17; index += 1) files[`agent/traces/trace-${index.toString(16).padStart(16, "0")}.json`] = "{}";
     const agent = (await snapshotExecutorOutput(await outDirWith(files), result, options)).executorEvidence.agent!;
-    expect(agent.ledgers).toEqual([]);
-    expect(agent.traces).toHaveLength(16);
-    expect(agent.dropped).toBe(3);
+    expect(agent.traces).toHaveLength(3);
+    expect(agent.dropped).toBe(14);
   });
 });

@@ -9,7 +9,7 @@ import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
 import { e2eApplicationGroupUsesModel, validateE2EApplicationExecutionAdmission } from "../application-scenarios.js";
 import { createCredentialRedactor } from "../executor/redact.js";
 import { executorContainerArgs } from "./executor-container.js";
-import { buildE2EAgentModelEvidence, type E2EModelChannelClosed } from "./agent-model-evidence.js";
+import { agentTraceGroupOf, buildE2EAgentModelEvidence, type E2EModelChannelClosed } from "./agent-model-evidence.js";
 import { verifyExecutorSeccompProfile } from "./executor-seccomp.js";
 import { openRegularFile, readRegularFileTail } from "./regular-file.js";
 import { SINKHOLE_ORIGIN_REF, planApplicationOrigins, mockOriginUrl } from "../application-mocks.js";
@@ -797,7 +797,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const { snapshot, cleanup } = settledRun(signal, "collection input readback");
     const inputs = (deps.assembleCollectionInputs ?? assembleDockerCollectionInputs)({ snapshot, binding, cleanup });
     // A group with an agent step carries its model evidence (the worker's receipts, the executor's ledgers, the run's key) beside the other protected inputs; any other group's are as they were.
-    return usesModel ? Object.freeze({ ...inputs, agentModel: buildE2EAgentModelEvidence({ closed: state.modelChannelClosed, valueKey: state.modelValueKey!, agent: snapshot.executorEvidence.agent }) }) : inputs;
+    return usesModel ? Object.freeze({ ...inputs, agentModel: buildE2EAgentModelEvidence({ closed: state.modelChannelClosed, valueKey: state.modelValueKey!, agent: snapshot.executorEvidence.agent, group: agentTraceGroupOf(compiled, runId) }) }) : inputs;
   }
 
   return Object.freeze({

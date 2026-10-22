@@ -40,7 +40,9 @@ export type { E2EApplicationProducer, E2EApplicationProofBytes, E2EApplicationSu
   E2EApplicationQualification, E2EApplicationUnmockedCall } from "./application-result-adapter.js";
 export { collectE2EApplicationRun } from "./application-collection.js";
 export { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } from "./application-templates.js";
-export { evaluateE2EAgentCase, E2EAgentModelEvidenceSchema, E2E_AGENT_UNKNOWN_CODES, E2E_AGENT_LEDGER_MAX_BYTES, E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION } from "./application-agent-result.js";
+export { E2E_AGENT_TRACE_BASE64_MAX, evaluateE2EAgentCase, E2EAgentModelEvidenceSchema, E2E_AGENT_UNKNOWN_CODES, E2E_AGENT_LEDGER_MAX_BYTES, E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION } from "./application-agent-result.js";
+export { agentInstructionDigest, mapAgentTraceToStep, reviewAgentTraceFile, selectAgentTraceUploads, verifiedAgentCaseLedger } from "./application-agent-traces.js";
+export type { E2EAgentTraceCase, E2EAgentTraceReview, E2EAgentTraceUpload } from "./application-agent-traces.js";
 export type { E2EAgentModelEvidence, E2EAgentUnknownCode, E2EAgentCaseVerdict, E2EAgentCaseInput, E2EAgentCaseResult, E2EAgentTranscriptDigest } from "./application-agent-result.js";
 export type { E2EActualApplicationRun, E2EActualApplicationShard } from "./application-collection.js";
 export { runIsolatedE2EApplication } from "./application-runtime.js";
@@ -67,7 +69,7 @@ export { prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment } from 
 export type { E2EApplicationPreparationInputs, E2EApplicationEnvironmentPorts } from "./application-services.js";
 export { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRuns, dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest, dockerOwnedCleanupReceipt,
   e2eRunNetworks, e2eModelSocketPath, MODEL_SOCKET_PATH_MAX_BYTES, ROVARA_RUN_LABEL, ROVARA_CREATED_LABEL, STALE_RUN_SWEEP_AGE_MS, DEFAULT_DEADLINE_GRACE_MS, WEB_API_BUILD_IMAGE } from "./host/docker-application-host.js";
-export { E2EModelChannelClosedSchema, buildE2EAgentModelEvidence, type E2EModelChannelClosed } from "./host/agent-model-evidence.js";
+export { E2EModelChannelClosedSchema, agentTraceGroupOf, buildE2EAgentModelEvidence, type E2EModelChannelClosed } from "./host/agent-model-evidence.js";
 export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, DockerApplicationModelChannel, DockerApplicationUnavailableReason, DockerBuildResult } from "./host/docker-application-host.js";
 export { executorContainerArgs } from "./host/executor-container.js";
 export { installedExecutorSeccompProfilePath, verifyExecutorSeccompProfile } from "./host/executor-seccomp.js";

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
-import { E2EApplicationEvidenceRefSchema, ProjectSetupRunnerToolchainSchema, canonicalJson, type E2EApplicationEvidenceRef, type E2ERunBinding } from "@agentx/contracts";
+import { E2EApplicationEvidenceRefSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, ProjectSetupRunnerToolchainSchema, canonicalJson, type E2EApplicationEvidenceRef, type E2ERunBinding } from "@agentx/contracts";
 import { bindMockLedgers, type CaseWindow, type ParsedMockLedger } from "./mock-ledger.js";
 import { buildMockProofs } from "./mock-proofs.js";
 import { SINKHOLE_ORIGIN_REF } from "../application-mocks.js";
@@ -178,8 +178,8 @@ async function readExecutorEvidence(outDir: string, containsCredential: (bytes: 
 }
 
 const MAX_AGENT_LEDGER_BYTES = 256 * 1024;
-const MAX_AGENT_TRACE_BYTES = 1_048_576;
-const MAX_AGENT_TRACES = 16;
+const MAX_AGENT_TRACE_BYTES = E2E_AGENT_TRACE_FILE_MAX_BYTES;
+const MAX_AGENT_TRACES = E2E_AGENT_TRACES_PER_GROUP_MAX;
 const MAX_AGENT_LEDGERS = 64;
 const AGENT_TRACE_FILE = /^trace-[a-f0-9]{16}\.json$/;
 

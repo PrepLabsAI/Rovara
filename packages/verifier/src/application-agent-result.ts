@@ -1,6 +1,6 @@
 import { z } from "zod";
 import {
-  E2EModelReceiptSchema, E2EModelRouteDefinitionSchema, checkE2EGroupModelBudget, checkE2EStepModelAccounting, crossCheckE2EAgentLedgerReceipts, e2eModelRouteRevision,
+  E2EAgentTraceBindingSchema, E2EModelReceiptSchema, E2EModelRouteDefinitionSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, checkE2EGroupModelBudget, checkE2EStepModelAccounting, crossCheckE2EAgentLedgerReceipts, e2eModelRouteRevision,
   parseVerifiedE2EAgentActionLedger,
   type E2EModelReceipt, type E2EModelRouteDefinition, type E2ERoundScope, type VerifiedE2EAgentActionLedger,
 } from "@agentx/contracts";
@@ -17,6 +17,7 @@ import {
 export const E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION = "rovara-agent-model-evidence/v1" as const;
 /** The most one case's action ledger may weigh (the contract's structural caps keep a real one far under it). Anything bigger is not a ledger of this run. */
 export const E2E_AGENT_LEDGER_MAX_BYTES = 65_536;
+export const E2E_AGENT_TRACE_BASE64_MAX = Math.ceil(E2E_AGENT_TRACE_FILE_MAX_BYTES * 4 / 3) + 4;
 const hex64 = z.string().regex(/^[a-f0-9]{64}$/);
 const count = z.number().int().min(0).max(1_000_000);
 
@@ -38,6 +39,13 @@ export const E2EAgentModelEvidenceSchema = z.object({
   /** One entry per receipt: the digests of the transcript bodies the worker kept (the bodies themselves are never uploaded) or why it kept none. */
   transcriptDigests: z.array(z.object({ receiptId: z.string().min(1).max(120), promptSha256: hex64.nullable(), responseSha256: hex64.nullable(),
     omitted: z.enum(["budget", "unparseable"]).nullable() }).strict()).max(300),
+  /**
+   * Task 4.6a (CAPTURE46): the cleaned recordings of the group's passed AI navigation steps, as the executor's trace files (base64, at most 128 KiB each, at most three), each with the
+   * step it is for and the binding the host's review made of it. A claim like the rest: the broker reviews every one again against the ledger it verified, and keeps one only on a PASS
+   * round. Absent on evidence from before Task 4.6a, which verifies exactly as it did.
+   */
+  traces: z.array(z.object({ caseDirectory: z.string().regex(/^[a-f0-9]{16}$/), stepIndex: z.number().int().min(0).max(255), keyHash: hex64, traceBase64: z.string().min(1).max(E2E_AGENT_TRACE_BASE64_MAX),
+    binding: E2EAgentTraceBindingSchema }).strict()).max(E2E_AGENT_TRACES_PER_GROUP_MAX).optional(),
 }).strict();
 export type E2EAgentModelEvidence = z.infer<typeof E2EAgentModelEvidenceSchema>;
 export type E2EAgentChannelFacts = E2EAgentModelEvidence["channel"];

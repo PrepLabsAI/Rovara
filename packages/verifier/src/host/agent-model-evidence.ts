@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { E2EModelReceiptSchema, E2EModelRouteDefinitionSchema, canonicalJson } from "@agentx/contracts";
 import { E2E_AGENT_LEDGER_MAX_BYTES, E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION, type E2EAgentModelEvidence, type E2EAgentTranscriptDigest } from "../application-agent-result.js";
+import { selectAgentTraceUploads, verifiedAgentCaseLedger, type E2EAgentTraceCase } from "../application-agent-traces.js";
+import { agentCaseDirectoryName } from "../executor/evidence-paths.js";
+import type { E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import type { ExecutorAgentEvidence } from "./executor-readback.js";
 
 /**
@@ -35,6 +38,16 @@ function digestOf(transcript: z.infer<typeof E2EModelChannelClosedSchema>["trans
   return { receiptId: transcript.receiptId, promptSha256, responseSha256, omitted };
 }
 
+/** The cases of a compiled group that have AI navigation steps, with those steps' approved goals by their index in the scenario (what the traces of the group are mapped to). */
+export function agentTraceGroupOf(compiled: Pick<E2ECompiledApplicationSuite, "bundle" | "expectedCases">, runId: string): NonNullable<Parameters<typeof buildE2EAgentModelEvidence>[0]["group"]> {
+  const stepsOf = new Map(compiled.bundle.scenarios.map((scenario) => [scenario.scenarioId, scenario.steps] as const));
+  const cases = compiled.expectedCases.flatMap((expected) => {
+    const steps = (stepsOf.get(expected.scenarioId) ?? []).flatMap((step, stepIndex) => (step.kind === "agent" ? [{ stepIndex, goal: step.goal }] : []));
+    return steps.length === 0 ? [] : [{ caseId: expected.caseId, steps }];
+  });
+  return { runId, cases };
+}
+
 /**
  * The evidence of a group's AI navigation steps for the collector, from what the channel returned when it closed (`closed`: anything; what is not a closed channel is a channel that
  * failed to close) and the ledgers the executor left. `valueKey` is the host's own key for the run (the one it wrote into the executor's plan), so a channel that returns another
@@ -42,7 +55,9 @@ function digestOf(transcript: z.infer<typeof E2EModelChannelClosedSchema>["trans
  *
  * A channel that failed does not make the group's evidence absent: it makes it say so (`evidenceErrors`), so the collector answers UNKNOWN with the code for it and never PASS.
  */
-export function buildE2EAgentModelEvidence(input: { closed: unknown; valueKey: string; agent: ExecutorAgentEvidence | undefined }): E2EAgentModelEvidence {
+export function buildE2EAgentModelEvidence(input: { closed: unknown; valueKey: string; agent: ExecutorAgentEvidence | undefined;
+  /** The group's run and its cases' approved agent steps (Task 4.6a): what the executor's trace files are mapped to and reviewed against. Without it, no trace is uploaded. */
+  group?: Readonly<{ runId: string; cases: ReadonlyArray<Readonly<{ caseId: string; steps: ReadonlyArray<Readonly<{ stepIndex: number; goal: string }>> }>> }> }): E2EAgentModelEvidence {
   const ledgers = (input.agent?.ledgers ?? []).filter((item) => item.bytes.byteLength <= E2E_AGENT_LEDGER_MAX_BYTES)
     .map((item) => ({ caseDirectory: item.caseDirectory, bytesBase64: Buffer.from(item.bytes).toString("base64"), sha256: sha(item.bytes) }));
   const parsed = E2EModelChannelClosedSchema.safeParse(input.closed);
@@ -51,9 +66,15 @@ export function buildE2EAgentModelEvidence(input: { closed: unknown; valueKey: s
       channel: { droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 1 }, ledgers, transcriptDigests: [] };
   }
   const closed = parsed.data;
+  const traceCases: E2EAgentTraceCase[] = (input.group?.cases ?? []).map((item) => ({ caseId: item.caseId, steps: item.steps,
+    ledger: verifiedAgentCaseLedger({ ledgerBytes: input.agent?.ledgers.find((entry) => entry.caseDirectory === agentCaseDirectoryName(item.caseId))?.bytes ?? null,
+      valueKey: input.valueKey, runId: input.group!.runId, caseId: item.caseId, steps: item.steps }) }));
+  // A recording is a replay input and nothing else: whatever goes wrong in choosing them leaves the group's evidence as it would have been without any.
+  const traces = (() => { try { return input.group === undefined ? [] : selectAgentTraceUploads({ files: input.agent?.traces ?? [], cases: traceCases, valueKey: input.valueKey }); } catch { return []; } })();
   const receipts = [...closed.receipts].sort((left, right) => sortKey(left).localeCompare(sortKey(right)));
   const transcripts = new Map(closed.transcripts.map((item) => [item.receiptId, item] as const));
   return { schemaVersion: E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION, route: closed.definition, valueKey: input.valueKey, receipts,
     channel: { droppedRequests: closed.droppedRequests, unscopedRequests: closed.unscopedRequests, overrun: closed.overrun, evidenceErrors: closed.evidenceErrors }, ledgers,
+    ...(traces.length === 0 ? {} : { traces }),
     transcriptDigests: receipts.flatMap((receipt) => { const transcript = transcripts.get(receipt.receiptId); return transcript === undefined ? [] : [digestOf(transcript)]; }) };
 }
