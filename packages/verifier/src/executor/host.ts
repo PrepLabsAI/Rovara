@@ -189,14 +189,19 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const agent = channelPlan === undefined ? null : (() => {
     const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId });
     const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
-    const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position });
+    // The adapter's own scan covers what the worker's cannot: a session value learned during a step (the begin marker, sent once per step, carries only what was known then).
+    const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position, scan: (bytes) => agentRedactor.contains(bytes) });
+    // The goals of the steps run so far: a trace's typed value that is text of one stays as it is, the ledger's rule (the runner writes a trace after its step has ended).
+    const goals: string[] = [];
     const origin = declaration.originByApplicationId.find((item) => item.applicationId === launchContext.selectedTarget.applicationId)?.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN;
     const store = createE2EAgentCaptureStore({
       scan: (bytes) => agentRedactor.contains(bytes),
       persist: (keyHash, bytes) => persistE2EAgentTrace(context.outDir, keyHash, bytes),
+      valueKey: channelPlan.valueKey, goals: () => goals,
     });
     const executor = createRovaraE2EAgentExecutor({ position: () => current.position, ledger: () => current.ledger, origin: () => origin });
-    const runStep = createE2EAgentStepDriver({ client, adapter, current, runId: plan.runId, valueKey: channelPlan.valueKey, outDir: context.outDir, sessionSecrets: () => sessionSecrets });
+    const driveStep = createE2EAgentStepDriver({ client, adapter, current, runId: plan.runId, valueKey: channelPlan.valueKey, outDir: context.outDir, sessionSecrets: () => sessionSecrets });
+    const runStep: typeof driveStep = (request) => { if (!goals.includes(request.goal)) goals.push(request.goal); return driveStep(request); };
     return { adapter, store, executor, runStep };
   })();
   const agentParts = agent === null ? {} : { modelFactory: () => agent.adapter as never, agentExecutor: agent.executor, agentCacheStore: agent.store };

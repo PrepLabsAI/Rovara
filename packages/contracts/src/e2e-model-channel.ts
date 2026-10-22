@@ -693,7 +693,9 @@ function pathOf(url: unknown): string | undefined {
 }
 
 function actionMatches(traced: Rec, action: VerifiedE2EAgentActionLedger["steps"][number]["actions"][number], key: string): boolean {
-  const keyed = (value: unknown, expected: string | null) => typeof value === "string" && expected !== null && e2eAgentValueDigest(key, value) === expected;
+  // A typed value the capture store kept as its keyed digest (`hmac-sha256:<digest>`, because it was not text of the goal) matches the ledger's digest as it is.
+  const keyed = (value: unknown, expected: string | null) => typeof value === "string" && expected !== null
+    && (e2eAgentValueDigest(key, value) === expected || value === `hmac-sha256:${expected}`);
   if (traced["name"] !== action.tool) return false;
   switch (action.tool) {
     case "tap": return targetMatches(traced["target"], action.node);

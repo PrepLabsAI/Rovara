@@ -1,5 +1,5 @@
 import { E2E_AGENT_STOP_CODES, type E2EModelChannelClient } from "@agentx/contracts";
-import { isAgentError } from "e2e/agent";
+import { AgentError, isAgentError } from "e2e/agent";
 import type { E2EWebAgentPorts } from "../web-runtime.js";
 import { createE2EAgentLedgerWriter, type E2EAgentLedgerWriter } from "./agent-ledger.js";
 import type { E2EAgentModelAdapter } from "./agent-model-adapter.js";
@@ -7,11 +7,14 @@ import type { E2EAgentModelAdapter } from "./agent-model-adapter.js";
 /**
  * The agent step driver's step lifecycle (Task 4.3b): what happens around one `agent.act` call.
  *
- * 1. The worker is told the step begins (the begin marker, with the session values the browser holds, so a page that shows one is refused before a model sees it). A marker the worker
+ * 1. The worker is told the step begins (the begin marker, with the session values the browser holds, so a page that shows one is refused before a model sees it). A marker is sent
+ *    once per step, so a value the application sets during the step reaches the worker only at the next step's begin; the model adapter's own scan (`scan`, the host's redactor,
+ *    which learns every session value as it arrives) refuses a request that carries one in the meantime. A marker the worker
  *    refuses ends the step here: no model call may be made for a step the worker does not know.
  * 2. The step's ledger is opened and the step is made current, so the adapter and the executor can attribute calls and actions to it.
  * 3. `act` runs. An `AgentError` is an outcome (`failed`, with its stop code), not a throw; anything else is recorded as a failed step and thrown again, because it is the executor's own
- *    fault and not something the case can go on from.
+ *    fault and not something the case can go on from. An action the ledger could not write fails the step with `ENVIRONMENT_UNAVAILABLE` whatever `act` answered: the executor's
+ *    tool tells the model a fixed sentence (never the file system's words or a path) and stops the loop, and the step never concludes with an unrecorded action.
  * 4. Whatever happened, the step is no longer current, the ledger records how it ended with the worker's receipt ids, and the worker is told the step ended.
  */
 export interface E2EAgentStepDriverOptions {
@@ -30,6 +33,7 @@ export interface E2EAgentStepDriverOptions {
 
 const STOP_CODES: ReadonlySet<string> = new Set(E2E_AGENT_STOP_CODES);
 const END_MARKER_TIMEOUT_MS = 10_000;
+const LEDGER_FAULT_MESSAGE = "the action ledger could not be written";
 
 export function createE2EAgentStepDriver(options: E2EAgentStepDriverOptions): E2EWebAgentPorts["runStep"] {
   const ledgers = new Map<string, E2EAgentLedgerWriter>();
@@ -51,17 +55,25 @@ export function createE2EAgentStepDriver(options: E2EAgentStepDriverOptions): E2
     let thrown: unknown;
     let receiptIds: string[] | undefined;
     let begun = false;
+    // An action the ledger could not record: the step fails with a fixed code whatever `act` answers, because the ledger no longer says what the agent did.
+    let ledgerFault = false;
+    const recording: E2EAgentLedgerWriter = { directory: ledger.directory, beginStep: (stepIndex, goal) => ledger.beginStep(stepIndex, goal), endStep: (stepIndex, end) => ledger.endStep(stepIndex, end),
+      recordAction(action: Parameters<E2EAgentLedgerWriter["recordAction"]>[0]): void {
+        try { ledger.recordAction(action); }
+        catch { ledgerFault = true; throw new AgentError("ENVIRONMENT_UNAVAILABLE", LEDGER_FAULT_MESSAGE); }
+      } };
     try {
       ledger.beginStep(position.stepIndex, request.goal);
       begun = true;
       options.current.position = position;
-      options.current.ledger = ledger;
+      options.current.ledger = recording;
       try { await request.act(request.goal, { maxSteps: request.maxActions, maxModelCalls: request.maxActions + 4, timeout: request.timeoutMs }); }
       catch (error) {
         verdict = "failed";
         if (isAgentError(error)) stopCode = STOP_CODES.has(error.code) ? error.code : "ACTION_FAILED";
         else { stopCode = "ACTION_FAILED"; thrown = error; }
       }
+      if (ledgerFault) { verdict = "failed"; stopCode = "ENVIRONMENT_UNAVAILABLE"; }
     } finally {
       options.current.position = null;
       options.current.ledger = null;

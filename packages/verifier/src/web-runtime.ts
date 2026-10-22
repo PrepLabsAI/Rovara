@@ -241,9 +241,11 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
     if (signal.aborted) throw new Error("application case was cancelled before its next admitted web step");
     const actionTimeout = Math.max(1, Math.min(30_000, (input.deadlineAt ?? Date.now() + 30_000) - Date.now()));
     if (actionTimeout <= 1 && (input.deadlineAt ?? Date.now() + 30_000) <= Date.now()) throw new Error("web action is outside the original case deadline");
-    const finalDownloadTrigger = csvAssertions.length === 1
-      ? input.scenario.steps.findLastIndex((candidate) => candidate.kind === "click" || candidate.kind === "tap" || candidate.kind === "agent")
-      : -1;
+    // The download trigger is the last approved click or tap, as before agent steps existed, wherever an agent step stands; only a case with no click or tap at all has its last
+    // agent step for its trigger. An agent step after the trigger click runs without a download waiter, and one before it cannot take the click's download.
+    const lastClick = input.scenario.steps.findLastIndex((candidate) => candidate.kind === "click" || candidate.kind === "tap");
+    const finalDownloadTrigger = csvAssertions.length !== 1 ? -1
+      : lastClick >= 0 ? lastClick : input.scenario.steps.findLastIndex((candidate) => candidate.kind === "agent");
     const action = { caseId: input.caseId, actionIndex: stepIndex, actionDigest: sha(canonicalJson(step)) };
     const window = await input.ports.actionWindows.begin(action, signal);
     if (!window || typeof window.actionId !== "string" || window.actionId.length < 1 || window.actionId.length > 160) {

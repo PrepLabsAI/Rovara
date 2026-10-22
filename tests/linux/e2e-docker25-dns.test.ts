@@ -27,7 +27,8 @@ describe.runIf(process.env.ROVARA_DOCKER === "1")("the production Docker host on
     root = await realpath(await mkdtemp(join("/var/tmp", "rovara-docker25-")));
     runRoot = join(root, "runs");
     evidenceRoot = join(root, "evidence");
-    await mkdir(runRoot, { recursive: true });
+    // The host refuses a run root that group or others can enter.
+    await mkdir(runRoot, { recursive: true, mode: 0o700 });
     await mkdir(evidenceRoot, { mode: 0o700 });
     await chmod(evidenceRoot, 0o700);
     // Nothing inside the dind daemon pulls from a registry: the runner pulled the dind image and the build image once (from the GHCR mirror, by digest; see scripts/ci-images.ts) and the

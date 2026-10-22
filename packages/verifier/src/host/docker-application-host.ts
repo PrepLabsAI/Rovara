@@ -692,8 +692,14 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       ...(!usesModel ? {} : { modelChannel: { protocol: E2E_MODEL_CHANNEL_SCHEMA_VERSION, socketPath: E2E_MODEL_CHANNEL_SOCKET_PATH, routeId: modelRoute!.routeId, routeRevision: modelRoute!.routeRevision,
         valueKey: state.modelValueKey! } }) });
     try {
-      await sweepStaleRovaraRuns(docker, STALE_RUN_SWEEP_AGE_MS, { now: deps.now, runRoot: deps.runRoot }).catch(() => 0);
       await mkdir(deps.runRoot, { recursive: true, mode: 0o700 });
+      // A run root that was already there is held to what this host would have made: a directory (not a link) of this user that nobody else can enter, since the run's plan
+      // (accounts and the agent value key) and its model socket live under it.
+      const root = await lstat(deps.runRoot);
+      if (!root.isDirectory()) throw new Error("the run root is not a directory");
+      if (typeof process.getuid === "function" && root.uid !== process.getuid()) throw new Error("the run root is owned by another user");
+      if ((root.mode & 0o077) !== 0) throw new Error("the run root is open to group or others");
+      await sweepStaleRovaraRuns(docker, STALE_RUN_SWEEP_AGE_MS, { now: deps.now, runRoot: deps.runRoot }).catch(() => 0);
       await mkdir(workspace, { mode: 0o700 });
       await mkdir(dirs.owned, { mode: 0o755 }); await mkdir(dirs.out, { mode: 0o755 });
       await mkdir(dirs.mock, { mode: 0o755 }); await mkdir(dirs.mockOut, { mode: 0o755 });

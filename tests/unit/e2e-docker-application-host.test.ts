@@ -274,6 +274,24 @@ describe("docker application host", () => {
     expect(Buffer.byteLength(diagnostics.appLogTail)).toBeLessThanOrEqual(65_536);
   });
 
+  it("refuses a run root that already exists open to group or others, or as a symlink, before it writes anything; a 0700 one of its own is used", async () => {
+    for (const mode of [0o755, 0o770, 0o707]) {
+      const fake = new FakeDockerCli();
+      const runRoot = await temp("open-run-root-"); await chmod(runRoot, mode);
+      const s = await setup({ fake, runRoot });
+      await expect(s.host.allocate(s.input as never, new AbortController().signal)).rejects.toThrow(/run root .*group or others/);
+      expect(await readdir(runRoot)).toEqual([]);
+      expect(fake.networks()).toEqual([]);
+    }
+    const target = await temp("run-root-target-"); const parent = await temp("run-root-link-");
+    const link = join(parent, "runs"); symlinkSync(target, link);
+    const fake = new FakeDockerCli(); const s = await setup({ fake, runRoot: link });
+    await expect(s.host.allocate(s.input as never, new AbortController().signal)).rejects.toThrow(/run root .*directory/);
+    expect(await readdir(target)).toEqual([]);
+    const own = new FakeDockerCli(); const ok = await setup({ fake: own, runRoot: await temp("own-run-root-") }); own.onExecutor = okOutput(ok);
+    expect((await runWith(ok)).unavailableReason).toBeNull();
+  });
+
   it("removes every labeled resource even when the build fails", async () => {
     const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
     fake.failOn("build", 1); fake.buildOutput = "npm error Missing script: does-not-exist\n";

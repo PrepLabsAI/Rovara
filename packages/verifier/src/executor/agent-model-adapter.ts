@@ -14,12 +14,13 @@ import type { E2EModelChannelClient, E2EModelChannelRequest, E2EModelChannelResp
  * - A file part, a reasoning part or an unknown part in the prompt is refused here (the channel schema refuses them too), so pixels cannot be sent by this path whatever the loop does.
  */
 
-export type E2EAgentModelErrorCode = "channel-error" | "unsupported-prompt" | "no-position" | "invalid-answer";
+export type E2EAgentModelErrorCode = "channel-error" | "unsupported-prompt" | "no-position" | "invalid-answer" | "credential-in-prompt";
 const AGENT_MODEL_ERROR_MESSAGES: Record<E2EAgentModelErrorCode, string> = {
   "channel-error": "the model call did not complete",
   "unsupported-prompt": "the prompt holds a part the model channel does not carry",
   "no-position": "no agent step is running to attribute the model call to",
   "invalid-answer": "the model channel answered with something that cannot be used",
+  "credential-in-prompt": "the prompt holds a credential or a session value, so it was not sent",
 };
 
 /** A plain, non-retryable error. `isRetryable` is false so the AI SDK never sends the request again. */
@@ -78,6 +79,12 @@ export interface E2EAgentModelAdapterOptions {
   routeId: string;
   /** The step the call belongs to. It returns null when no agent step is running, and the call is then refused before anything is sent. */
   position: () => { caseId: string; stepIndex: number } | null;
+  /**
+   * Whether the bytes of a request carry a credential this process knows (the run's accounts, and every session value it has learned, a cookie the application set during the
+   * step included). The worker scans each request against the values the begin marker gave it, and a marker is sent once per step (Task 4.3a), so a value learned later reaches only
+   * this scan: a request it flags is refused here and never sent.
+   */
+  scan?: (bytes: Uint8Array) => boolean;
 }
 
 export interface E2EAgentModelAdapter {
@@ -110,6 +117,7 @@ export function createE2EAgentModelAdapter(options: E2EAgentModelAdapterOptions)
         inputSchema: tool.inputSchema })) as unknown as NonNullable<E2EModelChannelRequest["call"]["tools"]>;
       const request = { prompt, ...(tools === undefined ? {} : { tools }), ...(call.toolChoice === undefined ? {} : { toolChoice: call.toolChoice as E2EModelChannelRequest["call"]["toolChoice"] }),
         ...(call.maxOutputTokens === undefined ? {} : { maxOutputTokens: call.maxOutputTokens }) } as E2EModelChannelRequest["call"];
+      if (options.scan?.(Buffer.from(JSON.stringify(request), "utf8")) === true) throw new E2EAgentModelError("credential-in-prompt");
       const slot = key(position);
       const callIndex = counters.get(slot) ?? 0;
       counters.set(slot, callIndex + 1);

@@ -408,3 +408,85 @@ describe("the model adapter (Task 4.3b, test case 4)", () => {
   }, 90_000);
 });
 
+
+describe("fix round 1 (Task 4.3b review)", () => {
+  it("ends the step blocked with ENVIRONMENT_UNAVAILABLE when the ledger cannot be written, and the model is told a fixed sentence with no fs text or path", async () => {
+    const t = build([{ tool: "tap", input: { target: "n2" } }, { tool: "tap", input: { target: "n3" } }, DONE]);
+    const failing = { directory: t.ledger.directory, beginStep: (index: number, goal: string) => t.ledger.beginStep(index, goal), endStep: (index: number, end: Parameters<typeof t.ledger.endStep>[1]) => t.ledger.endStep(index, end),
+      recordAction: () => { throw new Error("EACCES: permission denied, open '/srv/secret-path/actions.json'"); } };
+    const executor = createRovaraE2EAgentExecutor({ position: () => ({ caseId: CASE_ID, stepIndex: 0 }), ledger: () => failing, origin: () => ORIGIN });
+    const verdict = await executor.runStep(t.ctx as never);
+    expect(verdict).toMatchObject({ status: "blocked", errorCode: "ENVIRONMENT_UNAVAILABLE" });
+    expect(JSON.stringify(t.requests)).not.toMatch(/EACCES|secret-path|actions\.json/);
+    // No action runs after the one that could not be recorded.
+    expect(t.spies.actions).toEqual(['tap:[{"id":"n2"}]']);
+  });
+
+  it("describes the first action's node from the screen the model was shown in the prompt, not from a fresh observation", async () => {
+    const screens = [SCREEN, SCREEN.replace('#n2 button "Download orders" testid="download-orders"', '#n2 button "Something else" testid="other"')];
+    let reads = 0;
+    const t = build([{ tool: "tap", input: { target: "n2" } }, DONE], { screen: () => screens[Math.min(reads++, 1)]! });
+    await t.executor.runStep(t.ctx as never);
+    t.ledger.endStep(0, { verdict: "concluded", stopCode: null, receiptIds: [] });
+    const action = t.readLedger().steps[0]!.actions[0]!;
+    expect(action.node).toEqual({ role: "button", name: "Download orders", testId: "download-orders" });
+    expect(action.snapshotSha256).toBe(sha(SCREEN));
+  });
+
+  it("keeps a trace's typed value that is text of a goal, turns any other into its keyed digest, and drops a trace whose value shows anywhere else", async () => {
+    const valueKey = generateE2EAgentValueKey();
+    const outDir = temp();
+    const store = createE2EAgentCaptureStore({ valueKey, goals: () => [GOAL], persist: (keyHash, bytes) => persistE2EAgentTrace(outDir, keyHash, bytes) });
+    const typed = "a value the model made up 4711";
+    expect(await store.write("a".repeat(64), { actions: [{ name: "type", value: "orders", target: { role: "textbox" }, summary: "typed" },
+      { name: "typeText", value: typed, replace: true, summary: "typed text" }, { name: "select", value: typed, target: { role: "combobox" }, summary: "chose" }] })).toBeDefined();
+    const kept = readFileSync(agentTraceFilePath(outDir, "a".repeat(64)), "utf8");
+    expect(kept).not.toContain(typed);
+    const parsed = JSON.parse(kept) as { actions: Array<{ value: string }> };
+    expect(parsed.actions.map((action) => action.value)).toEqual(["orders", `hmac-sha256:${e2eAgentValueDigest(valueKey, typed)}`, `hmac-sha256:${e2eAgentValueDigest(valueKey, typed)}`]);
+    expect(JSON.stringify(store.taken())).not.toContain(typed);
+    // The typed action's own summary and an anchor's input value that is the typed value are rewritten with it; the trace is kept with no copy of the value.
+    expect(await store.write("f".repeat(64), { actions: [{ name: "type", value: typed, summary: `typed "${typed}"`, target: { role: "textbox", value: typed } }],
+      endAnchors: [{ role: "textbox", value: typed }] })).toBeDefined();
+    expect(readFileSync(agentTraceFilePath(outDir, "f".repeat(64)), "utf8")).not.toContain(typed);
+    // The value shows somewhere else (another action's summary, screen text): the trace is dropped whole.
+    expect(await store.write("b".repeat(64), { actions: [{ name: "type", value: typed, summary: "typed" }, { name: "tap", summary: `tapped "${typed}"`, target: { role: "button" } }] })).toBeUndefined();
+    expect(existsSync(agentTraceFilePath(outDir, "b".repeat(64)))).toBe(false);
+    expect(await store.write("g".repeat(64), { actions: [{ name: "type", value: typed, summary: "typed" }], endAnchors: [{ role: "text", name: `Hello ${typed}` }] })).toBeUndefined();
+    // Percent-encoded in a later URL: dropped too.
+    expect(await store.write("c".repeat(64), { actions: [{ name: "type", value: typed, summary: "typed" }, { name: "navigate", url: `/search?q=${encodeURIComponent(typed)}`, summary: "went" }] })).toBeUndefined();
+    // With no value key, any value that is not text of a goal drops the trace.
+    const keyless = createE2EAgentCaptureStore({ goals: () => [GOAL] });
+    expect(await keyless.write("d".repeat(64), { actions: [{ name: "type", value: typed, summary: "typed" }] })).toBeUndefined();
+    expect(await keyless.write("e".repeat(64), { actions: [{ name: "type", value: "orders", summary: "typed" }] })).toBeDefined();
+  });
+
+  it("a trace whose typed value the store kept as its keyed digest still matches the verified ledger in the review", async () => {
+    const typed = "a value the model made up 4711";
+    const t = build([{ tool: "type", input: { target: "n4", value: typed } }, DONE]);
+    await t.executor.runStep(t.ctx as never);
+    t.ledger.endStep(0, { verdict: "concluded", stopCode: null, receiptIds: [] });
+    const parsed = parseVerifiedE2EAgentActionLedger(t.readLedger(), { goals: new Map([[0, GOAL]]), valueKey: t.valueKey, runId: RUN_ID, caseId: CASE_ID });
+    if (!parsed.ok) throw new Error(parsed.reason);
+    const store = createE2EAgentCaptureStore({ valueKey: t.valueKey, goals: () => [GOAL] });
+    expect(await store.write("a".repeat(64), { actions: [{ name: "type", value: typed, summary: "typed", target: { role: "textbox", name: "File name" } }] })).toBeDefined();
+    const [held] = store.taken();
+    expect(JSON.stringify(held)).not.toContain(typed);
+    expect(reviewCapturedE2EAgentTrace({ stepIndex: 0, trace: held!.trace, ledger: parsed.ledger, valueKey: t.valueKey, credentialScanHit: false })).toMatchObject({ keep: true });
+    // A digest that is not the ledger's does not match.
+    const forged = { actions: [{ name: "type", value: `hmac-sha256:${"0".repeat(64)}`, summary: "typed", target: { role: "textbox", name: "File name" } }] };
+    expect(reviewCapturedE2EAgentTrace({ stepIndex: 0, trace: forged, ledger: parsed.ledger, valueKey: t.valueKey, credentialScanHit: false })).toMatchObject({ keep: false });
+  });
+
+  it("refuses a model call whose request carries a session value this process learned after the step began, before anything is sent", async () => {
+    const { client, requests } = scriptedClient([DONE, DONE]);
+    const redactor = createCredentialRedactor([]);
+    const adapter = createE2EAgentModelAdapter({ client, routeId: "r", position: () => ({ caseId: CASE_ID, stepIndex: 0 }), scan: (bytes) => redactor.contains(bytes) });
+    const prompt = (text: string) => ({ prompt: [{ role: "user", content: [{ type: "text", text }] }] });
+    await adapter.doGenerate(prompt("Screen: sid=session-cookie-value-7f3a9c"));
+    expect(requests).toHaveLength(1);
+    redactor.addSessionSecret("session-cookie-value-7f3a9c");
+    await expect(adapter.doGenerate(prompt("Screen: sid=session-cookie-value-7f3a9c"))).rejects.toMatchObject({ code: "credential-in-prompt", isRetryable: false });
+    expect(requests).toHaveLength(1);
+  });
+});

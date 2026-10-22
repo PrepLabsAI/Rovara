@@ -139,6 +139,35 @@ describe("web application runtime", () => {
     expect(result.steps.map((step) => step.declaredStepIndex)).toEqual([0, 1, 2]);
   });
 
+  for (const order of ["click then agent", "agent then click"] as const) {
+    it(`captures the download of the approved click whichever side of an agent step it is on (${order}); the agent step then waits for no download`, async () => {
+      const calls: string[] = [];
+      const fixtures = {
+        app: { open: async () => {} }, screen: { getByTestId: (id: string) => ({ click: async () => { calls.push(`click:${id}`); }, tap: async () => {}, fill: async () => {} }) },
+        browser: { goto: async () => {}, reload: async () => {}, waitForDownload: async (operation: () => Promise<void>) => {
+          calls.push("wait:start"); await operation(); calls.push("wait:end"); return { suggestedFilename: "orders.csv", path: "/protected/download" };
+        } },
+        agent: { act: async () => { calls.push("act"); } },
+      } as never;
+      const evidence = { recordCaseEvidence: async ({ bytes, mediaType }: { bytes: Uint8Array; mediaType: string }) => ({
+        artifactId: `artifact-${calls.length}`, sha256: await import("node:crypto").then(({ createHash }) => createHash("sha256").update(bytes).digest("hex")), byteLength: bytes.byteLength, mediaType }) };
+      const agent = { runStep: async (request: { act: (goal: string, options: never) => Promise<unknown> }) => {
+        calls.push("agent:start"); await request.act("goal", {} as never); calls.push("agent:end"); return { verdict: "concluded" as const, stopCode: null, receiptIds: [] }; } };
+      const casePorts = { ...ports(), evidence, agent, actionWindows: {
+        begin: async (action: { actionIndex: number }) => ({ actionId: `window-${action.actionIndex}` }),
+        finish: async () => ({ confirmed: true as const }),
+      }, readOwnedDownload: async () => Buffer.from("id\na1\n") } as unknown as E2EWebRuntimePorts;
+      const click = { kind: "click", testId: "export" }; const agentStep = { kind: "agent", goal: "Check the orders page", maxActions: 2 };
+      const result = await executeWebSteps({ caseId: "case-1", scenario: { steps: order === "click then agent" ? [click, agentStep] : [agentStep, click],
+        assertions: [{ kind: "csv", downloadName: "orders.csv", columns: ["id"], rows: [["a1"]] }] } as never, fixtures, ports: casePorts, signal: new AbortController().signal } as never);
+      expect(result.download?.suggestedFilename).toBe("orders.csv");
+      expect(result.agentDownloadStatus).toBeNull();
+      expect(calls).toEqual(order === "click then agent"
+        ? ["wait:start", "click:export", "wait:end", "agent:start", "act", "agent:end"]
+        : ["agent:start", "act", "agent:end", "wait:start", "click:export", "wait:end"]);
+    });
+  }
+
   it("requires an installed canonical JSON schema and validates the observed body against it", () => {
     const assertion = { kind: "json", responseId: "orders-state", schemaRef: "orders-state-v1", equals: { version: 1, ids: ["a1", "a2"] } };
     const schema = Buffer.from(canonicalJson({ type: "object", required: ["version", "ids"], additionalProperties: false,

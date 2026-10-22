@@ -132,7 +132,12 @@ export interface E2EAgentExecutorOptions {
 
 const direction = z.enum(["up", "down", "left", "right"]);
 
+/** What the model and the step are told when an action could not be written to the ledger: a fixed sentence, never the file system's words or a path. */
+export const E2E_AGENT_LEDGER_FAULT_MESSAGE = "the action ledger could not be written";
+
 export function createRovaraE2EAgentExecutor(options: E2EAgentExecutorOptions): StepExecutor {
+  // The screen each step's prompt was built from, so the first action's ledger node describes what the model was shown, not a later observation.
+  const prompted = new WeakMap<object, string>();
   return createToolLoopExecutor({
     name: E2E_AGENT_EXECUTOR_NAME,
     version: E2E_AGENT_EXECUTOR_VERSION,
@@ -140,6 +145,7 @@ export function createRovaraE2EAgentExecutor(options: E2EAgentExecutorOptions): 
     prepareMessages: (messages) => elideSupersededScreens(messages),
     async buildPrompt(ctx) {
       const observation = await ctx.observe();
+      prompted.set(ctx, observation.text);
       return `Goal: ${ctx.step.instruction}\n\n${SCREEN_HEADER}\n${boundScreen(observation.text)}`;
     },
     tools(ctx, helpers) {
@@ -151,7 +157,24 @@ export function createRovaraE2EAgentExecutor(options: E2EAgentExecutorOptions): 
         screen = { text: observation.text, sha: sha256(observation.text), nodes: parseScreen(observation.text) };
         return boundScreen(observation.text);
       };
-      const current = async () => { if (screen === null) await look(); return screen!; };
+      const current = async () => {
+        if (screen === null) {
+          const shown = prompted.get(ctx);
+          if (shown === undefined) await look();
+          else screen = { text: shown, sha: sha256(shown), nodes: parseScreen(shown) };
+        }
+        return screen!;
+      };
+      // A ledger that cannot be written ends the step: the action already ran but is not recorded, so nothing after it may run and the step can never pass. The loop's hard stop
+      // makes the step `blocked` with a fixed code, and the driver fails the step whatever the loop answers (agent-step-driver.ts).
+      const record = (ledger: E2EAgentLedgerWriter, entry: Parameters<E2EAgentLedgerWriter["recordAction"]>[0]): void => {
+        try { ledger.recordAction(entry); }
+        catch {
+          const fault = new AgentError("ENVIRONMENT_UNAVAILABLE", E2E_AGENT_LEDGER_FAULT_MESSAGE);
+          helpers.reportHardStop(fault);
+          throw fault;
+        }
+      };
       const nodeFor = (target: string): { id: string; node: LedgerNode } => {
         const id = target.replace(/^#/, "");
         const line = screen?.nodes.get(id);
@@ -168,7 +191,7 @@ export function createRovaraE2EAgentExecutor(options: E2EAgentExecutorOptions): 
         let failure: unknown;
         try { await spec.run(resolved === null ? null : resolved.id); }
         catch (error) { failure = error; outcome = isAgentError(error) && error.code === "POLICY_DENIED" ? "policy-denied" : "action-failed"; }
-        ledger.recordAction({ tool: spec.tool, node: resolved === null ? null : resolved.node, value: spec.value, url: spec.url ?? null, snapshotSha256: seen.sha, outcome });
+        record(ledger, { tool: spec.tool, node: resolved === null ? null : resolved.node, value: spec.value, url: spec.url ?? null, snapshotSha256: seen.sha, outcome });
         if (failure !== undefined) throw failure instanceof Error ? failure : new Error("the action failed");
         return `Done.\n\n${AFTER_HEADER}\n${await look()}`;
       };
@@ -194,7 +217,7 @@ export function createRovaraE2EAgentExecutor(options: E2EAgentExecutorOptions): 
               const ledger = options.ledger();
               if (ledger === null) throw new Error("an agent tool was called outside an agent step");
               const seen = await current();
-              ledger.recordAction({ tool: "navigate", node: null, value: null, url: "/", snapshotSha256: seen.sha, outcome: "policy-denied" });
+              record(ledger, { tool: "navigate", node: null, value: null, url: "/", snapshotSha256: seen.sha, outcome: "policy-denied" });
               throw new AgentError("POLICY_DENIED", "navigate only goes to pages of this application");
             }
             return act({ tool: "navigate", target: null, value: null, url: path, run: () => ctx.actions.navigate(new URL(url, `${origin}/`).toString()) });

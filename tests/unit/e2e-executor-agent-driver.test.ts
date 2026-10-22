@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentError } from "e2e/agent";
 import { E2EAgentActionLedgerSchema, generateE2EAgentValueKey, type E2EModelChannelClient } from "@agentx/contracts";
 import { E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "../../packages/verifier/src/executor/agent-ledger.js";
-import type { createE2EAgentLedgerWriter } from "../../packages/verifier/src/executor/agent-ledger.js";
+import { createE2EAgentLedgerWriter } from "../../packages/verifier/src/executor/agent-ledger.js";
 import { createE2EAgentStepDriver } from "../../packages/verifier/src/executor/agent-step-driver.js";
 
 // Task 4.3b: the lifecycle around one agent.act call (executor/agent-step-driver.ts): the markers the worker is told, the ledger, the current step, and what a failure does.
@@ -15,7 +15,7 @@ const GOAL = "Export the orders as a CSV file";
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-function setup(options: { begin?: () => Promise<void>; end?: () => Promise<void>; secrets?: string[] } = {}) {
+function setup(options: { begin?: () => Promise<void>; end?: () => Promise<void>; secrets?: string[]; ledgerFor?: (caseId: string) => ReturnType<typeof createE2EAgentLedgerWriter> } = {}) {
   const outDir = mkdtempSync(join(tmpdir(), "agent-driver-")); dirs.push(outDir);
   const valueKey = generateE2EAgentValueKey();
   const events: string[] = [];
@@ -27,7 +27,8 @@ function setup(options: { begin?: () => Promise<void>; end?: () => Promise<void>
   };
   const current: { position: { caseId: string; stepIndex: number } | null; ledger: ReturnType<typeof createE2EAgentLedgerWriter> | null } = { position: null, ledger: null };
   const adapter = { takeReceiptIds: (position: { caseId: string; stepIndex: number }) => { events.push(`receipts:${String(position.stepIndex)}`); return ["r1", "r2"]; } };
-  const driver = createE2EAgentStepDriver({ client, adapter, current, runId: RUN_ID, valueKey, outDir, sessionSecrets: () => options.secrets ?? [] });
+  const driver = createE2EAgentStepDriver({ client, adapter, current, runId: RUN_ID, valueKey, outDir, sessionSecrets: () => options.secrets ?? [],
+    ...(options.ledgerFor === undefined ? {} : { ledgerFor: options.ledgerFor }) });
   const ledger = () => E2EAgentActionLedgerSchema.parse(JSON.parse(readFileSync(join(outDir, E2E_AGENT_EVIDENCE_DIR, agentCaseDirectoryName(CASE_ID), E2E_AGENT_LEDGER_FILE), "utf8")));
   const request = (act: (goal: string, options: { maxSteps: number; maxModelCalls: number; timeout: number }) => Promise<unknown>) => ({ caseId: CASE_ID, stepIndex: 1, goal: GOAL, maxActions: 4, timeoutMs: 80_000, signal: new AbortController().signal, act });
   return { driver, current, events, markers, ledger, request, outDir };
@@ -95,5 +96,22 @@ describe("the agent step driver", () => {
     expect(t.ledger().steps.map((step) => step.stepIndex)).toEqual([1, 3]);
     await expect(t.driver(t.request(async () => undefined))).rejects.toThrow(/begins each step once/);
     expect(t.current).toEqual({ position: null, ledger: null });
+  });
+
+  it("fails the step with ENVIRONMENT_UNAVAILABLE when an action could not be written to the ledger, even when act resolved, and the error it saw has no fs text", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "agent-driver-fault-")); dirs.push(outDir);
+    const real = createE2EAgentLedgerWriter({ outDir, runId: RUN_ID, caseId: CASE_ID, valueKey: generateE2EAgentValueKey() });
+    const failing = { directory: real.directory, beginStep: (index: number, goal: string) => real.beginStep(index, goal), endStep: (index: number, end: Parameters<typeof real.endStep>[1]) => real.endStep(index, end),
+      recordAction: () => { throw new Error("EACCES: permission denied, open '/srv/secret-path/actions.json'"); } };
+    const t = setup({ ledgerFor: () => failing });
+    let seen: unknown;
+    // What the tool loop's guard does with an action's error: it becomes text for the model, and the step goes on (and could even pass).
+    const outcome = await t.driver(t.request(async () => {
+      try { t.current.ledger!.recordAction({ tool: "tap", node: null, value: null, url: null, snapshotSha256: "0".repeat(64), outcome: "ok" }); } catch (error) { seen = error; }
+      return { status: "passed" };
+    }));
+    expect(outcome).toEqual({ verdict: "failed", stopCode: "ENVIRONMENT_UNAVAILABLE", receiptIds: ["r1", "r2"] });
+    expect(String((seen as Error).message)).not.toMatch(/EACCES|secret-path|actions\.json/);
+    expect(t.events.at(-1)).toBe("end-marker");
   });
 });
