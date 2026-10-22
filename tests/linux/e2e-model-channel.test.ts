@@ -121,7 +121,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
 
     // The app container saw no socket, and reached neither the proxy by name nor the gateway on the proxy's port.
     const wallLine = diagnostics.appLogTail.split("\n").find((line) => line.startsWith("MODEL_WALL "));
-    expect(wallLine, diagnostics.appLogTail).toBeDefined();
+    expect(wallLine, JSON.stringify(diagnostics)).toBeDefined();
     const wall = JSON.parse(wallLine!.slice("MODEL_WALL ".length)) as { socket: boolean; proxy: string; gateway: string; hasDefaultRoute: boolean };
     expect(wall.socket).toBe(false);
     expect(wall.proxy).not.toBe("open");
