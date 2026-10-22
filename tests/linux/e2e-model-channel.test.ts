@@ -46,6 +46,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const answer = await client.generate({ caseId, stepIndex: 0, callIndex: 0, call });
       await client.endStep({ caseId, stepIndex: 0 });
       console.log("MODEL_CHANNEL_ANSWER " + JSON.stringify({ answer, planSocket: plan.modelChannel.socketPath, mounted: existsSync(plan.modelChannel.socketPath) }));
+      // The app's wall probe waits up to 3 s per target before it logs; keep the run up until it has, or the host tears the app down first and its log is empty.
+      await new Promise((resolve) => setTimeout(resolve, 8000));
     `;
     await writeFile(join(imageDir, "test-entry.mjs"), entry);
     const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
