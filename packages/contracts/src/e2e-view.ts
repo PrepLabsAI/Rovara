@@ -12,7 +12,8 @@ export const E2ESharedViewSchema = z.object({ schemaVersion: z.literal(1), setup
 export type E2ESharedView = z.infer<typeof E2ESharedViewSchema>;
 
 // ---------------------------------------------------------------------------------------------
-// Display schema v2 (M1.3 Task 3.7): one row per scenario of a browser and API round, derived by the broker from the evidence it verified itself.
+// Display schema v2 (M1.3 Task 3.7) and v3 (M1.4 Tasks 4.4b and 4.4c): one row per scenario of a browser and API round, derived by the broker from the evidence it verified itself.
+// v3 adds `agentNavigation` to a row and `reason` and `skippedAiScenarios` to the baseline. Every v2 schema stays strict, so a reader that only knows v2 refuses a v3 display and falls back.
 // ---------------------------------------------------------------------------------------------
 
 const displaySha256 = z.string().regex(/^[a-f0-9]{64}$/);
@@ -33,7 +34,27 @@ export const E2E_ARTIFACT_RETENTION_TAG_VALUE = "e2e-screenshot";
 /** The `x-amz-tagging` form of the tag. */
 export const E2E_ARTIFACT_RETENTION_TAG = `${E2E_ARTIFACT_RETENTION_TAG_KEY}=${E2E_ARTIFACT_RETENTION_TAG_VALUE}`;
 
-export const E2EDisplayScenarioSchema = z.object({
+/** How an AI-navigated step ended, as the executor's ledger recorded it. */
+export const E2E_DISPLAY_AGENT_STOPS = ["concluded", "cut-short", "failed"] as const;
+
+/**
+ * Display schema v3 (M1.4 Task 4.4b): what the AI did in an AI-navigated scenario, derived by the broker from the verified action ledger and from nothing the worker says about
+ * itself. It holds the approved goal, the role and name of the page elements the model acted on (never a typed value, a key, an option label or anything the model wrote), how
+ * each step ended, the number of model calls and the route that served them. `decidedBy` names the kinds of approved assertion that decided the row, so the page can say which check did.
+ */
+export const E2EDisplayAgentNavigationSchema = z.object({
+  steps: z.array(z.object({
+    goal: z.string().min(1).max(120),
+    actedOn: z.array(z.object({ role: z.string().regex(/^[a-z]{1,32}$/), name: z.string().max(60) }).strict()).max(8),
+    stop: z.enum(E2E_DISPLAY_AGENT_STOPS),
+  }).strict()).max(3),
+  modelCalls: z.number().int().min(0).max(1000),
+  routeId: z.string().min(1).max(120),
+  decidedBy: z.array(z.enum(E2E_DISPLAY_ASSERTION_KINDS)).max(E2E_DISPLAY_ASSERTION_KINDS.length).optional(),
+}).strict();
+export type E2EDisplayAgentNavigation = z.infer<typeof E2EDisplayAgentNavigationSchema>;
+
+const displayScenarioFields = {
   scenarioId: z.string().min(1).max(120),
   title: z.string().min(1).max(120),
   kind: z.enum(["web", "api"]),
@@ -44,17 +65,43 @@ export const E2EDisplayScenarioSchema = z.object({
   /** A screenshot is the only artifact kept: traces are not captured (Ruling CJ), so there is no `traceRef`. */
   screenshotRef: z.object({ sha256: displaySha256, bytes: z.number().int().positive().max(E2E_DISPLAY_SCREENSHOT_MAX_BYTES), contentType: z.literal("image/jpeg") }).strict().optional(),
   mockedOrigins: z.array(z.string().min(1).max(200)).max(32),
-}).strict().superRefine((row, context) => {
+};
+const onlyAFailedRowHasAFailedAssertion = (row: { failedAssertion?: unknown; status: string }, context: z.RefinementCtx) => {
   if (row.failedAssertion !== undefined && row.status !== "FAILED") context.addIssue({ code: "custom", path: ["failedAssertion"], message: "only a failed row has a failed assertion" });
-});
+};
+
+/** A row as display schema v2 (M1.3) wrote it. Strict: a v2 reader refuses anything a later version adds. Kept so stored v2 displays parse exactly as before. */
+export const E2EDisplayScenarioV2Schema = z.object(displayScenarioFields).strict().superRefine(onlyAFailedRowHasAFailedAssertion);
+/** A row as display schema v3 writes it: a v2 row, and for an AI-navigated scenario how the AI navigated. */
+export const E2EDisplayScenarioSchema = z.object({ ...displayScenarioFields, agentNavigation: E2EDisplayAgentNavigationSchema.optional() }).strict().superRefine(onlyAFailedRowHasAFailedAssertion);
 export type E2EDisplayScenario = z.infer<typeof E2EDisplayScenarioSchema>;
 
-/** The informational round on the unchanged code: `UNAVAILABLE` is "it could not be run" and holds no rows. It is never a candidate round and never gates anything. */
-export const E2EDisplayBaselineSchema = z.object({
-  status: z.enum(["PASSED", "FAILED", "UNKNOWN", "UNAVAILABLE"]),
-  scenarios: z.array(E2EDisplayScenarioSchema).max(64),
-}).strict().superRefine((baseline, context) => {
+const baselineStatus = z.enum(["PASSED", "FAILED", "UNKNOWN", "UNAVAILABLE"]);
+const aBaselineThatCouldNotRunHasNoRows = (baseline: { status: string; scenarios: readonly unknown[] }, context: z.RefinementCtx) => {
   if (baseline.status === "UNAVAILABLE" && baseline.scenarios.length > 0) context.addIssue({ code: "custom", path: ["scenarios"], message: "a baseline that could not run has no rows" });
+};
+
+/** The baseline as display schema v2 (M1.3) wrote it: `UNAVAILABLE` is "it could not be run" and holds no rows. It is never a candidate round and never gates anything. */
+export const E2EDisplayBaselineV2Schema = z.object({
+  status: baselineStatus,
+  scenarios: z.array(E2EDisplayScenarioV2Schema).max(64),
+}).strict().superRefine(aBaselineThatCouldNotRunHasNoRows);
+
+/** The reasons a baseline has no rows that the display puts into words. `agent-steps-only`: every scenario of the plan uses AI navigation, which runs only on the change. */
+export const E2E_DISPLAY_BASELINE_REASONS = ["agent-steps-only"] as const;
+/**
+ * The informational round on the unchanged code, as display schema v3 writes it. `reason` says why a baseline that could not run did not (BASEREASON); `skippedAiScenarios` lists,
+ * by id and title only, the AI-navigated scenarios a baseline that did run left out, because a baseline never runs the model. They are never result rows.
+ */
+export const E2EDisplayBaselineSchema = z.object({
+  status: baselineStatus,
+  scenarios: z.array(E2EDisplayScenarioSchema).max(64),
+  reason: z.enum(E2E_DISPLAY_BASELINE_REASONS).optional(),
+  skippedAiScenarios: z.array(z.object({ scenarioId: z.string().min(1).max(120), title: z.string().min(1).max(120) }).strict()).max(64).optional(),
+}).strict().superRefine((baseline, context) => {
+  aBaselineThatCouldNotRunHasNoRows(baseline, context);
+  if (baseline.reason !== undefined && baseline.status !== "UNAVAILABLE") context.addIssue({ code: "custom", path: ["reason"], message: "only a baseline that could not run has a reason" });
+  if (baseline.skippedAiScenarios !== undefined && baseline.status === "UNAVAILABLE") context.addIssue({ code: "custom", path: ["skippedAiScenarios"], message: "a baseline that could not run skipped nothing in particular" });
 });
 export type E2EDisplayBaseline = z.infer<typeof E2EDisplayBaselineSchema>;
 
