@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { createProcessDockerCli, type DockerCli } from "../../packages/verifier/src/host/docker-application-host.js";
+import { ensureLocalImage } from "./ci-images.js";
 
 const execFileAsync = promisify(execFile);
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
@@ -22,8 +23,11 @@ export type Dind = Readonly<{
   cli: DockerCli;
   /** Runs one docker command against the daemon inside and returns its output. */
   docker(...args: string[]): Promise<string>;
-  /** Copies an image of the outer daemon into the inner one. */
-  load(image: string): Promise<void>;
+  /**
+   * Copies an image of the outer daemon into the inner one (`docker save | docker exec -i dind docker load`): the daemon inside never pulls from a registry, so a registry's
+   * rate limit cannot fail it. With `pinned` (a digest-pinned ref) the outer image must carry that digest, and the copy must arrive with the same layers.
+   */
+  load(image: string, pinned?: string): Promise<void>;
   stop(): Promise<void>;
 }>;
 
@@ -55,8 +59,13 @@ export async function startDind(image: string, shared: { path: string; readOnly?
     await chmod(binary, 0o755);
     return {
       name, version, cli: createProcessDockerCli(binary), docker: inner, stop,
-      async load(imageRef) {
+      async load(imageRef, pinned) {
+        if (pinned !== undefined) await ensureLocalImage(imageRef, pinned);
+        const outerLayers = (await execFileAsync("docker", ["image", "inspect", "--format", "{{json .RootFS.Layers}}", imageRef])).stdout.trim();
         await execFileAsync("sh", ["-c", `docker save "$1" | docker exec -i "$2" docker load`, "sh", imageRef, name], { maxBuffer: 64 * 1024 * 1024 });
+        // The image id differs between image stores (the config digest, or the index digest on the containerd store); the layers' content digests do not.
+        const innerLayers = await inner("image", "inspect", "--format", "{{json .RootFS.Layers}}", imageRef);
+        if (innerLayers !== outerLayers || outerLayers === "null" || outerLayers === "[]") throw new Error(`${imageRef} did not arrive in the dind daemon with the layers of the outer image`);
       },
     };
   } catch (error) {

@@ -44,7 +44,9 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(firewall).toContain("sudo bash");
     expect(firewall).not.toContain("iptables -I");
     expect(run.indexOf("<<'FIREWALL'")).toBeGreaterThanOrEqual(0);
-    expect(run.indexOf("<<'FIREWALL'")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci ."));
+    expect(run.indexOf("<<'FIREWALL'")).toBeLessThan(run.indexOf('docker build -f "$RUNNER_TEMP/e2e-executor.Dockerfile" -t rovara-e2e-executor:ci .'));
+    // The Dockerfile it builds is the e2e-executor one with its FROM lines pointed at the pulled copy of the same digest (tests/contract/ci-images.test.ts).
+    expect(run).toContain('node scripts/ci-images.ts dockerfile environments/e2e-executor/Dockerfile "$RUNNER_TEMP/e2e-executor.Dockerfile"');
     // The smoke check is the shared definition in scripts/executor-smoke.ts (the one the release path and test-deploy use), never a copy of its flags: it runs after
     // `npm ci` and `npm run build`, which the script needs, and before the Linux tests.
     const smoke = run.split("\n").find((line) => line.includes("executor-smoke.ts"))!;
@@ -97,7 +99,7 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(step.run).toContain("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0");
     expect(step.run).toContain("Amazon Linux 2023");
     const run = job.steps.map((candidate) => candidate.run ?? "").join("\n");
-    expect(run.indexOf("apparmor_restrict_unprivileged_userns")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile"));
+    expect(run.indexOf("apparmor_restrict_unprivileged_userns")).toBeLessThan(run.indexOf("docker build -f"));
   });
 
   it("gives every job but the manual live-AWS one a time limit, so a hung runner fails in minutes and not after six hours", async () => {

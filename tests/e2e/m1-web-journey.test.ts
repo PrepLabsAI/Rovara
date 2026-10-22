@@ -30,6 +30,7 @@ import { postWorkerTerminalResult } from "../../packages/worker/src/terminal-cal
 import { workflowE2EApplicationHostDeps, type WorkflowE2EApplicationRuntimeConfig } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/docker-application-host.js";
+import { ciImage } from "../support/ci-images.js";
 import { call } from "../support/slack-broker.js";
 import { collectOnThisHost } from "../support/linux-web-api-probes.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
@@ -220,7 +221,7 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     /** The runs this journey started, by the labels its host put on their resources: another session's runs on the same Docker are none of this journey's business. */
     const seenRuns = new Set<string>();
     const applicationRuntime: WorkflowE2EApplicationRuntime = { runRoot, collect: collectLikeTheWorker,
-      createHost: (input) => createDockerApplicationHost(workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: WEB_API_BUILD_IMAGE, runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
+      createHost: (input) => createDockerApplicationHost(workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: ciImage("node-build", WEB_API_BUILD_IMAGE), runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
         observedDocker(createProcessDockerCli(), seenRuns), () => Date.now(), input)) };
     const workerState = createWorkerServerState(journal, {
       execute: async (invocation) => {
