@@ -3,8 +3,12 @@ import { chmod, chown, lstat, mkdir, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
+  E2E_MODEL_CHANNEL_GENERATE_PATH,
   E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES,
+  E2E_MODEL_CHANNEL_SCHEMA_VERSION,
+  E2E_MODEL_CHANNEL_STEP_PATH,
   E2EModelChannelRequestSchema,
+  E2EModelChannelStepMarkerSchema,
   E2EModelChannelResponseSchema,
   E2EModelRouteBudgetsSchema,
   canonicalJson,
@@ -31,7 +35,7 @@ import { isScriptedE2EModelAdmissible } from "./e2e-model-scripted.js";
  * The per-run model proxy (M1.4 Task 4.1): the worker side of `rovara-e2e-model-channel/v1`.
  *
  * It listens on one Unix socket (mode 0600) that the worker mounts into the executor container only, and accepts
- * `POST /v1/generate` and nothing else. The AI browser-test agent in the executor never holds a provider, key or
+ * `POST /v1/generate` (a model call) and `POST /v1/step` (the executor's marker that an agent step began or ended), and nothing else. The AI browser-test agent in the executor never holds a provider, key or
  * endpoint: everything it asks of a model comes through here, and the proxy is the only holder of the governed route.
  *
  * Per request, in this order: count it against the step and group budgets, refuse it if another call is in flight,
@@ -73,6 +77,11 @@ export interface E2EModelProxyOptions {
   socketPath: string;
   runId: string;
   route: GovernedE2EModelRoute;
+  /**
+   * The agent steps the admission holds (case id and step index). A `begin` marker on `/v1/step` is accepted only for one of them; with none given, every marker is refused.
+   * `beginStep` called in-process (by the worker itself) is not bound by it.
+   */
+  allowedSteps?: ReadonlyArray<{ caseId: string; stepIndex: number }>;
   /** The group's budgets. They may only lower the route's own. Defaults to the route's. */
   budgets?: E2EModelRouteDefinition["budgets"];
   credentialSet: E2ECredentialSet;
@@ -342,13 +351,64 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     }
   }
 
+  function doBeginStep(position: Position): void { current = { position: { caseId: position.caseId, stepIndex: position.stepIndex }, startedMs: now() }; last = current.position; }
+  function doEndStep(): void { current = null; }
+  function doAddCredentialValues(values: Partial<E2ECredentialSet>): void {
+    credentials = {
+      passwords: [...credentials.passwords, ...(values.passwords ?? [])],
+      emails: [...credentials.emails, ...(values.emails ?? [])],
+      cookieValues: [...credentials.cookieValues, ...(values.cookieValues ?? [])],
+    };
+    guard = createE2ECredentialGuard(credentials, { onUnscannable: "latch" });
+  }
+
+  /** The size of a step marker the proxy reads: a marker is a position and at most 32 cookie values. */
+  const MAX_MARKER_BYTES = 262_144;
+  const allowed = new Set((options.allowedSteps ?? []).map((position) => stepKey(position)));
+  const markerReply = (status: number, code: string): { status: number; body: unknown } => ({ status, body: status === 200
+    ? { schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, status: "ok" } : { schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, status: "refused", code } });
+
+  /**
+   * `POST /v1/step`: the executor says an agent step began or ended. The marker is held to this run and to the steps the admission holds, and it never adds budget: a
+   * refused marker changes nothing, and an accepted one only says which step the next calls belong to. A `begin` may bring the `Set-Cookie` values learned since the last step.
+   */
+  function serveMarker(body: BodyRead): { status: number; body: unknown } {
+    if (closing) return markerReply(503, "closing");
+    if (body.kind === "too-large") return markerReply(413, "too-large");
+    if (body.kind === "failed") return markerReply(400, "unreadable");
+    let json: unknown;
+    try { json = JSON.parse(body.bytes.toString("utf8")); } catch { return markerReply(400, "not-json"); }
+    const parsed = E2EModelChannelStepMarkerSchema.safeParse(json);
+    if (!parsed.success) return markerReply(400, "invalid-marker");
+    const marker = parsed.data;
+    if (marker.runId !== runId) return markerReply(403, "other-run");
+    const position: Position = { caseId: marker.caseId, stepIndex: marker.stepIndex };
+    if (marker.marker === "begin") {
+      if (!allowed.has(stepKey(position))) return markerReply(403, "step-not-admitted");
+      if (current !== null) return markerReply(409, "step-running");
+      if (marker.cookieValues !== undefined && marker.cookieValues.length > 0) doAddCredentialValues({ cookieValues: marker.cookieValues });
+      doBeginStep(position);
+      return markerReply(200, "ok");
+    }
+    if (current === null || stepKey(current.position) !== stepKey(position)) return markerReply(409, "step-not-running");
+    doEndStep();
+    return markerReply(200, "ok");
+  }
+
   const server: Server = createServer({ requestTimeout: 15_000, headersTimeout: 10_000, keepAliveTimeout: 1_000 }, (req, res) => {
     // A client that hangs up mid-request or mid-answer ends a request or response with an error, which is not ours to throw.
     req.on("error", () => undefined);
     res.on("error", () => undefined);
     void (async () => {
-      if (req.url !== "/v1/generate") { req.resume(); send(res, 404, { error: "not-found" }); return; }
+      if (req.url !== E2E_MODEL_CHANNEL_GENERATE_PATH && req.url !== E2E_MODEL_CHANNEL_STEP_PATH) { req.resume(); send(res, 404, { error: "not-found" }); return; }
       if (req.method !== "POST") { req.resume(); res.setHeader("allow", "POST"); send(res, 405, { error: "method-not-allowed" }); return; }
+      if (req.url === E2E_MODEL_CHANNEL_STEP_PATH) {
+        const marker = await readBody(req, MAX_MARKER_BYTES);
+        if (res.writableEnded || res.destroyed) return;
+        const reply = serveMarker(marker);
+        send(res, reply.status, reply.body);
+        return;
+      }
       if (closing && inFlight === null) { req.resume(); send(res, 503, { error: "closing" }, true); return; }
       const body = await readBody(req, E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES);
       let reply: { status: number; body: unknown };
@@ -413,16 +473,9 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
 
   const proxy: E2EModelProxy = {
     socketPath,
-    beginStep(position) { current = { position: { caseId: position.caseId, stepIndex: position.stepIndex }, startedMs: now() }; last = current.position; },
-    endStep() { current = null; },
-    addCredentialValues(values) {
-      credentials = {
-        passwords: [...credentials.passwords, ...(values.passwords ?? [])],
-        emails: [...credentials.emails, ...(values.emails ?? [])],
-        cookieValues: [...credentials.cookieValues, ...(values.cookieValues ?? [])],
-      };
-      guard = createE2ECredentialGuard(credentials, { onUnscannable: "latch" });
-    },
+    beginStep: doBeginStep,
+    endStep: doEndStep,
+    addCredentialValues: doAddCredentialValues,
     receipts: orderedReceipts,
     close() { closePromise ??= doClose(); return closePromise; },
   };

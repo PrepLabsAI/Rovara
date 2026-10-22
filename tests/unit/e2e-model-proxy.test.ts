@@ -176,12 +176,15 @@ describe("e2e model proxy: socket", () => {
     expect((await proxy.close()).receipts).toHaveLength(1);
   });
 
-  it("accepts only POST /v1/generate", async () => {
+  it("accepts only POST /v1/generate and POST /v1/step", async () => {
     const invoke = vi.fn(okInvoke());
     const { proxy } = await start(invoke);
     expect((await post({}, { method: "GET" })).status).toBe(405);
     expect((await post({}, { path: "/v1/other" })).status).toBe(404);
     expect((await post({}, { path: "/v1/generate?x=1" })).status).toBe(404);
+    expect((await post({}, { path: "/v1/step?x=1" })).status).toBe(404);
+    expect((await post({}, { method: "GET", path: "/v1/step" })).status).toBe(405);
+    expect((await post({}, { method: "PUT", path: "/v1/step" })).status).toBe(405);
     expect(invoke).not.toHaveBeenCalled();
     expect((await proxy.close()).receipts).toHaveLength(0);
   });
@@ -681,5 +684,129 @@ describe("e2e model proxy: the scripted route", () => {
       proxies.push(proxy);
       await proxy.close();
     }
+  });
+});
+
+// Task 4.3a, test case 4 (Ruling DB-4): the executor says which agent step is running over `POST /v1/step`.
+describe("e2e model proxy: step markers (POST /v1/step)", () => {
+  const OTHER_RUN = "11111111-2222-4333-8444-555555555555";
+  const marker = (overrides: Record<string, unknown> = {}) => ({ schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "begin", caseId: CASE_ID, stepIndex: 0, ...overrides });
+  const stepPost = (body: unknown, extra: { raw?: boolean } = {}) => post(body, { path: "/v1/step", ...extra });
+  const stepStatus = async (body: unknown) => (await stepPost(body)).body as unknown as { status: string; code?: string };
+  const steps = (...indexes: number[]) => indexes.map((stepIndex) => ({ caseId: CASE_ID, stepIndex }));
+
+  it("begin then end attributes calls to that position, and a call after end is refused", async () => {
+    const invoke = vi.fn(okInvoke());
+    const { proxy, evidence } = await start(invoke, { begin: false, allowedSteps: steps(0, 1) });
+    // Before any marker the proxy has no step: the call has no receipt and no phantom step.
+    const early = await post(channelRequest({ stepIndex: 1 }));
+    expect(early.body.receiptId).toBe("unscoped");
+    expect(invoke).not.toHaveBeenCalled();
+
+    expect((await stepPost(marker({ stepIndex: 1 }))).status).toBe(200);
+    expect((await post(channelRequest({ stepIndex: 1 }))).body.result.status).toBe("ok");
+    expect((await stepPost(marker({ marker: "end", stepIndex: 1 }))).status).toBe(200);
+    expect((await stepPost(marker({ stepIndex: 0 }))).status).toBe(200);
+    expect((await post(channelRequest({ stepIndex: 0 }))).body.result.status).toBe("ok");
+    expect((await stepPost(marker({ marker: "end", stepIndex: 0 }))).status).toBe(200);
+    // After the end marker a call is refused, not served.
+    const late = await post(channelRequest({ stepIndex: 0, callIndex: 1 }));
+    expect(late.body.result).toMatchObject({ status: "error", code: "refused-protocol" });
+    expect(invoke).toHaveBeenCalledTimes(2);
+
+    const summary = await proxy.close();
+    expect(summary.unscopedRequests).toBe(1);
+    expect(evidence.receipts.filter((receipt) => receipt.outcome === "ok").map((receipt) => [receipt.stepIndex, receipt.callIndex])).toEqual([[1, 0], [0, 0]]);
+  });
+
+  it("refuses a marker for a step the admission does not hold, or for another run, and gives it no budget", async () => {
+    const invoke = vi.fn(okInvoke());
+    const { proxy } = await start(invoke, { begin: false, allowedSteps: steps(0, 1), budgets: loweredBudgets({ maxAgentStepsPerGroup: 2 }) });
+    expect(await stepStatus(marker({ stepIndex: 5 }))).toEqual({ schemaVersion: "rovara-e2e-model-channel/v1", status: "refused", code: "step-not-admitted" });
+    expect((await stepPost(marker({ stepIndex: 5 }))).status).toBe(403);
+    expect((await stepPost(marker({ caseId: "case-not-in-the-admission" }))).status).toBe(403);
+    expect(await stepStatus(marker({ runId: OTHER_RUN }))).toMatchObject({ status: "refused", code: "other-run" });
+    expect((await stepPost(marker({ runId: OTHER_RUN }))).status).toBe(403);
+    // The refused markers began nothing: a call has no step, and used no agent step slot of the group's two.
+    expect((await post(channelRequest({ stepIndex: 5 }))).body.receiptId).toBe("unscoped");
+    expect(invoke).not.toHaveBeenCalled();
+    for (const stepIndex of [0, 1]) {
+      expect((await stepPost(marker({ stepIndex }))).status).toBe(200);
+      expect((await post(channelRequest({ stepIndex }))).body.result.status).toBe("ok");
+      expect((await stepPost(marker({ marker: "end", stepIndex }))).status).toBe(200);
+    }
+    expect(invoke).toHaveBeenCalledTimes(2);
+    const summary = await proxy.close();
+    expect(summary.receipts.map((receipt) => receipt.outcome)).toEqual(["ok", "ok"]);
+  });
+
+  it("refuses every marker when the admission names no steps, and an end marker for a step that is not running", async () => {
+    const { proxy } = await start(okInvoke(), { begin: false });
+    expect((await stepPost(marker())).status).toBe(403);
+    await proxy.close();
+    const second = await start(okInvoke(), { begin: false, allowedSteps: steps(0, 1) });
+    expect((await stepPost(marker({ marker: "end" }))).status).toBe(409);
+    expect((await stepPost(marker())).status).toBe(200);
+    // One step runs at a time, and the end names the step that is running.
+    expect((await stepPost(marker({ stepIndex: 1 }))).status).toBe(409);
+    expect((await stepPost(marker({ marker: "end", stepIndex: 1 }))).status).toBe(409);
+    expect((await stepPost(marker({ marker: "end" }))).status).toBe(200);
+    await second.proxy.close();
+  });
+
+  it("refuses a marker that is not JSON, has an unknown key, carries cookie values on end, or is oversized", async () => {
+    const { proxy } = await start(okInvoke(), { begin: false, allowedSteps: steps(0) });
+    expect((await stepPost("nonsense", { raw: true })).status).toBe(400);
+    expect((await stepPost(marker({ extra: 1 }))).status).toBe(400);
+    expect((await stepPost(marker({ marker: "end", cookieValues: ["sid=abcdef123456"] }))).status).toBe(400);
+    expect((await stepPost(marker({ cookieValues: Array.from({ length: 33 }, (_, i) => `c${i}=abcdef123456`) }))).status).toBe(400);
+    expect((await stepPost(marker({ cookieValues: ["x".repeat(300_000)] }))).status).toBe(413);
+    // None of them began a step.
+    expect((await post(channelRequest())).body.receiptId).toBe("unscoped");
+    await proxy.close();
+  });
+
+  it("scans the cookie values of a begin marker in later calls, and refuses a call that carries one without reaching the provider", async () => {
+    const invoke = vi.fn(okInvoke());
+    const { proxy, evidence } = await start(invoke, { begin: false, allowedSteps: steps(0, 1) });
+    const learned = "ZXhhbXBsZS1sZWFybmVkLXNlc3Npb24tdmFsdWU";
+    const withLearned = (stepIndex: number) => channelRequest({ stepIndex, callOverride: call(`#n1 button "Export orders"\nsession ${learned}`) });
+    // Positive control: before the executor reported the cookie, the very same page text is an ordinary prompt.
+    expect((await stepPost(marker())).status).toBe(200);
+    expect((await post(withLearned(0))).body.result.status).toBe("ok");
+    expect((await stepPost(marker({ marker: "end" }))).status).toBe(200);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    // The next begin carries the Set-Cookie value learned since: the same text is now refused, and the provider is not reached.
+    expect((await stepPost(marker({ stepIndex: 1, cookieValues: [`session=${learned}`] }))).status).toBe(200);
+    const reply = await post(withLearned(1));
+    expect(reply.body.result).toMatchObject({ status: "error", code: "refused-credential-match" });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const summary = await proxy.close();
+    expect(summary.receipts.map((receipt) => [receipt.stepIndex, receipt.outcome])).toEqual([[0, "ok"], [1, "refused-credential-match"]]);
+    // The refused call's stored transcript carries the redaction, not the value the executor reported.
+    const refused = evidence.transcripts.filter((transcript) => transcript.outcome === "refused-credential-match");
+    expect(refused).toHaveLength(1);
+    expect(JSON.stringify(refused)).not.toContain(learned);
+    expect(refused[0]!.prompt).toContain("[REDACTED]");
+  });
+
+  it("a cookie value too short to scan latches the proxy: the begin is accepted and every later call is refused", async () => {
+    const invoke = vi.fn(okInvoke());
+    const { proxy } = await start(invoke, { begin: false, allowedSteps: steps(0) });
+    expect((await stepPost(marker({ cookieValues: ["a=1"] }))).status).toBe(200);
+    expect((await post(channelRequest())).body.result).toMatchObject({ status: "error", code: "refused-credential-match" });
+    expect(invoke).not.toHaveBeenCalled();
+    await proxy.close();
+  });
+
+  it("POST /v1/generate without a begun step is refused, and the socket takes no marker once the proxy is closed", async () => {
+    const invoke = vi.fn(okInvoke());
+    const { proxy } = await start(invoke, { begin: false, allowedSteps: steps(0) });
+    const reply = await post(channelRequest());
+    expect(reply.body.result).toMatchObject({ status: "error", code: "refused-protocol", message: "no agent step has begun" });
+    expect(invoke).not.toHaveBeenCalled();
+    const closing = proxy.close();
+    await closing;
+    await expect(stepPost(marker())).rejects.toBeDefined();
   });
 });
