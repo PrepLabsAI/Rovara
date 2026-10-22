@@ -31,7 +31,7 @@ readonly HOST_ROOT=${AGENTX_HOST_ROOT:-}
 readonly RETRY_ATTEMPTS=5
 readonly RETRY_BASE_SECONDS=2
 readonly RETRY_MAX_SECONDS=30
-# No network try runs or waits past this many seconds from boot start, so a failure is reported inside the provisioner's 10 minute /ping window.
+# No network try runs past this many seconds from boot start: failures report inside the 10 minute /ping window.
 readonly BOOT_DEADLINE=$((SECONDS + ${AGENTX_BOOT_DEADLINE_SECONDS:-480}))
 # The worker's port, which the provisioner probes; a failed boot answers there instead.
 readonly WORKER_PORT=8080
@@ -514,6 +514,7 @@ size=$(wc -c <"$proposal" | tr -d '[:space:]')
 upload proposal.json "$proposal" || fail_with proposal-upload-failed
 publish_status SUCCEEDED qualified || { log "could not upload the success status"; exit 1; }
 log "qualified; the proposal and status are under the prefix"
+timeout --foreground --kill-after=10s 7500s docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/worker/dist/e2e-model-canary-cli.js --bucket "$BUCKET" --prefix "$PREFIX" >/dev/null 2>&1
 QUALIFICATION
 }
 

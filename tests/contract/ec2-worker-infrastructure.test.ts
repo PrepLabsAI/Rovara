@@ -248,25 +248,31 @@ describe("standing E2E qualification transport (agentx:e2eQualificationTransport
   });
 
   it("adds challenge/proposal/ready/status object access scoped to the caller's own role session (${aws:userid}) when enabled", () => {
-    const get = withAction(on.controlPlane, "s3:GetObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"));
-    const put = withAction(on.controlPlane, "s3:PutObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"));
-    expect(get).toHaveLength(1);
-    expect(put).toHaveLength(1);
+    const policyNamed = (name: string) => ofType(on.controlPlane, "AWS::IAM::Policy").find(([, r]) => r.Properties.PolicyName === name);
+    const statementsOf = (name: string) => (policyNamed(name)![1].Properties.PolicyDocument as { Statement: Statement[] }).Statement;
+    const resourcesFor = (statements: Statement[], action: string) => statements.filter((s) => [s.Action].flat().includes(action)).flatMap((s) => [s.Resource].flat().map(tail)).sort();
+    expect(withAction(on.controlPlane, "s3:GetObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"))).toHaveLength(2);
+    expect(withAction(on.controlPlane, "s3:PutObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"))).toHaveLength(2);
     // The IAM policy variable stays literal in the synthesized template (an EC2 role session's aws:userid is <role unique ID>:<instance ID>),
     // so one instance of the shared worker role reaches only its own prefix.
-    expect([get[0]!.Resource].flat().map(tail)).toEqual(["/e2e-runtime/${aws:userid}/challenge.json"]);
-    expect([put[0]!.Resource].flat().map(tail).sort()).toEqual(["/e2e-runtime/${aws:userid}/proposal.json", "/e2e-runtime/${aws:userid}/ready.json", "/e2e-runtime/${aws:userid}/status.json"]);
+    const transport = statementsOf("E2eQualificationTransport");
+    expect(resourcesFor(transport, "s3:GetObject")).toEqual(["/e2e-runtime/${aws:userid}/challenge.json"]);
+    expect(resourcesFor(transport, "s3:PutObject")).toEqual(["/e2e-runtime/${aws:userid}/proposal.json", "/e2e-runtime/${aws:userid}/ready.json", "/e2e-runtime/${aws:userid}/status.json"]);
+    // M1.4 Task 4.9: the model canary's two keys, in a policy of their own (added beside the deployed grant, never modifying it).
+    const canary = statementsOf("E2eQualificationTransportCanary");
+    expect(resourcesFor(canary, "s3:GetObject")).toEqual(["/e2e-runtime/${aws:userid}/canary-request.json"]);
+    expect(resourcesFor(canary, "s3:PutObject")).toEqual(["/e2e-runtime/${aws:userid}/canary-result.json"]);
     expect(JSON.stringify(on.controlPlane.toJSON())).not.toContain("e2e-runtime/*");
-    // The bucket is the control plane's own artifact bucket.
-    expect(JSON.stringify([get[0]!.Resource, put[0]!.Resource])).toMatch(/Artifacts/);
-    // No List, Delete or wildcard access in the policy that carries it.
-    const policy = ofType(on.controlPlane, "AWS::IAM::Policy").find(([, r]) => r.Properties.PolicyName === "E2eQualificationTransport")!;
-    expect(policy).toBeDefined();
-    const statements = (policy[1].Properties.PolicyDocument as { Statement: Statement[] }).Statement;
-    expect(actionsOf(statements).sort()).toEqual(["s3:GetObject", "s3:PutObject"]);
-    expect(JSON.stringify(statements.map((s) => s.Resource))).not.toMatch(/\/\*"|\/\*\\"/);
-    // It attaches to the EC2 workers' instance role, the same way the provider secret policies do.
-    expect(policy[1].Properties.Roles).toEqual([{ "Fn::Select": [3, { "Fn::Split": ["/", { Ref: "Ec2WorkerInstanceRoleArn" }] }] }]);
+    for (const name of ["E2eQualificationTransport", "E2eQualificationTransportCanary"]) {
+      const statements = statementsOf(name);
+      // The bucket is the control plane's own artifact bucket.
+      expect(JSON.stringify(statements.map((s) => s.Resource)), name).toMatch(/Artifacts/);
+      // No List, Delete or wildcard access in the policy that carries it.
+      expect(actionsOf(statements).sort(), name).toEqual(["s3:GetObject", "s3:PutObject"]);
+      expect(JSON.stringify(statements.map((s) => s.Resource)), name).not.toMatch(/\/\*"|\/\*\\"/);
+      // It attaches to the EC2 workers' instance role, the same way the provider secret policies do.
+      expect(policyNamed(name)![1].Properties.Roles, name).toEqual([{ "Fn::Select": [3, { "Fn::Split": ["/", { Ref: "Ec2WorkerInstanceRoleArn" }] }] }]);
+    }
   });
 
   it("leaves the protected foundation template and its instance role unchanged", () => {

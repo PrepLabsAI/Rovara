@@ -993,6 +993,19 @@ export class ControlPlaneStack extends Stack {
           ],
         },
       });
+      // M1.4 Task 4.9: the model canary's request and result, exact keys under the same prefix. A policy of its own, so the guarded add-only change set of the
+      // qualification-transport deploy unit adds it beside the deployed grant without modifying that grant.
+      new iam.CfnPolicy(this, "E2eQualificationTransportCanary", {
+        policyName: "E2eQualificationTransportCanary",
+        roles: [sessions.instanceRoleName],
+        policyDocument: {
+          Version: "2012-10-17",
+          Statement: [
+            { Sid: "ReadModelCanaryRequest", Effect: "Allow", Action: "s3:GetObject", Resource: artifacts.arnForObjects(`${ownPrefix}/canary-request.json`) },
+            { Sid: "WriteModelCanaryResult", Effect: "Allow", Action: "s3:PutObject", Resource: artifacts.arnForObjects(`${ownPrefix}/canary-result.json`) },
+          ],
+        },
+      });
     }
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);

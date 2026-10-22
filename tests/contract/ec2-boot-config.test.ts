@@ -373,6 +373,7 @@ case "$1" in
   login) cat >/dev/null; exit 0 ;;
   pull) [[ "$FAKE_EXECUTOR" == pullable ]] && touch "${dir}/pulled"; exit 0 ;;
 esac
+[[ "$*" == *e2e-model-canary-cli.js* ]] && exit 0
 out=; failure=; while (($#)); do [[ "$1" == --out ]] && out=$2; [[ "$1" == --failure-out ]] && failure=$2; shift; done
 if [[ "$FAKE_QUALIFIER" != 0 ]]; then
   if [[ -n "$failure" && -n "\${FAKE_FAILURE_FILE:-}" ]]; then
@@ -417,7 +418,7 @@ exec /bin/dd "\${a[@]}"`);
     const { result, called, object } = runHook();
     expect(result.status, result.stderr).toBe(0);
     const step = (call: string) => (call.startsWith("aws s3api get-object") ? "fetch" : call.startsWith("docker exec") ? "exec" : call.startsWith("docker image inspect") ? "inspect" : call.startsWith("aws s3api put-object") ? (call.includes("proposal.json") ? "upload-proposal" : call.includes("ready.json") ? "upload-ready" : "upload-status") : call.split(" ")[0]);
-    expect(called.map(step).filter((name) => name !== "chown" && name !== "mv")).toEqual(["inspect", "upload-ready", "fetch", "exec", "upload-proposal", "upload-status"]);
+    expect(called.map(step).filter((name) => name !== "chown" && name !== "mv")).toEqual(["inspect", "upload-ready", "fetch", "exec", "upload-proposal", "upload-status", "exec"]);
     // The ready marker comes once the worker answers, before the challenge is looked for, so boot time never eats the challenge's lifetime.
     expect(object("ready.json")).toContain('"state":"READY"');
     // Moves into the uid-1000 evidence directory are of a file onto that exact name, never into a directory of that name.
@@ -509,6 +510,26 @@ exec /bin/dd "\${a[@]}"`);
     const keys = called.flatMap((call) => [...call.matchAll(/--key (\S+)/g)].map((match) => match[1]));
     expect(keys.length).toBeGreaterThan(0);
     for (const key of keys) expect(key?.startsWith(qualificationPrefix), key).toBe(true);
+  });
+
+  describe("the model canary (M1.4 Task 4.9)", () => {
+    it("after a qualification that succeeded, hands the worker its own prefix to wait for the operator's canary request, bounded by timeout", () => {
+      const { result, called, object } = runHook();
+      expect(result.status, result.stderr).toBe(0);
+      const execs = called.filter((call) => call.startsWith("docker exec"));
+      expect(execs).toHaveLength(2);
+      expect(execs[1]).toBe(`docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/worker/dist/e2e-model-canary-cli.js --bucket ${qualification.bucket} --prefix ${qualificationPrefix}`);
+      expect(qualificationScript).toMatch(/timeout [^\n]*e2e-model-canary-cli\.js/);
+      // The canary comes after the qualification's own status, which it never changes.
+      expect(JSON.parse(object("status.json") ?? "{}")).toMatchObject({ state: "SUCCEEDED", reason: "qualified" });
+      expect(called.findIndex((call) => call.includes("status.json"))).toBeLessThan(called.lastIndexOf(execs[1]!));
+    });
+
+    it("never runs after a failed qualification", () => {
+      const { called } = runHook({ qualifier: 3 });
+      expect(called.filter((call) => call.startsWith("docker exec"))).toHaveLength(1);
+      expect(called.some((call) => call.includes("e2e-model-canary-cli.js"))).toBe(false);
+    });
   });
 
   describe("the executor image", () => {
