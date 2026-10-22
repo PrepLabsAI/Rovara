@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
 import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
   E2EModelRouteDefinitionSchema, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE,
-  INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, canonicalJson, indexExpiresAt, e2eModelRouteRevision, e2eModelRouteRevisionNumber, isKeyedModelProvider,
+  INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, indexExpiresAt, e2eModelRouteRevision, e2eModelRouteRevisionNumber, isKeyedModelProvider,
   type E2EModelRouteDefinition, type ModelProvider,
 } from "@agentx/contracts";
 import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest, type E2EAgentInstallation, type DerivedE2EAgentRoute } from "@agentx/model-runtime/e2e-route-derive";

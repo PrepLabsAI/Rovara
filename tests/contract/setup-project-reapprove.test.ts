@@ -24,7 +24,7 @@ function setup(options: { pin?: boolean } = {}) {
   bindSetupSourceProvider(plane, repositories);
   let pin = false;
   // Once `pin` is on, the control plane answers as an installation whose route is approvable: the policy pins a revision and the response says what it is.
-  const fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  const wrappedFetch = (async (url: string | URL | Request, init?: RequestInit) => {
     const response = await plane.fetch(url, init);
     const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
     if (!pin || path !== "/v1/admin/projects/setup-proposals") return response;
@@ -33,8 +33,8 @@ function setup(options: { pin?: boolean } = {}) {
     const policy = E2EPolicySchema.parse({ ...(body.policy as E2EPolicy), modelRouteRevision: options.pin === false ? null : PINNED });
     plane.setupProposals.set(String(body.proposalSha256), { ...stored, policy });
     return new Response(JSON.stringify({ ...body, policy, ...(options.pin === false ? {} : { aiNavigation: SENTENCE }) }), { status: 200, headers: { "content-type": "application/json" } });
-  }) as typeof fetch;
-  const services = { fetch, repositories, configDir, stackOutputs: async (name: string) => (name === "agentx-staging-foundation" ? FOUNDATION : undefined) };
+  }) as typeof globalThis.fetch;
+  const services = { fetch: wrappedFetch, repositories, configDir, stackOutputs: async (name: string) => (name === "agentx-staging-foundation" ? FOUNDATION : undefined) };
   return { plane, services, pinNow: () => { pin = true; } };
 }
 
@@ -120,7 +120,7 @@ describe("agentx project setup-approve (re-approval of an already registered pro
       const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
       if (path === "/v1/admin/projects/setup-proposals") return new Response(JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: "unavailable" } }), { status: 503, headers: { "content-type": "application/json" } });
       return context.services.fetch(url, init);
-    }) as typeof fetch };
+    }) as typeof globalThis.fetch };
     const prompter = scriptedPrompter([]);
     await expect(reapproveProjectSetup({ env: "staging", session, prompter, write: () => undefined, services: broken, projectName: "payments-api" })).rejects.toThrow();
     expect(prompter.asked).toEqual([]);

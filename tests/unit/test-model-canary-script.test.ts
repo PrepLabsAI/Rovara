@@ -26,7 +26,7 @@ const called = (overrides: Record<string, unknown> = {}, receiptOverrides: Recor
   provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-5-5", calls: 1, receipt: receipt(receiptOverrides), providerPayloadSha256: "e".repeat(64), usageMissing: false, ...overrides,
 });
 
-function effects(answer: unknown | undefined, options: { stale?: boolean; rowExists?: boolean } = {}) {
+function effects(answer: unknown, options: { stale?: boolean; rowExists?: boolean } = {}) {
   const objects = new Map<string, Buffer>();
   if (options.stale) objects.set(`${PREFIX}canary-result.json`, Buffer.from("{}"));
   const puts: Array<{ key: string; body: unknown }> = [];
