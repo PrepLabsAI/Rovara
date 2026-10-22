@@ -222,6 +222,8 @@ export async function runTaskInvocation(
       }
       await events.append("progress", { message: invocation.payload.workflowE2EAdmission?.purpose === "baseline"
         ? "AgentX is running the approved browser and API checks once on the code as the task started, for information only. It has no code-editing tools and decides nothing about the change."
+        : invocation.payload.workflowE2EAdmission?.purpose === "replay"
+        ? "AgentX is replaying a verified AI-navigated check from its recording, with no model, for an operator's audit. It has no code-editing tools and decides nothing about the change."
         : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
       const runners = dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,

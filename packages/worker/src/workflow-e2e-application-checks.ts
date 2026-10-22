@@ -289,6 +289,13 @@ export async function executeWorkflowE2EApplicationChecks(input: {
     && (signedBaseline.baseCommitSha !== reference.baseCommitSha || signedBaseline.attempt !== reference.attempt || signedBaseline.baseCommitSha !== admission.candidateCommitSha))) {
     throw new Error("native E2E baseline admission does not match the purpose, base commit and attempt of the signed CHECKS reference");
   }
+  // M1.4 Task 4.6b: an audit replay (the same candidate run again with no model) is likewise a kind of its own: the signed reference and the admission must agree on that kind, on the
+  // round it replays and on the attempt, so a replay is never run as a candidate's round and a candidate's is never run as a replay.
+  const signedReplay = admission.replay;
+  if ((reference.purpose === "replay") !== (signedReplay !== undefined) || (signedReplay !== undefined
+    && (signedReplay.sourceRoundId !== reference.sourceRoundId || signedReplay.attempt !== reference.attempt))) {
+    throw new Error("native E2E replay admission does not match the purpose, source round and attempt of the signed CHECKS reference");
+  }
   const validated = validateE2EApplicationExecutionAdmission(admission);
   // The portable child groups of a mixed plan are not executed here; running them would be a second authority, so they are refused rather than skipped.
   if (admission.portableProjection !== null || admission.groups.some((group) => group.protocol !== "trusted-e2e-application/v1")
@@ -296,7 +303,8 @@ export async function executeWorkflowE2EApplicationChecks(input: {
     throw new Error("native E2E application admission carries groups this worker does not execute");
   }
   // Task 4.3a (Ruling DB-5): the reference's `agentSteps` flag is what the dispatcher used to pick this worker, so it is not trusted alone. It must be exactly "some group of the
-  // admission has an agent step", and a baseline round (which never runs those) never carries it.
+  // admission has an agent step", and a baseline round (which never runs those) never carries it. An audit replay (Task 4.6b) runs its agent steps with no model, so no group of it uses
+  // one and its reference never carries the flag either.
   const anyGroupUsesModel = validated.applicationSuites.some(groupUsesModel);
   if ((reference.agentSteps === true) !== anyGroupUsesModel) throw new Error("native E2E reference agentSteps flag does not match the admission it names");
   if (reference.purpose === "baseline" && (reference.agentSteps === true || anyGroupUsesModel)) throw new Error("native E2E baseline round carries AI navigation steps");

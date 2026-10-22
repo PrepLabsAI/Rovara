@@ -37,7 +37,8 @@ function validateRunInput(input: E2ERunInput, compiled: E2ECompiledApplicationSu
     || binding.environmentDigest !== compiled.preparedEnvironmentDigest
     || binding.runtimeManifestDigest !== runtime.manifestDigest
     || binding.mockManifestDigest !== compiled.group.mockManifestDigest
-    || binding.modelRouteRevision !== (context.modelRoute?.routeRevision ?? null)
+    // An audit replay names no route but keeps the policy's revision, which is what its binding carries (the admission validator holds every binding to the policy's).
+    || binding.modelRouteRevision !== (context.modelRoute?.routeRevision ?? (context.replay === undefined ? null : context.selectionInput.policy.modelRouteRevision))
     || canonicalJson(binding.expectedCases) !== canonicalJson(compiled.expectedCases)) {
     throw new Error("application lifecycle descriptor, runtime profile, bundle, or immutable compiled admission differs from the exact run input");
   }

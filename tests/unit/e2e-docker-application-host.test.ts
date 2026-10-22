@@ -10,6 +10,7 @@ import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e
 import { E2E_AGENT_LEDGER_MAX_BYTES, type E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
+import { e2eApplicationGroupUsesModel } from "../../packages/verifier/src/application-scenarios.js";
 import { createDockerApplicationHost, createProcessDockerCli, dockerOwnedCleanupReceipt, dockerOwnedResourceInventory, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
 import { executorContainerArgs } from "../../packages/verifier/src/host/executor-container.js";
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
@@ -18,6 +19,7 @@ import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
 import { createInferredExecutorPlan } from "../support/e2e-inferred-fixture.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
 import { MOCK_UNMOCKED_RESPONSE_DIGEST, mockRequestDigest, mockResponseDigest } from "../../packages/verifier/src/executor/mock-server.js";
+import { FIXED_RUNTIME_DATING, replayPlanOf } from "../support/replay-fixture.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -1629,5 +1631,53 @@ describe("docker application host: the model channel", () => {
       expect(await sweepStaleRovaraRuns(new FakeDockerCli(), 3_600_000, { now: () => Date.now(), runRoot: fresh })).toBe(0);
       expect(existsSync(join(fresh, "fresh-run", "model", "model.sock"))).toBe(true);
     } finally { for (const server of servers) server.close(); }
+  });
+});
+
+// Task 4.6b, tests 9 and 11 at the Docker host: an audit replay runs the group's AI navigation steps with no model. The host offers no channel, mounts no socket, writes no channel into the
+// plan, carries the group's recordings in it, and reads no model evidence back.
+describe("docker application host: an audit replay (Task 4.6b)", () => {
+  const ROUTE = { routeId: "rovara-e2e-default", routeRevision: "r1-0123456789ab" };
+  const agentScenario = (targetId: string) => ({ scenarioId: "agent-export", requirementId: "orders-export", requestedTargetIds: [targetId], required: true, accountProfileId: "orders-owner",
+    minimumEvidence: "runtime" as const, requiredRealComponentIds: [], steps: [{ kind: "agent" as const, goal: "Export the orders as a CSV file", maxActions: 4 }],
+    assertions: [{ kind: "csv" as const, downloadName: "orders.csv", columns: ["id", "total"], rows: [["1", "10"]] }] });
+  const replayFixture = () => replayPlanOf((replay) => createOrdersExecutorPlan({ probe: "web-csv-positive-v1", modelRoute: ROUTE, runtimeAt: FIXED_RUNTIME_DATING,
+    accountScenarios: [{ accountProfileId: "orders-owner", scenario: agentScenario }], ...(replay === undefined ? {} : { replay }) }));
+
+  it("is a group that has an agent step and gets no model channel: the question every site asks is answered no for it", () => {
+    const fixture = replayFixture();
+    expect(fixture.plan.admission.replay?.purpose).toBe("replay");
+    expect(fixture.plan.admission.modelRoute).toBeNull();
+    expect(e2eApplicationGroupUsesModel(fixture.compiled)).toBe(false);
+    // Control: the same group planned as a candidate round does have a model channel.
+    const candidate = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", modelRoute: ROUTE, accountScenarios: [{ accountProfileId: "orders-owner", scenario: agentScenario }] });
+    expect(e2eApplicationGroupUsesModel(candidate.compiled)).toBe(true);
+  });
+
+  it("mounts no model socket and passes no model name to any container, opens no channel, and writes a plan with the group's recordings and no channel (test 9)", async () => {
+    const fake = new FakeDockerCli(); const fixture = replayFixture();
+    let planText = "";
+    const s = await setup({ fake, fixture }); fake.onExecutor = (outDir) => { planText = readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8"); okOutput(s)(outDir); };
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBeNull();
+    expect(fake.mountsFor("executor").some((mount) => /model/i.test(mount))).toBe(false);
+    for (const args of fake.calls.filter((call) => call[0] === "run")) expect(args.join(" "), args.join(" ")).not.toMatch(/model/i);
+    const plan = E2EExecutorPlanSchema.parse(JSON.parse(planText));
+    expect(plan.modelChannel).toBeUndefined();
+    expect(plan.replay?.traces).toEqual(fixture.plan.admission.replay!.traces);
+    expect(plan.admission.modelRoute).toBeNull();
+  });
+
+  it("reads back no model evidence: the collection inputs of a replay have no agentModel", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, fixture: replayFixture() }); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    const inputs = await s.host.readCollectionInputs(new AbortController().signal);
+    expect(inputs).toBe(collectionSentinel);
+    expect("agentModel" in inputs).toBe(false);
+  });
+
+  it("refuses to be given a model channel for a replay admission, however the caller got one (test 11)", async () => {
+    const fake = new FakeDockerCli(); const fixture = replayFixture();
+    await expect(setup({ fake, fixture, modelChannel: { async open() { throw new Error("must never be opened"); } } as never })).rejects.toThrow(/no AI navigation step and must not get the model channel/);
   });
 });

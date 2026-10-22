@@ -247,8 +247,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   if (!foundSuite || !foundBinding) throw new Error("docker application host group is not a runnable application group of its admission");
   const compiled = foundSuite;
   const binding = foundBinding;
-  // The model channel belongs to the group that has an agent step and to no other (Ruling DB-1): the mount, the plan field and the proxy are all decided by this one question.
+  // The model channel belongs to the group that has an agent step and to no other (Ruling DB-1): the mount, the plan field and the proxy are all decided by this one question. An audit
+  // replay (Task 4.6b) runs the same steps with no model, so the question is answered no for it: no channel is offered, no socket is mounted, no route is read.
   const usesModel = e2eApplicationGroupUsesModel(compiled);
+  const replay = validated.admission.replay;
   const modelRoute = validated.admission.modelRoute;
   if (usesModel && deps.modelChannel === undefined) throw new Error("docker application host group has an AI navigation step and needs the model channel");
   if (!usesModel && deps.modelChannel !== undefined) throw new Error("docker application host group has no AI navigation step and must not get the model channel");
@@ -693,7 +695,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
         timeoutMs: Math.min(launch.start.timeoutMs, 120_000) } }, deadlineAt, accounts: run.accounts,
       // The route is the admission's own: the plan names it and the executor holds it to the admission it decodes.
       ...(!usesModel ? {} : { modelChannel: { protocol: E2E_MODEL_CHANNEL_SCHEMA_VERSION, socketPath: E2E_MODEL_CHANNEL_SOCKET_PATH, routeId: modelRoute!.routeId, routeRevision: modelRoute!.routeRevision,
-        valueKey: state.modelValueKey! } }) });
+        valueKey: state.modelValueKey! } }),
+      // A replay's plan carries the recordings of this group's cases, as its admission binds them, and nothing of a model.
+      ...(replay === undefined ? {} : { replay: { traces: replay.traces.filter((trace) => compiled.expectedCases.some((expected) => expected.caseId === trace.caseId)) } }) });
     try {
       await mkdir(deps.runRoot, { recursive: true, mode: 0o700 });
       // A run root that was already there is held to what this host would have made: a directory (not a link) of this user that nobody else can enter, since the run's plan

@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readdir, realpath, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { E2EReplayTrace } from "@agentx/contracts";
 import { E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, WorkerInvocationSchema, canonicalJson, e2eModelRouteRevision, e2eRuntimeBindingKey, type E2EApplicationExecutionAdmission,
   type E2EModelDayBudgetRequest } from "@agentx/contracts";
 import { createDockerApplicationHost, DEFAULT_DEADLINE_GRACE_MS, STALE_RUN_SWEEP_AGE_MS, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
@@ -17,6 +18,7 @@ import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/wo
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
+import { FIXED_RUNTIME_DATING, replayPlanOf } from "../support/replay-fixture.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
 
 const TASK_ID = "44444444-4444-4444-8444-444444444444";
@@ -43,13 +45,17 @@ async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: Fa
   /** What the invocation's reference says besides the admission it names (agentSteps, purpose, base commit, attempt). */
   reference?: Record<string, unknown>;
   /** Marks the admission itself as a baseline round (re-signed), as the broker's baseline admission is. */
-  baseline?: boolean } = {}) {
+  baseline?: boolean;
+  /** Task 4.6b: plans an audit replay of the case (synthetic bound recordings); the reference then says so unless `reference` overrides it. */
+  replay?: boolean } = {}) {
   const fake = options.fake ?? new FakeDockerCli();
-  const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", taskId: TASK_ID, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+  const build = (replay: { traces: E2EReplayTrace[] } | undefined) => createOrdersExecutorPlan({ probe: "web-csv-positive-v1", taskId: TASK_ID, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+    ...(replay === undefined ? {} : { replay, runtimeAt: FIXED_RUNTIME_DATING }), ...(options.replay === true ? { runtimeAt: FIXED_RUNTIME_DATING } : {}),
     ...(options.route === undefined ? {} : { modelRoute: options.route }),
     ...(options.agent === true ? { accountScenarios: [{ accountProfileId: "orders-owner", scenario: (targetId: string) => ({ scenarioId: "agent-export", requirementId: "orders-export", requestedTargetIds: [targetId], required: true,
       accountProfileId: "orders-owner", minimumEvidence: "runtime" as const, requiredRealComponentIds: [], steps: [{ kind: "agent" as const, goal: "Export the orders as a CSV file", maxActions: 4 }],
       assertions: [{ kind: "csv" as const, downloadName: "orders.csv", columns: ["id", "total"], rows: [["1", "10"]] }] }) }] } : {}) });
+  const fixture = options.replay === true ? replayPlanOf(build) : build(undefined);
   const written = options.version2 === true ? asVersion2(fixture.plan.admission) : fixture.plan.admission;
   const signed = options.baseline === true
     ? (() => { const { admissionDigest: _digest, ...body } = written; void _digest; const withBaseline = { ...body, baseline: { purpose: "baseline" as const, baseCommitSha: written.candidateCommitSha, attempt: 1 } };
@@ -66,7 +72,8 @@ async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: Fa
       workflowE2EAdmission: { schemaVersion: 1, kind: "application", taskId: admission.taskId, workflowRevision: admission.workflowRevision, candidateDigest: admission.candidateDigest,
         roundId: admission.round.roundId, groupRunIds: admission.groups.map((group) => group.outerBinding.runId),
         admissionRef: { key: `workflow-e2e-admissions/sha256/${admissionSha}.json`, sha256: admissionSha, byteLength: admissionBytes.byteLength },
-        ...(options.agent === true ? { agentSteps: true } : {}), ...options.reference } },
+        ...(options.agent === true && options.replay !== true ? { agentSteps: true } : {}),
+        ...(options.replay === true ? { purpose: "replay", sourceRoundId: admission.replay!.sourceRoundId, attempt: admission.replay!.attempt } : {}), ...options.reference } },
   });
   if (invocation.kind !== "task") throw new Error("fixture invocation must be a task");
   const readAdmission = vi.fn(async (offset: number) => {
@@ -501,6 +508,42 @@ describe("workflow E2E application rounds: the model channel", () => {
     const plain = await setup({ baseline: true, reference: { ...base, baseCommitSha: createOrdersExecutorPlan({ probe: "web-csv-positive-v1" }).plan.admission.candidateCommitSha } });
     plain.fake.onExecutor = plain.okOutput;
     await expect(plain.run()).resolves.toMatchObject({ processStatus: "SUCCEEDED" });
+  });
+
+  // M1.4 Task 4.6b: an audit replay is run on the Docker host with no model channel at all, and only when its signed reference and its admission say the same thing.
+  describe("an audit replay (Task 4.6b)", () => {
+    it("runs the round's group on the host with no model channel and no model budget, whatever the worker could offer, and uploads its evidence", async () => {
+      const budget = budgetEvents();
+      const s = await setup({ route: SCRIPTED, agent: true, replay: true });
+      expect(s.admission.replay?.purpose).toBe("replay");
+      s.fake.onExecutor = s.okOutput;
+      // The worker offers a model channel and a budget; a replay uses neither (a group with an agent step would have opened both).
+      await expect(s.run({ modelBudget: budget.post, modelChannel: { environment: scriptedEnvironment, invoke: async () => { throw new Error("a replay never calls a model"); } } })).resolves.toMatchObject({ processStatus: "SUCCEEDED" });
+      expect(s.createHost).toHaveBeenCalledTimes(1);
+      expect(s.createHost.mock.calls[0]![0]).not.toHaveProperty("modelChannel");
+      expect(budget.sent).toEqual([]);
+      expect(s.fake.calls.some((args) => args.join(" ").includes("model.sock"))).toBe(false);
+      expect(evidenceOf(s.saved, s.runId).groupRun["kind"]).toBe("application");
+    });
+    it("refuses a reference and an admission that disagree about the replay (kind, round, attempt), before anything starts", async () => {
+      const mismatches: Array<[string, Parameters<typeof setup>[0]]> = [
+        ["a replay admission under a candidate's reference", { route: SCRIPTED, agent: true, replay: true, reference: { purpose: undefined, sourceRoundId: undefined, attempt: undefined } }],
+        ["a replay reference over a candidate's admission", { reference: { purpose: "replay", sourceRoundId: "11111111-1111-4111-8111-111111111111", attempt: 1 } }],
+        ["another source round", { route: SCRIPTED, agent: true, replay: true, reference: { sourceRoundId: "99999999-9999-4999-8999-999999999999" } }],
+        ["another attempt", { route: SCRIPTED, agent: true, replay: true, reference: { attempt: 2 } }],
+      ];
+      for (const [label, options] of mismatches) {
+        const s = await setup(options);
+        await expect(s.run(), label).rejects.toThrow(/replay admission does not match/);
+        expect(s.createHost, label).not.toHaveBeenCalled();
+        expect(s.fake.calls, label).toEqual([]);
+      }
+    });
+    it("refuses a replay reference that claims the model channel (agentSteps): no group of a replay uses one", async () => {
+      const s = await setup({ route: SCRIPTED, agent: true, replay: true, reference: { agentSteps: true } });
+      await expect(s.run()).rejects.toThrow(/agentSteps flag does not match/);
+      expect(s.createHost).not.toHaveBeenCalled();
+    });
   });
 
   it("makes a group UNKNOWN model-route-changed-reapprove, and starts no host, socket or container for it, when its route is not the one this worker derives", async () => {
