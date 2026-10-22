@@ -9,6 +9,9 @@ import { randomUUID } from "node:crypto";
 import { MAYA } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
+import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS } from "@agentx/contracts";
+import { e2eModelBudgetKey } from "../../packages/broker/src/e2e/model-route-registry.js";
+import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
 
 // M1.3 Task 3.7b, owner decision D2 (Review Focus 6 and the 3.7 review's findings F1, F3, F8, F9): when an application plan is approved, the approved scenarios run once on the
 // UNCHANGED code, in a round of their own, for information only. It has its own admission (purpose and base commit signed), its own callbacks and its own completion path, writes
@@ -513,5 +516,31 @@ describe("the baseline round on a project whose policy pins a model route", () =
     expect(decoded.modelRoute).toBeNull();
     expect(decoded.round.groupBindings.every((binding) => binding.modelRouteRevision === null)).toBe(true);
     expect((round.operationNow().workflowE2EAdmission as { agentSteps?: unknown }).agentSteps).toBeUndefined();
+  });
+});
+
+// The AI day budget belongs to the candidate's AI navigation steps. A baseline round has none, so it is never refused by the budget precheck and never charged by the callback.
+describe("the baseline round and the project's AI day budget", () => {
+  it("still dispatches when the project's day budget is spent: the baseline path never asks the budget's precheck", async () => {
+    const exhausted = { ...e2eModelBudgetKey("payments", new Date().toISOString().slice(0, 10)), entityType: "E2E_MODEL_BUDGET",
+      inputTokens: E2E_MODEL_ROUTE_DEFAULT_BUDGETS.maxInputTokensPerProjectDay, calls: E2E_MODEL_ROUTE_DEFAULT_BUDGETS.maxCallsPerProjectDay };
+    const round = await startApplicationRound({ baseline: "source", beforeDispatch: (harness) => harness.db.set(exhausted) });
+    expect(round.admissionRef.purpose).toBe("baseline");
+    expect(recordOf(round)).toMatchObject({ state: "STARTED", operationId: round.operationId });
+  });
+
+  it("refuses the e2e-model-budget callback for a baseline operation, even with the grant and an agentSteps reference, and writes no budget row", async () => {
+    const round = await startApplicationRound({ baseline: "source" });
+    round.markRunning();
+    const route = (capability: string) => call(round.harness.handler, { method: "POST", path: `/v1/internal/workspaces/${round.workspaceId}/operations/${round.operationId}/e2e-model-budget`,
+      headers: { "x-agentx-callback-capability": capability }, body: { schemaVersion: "rovara-e2e-model-budget/v1", reservationId: randomUUID(), stage: "reserve", groupRunId: round.admissionRef.groupRunIds[0], inputTokens: 1_000 } });
+    // The capability a baseline operation is issued does not carry the grant.
+    expect((await route(round.capabilityFor(round.operationId))).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    // Defense in depth: a grant and an agentSteps reference are still refused for the baseline purpose.
+    const operation = round.operationNow();
+    round.harness.db.set({ ...operation, pk: `WORKSPACE#${round.workspaceId}`, sk: `OPERATION#${round.operationId}`, workflowE2EAdmission: { ...operation.workflowE2EAdmission, agentSteps: true } });
+    const granted = issueCapability(round.harness.brokerInput as { callbackSigningKey: string }, round.workspaceId, round.operationId, operation.fence, false, false, false, false, false, true, true);
+    expect((await route(granted)).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(round.harness.db.find((item) => String(item.sk).startsWith("E2E_MODEL_BUDGET"))).toEqual([]);
   });
 });
