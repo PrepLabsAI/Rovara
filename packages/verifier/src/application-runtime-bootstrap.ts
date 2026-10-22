@@ -294,7 +294,7 @@ export async function prepareE2EApplicationCliConfig(input: { configUrl: string 
   const reporter = reporterModule.reporter;
   if (!reporter || reporter.name !== "agentx-application-first-party-reporter/v1" || typeof reporter.onEvent !== "function") throw new Error("fixed application reporter asset has no valid reporter export");
   const agentConfig = e2eApplicationAgentConfig({ modelRoute: declaration.modelRoute, replay: declaration.replay === true }, host);
-  return { projectId: declaration.projectId, tests: [declaration.testPath], targets: [target], timeout: declaration.timeoutMs, workers: 1, retries: 0, reporters: [reporter], ...agentConfig } as E2EConfig;
+  return { projectId: declaration.projectId, tests: [declaration.testPath], targets: [target], timeout: declaration.timeoutMs, workers: 1, retries: 0, reporters: [reporter], ...agentConfig };
 }
 
 /**

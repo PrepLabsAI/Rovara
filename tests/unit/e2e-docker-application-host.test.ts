@@ -1678,6 +1678,6 @@ describe("docker application host: an audit replay (Task 4.6b)", () => {
 
   it("refuses to be given a model channel for a replay admission, however the caller got one (test 11)", async () => {
     const fake = new FakeDockerCli(); const fixture = replayFixture();
-    await expect(setup({ fake, fixture, modelChannel: { async open() { throw new Error("must never be opened"); } } as never })).rejects.toThrow(/no AI navigation step and must not get the model channel/);
+    await expect(setup({ fake, fixture, modelChannel: { async open() { throw new Error("must never be opened"); } } })).rejects.toThrow(/no AI navigation step and must not get the model channel/);
   });
 });

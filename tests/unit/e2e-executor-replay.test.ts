@@ -20,7 +20,7 @@ function recording(trace: Record<string, unknown> = cleanTrace(), options: { key
   const keyHash = options.keyHash ?? KEY;
   const file = JSON.stringify({ schemaVersion: "rovara-agent-trace-file/v1", keyHash: options.fileKey ?? keyHash, trace });
   return { caseId: "case-a", stepIndex: 1, keyHash, traceBase64: Buffer.from(file).toString("base64"),
-    binding: { schemaVersion: "rovara-agent-trace/v1", runId: randomUUID(), caseId: "case-a", stepIndex: 1, traceSha256: sha(canonicalJson(trace)), ledgerSha256: sha("ledger"), actionCount: 1, ...options.bind } as E2EReplayTrace["binding"] };
+    binding: { schemaVersion: "rovara-agent-trace/v1", runId: randomUUID(), caseId: "case-a", stepIndex: 1, traceSha256: sha(canonicalJson(trace)), ledgerSha256: sha("ledger"), actionCount: 1, ...options.bind } };
 }
 
 describe("the replay store serves only bound recordings (tests 13 and 14)", () => {
@@ -151,7 +151,7 @@ describe("the bootstrap builds a replay config only from the replay parts (test 
     const config = e2eApplicationAgentConfig({ modelRoute: null, replay: true }, replayHost());
     expect(config.cache).toMatchObject({ mode: "read-only" });
     expect(Object.keys(config.agents!)).toEqual(["default"]);
-    expect(config.agents!["default"]).toEqual({ executor: expect.objectContaining({ name: "rovara-e2e-replay" }) });
+    expect(config.agents!["default"]).toEqual({ executor: expect.objectContaining({ name: "rovara-e2e-replay" }) as unknown });
     expect("model" in config.agents!["default"]!).toBe(false);
   });
   it("refuses a replay declaration whose host offers a model factory, a model-bearing executor, a writable store, or the governed (model) executor", () => {
@@ -172,7 +172,7 @@ describe("the bootstrap builds a replay config only from the replay parts (test 
   it("is unchanged for a declaration that names a route: the read-write capture cache and the agent with its model ceiling (the 4.3b config)", () => {
     const config = e2eApplicationAgentConfig({ modelRoute: route, replay: false }, modelHost());
     expect(config.cache).toMatchObject({ mode: "read-write" });
-    expect(config.agents!["default"]).toMatchObject({ maxInputTokens: 32000, executor: expect.objectContaining({ name: "rovara-e2e-agent" }) });
+    expect(config.agents!["default"]).toMatchObject({ maxInputTokens: 32000, executor: expect.objectContaining({ name: "rovara-e2e-agent" }) as unknown });
     expect(() => e2eApplicationAgentConfig({ modelRoute: route, replay: false }, replayHost())).toThrow(/model/);
   });
 });

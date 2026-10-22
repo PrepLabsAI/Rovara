@@ -39,7 +39,7 @@ describe("the replay config digest", () => {
     expect(() => expectedE2EApplicationConfigDigest({ ...base, modelRoute: route, replay: true })).toThrow(/replay/);
   });
   it("is the digest the pinned runner computes for the config the replay bootstrap builds", async () => {
-    const { resolveConfig } = await import(new URL("../../node_modules/e2e/dist/config/resolve.js", import.meta.url).href) as { resolveConfig(config: unknown, options: { projectRoot: string }): { configDigest: string } };
+    const { resolveConfig } = await import(new URL("../../node_modules/e2e/dist/config/resolve.js", import.meta.url).href) as { resolveConfig: (config: unknown, options: { projectRoot: string }) => { configDigest: string } };
     const { defineEngine } = await import("e2e/engine");
     const engine = defineEngine({ name: "playwright", version: "1.0.0", spiVersion: 1, platform: "web", observe: async () => { throw new Error("no effects"); }, perform: async () => { throw new Error("no effects"); }, actions: ["tap"] });
     // What the bootstrap builds for a replay shard: a store that never writes, and an executor that holds no model (so no model and no input ceiling in the agents entry).

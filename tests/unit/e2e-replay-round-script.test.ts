@@ -92,14 +92,14 @@ describe("agentx admin task e2e-replay", () => {
   it("posts the round with the admin token to the task's replay route, reads the attempts with a GET, and reports the broker's refusal with its own code", async () => {
     const { startTaskE2EReplay, showTaskE2EReplays } = await import("../../packages/cli/src/admin/task-e2e-replay.js");
     const post = vi.fn(async () => Response.json({ replay: { attempt: 1 } }, { status: 202 }));
-    await startTaskE2EReplay({ controlPlaneUrl: "https://agentx.example.test/", accessToken: "admin-token", taskId: TASK, roundId: ROUND }, post as unknown as typeof fetch);
+    await startTaskE2EReplay({ controlPlaneUrl: "https://agentx.example.test/", accessToken: "admin-token", taskId: TASK, roundId: ROUND }, post);
     const [url, init] = post.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(`https://agentx.example.test/v1/admin/tasks/${TASK}/e2e-replay`);
     expect(init.method).toBe("POST");
     expect(init.headers).toMatchObject({ authorization: "Bearer admin-token" });
     expect(JSON.parse(init.body as string)).toEqual({ roundId: ROUND });
     const get = vi.fn(async () => Response.json({ replays: [] }));
-    await showTaskE2EReplays({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t", taskId: TASK, roundId: ROUND }, get as unknown as typeof fetch);
+    await showTaskE2EReplays({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t", taskId: TASK, roundId: ROUND }, get);
     expect((get.mock.calls[0] as unknown as [string, RequestInit])[0]).toBe(`https://agentx.example.test/v1/admin/tasks/${TASK}/e2e-replay?roundId=${ROUND}`);
     expect((get.mock.calls[0] as unknown as [string, RequestInit])[1].method).toBe("GET");
     const refused = vi.fn(async () => Response.json({ error: { code: "CONFIG_INVALID", message: "replay-no-recording: the qualified round left no recording to replay" } }, { status: 400 }));
