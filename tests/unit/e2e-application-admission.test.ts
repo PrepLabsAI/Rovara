@@ -15,7 +15,7 @@ import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-r
 import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { builtWebAndApiAdmission } from "../support/e2e-web-and-api-admission.js";
-import { PROFILE, anonymousScenario, anonymousTargetOf, binding, csvScenario, inferredSnapshot, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { PROFILE, anonymousScenario, anonymousTargetOf, binding, csvScenario, inferredSnapshot, oneAppWebAndApiFixture, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 import { createWorkflowE2EAdmissionAgentStepsReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
 
 afterEach(disposeRealCandidates);
@@ -494,6 +494,20 @@ describe("a baseline round's admission on a project whose policy pins a model ro
       expect(validated.applicationSuites).toHaveLength(1);
     });
 
+    // tests/fixtures/admission-before-task-4-3a-web-and-api.json: written by the real builder at ed7fc431 (M1.4 with Task 3.4, before Task 4.3a) for one app's web and API
+    // scenarios on a route-pinned policy with agent-sized limits. Version 2, rows keyed by profile and kind, one group per kind, neither with an agent step.
+    it("a version 2 admission of a web and API plan (Task 3.4) written before Task 4.3a still validates, for both of its groups", () => {
+      const decoded = decodeE2EApplicationExecutionAdmission(readFileSync(new URL("../fixtures/admission-before-task-4-3a-web-and-api.json", import.meta.url)));
+      expect(decoded.schemaVersion).toBe(E2E_APPLICATION_ADMISSION_SCHEMA_V2);
+      expect(decoded.runtimeBindings.map((item) => item.key)).toEqual([e2eRuntimeBindingKey(PROFILE, "api"), e2eRuntimeBindingKey(PROFILE, "web")]);
+      expect(decoded.policy.modelRouteRevision).toBe(ROUTE);
+      expect(decoded.round.limits).toEqual(ROUTE_LIMITS);
+      expect(agentScenarioIds(decoded)).toEqual([]);
+      const validated = validateE2EApplicationExecutionAdmission(decoded);
+      expect(validated.applicationSuites.map((suite) => suite.runtimeKind).sort()).toEqual(["api", "web"]);
+      expect(validated.applicationSuites.every((suite) => !e2eApplicationGroupUsesModel(suite))).toBe(true);
+    });
+
     it("is refused when its round no longer says it ran under the policy's limits (the allowance is for admissions that did, not a way around the model-free limits)", () => {
       const { admissionDigest: _digest, ...body } = JSON.parse(stored().toString("utf8")) as { round: { limits: { caseTimeoutMs: number } }; admissionDigest: string };
       void _digest;
@@ -574,7 +588,43 @@ describe("a baseline round's admission on a project whose policy pins a model ro
       planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection({ ...fx, policy }, rows) });
     expect(decodeE2EApplicationExecutionAdmission(built.bytes).round.limits).toEqual(limits);
   });
-});
+
+  // Task 3.4 x 4.3a: a web and API plan has one group per kind, and the model channel is the web group's alone. A baseline drops the web group's AI navigation scenario and keeps
+  // the rest of both groups, with no route; a candidate round pins the route for the web group only.
+  it("a web and API plan with an AI navigation scenario on its web target: the decisions are per group, and its baseline drops only that scenario (Rulings CX and DD)", async () => {
+    const fx = oneAppWebAndApiFixture();
+    const agentWeb: E2EScenario = { ...fx.webScenario, scenarioId: "owner-agent-page", steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }],
+      assertions: [{ kind: "visible", testId: "orders", equals: true }] };
+    const intent = fx.build({ web: true, api: true }, [fx.webScenario, agentWeb, fx.apiScenario]);
+    const policy = { ...fx.policy, modelRouteRevision: ROUTE, limits: ROUTE_LIMITS };
+    const rows = () => [agentRow(), webApiRow("api")];
+    const artifact = { id: "feature-plan", sha256: "1".repeat(64) };
+    const approved = evaluateApplicationPlanApproval({ intent, taskId: "11111111-1111-4111-8111-111111111111", artifact, snapshot: fx.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy, registeredRuntimes: rows(), runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now(),
+      accounts: { entries: fx.registry, mode: "approve", pinned: [] } });
+    if (!approved.ok) throw new Error(approved.reason);
+    const candidate = await candidateOf({ "package.json": fx.manifest });
+    const build = (baseline: boolean) => decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission({ taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(),
+      operationFence: 3, workflowRevision: 7, roundId: randomUUID(), runId: randomUUID, intent, artifact, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy, registeredRuntimes: rows(), runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource,
+      planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approved.selection,
+      ...(baseline ? { baseline: { baseCommitSha: candidate.snapshot.commitSha, attempt: 1 } } : {}) }).bytes);
+    const usesModelByKind = (decoded: ReturnType<typeof decodeE2EApplicationExecutionAdmission>) => Object.fromEntries(validateE2EApplicationExecutionAdmission(decoded).applicationSuites
+      .map((suite) => [suite.runtimeKind, e2eApplicationGroupUsesModel(suite)]));
+
+    const roundOf = build(false);
+    expect(roundOf.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: ROUTE });
+    expect(roundOf.round.limits).toEqual(ROUTE_LIMITS);
+    expect(usesModelByKind(roundOf)).toEqual({ web: true, api: false });
+
+    const baselineOf = build(true);
+    expect(baselineOf.modelRoute).toBeNull();
+    expect(baselineOf.round.groupBindings).toHaveLength(2);
+    expect(baselineOf.round.groupBindings.every((item) => item.modelRouteRevision === null)).toBe(true);
+    expect(baselineOf.round.limits).toEqual(E2E_MODEL_FREE_LIMITS);
+    expect(agentScenarioIds(baselineOf)).toEqual([]);
+    expect(baselineOf.bundle.scenarios.map((scenario) => scenario.scenarioId).sort()).toEqual([fx.apiScenario.scenarioId, fx.webScenario.scenarioId].sort());
+    expect(usesModelByKind(baselineOf)).toEqual({ web: false, api: false });
   });
 });
 
