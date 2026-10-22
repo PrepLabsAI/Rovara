@@ -33,11 +33,7 @@ const E2EDisplayBaselineSchema = z.object({
   if (baseline.status === "UNAVAILABLE" && baseline.scenarios.length > 0) context.addIssue({ code: "custom", path: ["scenarios"], message: "a baseline that could not run has no rows" });
 });
 
-const E2EScenarioResultsSchema = z.object({
-  scenarios: z.array(E2EDisplayScenarioSchema).max(64),
-  baseline: E2EDisplayBaselineSchema.optional(),
-}).strict();
-type E2EScenarioResults = z.infer<typeof E2EScenarioResultsSchema>;
+type E2EScenarioResults = { scenarios: z.infer<typeof E2EDisplayScenarioSchema>[]; baseline?: z.infer<typeof E2EDisplayBaselineSchema> };
 
 const refFields = {
   capturedAt: z.string().datetime(),

@@ -9,4 +9,4 @@ export const agentNavigation = (overrides: Record<string, unknown> = {}) => ({
 
 /** A row of an AI-navigated scenario that passed. */
 export const agentRow = (overrides: Partial<E2EDisplayScenario> = {}): E2EDisplayScenario =>
-  row({ scenarioId: "owner-export-ai", title: "Owner export ai", agentNavigation: agentNavigation(), ...overrides } as Partial<E2EDisplayScenario>);
+  row({ scenarioId: "owner-export-ai", title: "Owner export ai", agentNavigation: agentNavigation(), ...overrides });

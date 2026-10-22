@@ -99,7 +99,7 @@ describe.runIf(agentRunnable)("the broker's verdict on real agent runs", () => {
       const ledgerText = JSON.stringify(a.run.readLedger() ?? {});
       const digests = [...ledgerText.matchAll(/"(?:valueDigest|snapshotSha256|goalDigest|valueKeyId)":"([a-f0-9]{64})"/gu)].map((match) => match[1]!);
       const secrets = [a.run.valueKey, ...a.run.fixture.plan.accounts.flatMap((account) => [account.password, account.email, account.email.split("@")[0]!]), ...digests, ...a.run.receipts.flatMap((receipt) => [receipt.receiptId, receipt.promptSha256])];
-      const stored = scrubScenarioResults({ scenarios: display.scenarios });
+      const stored = scrubScenarioResults({ scenarios: [...display.scenarios] });
       const everything = [JSON.stringify(display.scenarios), pageText(display.scenarios, false), slackText(display.scenarios), JSON.stringify(display.artifacts.map((artifact) => ({ sha256: artifact.sha256, contentType: artifact.contentType }))), JSON.stringify(stored)].join("\n");
       for (const secret of secrets) expect(everything, `${name}: ${secret.slice(0, 8)}`).not.toContain(secret);
       // Positive control: the scan ran over a real display, and over a ledger that has the digests it looks for.

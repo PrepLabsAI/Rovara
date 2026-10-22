@@ -10,14 +10,14 @@ describe("display schema v3 rows", () => {
   it("accepts a row with an agentNavigation block and refuses one that grows past its bounds, carries a value, or has an unknown field", () => {
     expect(E2EDisplayScenarioSchema.safeParse(agentRow()).success).toBe(true);
     const bad = [
-      agentRow({ agentNavigation: agentNavigation({ steps: Array.from({ length: 4 }, () => agentNavigation().steps[0]) }) } as never),
-      agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "x".repeat(121), actedOn: [], stop: "concluded" }] }) } as never),
-      agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: Array.from({ length: 9 }, () => ({ role: "button", name: "a" })), stop: "concluded" }] }) } as never),
-      agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [{ role: "button", name: "x".repeat(61) }], stop: "concluded" }] }) } as never),
-      agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [{ role: "textbox", name: "Email", value: "hunter2" }], stop: "concluded" }] }) } as never),
-      agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [], stop: "gave-up" }] }) } as never),
-      agentRow({ agentNavigation: agentNavigation({ modelCalls: -1 }) } as never),
-      agentRow({ agentNavigation: agentNavigation({ transcript: "the model said" }) } as never),
+      agentRow({ agentNavigation: agentNavigation({ steps: Array.from({ length: 4 }, () => agentNavigation().steps[0]) }) }),
+      agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "x".repeat(121), actedOn: [], stop: "concluded" }] }) }),
+      agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: Array.from({ length: 9 }, () => ({ role: "button", name: "a" })), stop: "concluded" }] }) }),
+      agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [{ role: "button", name: "x".repeat(61) }], stop: "concluded" }] }) }),
+      agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [{ role: "textbox", name: "Email", value: "hunter2" }], stop: "concluded" }] }) }),
+      agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [], stop: "gave-up" }] }) }),
+      agentRow({ agentNavigation: agentNavigation({ modelCalls: -1 }) }),
+      agentRow({ agentNavigation: agentNavigation({ transcript: "the model said" }) }),
     ];
     for (const value of bad) expect(E2EDisplayScenarioSchema.safeParse(value).success, JSON.stringify(value)).toBe(false);
   });
@@ -170,7 +170,7 @@ describe("scrubbing a stored result keeps the navigation block and the baseline'
   });
   it("redacts a credential pattern and an email in a goal, an element name and the route id, and keeps the block valid", () => {
     const dirty = agentRow({ agentNavigation: agentNavigation({ routeId: "route ops@tenant-a.example",
-      steps: [{ goal: "Open the page with password=hunter2-secret", actedOn: [{ role: "button", name: "Mail ops@tenant-a.example" }], stop: "concluded" }] }) } as never);
+      steps: [{ goal: "Open the page with password=hunter2-secret", actedOn: [{ role: "button", name: "Mail ops@tenant-a.example" }], stop: "concluded" }] }) });
     const scrubbed = scrubScenarioResults({ scenarios: [dirty] });
     expect(scrubbed).toBeDefined();
     const text = JSON.stringify(scrubbed);
@@ -214,7 +214,7 @@ describe("test 25: the badge on an AI-navigated row", () => {
 
   it("names at most two elements and counts the rest, says 'the model navigated' when it clicked nothing, and says 'the checks decided' when no single kind of check did", () => {
     const names = (list: string[], decidedBy?: unknown) => pageOf(results({ scenarios: [agentRow({ agentNavigation: agentNavigation({ decidedBy,
-      steps: [{ goal: "g", actedOn: list.map((name) => ({ role: "button", name })), stop: "concluded" }] }) } as never)] }));
+      steps: [{ goal: "g", actedOn: list.map((name) => ({ role: "button", name })), stop: "concluded" }] }) })] }));
     expect(names(["A", "B", "C", "D"], ["csv"])).toContain("AI-navigated: the model clicked 'A' and 'B' and 2 more; the CSV check decided");
     expect(names([], ["text"])).toContain("AI-navigated: the model navigated; the text check decided");
     expect(names(["A"], ["csv", "visible"])).toContain("AI-navigated: the model clicked 'A'; the checks decided");
@@ -228,7 +228,7 @@ describe("test 25: the badge on an AI-navigated row", () => {
   });
 
   it("scrubs the element name again and escapes it, so a stored name can't carry markup or an email", () => {
-    const hostile = agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [{ role: "button", name: "<img src=x onerror=alert(1)> ops@tenant-a.example" }], stop: "concluded" }] }) } as never);
+    const hostile = agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [{ role: "button", name: "<img src=x onerror=alert(1)> ops@tenant-a.example" }], stop: "concluded" }] }) });
     const raw = renderE2EScenarioRowsHtml(results({ scenarios: [hostile] }), { artifactPath });
     expect(raw).not.toContain("<img");
     expect(raw).not.toContain("ops@tenant-a.example");
@@ -244,7 +244,7 @@ describe("test 26: one Slack line for the round", () => {
   });
 
   it("adds the steps and calls of every AI-navigated row into the one line", () => {
-    const second = agentRow({ scenarioId: "owner-export-ai-2", agentNavigation: agentNavigation({ modelCalls: 2, steps: [agentNavigation().steps[0], agentNavigation().steps[0]] }) } as never);
+    const second = agentRow({ scenarioId: "owner-export-ai-2", agentNavigation: agentNavigation({ modelCalls: 2, steps: [agentNavigation().steps[0], agentNavigation().steps[0]] }) });
     expect(slackOf(results({ scenarios: [agentRow(), second] }))).toContain("AI navigation: 3 steps, 5 model calls (checks decide)");
   });
 

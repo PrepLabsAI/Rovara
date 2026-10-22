@@ -73,7 +73,7 @@ describe("display envelope v3", () => {
   });
 
   it("scrubs the navigation block again before it is stored", () => {
-    const dirty = agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "Open ops@tenant-a.example with password=hunter2-secret", actedOn: [{ role: "button", name: "Mail ops@tenant-a.example" }], stop: "concluded" }] }) } as never);
+    const dirty = agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "Open ops@tenant-a.example with password=hunter2-secret", actedOn: [{ role: "button", name: "Mail ops@tenant-a.example" }], stop: "concluded" }] }) });
     const stored = Buffer.from(make(results({ scenarios: [dirty] })).bytes).toString("utf8");
     for (const secret of ["ops@tenant-a.example", "hunter2-secret"]) expect(stored).not.toContain(secret);
   });
@@ -133,7 +133,8 @@ describe("test 26 through the notifier", () => {
   it("the notifier built for v3 adds the one AI navigation line from the stored block", async () => {
     const made = make(results({ scenarios: [agentRow(), ...results().scenarios] }));
     const blocks = (await workflowE2ENotifierBlocks({ task: taskOf(made.ref) as never, readPrivateObject: readerOf(made.bytes), taskPageUrl: "https://agentx.test/review/11111111-1111-4111-8111-111111111111/task" }))!;
-    const lines = blocks.map((block) => block.text.text).join("\n").split("\n");
-    expect(lines.filter((line) => line.startsWith("AI navigation:"))).toEqual(["AI navigation: 1 step, 3 model calls (checks decide)"]);
+    const text = blocks.map((block) => JSON.stringify(block)).join("\n");
+    expect(text.split("AI navigation: ").length - 1).toBe(1);
+    expect(text).toContain("AI navigation: 1 step, 3 model calls (checks decide)");
   });
 });

@@ -8,6 +8,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import { E2EAgentActionLedgerSchema, WorkerInvocationSchema, e2eAgentValueKeyId, parseVerifiedE2EAgentActionLedger, type E2EModelDayBudgetRequest } from "@agentx/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { verifyApplicationE2EEvidence } from "../../packages/broker/src/e2e/application-evidence.js";
+import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
 import type { E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
 import { encodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps } from "../../packages/verifier/src/application-scenarios.js";
 import { createProcessDockerCli, createDockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
@@ -21,6 +22,11 @@ import { workflowE2EApplicationHostDeps, type WorkflowE2EApplicationRuntimeConfi
 import { ciImage } from "../support/ci-images.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { AGENT_GOAL, ORDERS_M14_APP_FILES, ORDERS_M14_ROOT, createOrdersM14AgentPlan, sha256Hex } from "../support/orders-m14-agent.js";
+
+/** The task page's section for these rows as text (entities undone, so a sentence is matched as the owner reads it), and the Slack summary of them. */
+const pageText = (scenarios: readonly object[]) => renderE2EScenarioRowsHtml({ scenarios: scenarios as never }, { artifactPath: (sha256) => `/a/${sha256}` })
+  .replaceAll("&#39;", "'").replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+const slackText = (scenarios: readonly object[]) => renderE2EScenarioSlackBlocks({ scenarios: scenarios as never }, { taskPageUrl: "https://agentx.test/review/t/task" }).map((block) => block.text.text).join("\n");
 
 // M1.4 native journeys (Task 4.3b). Each is a whole path of an application round that has an `agent` step, through the worker's own check path (`executeWorkflowE2EChecks`): the admission
 // is read and held to the signed invocation, the worker re-derives the route from its settings, opens the model channel for the group, the production Docker host runs the m14 orders app
@@ -166,6 +172,10 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     expect(verdict.results[0]!.status).toBe("passed");
     expect(verdict.results[0]!.modelReceiptIds).toEqual(step.receiptIds.slice().sort());
     expect(verdict.display?.scenarios).toHaveLength(1);
+    // Task 4.4b: the row says how the AI navigated, from the ledger the broker verified, and the page and Slack say it in the owner's words.
+    expect(verdict.display!.scenarios[0]).toMatchObject({ status: "PASSED", agentNavigation: { steps: [{ stop: "concluded", actedOn: [{ role: "button", name: "Download orders" }] }], modelCalls: 2, decidedBy: ["csv"] } });
+    expect(pageText(verdict.display!.scenarios)).toContain("AI-navigated: the model clicked 'Download orders'; the CSV check decided");
+    expect(slackText(verdict.display!.scenarios)).toContain("AI navigation: 1 step, 2 model calls (checks decide)");
   }, 500_000);
 
   it("agent-wrong-action: the model taps the decoy 'Download invoices'; the ledger says so and the executor completes the run with failures", async () => {
@@ -181,6 +191,9 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     expect(verdict.verdict, `${verdict.reason}\n${j.why}`).toBe("FAILED");
     expect(verdict.results[0]!.cases[0]).toMatchObject({ status: "failed", reason: "observed-application-assertion-failure" });
     expect(verdict.display!.scenarios[0]).toMatchObject({ status: "FAILED", failedAssertion: { kind: "csv", expected: "orders.csv", actual: "invoices.csv" } });
+    // The row names the button the model took, so the owner can see it was the wrong one.
+    expect(verdict.display!.scenarios[0]!.agentNavigation?.steps[0]?.actedOn).toEqual([{ role: "button", name: "Download invoices" }]);
+    expect(pageText(verdict.display!.scenarios)).toContain("AI-navigated: the model clicked 'Download invoices'; the CSV check decided");
   }, 500_000);
 
   it("agent-model-outage: the provider fails; the receipt is provider-error, the ledger verdict is failed with MODEL_PROVIDER_FAILED, and nothing was downloaded", async () => {
@@ -196,6 +209,8 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     expect(verdict.verdict, `${verdict.reason}\n${j.why}`).toBe("UNKNOWN");
     expect(verdict.results[0]!.cases[0]).toMatchObject({ status: "unavailable", reason: "model-unavailable" });
     expect(verdict.results[0]!.modelReceiptIds).toEqual([]);
+    expect(verdict.display!.scenarios[0]).toMatchObject({ status: "UNKNOWN", reason: "The AI model couldn't be reached, so this AI-navigated check could not run; retry the checks" });
+    expect(verdict.display!.scenarios[0]).not.toHaveProperty("agentNavigation");
   }, 500_000);
 });
 
