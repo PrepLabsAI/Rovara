@@ -3,7 +3,7 @@ import { E2ERunBindingSchema, canonicalJson, e2ePolicyDigest, type E2ECollection
 import { createHash } from "node:crypto";
 import type { E2EActualApplicationRun } from "./application-collection.js";
 import { runIsolatedE2E } from "./runtime.js";
-import { validateE2ECompiledApplicationAdmission, type E2ECompiledApplicationSuite } from "./application-scenarios.js";
+import { e2eCompiledRuntime, validateE2ECompiledApplicationAdmission, type E2ECompiledApplicationSuite } from "./application-scenarios.js";
 
 const READBACK_CAP_MS = 30_000;
 export type E2EApplicationRuntimePorts = E2ERuntimePorts & Readonly<{ readActualRun(signal: AbortSignal): Promise<E2EActualApplicationRun> }>;
@@ -11,7 +11,7 @@ export type E2EIsolatedApplicationRun = Readonly<{ lifecycle: E2ECollection; act
 
 function validateRunInput(input: E2ERunInput, compiled: E2ECompiledApplicationSuite, binding: E2ERunBinding): void {
   const context = compiled.runtimeAdmissionContext;
-  const runtime = compiled.runtimeBindings.get(compiled.group.runtimeProfileId);
+  const runtime = e2eCompiledRuntime(compiled);
   const expectedBuildDigest = createHash("sha256").update(canonicalJson(compiled.inventory)).digest("hex");
   const targetIds = new Set(compiled.group.targetIds);
   const applicationIds = [...new Set(context.selectionInput.intent.applicationRuntimeRefs.filter((ref) => targetIds.has(ref.targetId))
@@ -80,7 +80,7 @@ export async function runIsolatedE2EApplication(input: { input: E2ERunInput; com
   const binding = E2ERunBindingSchema.parse(input.input.binding);
   if (canonicalJson(binding.expectedCases) !== canonicalJson(input.compiled.expectedCases) || binding.groupId !== input.compiled.group.groupId) throw new Error("application lifecycle binding does not match the exact compiled group");
   if (binding.executionMode !== input.compiled.group.mode || binding.mockManifestDigest !== input.compiled.group.mockManifestDigest
-    || binding.runtimeManifestDigest !== input.compiled.runtimeAdmissionContext.runtimeBindings.get(input.compiled.group.runtimeProfileId)?.manifestDigest
+    || binding.runtimeManifestDigest !== e2eCompiledRuntime(input.compiled)?.manifestDigest
     || !input.compiled.shards.every((shard) => input.compiled.inventory.shards.some((item) => item.shardId === shard.shardId && item.targetId === shard.targetId))) throw new Error("application lifecycle runtime profile, group mode, or shard inventory differs from compiled admission");
   validateRunInput(input.input, input.compiled, binding);
   const lifecycle = await runIsolatedE2E(input.input, input.ports, input.signal);

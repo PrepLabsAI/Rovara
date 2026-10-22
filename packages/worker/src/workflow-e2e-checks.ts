@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import {
   E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2EScenarioBundleSchema,
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
-  canonicalJson, e2eScenarioBundleDigest, selectE2EExecutionPlan, verifyE2ESourceSnapshot,
+  canonicalJson, e2eScenarioBundleDigest, isE2EApplicationAdmissionSchemaVersion, selectE2EExecutionPlan, verifyE2ESourceSnapshot,
   type E2ESourceSnapshot, type E2EWorkflowAdmissionRef, type WorkerInvocation,
 } from "@agentx/contracts";
 import { executeWorkflowE2EApplicationChecks, type WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
@@ -47,7 +47,7 @@ export async function readWorkflowE2EAdmissionBytes(input: { reference: E2EWorkf
 /** True only for an admission of the application kind (a browser or API round); anything else, unreadable included, is not one. */
 export async function workflowE2EAdmissionIsApplication(input: Parameters<typeof readWorkflowE2EAdmissionBytes>[0]): Promise<boolean> {
   const bytes = await readWorkflowE2EAdmissionBytes(input);
-  try { return (JSON.parse(bytes.toString("utf8")) as { schemaVersion?: unknown } | null)?.schemaVersion === "workflow-e2e-application-admission/v1"; } catch { return false; }
+  try { return isE2EApplicationAdmissionSchemaVersion((JSON.parse(bytes.toString("utf8")) as { schemaVersion?: unknown } | null)?.schemaVersion); } catch { return false; }
 }
 
 /** Executes only the exact immutable admission named by the server-created CHECKS invocation. */
@@ -76,7 +76,7 @@ export async function executeWorkflowE2EChecks(input: {
   const admissionBytes = await readWorkflowE2EAdmissionBytes({ reference, readAdmission: input.readAdmission, throwIfCancelled });
   const parsedAdmission = JSON.parse(admissionBytes.toString("utf8")) as Admission;
   // The admission's own schema version picks the path. An application admission never reaches the portable code below, and a portable one never reaches Docker.
-  const isApplicationAdmission = (parsedAdmission as { schemaVersion?: unknown } | null)?.schemaVersion === "workflow-e2e-application-admission/v1";
+  const isApplicationAdmission = isE2EApplicationAdmissionSchemaVersion((parsedAdmission as { schemaVersion?: unknown } | null)?.schemaVersion);
   // The reference's kind is what the dispatcher used to decide which worker may receive the round, so it is not trusted alone: it must say what the admission is.
   if (isApplicationAdmission !== (reference.kind === "application")) throw new Error("native E2E reference kind does not match the admission it names");
   if (isApplicationAdmission) {

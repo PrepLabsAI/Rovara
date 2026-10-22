@@ -601,6 +601,47 @@ describe("ec2-ebs delivery", () => {
           await expect(unknown.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
         });
 
+        describe("version 2 admissions, which key the runtime rows by profile and kind (Task 3.4)", () => {
+          const V2 = "workflow-e2e-application-admission/v2";
+          const SENTENCE = "This worker can't run combined browser and API checks yet; retry once it restarts.";
+          const v2Capable = [...capable, "task.workflowE2EApplicationChecks.v2"];
+
+          it("never sends a version 2 admission to a worker that lacks task.workflowE2EApplicationChecks.v2, and says so in one plain sentence", async () => {
+            const record = checks(admission({ kind: "application" }));
+            const older = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: withSchema(V2) });
+            const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+            expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+            expect(refusal?.message).toBe(`RUNTIME_UNAVAILABLE: ${SENTENCE}`);
+            expect(older.post).not.toHaveBeenCalled();
+            // A baseline round is an application round too: its version 2 admission is held to the same rule.
+            const baseline = checks(admission({ kind: "application", purpose: "baseline", baseCommitSha: "c".repeat(40), attempt: 1 }));
+            const olderBaseline = delivery({ workerFeatures: async () => [...capable, "task.workflowE2EBaselineChecks"], workflowE2EAdmissionSchemaVersion: withSchema(V2) });
+            await expect(olderBaseline.deliver(baseline, baseline.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${SENTENCE}` });
+            expect(olderBaseline.post).not.toHaveBeenCalled();
+          });
+
+          it("hands a version 2 admission, unchanged, to a worker that lists both features", async () => {
+            const ref = admission({ kind: "application" });
+            const record = checks(ref);
+            const current = delivery({ workerFeatures: async () => v2Capable, workflowE2EAdmissionSchemaVersion: withSchema(V2) });
+            expect(await current.deliver(record, record.invocation)).toBe("DELIVERED");
+            expect(postedPayload(current.post).workflowE2EAdmission).toEqual(ref);
+          });
+
+          it("still hands a version 1 admission (stored before the change) to a worker that lists only task.workflowE2EApplicationChecks", async () => {
+            const record = checks(admission({ kind: "application" }));
+            const older = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: withSchema(APPLICATION) });
+            expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+          });
+
+          it("does not take the feature for a version 2 reader: a worker that lists only the version 2 string is still refused, since it does not run application admissions at all", async () => {
+            const record = checks(admission({ kind: "application" }));
+            const odd = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks.v2"], workflowE2EAdmissionSchemaVersion: withSchema(V2) });
+            await expect(odd.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+            expect(odd.post).not.toHaveBeenCalled();
+          });
+        });
+
         it("reads no admission for an invocation that carries none", async () => {
           const reader = withSchema(APPLICATION);
           const plain = taskRecord({});
@@ -612,6 +653,7 @@ describe("ec2-ebs delivery", () => {
 
       it("is advertised by the worker's own /ping feature list", () => {
         expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EApplicationChecks");
+        expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EApplicationChecks.v2");
       });
 
       describe("baseline rounds (Task 3.7b)", () => {

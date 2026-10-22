@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { types } from "node:util";
 import { z } from "zod";
-import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, canonicalJson, copyBoundedE2EJsonData, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema,
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, canonicalJson, e2eRuntimeBindingOf, copyBoundedE2EJsonData, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema,
   E2EExpectedCaseSchema, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAssertionSchema,
   E2EScenarioSchema, E2ERuntimeAccountRefSchema, E2EAppArtifactRefSchema, E2EMockSpecSchema, isE2EAnonymousSessionRef, readE2EApplicationProjectContract, type E2EApplicationEvidenceRef, type E2ECaseCoverage, type E2EQualifiedResult,
   type E2ERound, type E2ERunBinding, type E2ERuntimeAccountRef } from "@agentx/contracts";
@@ -964,7 +964,7 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
     const scenario = input.compiled.bundle.scenarios.find((item) => item.scenarioId === expected.scenarioId);
     const runtimeRef = input.compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs.find((item) => item.targetId === expected.targetId);
     const application = input.compiled.applicationBindings.get(runtimeRef?.applicationId ?? "");
-    const runtime = runtimeRef ? input.compiled.runtimeBindings.get(runtimeRef.runtimeProfileId) : undefined;
+    const runtime = runtimeRef ? e2eRuntimeBindingOf(input.compiled.runtimeBindings, runtimeRef.runtimeProfileId, input.compiled.runtimeKind) : undefined;
     // The case's own account: one application can carry several (an owner and a viewer), so the reference is the one of this case's application and account profile, and
     // exactly one (as approval and the executor's `accountRefFor` resolve it). Never the application's first.
     const accountRef = runtimeRef ? admittedRuntimeAccountRef({ runtimeRef, accountProfileId: expected.accountProfileId,

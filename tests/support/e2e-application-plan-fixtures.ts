@@ -6,7 +6,7 @@ import {
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
-import { registryFor } from "./e2e-account-registry-fixtures.js";
+import { ordersManifestWith, registryFor } from "./e2e-account-registry-fixtures.js";
 import type { E2EAccountRegistryEntry } from "../../packages/broker/src/e2e/application-account-registry.js";
 
 /** Fixtures shared by the application planning, approval, admission and dispatch tests: the orders contract app, its approved setup, a v2 intent, and READY catalog rows. */
@@ -151,3 +151,35 @@ export function webAndApiFixture() {
   return { snapshot, setup, policy, build, web, api, scenarios, registry };
 }
 
+
+/**
+ * One application that serves both its page and its API (Task 3.4): its project contract names `api-1` beside `web-1` in `targetAccounts`, so discovery proposes a web and an API
+ * target for the one package, each with the owner account's variant. Two scenarios, one per kind: the owner's page and the owner's API request, both approved on the qualified profile.
+ */
+export function oneAppWebAndApiFixture() {
+  const manifest = ordersManifestWith((e2e) => { e2e.targetAccounts.push({ baseTargetId: "api-1", profileId: "orders-owner" }); });
+  const snapshot = snapshotOf({ "package.json": manifest });
+  const setup = approvedSetup(snapshot, [{ kind: "web", profileId: PROFILE }, { kind: "api", profileId: PROFILE }]);
+  const registry: E2EAccountRegistryEntry[] = registryFor(snapshot, NOW);
+  const ownerOf = (kind: "web" | "api") => setup.proposal.targets.find((item) => item.kind === kind && item.accountProfileId === "orders-owner")!;
+  const web = ownerOf("web");
+  const api = ownerOf("api");
+  const application = setup.inspection.applications.find((item) => item.applicationId === web.applicationId)!;
+  const sourceRefs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths);
+  const account = deriveE2EApplicationRuntimeAccountRef(registry.find((entry) => entry.definition.applicationId === application.applicationId && entry.definition.profileId === "orders-owner")!.definition);
+  const webScenario: E2EScenario = { ...csvScenario, scenarioId: "owner-export-page", requestedTargetIds: [web.targetId], accountProfileId: "orders-owner" };
+  const apiScenarioOnOwner: E2EScenario = { ...apiScenario, scenarioId: "owner-api-health", requestedTargetIds: [api.targetId], accountProfileId: "orders-owner" };
+  const policy = { ...setup.policy, baselineScenarioIds: [webScenario.scenarioId, apiScenarioOnOwner.scenarioId] };
+  const runtimeRef = (target: typeof web) => ({ targetId: target.targetId, applicationId: application.applicationId, recipeDigest: application.recipe!.recipeDigest, sourceRefs,
+    runtimeProfileId: target.runtimeProfileId, accountProfileId: target.accountProfileId });
+  /** The plan's intent: which kinds are executable (the other is listed as unavailable), and optionally a replacement for a scenario. */
+  const build = (executable: { web: boolean; api: boolean }, scenarios: readonly E2EScenario[] = [webScenario, apiScenarioOnOwner]) => E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2,
+    requestedTargetIds: [web.targetId, api.targetId], portableOperationRefs: [], mockFixtureRefs: [],
+    accountContextRefs: [{ applicationId: application.applicationId, profileId: "orders-owner", sourcePath: sourceRefs[0]!.path, sourceSha256: sourceRefs[0]!.sha256 }],
+    scenarios, semanticExportDeltas: [],
+    applicationRuntimeRefs: (["web", "api"] as const).filter((kind) => executable[kind]).map((kind) => runtimeRef(kind === "web" ? web : api)),
+    runtimeAccountRefs: [account],
+    unavailableTargetRefs: (["web", "api"] as const).filter((kind) => !executable[kind]).map((kind) => ({ targetId: (kind === "web" ? web : api).targetId,
+      applicationId: application.applicationId, accountProfileId: "orders-owner", sourceRefs })) });
+  return { manifest, snapshot, setup, policy, build, web, api, application, webScenario, apiScenario: apiScenarioOnOwner, registry };
+}

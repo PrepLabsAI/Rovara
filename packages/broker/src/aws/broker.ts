@@ -33,7 +33,7 @@ import {
   buildE2ESharedView,
   CandidateManifestSchema,
   selectE2EExecutionPlan,
-  inspectE2ERepository,
+  inspectE2ERepository, inspectE2ERepositoryBeforeContractApiTargets,
   proposeE2ESetup,
   WEB_API_RUNTIME_PROFILE_ID,
   verifyE2ESourceSnapshot,
@@ -219,7 +219,7 @@ import {
   E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   type E2EScenarioResults, type E2ESharedView,
-  type E2EApplicationExecutionAdmission,
+  type E2EApplicationExecutionAdmission, isE2EApplicationAdmissionSchemaVersion,
   type E2ERegisteredRuntime,
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
@@ -6607,7 +6607,6 @@ async function handleWorkflowBaselineSource(dependencies: AwsBrokerDependencies,
 
 const WORKFLOW_E2E_TRANSFER_CHUNK_BYTES = 64 * 1024;
 const WORKFLOW_E2E_ADMISSION_MAX_BYTES = 24 * 1024 * 1024;
-const APPLICATION_ADMISSION_SCHEMA = "workflow-e2e-application-admission/v1";
 
 /**
  * An application admission as the evidence upload judges it: decoded by the worker's own decoder (its content address is already checked), with the groups the
@@ -6670,7 +6669,7 @@ async function handleWorkflowE2EEvidenceUpload(dependencies: AwsBrokerDependenci
   const stored = JSON.parse(admissionText) as { schemaVersion?: string; round?: { groupBindings?: Array<{ runId?: string; groupId?: string; expectedCases?: unknown[] }> }; plan?: { groups?: unknown[] };
     taskId?: string; operationId?: string; operationFence?: number; workflowRevision?: number; candidateDigest?: string };
   // An application admission is judged by its own decoder: its groups, plan groups and sizes come from it, never from the portable plan an application round does not have.
-  const applicationKind = stored.schemaVersion === APPLICATION_ADMISSION_SCHEMA;
+  const applicationKind = isE2EApplicationAdmissionSchemaVersion(stored.schemaVersion);
   const application = applicationKind ? applicationUploadAdmission(admissionText, admissionRef.groupRunIds) : undefined;
   const admission = (application?.admission ?? stored) as typeof stored;
   const groups = admission.round?.groupBindings;
@@ -7312,12 +7311,14 @@ async function verifyProjectSetupSmokeEvidence(
       return { path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") };
     }) } as unknown as E2ESourceSnapshot;
     verifyE2ESourceSnapshot(snapshot, snapshot.candidate);
-    const sourceInspection = inspectE2ERepository(snapshot, snapshot.candidate).inspection;
+    // An admission stored before a web app's contract could name its API target recorded discovery without it; it is read against that derivation as well as the current one.
+    const sourceInspections = [inspectE2ERepository(snapshot, snapshot.candidate).inspection, inspectE2ERepositoryBeforeContractApiTargets(snapshot, snapshot.candidate).inspection];
+    const sourceInspection = sourceInspections.find((candidate) => canonicalJson(admission.discoveredApplications) === canonicalJson(candidate.applications)
+      && canonicalJson(admission.discoveryMissingInputs) === canonicalJson(candidate.missingInputs)
+      && canonicalJson(admission.discoveredTargetIds) === canonicalJson(candidate.proposedTargets.map((target) => target.targetId).sort()));
+    if (sourceInspection === undefined) return undefined;
     const discoveredTargetIds = sourceInspection.proposedTargets.map((target) => target.targetId).sort();
-    if (canonicalJson(admission.discoveredApplications) !== canonicalJson(sourceInspection.applications)
-      || canonicalJson(admission.discoveryMissingInputs) !== canonicalJson(sourceInspection.missingInputs)
-      || canonicalJson(admission.discoveredTargetIds) !== canonicalJson(discoveredTargetIds)
-      || canonicalJson(evidence.discoveredApplications) !== canonicalJson(sourceInspection.applications)
+    if (canonicalJson(evidence.discoveredApplications) !== canonicalJson(sourceInspection.applications)
       || canonicalJson(evidence.discoveryMissingInputs) !== canonicalJson(sourceInspection.missingInputs)
       || canonicalJson(evidence.discoveredTargetIds) !== canonicalJson(discoveredTargetIds)) return undefined;
     E2EPolicySchema.parse(admission.policy);
@@ -7495,7 +7496,7 @@ async function verifyWorkflowE2EEvidence(
     const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
     // The admission names its own kind. An application admission is verified by the application verifier and never reaches the portable code below; a task whose approved
     // plan is an application plan has no portable verification at all (Ruling AX), whatever admission and evidence are recorded for it.
-    if (storedAdmissionSchemaVersion(admissionText) === APPLICATION_ADMISSION_SCHEMA) {
+    if (isE2EApplicationAdmissionSchemaVersion(storedAdmissionSchemaVersion(admissionText))) {
       if (diagnostic !== undefined) diagnostic.application = true;
       return await verifyApplicationWorkflowE2EEvidence({ dependencies, operation, task, candidate, reference, admissionText: admissionText!, projection, diagnostic, unavailable,
         ...(options?.terminalStatus === undefined ? {} : { terminalStatus: options.terminalStatus }) });

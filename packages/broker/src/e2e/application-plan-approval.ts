@@ -12,8 +12,6 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 const REASON_MAX_CHARS = 600;
 /** What the Owner and the planner are told to do with portable criteria in a version 2 plan (Ruling BE). */
 export const BE_REMEDY = "put portable checks in a schemaVersion 1 plan or drop them";
-/** Why a version 2 plan may not run web and API targets together (Ruling BF). */
-export const BF_REASON = "one runtime kind per plan in M1.2";
 const BLOCKED_LISTED = 5;
 
 /** A refusal reason a person can read: one line of at most REASON_MAX_CHARS, with no control characters (planner-written IDs reach it). */
@@ -158,7 +156,7 @@ export function applicationRoundIntent(intent: E2EApplicationPlanIntent): E2EApp
 /** What the approval's own derivation produced, for a caller that builds an admission from the same facts it just checked. */
 export type ApplicationDerivation = ReturnType<typeof deriveE2EApplicationFeatureExecutionSelection>;
 /**
- * Why an approval was refused, when the cause is knowable. `plan`: the plan itself can never run as written (portable criteria, web and api together, no application
+ * Why an approval was refused, when the cause is knowable. `plan`: the plan itself can never run as written (portable criteria, no application
  * scenario, a target with no source-owned identity), so only a corrected plan helps. `runtime`: the registered runtime cannot carry it now (no READY row of the kind, bound
  * elsewhere, not READY), so only the runtime being qualified again helps. `accounts`: a test account the plan stands on is not the registered one now (a newer revision, an
  * expired or unreadable definition, none registered), so only approving the checks again, or the setup being approved again, helps. Anything else has no scope and the
@@ -218,13 +216,6 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     const intent = applicationRoundIntent(fullIntent);
     const applicationPolicy = { ...policy, baselineScenarioIds: policy.baselineScenarioIds.filter((id) => applicationScenarioIds.has(id)) };
     const bindingDigest = sha256(canonicalJson(Ec2RuntimeBindingSchema.parse(input.runtimeBinding)));
-    // Ruling BF: an application round carries exactly one runtime kind (the verifier keys its runtime bindings by profile, so a web row and an api row of
-    // one profile cannot be admitted together). Kind-aware rounds wait for M1.3.
-    const executableKinds = [...new Set(intent.applicationRuntimeRefs.flatMap((ref) => {
-      const target = policy.targets.find((item) => item.targetId === ref.targetId);
-      return target === undefined ? [] : [target.kind];
-    }))].sort();
-    if (executableKinds.length > 1) return refuse(`the plan's executable targets span ${executableKinds.join(" and ")}: ${BF_REASON}`, "plan");
     const availability: E2ERuntimeAvailability[] = [];
     const accountRefs: E2ERuntimeAccountRef[] = [];
     const usedRows: Array<{ kind: "web" | "api"; row: E2ERegisteredRuntime }> = [];

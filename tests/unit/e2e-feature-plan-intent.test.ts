@@ -85,11 +85,11 @@ describe("source-bound portable feature plan binding", () => {
       portableOperationRefs: [{ operationId: operation.operationId, applicationId: operation.applicationId,
         requestedTargetIds: operation.requestedTargetIds, packageExportSubpath: operation.packageExportSubpath,
         moduleSpecifier: operation.moduleSpecifier, callableSelector: { kind: "named", exportName: "renderOrders" } }],
-      mockFixtureRefs: [{ componentId: fixture.componentId, requestedTargetId: fixture.requestedTargetId,
+      mockFixtureRefs: [{ componentId: fixture.componentId, requestedTargetId: fixture.requestedTargetIds[0]!,
         operationId: fixture.operationId, sourcePath: fixture.sourcePath, sourceSha256: fixture.sourceSha256 }],
       accountContextRefs: context.accountContextRefs,
       scenarios: fixture.variants.map((variant) => ({ scenarioId: `render-orders-${variant.id}`, requirementId: "render-orders",
-        requestedTargetIds: [fixture.requestedTargetId], required: true, accountProfileId: "synthetic", minimumEvidence: "mock-contract" as const,
+        requestedTargetIds: [fixture.requestedTargetIds[0]!], required: true, accountProfileId: "synthetic", minimumEvidence: "mock-contract" as const,
         requiredRealComponentIds: [], steps: [{ kind: "invoke-contract" as const, operationId: operation.operationId, input: { mode: variant.inputValue } }],
         assertions: [{ kind: "state" as const, probeId: "result", equals: variant.id === "success" ? "Sample order" : variant.id === "refusal" ? "refused:403" : "invalid-data", pollTimeoutMs: 1000 }] })),
       semanticExportDeltas: [],
@@ -133,11 +133,11 @@ describe("source-bound portable feature plan binding", () => {
       portableOperationRefs: context.portableOperations.map((item) => ({ operationId: item.operationId, applicationId: item.applicationId,
         requestedTargetIds: item.requestedTargetIds, packageExportSubpath: item.packageExportSubpath, moduleSpecifier: item.moduleSpecifier,
         callableSelector: item.callableSelectors[0]!.selector })),
-      mockFixtureRefs: context.mockFixtures.map(({ componentId, requestedTargetId, operationId, sourcePath, sourceSha256 }) =>
-        ({ componentId, requestedTargetId, operationId, sourcePath, sourceSha256 })),
+      mockFixtureRefs: context.mockFixtures.flatMap(({ componentId, requestedTargetIds, operationId, sourcePath, sourceSha256 }) =>
+        requestedTargetIds.map((requestedTargetId) => ({ componentId, requestedTargetId, operationId, sourcePath, sourceSha256 }))),
       accountContextRefs: context.accountContextRefs,
       scenarios: context.mockFixtures[0]!.variants.map((variant) => ({ scenarioId: `render-orders-${variant.id}`, requirementId: "render-orders-requirement",
-        requestedTargetIds: [context.mockFixtures[0]!.requestedTargetId], required: true, accountProfileId: "synthetic", minimumEvidence: "mock-contract" as const,
+        requestedTargetIds: [context.mockFixtures[0]!.requestedTargetIds[0]!], required: true, accountProfileId: "synthetic", minimumEvidence: "mock-contract" as const,
         requiredRealComponentIds: [], steps: [{ kind: "invoke-contract" as const, operationId: operation!.operationId,
           input: { [context.mockFixtures[0]!.inputSelector.name]: variant.inputValue } }],
         assertions: [{ kind: "state" as const, probeId: "result", equals: variant.id === "success" ? "Sample order" : variant.id === "refusal" ? "refused:403" : "invalid-data", pollTimeoutMs: 1000 }] })),
@@ -152,7 +152,7 @@ describe("source-bound portable feature plan binding", () => {
       now: Date.parse("2026-10-13T12:30:00.000Z") });
     expect(admission.plan.groups.flatMap((group) => group.expectedCases).map((item) => item.scenarioId)).toEqual(["render-orders-success", "render-orders-refusal", "render-orders-invalid-data"]);
     expect(admission.selectionInput.mockableComponents?.[0]).toMatchObject({ componentId: context.mockFixtures[0]!.componentId,
-      requestedTargetId: context.mockFixtures[0]!.requestedTargetId, kind: "api" });
+      requestedTargetId: context.mockFixtures[0]!.requestedTargetIds[0]!, kind: "api" });
     const group = admission.plan.groups[0]!;
     const bundleBody = { schemaVersion: 1 as const, planDigest: "c".repeat(64), templateVersion: "trusted-e2e/v1", scenarios: proposed.scenarios, bundleDigest: "0".repeat(64) };
     const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };

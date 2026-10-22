@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_HARD_LIMITS, canonicalJson, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
   type WorkerInvocation } from "@agentx/contracts";
 import { collectE2EApplicationRun, decodeE2EApplicationExecutionAdmission, e2eApplicationPrivateTransferMaxBytes, runIsolatedE2EApplication,
-  validateE2EApplicationExecutionAdmission, type DockerApplicationHost, type E2ECompiledApplicationSuite } from "@agentx/verifier";
+  e2eCompiledRuntime, validateE2EApplicationExecutionAdmission, type DockerApplicationHost, type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { runWithConcurrency } from "./bounded-concurrency.js";
 import { admittedRepositoryOf, assertBuildSourceBelongsToCandidate, createProcessCandidateGit, stageCandidateSource, type CandidateGit } from "./e2e-candidate-source.js";
 
@@ -211,8 +211,8 @@ function applicationRunInput(compiled: E2ECompiledApplicationSuite, binding: E2E
   const targetIds = new Set(compiled.group.targetIds);
   const kinds = new Set(context.executionPlan.effectiveTargets.filter((target) => targetIds.has(target.targetId)).map((target) => target.kind));
   const kind = kinds.size === 1 ? [...kinds][0] : undefined;
-  if (kind !== "web" && kind !== "api") throw new Error("application group must run exactly one web or API target kind");
-  const runtime = compiled.runtimeBindings.get(compiled.group.runtimeProfileId);
+  if ((kind !== "web" && kind !== "api") || kind !== compiled.runtimeKind) throw new Error("application group must run exactly one web or API target kind");
+  const runtime = e2eCompiledRuntime(compiled);
   if (!runtime) throw new Error("application group has no registered runtime binding");
   const applicationIds = [...new Set(context.selectionInput.intent.applicationRuntimeRefs.filter((ref) => targetIds.has(ref.targetId)).map((ref) => ref.applicationId))].sort();
   const applications = applicationIds.map((applicationId) => {

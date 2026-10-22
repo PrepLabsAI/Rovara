@@ -15,7 +15,7 @@ const shortLine = (reason: string, max: number) => {
 };
 
 /**
- * The plan itself can no longer be run as written (portable criteria, web and API targets together, a target with no source-owned identity), which only a corrected plan
+ * The plan itself can no longer be run as written (portable criteria, a target with no source-owned identity), which only a corrected plan
  * fixes. Dispatch sends the task back to plan review (Request changes is the owner's way on) instead of blocking it where nothing the owner can press would help.
  */
 export class ApplicationPlanDefect extends ApplicationDispatchRefusal {

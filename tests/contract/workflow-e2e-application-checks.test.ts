@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readdir, realpath, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E2E_HARD_LIMITS, WorkerInvocationSchema, type E2EApplicationExecutionAdmission } from "@agentx/contracts";
+import { E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, WorkerInvocationSchema, canonicalJson, e2eRuntimeBindingKey, type E2EApplicationExecutionAdmission } from "@agentx/contracts";
 import { createDockerApplicationHost, DEFAULT_DEADLINE_GRACE_MS, STALE_RUN_SWEEP_AGE_MS, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
@@ -23,10 +23,19 @@ const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("he
 const assembledRun = { protocol: "e2e-actual-application-run/v1", cleanupConfirmed: true, cleanupServerListening: false, supervisorReadback: { marker: "assembled" } };
 const collectionInputs = { marker: "collection-inputs" };
 
-async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: FakeDockerCli; assembled?: object } = {}) {
+/** The same admission as the current broker writes it: schema version 2, each runtime row keyed by its profile and kind (the probe plan writes version 1). */
+function asVersion2(admission: E2EApplicationExecutionAdmission): E2EApplicationExecutionAdmission {
+  const { admissionDigest: _digest, ...body } = admission;
+  void _digest;
+  const edited = { ...body, schemaVersion: E2E_APPLICATION_ADMISSION_SCHEMA_V2,
+    runtimeBindings: admission.runtimeBindings.map(({ value }) => ({ key: e2eRuntimeBindingKey(value.profileId, value.capabilities.kind as "web" | "api"), value })).sort((a, b) => (a.key < b.key ? -1 : 1)) };
+  return { ...edited, admissionDigest: sha(Buffer.from(canonicalJson(edited), "utf8")) };
+}
+
+async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: FakeDockerCli; assembled?: object; version2?: boolean } = {}) {
   const fake = options.fake ?? new FakeDockerCli();
   const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", taskId: TASK_ID, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }) });
-  const admission: E2EApplicationExecutionAdmission = fixture.plan.admission;
+  const admission: E2EApplicationExecutionAdmission = options.version2 === true ? asVersion2(fixture.plan.admission) : fixture.plan.admission;
   const admissionBytes = Buffer.from(encodeE2EApplicationExecutionAdmission(admission), "utf8");
   const admissionSha = sha(admissionBytes);
   const invocation = WorkerInvocationSchema.parse({
@@ -124,6 +133,17 @@ describe("workflow E2E application rounds", () => {
     expect(aggregate.payload.groupRuns).toEqual([group.groupRun]);
     expect(result).toMatchObject({ roundId: s.admission.round.roundId, candidateDigest: s.admission.candidateDigest, processStatus: "SUCCEEDED" });
     expect(result.evidenceRef.key).toMatch(/^workflow-e2e-evidence\/sha256\//);
+  });
+
+  it("runs a version 2 admission (runtime rows keyed by profile and kind) exactly as a version 1 one: the group is built from the row of its own kind", async () => {
+    const s = await setup({ version2: true });
+    expect(s.admission.schemaVersion).toBe(E2E_APPLICATION_ADMISSION_SCHEMA_V2);
+    expect(s.admission.runtimeBindings.map((item) => item.key)).toEqual([e2eRuntimeBindingKey(s.admission.runtimeBindings[0]!.value.profileId, s.admission.runtimeBindings[0]!.value.capabilities.kind as "web" | "api")]);
+    s.fake.onExecutor = s.okOutput;
+    const result = await s.run();
+    expect(s.calls).toEqual(["allocate", "execute", "close"]);
+    expect(evidenceOf(s.saved, s.runId).groupRun).toMatchObject({ kind: "application", collection: { status: "PASS" } });
+    expect(result).toMatchObject({ roundId: s.admission.round.roundId, processStatus: "SUCCEEDED" });
   });
 
   it("uploads UNKNOWN with the reason 'evidence too large', never the evidence, for a group whose evidence is over the group ceiling, and logs the sizes", async () => {

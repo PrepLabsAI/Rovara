@@ -14,7 +14,7 @@ import { e2eBindingDigest, e2ePolicyDigest, E2EExpectedCaseSchema, E2ERoundSchem
   type E2EExpectedCase, type E2ERound, type E2EScenario, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import type { E2EApplicationCliLaunchContext } from "./application-runtime-bootstrap.js";
 import type { E2EApplicationRuntimePorts } from "./application-runtime.js";
-import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
+import { e2eCompiledRuntime, type E2ECompiledApplicationSuite } from "./application-scenarios.js";
 import { E2EAssertionSchema } from "@agentx/contracts";
 import { E2EMockSpecSchema, type E2EMockSpec } from "@agentx/contracts";
 import { E2EApplicationAccountIdentityProjectionSchema, E2EApplicationObservationBindingSchema, E2EApplicationProofBytesSchema,
@@ -505,7 +505,7 @@ export function createE2EApplicationRuntimePorts(input: {
     || input.runInput.profile.profileId !== input.compiled.group.runtimeProfileId
     || input.runInput.profile.runtimeManifestDigest !== preparation.runtimeManifestDigest
     || input.runInput.profile.networkPolicyDigest !== preparation.networkPolicyDigest
-    || input.compiled.runtimeBindings.get(input.compiled.group.runtimeProfileId)?.manifestDigest !== preparation.runtimeManifestDigest
+    || e2eCompiledRuntime(input.compiled)?.manifestDigest !== preparation.runtimeManifestDigest
     || binding.groupId !== preparation.groupId || binding.operationId !== preparation.operationId
     || binding.operationFence !== preparation.operationFence || binding.workflowRevision !== preparation.workflowRevision
     || binding.candidateDigest !== preparation.candidateDigest || binding.planDigest !== preparation.planDigest

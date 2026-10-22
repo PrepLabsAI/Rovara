@@ -40,6 +40,7 @@ import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import type { binding as projectBinding} from "../support/e2e-application-plan-fixtures.js";
 import { PROFILE, shaCanonical, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 import { ACCOUNTS_APP_FILES, ACCOUNTS_FIXTURE_ROOT, webAccountScenarios } from "../support/e2e-accounts-fixture.js";
+import { planOwnerWebAndApi } from "../support/e2e-web-and-api-plan.js";
 import { INFERRED_APP_FILES, INFERRED_FIXTURE_ROOT, anonymousWebScenarios } from "../support/e2e-inferred-fixture.js";
 
 // M1.3 native journeys. Each case is a whole path of an application round on a real Docker host, gated like `m1-web-journey.test.ts`: it needs Docker and the executor image, so it runs
@@ -109,6 +110,16 @@ async function stageCandidate(root: string, name: string, edit?: (server: string
   return dir;
 }
 
+/** The M1.3 orders web fixture (Task 3.8): one app whose contract names a web and an API target, with the `/api/tenants/:tenantId/orders` route the web-and-api journey asks. */
+const M13_FIXTURE_ROOT = join(import.meta.dirname, "../fixtures/orders-web-m13");
+const M13_APP_FILES = ["package.json", "server.mjs", "public", "fixtures", "inventory", "e2e", "scripts"];
+/** The tenant check of the orders-web fixture's API, which the leaky candidate of the web-and-api journey leaves out. */
+const TENANT_CHECK = 'if (tenantPath[1] !== account.tenantId) return json(403, { error: "tenant access refused" });';
+const withTenantCheckRemoved = (server: string) => {
+  if (!server.includes(TENANT_CHECK)) throw new Error("the fixture's tenant check moved; update the journey's candidates");
+  return server.replace(TENANT_CHECK, "");
+};
+
 type PlanningContext = Extract<ReturnType<typeof buildFeatureE2EPlanningContext>, { status: "available" }>;
 /** What a journey varies: the fixture app whose files the repository holds, the task, and the plan the planner writes for it. */
 type JourneyInput = Readonly<{ fixtureRoot: string; planningFiles: readonly string[]; instructions: string;
@@ -120,6 +131,8 @@ type JourneyInput = Readonly<{ fixtureRoot: string; planningFiles: readonly stri
    * on, and `stageBase` stages the app as the task starts (the unchanged code the baseline runs).
    */
   baseline?: { stageBase(root: string): Promise<string> };
+  /** Task 3.4: the project also has the API runtime row READY (a profile registers a web row and an API row), so the plan can run API scenarios beside web ones. */
+  apiRuntime?: boolean;
   plan(context: PlanningContext): { title: string; claims: Array<{ id: string; text: string }>; plannerIntent: object } | Promise<{ title: string; claims: Array<{ id: string; text: string }>; plannerIntent: object }> }>;
 
 describe.runIf(dockerReady)("M1.3 native journeys", () => {
@@ -175,6 +188,10 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const runnerToolchain = { execPath: runner.execPath, version: runner.version, platform: runner.platform, arch: runner.arch };
     harness.db.set({ ...webRowKey, ...webApiRow("web", { runnerEnvironment, runnerEnvironmentDigest: shaCanonical(runnerEnvironment), runnerToolchain, runnerToolchainDigest: shaCanonical(runnerToolchain) }),
       binding: runtimeBinding, bindingDigest: shaCanonical(runtimeBinding) });
+    if (input.apiRuntime === true) {
+      harness.db.set({ ...e2eRegisteredRuntimeKey("catalog", PROFILE, "api"), ...webApiRow("api", { runnerEnvironment, runnerEnvironmentDigest: shaCanonical(runnerEnvironment), runnerToolchain, runnerToolchainDigest: shaCanonical(runnerToolchain) }),
+        binding: runtimeBinding, bindingDigest: shaCanonical(runtimeBinding) });
+    }
     const admin = { subject: "admin-subject", admin: true };
     const proposalResponse = await call(harness.handler, { method: "POST", path: "/v1/admin/projects/setup-proposals", user: admin, body: { repositoryUrl: "https://github.com/example/demo.git", ref: "main" } });
     expect(proposalResponse.status, JSON.stringify(proposalResponse.body)).toBe(200);
@@ -203,7 +220,9 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const readyWeb = { kind: "web" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedSteps,
       supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions };
     // The accounts the setup approval registered, as the broker shows them to the planner: a plan's account references are the registry's (Task 3.1).
-    const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [readyWeb],
+    const readyApi = { kind: "api" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedSteps,
+      supportedAssertions: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedAssertions };
+    const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: input.apiRuntime === true ? [readyWeb, readyApi] : [readyWeb],
       accountRegistry: accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments")) });
     if (context.status !== "available") throw new Error(context.reason);
     const planned = await input.plan(context);
@@ -387,7 +406,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
         const viewerTarget = variant === "results" ? targetOf("orders-viewer") : undefined;
         if (variant === "results") expect(viewerTarget, JSON.stringify(context.targets)).toBeDefined();
         // The planner is offered the inventory mock because the app's OpenAPI document and a source-backed fixture for it are in the repository.
-        const mock = context.mockFixtures.find((item) => item.requestedTargetId === target!.targetId);
+        const mock = context.mockFixtures.find((item) => item.requestedTargetIds.includes(target!.targetId));
         expect(mock, JSON.stringify(context.mockFixtures)).toMatchObject({ componentId: e2eApiSchemaComponentId("inventory/openapi.json"), contractPath: "inventory/openapi.json", sourcePath: "e2e/mocks/inventory-v1.json" });
         const scenario: E2EScenario = { scenarioId: "show-stock-status", requirementId: "orders-stock-status", requestedTargetIds: [target!.targetId], required: true, accountProfileId: target!.accountProfileId,
           minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "navigate", path: "/" }, { kind: "click", testId: "check-inventory" }],
@@ -409,7 +428,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
         // `credential-echo`: the owner's export, whose first row the candidate fills with the password the owner signed in with.
         const echoScenarios = variant !== "credential-echo" ? [] : [web("owner-export", "orders-export", target!, openAndExport, [{ kind: "csv", downloadName: "orders.csv", columns: ["id", "customer", "total", "state"], rows: ordersOfOwner }])];
         const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: planTargets.map((item) => item.targetId), portableOperationRefs: [],
-          mockFixtureRefs: variant === "results" || variant === "credential-echo" ? [] : [{ componentId: mock!.componentId, requestedTargetId: mock!.requestedTargetId, operationId: mock!.operationId, sourcePath: mock!.sourcePath, sourceSha256: mock!.sourceSha256 }],
+          mockFixtureRefs: variant === "results" || variant === "credential-echo" ? [] : [{ componentId: mock!.componentId, requestedTargetId: target!.targetId, operationId: mock!.operationId, sourcePath: mock!.sourcePath, sourceSha256: mock!.sourceSha256 }],
           accountContextRefs: planTargets.flatMap((who) => context.accountContextRefs.filter((ref) => ref.applicationId === who.applicationId && ref.profileId === who.accountProfileId)),
           scenarios: variant === "results" ? resultsScenarios : variant === "credential-echo" ? echoScenarios : [scenario], semanticExportDeltas: [],
           applicationRuntimeRefs: planTargets.flatMap((who) => context.runtimeRefs!.filter((ref) => ref.targetId === who.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! }))),
@@ -868,6 +887,103 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     await nothingLeftBehind();
   }
 
+  /** A copy of the orders-web fixture app a coder would produce, optionally edited (the tenant leak is how candidate 1 differs from candidate 2). */
+  async function stageOrdersWebCandidate(root: string, name: string, edit?: (server: string) => string) {
+    const dir = join(root, name);
+    await mkdir(dir, { recursive: true });
+    for (const file of M13_APP_FILES) await cp(join(M13_FIXTURE_ROOT, file), join(dir, file), { recursive: true });
+    if (edit) await writeFile(join(dir, "server.mjs"), edit(await readFile(join(dir, "server.mjs"), "utf8")));
+    return dir;
+  }
+
+  /**
+   * Task 3.4, whole: one app that serves its page and its API, planned with a web scenario and an API scenario on the owner of tenant-a. The web scenario asserts the orders table shows
+   * only tenant-a's rows (`text`); the API scenario asks `GET /api/tenants/tenant-b/orders` and expects 403 (`http-status`). The broker admits ONE admission (schema version 2) with a runtime
+   * row per kind (`<profile>#api`, `<profile>#web`) and two groups, the worker runs the two groups on the Docker host, and the broker verifies each against its own kind's row.
+   * Candidate 1 leaves the tenant check out of the API: the web group passes and the API group FAILS, so the round is FAILED and sent back. Candidate 2 is the fixture as it ships: PASS.
+   */
+  async function webAndApiJourney() {
+    let plannedRef: { applicationId: string; profileId: string; revision: number; definitionDigest: string } | undefined;
+    const journey = await startJourney({ fixtureRoot: M13_FIXTURE_ROOT, planningFiles: ["package.json"], apiRuntime: true,
+      // The setup is approved on the contract alone: with the inventory contract and its mock in the repository too, the planner's context for this app's ten targets is over its 12,000-byte bound
+      // (see tests/unit/e2e-orders-web-and-api-plan.test.ts), and the candidate carries those files either way.
+      instructions: "An owner sees only its own tenant's orders, in the page and through the API",
+      plan: (context) => {
+        const planned = planOwnerWebAndApi(context);
+        plannedRef = planned.intent.runtimeAccountRefs[0];
+        return { title: "Owners see only their tenant", claims: [{ id: "1", text: "An owner's page lists only its tenant's orders, and the API refuses another tenant's." }], plannerIntent: planned.plannerIntent };
+      } });
+    const { root, harness, taskKey, faux, workflowNow, operationRows, runOperation, writePreparationManifest, completeReadiness, nothingLeftBehind } = journey;
+    expect(plannedRef, "the plan carries the owner's registry reference").toBeDefined();
+    const leaky = await stageOrdersWebCandidate(root, "candidate-leaky", withTenantCheckRemoved);
+    const fixed = await stageOrdersWebCandidate(root, "candidate-fixed");
+    const implementation = (candidate: string) => fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidate}/." repo/demo/` })]);
+    const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+    const presentation = () => brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, harness.db.get(taskKey.pk, taskKey.sk) as never, operationRows(() => true), "owner");
+    type GroupCase = { caseId: string; status: string; accountContextId: string; assertionReceipts: Array<{ assertionIndex: number; status: string }> };
+    type GroupRun = { binding: { groupId: string; expectedCases: Array<{ targetId: string }> }; collection: { status: string; result: { cases: GroupCase[] } } };
+    const groupsOf = (operation: Record<string, unknown>): GroupRun[] => (operation.workflowE2EGroupEvidenceRefs as Array<{ evidenceRef: { key: string } }>).map((ref) =>
+      (JSON.parse(harness.s3.objects.get(ref.evidenceRef.key)!) as { groupRun: GroupRun }).groupRun);
+    const admissionOf = (operation: Record<string, unknown>) => JSON.parse(harness.s3.objects.get((operation.workflowE2EAdmission as { admissionRef: { key: string } }).admissionRef.key)!) as
+      { schemaVersion: string; runtimeBindings: Array<{ key: string; value: { capabilities: { kind: string } } }>; groups: unknown[]; applicationBindings: unknown[]; executionPlan: { effectiveTargets: Array<{ targetId: string; kind: string }> } };
+
+    // Round 1: the leaky candidate. The page is right, the API answers tenant-b's orders to tenant-a's owner.
+    faux.setResponses([implementation(leaky), fauxAssistantMessage("I added the tenant orders API.")]);
+    await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
+    const first = await runOperation("IMPLEMENT");
+    expect(first.operation.status, JSON.stringify(first.operation)).toBe("SUCCEEDED");
+    await completeReadiness();
+    const checks1 = await runOperation("CHECKS");
+    expect(checks1.operation.status, JSON.stringify({ operation: checks1.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
+    // One admission of version 2 for both kinds: a row per kind under `<profile>#<kind>`, one application built for both, and a group for each kind.
+    const admission1 = admissionOf(checks1.operation);
+    expect(admission1.schemaVersion).toBe("workflow-e2e-application-admission/v2");
+    expect(admission1.runtimeBindings.map((item) => [item.key, item.value.capabilities.kind])).toEqual([[`${PROFILE}#api`, "api"], [`${PROFILE}#web`, "web"]]);
+    expect(admission1.applicationBindings).toHaveLength(1);
+    expect(admission1.groups).toHaveLength(2);
+    const groups1 = groupsOf(checks1.operation);
+    expect(groups1, "a group per kind").toHaveLength(2);
+    const kindOfTarget = (targetId: string) => admission1.executionPlan.effectiveTargets.find((target) => target.targetId === targetId)!.kind;
+    const byKind = Object.fromEntries(groups1.map((group) => [kindOfTarget(group.binding.expectedCases[0]!.targetId), group])) as Record<"web" | "api", GroupRun>;
+    expect(Object.keys(byKind).sort()).toEqual(["api", "web"]);
+    // The web group passes, the API group fails on its one assertion: the round is FAILED, and send-back is offered.
+    expect(byKind.web.collection.status).toBe("PASS");
+    expect(byKind.api.collection.status).toBe("FAILED");
+    expect(byKind.api.collection.result.cases.map((item) => [item.status, item.assertionReceipts.map((receipt) => receipt.status)])).toEqual([["failed", ["failed"]]]);
+    expect(byKind.web.collection.result.cases.map((item) => item.status)).toEqual(["passed"]);
+    expect(workflowNow().blockReason).toBe("one or more admitted E2E groups failed");
+    const e2e1 = workflowNow().e2e as { failedRound?: { status: string }; qualifiedRound?: unknown };
+    expect(e2e1.failedRound).toMatchObject({ status: "FAILED" });
+    expect(e2e1.qualifiedRound).toBeUndefined();
+    expect(workflowSendBackOffered(workflowNow() as never)).toBe(true);
+    expect((await presentation())?.shared.e2e.status).toBe("FAILED");
+
+    // Round 2: send it back; the fixture as it ships answers 403 to the other tenant, and both groups pass.
+    const sentBack = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${journey.taskId}/workflow/send-back`, { requestId: randomUUID(), expectedRevision: workflowNow().revision,
+      instructions: "The API must refuse another tenant's orders." });
+    expect(sentBack.status, JSON.stringify(sentBack.body)).toBe(200);
+    faux.setResponses([implementation(fixed), fauxAssistantMessage("The tenant check is back.")]);
+    const second = await runOperation("IMPLEMENT");
+    expect(second.operation.status, JSON.stringify(second.operation)).toBe("SUCCEEDED");
+    const secondCandidateDigest = workflowNow().candidate!.digest;
+    await completeReadiness();
+    const checks2 = await runOperation("CHECKS", checks1.invocation.operationId);
+    expect(checks2.operation.status, JSON.stringify({ operation: checks2.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
+    expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "REVIEW" });
+    const e2e2 = workflowNow().e2e as { failedRound?: unknown; qualifiedRound?: { candidateDigest: string } };
+    expect(e2e2.qualifiedRound).toMatchObject({ candidateDigest: secondCandidateDigest });
+    expect(e2e2.failedRound).toBeUndefined();
+    const groups2 = groupsOf(checks2.operation);
+    expect(groups2).toHaveLength(2);
+    expect(groups2.every((group) => group.collection.status === "PASS" && group.collection.result.cases.every((item) => item.status === "passed"
+      && item.assertionReceipts.every((receipt) => receipt.status === "passed")))).toBe(true);
+    // Both groups run as the one owner account: the case of each is bound to the registry's reference for that account.
+    const contextId = `app-account-${createHash("sha256").update(canonicalJson([plannedRef!.applicationId, plannedRef!.profileId, plannedRef!.revision, plannedRef!.definitionDigest])).digest("hex")}`.slice(0, 120);
+    expect(groups2.flatMap((group) => group.collection.result.cases.map((item) => item.accountContextId))).toEqual([contextId, contextId]);
+    expect((await presentation())?.shared.e2e.status).toBe("PASS");
+    await nothingLeftBehind();
+  }
+
   it("mocked-origin: the round is PASS with the inventory origin served by its approved mock, named on the result as mockedOrigins [inventory-v1]", async () => {
     await inventoryJourney("mocked-origin");
   }, 600_000);
@@ -886,6 +1002,10 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
 
   it("anonymous-inferred: an app with no project contract runs two signed-out scenarios on its anonymous variant; the plan is approved, the round is PASS with no account binding, and publication has checks", async () => {
     await anonymousInferredJourney();
+  }, 1_800_000);
+
+  it("web-and-api: one app planned with a web scenario and an API scenario runs as one version 2 admission with a row and a group per kind; the tenant leak in the API is FAILED and sent back, the fixed candidate is PASS", async () => {
+    await webAndApiJourney();
   }, 1_800_000);
 
   it("accounts: three accounts in two tenants in one group; the viewer-access defect is FAILED and sent back, the fixed candidate is PASS, and no seeded credential is stored anywhere", async () => {

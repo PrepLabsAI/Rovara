@@ -37,7 +37,11 @@ export type FeatureE2EPlanningContext = {
   portableOperations: Array<{ operationId: string; applicationId: string; requestedTargetIds: string[]; packageExportSubpath: string;
     moduleSpecifier: string; callableSelectors: Array<{ selector: { kind: "default" } | { kind: "named"; exportName: string }; firstInputParameter?: string }>;
     sourceRefs: Array<{ path: string; sha256: string }> }>;
-  mockFixtures: Array<{ componentId: string; requestedTargetId: string; operationId: string; sourcePath: string; sourceSha256: string;
+  /**
+   * Each source-backed mock once (PLANCTX, Ruling DE), with every target that may use it in `requestedTargetIds`. The plan still names a mock per target it uses (`mockFixtureRefs`
+   * carries one `requestedTargetId` each), so a target the mock lists may copy the reference with its own id.
+   */
+  mockFixtures: Array<{ componentId: string; requestedTargetIds: string[]; operationId: string; sourcePath: string; sourceSha256: string;
     contractPath: string; contractSha256: string; method: string; path: string; inputSelector: { kind: "query"; name: string };
     callableMappings: Array<{ invokeOperationId: string; callableSelector: { kind: "default" } | { kind: "named"; exportName: string }; firstInputParameter: string }>;
     variants: Array<{ id: string; inputValue: string; status: number; response: unknown }> }>;
@@ -233,6 +237,8 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     }).slice(0, 32);
 
     const mockFixtures: FeatureE2EPlanningContext["mockFixtures"] = [];
+    const mockByIdentity = new Map<string, FeatureE2EPlanningContext["mockFixtures"][number]>();
+    const mockOfTarget = new Set<string>();
     for (const target of targets) {
       for (const edge of discovered.inspection.dependencyEdges.filter((item) => item.fromApplicationId === target.applicationId
         && item.contractRef !== null && /(^|\/)(?:openapi|swagger)\.(?:json|ya?ml)$/i.test(item.contractRef))) {
@@ -257,13 +263,20 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
               && (inputParameter.schema.maxLength === undefined || variant.inputValue.length <= inputParameter.schema.maxLength)
               && (inputParameter.schema.minLength === undefined || variant.inputValue.length >= inputParameter.schema.minLength));
           if (contractOperation === undefined || inputParameter === undefined || !inputMatchesSchema) continue;
-          if (mockFixtures.some((item) => item.requestedTargetId === target.targetId && item.componentId === edge.toComponentId)) continue;
-          mockFixtures.push({ componentId: edge.toComponentId, requestedTargetId: target.targetId, operationId: parsed.data.operationId,
+          // A target takes the first mock that fits a component, as before; a mock that other targets already use is listed once, under every target that uses it.
+          if (mockOfTarget.has(`${target.targetId}\0${edge.toComponentId}`)) continue;
+          mockOfTarget.add(`${target.targetId}\0${edge.toComponentId}`);
+          const identity = [edge.toComponentId, source.path, source.sha256, contractPath, contractSource.sha256].join("\0");
+          const listed = mockByIdentity.get(identity);
+          if (listed !== undefined) { listed.requestedTargetIds.push(target.targetId); continue; }
+          const entry: FeatureE2EPlanningContext["mockFixtures"][number] = { componentId: edge.toComponentId, requestedTargetIds: [target.targetId], operationId: parsed.data.operationId,
             sourcePath: source.path, sourceSha256: source.sha256, contractPath, contractSha256: contractSource.sha256,
             method: parsed.data.method, path: parsed.data.path, inputSelector: { kind: "query", name: parsed.data.inputField },
             callableMappings: [],
             variants: parsed.data.variants.map((variant) => ({ id: variant.id, inputValue: variant.inputValue, status: variant.status,
-              response: redactSecrets(variant.body) })) });
+              response: redactSecrets(variant.body) })) };
+          mockByIdentity.set(identity, entry);
+          mockFixtures.push(entry);
         }
       }
     }
