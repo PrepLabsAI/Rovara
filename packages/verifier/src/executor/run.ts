@@ -148,7 +148,7 @@ type ShardOutcome = { shardId: string; launchId: string; targetKind: string; lis
  */
 async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApplicationCliLaunchContext; workDir: string; planPath: string; outDir: string;
   browser: LocalChromium | null; redactor: CredentialRedactor; signal: AbortSignal; log: (line: string) => Promise<void>;
-  /** A plan with a model channel: the run keeps the replay cache the config sets (the capture-only store) instead of switching it off. */
+  /** A plan with a model channel (the capture-only store) or an audit replay (the read-only store of the recordings): the run keeps the replay cache the config sets instead of switching it off. */
   agentCapture?: boolean; modelSocketPath?: string }): Promise<ShardOutcome> {
   const { resolved, launch } = input;
   const shard = resolved.suite.shards.find((candidate) => candidate.shardId === launch.shardId)!;
@@ -200,7 +200,8 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
 
   await input.log(`shard ${shard.shardId}: running ${shard.selection.tuples.length} case(s)`);
   // `--no-cache` wins over the config, so a group with an agent step must not pass it: its config names the capture-only store (a candidate round never replays, and the store only
-  // keeps what the runner writes after a later check passed). Every other group's config says `cache: "off"` and the flag stays, as it always was.
+  // keeps what the runner writes after a later check passed), or, in an audit replay, the read-only store of the bound recordings. Every other group's config says `cache: "off"` and
+  // the flag stays, as it always was.
   const run = await runProcess(process.execPath, [cliPath, "run", "--config", configPath, "--reporter", "json", "--output", E2E_EXECUTOR_OUTPUT_DIR,
     ...(input.agentCapture === true ? [] : ["--no-cache"]), "--workers", "1", "--retries", "0"], { cwd: project, env, deadlineAt: resolved.deadlineAtMs, signal: input.signal });
   // What the sessions of this shard's cases hold (cookie values) is scrubbed from every text this parent writes from here on, the raw report included.
@@ -389,7 +390,7 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     for (const launch of launches) {
       if (state.forwarderFailure) break;
       shards.push(await runShard({ resolved, launch, workDir, planPath: input.planPath, outDir, browser, redactor, signal: runSignal, log,
-        ...(plan.modelChannel === undefined ? {} : { agentCapture: true }), ...(input.modelSocketPath === undefined ? {} : { modelSocketPath: input.modelSocketPath }) }));
+        ...(plan.modelChannel === undefined && plan.replay === undefined ? {} : { agentCapture: true }), ...(input.modelSocketPath === undefined ? {} : { modelSocketPath: input.modelSocketPath }) }));
     }
     if (state.forwarderFailure) { reason = "forwarder-failed"; await log(`unavailable: forwarder-failed: ${state.forwarderFailure.message}`); return; }
     if (shards.length === 0) { reason = "no-shards"; await log("unavailable: no-shards"); return; }

@@ -1,6 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,8 @@ import { createWebApiProbePlan, type WebApiProbePlan, type WebApiProbeRunner } f
 export const ORDERS_M14_ROOT = join(import.meta.dirname, "../fixtures/orders-web-m14");
 /** The files a candidate carries: what the app runs from. */
 export const ORDERS_M14_APP_FILES = ["package.json", "server.mjs", "scripts", "public", "fixtures", "inventory", "e2e"];
+/** A fixed runtime dating for the tests that run a round and then its replay: one stored registry row gives both the same case ids. */
+export const FIXED_RUNTIME_AT = Math.floor(Date.now() / 3_600_000) * 3_600_000;
 export const AGENT_GOAL = "Export the orders as a CSV file";
 export const SCRIPTED_ROUTE = Object.freeze({ routeId: "rovara-scripted/v1", routeRevision: e2eModelRouteRevision(scriptedE2ERouteDefinition()) });
 /** The limits a project that pins this route runs under: the broker derives them from the route's budgets, so the collector accepts the model calls the route allows (Task 4.4a). */
@@ -44,6 +46,10 @@ export type AgentPlanOptions = {
   taskId?: string;
   /** Adds a second case to the group: a plain one with no agent step (open the page, see the identity), for the cases a group's deterministic and AI-navigated cases share. */
   withDeterministicCase?: boolean;
+  /** An audit replay of the case (Task 4.6b): the recordings it serves, as the verified round's upload carried them. The plan pins the scripted route's limits and names no route. */
+  replay?: NonNullable<Parameters<typeof createWebApiProbePlan>[0]["replay"]>;
+  /** The time the registered runtime row is dated from: a round and its replay pass the same one, so they have the same case ids (a case id is bound to the runtime row). */
+  runtimeAt?: number;
   /** The runner the plan's registered runtime records: what the executor image reports on a real host, so the broker's re-collection sees the runtime the run was on. */
   runner?: WebApiProbeRunner;
 };
@@ -51,7 +57,7 @@ export type AgentPlanOptions = {
 /** A plan with one web case: open the page, an agent step with `goal`, and (by default) the CSV assertion on the owner's orders export. */
 export function createOrdersM14AgentPlan(options: AgentPlanOptions = {}): WebApiProbePlan {
   const goal = options.goal ?? AGENT_GOAL;
-  return createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot: ORDERS_M14_ROOT, modelRoute: SCRIPTED_ROUTE, routeLimits: SCRIPTED_ROUTE_LIMITS, ...(options.runner === undefined ? {} : { runner: options.runner }), healthTimeoutMs: 20_000, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }), ...(options.mock === true ? { mock: true } : {}), ...(options.taskId === undefined ? {} : { taskId: options.taskId }),
+  return createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot: ORDERS_M14_ROOT, modelRoute: SCRIPTED_ROUTE, routeLimits: SCRIPTED_ROUTE_LIMITS, ...(options.runner === undefined ? {} : { runner: options.runner }), ...(options.replay === undefined ? {} : { replay: options.replay }), ...(options.runtimeAt === undefined ? {} : { runtimeAt: options.runtimeAt }), healthTimeoutMs: 20_000, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }), ...(options.mock === true ? { mock: true } : {}), ...(options.taskId === undefined ? {} : { taskId: options.taskId }),
     accountScenarios: [{ accountProfileId: "orders-owner", scenario: (targetId: string): E2EScenario => ({ scenarioId: "agent-export", requirementId: "orders-export", requestedTargetIds: [targetId], required: true,
       accountProfileId: "orders-owner", minimumEvidence: "runtime", requiredRealComponentIds: [],
       steps: [...(options.before ?? [{ kind: "navigate" as const, path: "/" }]), { kind: "agent" as const, goal, maxActions: options.maxActions ?? 4 }, ...(options.after ?? [])],
@@ -77,11 +83,19 @@ export type OrdersM14AppProcess = Readonly<{ upstream: string; directory: string
  * The m14 app as the host would run it, but on this machine: the accounts file written for the plan's accounts, the recipe's seed command run for real against it, then the app on a
  * loopback port reading the records the seed built. For executor tests that run the real CLI and a real local Chromium without Docker.
  */
-export async function startOrdersM14App(fixture: WebApiProbePlan): Promise<OrdersM14AppProcess> {
+export async function startOrdersM14App(fixture: WebApiProbePlan, options: { renamed?: boolean } = {}): Promise<OrdersM14AppProcess> {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "orders-m14-app-")));
   const app = join(directory, "app");
   await mkdir(app, { recursive: true });
   for (const file of ORDERS_M14_APP_FILES) await cp(join(ORDERS_M14_ROOT, file), join(app, file), { recursive: true });
+  // The candidate of a replay that went stale (Task 4.6b): the owner's download button renamed, so the recorded tap no longer finds its target.
+  if (options.renamed === true) {
+    const server = join(app, "server.mjs");
+    const source = await readFile(server, "utf8");
+    const renamed = source.replace('data-testid="download-orders"', 'data-testid="get-orders-file"').replace(">Download orders<", ">Fetch the orders file<");
+    if (renamed === source) throw new Error("the m14 app has no download button to rename");
+    await writeFile(server, renamed);
+  }
   const applicationId = fixture.compiled.originByApplicationId[0]!.applicationId;
   const contract = readE2EApplicationProjectContract(fixture.compiled.runtimeAdmissionContext.selectionInput.sourceSnapshot, applicationId)!;
   const accountsFile = join(directory, "rovara-accounts.json");

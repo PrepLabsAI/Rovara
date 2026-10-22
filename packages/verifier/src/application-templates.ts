@@ -36,17 +36,30 @@ export const E2E_AGENT_EXECUTOR_NAME = "rovara-e2e-agent" as const;
 export const E2E_AGENT_EXECUTOR_VERSION = "1" as const;
 export const E2E_AGENT_CONFIG_MAX_INPUT_TOKENS = E2E_MODEL_ROUTE_DEFAULT_BUDGETS.maxInputTokens;
 
+/**
+ * What a replay group puts into the sanitized config (Task 4.6b): the agents entry names Rovara's replay executor (`rovara-e2e-replay`, version 1), which holds no model, so the entry has
+ * no model and no input ceiling, and the replay cache is read-only over a store that never writes. Only a group of an audit replay that has an agent step has these. No other digest moves:
+ * a replay is one more way a config can be written, selected by `replay: true` and by nothing else.
+ */
+export const E2E_REPLAY_EXECUTOR_NAME = "rovara-e2e-replay" as const;
+export const E2E_REPLAY_EXECUTOR_VERSION = "1" as const;
+
 export function expectedE2EApplicationConfigDigest(input: {
   projectId: string; tests: readonly string[]; target: E2EApplicationLaunchTarget; timeout: number;
   modelRoute: null | { routeId: string; routeRevision: string };
+  /** True for a shard of an audit replay that has an agent step; it requires `modelRoute: null`. */
+  replay?: boolean;
 }): string {
   const target = input.target;
-  const agents = input.modelRoute === null ? undefined : { default: { model: {
-    provider: "agentx-e2e", modelId: input.modelRoute.routeId, specificationVersion: "v4",
-  }, maxInputTokens: E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, executor: { name: E2E_AGENT_EXECUTOR_NAME, version: E2E_AGENT_EXECUTOR_VERSION } } };
+  if (input.replay === true && input.modelRoute !== null) throw new Error("a replay config names no model route");
+  const agents = input.replay === true ? { default: { executor: { name: E2E_REPLAY_EXECUTOR_NAME, version: E2E_REPLAY_EXECUTOR_VERSION } } }
+    : input.modelRoute === null ? undefined : { default: { model: {
+      provider: "agentx-e2e", modelId: input.modelRoute.routeId, specificationVersion: "v4",
+    }, maxInputTokens: E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, executor: { name: E2E_AGENT_EXECUTOR_NAME, version: E2E_AGENT_EXECUTOR_VERSION } } };
   const sanitized = {
     projectId: input.projectId, tests: [...input.tests], workers: 1, retries: 0, timeout: input.timeout,
-    cache: input.modelRoute === null ? "off" : { mode: "read-write", store: { writable: true } }, reporters: [], ...(agents === undefined ? {} : { agents }),
+    cache: input.replay === true ? { mode: "read-only", store: { writable: false } } : input.modelRoute === null ? "off" : { mode: "read-write", store: { writable: true } },
+    reporters: [], ...(agents === undefined ? {} : { agents }),
     targets: [{ name: target.targetId, platform: target.engine?.platform ?? "api", app: sanitizeApp(target.app),
       ...(target.engine === null ? {} : { engine: sanitizeEngine(target.engine) }) }],
   };
@@ -89,11 +102,13 @@ export function renderE2EApplicationDeclaration(input: {
   target: E2EApplicationLaunchTarget; cliHost: { profileId: string; descriptor: E2EApplicationCliHostDescriptor };
   preparedEnvironmentDigest: string; originByApplicationId: readonly { applicationId: string; origin: string }[];
   timeoutMs: number; modelRoute: null | { routeId: string; routeRevision: string };
+  /** True for a shard of an audit replay that has an agent step (Task 4.6b). The key is written only then, so every other declaration is byte for byte what it was. */
+  replay?: boolean;
   expectedConfigDigest: string; cases: readonly E2EExpectedCase[]; assertionsByCase: ReadonlyMap<string, readonly { index: number; kind: string; digest: string }[]>;
 }): string {
   return `${JSON.stringify({ schemaVersion: "e2e-application-cli-declaration/v1", projectId: "rovara-application-e2e",
     testPath: APPLICATION_E2E_TEST_PATH, target: input.target, cliHost: input.cliHost, preparedEnvironmentDigest: input.preparedEnvironmentDigest,
-    originByApplicationId: input.originByApplicationId, timeoutMs: input.timeoutMs, modelRoute: input.modelRoute,
+    originByApplicationId: input.originByApplicationId, timeoutMs: input.timeoutMs, modelRoute: input.modelRoute, ...(input.replay === true ? { replay: true } : {}),
     expectedConfigDigest: input.expectedConfigDigest,
     cases: input.cases.map((item) => ({ caseId: item.caseId, upstreamTestId: item.upstreamTestId, targetId: item.targetId,
       assertionBindings: input.assertionsByCase.get(item.caseId) ?? [] })) }, null, 2)}\n`;

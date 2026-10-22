@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, WEB_API_AGENT_GUARD_MARKER_TESTID, WEB_API_AGENT_GUARD_PAGE_PATH, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_MAX_ACTIONS, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
   E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimits, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
-  selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
+  selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EReplaySourceCase, type E2EReplayTrace, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { compileE2EApplicationScenarios, e2eApplicationGroupUsesModel, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../application-build-source.js";
 import { loadWebApiQualificationProbeAssets, type E2EAgentProbeScriptTurn } from "../application-runtime-probes.js";
@@ -186,6 +186,17 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
    * them, so a plan whose collector must accept model usage needs them. Default: the small model-free ones this builder always used.
    */
   routeLimits?: E2EPolicy["limits"];
+  /**
+   * Plans an audit replay of a round (Task 4.6b), for the tests and the journeys: the policy still pins `modelRoute` (the revision and the agent-sized limits), but the compilation
+   * context and the admission name no model route, the admission carries `replay` (the recordings, and what the source round showed: by default every assertion passed and no CSV),
+   * and the executor plan carries the same recordings and no model channel.
+   */
+  replay?: { traces: readonly E2EReplayTrace[]; sourceRoundId?: string; attempt?: number; sourceCases?: readonly E2EReplaySourceCase[] };
+  /**
+   * The time the registered runtime row is dated from (qualified an hour before it, expiring a day after it). A case id is bound to the runtime row, so two plans built for the same case
+   * (a round and its replay) pass the same one, as a registry that holds one stored row gives them.
+   */
+  runtimeAt?: number;
   /** The runner the registered runtime row records (default: a Linux 6.8.0 arm64 host). A journey on a real Docker host passes what its executor image reports, as the broker's registration does. */
   runner?: WebApiProbeRunner }): WebApiProbePlan {
   const kind = options.probe.startsWith("web-") ? "web" as const : "api" as const;
@@ -247,7 +258,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const runtimeProfileId = E2E_EXECUTOR_HOST_PROFILE_ID;
-  const runtime = registeredRuntime(kind, runtimeProfileId, nowMs, options.modelRoute !== undefined && kind === "web", options.runner);
+  const runtime = registeredRuntime(kind, runtimeProfileId, options.runtimeAt ?? nowMs, options.modelRoute !== undefined && kind === "web", options.runner);
   // The approved mock: the inventory fixture of the app tree, linked by the inventory origin's contract (its OpenAPI document) to the discovery component of that document.
   const [openApiFile, fixtureFile] = mockFiles;
   const mockComponentId = openApiFile === undefined ? "" : e2eApiSchemaComponentId(openApiFile.path);
@@ -309,8 +320,11 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     .sort((left, right) => (left.targetId < right.targetId ? -1 : left.targetId > right.targetId ? 1 : 0));
   const bundleBody = { schemaVersion: 1 as const, planDigest, templateVersion: "trusted-e2e-application/v1" as const, scenarios, bundleDigest: "0".repeat(64) };
   const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
-  const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets, modelRoute: options.modelRoute ?? null, cliHostsByProfile,
-    preparedEnvironmentsByGroup: new Map([[group.groupId, { preparedEnvironmentDigest, originByApplicationId: [{ applicationId: application.applicationId, origin: WEB_API_PROBE_APP_ORIGIN }] }]]) };
+  const replayBindings = options.replay === undefined ? undefined : options.replay.traces.map((trace) => ({ caseId: trace.caseId, stepIndex: trace.stepIndex, keyHash: trace.keyHash,
+    traceSha256: trace.binding.traceSha256, actionCount: trace.binding.actionCount }));
+  const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets, modelRoute: options.replay === undefined ? options.modelRoute ?? null : null, cliHostsByProfile,
+    preparedEnvironmentsByGroup: new Map([[group.groupId, { preparedEnvironmentDigest, originByApplicationId: [{ applicationId: application.applicationId, origin: WEB_API_PROBE_APP_ORIGIN }] }]]),
+    ...(replayBindings === undefined ? {} : { replay: { bindings: replayBindings } }) };
   const compiled = compileE2EApplicationScenarios({ context, groupId: group.groupId });
   const roundId = randomUUID();
   // As the control plane admits a round: a route-pinned policy's round with no agent step runs under the model-free limits, and its deadline fits them (Task 4.3a).
@@ -337,10 +351,15 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     sourceSnapshot: sourceSnapshotWire, intent, intentDigest: hash(canonicalJson(intent)),
     selectionInput: { ...selectionInput, sourceSnapshot: sourceSnapshotWire }, applicationApprovalBinding,
     applicationBindings: [...applicationBindings].map(([key, value]) => ({ key, value })).sort((a, b) => a.key.localeCompare(b.key)),
-    runtimeBindings: [...runtimeBindings].map(([key, value]) => ({ key, value })), launchTargets, modelRoute: options.modelRoute ?? null,
+    runtimeBindings: [...runtimeBindings].map(([key, value]) => ({ key, value })), launchTargets, modelRoute: options.replay === undefined ? options.modelRoute ?? null : null,
     cliHosts: [...cliHostsByProfile].map(([profileId, descriptor]) => ({ profileId, descriptor })),
     preparedEnvironments: [{ groupId: group.groupId, preparedEnvironmentDigest, originByApplicationId: compiled.originByApplicationId }],
-    policy, bundle, executionPlan, portableProjection: null, round, groups: [groupAdmission] };
+    policy, bundle, executionPlan, portableProjection: null, round, groups: [groupAdmission],
+    ...(options.replay === undefined ? {} : { replay: { purpose: "replay" as const, sourceRoundId: options.replay.sourceRoundId ?? randomUUID(), sourceAdmissionSha256: "e".repeat(64),
+      sourceEvidenceSha256: "f".repeat(64), attempt: options.replay.attempt ?? 1,
+      sourceCases: options.replay.sourceCases ?? compiled.expectedCases.map((expected) => ({ caseId: expected.caseId,
+        assertionOutcomes: expected.assertionDigests.map(() => "passed" as const), csvSha256: null })),
+      traces: [...options.replay.traces] } }) };
   const admission = E2EApplicationExecutionAdmissionSchema.parse(JSON.parse(encodeE2EApplicationExecutionAdmission({ ...admissionBody,
     admissionDigest: hash(canonicalJson(admissionBody)) } as never)));
   const role = options.role ?? "owner";
@@ -351,7 +370,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const { email, password } = accounts[0] ?? { email: "", password: "" };
   const plan = E2EExecutorPlanSchema.parse({ schemaVersion: "e2e-executor-plan/v1", runId: binding.runId, groupId: group.groupId, admission,
     admissionDigest: admission.admissionDigest, app: { origin: E2E_EXECUTOR_APP_ORIGIN, health: { path: inferred ? "/" : "/health", expectedStatus: 200, timeoutMs: options.healthTimeoutMs ?? 30_000 } },
-    deadlineAt: Date.parse(binding.deadlineAt), accounts });
+    deadlineAt: Date.parse(binding.deadlineAt), accounts, ...(options.replay === undefined ? {} : { replay: { traces: [...options.replay.traces] } }) });
   return { plan, compiled, caseId: compiled.expectedCases[0]!.caseId, probe: options.probe, scenario, scenarios,
     seed: { accounts: inferred ? [] : [{ email, passwordDigest: createHash("sha256").update(password, "utf8").digest("hex"), subjectId: `subject-${randomUUID()}`,
       tenantId: "tenant-a", role, displayName: role === "owner" ? "Orders Owner" : "Orders Viewer" }] },

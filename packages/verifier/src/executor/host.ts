@@ -18,6 +18,7 @@ import type { E2EAgentLedgerWriter } from "./agent-ledger.js";
 import { createE2EAgentStepDriver } from "./agent-step-driver.js";
 import { createE2EAgentModelAdapter } from "./agent-model-adapter.js";
 import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
+import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, createRovaraE2EReplayExecutor } from "./agent-replay.js";
 import { createE2EModelChannelClient } from "./model-channel.js";
 import { createCredentialRedactor } from "./redact.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
@@ -185,7 +186,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   // this process's, and the begin and end markers tell the worker which step each model call belongs to.
   const channelPlan = plan.modelChannel;
   // This process loads the AI SDK (the CLI process, not the executor's parent that `entry.ts` guards): a model given as a string must still never reach its default gateway.
-  if (channelPlan !== undefined) installRefusingE2EDefaultProvider();
+  const replayPlan = plan.replay;
+  if (channelPlan !== undefined || replayPlan !== undefined) installRefusingE2EDefaultProvider();
   const agent = channelPlan === undefined ? null : (() => {
     const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId });
     const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
@@ -204,7 +206,14 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     const runStep: typeof driveStep = (request) => { if (!goals.includes(request.goal)) goals.push(request.goal); return driveStep(request); };
     return { adapter, store, executor, runStep };
   })();
-  const agentParts = agent === null ? {} : { modelFactory: () => agent.adapter as never, agentExecutor: agent.executor, agentCacheStore: agent.store };
+  // An audit replay (Task 4.6b): the recordings of the plan behind a store that never writes, the executor that holds no model and the step port that runs the runner's `act` with no
+  // channel marker and no ledger. There is no channel client, no model adapter and no model factory, whatever else the process could do; the plan schema refuses `replay` with `modelChannel`.
+  const replay = replayPlan === undefined ? null : (() => {
+    const state = createE2EReplayState();
+    return { store: createE2EReplayStore(replayPlan.traces, state), executor: createRovaraE2EReplayExecutor(state), runStep: createE2EReplayStepDriver(state) };
+  })();
+  const agentParts = agent !== null ? { modelFactory: () => agent.adapter as never, agentExecutor: agent.executor, agentCacheStore: agent.store }
+    : replay !== null ? { agentExecutor: replay.executor, agentCacheStore: replay.store } : {};
 
   const casePlans: E2EWebRuntimePorts["casePlans"] = { readCasePlan: async (request, signal) => {
     const result = await fileLedger.casePlans.readCasePlan(request, signal);
@@ -248,7 +257,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     // Screenshots and traces of failed cases follow the admitted capture policy and nothing else; with both off the case adapter is given no capture port at all.
     const screenshots = fileLedger.capture.enabled("screenshot");
     const ports: E2EWebRuntimePorts = Object.freeze({ ...shared,
-      ...(agent === null ? {} : { agent: { runStep: agent.runStep } }),
+      ...(agent !== null ? { agent: { runStep: agent.runStep } } : replay !== null ? { agent: { runStep: replay.runStep } } : {}),
       ...(screenshots ? { capture: { screenshots, record: (item: { caseId: string; kind: "screenshot"; bytes: Uint8Array }) => fileLedger.capture.record(item) } } : {}),
       resolveOwnedCdpEndpoint: async () => {
         if (!context.cdpEndpoint) throw new Error("the executor launched no browser for this shard");
