@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { chmodSync, realpathSync } from "node:fs";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -21,7 +21,9 @@ import { createScriptedE2EInvoke, type ScriptedTurn } from "../../packages/worke
 import { workflowE2EApplicationHostDeps, type WorkflowE2EApplicationRuntimeConfig } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
 import { ciImage } from "../support/ci-images.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
-import { AGENT_GOAL, ORDERS_M14_APP_FILES, ORDERS_M14_ROOT, createOrdersM14AgentPlan, sha256Hex } from "../support/orders-m14-agent.js";
+import { AGENT_GOAL, FIXED_RUNTIME_AT, ORDERS_M14_APP_FILES, ORDERS_M14_ROOT, createOrdersM14AgentPlan, sha256Hex } from "../support/orders-m14-agent.js";
+import { replaySourceCasesOf, verifyReplayEvidence } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
+import type { E2EReplaySourceCase, E2EReplayTrace } from "@agentx/contracts";
 
 /** The task page's section for these rows as text (entities undone, so a sentence is matched as the owner reads it), and the Slack summary of them. */
 const pageText = (scenarios: readonly object[]) => renderE2EScenarioRowsHtml({ scenarios: scenarios as never }, { artifactPath: (sha256) => `/a/${sha256}` })
@@ -46,12 +48,13 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
   afterAll(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }, 120_000);
 
   /** One round with one group whose case has an agent step, run through the worker's checks on a real Docker host. */
-  async function journey(script: readonly ScriptedTurn[]) {
+  async function journey(script: readonly ScriptedTurn[], options: { replay?: { traces: readonly E2EReplayTrace[]; sourceCases: readonly E2EReplaySourceCase[] }; renamed?: boolean } = {}) {
     // The runtime row of the plan records the machine the runner ran on, as the broker's registration does from the executor image itself: the broker holds the run to it.
     const reported = JSON.parse(execFileSync("docker", ["run", "--rm", "--entrypoint", "node", EXECUTOR_IMAGE, "-p",
       "JSON.stringify({ os: process.platform + ' ' + require('os').release(), arch: process.arch, runtime: 'node ' + process.version, execPath: process.execPath, version: process.version, platform: process.platform })"],
     { encoding: "utf8" })) as { os: string; arch: "arm64" | "x64"; runtime: string; execPath: string; version: "v22.23.2"; platform: "linux" };
-    const fixture = createOrdersM14AgentPlan({ mock: true, taskId: TASK_ID, runner: { environment: { os: reported.os, arch: reported.arch, runtime: reported.runtime },
+    // A round and its replay share the registry's one runtime row, so they have the same case ids (`runtimeAt`).
+    const fixture = createOrdersM14AgentPlan({ mock: true, taskId: TASK_ID, runtimeAt: FIXED_RUNTIME_AT, ...(options.replay === undefined ? {} : { replay: options.replay }), runner: { environment: { os: reported.os, arch: reported.arch, runtime: reported.runtime },
       toolchain: { execPath: reported.execPath, version: reported.version, platform: reported.platform, arch: reported.arch } } });
     const admission = fixture.plan.admission;
     const admissionBytes = Buffer.from(encodeE2EApplicationExecutionAdmission(admission), "utf8");
@@ -63,7 +66,9 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
         readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 }],
         workflowE2EAdmission: { schemaVersion: 1, kind: "application", taskId: admission.taskId, workflowRevision: admission.workflowRevision, candidateDigest: admission.candidateDigest,
           roundId: admission.round.roundId, groupRunIds: admission.groups.map((group) => group.outerBinding.runId),
-          admissionRef: { key: `workflow-e2e-admissions/sha256/${admissionSha}.json`, sha256: admissionSha, byteLength: admissionBytes.byteLength }, agentSteps: true } },
+          admissionRef: { key: `workflow-e2e-admissions/sha256/${admissionSha}.json`, sha256: admissionSha, byteLength: admissionBytes.byteLength },
+          // An audit replay (Task 4.6b) is signed as one and has no model channel, so its reference never claims the agent steps feature.
+          ...(admission.replay === undefined ? { agentSteps: true } : { purpose: "replay", sourceRoundId: admission.replay.sourceRoundId, attempt: admission.replay.attempt }) } },
     });
     if (invocation.kind !== "task") throw new Error("fixture invocation must be a task");
     const base = realpathSync(await mkdtemp(join(tmpdir(), "m1-4-journey-")));
@@ -84,6 +89,11 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
       } };
     const appCopy = join(base, "app");
     for (const file of ORDERS_M14_APP_FILES) await cp(join(ORDERS_M14_ROOT, file), join(appCopy, file), { recursive: true });
+    // The candidate of a replay that went stale: the owner's download button renamed, so the recorded tap finds no target.
+    if (options.renamed === true) {
+      const server = join(appCopy, "server.mjs");
+      await writeFile(server, (await readFile(server, "utf8")).replace('data-testid="download-orders"', 'data-testid="get-orders-file"').replace(">Download orders<", ">Fetch the orders file<"));
+    }
     const hosts: Array<ReturnType<typeof createDockerApplicationHost>> = [];
     const config = { executorImage: EXECUTOR_IMAGE, buildImage: ciImage("node-build", WEB_API_BUILD_IMAGE), runRoot } satisfies WorkflowE2EApplicationRuntimeConfig;
     // The collector compares the toolchain the executor reported (the image's Node, at its path) with the process reading the result: a CI runner's Node differs in path only, so the
@@ -144,7 +154,16 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
         aggregate: JSON.parse(aggregateSaved.bytes.toString("utf8")) as unknown, groupEvidence: new Map([[runId, group]]),
         receivedAt: new Map([[runId, group.groupRun.actual?.collection.receivedAt ?? new Date().toISOString()]]), terminalStatus: "SUCCEEDED", modelRouteDefinition: scriptedE2ERouteDefinition() });
     };
-    return { fixture, result, closed, sent, caseId, ledger, agentModel, saved, runId, why, verdict, steps: e2eApplicationGroupAgentSteps(fixture.compiled) };
+    /** The broker's verification of an audit replay's evidence and the result it would record, against the source cases the replay admission signs. */
+    const replayResult = () => {
+      if (group === undefined || aggregateSaved === undefined || admission.replay === undefined) throw new Error(`not a replay with uploaded evidence\n${why}`);
+      return verifyReplayEvidence({ admissionBytes,
+        subject: { taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
+          candidateDigest: admission.candidateDigest, roundId: admission.round.roundId, groupRunIds: [runId], admissionSha256: admissionSha },
+        aggregate: JSON.parse(aggregateSaved.bytes.toString("utf8")) as unknown, groupEvidence: new Map([[runId, group]]),
+        receivedAt: new Map([[runId, group.groupRun.actual?.collection.receivedAt ?? new Date().toISOString()]]), terminalStatus: "SUCCEEDED", replay: admission.replay })?.replay;
+    };
+    return { fixture, result, closed, sent, caseId, ledger, agentModel, saved, runId, why, verdict, replayResult, steps: e2eApplicationGroupAgentSteps(fixture.compiled), runRoot };
   }
 
   it("agent-renamed-export: the worker opens the channel, the goal finds 'Download orders', the executor captures one download and the ledger and receipts agree", async () => {
@@ -195,6 +214,37 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     expect(verdict.display!.scenarios[0]!.agentNavigation?.steps[0]?.actedOn).toEqual([{ role: "button", name: "Download invoices", did: "tap" }]);
     expect(pageText(verdict.display!.scenarios)).toContain("AI-navigated: the model clicked 'Download invoices'; the CSV check decided");
   }, 500_000);
+
+  // M1.4 Task 4.6b, test 21: the audit replay of a verified round, through the worker's own check path on a real Docker host, with the real executor image. The candidate round passes
+  // and leaves a recording; the broker's verification keeps it; the replay serves only that recording with no model channel, no socket and no budget, and reproduces the round (the
+  // same CSV bytes); the same replay against a candidate that renamed its button cannot go on and says so, without ever reaching a model.
+  it("agent-replay: a verified round replays whole with no model, and a renamed button makes the replay stop with replay-needs-model", async () => {
+    const original = await journey([{ kind: "tap", name: /Download orders/ }, { kind: "done" }]);
+    expect(original.result.processStatus, original.why).toBe("SUCCEEDED");
+    const verified = original.verdict();
+    expect(verified.verdict, `${verified.reason}\n${original.why}`).toBe("PASS");
+    expect(verified.agentTraces, "the round left one recording the broker's review kept").toHaveLength(1);
+    const traces: E2EReplayTrace[] = verified.agentTraces!.map((trace) => ({ caseId: trace.caseId, stepIndex: trace.stepIndex, keyHash: trace.keyHash, traceBase64: Buffer.from(trace.bytes).toString("base64"), binding: trace.binding }));
+    const sourceCases = replaySourceCasesOf(verified);
+    expect(sourceCases).toHaveLength(1);
+    expect(sourceCases[0]!.csvSha256).toMatch(/^[a-f0-9]{64}$/);
+
+    const replay = await journey([], { replay: { traces, sourceCases } });
+    expect(replay.result.processStatus, replay.why).toBe("SUCCEEDED");
+    // No model at all: no channel was opened for the group, no budget was reserved, no receipt or ledger exists, and no socket was ever made in the run's directory.
+    expect(replay.closed).toEqual([]);
+    expect(replay.sent).toEqual([]);
+    expect(replay.agentModel).toBeUndefined();
+    expect(replay.ledger).toBeNull();
+    expect(replay.fixture.plan.admission.modelRoute).toBeNull();
+    expect(replay.result).toMatchObject({ processStatus: "SUCCEEDED" });
+    expect(replay.replayResult(), replay.why).toEqual({ status: "PASS", reproduced: true, downloadSha256Match: true });
+
+    const stale = await journey([], { replay: { traces, sourceCases }, renamed: true });
+    expect(stale.closed).toEqual([]);
+    expect(stale.sent).toEqual([]);
+    expect(stale.replayResult(), stale.why).toEqual({ status: "UNKNOWN", reproduced: false, downloadSha256Match: false, reason: "replay-needs-model" });
+  }, 900_000);
 
   it("agent-model-outage: the provider fails; the receipt is provider-error, the ledger verdict is failed with MODEL_PROVIDER_FAILED, and nothing was downloaded", async () => {
     const j = await journey([{ kind: "fail", message: "provider down" }]);

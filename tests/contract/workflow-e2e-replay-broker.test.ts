@@ -52,6 +52,22 @@ describe.runIf(agentRunnable)("the broker verifies an audit replay (Task 4.6b)",
     return { round, verified: verifyReplayEvidence({ ...input, replay: { sourceCases } }) };
   };
 
+  it("test 19: a source round whose stored evidence was edited is not verified, keeps no recording, and so gives the replay nothing to serve", async () => {
+    const assembled = asLinuxRun(await assembleAgentRun(source));
+    // Control: the unedited round is PASS and keeps its recording.
+    const control = brokerRoundFor(assembled).verify();
+    expect(control.verdict).toBe("PASS");
+    expect(control.agentTraces).toHaveLength(1);
+    // The stored ledger edited after the fact (one receipt of the model dropped from the inputs the worker packed): the broker's own re-collection no longer matches what was stored.
+    const edited = brokerRoundFor(assembled, { editGroupRun: (groupRun) => {
+      const actual = groupRun["actual"] as { collectionInputs: { agentModel?: { receipts: unknown[] } } };
+      actual.collectionInputs.agentModel!.receipts = actual.collectionInputs.agentModel!.receipts.slice(1);
+    } }).verify();
+    expect(edited.verdict).not.toBe("PASS");
+    expect(edited.agentTraces ?? []).toHaveLength(0);
+    expect(replaySourceCasesOf(edited)).toEqual([]);
+  });
+
   it("the verified source round: PASS, with the recording the replay will serve and the facts the replay is judged against", async () => {
     const verified = brokerRoundFor(asLinuxRun(await assembleAgentRun(source))).verify();
     expect(verified.verdict).toBe("PASS");
