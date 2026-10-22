@@ -405,7 +405,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
         const viewerTarget = variant === "results" ? targetOf("orders-viewer") : undefined;
         if (variant === "results") expect(viewerTarget, JSON.stringify(context.targets)).toBeDefined();
         // The planner is offered the inventory mock because the app's OpenAPI document and a source-backed fixture for it are in the repository.
-        const mock = context.mockFixtures.find((item) => item.requestedTargetId === target!.targetId);
+        const mock = context.mockFixtures.find((item) => item.requestedTargetIds.includes(target!.targetId));
         expect(mock, JSON.stringify(context.mockFixtures)).toMatchObject({ componentId: e2eApiSchemaComponentId("inventory/openapi.json"), contractPath: "inventory/openapi.json", sourcePath: "e2e/mocks/inventory-v1.json" });
         const scenario: E2EScenario = { scenarioId: "show-stock-status", requirementId: "orders-stock-status", requestedTargetIds: [target!.targetId], required: true, accountProfileId: target!.accountProfileId,
           minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "navigate", path: "/" }, { kind: "click", testId: "check-inventory" }],
@@ -427,7 +427,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
         // `credential-echo`: the owner's export, whose first row the candidate fills with the password the owner signed in with.
         const echoScenarios = variant !== "credential-echo" ? [] : [web("owner-export", "orders-export", target!, openAndExport, [{ kind: "csv", downloadName: "orders.csv", columns: ["id", "customer", "total", "state"], rows: ordersOfOwner }])];
         const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: planTargets.map((item) => item.targetId), portableOperationRefs: [],
-          mockFixtureRefs: variant === "results" || variant === "credential-echo" ? [] : [{ componentId: mock!.componentId, requestedTargetId: mock!.requestedTargetId, operationId: mock!.operationId, sourcePath: mock!.sourcePath, sourceSha256: mock!.sourceSha256 }],
+          mockFixtureRefs: variant === "results" || variant === "credential-echo" ? [] : [{ componentId: mock!.componentId, requestedTargetId: target!.targetId, operationId: mock!.operationId, sourcePath: mock!.sourcePath, sourceSha256: mock!.sourceSha256 }],
           accountContextRefs: planTargets.flatMap((who) => context.accountContextRefs.filter((ref) => ref.applicationId === who.applicationId && ref.profileId === who.accountProfileId)),
           scenarios: variant === "results" ? resultsScenarios : variant === "credential-echo" ? echoScenarios : [scenario], semanticExportDeltas: [],
           applicationRuntimeRefs: planTargets.flatMap((who) => context.runtimeRefs!.filter((ref) => ref.targetId === who.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! }))),

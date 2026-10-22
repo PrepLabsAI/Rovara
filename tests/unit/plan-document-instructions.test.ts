@@ -115,7 +115,7 @@ describe("planDocumentInstructions", () => {
       portableOperations: [{ operationId: "op-render", applicationId: "ordinary-orders", requestedTargetIds: ["web-1"],
         packageExportSubpath: ".", moduleSpecifier: "./src/index.mjs", callableSelectors: [{ selector: { kind: "named", exportName: "renderOrders" } }],
         sourceRefs: [{ path: "src/index.mjs", sha256: "1".repeat(64) }] }],
-      mockFixtures: [{ componentId: "api-schema-orders", requestedTargetId: "web-1", operationId: "listOrders", sourcePath: "fixtures/orders-mocks.json",
+      mockFixtures: [{ componentId: "api-schema-orders", requestedTargetIds: ["web-1"], operationId: "listOrders", sourcePath: "fixtures/orders-mocks.json",
         sourceSha256: "d".repeat(64), contractPath: "openapi.json", contractSha256: "f".repeat(64), method: "GET", path: "/orders",
         inputSelector: { kind: "query", name: "mode" }, callableMappings: [],
         variants: [{ id: "success", inputValue: "success", status: 200, response: { orders: [{ name: "Sample order" }] } }] }],
@@ -131,6 +131,9 @@ describe("planDocumentInstructions", () => {
     expect(codingPlan).toContain('"callableMappings":[]');
     expect(codingPlan).toContain("the fixture is an unlinked schema hint only");
     expect(codingPlan).toContain("The model's `e2e` member is an untrusted proposal");
+    // PLANCTX: a mock is listed once with its targets, and the planner is told to write one reference per target; a context with no mock does not say it.
+    expect(codingPlan).toContain("each `mockFixtureRefs` entry names exactly one of those targets as its `requestedTargetId`");
+    expect(planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: { ...context, mockFixtures: [] } })).not.toContain("requestedTargetIds`; each `mockFixtureRefs`");
     const unavailable = planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: { status: "unknown", reason: "prepared-source capture failed" } });
     expect(unavailable).toContain("prepared-source capture failed");
     expect(unavailable).toContain("Do not invent target, operation, fixture, account, or source IDs");

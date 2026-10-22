@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_APPLICATION_ADMISSION_SCHEMA_V2, e2eRuntimeBindingKey } from "@agentx/contracts";
+import { E2E_APPLICATION_ADMISSION_SCHEMA_V2, canonicalJson, e2eRuntimeBindingKey } from "@agentx/contracts";
 import { decodeE2EApplicationExecutionAdmission, e2eCompiledRuntime, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { buildApplicationExecutionAdmission } from "../../packages/broker/src/e2e/application-admission.js";
 import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
@@ -69,15 +69,24 @@ describe("the orders-web fixture planned as a web scenario and an API scenario o
     expect(new Set(validated.applicationSuites.flatMap((suite) => suite.expectedCases.map((expected) => expected.accountProfileId)))).toEqual(new Set(["orders-owner"]));
   });
 
-  // KNOWN GAP (reported with Task 3.4): the planner's context is bounded to 12,000 bytes, and it lists the source-backed mock of the inventory service once per target. With the
-  // fixture's inventory contract and mock in the repository, its ten targets (a web and an API target for each of three accounts, the base and the signed-out visitor) come to about
-  // 17,000 bytes, so planning is unavailable for the fixture as the live demo will have it. It is not this task's to size; this pins the behaviour, and turns red when it is fixed.
-  it("pins that the planner's context for the whole fixture is over its bound today, which is why the journey approves the setup on the contract alone", () => {
+  // PLANCTX (Ruling DE): the source-backed mock of the inventory service is listed once, with every target that may use it, so the fixture as the live demo has it (its inventory contract and
+  // mock in the repository, ten targets: a web and an API target for each of three accounts, the base and the signed-out visitor) fits the planner's 12,000-byte bound. It was listed once per
+  // target and came to about 16,800 bytes, so planning was unavailable for the demo.
+  it("plans the whole fixture, with the inventory mock listed once for all ten targets and the context inside its bound", () => {
     const files = ["package.json", "inventory/openapi.json", "e2e/mocks/inventory-v1.json"];
     const snapshot = snapshotOf(Object.fromEntries(files.map((path) => [path, readFileSync(join(FIXTURE, path), "utf8")])));
     const setup = approvedSetup(snapshot, [{ kind: "web", profileId: PROFILE }, { kind: "api", profileId: PROFILE }]);
     const ready = (kind: "web" | "api") => ({ kind, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities(kind, "a".repeat(64)).supportedSteps, supportedAssertions: webApiRuntimeCapabilities(kind, "a".repeat(64)).supportedAssertions });
     const context = buildFeatureE2EPlanningContext(setup.policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [ready("web"), ready("api")], accountRegistry: registryFor(snapshot, NOW) });
-    expect(context).toMatchObject({ status: "unknown", reason: "source-backed planning references exceed the bounded prompt context" });
+    if (context.status !== "available") throw new Error(context.reason);
+    expect(Buffer.byteLength(canonicalJson(context), "utf8")).toBeLessThanOrEqual(12_000);
+    expect(context.targets).toHaveLength(10);
+    // The mock once, and every target still learns it may use it.
+    expect(context.mockFixtures).toHaveLength(1);
+    expect(context.mockFixtures[0]).toMatchObject({ contractPath: "inventory/openapi.json", sourcePath: "e2e/mocks/inventory-v1.json" });
+    expect([...context.mockFixtures[0]!.requestedTargetIds].sort()).toEqual(context.targets.map((target) => target.targetId).sort());
+    expect(canonicalJson(context).split(context.mockFixtures[0]!.sourceSha256)).toHaveLength(2);
+    // The plan of the journey is still made from this context.
+    expect(planOwnerWebAndApi(context).intent.requestedTargetIds).toHaveLength(2);
   });
 });
