@@ -1,7 +1,7 @@
 // The public images CI pulls, and how it gets them without hitting a public registry's anonymous rate limit (GitHub's shared runner IPs do: `toomanyrequests: Rate exceeded`).
 // Each image is pinned by digest (.github/ci-images.json). The Mirror CI images workflow copies it, digest for digest, to ghcr.io/<owner>/rovara-ci/<name>, and CI pulls from
 // there with GITHUB_TOKEN (no cloud credentials), falling back to the upstream registry only when the mirror copy is missing or keeps failing. Either way the image is tagged with a
-// local alias (rovara-ci/<name>:<12 hex of the digest>) after its digest is checked, and the tests and the Dockerfile build use that alias, so nothing later pulls again.
+// local alias (localhost/rovara-ci/<name>:<12 hex of the digest>) after its digest is checked, and the tests and the Dockerfile build use that alias, so nothing later pulls again.
 // Node runs this file directly, so it imports only Node's own modules and uses only syntax Node can strip.
 import { spawn } from "node:child_process";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
@@ -30,8 +30,11 @@ export function parseManifest(text: string): CiImage[] {
 export const loadManifest = (path = MANIFEST_PATH): CiImage[] => parseManifest(readFileSync(path, "utf8"));
 /** The ref the rest of the repository pins: the upstream tag and its digest. */
 export const pinnedRef = (image: CiImage): string => `${image.upstream}@${image.digest}`;
-/** The ref the Dockerfile FROM lines and tests use inside CI: no registry involved, so nothing can pull it again. */
-export const localAlias = (image: CiImage): string => `rovara-ci/${image.name}:${image.digest.slice("sha256:".length, "sha256:".length + 12)}`;
+/**
+ * The ref the Dockerfile FROM lines and tests use inside CI: no registry involved, so nothing can pull it again. It lives under `localhost/`, which no public registry serves
+ * (a bare `rovara-ci/<name>` would resolve to Docker Hub, where someone else could publish it).
+ */
+export const localAlias = (image: CiImage): string => `localhost/rovara-ci/${image.name}:${image.digest.slice("sha256:".length, "sha256:".length + 12)}`;
 /** The environment variable that hands the alias to the tests (tests/support/ci-images.ts reads it). */
 export const aliasEnvName = (name: string): string => `ROVARA_CI_IMAGE_${name.toUpperCase().replace(/-/g, "_")}`;
 /** The mirror copy of an image by digest. GHCR names are lower case. */
@@ -69,7 +72,7 @@ async function pullWithRetry(ref: string, deps: Deps, giveUpWhenMissing: boolean
 }
 
 /** The image under `ref` must carry the pinned digest among its repo digests (a pull by digest already checks the content; this checks what we tag). */
-async function assertDigest(ref: string, image: CiImage, deps: Deps): Promise<void> {
+export async function assertDigest(ref: string, image: CiImage, deps: Deps): Promise<void> {
   const inspected = await deps.run("docker", ["image", "inspect", "--format", "{{json .RepoDigests}}", ref]);
   let digests: unknown = [];
   try { digests = JSON.parse(inspected.output.trim()); } catch { /* handled below */ }
@@ -139,17 +142,43 @@ export async function mirrorImage(image: CiImage, owner: string, deps: Deps): Pr
 
 /**
  * The Dockerfile with every FROM of a pinned image pointed at its local alias, so `docker build` finds the base in the daemon and pulls nothing. Every FROM line must name
- * a pinned image; anything else is refused, so a base that is not mirrored cannot slip in.
+ * a pinned image; anything else is refused, so a base that is not mirrored cannot slip in. FROM is matched without regard to case, after any leading whitespace, and with LF or
+ * CRLF line endings (each line keeps its own). `COPY/ADD --from=` and `RUN --mount=...,from=` may name only a build stage, never an image (anything with a `/` or `:`, or a name that
+ * is not an earlier stage), because the builder would pull that image.
  */
 export function rewriteDockerfile(text: string, images: CiImage[]): string {
   let rewritten = 0;
-  const lines = text.split("\n").map((line) => {
-    const from = /^(FROM\s+(?:--\S+\s+)*)(\S+)(.*)$/.exec(line);
-    if (!from) return line;
-    const image = images.find((candidate) => from[2] === pinnedRef(candidate));
-    if (!image) throw new Error(`the Dockerfile line "${line}" does not name a pinned CI image`);
-    rewritten += 1;
-    return `${from[1]}${localAlias(image)}${from[3]}`;
+  const stages = new Set<string>();
+  let stageIndex = 0;
+  const lines = text.split("\n").map((raw) => {
+    const cr = raw.endsWith("\r") ? "\r" : "";
+    const line = cr === "" ? raw : raw.slice(0, -1);
+    const from = /^(\s*FROM\s+(?:--\S+\s+)*)(\S+)(.*)$/i.exec(line);
+    if (from) {
+      const image = images.find((candidate) => from[2] === pinnedRef(candidate));
+      if (!image) throw new Error(`the Dockerfile line "${line.trim()}" does not name a pinned CI image`);
+      rewritten += 1;
+      stages.add(String(stageIndex));
+      stageIndex += 1;
+      const alias = /^\s+AS\s+(\S+)/i.exec(from[3]!);
+      if (alias) stages.add(alias[1]!.toLowerCase());
+      return `${from[1]}${localAlias(image)}${from[3]}${cr}`;
+    }
+    const options = /^\s*(COPY|ADD|RUN)\s+((?:--\S+\s+)*)/i.exec(line);
+    if (options) {
+      const sources: string[] = [];
+      for (const option of options[2]!.split(/\s+/).filter(Boolean)) {
+        if (/^--from=/i.test(option) && options[1]!.toUpperCase() !== "RUN") sources.push(option.slice("--from=".length));
+        if (/^--mount=/i.test(option) && options[1]!.toUpperCase() === "RUN") {
+          for (const part of option.slice("--mount=".length).split(",")) if (/^from=/i.test(part)) sources.push(part.slice("from=".length));
+        }
+      }
+      for (const source of sources) {
+        const name = source.replace(/^["']|["']$/g, "");
+        if (/[/:]/.test(name) || !stages.has(name.toLowerCase())) throw new Error(`the Dockerfile line "${line.trim()}" takes files from "${name}", which is not an earlier build stage (an image would be pulled)`);
+      }
+    }
+    return raw;
   });
   if (rewritten === 0) throw new Error("the Dockerfile has no FROM line to rewrite");
   return lines.join("\n");
@@ -203,13 +232,22 @@ async function main(argv: string[]): Promise<number> {
     for (const image of select(all, rest)) await mirrorImage(image, owner, deps);
     return 0;
   }
+  if (command === "verify") {
+    // Before `docker build`: each local alias must exist and carry the pinned digest, or the build would pull (or build on) something else.
+    const deps = realDeps();
+    for (const image of select(all, rest)) {
+      await assertDigest(localAlias(image), image, deps);
+      deps.log(`${image.name}: ${localAlias(image)} carries ${image.digest}`);
+    }
+    return 0;
+  }
   if (command === "dockerfile") {
     const [from, to] = rest;
     if (!from || !to) throw new Error("usage: ci-images.ts dockerfile <in> <out>");
     writeFileSync(to, rewriteDockerfile(readFileSync(from, "utf8"), all));
     return 0;
   }
-  throw new Error("usage: ci-images.ts pull [--github-env] [--owner=x] [name...] | mirror [--owner=x] [name...] | dockerfile <in> <out>");
+  throw new Error("usage: ci-images.ts pull [--github-env] [--owner=x] [name...] | mirror [--owner=x] [name...] | verify [name...] | dockerfile <in> <out>");
 }
 
 if (process.argv[1]?.endsWith("ci-images.ts")) {

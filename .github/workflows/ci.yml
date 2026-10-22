@@ -8,6 +8,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
+# Read-only by default; a job that needs more says so itself (linux-runtime reads packages, live-aws mints an OIDC token).
+permissions:
+  contents: read
+
 # Pushing to a pull request again supersedes its run in progress. A manual run is never cancelled.
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
@@ -163,6 +167,7 @@ jobs:
       # The Dockerfile's FROM lines name the pinned upstream image; the build uses a copy whose FROM lines name the local alias of the very same digest, so it pulls nothing.
       - name: Build the executor image
         run: |
+          node scripts/ci-images.ts verify node-build
           node scripts/ci-images.ts dockerfile environments/e2e-executor/Dockerfile "$RUNNER_TEMP/e2e-executor.Dockerfile"
           docker build -f "$RUNNER_TEMP/e2e-executor.Dockerfile" -t rovara-e2e-executor:ci .
       - run: npm ci
