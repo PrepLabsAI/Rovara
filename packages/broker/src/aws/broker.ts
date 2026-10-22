@@ -7492,6 +7492,7 @@ async function verifyWorkflowE2EEvidence(
     // M1.3 Task 3.7b: this is the candidate's verification. A baseline round (the unchanged code, for information only) is never a candidate round, whatever the workflow's current
     // round says: its own completion path verifies it (verifyBaselineEvidence), and nothing here can turn it into a verdict on the candidate.
     if (reference?.purpose === "baseline") return unavailable("baseline-admission-is-not-a-candidate-round");
+    if (reference?.purpose === "replay") return unavailable("replay-admission-is-not-a-candidate-round");
     const evidenceRef = operation.workflowE2EEvidenceRef;
     const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
     const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
@@ -10600,6 +10601,9 @@ async function requireApplicationSelectionStillCurrent(dependencies: AwsBrokerDe
   return current;
 }
 
+/** Whether an operation's signed reference is for a round that is not the candidate's: the baseline (the unchanged code) or an audit replay (Task 4.6b). Neither can ever be a verdict on the candidate. */
+const isNonCandidateRound = (reference: { purpose?: "baseline" | "replay" | undefined } | undefined): boolean => reference?.purpose === "baseline" || reference?.purpose === "replay";
+
 const NO_COMMITTED_EXPORT_REASON = "the candidate has no committed source export, so there is no source to build and run";
 const NO_BUILD_SOURCE_REASON = "no build source manifest was exported for this candidate";
 
@@ -11385,7 +11389,8 @@ async function completedWorkflowItems(
   if (operation.kind !== "task" || operation.workflowMode === undefined || task.workflow.state !== "RUNNING") return [];
   // M1.3 Task 3.7b: the candidate's completion refuses a baseline round (the unchanged code, for information only), whatever state the workflow is in. Its result moves nothing here:
   // it settles its own record (settleBaselineRound) after the terminal result is committed.
-  if (operation.workflowE2EAdmission?.purpose === "baseline") return [];
+  // M1.4 Task 4.6b: the same for an audit replay of a verified round (no model, an operator's check): it settles its own record (settleReplayRound) and moves nothing here.
+  if (isNonCandidateRound(operation.workflowE2EAdmission)) return [];
   let next: WorkflowSnapshot;
   // The planning answer's own outcome for the task record: why it could not be read, or `null` to forget an old reason.
   let planUnreadable: DeveloperTaskRecord["planUnreadable"] | null | undefined;
@@ -11497,7 +11502,7 @@ async function completedWorkflowItems(
         let e2eQualification: { candidateDigest: string; contractDigest: string; policyDigest: string; bundleDigest: string; executionPlanDigest: string;
           roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string } | undefined;
         if (operation.workflowMode === "CHECKS" && task.workflow.e2e?.required === true) {
-          if (operation.workflowE2EAdmission?.purpose === "baseline") throw new Error("a baseline round is never a candidate's CHECKS");
+          if (isNonCandidateRound(operation.workflowE2EAdmission)) throw new Error("a baseline or replay round is never a candidate's CHECKS");
           if (task.workflow.e2e.currentGroupRunIds.length === 0 || task.workflow.e2e.currentRoundId === undefined
             || operation.workflowE2EAdmission === undefined || operation.workflowE2EEvidenceRef === undefined) {
             verificationFailure = "the current candidate-bound E2E round or its private evidence is missing";

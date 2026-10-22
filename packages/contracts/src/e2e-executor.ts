@@ -4,6 +4,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { E2EApplicationExecutionAdmissionSchema } from "./e2e-application-execution.js";
 import { E2EFormLoginSchema } from "./e2e.js";
 import { E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH } from "./e2e-model-channel.js";
+import { E2EReplayTraceSchema, E2E_REPLAY_TRACES_MAX } from "./e2e-replay.js";
 
 /** The only application an executor run may reach: the candidate app's alias on the per-run internal network. */
 export const E2E_EXECUTOR_APP_ORIGIN = "http://app:4317" as const;
@@ -76,6 +77,11 @@ export const E2EExecutorPlanSchema = z.object({
      */
     valueKey: z.string().regex(/^[a-f0-9]{64}$/),
   }).strict().optional(),
+  /**
+   * Present only for an audit replay (Task 4.6b): the recordings the read-only store serves for this group, as its admission binds them. The executor holds no model and gets no model
+   * channel; a plan with both is refused. An executor built before this field refuses the plan (the schema is strict), so a mixed fleet fails cleanly.
+   */
+  replay: z.object({ traces: z.array(E2EReplayTraceSchema).max(E2E_REPLAY_TRACES_MAX) }).strict().optional(),
 }).strict().superRefine((plan, context) => {
   if (plan.admission.admissionDigest !== plan.admissionDigest || e2eExecutorAdmissionDigest(plan.admission) !== plan.admissionDigest) {
     context.addIssue({ code: "custom", path: ["admissionDigest"], message: "executor plan admission digest does not bind its admission" });
@@ -86,6 +92,19 @@ export const E2EExecutorPlanSchema = z.object({
   if (plan.modelChannel !== undefined
     && (plan.admission.modelRoute === null || plan.admission.modelRoute.routeId !== plan.modelChannel.routeId || plan.admission.modelRoute.routeRevision !== plan.modelChannel.routeRevision)) {
     context.addIssue({ code: "custom", path: ["modelChannel"], message: "executor plan model channel is not the route its admission pins" });
+  }
+  if (plan.replay !== undefined && plan.modelChannel !== undefined) {
+    context.addIssue({ code: "custom", path: ["replay"], message: "an executor plan for a replay has no model channel" });
+  }
+  if ((plan.replay !== undefined) !== (plan.admission.replay !== undefined)) {
+    context.addIssue({ code: "custom", path: ["replay"], message: "an executor plan carries its replay recordings exactly when its admission is a replay" });
+  } else if (plan.replay !== undefined && plan.admission.replay !== undefined) {
+    // Each recording the plan serves is one the admission binds (same case, step, key and binding); the bytes themselves are held to the binding by the store, not here.
+    const bound = new Map(plan.admission.replay.traces.map((trace) => [`${trace.caseId}\u0000${trace.stepIndex}`, canonicalJson({ keyHash: trace.keyHash, binding: trace.binding })]));
+    const serves = plan.replay.traces.map((trace) => `${trace.caseId}\u0000${trace.stepIndex}`);
+    if (new Set(serves).size !== serves.length || plan.replay.traces.some((trace) => bound.get(`${trace.caseId}\u0000${trace.stepIndex}`) !== canonicalJson({ keyHash: trace.keyHash, binding: trace.binding }))) {
+      context.addIssue({ code: "custom", path: ["replay"], message: "an executor plan serves a replay recording its admission does not bind" });
+    }
   }
   if (new Set(plan.accounts.map((account) => account.profileId)).size !== plan.accounts.length) {
     context.addIssue({ code: "custom", path: ["accounts"], message: "executor plan accounts must have unique profiles" });

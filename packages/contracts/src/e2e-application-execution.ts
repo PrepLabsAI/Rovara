@@ -11,6 +11,7 @@ import { CandidateManifestSchema } from "./task-workflow.js";
 import { isSafeE2ESourcePath } from "./e2e-source.js";
 import { E2ERegisteredRuntimeSchema, type E2ERegisteredRuntime } from "./e2e-runtime-registration.js";
 import { E2EPortableApprovalBindingSchema } from "./e2e-portable.js";
+import { E2EApplicationReplaySchema } from "./e2e-replay.js";
 import { E2ERuntimeAccountRefSchema } from "./e2e-application.js";
 import type { E2EApplicationPlanSelectionInput } from "./e2e-application-execution-plan.js";
 
@@ -239,6 +240,11 @@ export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: 
    * the commit the round builds from, so a baseline admission can only be about the base.
    */
   baseline: z.object({ purpose: z.literal("baseline"), baseCommitSha: sha1, attempt: z.number().int().positive() }).strict().optional(),
+  /**
+   * M1.4 Task 4.6b: signed into an audit replay of a verified AI-navigated round (the same candidate run again with no model, for an operator's check) and absent from every other
+   * round. It names the round it replays, what that round showed and the recordings it serves, each bound by digest; the admission names no model route.
+   */
+  replay: E2EApplicationReplaySchema.optional(),
   portableProjection: E2EApplicationPortableProjectionSchema.nullable(), round: E2ERoundSchema,
   groups: z.array(E2EApplicationGroupAdmissionSchema).max(4), admissionDigest: sha256,
 }).strict().superRefine((admission, context) => {
@@ -251,6 +257,9 @@ export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: 
   }
   if (admission.baseline !== undefined && admission.baseline.baseCommitSha !== admission.candidateCommitSha) {
     context.addIssue({ code: "custom", path: ["baseline", "baseCommitSha"], message: "a baseline round builds from its base commit and nothing else" });
+  }
+  if (admission.replay !== undefined && (admission.modelRoute !== null || admission.baseline !== undefined)) {
+    context.addIssue({ code: "custom", path: ["replay"], message: "a replay round names no model route and is not a baseline" });
   }
   const portableSelection = admission.portableProjection?.selectionInput as { sourceSnapshot?: z.infer<typeof sourceSnapshotWireSchema> } | undefined;
   const wireSources = [admission.sourceSnapshot, admission.selectionInput.sourceSnapshot,
@@ -302,4 +311,9 @@ export type E2EApplicationCompilationContext = Readonly<{
    * limits for its shards, not the model-free ones. The compiler then keeps those limits, so the shard digests the admission was written with still match.
    */
   policyLimitsForModelFreeShards?: true;
+  /**
+   * Set only for an audit replay (Task 4.6b): the group runs with no model route and a read-only store of the bound recordings, whatever agent steps its scenarios have. It carries the
+   * binding of each recording (what the verified round showed for the step), never the recording itself, so the compiled files do not depend on the recordings' bytes.
+   */
+  replay?: Readonly<{ bindings: ReadonlyArray<Readonly<{ caseId: string; stepIndex: number; keyHash: string; traceSha256: string; actionCount: number }>> }>;
 }>;

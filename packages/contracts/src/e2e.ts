@@ -251,13 +251,20 @@ export const E2EWorkflowAdmissionRefSchema = z.object({
    * M1.3 Task 3.7b: a baseline round (the approved scenarios on the unchanged code, for information only) says so here, with the base commit it runs and the attempt, and the
    * admission it names signs the same. A reference without these is a candidate round's. Only an application round can be a baseline.
    */
-  purpose: z.literal("baseline").optional(), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(), attempt: positiveInt.optional(),
+  purpose: z.enum(["baseline", "replay"]).optional(), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(), attempt: positiveInt.optional(),
+  /**
+   * M1.4 Task 4.6b: an audit replay of a verified round (the same candidate run again with no model, for an operator's check) names the round it replays. A reference without a
+   * purpose is a candidate round's. Only an application round can be a replay.
+   */
+  sourceRoundId: z.string().uuid().optional(),
 }).strict().superRefine((reference, context) => {
   const baseline = reference.purpose === "baseline";
-  if (baseline !== (reference.baseCommitSha !== undefined) || baseline !== (reference.attempt !== undefined)) {
-    context.addIssue({ code: "custom", path: ["purpose"], message: "a baseline reference carries its base commit and attempt, and only a baseline reference does" });
+  const replay = reference.purpose === "replay";
+  if (baseline !== (reference.baseCommitSha !== undefined) || (baseline || replay) !== (reference.attempt !== undefined)) {
+    context.addIssue({ code: "custom", path: ["purpose"], message: "a baseline or replay reference carries its attempt (a baseline also its base commit), and only those references do" });
   }
-  if (baseline && reference.kind !== "application") context.addIssue({ code: "custom", path: ["kind"], message: "only an application round can be a baseline" });
+  if (replay !== (reference.sourceRoundId !== undefined)) context.addIssue({ code: "custom", path: ["sourceRoundId"], message: "a replay reference names the round it replays, and only a replay reference does" });
+  if ((baseline || replay) && reference.kind !== "application") context.addIssue({ code: "custom", path: ["kind"], message: "only an application round can be a baseline or a replay" });
 });
 export type E2EWorkflowAdmissionRef = z.infer<typeof E2EWorkflowAdmissionRefSchema>;
 /**
