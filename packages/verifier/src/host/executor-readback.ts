@@ -9,6 +9,7 @@ import { SINKHOLE_ORIGIN_REF } from "../application-mocks.js";
 import type { E2EActualApplicationRun, E2EActualApplicationShard } from "../application-collection.js";
 import { compareE2EApplicationPublicList } from "../application-identity.js";
 import { parseE2EApplicationReport } from "../application-report-schema.js";
+import type { E2EAgentModelEvidence } from "../application-agent-result.js";
 import { E2EApplicationAssertionAssetBindingSchema, E2EApplicationCaseCaptureSchema, E2EApplicationObservationBindingSchema, e2eApplicationAggregateRunUsage,
   normalizeE2EApplicationPublicList, type E2EApplicationAssertionAssetBinding, type E2EApplicationObservationBinding, type E2EApplicationProofBytes } from "../application-result-adapter.js";
 import { expectedE2EApplicationReporterDigest } from "../application-runtime-assets.js";
@@ -331,7 +332,12 @@ export type DockerCollectionInputs = Readonly<{ environment: { ci: boolean; trus
   usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
   expectedSupervisorReceiptRefs: readonly E2EApplicationEvidenceRef[]; ownedResourceInventoryDigest: string;
   observationBindings: readonly E2EApplicationObservationBinding[]; assertionAssets: readonly E2EApplicationAssertionAssetBinding[];
-  governedModelReceipts: readonly never[]; ownedClosedAt: string }>;
+  governedModelReceipts: readonly never[]; ownedClosedAt: string;
+  /**
+   * The worker's receipts, the executor's action ledgers and the run's value key, for a group that has an agent step (Task 4.4a), added by the host from its closed model channel; absent
+   * for any other group, so its evidence is what it was before. `governedModelReceipts` stays empty: the M1-era projection rows are not how an agent step is read.
+   */
+  agentModel?: E2EAgentModelEvidence }>;
 
 /**
  * The collector's protected inputs for a finished run: the bindings the ledger persisted, the cleanup receipt the host will

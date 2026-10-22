@@ -14,6 +14,7 @@ const run = async (...args: Parameters<typeof runAgentCase>) => { const result =
 
 const agentStepObservation = (out: string) => observations(out).filter((item) => item.kind === "step-observation").map((item) => JSON.parse(item.content!) as { kind: string; agent?: { verdict: string; stopCode: string | null; download: string } })
   .find((item) => item.kind === "agent");
+const caseCaptures = (out: string) => observations(out).filter((item) => item.kind === "case-capture").map((item) => JSON.parse(item.content!) as { terminal: { kind: string }; assertions: Array<{ outcome: string; reason: string }>; steps: Array<{ kind: string; outcome: string }> });
 const caseCapture = (out: string) => observations(out).filter((item) => item.kind === "case-capture").map((item) => JSON.parse(item.content!) as { assertions: Array<{ outcome: string; reason: string }>; steps: Array<{ kind: string; outcome: string }> })[0];
 
 describe.runIf(agentRunnable)("the agent step end to end, on this machine", () => {
@@ -90,11 +91,16 @@ describe.runIf(agentRunnable)("the agent step end to end, on this machine", () =
     expect(downloadsOf(r.out)).toEqual([]);
   }, 300_000);
 
-  it("a step that failed never lets the case go on to pass: with an assertion the page would satisfy anyway (no csv), the case still fails and records no capture frame", async () => {
+  it("a step that failed never lets the case go on to pass: with an assertion the page would satisfy anyway (no csv), the case still fails; its capture says the step stopped and observes nothing", async () => {
     const r = await run({ script: [{ kind: "fail", message: "provider down" }], plan: { assertions: [{ kind: "visible", testId: "identity", equals: true }] } });
     expect(r.result.exitCode, executorLog(r.out)).toBe(1);
     expect(caseStatuses(r.out, r.fixture)).toEqual({ "agent-export": "failed" });
-    expect(observations(r.out).filter((item) => item.kind === "case-capture")).toEqual([]);
+    // Task 4.4a: the case's capture is written (the collector then names why the case is UNKNOWN), with the stopped step as it ended and every assertion unavailable: the page, which the
+    // step left half-way, is not observed, so the satisfiable `visible` assertion is not evaluated.
+    const captures = caseCaptures(r.out);
+    expect(captures).toHaveLength(1);
+    expect(captures[0]).toMatchObject({ terminal: { kind: "unavailable" }, steps: [{ kind: "navigate", outcome: "completed" }, { kind: "agent", outcome: "unavailable" }],
+      assertions: [{ outcome: "unavailable", reason: "agent-step-did-not-conclude" }] });
     expect(r.readLedger()!.steps[0]).toMatchObject({ verdict: "failed", stopCode: "MODEL_PROVIDER_FAILED" });
   }, 300_000);
 

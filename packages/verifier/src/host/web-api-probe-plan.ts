@@ -163,7 +163,12 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
    * Plans a web group whose scenarios may have `agent` steps (Task 4.3a): the runtime declares the step, and the policy, the compilation context, the run binding and the admission
    * all pin this route, as the broker's admission does for a project that approved AI navigation. Pair it with `accountScenarios` for the scenario that has the step.
    */
-  modelRoute?: { routeId: string; routeRevision: string } }): WebApiProbePlan {
+  modelRoute?: { routeId: string; routeRevision: string };
+  /**
+   * The policy limits of a route-pinned plan, as the broker derives them from the route's budgets (`e2eAgentRoutePolicyLimits`, Task 4.2): a round that makes model calls is held to
+   * them, so a plan whose collector must accept model usage needs them. Default: the small model-free ones this builder always used.
+   */
+  routeLimits?: E2EPolicy["limits"] }): WebApiProbePlan {
   const kind = options.probe.startsWith("web-") ? "web" as const : "api" as const;
   const inferred = options.inferred === true;
   if (inferred && (options.recipeBuild || options.recipeStart || options.mock)) throw new Error("an inferred-recipe app has no recipe to edit and no mock to approve");
@@ -246,7 +251,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     targets: withE2EAnonymousTargets(setupProposal.targets, discovery.anonymous), defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: options.modelRoute?.routeRevision ?? null,
     // The real web engine reports screenshot and video capability, and the compiler binds the launch descriptor to the capture policy.
     capture: { screenshots: kind === "web", traces: false, video: kind === "web", downloads: false },
-    limits: { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 60_000, caseTimeoutMs: 120_000,
+    limits: options.routeLimits ?? { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 60_000, caseTimeoutMs: 120_000,
       maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
   const selectionInput = { candidateDigest: candidate.digest, expectedCandidate: candidate, sourceSnapshot: snapshot, planDigest, policy, scenarios,
     selectedTargetIds: targets.map((item) => item.targetId), intent, intentDigest: hash(canonicalJson(intent)), setupProposal, setupApproval, applicationApprovalBinding,

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH, E2EExecutorPlanSchema, e2eModelRouteRevision, generateE2EAgentValueKey, readE2EApplicationProjectContract,
   type E2EExecutorPlan, type E2EScenario } from "@agentx/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
+import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { createWebApiProbePlan, type WebApiProbePlan } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 
 /**
@@ -18,6 +19,8 @@ export const ORDERS_M14_ROOT = join(import.meta.dirname, "../fixtures/orders-web
 export const ORDERS_M14_APP_FILES = ["package.json", "server.mjs", "scripts", "public", "fixtures", "inventory", "e2e"];
 export const AGENT_GOAL = "Export the orders as a CSV file";
 export const SCRIPTED_ROUTE = Object.freeze({ routeId: "rovara-scripted/v1", routeRevision: e2eModelRouteRevision(scriptedE2ERouteDefinition()) });
+/** The limits a project that pins this route runs under: the broker derives them from the route's budgets, so the collector accepts the model calls the route allows (Task 4.4a). */
+export const SCRIPTED_ROUTE_LIMITS = e2eAgentRoutePolicyLimits(scriptedE2ERouteDefinition().budgets);
 export const sha256Hex = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
 /** What the owner's CSV holds when the app's inventory service is not reachable (a run with no mock): the page and the export both read an order's stock as unavailable. */
@@ -44,7 +47,7 @@ export type AgentPlanOptions = {
 /** A plan with one web case: open the page, an agent step with `goal`, and (by default) the CSV assertion on the owner's orders export. */
 export function createOrdersM14AgentPlan(options: AgentPlanOptions = {}): WebApiProbePlan {
   const goal = options.goal ?? AGENT_GOAL;
-  return createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot: ORDERS_M14_ROOT, modelRoute: SCRIPTED_ROUTE, healthTimeoutMs: 20_000, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }), ...(options.mock === true ? { mock: true } : {}), ...(options.taskId === undefined ? {} : { taskId: options.taskId }),
+  return createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot: ORDERS_M14_ROOT, modelRoute: SCRIPTED_ROUTE, routeLimits: SCRIPTED_ROUTE_LIMITS, healthTimeoutMs: 20_000, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }), ...(options.mock === true ? { mock: true } : {}), ...(options.taskId === undefined ? {} : { taskId: options.taskId }),
     accountScenarios: [{ accountProfileId: "orders-owner", scenario: (targetId: string): E2EScenario => ({ scenarioId: "agent-export", requirementId: "orders-export", requestedTargetIds: [targetId], required: true,
       accountProfileId: "orders-owner", minimumEvidence: "runtime", requiredRealComponentIds: [],
       steps: [...(options.before ?? [{ kind: "navigate" as const, path: "/" }]), { kind: "agent" as const, goal, maxActions: options.maxActions ?? 4 }, ...(options.after ?? [])],

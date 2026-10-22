@@ -36,7 +36,7 @@ export function collectE2EApplicationRun(input: { actual: E2EActualApplicationRu
   usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
   expectedSupervisorReceiptRefs: readonly E2EApplicationEvidenceRef[]; ownedResourceInventoryDigest: string;
   observationBindings: Parameters<typeof collect>[0]["observationBindings"]; assertionAssets: Parameters<typeof collect>[0]["assertionAssets"];
-  governedModelReceipts: Parameters<typeof collect>[0]["governedModelReceipts"]; ownedClosedAt: string | null }): E2EApplicationCollectionResult {
+  governedModelReceipts: Parameters<typeof collect>[0]["governedModelReceipts"]; agentModel?: Parameters<typeof collect>[0]["agentModel"]; ownedClosedAt: string | null }): E2EApplicationCollectionResult {
   try {
     const binding = E2ERunBindingSchema.parse(input.binding); const round = E2ERoundSchema.parse(input.round);
     const toolchain = ProjectSetupRunnerToolchainSchema.parse(input.actual.runnerToolchain);
@@ -93,7 +93,7 @@ export function collectE2EApplicationRun(input: { actual: E2EActualApplicationRu
     return collect({ actual: collection, compiled: input.compiled, binding, round, environment: input.environment, usage: input.usage, limits: input.limits,
       expectedSupervisorReceiptRefs: input.expectedSupervisorReceiptRefs, ownedResourceInventoryDigest: input.ownedResourceInventoryDigest,
       observationBindings: input.observationBindings, assertionAssets: input.assertionAssets, governedModelReceipts: input.governedModelReceipts,
-      ownedClosedAt: input.ownedClosedAt });
+      ...(input.agentModel == null ? {} : { agentModel: input.agentModel }), ownedClosedAt: input.ownedClosedAt });
   } catch (error) {
     return { collection: null, oracle: null, qualification: null, unavailableReason: error instanceof Error ? error.message : "application readback unavailable" };
   }

@@ -227,7 +227,8 @@ export type WorkflowE2EModelChannelDependencies = Readonly<{
   socketOwner?: { uid: number; gid: number };
   /**
    * Told, when a group's channel closes, how many calls it served (counts only; never a prompt or an answer), and the run's value key (Ruling DB-6): the HMAC key the executor's
-   * action ledger was written under. The key is operator evidence for the checks that read that ledger (Task 4.4); it is not logged and not in any file the executor writes.
+   * action ledger was written under. The key is a verdict input for the checks that read that ledger (Task 4.4a): it goes to private evidence with the receipts, is not logged and is
+   * not in any file the executor writes.
    */
   onClosed?(summary: { groupRunId: string; receipts: number; outcomes: Record<string, number>; valueKey: string }): void;
 }>;
@@ -352,13 +353,15 @@ export async function executeWorkflowE2EApplicationChecks(input: {
           ...(dependencies.assertSharedConfig === undefined ? {} : { assertSharedConfig: dependencies.assertSharedConfig }), ...(dependencies.socketOwner === undefined ? {} : { socketOwner: dependencies.socketOwner }) });
         return { async close() {
           const summary = await session.close();
+          const transcripts = evidence.transcripts();
           const outcomes: Record<string, number> = {};
           for (const receipt of summary.receipts) outcomes[receipt.outcome] = (outcomes[receipt.outcome] ?? 0) + 1;
           // Counts only, so the line can carry no prompt, answer or credential.
           console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_model_channel_closed", groupRunId, receipts: summary.receipts.length, outcomes,
             droppedRequests: summary.droppedRequests, unscopedRequests: summary.unscopedRequests, overrun: summary.overrun, evidenceErrors: summary.evidenceErrors }));
           dependencies.onClosed?.({ groupRunId, receipts: summary.receipts.length, outcomes, valueKey: open.valueKey });
-          return summary;
+          // What the host reads into the group's evidence (Task 4.4a): the receipts and the channel's own tally, the transcripts (for their digests only), the run's key and the route served.
+          return { ...summary, transcripts, valueKey: open.valueKey, definition: session.definition };
         } };
       } } };
     };

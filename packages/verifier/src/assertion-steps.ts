@@ -28,7 +28,8 @@ class ApprovedAssertionMismatch extends Error {
 const isMismatch = (error: unknown): boolean => error instanceof ApprovedAssertionMismatch
   || (error instanceof Error && error.cause instanceof ApprovedAssertionMismatch);
 
-export type CaseOutcome = Readonly<{ failedIndex: number; unavailableIndex: number }>;
+/** `agentStopped` is set when an agent step did not conclude, so no assertion was observed (Task 4.4a); the case then ends in an error all the same. */
+export type CaseOutcome = Readonly<{ failedIndex: number; unavailableIndex: number; agentStopped?: Readonly<{ stopCode: string | null }> | null }>;
 export type ChainResult = Readonly<{ outcome: CaseOutcome | null; error: unknown }>;
 
 /**

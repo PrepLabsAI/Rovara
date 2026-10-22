@@ -234,8 +234,11 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
   const steps: E2EApplicationCaseCapture["steps"] = [];
   /** Set only when an agent step was the last step that can trigger the CSV download: what came of it. */
   let agentDownloadStatus: WebAgentDownloadStatus | null = null;
+  /** Set when an agent step did not conclude: the case stops there (Task 4.4a), with the step recorded as it ended and no assertion observed on a page it left half-way. */
+  let agentStopCode: string | null | undefined;
   let pendingChooser: { chooser: FileChooser; page: Page; triggerIndex: number; triggerActionDigest: string; triggerActionId: string } | null = null;
   for (let stepIndex = 0; stepIndex < input.scenario.steps.length; stepIndex += 1) {
+    if (agentStopCode !== undefined) break;
     const step = input.scenario.steps[stepIndex]!;
     const signal = input.signal;
     if (signal.aborted) throw new Error("application case was cancelled before its next admitted web step");
@@ -336,8 +339,18 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
       } else {
         outcome = await runAgent();
       }
-      // A step that did not conclude stops the case here: its facts are in the ledger and the report, and no assertion is observed on a page it left half-way.
-      if (outcome.verdict === "failed") throw new Error(`the web agent step did not conclude (${outcome.stopCode ?? "unknown"})`);
+      // A step that did not conclude stops the case here: its facts are in the ledger and the report, and no assertion is observed on a page it left half-way. The step is recorded as
+      // it ended, so the case's capture can name it and the collector can say why the case is UNKNOWN; the case still fails (the caller throws once the capture is written).
+      if (outcome.verdict === "failed") {
+        const failedObservationId = randomUUID();
+        const failedRef = await recordJson(input.ports, input.caseId, "step-observation", { schemaVersion: "e2e-application-step-observation/v1",
+          caseId: input.caseId, index: stepIndex, declaredStepIndex: stepIndex, kind: step.kind, observationId: failedObservationId, at: utc(), outcome: "unavailable",
+          agent: { verdict: outcome.verdict, stopCode: outcome.stopCode, download: "not-applicable" } }, signal);
+        steps.push({ index: stepIndex, declaredStepIndex: stepIndex, kind: step.kind, actionDigest: sha(canonicalJson(step)), observationId: failedObservationId, at: utc(),
+          outcome: "unavailable", evidenceRefs: [failedRef], agentOperationRefs: [] });
+        agentStopCode = outcome.stopCode;
+        continue;
+      }
       if (captured) download = captured;
       if (status !== null) agentDownloadStatus = status;
       const observationId = randomUUID();
@@ -418,8 +431,8 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
     if (actionError !== undefined) throw new Error("web action failed with a non-error rejection", { cause: actionError });
   }
   if (pendingChooser !== null) throw new Error("owned file chooser was opened without its exact following approved fixture selection");
-  if (csvAssertions.length > 0 && !download && agentDownloadStatus === null) throw new Error("CSV assertion has no exact preceding admitted download trigger");
-  return { download, steps, agentDownloadStatus };
+  if (agentStopCode === undefined && csvAssertions.length > 0 && !download && agentDownloadStatus === null) throw new Error("CSV assertion has no exact preceding admitted download trigger");
+  return { download, steps, agentDownloadStatus, agentStopped: agentStopCode !== undefined ? { stopCode: agentStopCode } : null };
 }
 
 async function observeWebAssertions(input: { caseId: string; scenario: E2EScenario; fixtures: WebFixtures; engine: EngineHandle;
@@ -428,13 +441,15 @@ async function observeWebAssertions(input: { caseId: string; scenario: E2EScenar
   download: { suggestedFilename: string; bytes: Uint8Array; contentRef: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>> } | null;
   /** Why an agent step that was to cause the download left none to use; absent for any other step. */
   agentDownloadStatus?: WebAgentDownloadStatus | null;
+  /** An agent step did not conclude: no assertion is observed, and each is recorded as unavailable for that reason. */
+  agentStopped?: boolean;
   signal: AbortSignal }): Promise<{ assertions: E2EApplicationCaseCapture["assertions"]; refs: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>>[] }> {
   const surface = surfaceOf(input.engine);
   if (!surface) throw new Error("installed web engine did not expose its own live Playwright surface");
   const page = surface.page();
   const assertions: E2EApplicationCaseCapture["assertions"] = [];
   const refs: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>>[] = [];
-  let stoppedReason: string | null = null;
+  let stoppedReason: string | null = input.agentStopped === true ? "agent-step-did-not-conclude" : null;
   for (let index = 0; index < input.scenario.assertions.length; index += 1) {
     if (input.signal.aborted) throw new Error("application assertion observation was cancelled");
     const assertion = input.scenario.assertions[index]!;
@@ -551,7 +566,8 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
         }
         const stepResult = await executeWebSteps({ caseId, scenario, fixtures, ports, page, signal: operationSignal, deadlineAt: caseDeadline, origin });
         const assertionResult = await observeWebAssertions({ caseId, scenario, fixtures, engine: liveEngine, ports, plan,
-          binding: protectedObservation.binding, download: stepResult.download, agentDownloadStatus: stepResult.agentDownloadStatus, signal: operationSignal });
+          binding: protectedObservation.binding, download: stepResult.download, agentDownloadStatus: stepResult.agentDownloadStatus,
+          agentStopped: stepResult.agentStopped !== null, signal: operationSignal });
         const failedIndex = assertionResult.assertions.findIndex((item) => item.outcome === "failed");
         const unavailableIndex = assertionResult.assertions.findIndex((item) => item.outcome === "unavailable");
         const at = utc();
@@ -568,11 +584,13 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
           upstreamRunId: protectedObservation.upstreamRunId, observedAt: at, steps: stepResult.steps,
           assertions: assertionResult.assertions, artifacts, terminal });
         await recordJson(ports, caseId, "case-capture", capture, operationSignal);
-        return { failedIndex, unavailableIndex };
+        return { failedIndex, unavailableIndex, agentStopped: stepResult.agentStopped };
         });
         if (chain.outcome === null) throw chain.error;
-        const { failedIndex, unavailableIndex } = chain.outcome;
+        const { failedIndex, unavailableIndex, agentStopped } = chain.outcome;
         captureOutcome = failedIndex >= 0 ? "failed" : unavailableIndex >= 0 ? "unknown" : "passed";
+        // The capture of a case whose agent step did not conclude is written (so the collector can name why the case is UNKNOWN), and the case fails all the same.
+        if (agentStopped != null) throw new Error(`the web agent step did not conclude (${agentStopped.stopCode ?? "unknown"})`);
         if (failedIndex >= 0) throw new Error(`web assertion ${failedIndex} failed against the actual owned browser observation`);
         if (unavailableIndex >= 0) throw new Error(`web assertion ${unavailableIndex} is unavailable on the installed fixed browser surface`);
       } catch (error) {

@@ -13,6 +13,7 @@ import { E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName }
 import { runE2EExecutorSerially as runE2EExecutor } from "./executor-run-lock.js";
 import { AGENT_GOAL, SCRIPTED_ROUTE, createOrdersM14AgentPlan, sha256Hex, startOrdersM14App, withModelChannel, type AgentPlanOptions, type OrdersM14AppProcess } from "./orders-m14-agent.js";
 import type { WebApiProbePlan } from "../../packages/verifier/src/host/web-api-probe-plan.js";
+import type { E2EModelChannelClosed } from "../../packages/verifier/src/host/agent-model-evidence.js";
 
 /**
  * The agent step end to end on this machine (Task 4.3b): the real executor, the pinned CLI, a real Chromium and the m14 orders app, with the worker's real model proxy on a unix socket
@@ -25,6 +26,8 @@ const sandboxed = async (request: { runId: string; groupId: string }) => ({ sche
 
 export type AgentRun = {
   fixture: WebApiProbePlan; out: string; result: { exitCode: 0 | 1 | 2; reason: string | null }; receipts: E2EModelReceipt[]; valueKey: string; caseId: string;
+  /** What the worker's channel returns when it closes (what the Docker host reads into the group's evidence): the summary, the transcripts it kept, the key and the route served. */
+  closed: E2EModelChannelClosed;
   /** The size in bytes of each model request's call, as the worker saw it. */
   requestBytes: number[];
   /** The size in bytes of the newest screen text in each request: the observation the model acted on. */
@@ -57,8 +60,8 @@ export async function runAgentCase(options: { script: readonly ScriptedTurn[]; p
     inspectChromiumSandbox: sandboxed, chromiumSandboxSettleMs: 0, modelSocketPath: session.socketPath });
   const summary = await session.close();
   const caseId = fixture.compiled.expectedCases[0]!.caseId;
-  void evidence;
-  return { fixture, out, result, receipts: summary.receipts, valueKey, caseId, requestBytes, screenBytes, app,
+  const closed: E2EModelChannelClosed = { ...summary, transcripts: evidence.transcripts(), valueKey, definition: session.definition };
+  return { fixture, out, result, receipts: summary.receipts, closed, valueKey, caseId, requestBytes, screenBytes, app,
     readLedger() {
       const path = join(out, E2E_AGENT_EVIDENCE_DIR, agentCaseDirectoryName(caseId), E2E_AGENT_LEDGER_FILE);
       return existsSync(path) ? E2EAgentActionLedgerSchema.parse(JSON.parse(readFileSync(path, "utf8"))) : null;

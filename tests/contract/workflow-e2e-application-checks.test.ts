@@ -12,6 +12,7 @@ import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e
 import { DIAGNOSTICS_NOTICE, createEvidenceBudget } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES } from "@agentx/contracts";
 import type { CandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
+import type { E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
@@ -558,6 +559,47 @@ describe("workflow E2E application rounds: the model channel", () => {
     expect(planKey).toMatch(/^[a-f0-9]{64}$/);
     expect(closed).toEqual([{ groupRunId: s.runId, receipts: 1, outcomes: { ok: 1 }, valueKey: planKey }]);
     expect(existsSync(join(s.runRoot, s.runId))).toBe(false);
+  });
+
+  it("hands the model evidence the host read to the collector and uploads it with the group's verdict inputs (receipts, route, the run's key, digests), and logs none of it (Task 4.4a)", async () => {
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    let planKey = "";
+    try {
+      const s = await setup({ route: SCRIPTED, agent: true });
+      s.fake.onExecutor = async (outDir) => {
+        planKey = (JSON.parse(readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8")) as { modelChannel: { valueKey: string } }).modelChannel.valueKey;
+        const client = createE2EModelChannelClient({ socketPath: join(s.runRoot, s.runId, "model", "model.sock"), runId: s.runId });
+        const caseId = s.fixture.compiled.expectedCases[0]!.caseId;
+        await client.beginStep({ caseId, stepIndex: 0 });
+        await client.generate({ caseId, stepIndex: 0, callIndex: 0, call: { prompt: [{ role: "system", content: "You drive a web application." }, { role: "user", content: [{ type: "text", text: "Goal: Export the orders as a CSV file\n#n1 button \"Download orders\"" }] }],
+          tools: [{ type: "function", name: "complete_step", inputSchema: { type: "object", properties: { status: { type: "string" }, summary: { type: "string" } } } }] } });
+        await client.endStep({ caseId, stepIndex: 0 });
+        s.okOutput(outDir);
+      };
+      await s.run({ modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment, policyScope: "standard",
+        invoke: async () => ({ servedModelId: "rovara-scripted-v1", content: [{ type: "tool-call", toolCallId: "t1", toolName: "complete_step", input: JSON.stringify({ status: "passed", summary: "ok" }) }],
+          finishReason: { unified: "tool-calls", raw: "scripted" }, usage: { inputTokens: 300, outputTokens: 20 } }) } });
+      const collected = s.collect.mock.calls[0]![0] as { agentModel: E2EAgentModelEvidence; governedModelReceipts: unknown[] };
+      expect(collected.governedModelReceipts ?? []).toEqual([]);
+      expect(collected.agentModel).toMatchObject({ schemaVersion: "rovara-agent-model-evidence/v1", valueKey: planKey, route: scriptedE2ERouteDefinition(),
+        channel: { droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 0 }, ledgers: [] });
+      expect(collected.agentModel.receipts).toHaveLength(1);
+      expect(collected.agentModel.receipts[0]).toMatchObject({ runId: s.runId, outcome: "ok", routeId: SCRIPTED.routeId, routeRevision: SCRIPTED.routeRevision });
+      expect(collected.agentModel.transcriptDigests).toEqual([{ receiptId: collected.agentModel.receipts[0]!.receiptId, promptSha256: collected.agentModel.receipts[0]!.promptSha256,
+        responseSha256: collected.agentModel.receipts[0]!.responseSha256, omitted: null }]);
+      // It is uploaded as part of the verdict inputs, exactly as the collector saw it.
+      const uploaded = evidenceOf(s.saved, s.runId).groupRun as { actual: { collectionInputs: { agentModel: unknown } } };
+      expect(uploaded.actual.collectionInputs.agentModel).toEqual(JSON.parse(JSON.stringify(collected.agentModel)));
+      // No worker log line carries the key, a receipt id or a word of the prompt.
+      for (const line of lines) {
+        expect(line).not.toContain(planKey);
+        expect(line).not.toContain(collected.agentModel.receipts[0]!.receiptId);
+        expect(line).not.toContain("Download orders");
+      }
+      expect(lines.some((line) => line.includes("workflow.e2e_model_channel_closed"))).toBe(true);
+    } finally { log.mockRestore(); }
+    expect(planKey).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("closes the channel when the executor throws, and the socket is gone", async () => {

@@ -9,6 +9,7 @@ import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
 import { e2eApplicationGroupUsesModel, validateE2EApplicationExecutionAdmission } from "../application-scenarios.js";
 import { createCredentialRedactor } from "../executor/redact.js";
 import { executorContainerArgs } from "./executor-container.js";
+import { buildE2EAgentModelEvidence, type E2EModelChannelClosed } from "./agent-model-evidence.js";
 import { verifyExecutorSeccompProfile } from "./executor-seccomp.js";
 import { openRegularFile, readRegularFileTail } from "./regular-file.js";
 import { SINKHOLE_ORIGIN_REF, planApplicationOrigins, mockOriginUrl } from "../application-mocks.js";
@@ -126,7 +127,7 @@ export type DockerApplicationModelChannel = Readonly<{
    * `valueKey` is the run's HMAC key for the agent ledger's digests (Ruling DB-6): the host makes it per run, writes it into the executor's plan, and gives the same key here so the
    * worker, which owns the receipts, keeps it with them for Task 4.4. It is never put in an argument, an environment variable or a log line.
    */
-  open(input: { socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; signal: AbortSignal; valueKey: string }): Promise<{ close(): Promise<unknown> }>;
+  open(input: { socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; signal: AbortSignal; valueKey: string }): Promise<{ close(): Promise<E2EModelChannelClosed> }>;
 }>;
 
 export type DockerApplicationHostDeps = Readonly<{
@@ -319,6 +320,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     appLogTail: "", buildLogTail: "", executorLogTail: "", buildResult: null as DockerBuildResult | null, redactor: createCredentialRedactor([]), createdAt: 0,
     /** The run's account credentials, which the model channel's scan is given and nothing else is. */
     credentials: { passwords: [] as string[], emails: [] as string[] }, modelChannel: null as null | { close(): Promise<unknown> }, modelChannelClosing: null as Promise<void> | null,
+    /** What the model channel returned when it closed; `undefined` until it did, and also after a close that threw (which `buildE2EAgentModelEvidence` reads as a fault). */
+    modelChannelClosed: undefined as unknown,
     /** The run's agent value key: made at allocation for a group that has an agent step, null for any other. */
     modelValueKey: null as string | null };
   const redact = (text: string) => tailOf(state.redactor.text(redactText(text)), MAX_TAIL_BYTES);
@@ -362,7 +365,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   function closeModelChannel(): Promise<void> {
     const channel = state.modelChannel;
     if (channel === null) return Promise.resolve();
-    state.modelChannelClosing ??= (async () => { try { await channel.close(); } catch { /* the socket directory goes with the workspace */ } })();
+    state.modelChannelClosing ??= (async () => { try { state.modelChannelClosed = await channel.close(); } catch { /* the socket directory goes with the workspace; the evidence then says the channel failed */ } })();
     return state.modelChannelClosing;
   }
 
@@ -792,7 +795,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
 
   async function readCollectionInputs(signal: AbortSignal): Promise<DockerCollectionInputs> {
     const { snapshot, cleanup } = settledRun(signal, "collection input readback");
-    return (deps.assembleCollectionInputs ?? assembleDockerCollectionInputs)({ snapshot, binding, cleanup });
+    const inputs = (deps.assembleCollectionInputs ?? assembleDockerCollectionInputs)({ snapshot, binding, cleanup });
+    // A group with an agent step carries its model evidence (the worker's receipts, the executor's ledgers, the run's key) beside the other protected inputs; any other group's are as they were.
+    return usesModel ? Object.freeze({ ...inputs, agentModel: buildE2EAgentModelEvidence({ closed: state.modelChannelClosed, valueKey: state.modelValueKey!, agent: snapshot.executorEvidence.agent }) }) : inputs;
   }
 
   return Object.freeze({

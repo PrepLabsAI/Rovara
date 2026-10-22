@@ -5,7 +5,10 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E2EExecutorPlanSchema } from "@agentx/contracts";
+import { E2EExecutorPlanSchema, canonicalJson, e2eModelRouteRevision } from "@agentx/contracts";
+import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
+import { E2E_AGENT_LEDGER_MAX_BYTES, type E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
+import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
 import { createDockerApplicationHost, createProcessDockerCli, dockerOwnedCleanupReceipt, dockerOwnedResourceInventory, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
 import { executorContainerArgs } from "../../packages/verifier/src/host/executor-container.js";
@@ -1437,6 +1440,115 @@ describe("docker application host: the model channel", () => {
       expect(used.closes(), how).toBe(how === "close-only" ? 0 : 1);
       expect(events.filter((event) => event === "close"), how).toHaveLength(how === "close-only" ? 0 : 1);
     }
+  });
+
+  describe("the group's model evidence (Task 4.4a)", () => {
+    const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+    const definition = scriptedE2ERouteDefinition();
+    const receiptOf = (runId: string, caseId: string, callIndex: number, over: Record<string, unknown> = {}) => ({ receiptId: `rcpt-${callIndex}`, runId, caseId, stepIndex: 0, callIndex,
+      routeId: definition.routeId, routeRevision: e2eModelRouteRevision(definition), provider: definition.provider, modelId: definition.modelId, startedAt: new Date(Date.UTC(2026, 9, 22, 10, 0, callIndex)).toISOString(),
+      inputTokens: 10, outputTokens: 2, latencyMs: 3, servedModelId: null, servedUpstream: null, promptSha256: sha(`p${callIndex}`), responseSha256: sha(`r${callIndex}`), outcome: "ok", ...over });
+    const transcriptOf = (receiptId: string, prompt: unknown, response: unknown, over: Record<string, unknown> = {}) => ({ receiptId, prompt: JSON.stringify(prompt), response: JSON.stringify(response), ...over });
+    /** What a worker's channel returns when it closes: the receipts it wrote and their transcripts, in the order they were written (not sorted). */
+    const closedOf = (s: Setup, over: Record<string, unknown> = {}) => {
+      const caseId = s.fixture.compiled.expectedCases[0]!.caseId;
+      const receipts = [receiptOf(s.runId, caseId, 1), receiptOf(s.runId, caseId, 0)];
+      return { receipts, droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 0, valueKey: "", definition, ...over,
+        transcripts: [transcriptOf("rcpt-1", { call: 1 }, { result: 1 }), transcriptOf("rcpt-0", { call: 0 }, { result: 0 })] };
+    };
+    const withLedger = (s: Setup, bytes: Uint8Array) => (outDir: string) => {
+      okOutput(s)(outDir);
+      const dir = join(outDir, "agent", agentCaseDirectoryName(s.fixture.compiled.expectedCases[0]!.caseId));
+      mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, "agent-actions.json"), bytes);
+    };
+
+    it("31. returns the closed channel's receipts (sorted by step and call), the host's own value key, the executor's ledger and a transcript digest per receipt", async () => {
+      const fake = new FakeDockerCli(); let keyGiven = "";
+      const port = { async open(input: { valueKey: string }) { keyGiven = input.valueKey; return { async close() { return closedOf(s, { valueKey: input.valueKey }); } }; } };
+      const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: port as never });
+      const ledgerBytes = new TextEncoder().encode(JSON.stringify({ schemaVersion: "rovara-agent-actions/v1", marker: "ledger as the executor wrote it" }));
+      let planKey = "";
+      fake.onExecutor = (outDir) => { planKey = E2EExecutorPlanSchema.parse(JSON.parse(readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8"))).modelChannel!.valueKey; withLedger(s, ledgerBytes)(outDir); };
+      await runWith(s);
+      const inputs = await s.host.readCollectionInputs(new AbortController().signal) as unknown as { agentModel: E2EAgentModelEvidence };
+      const { agentModel } = inputs;
+      expect(agentModel.schemaVersion).toBe("rovara-agent-model-evidence/v1");
+      expect(agentModel.valueKey).toBe(keyGiven);
+      expect(agentModel.valueKey).toBe(planKey);
+      expect(agentModel.route).toEqual(definition);
+      expect(agentModel.receipts.map((receipt) => receipt.callIndex)).toEqual([0, 1]);
+      expect(agentModel.channel).toEqual({ droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 0 });
+      expect(agentModel.ledgers).toEqual([{ caseDirectory: agentCaseDirectoryName(s.fixture.compiled.expectedCases[0]!.caseId), bytesBase64: Buffer.from(ledgerBytes).toString("base64"), sha256: sha(ledgerBytes) }]);
+      // The digests are those of the canonical JSON each body holds, one record per receipt in the receipts' order; bodies are never carried.
+      expect(agentModel.transcriptDigests).toEqual([
+        { receiptId: "rcpt-0", promptSha256: sha(canonicalJson({ call: 0 })), responseSha256: sha(canonicalJson({ result: 0 })), omitted: null },
+        { receiptId: "rcpt-1", promptSha256: sha(canonicalJson({ call: 1 })), responseSha256: sha(canonicalJson({ result: 1 })), omitted: null }]);
+      expect(JSON.stringify(agentModel)).not.toContain("\"call\"");
+      // The base inputs are as they were (the host still returns what the readback assembled), and `governedModelReceipts` is untouched.
+      expect(inputs).toMatchObject(collectionSentinel);
+    });
+
+    it("31. a transcript body that was omitted, or is not JSON, becomes a digest-less record that says why; nothing of its text is kept", async () => {
+      const fake = new FakeDockerCli();
+      const port = { async open(input: { valueKey: string }) { return { async close() {
+        const closed = closedOf(s, { valueKey: input.valueKey });
+        return { ...closed, transcripts: [{ receiptId: "rcpt-1", prompt: null, response: null, omitted: "budget" }, { receiptId: "rcpt-0", prompt: "not json at all", response: "{}" }] };
+      } }; } };
+      const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: port as never });
+      fake.onExecutor = okOutput(s);
+      await runWith(s);
+      const { agentModel } = await s.host.readCollectionInputs(new AbortController().signal) as unknown as { agentModel: E2EAgentModelEvidence };
+      expect(agentModel.transcriptDigests).toEqual([{ receiptId: "rcpt-0", promptSha256: null, responseSha256: null, omitted: "unparseable" },
+        { receiptId: "rcpt-1", promptSha256: null, responseSha256: null, omitted: "budget" }]);
+    });
+
+    it("31. a group without an agent step returns exactly what the readback assembled: no agentModel key", async () => {
+      const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.onExecutor = okOutput(s);
+      await runWith(s);
+      const inputs = await s.host.readCollectionInputs(new AbortController().signal);
+      expect(inputs).toBe(collectionSentinel);
+      expect("agentModel" in inputs).toBe(false);
+    });
+
+    it("31. a channel whose close threw gives evidence that says so (an evidence error, no route), never null and never a pass; the ledger the executor left is still carried", async () => {
+      const fake = new FakeDockerCli();
+      const port = { async open() { return { async close() { throw new Error("the proxy fell over: /secret/path"); } }; } };
+      const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: port as never });
+      const ledgerBytes = new TextEncoder().encode("{}");
+      fake.onExecutor = withLedger(s, ledgerBytes);
+      await runWith(s);
+      const { agentModel } = await s.host.readCollectionInputs(new AbortController().signal) as unknown as { agentModel: E2EAgentModelEvidence };
+      expect(agentModel.route).toBeNull();
+      expect(agentModel.receipts).toEqual([]);
+      expect(agentModel.channel.evidenceErrors).toBeGreaterThanOrEqual(1);
+      expect(agentModel.ledgers).toHaveLength(1);
+      expect(JSON.stringify(agentModel)).not.toContain("/secret/path");
+    });
+
+    it("31. a channel that returns something else than a closed channel (nothing, another key, a malformed receipt) is a fault too", async () => {
+      for (const returned of [() => undefined, () => ({ ok: true }), (key: string) => ({ ...closedOf(setupLess(), { valueKey: key.replace(/^./, "0") }) }),
+        (key: string) => ({ ...closedOf(setupLess(), { valueKey: key }), receipts: [{ receiptId: "x" }] })]) {
+        const fake = new FakeDockerCli();
+        const port = { async open(input: { valueKey: string }) { return { async close() { return returned(input.valueKey); } }; } };
+        const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: port as never });
+        fake.onExecutor = okOutput(s);
+        await runWith(s);
+        const { agentModel } = await s.host.readCollectionInputs(new AbortController().signal) as unknown as { agentModel: E2EAgentModelEvidence };
+        expect(agentModel.route).toBeNull();
+        expect(agentModel.channel.evidenceErrors).toBeGreaterThanOrEqual(1);
+      }
+      function setupLess() { return { runId: "11111111-1111-4111-8111-111111111111", fixture: { compiled: { expectedCases: [{ caseId: "case-x" }] } } } as unknown as Setup; }
+    });
+
+    it("31. a ledger over 64 KiB is left out of the evidence (the collector then has none), and the others are kept", async () => {
+      const fake = new FakeDockerCli();
+      const port = { async open(input: { valueKey: string }) { return { async close() { return closedOf(s, { valueKey: input.valueKey }); } }; } };
+      const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: port as never });
+      fake.onExecutor = withLedger(s, new Uint8Array(E2E_AGENT_LEDGER_MAX_BYTES + 1).fill(0x20));
+      await runWith(s);
+      const { agentModel } = await s.host.readCollectionInputs(new AbortController().signal) as unknown as { agentModel: E2EAgentModelEvidence };
+      expect(agentModel.ledgers).toEqual([]);
+    });
   });
 
   it("is unavailable, and starts no executor, when the channel cannot be opened; what it says is a fixed sentence, not the error's words", async () => {

@@ -1,4 +1,4 @@
-import type { E2EModelReceipt } from "@agentx/contracts";
+import type { E2EModelReceipt, E2EModelRouteDefinition } from "@agentx/contracts";
 import {
   assertE2EEnvironmentCannotRedirect,
   assertE2ESharedAwsConfigCannotRedirect,
@@ -58,6 +58,8 @@ export interface OpenE2EModelChannelSessionOptions {
 
 export interface E2EModelChannelSession {
   readonly socketPath: string;
+  /** The route definition this worker derived for the admission's revision and served the group under (never one taken from the admission or the executor). */
+  readonly definition: E2EModelRouteDefinition;
   close(): Promise<E2EModelReceiptSummary>;
 }
 
@@ -94,12 +96,12 @@ export async function openE2EModelChannelSession(options: OpenE2EModelChannelSes
     signal: options.signal, policyScope: options.policyScope, environment, allowedSteps: options.allowedSteps, now,
     ...(socketOwner === undefined ? {} : { socketOwner }),
   });
-  return { socketPath: proxy.socketPath, close: () => proxy.close() };
+  return { socketPath: proxy.socketPath, definition, close: () => proxy.close() };
 }
 
 /**
  * Where a group's receipts and transcripts go in this process: kept in memory for the life of the group and read back once at close. Receipts hold digests only; transcript bodies are
- * already redacted by the proxy. Reading them into the round's evidence is Task 4.4's; here they exist so a run's calls can be counted and checked.
+ * already redacted by the proxy. The receipts and the digests of the transcripts go into the round's evidence (Task 4.4a); the transcript bodies stay here and are never uploaded.
  */
 export function createE2EModelEvidenceCollector(): E2EModelEvidenceSink & { receipts(): E2EModelReceipt[]; transcripts(): E2EModelTranscript[] } {
   const receipts: E2EModelReceipt[] = [];
