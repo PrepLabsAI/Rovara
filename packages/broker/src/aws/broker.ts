@@ -10695,6 +10695,15 @@ async function runBaselineRoundFirst(
     if (record === undefined || record.state === "RECORDED") return "GO";
     if (record.state === "REQUESTED") return await startBaselineApplicationRound(dependencies, routeDependencies, { ...input, record });
     const operation = record.operationId === undefined ? undefined : await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, record.operationId));
+    // An operation whose cancel failed ends INTERRUPTED but keeps its workspace, as it might still run: where the workspace still names it as active, it did not stop, so it is
+    // stuck exactly as one that never confirmed its cancel (the candidate then tries, and a busy or not-ready workspace blocks the dispatch with the reason that names it).
+    if (operation?.status === "INTERRUPTED" && (record.state === "STARTED" || record.state === "UNAVAILABLE")) {
+      const holder = await requireWorkspace(dependencies, task.workspaceId);
+      if (holder.activeOperationId === operation.id) {
+        await markWorkflowE2EBaselineUnavailable(store, task, "cancel-unconfirmed", { from: ["STARTED", "UNAVAILABLE"], operationId: operation.id });
+        return "STUCK";
+      }
+    }
     if (operation === undefined || TERMINAL.has(operation.status)) {
       if (record.state === "STARTED") {
         // Its operation has ended but the record was not settled (the settling is best effort): settle it now. Settling twice is harmless.
@@ -10715,8 +10724,9 @@ async function runBaselineRoundFirst(
     if (record.state === "STARTED" && Number.isFinite(timeUp) && Date.now() <= timeUp) return "WAIT";
     if (record.state === "STARTED") await markWorkflowE2EBaselineUnavailable(store, task, "timed-out", { from: ["STARTED"], operationId: operation.id });
     // Past its time: the round is dead or stuck. Ask for it to be cancelled, so the workspace is free for the candidate, and wait for the worker to say so, for a while only.
+    // A marked record whose time cannot be read is past the hold (it fails open, as an unreadable deadline does): it is never waited on.
     const markedAt = record.state === "UNAVAILABLE" ? Date.parse(record.recordedAt ?? "") : Number.NaN;
-    if (Number.isFinite(markedAt) && Date.now() - markedAt > BASELINE_HOLD_LIMIT_MS) {
+    if (record.state === "UNAVAILABLE" && (!Number.isFinite(markedAt) || Date.now() - markedAt > BASELINE_HOLD_LIMIT_MS)) {
       await markWorkflowE2EBaselineUnavailable(store, task, "cancel-unconfirmed", { from: ["UNAVAILABLE"], operationId: operation.id });
       return "STUCK";
     }
@@ -10850,7 +10860,7 @@ async function startWorkflowE2EChecksDispatch(
       return await startApplicationE2EChecksDispatch(dependencies, routeDependencies, { task, expected, caller, intent: approved.plan.e2e, artifact, approval: canonicalApproval });
     } catch (error) {
       // The baseline would not stop and still holds the workspace: the candidate cannot start, and the reason says so instead of spending the dispatch's attempts on a busy workspace.
-      if (baseline === "STUCK" && error instanceof AgentXError && error.code === "WORKSPACE_BUSY") throw new ApplicationDispatchRefusal(BASELINE_STUCK_REASON);
+      if (baseline === "STUCK" && error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY")) throw new ApplicationDispatchRefusal(BASELINE_STUCK_REASON);
       throw error;
     }
   }

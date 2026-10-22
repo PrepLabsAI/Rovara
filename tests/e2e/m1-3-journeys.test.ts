@@ -78,6 +78,20 @@ const withViewerRefusedAs401 = (server: string) => {
   if (!server.includes(VIEWER_REFUSAL)) throw new Error("the fixture's viewer refusal moved; update the journey's candidates");
   return server.replace(VIEWER_REFUSAL, VIEWER_REFUSAL.replace("json(403", "json(401"));
 };
+/** Every spelling an encoder could leave of a secret: as is, base64 and base64url, percent-encoded, hex (either case), and JSON-escaped. */
+const spellingsOf = (secret: string) => [["as is", secret], ["base64", Buffer.from(secret).toString("base64")], ["base64url", Buffer.from(secret).toString("base64url")],
+  ["percent-encoded", encodeURIComponent(secret)], ["hex", Buffer.from(secret).toString("hex")], ["HEX", Buffer.from(secret).toString("hex").toUpperCase()], ["JSON", JSON.stringify(secret).slice(1, -1)]] as const;
+/**
+ * The plan file the host mounts into the executor holds the run's accounts, passwords included. The arguments of the executor's `docker run` name it (`-v <host path>:/run/rovara/plan.json:ro`),
+ * and the host wrote it before it ran the command: the passwords are read from it at that moment, by the journey and not by the code under test, so the journey has an oracle of its own.
+ */
+const PLAN_MOUNT_SUFFIX = ":/run/rovara/plan.json:ro";
+const seededPasswordsOf = (args: string[]): string[] => {
+  const mount = args.find((value, index) => args[index - 1] === "-v" && value.endsWith(PLAN_MOUNT_SUFFIX));
+  if (mount === undefined) return [];
+  const plan = JSON.parse(readFileSync(mount.slice(0, -PLAN_MOUNT_SUFFIX.length), "utf8")) as { accounts?: Array<{ password?: unknown }> };
+  return (plan.accounts ?? []).flatMap((account) => (typeof account.password === "string" && account.password.length > 0 ? [account.password] : []));
+};
 /** A candidate that copies the password of the last sign-in into the first row of the owner's export: a bare credential value in an asserted observation. */
 const SIGN_IN_FAILURE = 'if (!matches) return json(401, { error: "invalid credentials" });';
 const OWNER_ROWS = "let rows = orders.orders.filter((item) => item.tenantId === account.tenantId);";
@@ -359,8 +373,11 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
    * production Docker host with the approved mock and the sinkhole, and the broker verifies what came back on its own.
    */
   async function inventoryJourney(variant: "mocked-origin" | "unmocked-call" | "results" | "credential-echo") {
+    // `credential-echo`: the passwords the host seeded, read from the plan file it mounts into the executor (see `seededPasswordsOf`), for the oracle of the journey's own.
+    const seededPasswords: string[] = [];
     const journey = await startJourney({ fixtureRoot: FIXTURE_ROOT, planningFiles: ["package.json", "inventory/openapi.json", "e2e/mocks/inventory-v1.json"],
       instructions: "Show each order's stock status from the inventory service",
+      ...(variant === "credential-echo" ? { observeDocker: (args: string[]) => { seededPasswords.push(...seededPasswordsOf(args)); } } : {}),
       ...(variant === "results" ? { baseline: { stageBase: (root: string) => stageCandidate(root, "base", (server) => withViewerRefusedAs401(withDefaultDefect("extra-order")(server))) } } : {}),
       plan: async (context) => {
         const targetOf = (profileId: string) => context.targets.find((item) => item.kind === "web" && item.accountProfileId === profileId);
@@ -583,6 +600,21 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       expect(surfaces.display, "a display was stored").not.toBe("");
       // The host's predicate exists only for a run it read; a run the executor ended for a leak has none, and then the executor's removal of the file is the proof.
       if (scan !== undefined) for (const [name, text] of Object.entries(surfaces)) expect(scan(Buffer.from(text, "utf8")), `the ${name} carries a run credential`).toBe(false);
+      // The journey's own oracle, which does not depend on the host's scan (that scan exists only for a run the host read, and it is the code under test). The passwords are the ones the host
+      // wrote to the plan file it mounted into the executor. At least one was captured, or the check below would pass for nothing; and none, in any spelling, is in anything the broker stored
+      // or shows: the rows, the page, Slack, the stored display, and the stored evidence of each group.
+      const passwords = [...new Set(seededPasswords)];
+      expect(passwords.length, "the plan file the host mounted into the executor was read, and it held a password").toBeGreaterThan(0);
+      const groupEvidence = ((checks.operation.workflowE2EGroupEvidenceRefs ?? []) as Array<{ evidenceRef: { key: string } }>).map((ref) => harness.s3.objects.get(ref.evidenceRef.key) ?? "");
+      expect(groupEvidence.length, "the round stored evidence for at least one group").toBeGreaterThan(0);
+      expect(groupEvidence.every((text) => text.length > 0), "every group's stored evidence was read").toBe(true);
+      const oracleSurfaces: Record<string, string> = { rows: surfaces.rows!, page: surfaces.page!, slack: surfaces.slack!, "stored display": surfaces.display!,
+        ...Object.fromEntries(groupEvidence.map((text, index) => [`stored group evidence ${index + 1}`, text])) };
+      for (const password of passwords) {
+        for (const [form, spelling] of spellingsOf(password)) {
+          for (const [name, text] of Object.entries(oracleSurfaces)) expect(text.includes(spelling), `the ${name} holds a seeded password (${password.length} characters) as ${form}`).toBe(false);
+        }
+      }
     }
 
     if (variant === "credential-echo") {
@@ -766,11 +798,8 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const stored = [JSON.stringify(harness.db.find(() => true)), ...[...harness.s3.objects.values()].map((value) => (typeof value === "string" ? value : Buffer.from(value as Uint8Array).toString("latin1")))];
     for (const entry of await readdir(evidenceRoot, { recursive: true, withFileTypes: true })) if (entry.isFile()) stored.push((await readFile(join(entry.parentPath, entry.name))).toString("latin1"));
     expect(stored.join("\n").length).toBeGreaterThan(10_000);
-    // Every spelling an encoder could leave: as is, base64 and base64url, percent-encoded, hex (either case), and JSON-escaped.
-    const spellings = (secret: string) => [["as is", secret], ["base64", Buffer.from(secret).toString("base64")], ["base64url", Buffer.from(secret).toString("base64url")],
-      ["percent-encoded", encodeURIComponent(secret)], ["hex", Buffer.from(secret).toString("hex")], ["HEX", Buffer.from(secret).toString("hex").toUpperCase()], ["JSON", JSON.stringify(secret).slice(1, -1)]] as const;
     for (const secret of new Set(secrets)) {
-      for (const [form, spelling] of spellings(secret)) {
+      for (const [form, spelling] of spellingsOf(secret)) {
         for (const text of stored) expect(text.includes(spelling), `a stored byte holds a seeded credential (${secret.length} characters, ${secret.startsWith("rovara-") ? "an email part" : "a password"}) as ${form}`).toBe(false);
       }
     }

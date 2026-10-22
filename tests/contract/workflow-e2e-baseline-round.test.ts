@@ -381,6 +381,63 @@ describe("a baseline never holds the candidate for ever (review 3.7b finding 3)"
   });
 });
 
+describe("a baseline that is stuck is never waited on and never spends the candidate's attempts (3.7c)", () => {
+  const spent = (round: RoundCore) => round.harness.db.find((item) => item.pk === "WORKFLOW_DISPATCH" && item.taskId === round.taskId).map((row) => row.attempts ?? 0);
+  const expectStuck = (round: RoundCore) => {
+    expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason: "cancel-unconfirmed" });
+    expect(round.workflowNow().state).toBe("BLOCKED");
+    expect(round.workflowNow().blockReason).toMatch(/unchanged code/iu);
+    expect(round.workflowNow().blockReason).toMatch(/still|did not stop/iu);
+    expect(spent(round).every((attempts) => attempts === 0)).toBe(true);
+    expect(e2eOf(round).failedRound).toBeUndefined();
+    expect(e2eOf(round).qualifiedRound).toBeUndefined();
+  };
+
+  // R2: an operation whose cancel failed ends INTERRUPTED but keeps its workspace, as it might still run. That is a baseline that did not stop, not one that failed.
+  it.each([
+    ["BUSY", "BUSY"],
+    ["STOPPED", "STOPPED"],
+  ] as const)("an INTERRUPTED baseline that the %s workspace still names as active is stuck: marked cancel-unconfirmed, and the candidate is blocked without spending attempts", async (_name, workspaceStatus) => {
+    const round = await startApplicationRound({ baseline: "source" });
+    round.markRunning();
+    round.harness.db.set({ ...round.operationNow(), status: "INTERRUPTED" });
+    const workspaceKey = { pk: `WORKSPACE#${round.workspaceId}`, sk: "META" };
+    const held = round.harness.db.get(workspaceKey.pk, workspaceKey.sk)!;
+    expect(held.activeOperationId).toBe(round.operationId);
+    round.harness.db.set({ ...held, status: workspaceStatus });
+    await round.runDispatch();
+    expectStuck(round);
+    expect(round.checksOperations()).toHaveLength(1);
+  });
+
+  it("an INTERRUPTED baseline that the workspace no longer names goes on: the candidate is not blocked", async () => {
+    const round = await startApplicationRound({ baseline: "source" });
+    round.markRunning();
+    round.harness.db.set({ ...round.operationNow(), status: "INTERRUPTED" });
+    const { activeOperationId: _active, ...freed } = round.harness.db.get(`WORKSPACE#${round.workspaceId}`, "META")!;
+    void _active;
+    round.harness.db.set({ ...freed, status: "READY" });
+    const candidate = await round.nextRound();
+    expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason: "run-failed" });
+    expect(candidate.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+  });
+
+  // R5: a record whose time cannot be read is past the hold. It is never waited on.
+  it("a marked baseline whose recorded time cannot be read counts as past the hold: cancel-unconfirmed, stuck, never waited on", async () => {
+    const round = await startApplicationRound({ baseline: "source" });
+    round.markRunning();
+    const { E2E_BASELINE_RUN_GRACE_MS } = await baselineModule();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.parse(String(recordOf(round)!.deadlineAt)) + E2E_BASELINE_RUN_GRACE_MS + 1_000);
+    await round.runDispatch();
+    expect(round.operationNow().status).toBe("CANCEL_REQUESTED");
+    expect(recordOf(round)).toMatchObject({ state: "UNAVAILABLE", reason: "timed-out" });
+    round.harness.db.set({ ...recordOf(round)!, recordedAt: "not-a-date" });
+    await round.runDispatch();
+    expectStuck(round);
+  });
+});
+
 describe("the owner's Stop during the baseline stops the whole CHECKS step (review 3.7b finding 7)", () => {
   const stop = async (round: RoundCore) => round.harness.dev(MAYA, "POST", `/v1/dev/tasks/${round.taskId}/cancel`, { requestId: randomUUID() });
 
