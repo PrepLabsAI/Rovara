@@ -231,6 +231,8 @@ describe("who may call it", () => {
   it.each<[string, Partial<E2EModelBudgetOperation>]>([
     ["an operation whose admission reference has no agentSteps", { workflowE2EAdmission: { taskId: TASK, groupRunIds: [GROUP] } }],
     ["a baseline round, even one that says agentSteps", { workflowE2EAdmission: { taskId: TASK, groupRunIds: [GROUP], agentSteps: true, purpose: "baseline" } }],
+    // Task 4.6b: an audit replay has no model, so it never reserves a model budget, whatever its reference says.
+    ["an audit replay, even one that says agentSteps", { workflowE2EAdmission: { taskId: TASK, groupRunIds: [GROUP], agentSteps: true, purpose: "replay" } }],
     ["an operation with no admission", { workflowE2EAdmission: undefined }],
     ["an operation that is not running", { status: "SUCCEEDED" }],
     ["an operation that is not a CHECKS task", { workflowMode: "IMPLEMENT" }],

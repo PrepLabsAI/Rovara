@@ -8,7 +8,9 @@ import { recordingsOf, runReplayCase, type ReplayRun } from "../support/agent-re
 import { asLinuxRun, assembleAgentRun, assembleReplayRun, brokerRoundFor, type AssembledRun } from "../support/agent-collection.js";
 import { FIXED_RUNTIME_AT, type OrdersM14Variant } from "../support/orders-m14-agent.js";
 import { verifyApplicationE2EEvidence } from "../../packages/broker/src/e2e/application-evidence.js";
-import { replayResultOf, replaySourceCasesOf, verifyReplayEvidence } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
+import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replayResultOf, replaySourceCasesOf, replayStartItem, requestWorkflowE2EReplay, verifyReplayEvidence } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
 
 // M1.4 Task 4.6b: the broker's own verification of a replay. The real executor and Chromium replay the recording a verified round left; the broker re-collects the replay from its raw
 // evidence, and records `{ status, reproduced, downloadSha256Match, reason? }` from that and from what the verified round showed, which the replay admission signs.
@@ -108,6 +110,34 @@ describe.runIf(agentRunnable)("the broker verifies an audit replay (Task 4.6b)",
     // Control: the same inputs read as what they were signed as are verified.
     expect(verifyApplicationE2EEvidence({ ...replayRound.input, purpose: "replay" }).verdict).toBe("PASS");
     expect(candidateRound.verify().verdict).toBe("PASS");
+  });
+
+  it("records the verified result only for the round that was started, conditionally: a record that moved on is left as it is, and the result is the verification's own", async () => {
+    const { round, verified } = await replayOf(replays.whole);
+    expect(verified).toBeDefined();
+    const task = { taskId: "11111111-1111-4111-8111-111111111111" } as never;
+    const source = "33333333-3333-4333-8333-333333333333";
+    const admissionSha256 = round.input.subject.admissionSha256;
+    const startedStore = async (overrides: Record<string, unknown> = {}) => {
+      const db = new FakeDynamoDb(); const s = { db, documentClient: db as never, tableName: "state" };
+      await requestWorkflowE2EReplay(s, task, { sourceRoundId: source, attempt: 1 });
+      await db.send(new TransactWriteCommand({ TransactItems: [replayStartItem(s, task, { sourceRoundId: source, attempt: 1, operationId: round.input.subject.operationId, roundId: round.input.subject.roundId,
+        admissionSha256, startedAt: "2026-10-22T10:00:00.000Z", deadlineAt: "2026-10-22T10:25:00.000Z", ...overrides })] }));
+      return s;
+    };
+    const expected = { sourceRoundId: source, attempt: 1, operationId: round.input.subject.operationId, roundId: round.input.subject.roundId, admissionSha256 };
+    const s = await startedStore();
+    expect(await recordWorkflowE2EReplay(s, task, { verified: verified!, expected })).toBe(true);
+    expect(await readWorkflowE2EReplayRecord(s, "11111111-1111-4111-8111-111111111111", { sourceRoundId: source, attempt: 1 })).toMatchObject({ state: "RECORDED",
+      replay: { status: "PASS", reproduced: true, downloadSha256Match: true } });
+    // A record that is no longer this round's is not written over: another operation, another admission.
+    for (const edit of [{ operationId: "another-operation" }, { admissionSha256: "9".repeat(64) }]) {
+      const moved = await startedStore(edit);
+      expect(await recordWorkflowE2EReplay(moved, task, { verified: verified!, expected })).toBe(false);
+      expect((await readWorkflowE2EReplayRecord(moved, "11111111-1111-4111-8111-111111111111", { sourceRoundId: source, attempt: 1 }))?.state).toBe("STARTED");
+    }
+    // A verification of another round is refused outright.
+    await expect(recordWorkflowE2EReplay(s, task, { verified: verified!, expected: { ...expected, roundId: "another-round" } })).rejects.toThrow(/not of the round/);
   });
 
   it("verifies nothing for an admission it did not store: bytes that are not the content address give no result", async () => {

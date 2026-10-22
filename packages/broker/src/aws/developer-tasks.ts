@@ -3157,6 +3157,54 @@ export async function startTaskWorkflowE2EBaselineFromSystem(
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
 
+/**
+ * M1.4 Task 4.6b: starts an audit replay of the task's qualified round as a separate server-admitted CHECKS operation. Like the baseline's start it changes nothing about the workflow (no
+ * revision, no state, no round, no qualification): the task is only held to be where the operator saw it, open and still carrying the qualified round of that candidate (a condition
+ * check), so a replay never starts for a task that has moved on or closed. `extra` is the replay record's own start (REQUESTED to STARTED), written in the same transaction as the
+ * operation, so there is at most one replay per round and attempt and never an operation without its record. The request id is derived from the round and the attempt, so a repeated
+ * request is the broker's duplicate of the first.
+ */
+export async function startTaskWorkflowE2EReplayFromSystem(
+  deps: DeveloperTaskRouteDependencies,
+  taskId: string,
+  expected: { sourceRoundId: string; candidateDigest: string },
+  admission: E2EWorkflowAdmissionRef,
+  operationId: string,
+  extra: TransactItems,
+  actor?: DeveloperCaller,
+): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.e2e?.required !== true
+    || workflow.e2e.qualifiedRound?.roundId !== expected.sourceRoundId || workflow.e2e.qualifiedRound.candidateDigest !== expected.candidateDigest
+    || workflow.candidate?.digest !== expected.candidateDigest
+    || admission.purpose !== "replay" || admission.sourceRoundId !== expected.sourceRoundId || admission.attempt === undefined || admission.taskId !== taskId
+    || admission.candidateDigest !== expected.candidateDigest || admission.workflowRevision !== workflow.revision || admission.roundId.length === 0
+    || admission.groupRunIds.length === 0 || new Set(admission.groupRunIds).size !== admission.groupRunIds.length) return "STALE";
+  const dispatchAccess = await systemTaskAccess(deps, task);
+  const workspace = await deps.actions.workspace(task.workspaceId);
+  if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
+  const receivedAt = iso(deps);
+  const requestId = workflowRequestId("agentx-replay-e2e-checks", taskId, workflow.revision, expected.sourceRoundId, admission.attempt);
+  const accepted = await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, {
+    requestId, conversationId: task.conversationId,
+    prompt: "Run the broker-admitted audit replay of the verified AI-navigated round, with no model. Do not edit files or expand the admitted scenarios.",
+  }, (operation) => [
+    { ConditionCheck: {
+      TableName: deps.tableName, Key: taskKey(taskId),
+      ConditionExpression: "workflow.revision = :revision AND workflow.candidate.digest = :candidate AND workflow.e2e.required = :required AND workflow.e2e.qualifiedRound.roundId = :round AND attribute_not_exists(closedAt)",
+      ExpressionAttributeValues: { ":revision": workflow.revision, ":candidate": expected.candidateDigest, ":required": true, ":round": expected.sourceRoundId },
+    } },
+    putNew(turnTable(deps), aiToolTurn({
+      party: actor === undefined ? partyOfTask(task) : partyOfTaskActor(task, actor), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+      receivedAt, finishedAt: iso(deps), request: "Run audit replay of a verified round", response: `Broker-admitted audit replay (no model) started as operation ${operation.id}.`, operationId: operation.id,
+    })),
+    ...extra,
+    ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+  ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission, readiness: [] });
+  return accepted.duplicate ? "DUPLICATE" : "STARTED";
+}
+
 /** The task's page, which the draft pull request's description links to. */
 export function taskPageUrl(issuer: string, taskId: string): string {
   return new URL(`/review/${encodeURIComponent(taskId)}/task`, new URL(issuer).origin).href;

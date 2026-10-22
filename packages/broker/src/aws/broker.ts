@@ -205,6 +205,9 @@ import {
   WORKFLOW_RESOLVE_FINDINGS_MAX,
   sameJsonContent,
   type E2ESourceSnapshot,
+  type E2EReplayRefusal,
+  type E2EReplaySourceCase,
+  E2E_REPLAY_ATTEMPTS_MAX,
   type E2EWorkflowAdmissionRef,
   E2EWorkflowAdmissionRefSchema,
   E2EWorkflowEvidenceRefSchema,
@@ -237,6 +240,10 @@ import {
   E2E_BASELINE_ATTEMPT, E2E_BASELINE_PURPOSE, E2E_BASELINE_RUN_GRACE_MS, baselineStartFailureReason, baselineStartItem, markWorkflowE2EBaselineUnavailable, projectE2EBaselineWanted, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord,
   recordWorkflowE2EBaseline, requestWorkflowE2EBaselineRound, verifyBaselineEvidence, type BaselineRecord, type BaselineUnavailableReason, type SkippedAiScenarios,
 } from "./workflow-e2e-baseline.js";
+import {
+  E2E_REPLAY_PURPOSE, E2E_REPLAY_RUN_GRACE_MS, listWorkflowE2EReplayRecords, markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replaySourceCasesOf, replayStartItem,
+  requestWorkflowE2EReplay, verifyReplayEvidence, type ReplayRecord, type ReplayUnavailableReason,
+} from "./workflow-e2e-replay.js";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { outcomeMetric } from "./admin-change-audit.js";
@@ -300,7 +307,7 @@ import { buildApplicationExecutionAdmission } from "../e2e/application-admission
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
-import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification } from "../e2e/application-evidence.js";
+import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification, type VerifiedAgentTrace } from "../e2e/application-evidence.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
@@ -308,7 +315,7 @@ import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from ".
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, candidateBuildSourceAdmissionReference, type StoredCandidateBuildSource } from "./candidate-build-source.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
@@ -1394,6 +1401,10 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       }
       // Spec 025 C25: an admin switches a shared task's mode, within its project's policy.
       // Any segment: a mistyped task ID gets TASK_NOT_FOUND from the handler, not the catch-all refusal.
+      const taskE2EReplay = /^\/v1\/admin\/tasks\/([^/]+)\/e2e-replay$/.exec(url.pathname);
+      if ((request.method === "POST" || request.method === "GET") && taskE2EReplay?.[1]) {
+        return json(await adminTaskE2EReplay(dependencies, identity, taskE2EReplay[1], request.method, body, url.searchParams), request.requestId, request.method === "POST" ? 202 : 200);
+      }
       const taskShareMode = /^\/v1\/admin\/tasks\/([^/]+)\/share-mode$/.exec(url.pathname);
       if (request.method === "POST" && taskShareMode?.[1]) {
         return json(await adminTaskShareMode(dependencies, identity, taskShareMode[1], body, tasks), request.requestId);
@@ -6173,7 +6184,16 @@ async function handleCallback(
     if (body.sha256 !== reference.admissionRef.sha256 || body.offset % WORKFLOW_CANDIDATE_CHUNK_BYTES !== 0
       || body.offset >= reference.admissionRef.byteLength) throw agentXError("CALLBACK_FORBIDDEN", "E2E admission read is outside its immutable reference");
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(reference.taskId));
-    if (reference.purpose === "baseline") {
+    if (reference.purpose === "replay") {
+      // M1.4 Task 4.6b: an audit replay is not the workflow's round either (the workflow has moved past its checks, and its candidate round is the replay's source): it is read on what the
+      // replay's own record says, this operation is the round that record started, for this source round and attempt.
+      const record = task === undefined || reference.sourceRoundId === undefined || reference.attempt === undefined ? undefined
+        : await readWorkflowE2EReplayRecord(dependencies, task.taskId, { sourceRoundId: reference.sourceRoundId, attempt: reference.attempt });
+      if (task === undefined || task.workspaceId !== operation.workspaceId || task.closedAt !== undefined || record === undefined || record.state !== "STARTED" || record.operationId !== operation.id
+        || record.roundId !== reference.roundId || record.admissionSha256 !== reference.admissionRef.sha256) {
+        throw agentXError("STALE_FENCE", "the replay round is no longer the one that was started");
+      }
+    } else if (reference.purpose === "baseline") {
       // M1.3 Task 3.7b: a baseline round is not the workflow's current round (the workflow is not running it, and its candidate is another), so it is read on what the baseline's
       // own record says instead: this operation is the round that record started, for this plan, base commit and attempt.
       const record = task === undefined ? undefined : await readWorkflowE2EBaselineRecord(dependencies, task);
@@ -8041,6 +8061,48 @@ async function verifyBaselineRound(dependencies: AwsBrokerDependencies, operatio
   return verifyBaselineEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
     candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
   aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", ...(skippedAiScenarios === undefined ? {} : { skippedAiScenarios }) });
+}
+
+/**
+ * M1.4 Task 4.6b: the audit replay's own completion. When its operation ends, this settles the replay's record, and does nothing else: no workflow transition, no `qualifiedRound` or
+ * `failedRound`, no send-back, no publication, no task page. An operation that did not succeed leaves the record saying the replay could not be run; one that succeeded is verified exactly
+ * as a candidate's evidence is read (`loadApplicationEvidenceInputs`, then the verifier for the purpose it was signed with), and only that verification is recorded, conditionally, on the
+ * source round, attempt, operation, round and admission the record started. It never throws: whatever goes wrong here, the replay is a record that stays STARTED and is read as not run
+ * once its time is up.
+ */
+async function settleReplayRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus): Promise<void> {
+  const reference = operation.workflowE2EAdmission;
+  if (operation.kind !== "task" || reference?.purpose !== "replay" || reference.sourceRoundId === undefined || reference.attempt === undefined) return;
+  try {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(reference.taskId));
+    if (task === undefined || task.workspaceId !== operation.workspaceId) return;
+    const round = { sourceRoundId: reference.sourceRoundId, attempt: reference.attempt };
+    const record = await readWorkflowE2EReplayRecord(dependencies, task.taskId, round);
+    if (record === undefined || record.state !== "STARTED" || record.operationId !== operation.id) return;
+    const unavailable = (reason: ReplayUnavailableReason) => markWorkflowE2EReplayUnavailable(dependencies, task, round, reason, { from: ["STARTED"], operationId: operation.id });
+    if (status !== "SUCCEEDED") { await unavailable(status === "CANCELLED" ? "stopped" : "run-failed"); return; }
+    const verified = await verifyReplayRound(dependencies, operation, reference);
+    if (verified === undefined) { await unavailable("unverified"); return; }
+    await recordWorkflowE2EReplay(dependencies, task, { verified, expected: { ...round, operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256 } });
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_replay_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
+  }
+}
+
+/** The broker's own verification of a finished replay round's evidence, or undefined when the admission or the evidence cannot be read or verify to nothing. */
+async function verifyReplayRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, reference: E2EWorkflowAdmissionRef) {
+  const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
+  if (admissionText === undefined) return undefined;
+  const admissionBytes = Buffer.from(admissionText, "utf8");
+  if (createHash("sha256").update(admissionBytes).digest("hex") !== reference.admissionRef.sha256 || admissionBytes.byteLength !== reference.admissionRef.byteLength) return undefined;
+  let admission: E2EApplicationExecutionAdmission;
+  try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return undefined; }
+  if (admission.replay === undefined) return undefined;
+  const loaded = await loadApplicationEvidenceInputs(dependencies, operation, reference, admission);
+  if ("unavailable" in loaded) return undefined;
+  return verifyReplayEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
+    candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
+  aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", replay: admission.replay });
 }
 
 /**
@@ -10935,6 +10997,163 @@ async function startBaselineApplicationRound(
   }
 }
 
+/**
+ * M1.4 Task 4.6b: the operator's request to replay a verified AI-navigated round. Everything that can refuse refuses here, before a runner is started or anything is recorded:
+ *
+ *  - the task is open, and the round asked for is its qualified round, of its current candidate (`replay-task-closed`, `replay-not-qualified`);
+ *  - no attempt of this round is still running, and the attempts have not run out (`replay-in-progress`, `replay-attempts-exhausted`);
+ *  - the source round, loaded by the content addresses `qualifiedRound` binds and verified again by the broker with the registry's own route definition, is PASS (`replay-source-not-pass`),
+ *    can be read (`replay-source-unavailable`) and left at least one recording the broker's review kept (`replay-no-recording`: every round from before the recordings was kept, and a
+ *    round whose runtime would now run other cases than it ran then, are covered by the last two);
+ *  - the candidate's exported source and the approved plan can be read and the admission builds (`replay-source-unavailable`).
+ *
+ * Then the admission is built from the same inputs a candidate round's is (the same candidate, plan, accounts and runtime rows, read now), with no model route, and the one CHECKS
+ * operation that carries exactly that admission is started, with the replay record's own start in the same transaction. The workflow is not touched: no revision, state, round or
+ * qualification changes, and the candidate's verification, completion, send-back and publication all refuse a replay round.
+ */
+async function startReplayApplicationRound(
+  dependencies: AwsBrokerDependencies,
+  routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
+  input: { task: DeveloperTaskRecord; caller: Parameters<typeof startTaskWorkflowReviewFromSystem>[3]; sourceRoundId: string },
+): Promise<{ sourceRoundId: string; attempt: number; operationId: string; roundId: string; state: "STARTED" }> {
+  const { task, sourceRoundId } = input;
+  const refuse = (code: E2EReplayRefusal, detail: string) => agentXError(code === "replay-in-progress" ? "TASK_BUSY" : "CONFIG_INVALID", `${code}: ${detail}`);
+  const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
+  if (task.closedAt !== undefined) throw refuse("replay-task-closed", "the task is closed");
+  const workflow = task.workflow;
+  const qualified = workflow?.e2e?.required === true ? workflow.e2e.qualifiedRound : undefined;
+  if (workflow === undefined || qualified === undefined || qualified.roundId !== sourceRoundId) throw refuse("replay-not-qualified", "that round is not the task's qualified round");
+  const candidate = workflow.candidate;
+  if (candidate === undefined || candidate.digest !== qualified.candidateDigest) throw refuse("replay-source-unavailable", "the task's candidate is no longer the one that was qualified");
+
+  // Attempts: one at a time, a few in all. A record that never got going (or whose run ran out of time) does not hold the next one.
+  const records = await listWorkflowE2EReplayRecords(store, task.taskId, sourceRoundId);
+  const latest = records.at(-1);
+  if (latest !== undefined) {
+    const lapsed = latest.state === "REQUESTED" ? Date.now() - Date.parse(latest.requestedAt) > REPLAY_REQUEST_GRACE_MS
+      : latest.state === "STARTED" && Date.now() > Date.parse(latest.deadlineAt ?? "") + E2E_REPLAY_RUN_GRACE_MS;
+    if ((latest.state === "REQUESTED" || latest.state === "STARTED") && !lapsed) throw refuse("replay-in-progress", "a replay of this round is still running");
+    if (lapsed) await markWorkflowE2EReplayUnavailable(store, task, { sourceRoundId, attempt: latest.attempt }, latest.state === "REQUESTED" ? "start-failed" : "timed-out", { from: [latest.state as "REQUESTED" | "STARTED"] });
+  }
+  const attempt = (latest?.attempt ?? 0) + 1;
+  if (attempt > E2E_REPLAY_ATTEMPTS_MAX) throw refuse("replay-attempts-exhausted", `a round is replayed at most ${E2E_REPLAY_ATTEMPTS_MAX} times`);
+
+  // The source round, verified again by the broker.
+  const source = await reverifyQualifiedRound(dependencies, task, qualified);
+  if ("refusal" in source) throw refuse(source.refusal, source.detail);
+
+  // The admission: the same inputs a candidate round's is built from, read now. A candidate whose inputs cannot be read, or that would now run other cases, cannot be replayed.
+  let built: ReturnType<typeof buildApplicationExecutionAdmission>;
+  let operationId: string;
+  try {
+    const artifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
+    if (artifact === undefined || workflow.e2e?.contractDigest !== artifact.sha256) throw applicationRoundRefusal("the approved plan is no longer the one that was qualified");
+    const approved = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), artifact, {});
+    if (approved?.format !== "structured" || approved.plan.e2e?.schemaVersion !== 2) throw applicationRoundRefusal("the approved plan is not an application plan");
+    const canonicalApproval = resolveWorkflowE2ECanonicalApproval({ taskId: task.taskId,
+      workflow: workflow as NonNullable<typeof workflow> & { artifacts: Array<{ id: string; type: string; sha256: string }>;
+        decisions: Array<{ decision: string; actorId: string; artifactDigest?: string; workBreakdownDigest?: string; workflowRevision: number }> },
+      artifact, plan: approved.plan });
+    if (canonicalApproval === undefined) throw applicationRoundRefusal("the approved plan's approval cannot be read");
+    const intent = approved.plan.e2e;
+    const current = await requireApplicationSelectionStillCurrent(dependencies, task, intent, artifact);
+    const sourceOperation = await candidateSourceOperation(dependencies, task, candidate.digest);
+    if (sourceOperation === undefined) throw applicationRoundRefusal(NO_COMMITTED_EXPORT_REASON);
+    const stored = readyCandidateBuildSource(sourceOperation, candidate.digest);
+    const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, sourceOperation, candidate);
+    if (sourceExport === undefined || sourceExport.repositories.length !== 1) throw applicationRoundRefusal("the stored candidate source export is unavailable or does not hold exactly one repository");
+    const repository = sourceExport.repositories[0]!;
+    if (stored.repositoryId !== repository.repositoryId || stored.commitSha !== repository.commitSha || stored.treeSha !== repository.treeSha) {
+      throw applicationRoundRefusal("the stored build source is for another commit or tree than the exported candidate");
+    }
+    const manifest = await readCandidateBuildSourceManifest(dependencies, stored);
+    const snapshot: E2ESourceSnapshot = { candidate, commitSha: repository.commitSha, treeSha: repository.treeSha, treeComplete: true, treePaths: repository.treePaths,
+      sources: repository.sources.map((item) => ({ path: item.path, sha256: item.sha256, kind: "blob" as const, bytes: Buffer.from(item.bytesBase64, "base64") })) };
+    const creatorAuthority = await requireWorkflowE2ECreatorAuthority(dependencies, task);
+    const workspace = await routeDependencies.actions.workspace(task.workspaceId);
+    operationId = randomUUID();
+    const planDigest = createHash("sha256").update(canonicalJson({
+      domain: "workflow-application-e2e-replay-plan/v1", taskId: task.taskId, artifactId: canonicalApproval.artifactId, artifactSha256: canonicalApproval.artifactDigest,
+      graphDigest: canonicalApproval.graphDigest, graphRunId: canonicalApproval.runId, workflowRevision: canonicalApproval.workflowRevision, actorId: canonicalApproval.actorId, sourceRoundId, attempt,
+    })).digest("hex");
+    built = buildApplicationExecutionAdmission({ taskId: task.taskId, operationId, operationFence: workspace.fence + 1, workflowRevision: workflow.revision, roundId: randomUUID(),
+      runId: randomUUID, intent, artifact, snapshot, setupProposal: current.inputs.setup.setupProposal, setupApproval: current.inputs.setup.setupApproval, policy: current.inputs.policy,
+      registeredRuntimes: current.inputs.rows, runtimeCatalogId: current.inputs.runtimeCatalogId, runtimeBinding: current.inputs.runtimeBinding,
+      buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored) }, planDigest, now: Date.now(), creatorAuthority, accountEntries: current.inputs.accountEntries,
+      recordedSelection: E2EApplicationSelectionRecordSchema.parse(workflow.e2e?.applicationSelection),
+      replay: { sourceRoundId, sourceAdmissionSha256: qualified.admissionSha256, sourceEvidenceSha256: qualified.evidenceSha256, attempt, sourceCases: source.sourceCases,
+        traces: source.traces.map((trace) => ({ caseId: trace.caseId, stepIndex: trace.stepIndex, keyHash: trace.keyHash, traceBase64: Buffer.from(trace.bytes).toString("base64"), binding: trace.binding })) } });
+  } catch (error) {
+    // The admission could not be built from what the task holds now: nothing was started or recorded. A fault that a later attempt can get past is the operator's to retry.
+    if (error instanceof ApplicationDispatchRefusal || error instanceof ApplicationPlanDefect) throw refuse("replay-source-unavailable", error.message.replace(/\p{Cc}+/gu, " ").slice(0, 300));
+    throw error;
+  }
+
+  // Past every refusal: the record is asked for (once per round and attempt), then the operation and the record's start commit together.
+  if (await requestWorkflowE2EReplay(store, task, { sourceRoundId, attempt }) === "ALREADY") throw refuse("replay-in-progress", "a replay of this round is already being started");
+  try {
+    const admissionRef = E2EWorkflowAdmissionRefSchema.parse({ schemaVersion: 1, kind: "application", taskId: task.taskId, workflowRevision: workflow.revision, candidateDigest: candidate.digest,
+      roundId: built.roundId, groupRunIds: built.groupRunIds, admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength },
+      purpose: E2E_REPLAY_PURPOSE, sourceRoundId, attempt });
+    await storeWorkflowE2EAdmission(dependencies, { key: admissionRef.admissionRef.key, sha256: built.sha256, bytes: built.bytes, taskId: task.taskId, candidateDigest: candidate.digest });
+    const outcome = await startTaskWorkflowE2EReplayFromSystem(routeDependencies, task.taskId, { sourceRoundId, candidateDigest: candidate.digest }, admissionRef, operationId,
+      [replayStartItem(store, task, { sourceRoundId, attempt, operationId, roundId: built.roundId, admissionSha256: built.sha256, startedAt: new Date().toISOString(), deadlineAt: built.admission.round.deadlineAt })],
+      input.caller);
+    if (outcome === "STALE") {
+      await markWorkflowE2EReplayUnavailable(store, task, { sourceRoundId, attempt }, "start-failed", { from: ["REQUESTED"] });
+      throw refuse("replay-not-qualified", "the task moved on while the replay was being started");
+    }
+    return { sourceRoundId, attempt, operationId, roundId: built.roundId, state: "STARTED" };
+  } catch (error) {
+    // The operation was not started (a busy workspace, a fault): the record says so, and the operator asks again.
+    await markWorkflowE2EReplayUnavailable(store, task, { sourceRoundId, attempt }, "start-failed", { from: ["REQUESTED"] }).catch(() => false);
+    throw error;
+  }
+}
+
+/** How long a replay that was asked for and never started holds the next attempt back. */
+const REPLAY_REQUEST_GRACE_MS = 10 * 60_000;
+
+/**
+ * Loads the task's qualified round by the content addresses `qualifiedRound` binds (its admission and its evidence), verifies it again as the broker verified it, with the registry's own
+ * definition of the round's route, and takes what the replay needs from that: the recordings its review kept and what each case showed. A refusal names the first thing that fails.
+ */
+async function reverifyQualifiedRound(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, qualified: NonNullable<NonNullable<NonNullable<DeveloperTaskRecord["workflow"]>["e2e"]>["qualifiedRound"]>):
+  Promise<{ sourceCases: E2EReplaySourceCase[]; traces: readonly VerifiedAgentTrace[] } | { refusal: E2EReplayRefusal; detail: string }> {
+  const unavailable = (detail: string) => ({ refusal: "replay-source-unavailable" as const, detail });
+  try {
+    const operation = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
+      .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "CHECKS")
+      .map((item) => item as unknown as OperationRecord)
+      .filter((item) => item.status === "SUCCEEDED" && item.workflowE2EAdmission?.purpose === undefined && item.workflowE2EAdmission?.roundId === qualified.roundId
+        && item.workflowE2EAdmission.admissionRef.sha256 === qualified.admissionSha256 && item.workflowE2EEvidenceRef?.sha256 === qualified.evidenceSha256)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    const reference = operation?.workflowE2EAdmission;
+    if (operation === undefined || reference === undefined) return unavailable("the checks operation of the qualified round cannot be found");
+    const text = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
+    if (text === undefined) return unavailable("the qualified round's admission is unavailable");
+    const admissionBytes = Buffer.from(text, "utf8");
+    if (createHash("sha256").update(admissionBytes).digest("hex") !== qualified.admissionSha256 || admissionBytes.byteLength !== reference.admissionRef.byteLength) return unavailable("the qualified round's admission changed");
+    let admission: E2EApplicationExecutionAdmission;
+    try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return unavailable("the qualified round's admission cannot be read"); }
+    const loaded = await loadApplicationEvidenceInputs(dependencies, operation, reference, admission);
+    if ("unavailable" in loaded) return unavailable("the qualified round's evidence cannot be read");
+    const route = await modelRouteForAdmission((key) => getItem<Record<string, unknown>>(dependencies, key), admission);
+    if ("unavailable" in route) return unavailable("the model route registry cannot be read");
+    const verified = verifyApplicationE2EEvidence({ admissionBytes, subject: { taskId: task.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
+      candidateDigest: qualified.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
+    aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", ...(route.definition === undefined ? {} : { modelRouteDefinition: route.definition }) });
+    if (verified.verdict !== "PASS") return { refusal: "replay-source-not-pass" as const, detail: "the qualified round does not verify as PASS now" };
+    const traces = verified.agentTraces ?? [];
+    if (traces.length === 0) return { refusal: "replay-no-recording" as const, detail: "the qualified round left no recording to replay" };
+    return { sourceCases: replaySourceCasesOf(verified), traces };
+  } catch (error) {
+    if (error instanceof ApplicationDispatchRefusal) return unavailable(error.message.slice(0, 300));
+    if (isTransientAwsFault(error)) throw error;
+    return unavailable("the qualified round could not be loaded");
+  }
+}
+
 /** Creates the content-addressed admission and starts the separate current CHECKS operation. */
 async function startWorkflowE2EChecksDispatch(
   dependencies: AwsBrokerDependencies,
@@ -12232,7 +12451,7 @@ async function recordTerminalResult(
     && cancelTargetOperation.workflowDependencies !== undefined ? cancelTargetOperation : undefined;
   // A baseline round is not the workflow's: cancelling it never touches the workflow (M1.3 Task 3.7b).
   const e2eCancelBoundTarget = cancelTargetOperation?.kind === "task" && cancelTargetOperation.workflowMode === "CHECKS"
-    && cancelTargetOperation.workflowE2EAdmission !== undefined && cancelTargetOperation.workflowE2EAdmission.purpose !== "baseline" ? cancelTargetOperation : undefined;
+    && cancelTargetOperation.workflowE2EAdmission !== undefined && !isNonCandidateRound(cancelTargetOperation.workflowE2EAdmission) ? cancelTargetOperation : undefined;
   if (graphCancelBoundTarget !== undefined && graphCancelBoundTarget.fence !== operation.fence) {
     throw agentXError("STALE_FENCE", "cancel and graph target no longer share the current workspace fence");
   }
@@ -12384,6 +12603,12 @@ async function recordTerminalResult(
   if (closeCanFinish && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id, operation.createdAt, operation.discardUnpublished === true && closePreflight?.safeToClose !== true);
   // M1.3 Task 3.7b: a baseline round settles its own record now that its result is committed, before the step it was holding back is started.
   if (recordedStatus === terminalStatus) await settleBaselineRound(dependencies, operation, terminalStatus);
+  // M1.4 Task 4.6b: so does an audit replay, into a record of its own.
+  if (recordedStatus === terminalStatus) await settleReplayRound(dependencies, operation, terminalStatus);
+  // A replay that was stopped ends through the cancel operation that stopped it (the target's own terminal state is written with the cancel's): its record says so.
+  if (recordedStatus === terminalStatus && operation.kind === "cancel" && terminalStatus === "SUCCEEDED" && cancelTargetOperation?.workflowE2EAdmission?.purpose === "replay") {
+    await settleReplayRound(dependencies, cancelTargetOperation, "CANCELLED");
+  }
   // Gap 6: start any step this result made due (its dispatch row committed above); a lost start is the sweep's.
   if (taskPointer !== undefined) await dispatchWorkflowContinuation(dependencies, taskPointer.taskId);
   // A task that finished while this ran (merged during a feedback review, say) gives back its slot and workspace now.
@@ -12950,6 +13175,44 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
     task,
     value,
   );
+}
+
+/**
+ * M1.4 Task 4.6b: the operator's routes for an audit replay of a task's qualified round: `POST /v1/admin/tasks/{taskId}/e2e-replay` (body `{ roundId }`) starts one, `GET` (query `roundId`,
+ * default the qualified round) reads the record of each attempt. Both are an administrator's, of the task's project. Neither touches the task: the record is kept apart from it and the
+ * task page does not show it in M1.4.
+ */
+async function adminTaskE2EReplay(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, taskId: string, method: "POST" | "GET", value: unknown, query: URLSearchParams): Promise<unknown> {
+  if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  if (!TASK_ID_PATTERN.test(taskId)) throw agentXError("TASK_NOT_FOUND", "that is not a task ID");
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId}`);
+  const membership = await getMembership(dependencies, identity.ownerKey, task.project);
+  if (membership?.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
+  const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
+  if (method === "GET") {
+    const asked = query.get("roundId") ?? task.workflow?.e2e?.qualifiedRound?.roundId;
+    const roundId = z.string().uuid().safeParse(asked);
+    if (!roundId.success) throw agentXError("CONFIG_INVALID", "replay-not-qualified: the task has no qualified round to read replays of");
+    const records = await listWorkflowE2EReplayRecords(store, taskId, roundId.data);
+    return { sourceRoundId: roundId.data, replays: records.map(replayRecordView) };
+  }
+  const { roundId } = z.object({ roundId: z.string().uuid() }).strict().parse(value);
+  const caller = { developerId: task.developerId, sessionId: "replay-admin", amr: task.provider, name: task.developerName };
+  const routeDependencies = developerTaskRouteDependencies({
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
+    now: Date.now, tasks: developerTaskActions(dependencies), refreshTaskFeedback: (id) => refreshTaskFeedbackForOwnerDecision(dependencies, id),
+    workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+    workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+  }, caller, undefined, null);
+  return { replay: await startReplayApplicationRound(dependencies, routeDependencies, { task, caller, sourceRoundId: roundId }) };
+}
+
+/** What the operator reads of a replay record: its state, when, and the broker's own result; never an id of an operation or an object. */
+function replayRecordView(record: ReplayRecord) {
+  return { attempt: record.attempt, state: record.state, requestedAt: record.requestedAt, ...(record.startedAt === undefined ? {} : { startedAt: record.startedAt }),
+    ...(record.recordedAt === undefined ? {} : { recordedAt: record.recordedAt }), ...(record.reason === undefined ? {} : { reason: record.reason }), ...(record.replay === undefined ? {} : { replay: record.replay }) };
 }
 
 /** Whether closing a workspace of this mode deletes its storage. */
