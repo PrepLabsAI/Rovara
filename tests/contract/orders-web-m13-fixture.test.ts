@@ -172,11 +172,9 @@ describe("project contract of orders-web-m13", () => {
     expect(inspection.missingInputs.filter((input) => input.kind === "target-selection")).toEqual([]);
   });
 
-  // KNOWN GAP (reported with Task 3.8): discovery gives a root package one base target, `web-1` (an `api-N` target exists only for a package with a server dependency or
-  // under api/ or server/). The plan wants this one app to carry web-1 and api-1 for all three accounts, so with the declared contract the account variants do not bind and
-  // discovery falls back to the `synthetic` web target with a blocking "target-selection" input. `it.fails` passes while that is so; it turns red when discovery proposes
-  // the api-1 base target for the app, which is the moment to change it to a plain `it`.
-  it.fails("is found by discovery with the contract as declared: a web and an api target per account", () => {
+  // Task 3.4 (Ruling DA): the contract names `api-1` beside `web-1` in `targetAccounts`, and discovery now proposes that API target for the web package, so the account variants of
+  // both bind. (Before, this was the known gap of Task 3.8: the variants did not bind and discovery fell back to the `synthetic` web target with a blocking "target-selection" input.)
+  it("is found by discovery with the contract as declared: a web and an api target per account", () => {
     const inspection = discover();
     for (const kind of ["web", "api"]) {
       expect(inspection.proposedTargets.filter((target) => target.kind === kind && target.accountProfileId !== "synthetic").map((target) => target.accountProfileId).sort(), kind).toEqual(["orders-owner", "orders-owner-b", "orders-viewer"]);

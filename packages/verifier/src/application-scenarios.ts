@@ -6,7 +6,7 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationBuildSourceManifestS
   E2EApplicationPreparedGroupFactsSchema, E2EAppArtifactRefSchema, E2EAppBuildManifestSchema,
   E2EApplicationPlanIntentSchema, E2EExecutionPlanSchema, E2ERuntimeCapabilityDescriptorSchema, E2EScenarioBundleSchema,
   E2ERegisteredRuntimeSchema, canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes,
-  e2eAppBuildManifestDigest, e2ePolicyDigest, e2eScenarioBundleDigest, selectE2EApplicationExecutionPlan,
+  e2eAppBuildManifestDigest, e2ePolicyDigest, e2eRuntimeBindingKey, e2eRuntimeBindingOf, e2eScenarioBundleDigest, selectE2EApplicationExecutionPlan,
   projectE2EApplicationPortableSelection, validateE2EAppBuildBinding, verifyE2ESourceSnapshot, E2EApplicationPortableProjectionSchema,
   E2EApplicationExecutionAdmissionSchema, E2EApplicationGroupAdmissionSchema, E2ERoundSchema, E2ERunBindingSchema,
   type CandidateManifest, type E2EApplicationApprovalBinding, type E2EApplicationBuildSourceManifest,
@@ -48,6 +48,8 @@ export type E2ECompiledApplicationSuite = Readonly<{
   protocol: "trusted-e2e-application/v1"; bundle: E2EScenarioBundle;
   group: E2EExecutionPlan["groups"][number] & { mocks: readonly E2EExecutionPlan["mocks"][number][] };
   cliHost: { profileId: string; descriptor: E2EApplicationCliHostDescriptor };
+  /** The one target kind of this group (a group never mixes web and API targets): with the group's runtime profile, it names the runtime row the group runs on (`e2eCompiledRuntime`). */
+  runtimeKind: "web" | "api";
   preparedEnvironmentDigest: string; originByApplicationId: readonly { applicationId: string; origin: string }[];
   files: ReadonlyMap<string, string>; inventory: E2EApplicationCompiledGroupInventory; groupConfigManifestDigest: string;
   shards: readonly E2EApplicationCompiledShard[]; expectedCases: readonly E2EExpectedCase[]; selectionPacketPath: string;
@@ -58,6 +60,11 @@ export type E2ECompiledApplicationSuite = Readonly<{
     bundleDigest: string; compiledInventoryDigest: string; applicationBindingsDigest: string; runtimeBindingsDigest: string;
     launchTargetsDigest: string; assertionBindingsDigest: string }>;
 }>;
+
+/** The runtime row a compiled group runs on: its profile's row of the group's own kind. A web group never finds the API row of the same profile, nor the other way round. */
+export function e2eCompiledRuntime(compiled: Pick<E2ECompiledApplicationSuite, "runtimeBindings" | "runtimeKind"> & { group: Pick<E2ECompiledApplicationSuite["group"], "runtimeProfileId"> }): E2ERegisteredRuntime | undefined {
+  return e2eRuntimeBindingOf(compiled.runtimeBindings, compiled.group.runtimeProfileId, compiled.runtimeKind);
+}
 
 function ordinaryRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError(`${label} must be an ordinary record`);
@@ -275,23 +282,38 @@ function validateBindings(context: E2EApplicationCompilationContext, plan: E2EEx
   const launchTargets = [...context.launchTargets].sort((a, b) => a.targetId.localeCompare(b.targetId));
   if (canonicalJson(launchTargets.map((item) => item.targetId)) !== canonicalJson(runnableTargetIds)) throw new Error("application launch targets must exactly cover runnable targets");
   const runtimeRefs = new Map(context.selectionInput.intent.applicationRuntimeRefs.map((item) => [item.targetId, item]));
+  // The runtime rows the round runs on, one per (profile, kind) of its runnable targets: a profile registers a web row and an API row, and a plan can run both.
+  const kindOf = (targetId: string): "web" | "api" => {
+    const kind = targetById.get(targetId)!.kind;
+    if (kind !== "web" && kind !== "api") throw new Error("runnable application target is neither a web nor an API target");
+    return kind;
+  };
+  const neededRows = [...new Set(runnableTargetIds.map((targetId) => e2eRuntimeBindingKey(targetById.get(targetId)!.runtimeProfileId, kindOf(targetId))))].sort();
+  const neededProfiles = new Set(runnableTargetIds.map((targetId) => targetById.get(targetId)!.runtimeProfileId));
+  // A v2 admission keys its rows `<profile>#<kind>`; one stored before that keyed them by the profile alone, which can name one kind only, so it can serve a profile with one kind of target.
+  const suppliedKeys = [...context.runtimeBindings.keys()].sort();
+  const keyedByKind = canonicalJson(suppliedKeys) === canonicalJson(neededRows);
+  const keyedByProfile = canonicalJson(suppliedKeys) === canonicalJson([...neededProfiles].sort()) && neededRows.length === neededProfiles.size;
+  if (!keyedByKind && !keyedByProfile) throw new Error("runtime binding map contains a missing or foreign profile or kind");
   for (const targetId of runnableTargetIds) {
     const target = targetById.get(targetId)!;
     const ref = runtimeRefs.get(targetId);
-    const runtime = context.runtimeBindings.get(target.runtimeProfileId);
+    const runtime = e2eRuntimeBindingOf(context.runtimeBindings, target.runtimeProfileId, kindOf(targetId));
     const launch = context.launchTargets.find((item) => item.targetId === targetId)!;
     if (!ref || ref.applicationId !== target.applicationId || ref.runtimeProfileId !== target.runtimeProfileId || !runtime) throw new Error("runnable application target has no exact assignment or registered runtime profile");
     validateE2EApplicationLaunchTarget(target, launch, runtime, context.selectionInput.policy.capture);
   }
-  if (context.runtimeBindings.size !== profileIds.length || [...context.runtimeBindings.keys()].some((id) => !profileIds.includes(id))) throw new Error("runtime binding map contains a missing or foreign profile");
-  const selectedRuntimeRows = context.selectionInput.registeredRuntimes.filter((runtime) => profileIds.includes(runtime.profileId));
-  if (new Set(selectedRuntimeRows.map((runtime) => runtime.profileId)).size !== selectedRuntimeRows.length) {
+  const selectedRuntimeRows = context.selectionInput.registeredRuntimes.filter((runtime) => neededProfiles.has(runtime.profileId));
+  const rowKeyOf = (runtime: E2ERegisteredRuntime) => (runtime.capabilities.kind === "web" || runtime.capabilities.kind === "api" ? e2eRuntimeBindingKey(runtime.profileId, runtime.capabilities.kind) : `${runtime.profileId}#${runtime.capabilities.kind}`);
+  if (new Set(selectedRuntimeRows.map(rowKeyOf)).size !== selectedRuntimeRows.length) {
     throw new Error("selection input contains an ambiguous registered runtime profile");
   }
-  const selectedRuntimeByProfile = new Map(selectedRuntimeRows.map((runtime) => [runtime.profileId, runtime]));
-  for (const profileId of profileIds) {
-    const selectedRuntime = selectedRuntimeByProfile.get(profileId);
-    const suppliedRuntime = context.runtimeBindings.get(profileId);
+  if (neededRows.some((key) => !selectedRuntimeRows.some((runtime) => rowKeyOf(runtime) === key))) throw new Error("selection input lacks a registered runtime row of a runnable target");
+  const selectedRuntimeByKey = new Map(selectedRuntimeRows.map((runtime) => [rowKeyOf(runtime), runtime]));
+  for (const key of neededRows) {
+    const separator = key.lastIndexOf("#");
+    const selectedRuntime = selectedRuntimeByKey.get(key);
+    const suppliedRuntime = e2eRuntimeBindingOf(context.runtimeBindings, key.slice(0, separator), key.slice(separator + 1) as "web" | "api");
     if (!selectedRuntime || !suppliedRuntime || canonicalJson(selectedRuntime) !== canonicalJson(suppliedRuntime)) {
       throw new Error("runtime binding differs from the exact selected registered runtime row");
     }
@@ -336,6 +358,8 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
   if (targetIds.length < 1 || targetIds.length > 3 || group.expectedCases.length === 0 || group.expectedCases.length > 64) throw new Error("application group has no cases or exceeds its approved limits");
   const profileId = index.targetById.get(targetIds[0]!)!.runtimeProfileId;
   if (targetIds.some((targetId) => index.targetById.get(targetId)?.runtimeProfileId !== profileId)) throw new Error("application group mixes runtime profiles");
+  const runtimeKind = index.targetById.get(targetIds[0]!)!.kind;
+  if ((runtimeKind !== "web" && runtimeKind !== "api") || targetIds.some((targetId) => index.targetById.get(targetId)?.kind !== runtimeKind)) throw new Error("application group mixes web and API targets");
   const cliDescriptor = index.cliByProfile.get(profileId);
   if (!cliDescriptor) throw new Error("application group has no exact installed CLI host descriptor");
   const cliHost = { profileId, descriptor: E2EApplicationCliHostDescriptorSchema.parse(cliDescriptor) };
@@ -420,7 +444,7 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
     bundleDigest: context.bundle.bundleDigest, compiledInventoryDigest: inventory.digest, applicationBindingsDigest: bindingsDigest,
     runtimeBindingsDigest: runtimeDigest, launchTargetsDigest: launchDigest, assertionBindingsDigest: assertionDigest });
   return Object.freeze({ protocol: "trusted-e2e-application/v1", bundle: context.bundle,
-    group: Object.freeze({ ...group, mocks: Object.freeze(groupMocks) }), cliHost, preparedEnvironmentDigest: prepared.preparedEnvironmentDigest,
+    group: Object.freeze({ ...group, mocks: Object.freeze(groupMocks) }), cliHost, runtimeKind, preparedEnvironmentDigest: prepared.preparedEnvironmentDigest,
     originByApplicationId: Object.freeze([...prepared.originByApplicationId]), files, inventory, groupConfigManifestDigest,
     shards: Object.freeze(shards), expectedCases: Object.freeze(expectedCases), selectionPacketPath: `shards/${shards[0]!.shardId}/${E2E_APPLICATION_SELECTION_PACKET_PATH}`,
     applicationBindings: context.applicationBindings, runtimeBindings: context.runtimeBindings,
@@ -471,6 +495,7 @@ export function validateE2ECompiledApplicationAdmission(compiled: E2ECompiledApp
     || canonicalJson(admissionFacts(recompilation)) !== canonicalJson(admissionFacts(compiled))
     || canonicalJson(recompilation.group) !== canonicalJson(compiled.group)
     || canonicalJson(recompilation.cliHost) !== canonicalJson(compiled.cliHost)
+    || recompilation.runtimeKind !== compiled.runtimeKind
     || recompilation.preparedEnvironmentDigest !== compiled.preparedEnvironmentDigest
     || canonicalJson(recompilation.originByApplicationId) !== canonicalJson(compiled.originByApplicationId)
     || recompilation.groupConfigManifestDigest !== compiled.groupConfigManifestDigest
@@ -638,7 +663,7 @@ export function validateE2EApplicationExecutionAdmission(admissionInput: unknown
       || outerBinding.mockManifestDigest !== group.mockManifestDigest || canonicalJson(outerBinding.expectedCases) !== canonicalJson(group.expectedCases)
       || outerBinding.appBuildDigest !== sha256(canonicalJson(compiled.inventory))
       || outerBinding.environmentDigest !== compiled.preparedEnvironmentDigest
-      || outerBinding.runtimeManifestDigest !== runtimeBindings.get(compiled.cliHost.profileId)?.manifestDigest
+      || outerBinding.runtimeManifestDigest !== e2eCompiledRuntime(compiled)?.manifestDigest
       || canonicalJson(admitted.cliHost) !== canonicalJson({ profileId: compiled.cliHost.profileId, descriptor: cliHost?.descriptor })
       || admitted.preparedEnvironmentDigest !== compiled.preparedEnvironmentDigest
       || canonicalJson(admitted.originByApplicationId) !== canonicalJson(compiled.originByApplicationId)

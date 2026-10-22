@@ -138,16 +138,20 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
 
   it("lists the baseline feature (Task 3.7b) exactly when it lists application CHECKS: both need the executor image on the host, and both are withheld together with the reason", async () => {
     const BASELINE = "task.workflowE2EBaselineChecks";
+    const V2 = "task.workflowE2EApplicationChecks.v2";
     const docker = { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) };
     const monitor = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "linux", arch: "arm64", docker, intervalMs: 60_000 });
-    expect(monitor.executor.withholdableInvocationFeatures).toEqual([FEATURE, BASELINE]);
+    expect(monitor.executor.withholdableInvocationFeatures).toEqual([FEATURE, V2, BASELINE]);
     const before = await pingOf(monitor);
     expect(before.body.invocationFeatures).not.toContain(BASELINE);
+    // Task 3.4: the string for version 2 admissions (web and API groups in one plan) is listed and withheld with the application CHECKS feature, so a worker that cannot run application rounds never claims it.
+    expect(before.body.invocationFeatures).not.toContain(V2);
+    expect(before.body.invocationFeatureDiagnostics).toMatchObject({ [V2]: { status: "unavailable", reason: "not-yet-checked" } });
     expect(before.body.invocationFeatureDiagnostics).toMatchObject({ [BASELINE]: { status: "unavailable", reason: "not-yet-checked" } });
     monitor.start();
     await vi.waitFor(() => expect(monitor.current()).toEqual({ status: "ready" }));
     const ready = await pingOf(monitor);
-    expect(ready.body.invocationFeatures).toEqual(expect.arrayContaining([FEATURE, BASELINE]));
+    expect(ready.body.invocationFeatures).toEqual(expect.arrayContaining([FEATURE, V2, BASELINE]));
     monitor.stop();
     const missing = { run: vi.fn(async () => ({ code: 1, stdout: "", stderr: "" })) };
     const without = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "linux", arch: "arm64", docker: missing, intervalMs: 60_000 });
@@ -155,6 +159,8 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     await vi.waitFor(() => expect(without.current()).toMatchObject({ status: "unavailable" }));
     const lacking = await pingOf(without);
     expect(lacking.body.invocationFeatures).not.toContain(BASELINE);
+    expect(lacking.body.invocationFeatures).not.toContain(V2);
+    expect(lacking.body.invocationFeatureDiagnostics).toMatchObject({ [V2]: { status: "unavailable", reason: "executor-image-not-on-host" } });
     // Exporting the unchanged code needs the repository alone, so a host without the executor image still lists it (review 3.7b finding 5).
     expect(lacking.body.invocationFeatures).toContain("task.workflowE2EBaselineSource");
     expect(lacking.body.invocationFeatureDiagnostics).toMatchObject({ [BASELINE]: { status: "unavailable", reason: "executor-image-not-on-host" } });

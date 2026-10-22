@@ -65,6 +65,11 @@ export async function workflowE2EApplicationChecksAvailability(environment: Node
 }
 
 const APPLICATION_CHECKS_FEATURE = "task.workflowE2EApplicationChecks" as const;
+/**
+ * M1.3 Task 3.4: a version 2 application admission (runtime rows keyed by profile and kind, so one plan can run web and API groups). A worker lists it beside the feature above, and the two
+ * are listed and withheld together, so the dispatcher sends the new admission only to a worker that reads it.
+ */
+const APPLICATION_CHECKS_V2_FEATURE = "task.workflowE2EApplicationChecks.v2" as const;
 /** M1.3 Task 3.7b: running the baseline round needs exactly what an application round needs (the executor image on the host), so the two are listed, and withheld, together. */
 const BASELINE_CHECKS_FEATURE = "task.workflowE2EBaselineChecks" as const;
 /** A check that has not answered by then is an unavailable answer, so one hung Docker cannot stop the refresh for good. */
@@ -106,8 +111,8 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
     stop(): void { if (timer !== undefined) { clearInterval(timer); timer = undefined; } },
     /** The parts of a WorkerExecutor that keep the feature off /ping while it is unavailable. */
     executor: {
-      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, BASELINE_CHECKS_FEATURE] as const,
-      withheldInvocationFeatures: () => latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest, [BASELINE_CHECKS_FEATURE]: latest },
+      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE] as const,
+      withheldInvocationFeatures: () => latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest, [APPLICATION_CHECKS_V2_FEATURE]: latest, [BASELINE_CHECKS_FEATURE]: latest },
     },
   };
 }

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
+  E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson, e2eRuntimeBindingKey,
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, inspectE2EApplicationRepository, validateE2EAppBuildBinding, withE2EAnonymousTargets,
   type E2ECreatorAuthority, type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
   type E2EApplicationLaunchTarget, type E2EApplicationPlanIntent, type E2EAppArtifactRef, type E2EAppBuildManifest, type E2ERegisteredRuntime, type E2ERound,
@@ -13,7 +13,7 @@ import {
 } from "@agentx/verifier";
 import { ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal } from "./application-dispatch-check.js";
 import { definitionOfAccountRef, type E2EAccountRegistryEntry } from "./application-account-registry.js";
-import { BF_REASON, evaluateApplicationPlanApproval } from "./application-plan-approval.js";
+import { evaluateApplicationPlanApproval } from "./application-plan-approval.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 
@@ -32,7 +32,7 @@ export type ApplicationAdmissionInput = Readonly<{
   setupProposal: E2ESetupProposal; setupApproval: PlanApprovalRef;
   /** The task's pinned project policy. */
   policy: unknown;
-  /** The runtime rows READY now. Only the row of the one kind the plan runs is passed on to the verifier (Ruling BF). */
+  /** The runtime rows READY now. Only the rows of the kinds the plan runs are passed on to the verifier (a profile registers a web row and an API row; Ruling BF, Task 3.4). */
   registeredRuntimes: readonly E2ERegisteredRuntime[];
   runtimeCatalogId: string; runtimeBinding: Ec2RuntimeBinding;
   /** The candidate's exported build source: the manifest and the reference an admission carries (`candidateBuildSourceAdmissionReference`). */
@@ -62,8 +62,8 @@ export type ApplicationAdmission = Readonly<{
   roundId: string;
   /** One run id per admitted group, in the round's group order: what the CHECKS operation and the evidence uploads are keyed by. */
   groupRunIds: string[];
-  /** The one runtime kind of the round. */
-  kind: "web" | "api";
+  /** The runtime kinds of the round, sorted: one, or `["api", "web"]` for a plan with both. */
+  kinds: Array<"web" | "api">;
   /** What a baseline round signed (purpose, base commit, attempt); absent for a candidate round. */
   baseline?: { purpose: "baseline"; baseCommitSha: string; attempt: number };
 }>;
@@ -72,13 +72,13 @@ const refusal = applicationRoundRefusal;
 const failure = (error: unknown) => (error instanceof Error ? error.message : "unreadable input");
 
 /**
- * Builds the application admission a worker decodes (`decodeE2EApplicationExecutionAdmission`) for one single-kind round, from the approved intent, the exported
+ * Builds the application admission a worker decodes (`decodeE2EApplicationExecutionAdmission`) for one round, from the approved intent, the exported
  * candidate and the approved setup, and checks it with the worker's own validator before returning it. Every input that is missing or does not agree is a
  * refusal (an `ApplicationDispatchRefusal`) with a specific reason: nothing is defaulted, and nothing falls back to the portable path.
  *
  * The selection and the application approval binding are derived against the exported candidate (the source the round builds), under this round's plan
  * identity; that derivation re-checks the candidate against the approved setup, so an application whose recipe, identity metadata or targets changed since
- * the setup was approved is refused ("replan"). Only the READY row of the plan's one runtime kind goes into the admission.
+ * the setup was approved is refused ("replan"). Only the READY rows of the kinds the plan runs go into the admission, keyed by profile and kind.
  */
 export function buildApplicationExecutionAdmission(input: ApplicationAdmissionInput): ApplicationAdmission {
   // The pinned policy holds the base targets; each qualified base web or API target also offers the signed-out visitor, derived here from the candidate's discovery (Ruling AZ).
@@ -91,12 +91,11 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   const refs = input.intent.applicationRuntimeRefs;
   if (refs.length === 0) throw new ApplicationPlanDefect("the approved plan has no target that can run application scenarios, so there is nothing to run");
 
-  // Ruling BF: one runtime kind per round. The row of that kind alone is passed on (a profile registers a web row and an api row, which the verifier cannot tell apart).
+  // A profile registers a web row and an API row, so the rows are told apart by kind (Task 3.4): the verifier gets the READY row of each kind the plan runs, and no other.
   const kinds = [...new Set(refs.map((ref) => policy.targets.find((target) => target.targetId === ref.targetId)?.kind))];
   if (kinds.some((kind) => kind !== "web" && kind !== "api")) throw new ApplicationPlanDefect("a target of the approved plan is not in the project policy or is not a web or API target");
-  if (kinds.length > 1) throw new ApplicationPlanDefect(`the plan's executable targets span ${kinds.join(" and ")}: ${BF_REASON}`);
-  const kind = kinds[0] as "web" | "api";
-  const rows = input.registeredRuntimes.filter((row) => row.capabilities.kind === kind);
+  const roundKinds = (kinds as Array<"web" | "api">).sort();
+  const rows = input.registeredRuntimes.filter((row) => (row.capabilities.kind === "web" || row.capabilities.kind === "api") && roundKinds.includes(row.capabilities.kind));
 
   const evaluation = evaluateApplicationPlanApproval({ intent: input.intent, taskId: input.taskId, artifact: input.artifact, snapshot: input.snapshot, setupProposal: input.setupProposal,
     setupApproval: input.setupApproval, policy, registeredRuntimes: rows, runtimeCatalogId: input.runtimeCatalogId, runtimeBinding: input.runtimeBinding, now: input.now,
@@ -134,11 +133,14 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   for (const profileId of profileIds) {
     if (profileId !== E2E_EXECUTOR_HOST_PROFILE_ID) throw applicationRuntimeRefusal(`no installed browser and API host is registered for runtime profile ${profileId}`);
   }
-  const runtimeFor = (profileId: string): E2ERegisteredRuntime => {
-    const row = selection.registeredRuntimes.find((item) => item.profileId === profileId);
+  const runtimeFor = (profileId: string, kind: "web" | "api"): E2ERegisteredRuntime => {
+    const row = selection.registeredRuntimes.find((item) => item.profileId === profileId && item.capabilities.kind === kind);
     if (row === undefined) throw applicationRuntimeRefusal(`no ${kind} runtime of profile ${profileId} is READY`);
     return row;
   };
+  // The (profile, kind) pairs the round runs on, in the order of their keys: one runtime row each.
+  const runtimePairs = [...new Map(runnableTargets.map((target) => [e2eRuntimeBindingKey(target.runtimeProfileId, target.kind), { profileId: target.runtimeProfileId, kind: target.kind }])).entries()]
+    .sort(([left], [right]) => (left < right ? -1 : 1)).map(([key, pair]) => ({ key, ...pair }));
 
   // The exported build source must be this candidate's, exactly.
   const candidate = input.snapshot.candidate;
@@ -165,8 +167,8 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   if (spanMs + DEFAULT_DEADLINE_GRACE_MS >= STALE_RUN_SWEEP_AGE_MS) throw applicationRuntimeRefusal("the round's allowed run time is not shorter than the stale-run sweep");
   const deadlineAt = new Date(admittedAtMs + spanMs).toISOString();
   // A runtime that stops being READY mid-round would leave a finished run unverifiable, so a round does not start on one that expires before it could end.
-  for (const profileId of profileIds) {
-    const row = runtimeFor(profileId);
+  for (const { profileId, kind } of runtimePairs) {
+    const row = runtimeFor(profileId, kind);
     if (Date.parse(row.expiresAt) < Date.parse(deadlineAt)) throw applicationRuntimeRefusal(`the ${kind} runtime of profile ${profileId} expires at ${row.expiresAt}, before this round could end at ${deadlineAt}`);
   }
   // The same goes for a test account: a round does not start on a definition that expires before it could end, or its verdict could not be verified. Registering the
@@ -186,7 +188,10 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     const approved = approval.applications.find((item) => item.applicationId === applicationId);
     if (approved === undefined) throw refusal(`application ${applicationId} is not in the application approval`);
     const targets = runnableTargets.filter((target) => target.applicationId === applicationId);
-    const runtime = runtimeFor(targets[0]!.runtimeProfileId);
+    // An application that runs as a web and an API target is built once for both: the rows of its kinds must name one installed runtime, or there is no one toolchain to build it with.
+    const toolchains = [...new Set(targets.map((target) => runtimeFor(target.runtimeProfileId, target.kind).manifestDigest))];
+    if (toolchains.length !== 1) throw applicationRuntimeRefusal(`the runtime rows application ${applicationId} runs on were qualified against different runtimes, so there is no one toolchain to build it with`);
+    const runtime = runtimeFor(targets[0]!.runtimeProfileId, targets[0]!.kind);
     const outputs = [...new Set(targets.map((target) => target.kind))].sort().map((platform) => ({
       artifactId: `build-${sha256(canonicalJson({ domain: "rovara-docker-build-artifact-id/v1", applicationId, platform, manifestDigest: manifest.manifestDigest })).slice(0, 32)}`,
       sha256: sha256(canonicalJson({ domain: "rovara-docker-build-output/v1", candidateDigest: candidate.digest, applicationId, recipeDigest: approved.recipe.recipeDigest,
@@ -201,15 +206,15 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     return { key: applicationId, value: { approval, build, artifacts, buildSource: { manifest, reference } } };
   });
 
-  const runtimeBindings = profileIds.map((profileId) => ({ key: profileId, value: runtimeFor(profileId) }));
+  const runtimeBindings = runtimePairs.map(({ key, profileId, kind }) => ({ key, value: runtimeFor(profileId, kind) }));
   const launchTargets: E2EApplicationLaunchTarget[] = runnableTargets.map((target) => {
-    try { return webApiApplicationLaunchTarget({ target, runtime: runtimeFor(target.runtimeProfileId), capture: selection.policy.capture }); }
+    try { return webApiApplicationLaunchTarget({ target, runtime: runtimeFor(target.runtimeProfileId, target.kind), capture: selection.policy.capture }); }
     catch (error) { throw refusal(`the launch declaration of target ${target.targetId} could not be built: ${failure(error)}`); }
   });
   const cliHosts = profileIds.map((profileId) => ({ profileId, descriptor: { ...E2E_EXECUTOR_HOST_DESCRIPTOR } }));
   const preparedEnvironments = groups.map((group) => {
     const members = group.targetIds.map((targetId) => runnableTargets.find((target) => target.targetId === targetId)!);
-    const runtime = runtimeFor(members[0]!.runtimeProfileId);
+    const runtime = runtimeFor(members[0]!.runtimeProfileId, members[0]!.kind);
     return { groupId: group.groupId,
       preparedEnvironmentDigest: sha256(canonicalJson({ domain: "rovara-docker-prepared-environment/v1", groupId: group.groupId, runtimeProfileId: runtime.profileId,
         runtimeManifestDigest: runtime.manifestDigest, networkPolicyDigest: runtime.capabilities.networkPolicyDigest, targetIds: [...group.targetIds].sort() })),
@@ -231,7 +236,7 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
       operationFence: input.operationFence, workflowRevision: input.workflowRevision, groupId: group.groupId, executionPlanDigest: plan.digest, executionMode: group.mode,
       mockManifestDigest: group.mockManifestDigest, authorizationRevision: availability?.authorizationRevision ?? "unavailable", candidateDigest: candidate.digest,
       planDigest: input.planDigest, policyDigest, bundleDigest: derivation.bundle.bundleDigest, appBuildDigest: sha256(canonicalJson(compiled.inventory)),
-      environmentDigest: compiled.preparedEnvironmentDigest, runtimeManifestDigest: runtimeFor(compiled.cliHost.profileId).manifestDigest,
+      environmentDigest: compiled.preparedEnvironmentDigest, runtimeManifestDigest: runtimeFor(compiled.cliHost.profileId, compiled.runtimeKind).manifestDigest,
       modelRouteRevision: selection.policy.modelRouteRevision, expectedCases: compiled.expectedCases, admittedAt, deadlineAt });
     const admitted: E2EApplicationGroupAdmission = { protocol: "trusted-e2e-application/v1", outerBinding: binding, cliHost: compiled.cliHost,
       preparedEnvironmentDigest: compiled.preparedEnvironmentDigest, originByApplicationId: [...compiled.originByApplicationId], compiledInventoryDigest: compiled.inventory.digest,
@@ -247,7 +252,7 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
       if (source.kind !== "blob") throw refusal(`source ${source.path} is not a regular file`);
       return { path: source.path, sha256: source.sha256, bytesBase64: Buffer.from(source.bytes).toString("base64"), kind: "blob" as const };
     }) };
-  const body = { schemaVersion: "workflow-e2e-application-admission/v1" as const, taskId: input.taskId, operationId: input.operationId, operationFence: input.operationFence,
+  const body = { schemaVersion: E2E_APPLICATION_ADMISSION_SCHEMA_V2, taskId: input.taskId, operationId: input.operationId, operationFence: input.operationFence,
     workflowRevision: input.workflowRevision, candidateDigest: candidate.digest, candidateCommitSha: input.snapshot.commitSha, candidateTreeSha: input.snapshot.treeSha,
     sourceSnapshot: wire, intent: selection.intent, intentDigest: selection.intentDigest, selectionInput: { ...selection, sourceSnapshot: wire },
     applicationApprovalBinding: approval, applicationBindings, runtimeBindings, launchTargets: [...launchTargets].sort((left, right) => (left.targetId < right.targetId ? -1 : 1)),
@@ -263,5 +268,5 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     validateE2EApplicationExecutionAdmission(admission);
   } catch (error) { throw refusal(`the admission could not be built within its limits or did not validate: ${failure(error)}`); }
   return { admission, bytes, sha256: sha256(bytes), admissionDigest: admission.admissionDigest, roundId: input.roundId,
-    groupRunIds: round.groupBindings.map((binding) => binding.runId), kind, ...(signedBaseline === undefined ? {} : { baseline: signedBaseline }) };
+    groupRunIds: round.groupBindings.map((binding) => binding.runId), kinds: roundKinds, ...(signedBaseline === undefined ? {} : { baseline: signedBaseline }) };
 }

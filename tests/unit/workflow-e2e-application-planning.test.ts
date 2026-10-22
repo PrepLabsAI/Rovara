@@ -6,7 +6,7 @@ import {
   E2EWorkflowAdmissionRefSchema, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
   WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, canonicalPlanJson, workflowSendBackOffered,
   WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey, readCanonicalPlan, portableOperationId, type E2EApplicationPlanIntent,
-  selectE2EApplicationExecutionPlan, e2eAnonymousRuntimeAccountRef,
+  selectE2EApplicationExecutionPlan, e2eAnonymousRuntimeAccountRef, E2E_APPLICATION_ADMISSION_SCHEMA_V2,
   type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
@@ -266,14 +266,9 @@ describe("a v2 intent with portable criteria is refused at approval (Ruling BE, 
     expect(refusal(result)).toContain("semanticExportDeltas");
   });
 
-  it("marks a plan-intrinsic refusal (portable criteria, web and api together) apart from a runtime one, so dispatch can send the plan back to planning", () => {
+  it("marks a plan-intrinsic refusal (portable criteria) apart from a runtime one, so dispatch can send the plan back to planning", () => {
     const portable = evaluate({ snapshot: mixedSnapshot, mutateIntent: withProposedCallable });
     expect(!portable.ok && portable.scope).toBe("plan");
-    const bf = webAndApiFixture();
-    const both = evaluateApplicationPlanApproval({ intent: bf.build({ web: true, api: true }), taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot: bf.snapshot, setupProposal: bf.setup.proposal,
-      setupApproval: bf.setup.setupApproval, policy: bf.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW,
-      accounts: { entries: bf.registry, mode: "approve", pinned: [] } });
-    expect(!both.ok && both.scope).toBe("plan");
     const noRow = evaluate({ registeredRuntimes: [] });
     expect(!noRow.ok && noRow.scope).toBe("runtime");
     const expired = evaluate({ registeredRuntimes: [webApiRow("web", { qualifiedAt: new Date(NOW - 7_200_000).toISOString(), expiresAt: new Date(NOW - 1_000).toISOString() })] });
@@ -345,21 +340,24 @@ function workflowFixtureFor(blockReason: string) {
     e2e: { contractDigest: "a".repeat(64), policyDigest: "b".repeat(64), bundleDigest: "c".repeat(64), executionPlanDigest: "d".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] } };
 }
 
-describe("one runtime kind per application plan (Ruling BF)", () => {
-  const BF_REASON = "one runtime kind per plan in M1.2";
+describe("web and API targets in one application plan (Ruling BF, Task 3.4)", () => {
   const bothKinds = () => {
     const fixture = webAndApiFixture();
-    const run = (intent: E2EApplicationPlanIntent) => evaluateApplicationPlanApproval({ intent, taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot: fixture.snapshot,
-      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
+    const run = (intent: E2EApplicationPlanIntent, registeredRuntimes = [webApiRow("web"), webApiRow("api")]) => evaluateApplicationPlanApproval({ intent, taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot: fixture.snapshot,
+      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes,
       runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW, accounts: { entries: fixture.registry, mode: "approve", pinned: [] } });
     return { ...fixture, run };
   };
 
-  it("refuses an intent whose executable targets span web and api, saying why", () => {
+  it("approves an intent whose executable targets span web and api, recording the row of each kind", () => {
     const fixture = bothKinds();
     const result = fixture.run(fixture.build({ web: true, api: true }));
-    expect(result.ok).toBe(false);
-    expect(result.ok ? "" : result.reason).toContain(BF_REASON);
+    expect(result.ok, result.ok ? "" : result.reason).toBe(true);
+    if (result.ok) {
+      expect(result.selection.executableTargetIds).toEqual([fixture.web.targetId, fixture.api.targetId].sort());
+      expect(result.selection.runtimeRows.map((row) => row.kind).sort()).toEqual(["api", "web"]);
+      expect(result.derivation.plan.groups.map((group) => group.targetIds)).toHaveLength(2);
+    }
   });
 
   it("approves either kind alone, with the other target listed as unavailable", () => {
@@ -370,6 +368,27 @@ describe("one runtime kind per application plan (Ruling BF)", () => {
     const apiOnly = fixture.run(fixture.build({ web: false, api: true }));
     expect(apiOnly.ok, apiOnly.ok ? "" : apiOnly.reason).toBe(true);
     if (apiOnly.ok) expect(apiOnly.selection).toMatchObject({ executableTargetIds: [fixture.api.targetId], runtimeRows: [{ kind: "api" }] });
+  });
+
+  it("still refuses a plan that needs a kind with no READY row, naming the kind (the runtime is at fault, not the plan)", () => {
+    const fixture = bothKinds();
+    const noApiRow = fixture.run(fixture.build({ web: true, api: true }), [webApiRow("web")]);
+    expect(noApiRow.ok).toBe(false);
+    expect(noApiRow.ok ? "" : noApiRow.reason).toMatch(/no api runtime of profile .* is READY/);
+    expect(!noApiRow.ok && noApiRow.scope).toBe("runtime");
+  });
+
+  it("refuses a request step on a web target and a browser step on an api target, each against its own kind's descriptor", () => {
+    const fixture = bothKinds();
+    const intent = fixture.build({ web: true, api: true });
+    const requestOnWeb = fixture.run({ ...intent, scenarios: intent.scenarios.map((scenario) => scenario.requestedTargetIds[0] === fixture.web.targetId
+      ? { ...scenario, steps: [{ kind: "request" as const, requestId: "r", path: "/health", method: "GET" as const, body: {} }], assertions: [{ kind: "http-status" as const, path: "/health", method: "GET" as const, equals: 200 }] } : scenario) });
+    expect(requestOnWeb.ok).toBe(false);
+    expect(requestOnWeb.ok ? "" : requestOnWeb.reason).toMatch(new RegExp(`target ${fixture.web.targetId}: application runtime is not ready`));
+    const browserOnApi = fixture.run({ ...intent, scenarios: intent.scenarios.map((scenario) => scenario.requestedTargetIds[0] === fixture.api.targetId
+      ? { ...scenario, steps: [{ kind: "navigate" as const, path: "/" }], assertions: [{ kind: "visible" as const, testId: "x", equals: true }] } : scenario) });
+    expect(browserOnApi.ok).toBe(false);
+    expect(browserOnApi.ok ? "" : browserOnApi.reason).toMatch(/UI scenario steps are incompatible with API target/);
   });
 });
 
@@ -909,7 +928,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
 
   const noPortableAdmission = (dispatched: Awaited<ReturnType<typeof atChecksDispatch>>) => {
     for (const name of dispatched.admissionObjects()) {
-      expect((JSON.parse(dispatched.harness.s3.objects.get(name)!) as { schemaVersion?: unknown }).schemaVersion, name).toBe("workflow-e2e-application-admission/v1");
+      expect((JSON.parse(dispatched.harness.s3.objects.get(name)!) as { schemaVersion?: unknown }).schemaVersion, name).toBe(E2E_APPLICATION_ADMISSION_SCHEMA_V2);
     }
   };
 

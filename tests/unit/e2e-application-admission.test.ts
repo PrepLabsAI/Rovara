@@ -1,15 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
-  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, E2ESetupProposalSchema, createCandidateManifest, inspectE2ERepository, proposeE2ESetup, verifyE2ESetupProposal } from "@agentx/contracts";
+import { E2EApplicationPlanIntentSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V1, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
+  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, e2eRuntimeBindingKey, E2ESetupProposalSchema, createCandidateManifest, inspectE2ERepository, proposeE2ESetup, verifyE2ESetupProposal } from "@agentx/contracts";
 import { registryFor } from "../support/e2e-account-registry-fixtures.js";
-import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
+import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, e2eCompiledRuntime, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
 import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/broker/src/e2e/application-admission.js";
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
-import { applicationIntentDigest, evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
+import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
+import { builtWebAndApiAdmission } from "../support/e2e-web-and-api-admission.js";
 import { PROFILE, anonymousScenario, anonymousTargetOf, binding, inferredSnapshot, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 
 afterEach(disposeRealCandidates);
@@ -99,7 +100,7 @@ describe("the application admission built for a single-kind round", () => {
     const { approval, build } = decoded.applicationBindings[0]!.value;
     expect(approval.applications[0]!.recipe.build.map((command) => [command.program, ...command.args])).toEqual([["npm", "ci"]]);
     expect(build.lockfileRefs.map((ref) => ref.path)).toEqual(["package-lock.json"]);
-    expect(built.kind).toBe("web");
+    expect(built.kinds).toEqual(["web"]);
   });
 
   it("returns the per-group run ids and the admission digest that verification of the round needs", async () => {
@@ -112,7 +113,7 @@ describe("the application admission built for a single-kind round", () => {
     expect(built.groupRunIds.length).toBeGreaterThan(0);
     expect(new Set(built.groupRunIds).size).toBe(built.groupRunIds.length);
     expect(built.admissionDigest).toBe(decoded.admissionDigest);
-    expect(built.kind).toBe("web");
+    expect(built.kinds).toEqual(["web"]);
   });
 
   it("carries the exported build source reference and manifest, bound to the exported commit and tree", async () => {
@@ -163,7 +164,7 @@ describe("the application admission built for a single-kind round", () => {
     expect(decoded.modelRoute).toBeNull();
   });
 
-  it("passes the verifier only the READY row of the kind in use (Ruling BF), so a profile's web and api rows are never ambiguous", async () => {
+  it("passes the verifier only the READY rows of the kinds in use, so a web-only plan carries no api row of its profile", async () => {
     const { input } = await inputs({ registeredRuntimes: [webApiRow("web"), webApiRow("api")] });
     const decoded = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission(input).bytes);
     expect(decoded.selectionInput.registeredRuntimes).toHaveLength(1);
@@ -180,7 +181,7 @@ describe("the application admission built for a single-kind round", () => {
       setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
       runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), accountEntries: fixture.registry, recordedSelection: webAndApiSelection(fixture) };
     const built = buildApplicationExecutionAdmission(input);
-    expect(built.kind).toBe("api");
+    expect(built.kinds).toEqual(["api"]);
     const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
     expect(decoded.launchTargets[0]).toMatchObject({ targetId: fixture.api.targetId, app: null });
     expect(decoded.selectionInput.registeredRuntimes.map((item) => item.capabilities.kind)).toEqual(["api"]);
@@ -200,16 +201,6 @@ describe("the application admission built for a single-kind round", () => {
 });
 
 describe("the builder refuses with a specific reason, never a portable fallback", () => {
-  it("refuses an intent whose executable targets span web and api (Ruling BF, defense in depth after approval)", async () => {
-    const fixture = webAndApiFixture();
-    const candidate = await candidateOf({ "package.json": ordersContractManifest, "api/package.json": Buffer.from(fixture.snapshot.sources.find((item) => item.path === "api/package.json")!.bytes).toString("utf8") });
-    const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
-      runId: randomUUID, intent: fixture.build({ web: true, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
-      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
-      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), accountEntries: fixture.registry, recordedSelection: webAndApiSelection(fixture) };
-    expect(refusalOf(() => buildApplicationExecutionAdmission(input))).toContain("one runtime kind per plan in M1.2");
-  });
-
   it("refuses a manifest exported for another tree", async () => {
     const { input } = await inputs();
     const other = await candidateOf({ ...ordersTree, "src/extra.js": "export const extra = 1;\n" });
@@ -422,5 +413,130 @@ describe("setup proposals stored before Task 3.3", () => {
     const admitted = decoded.selectionInput.policy.targets;
     expect(admitted.map((target) => target.targetId)).toEqual([...policy.targets.map((target) => target.targetId), "web-1-anonymous"]);
     expect(admitted.find((target) => target.targetId === "web-1-anonymous")).toMatchObject({ accountProfileId: "rovara-anonymous", runtimeProfileId: PROFILE });
+  });
+});
+
+describe("an admission for a plan that runs web and API checks together (Task 3.4)", () => {
+  const BOTH_ROWS = () => [webApiRow("web"), webApiRow("api")];
+  const sha256Of = (value: string) => createHash("sha256").update(value).digest("hex");
+  /** The approval of a plan on one app's web and API targets, and the admission dispatch builds for it from the candidate. */
+  async function oneApp() {
+    const { fx, intent, approved, candidate, input } = await builtWebAndApiAdmission();
+    return { fx, intent, approved, candidate, input };
+  }
+  /** The same admission re-signed with an edit, as the broker's own writer would have written it (the digest is over everything else); the bytes are not checked by the schema on the way out. */
+  function resigned(admission: ReturnType<typeof decodeE2EApplicationExecutionAdmission>, edit: (body: Record<string, unknown>) => void): Buffer {
+    const { admissionDigest: _digest, ...body } = admission;
+    void _digest;
+    const edited = JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+    edit(edited);
+    return Buffer.from(canonicalJson({ ...edited, admissionDigest: sha256Of(canonicalJson(edited)) }), "utf8");
+  }
+  /** What the previous code wrote for a plan of one kind: schema version 1, and each runtime row keyed by its profile alone. */
+  const asWrittenByVersion1 = (admission: ReturnType<typeof decodeE2EApplicationExecutionAdmission>) => resigned(admission, (body) => {
+    body.schemaVersion = E2E_APPLICATION_ADMISSION_SCHEMA_V1;
+    body.runtimeBindings = admission.runtimeBindings.map((item) => ({ key: item.value.profileId, value: item.value }));
+  });
+
+  it("builds one admission for an app with a web and an API target: schema version 2, a runtime row per kind, and a group for each kind", async () => {
+    const { input, intent, approved } = await oneApp();
+    const built = buildApplicationExecutionAdmission(input);
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    expect(decoded.schemaVersion).toBe(E2E_APPLICATION_ADMISSION_SCHEMA_V2);
+    expect(built.kinds).toEqual(["api", "web"]);
+    expect(decoded.runtimeBindings.map((item) => item.key)).toEqual([e2eRuntimeBindingKey(PROFILE, "api"), e2eRuntimeBindingKey(PROFILE, "web")]);
+    expect(decoded.runtimeBindings.map((item) => item.value.capabilities.kind)).toEqual(["api", "web"]);
+    expect(decoded.selectionInput.registeredRuntimes.map((item) => item.capabilities.kind).sort()).toEqual(["api", "web"]);
+    // One application, built once for both kinds.
+    expect(decoded.applicationBindings).toHaveLength(1);
+    expect(decoded.applicationBindings[0]!.value.build.outputs.map((output) => output.platform).sort()).toEqual(["api", "web"]);
+    // Two groups (a group never mixes kinds), each compiled against the row of its own kind, and the worker's own validator accepts the whole.
+    const validated = validateE2EApplicationExecutionAdmission(decoded);
+    expect(validated.applicationSuites).toHaveLength(2);
+    expect(decoded.groups).toHaveLength(2);
+    expect(built.groupRunIds).toHaveLength(2);
+    expect(validated.applicationSuites.map((suite) => suite.runtimeKind).sort()).toEqual(["api", "web"]);
+    for (const suite of validated.applicationSuites) {
+      expect(e2eCompiledRuntime(suite)?.capabilities.kind, suite.group.groupId).toBe(suite.runtimeKind);
+      const kindsOfTargets = new Set(suite.group.targetIds.map((targetId) => validated.executionPlan.effectiveTargets.find((target) => target.targetId === targetId)!.kind));
+      expect([...kindsOfTargets]).toEqual([suite.runtimeKind]);
+    }
+    expect(decoded.launchTargets.map((target) => target.app === null)).toContain(true);
+    expect(decoded.launchTargets.map((target) => target.app === null)).toContain(false);
+    // The FX3 lesson: the parsed approved intent is the admission's intent (with the approval's pinned account refs), and the digest the approval recorded is the plan's.
+    expect(canonicalJson(decoded.intent)).toBe(canonicalJson(applicationIntentWithAccountRefs(applicationRoundIntent(E2EApplicationPlanIntentSchema.parse(JSON.parse(JSON.stringify(intent)))), approved.accountRefs)));
+    expect(decoded.intentDigest).toBe(sha256Of(canonicalJson(decoded.intent)));
+    expect(applicationIntentDigest(intent)).toBe(approved.selection.intentDigest);
+  });
+
+  it("builds one admission for a web app and an API app, each with its own row", async () => {
+    const fixture = webAndApiFixture();
+    const candidate = await candidateOf({ "package.json": ordersContractManifest, "api/package.json": Buffer.from(fixture.snapshot.sources.find((item) => item.path === "api/package.json")!.bytes).toString("utf8") });
+    const intent = fixture.build({ web: true, api: true });
+    const approved = evaluateApplicationPlanApproval({ intent, taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: fixture.snapshot,
+      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: BOTH_ROWS(), runtimeCatalogId: "catalog", runtimeBinding: binding,
+      now: Date.now(), accounts: { entries: fixture.registry, mode: "approve", pinned: [] } });
+    if (!approved.ok) throw new Error(approved.reason);
+    const built = buildApplicationExecutionAdmission({ taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
+      runId: randomUUID, intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval,
+      policy: fixture.policy, registeredRuntimes: BOTH_ROWS(), runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(),
+      accountEntries: fixture.registry, recordedSelection: approved.selection });
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    expect(built.kinds).toEqual(["api", "web"]);
+    expect(decoded.applicationBindings).toHaveLength(2);
+    expect(decoded.runtimeBindings.map((item) => item.key)).toEqual([e2eRuntimeBindingKey(PROFILE, "api"), e2eRuntimeBindingKey(PROFILE, "web")]);
+    expect(validateE2EApplicationExecutionAdmission(decoded).applicationSuites.map((suite) => suite.runtimeKind).sort()).toEqual(["api", "web"]);
+  });
+
+  it("refuses a web group handed the API row of its profile: the key says one kind and the row is the other", async () => {
+    const { input } = await oneApp();
+    const decoded = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission(input).bytes);
+    const apiRow = decoded.runtimeBindings.find((item) => item.value.capabilities.kind === "api")!.value;
+    const swapped = (key: string) => resigned(decoded, (body) => {
+      body.runtimeBindings = decoded.runtimeBindings.map((item) => item.key === key ? { key, value: apiRow } : item);
+    });
+    // The schema reads the key against the row it holds, so the swap does not even decode...
+    expect(() => decodeE2EApplicationExecutionAdmission(swapped(e2eRuntimeBindingKey(PROFILE, "web")))).toThrow(/runtime binding keys/);
+    // ...and a row that is not the one the selection approved, under an honest key, is refused by the verifier's exact comparison.
+    const requalified = resigned(decoded, (body) => {
+      body.runtimeBindings = decoded.runtimeBindings.map((item) => item.value.capabilities.kind === "web" ? { key: item.key, value: { ...item.value, generation: item.value.generation + 1 } } : item);
+    });
+    expect(() => validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(requalified))).toThrow(/runtime binding differs from the exact selected registered runtime row/);
+  });
+
+  it("reads an admission the previous code wrote (version 1, rows keyed by the profile), for a web round and for an API round", async () => {
+    const web = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission((await inputs()).input).bytes);
+    const asV1 = decodeE2EApplicationExecutionAdmission(asWrittenByVersion1(web));
+    expect(asV1.schemaVersion).toBe(E2E_APPLICATION_ADMISSION_SCHEMA_V1);
+    expect(asV1.runtimeBindings.map((item) => item.key)).toEqual([PROFILE]);
+    const validated = validateE2EApplicationExecutionAdmission(asV1);
+    expect(validated.applicationSuites).toHaveLength(1);
+    expect(e2eCompiledRuntime(validated.applicationSuites[0]!)?.capabilities.kind).toBe("web");
+    // The binding the stored round carries is the same digest the row of its own kind gives.
+    expect(validated.admission.round.groupBindings[0]!.runtimeManifestDigest).toBe(e2eCompiledRuntime(validated.applicationSuites[0]!)!.manifestDigest);
+
+    const fixture = webAndApiFixture();
+    const candidate = await candidateOf({ "package.json": ordersContractManifest, "api/package.json": Buffer.from(fixture.snapshot.sources.find((item) => item.path === "api/package.json")!.bytes).toString("utf8") });
+    const apiAdmission = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission({ taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4,
+      roundId: randomUUID(), runId: randomUUID, intent: fixture.build({ web: false, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
+      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: BOTH_ROWS(), runtimeCatalogId: "catalog", runtimeBinding: binding,
+      buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), accountEntries: fixture.registry, recordedSelection: webAndApiSelection(fixture) }).bytes);
+    const apiV1 = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(asWrittenByVersion1(apiAdmission)));
+    expect(apiV1.applicationSuites.map((suite) => suite.runtimeKind)).toEqual(["api"]);
+    expect(e2eCompiledRuntime(apiV1.applicationSuites[0]!)?.capabilities.kind).toBe("api");
+  });
+
+  it("refuses runtime keys that do not fit the admission's version: a v2 key without its kind, a v1 key with one, and two kinds of one profile under the profile alone", async () => {
+    const { input } = await oneApp();
+    const both = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission(input).bytes);
+    const profileAlone = resigned(both, (body) => { body.runtimeBindings = both.runtimeBindings.map((item) => ({ key: item.value.profileId, value: item.value })); });
+    expect(() => decodeE2EApplicationExecutionAdmission(profileAlone)).toThrow(/runtime binding keys/);
+    const v1WithKinds = resigned(both, (body) => { body.schemaVersion = E2E_APPLICATION_ADMISSION_SCHEMA_V1; });
+    expect(() => decodeE2EApplicationExecutionAdmission(v1WithKinds)).toThrow(/runtime binding keys/);
+    const v1BothUnderProfile = resigned(both, (body) => {
+      body.schemaVersion = E2E_APPLICATION_ADMISSION_SCHEMA_V1;
+      body.runtimeBindings = both.runtimeBindings.map((item) => ({ key: item.value.profileId, value: item.value }));
+    });
+    expect(() => decodeE2EApplicationExecutionAdmission(v1BothUnderProfile)).toThrow();
   });
 });

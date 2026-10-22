@@ -1,7 +1,9 @@
 import {
+  E2E_APPLICATION_ADMISSION_SCHEMA_V2,
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
   WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED,
   agentXError,
+  isE2EApplicationAdmissionSchemaVersion,
   modelSelectionFor,
   workerInvokeToken,
   workerInvokeTokenPayload,
@@ -95,7 +97,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     const workflowE2EReadiness = storedReadiness === "READINESS";
     if (workflowE2EReadiness && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     if (invocation.kind === "project-setup-smoke" && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
-    await checkAdmissionKind(invocation, dependencies.workflowE2EAdmissionSchemaVersion);
+    const admissionSchemaVersion = await checkAdmissionKind(invocation, dependencies.workflowE2EAdmissionSchemaVersion);
     let binding: Ec2RuntimeBinding | undefined;
     let session: { ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string };
     if (invocation.kind === "project-setup-smoke") {
@@ -129,7 +131,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
       return { readinessGeneration: session.generation };
     }
     if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
-    const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures);
+    const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures, admissionSchemaVersion);
     if (invocation.kind === "task" && invocation.payload.workflowE2EPlanVersion !== undefined
       && !(sent.kind === "task" && sent.payload.workflowE2EPlanVersion !== undefined)) {
       // Without the recorder the operation record would keep saying version 2 was offered while the worker was sent a portable-only run, so the broker would
@@ -168,25 +170,27 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
   };
 }
 
-const APPLICATION_ADMISSION_SCHEMA = "workflow-e2e-application-admission/v1";
+/** What a worker that cannot run a version 2 application admission (web and API runtime bindings keyed by kind) is told; the feature it must list is `task.workflowE2EApplicationChecks.v2`. */
+export const COMBINED_CHECKS_WORKER_REFUSAL = "This worker can't run combined browser and API checks yet; retry once it restarts.";
 const PORTABLE_ADMISSION_SCHEMA = "workflow-e2e-admission/v1";
 
 /**
  * The reference's `kind` decides which worker may receive an application round, so it is checked against the admission it names before any compute is started: a reference
  * without `kind` that names an application admission would bypass the gate, and one marked application that names a portable admission is a broker defect. Both are refused.
  */
-async function checkAdmissionKind(invocation: WorkerInvocation, read: Ec2DeliveryDependencies["workflowE2EAdmissionSchemaVersion"]): Promise<void> {
-  if (read === undefined || invocation.kind !== "task" || invocation.payload.workflowE2EAdmission === undefined) return;
+async function checkAdmissionKind(invocation: WorkerInvocation, read: Ec2DeliveryDependencies["workflowE2EAdmissionSchemaVersion"]): Promise<string | undefined> {
+  if (read === undefined || invocation.kind !== "task" || invocation.payload.workflowE2EAdmission === undefined) return undefined;
   const reference = invocation.payload.workflowE2EAdmission;
   let schemaVersion: string | undefined;
   try { schemaVersion = await read(reference); } catch { schemaVersion = undefined; }
   if (schemaVersion === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "could not read the E2E admission to check its kind against the reference; no round was sent");
-  if (schemaVersion !== APPLICATION_ADMISSION_SCHEMA && schemaVersion !== PORTABLE_ADMISSION_SCHEMA) {
+  if (!isE2EApplicationAdmissionSchemaVersion(schemaVersion) && schemaVersion !== PORTABLE_ADMISSION_SCHEMA) {
     throw agentXError("CONFIG_INVALID", "the E2E admission is of a kind this dispatcher does not know; no round was sent");
   }
-  if ((schemaVersion === APPLICATION_ADMISSION_SCHEMA) !== (reference.kind === "application")) {
+  if (isE2EApplicationAdmissionSchemaVersion(schemaVersion) !== (reference.kind === "application")) {
     throw agentXError("CONFIG_INVALID", "the E2E admission reference's kind does not match the admission it names; no round was sent");
   }
+  return schemaVersion;
 }
 
 /**
@@ -213,6 +217,7 @@ async function forWorker(
   invocation: WorkerInvocation,
   pingUrl: string,
   workerFeatures: Ec2DeliveryDependencies["workerFeatures"],
+  admissionSchemaVersion?: string,
 ): Promise<WorkerInvocation> {
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
@@ -267,6 +272,11 @@ async function forWorker(
   // sent one (and never a trimmed one): the attempt fails with this reason instead (Ruling BQ, mixed fleet).
   if (carriesApplicationAdmission && !features.includes("task.workflowE2EApplicationChecks")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "browser and API verification needs a worker that runs application admissions (it must list task.workflowE2EApplicationChecks); this worker predates it or has no executor image on its host, so no application round was sent to it");
+  }
+  // M1.3 Task 3.4: a version 2 admission keys its runtime rows by profile and kind, which a worker built before it cannot read. It is refused here, before compute is spent, with a sentence the
+  // owner can act on (the worker lists the feature again once it restarts on the new image).
+  if (carriesApplicationAdmission && admissionSchemaVersion === E2E_APPLICATION_ADMISSION_SCHEMA_V2 && !features.includes("task.workflowE2EApplicationChecks.v2")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", COMBINED_CHECKS_WORKER_REFUSAL);
   }
   // M1.3 Task 3.7b: a baseline round is an application round of a kind of its own. A worker that runs application admissions but predates baseline rounds would run it as a
   // candidate's, and its refusal of the signed purpose would come only after compute was spent, so it is refused here with the reason.

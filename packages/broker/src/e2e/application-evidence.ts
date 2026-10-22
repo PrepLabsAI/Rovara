@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EApplicationExecutionAdmission, type E2EDisplayScenario,
   type E2EExecutionPlan, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
 import { createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
-  e2eApplicationAggregateRunUsage, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
+  e2eApplicationAggregateRunUsage, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
   type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { buildScenarioRows, readCaptureScreenshots, type DisplayArtifact, type DisplayGroupInput } from "./application-display.js";
 import { combineE2EVerdicts, type E2EVerdict } from "./verdict.js";
@@ -280,7 +280,7 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     const mockOrigins = e2eApplicationHostedMockOrigins(suite).map((origin) => origin.originRef);
     const inventoryDigest = dockerOwnedResourceInventoryDigest(binding.runId, mockOrigins);
     if (inputs.ownedResourceInventoryDigest !== inventoryDigest) return unknown("the group's owned-resource inventory is not the one its run id derives");
-    const runtime = suite.runtimeBindings.get(suite.group.runtimeProfileId);
+    const runtime = e2eCompiledRuntime(suite);
     if (runtime === undefined || !same(inputs.environment, runtime.runnerEnvironment)) return unknown("the runner's environment is not the admitted runtime's environment");
     if (!same(inputs.limits, APPLICATION_RUNNER_LIMITS)) return unknown("the runner's limits are not the configured limits");
     if (!Array.isArray(inputs.governedModelReceipts) || inputs.governedModelReceipts.length !== 0) return unknown("a run with no model route cannot carry model receipts");
