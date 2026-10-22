@@ -15,6 +15,7 @@ import { expectedE2EApplicationReporterDigest } from "../application-runtime-ass
 import type { E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { uuidFor } from "../executor/case-ledger.js";
 import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, CAPTURE_SCREENSHOT_MAX_BYTES, type CaptureEntry } from "../executor/capture.js";
+import { E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE } from "../executor/evidence-paths.js";
 import { openRegularFile, readRegularFileHead } from "./regular-file.js";
 
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
@@ -49,6 +50,17 @@ export type ExecutorOutputEvidence = Readonly<{
   executorLogHead: Uint8Array;
   /** `artifacts.json` and the capture files it lists that are still on disk and clean; null when the run listed none. */
   captures: Readonly<{ artifacts: readonly CaptureEntry[]; files: readonly ExecutorCaptureFile[] }> | null;
+  /**
+   * What an agent step left (Task 4.3b), present only for a run that had one: the action ledger of each case that ran an agent step, exactly as the executor wrote it, and the replay
+   * recordings it kept. The ledger is read by Task 4.4 through `parseVerifiedE2EAgentActionLedger` and never trusted as is; neither file is ever a verdict input here. A file
+   * that carries a run credential (the host's own predicate) or is not a plain bounded file is not handed on and is counted in `dropped`.
+   */
+  agent?: ExecutorAgentEvidence;
+}>;
+export type ExecutorAgentEvidence = Readonly<{
+  ledgers: ReadonlyArray<Readonly<{ caseDirectory: string; bytes: Uint8Array }>>;
+  traces: ReadonlyArray<Readonly<{ name: string; bytes: Uint8Array }>>;
+  dropped: number;
 }>;
 /** One action of one case as the executor's ledger recorded it: when it began and, if it did, when it finished. */
 export type ExecutorActionWindow = Readonly<{ caseId: string; actionIndex: number; beganAt: string; finishedAt: string | null }>;
@@ -164,6 +176,47 @@ async function readExecutorEvidence(outDir: string, containsCredential: (bytes: 
   } catch { return Object.freeze({ executorLogHead, captures: null }); }
 }
 
+const MAX_AGENT_LEDGER_BYTES = 256 * 1024;
+const MAX_AGENT_TRACE_BYTES = 1_048_576;
+const MAX_AGENT_TRACES = 16;
+const MAX_AGENT_LEDGERS = 64;
+const AGENT_TRACE_FILE = /^trace-[a-f0-9]{16}\.json$/;
+
+/** The agent step's files under `agent/`, read once, best effort and bounded. Null when the run left none; anything unreadable is dropped and counted. */
+async function readAgentEvidence(outDir: string, containsCredential: (bytes: Uint8Array) => boolean): Promise<ExecutorAgentEvidence | null> {
+  const root = join(outDir, E2E_AGENT_EVIDENCE_DIR);
+  let entries: string[];
+  try { await requireRealDirectory(root, E2E_AGENT_EVIDENCE_DIR); entries = (await readdir(root)).sort(); } catch { return null; }
+  const budget = { total: 0 };
+  const total = 8 * 1024 * 1024;
+  let dropped = 0;
+  const ledgers: Array<{ caseDirectory: string; bytes: Uint8Array }> = [];
+  const traces: Array<{ name: string; bytes: Uint8Array }> = [];
+  const take = async (relative: string, max: number): Promise<Uint8Array | null> => {
+    try {
+      const bytes = await readRegular(outDir, relative, budget, max, total);
+      if (containsCredential(bytes)) { dropped += 1; return null; }
+      return bytes;
+    } catch { dropped += 1; return null; }
+  };
+  for (const name of entries) {
+    if (SAFE_DIR.test(name)) {
+      if (ledgers.length >= MAX_AGENT_LEDGERS) { dropped += 1; continue; }
+      const bytes = await take(`${E2E_AGENT_EVIDENCE_DIR}/${name}/${E2E_AGENT_LEDGER_FILE}`, MAX_AGENT_LEDGER_BYTES);
+      if (bytes !== null) ledgers.push({ caseDirectory: name, bytes });
+    } else if (name === "traces") {
+      let files: string[];
+      try { await requireRealDirectory(join(root, "traces"), `${E2E_AGENT_EVIDENCE_DIR}/traces`); files = (await readdir(join(root, "traces"))).filter((file) => AGENT_TRACE_FILE.test(file)).sort(); } catch { dropped += 1; continue; }
+      for (const file of files) {
+        if (traces.length >= MAX_AGENT_TRACES) { dropped += 1; continue; }
+        const bytes = await take(`${E2E_AGENT_EVIDENCE_DIR}/traces/${file}`, MAX_AGENT_TRACE_BYTES);
+        if (bytes !== null) traces.push({ name: file, bytes });
+      }
+    }
+  }
+  return Object.freeze({ ledgers: Object.freeze(ledgers), traces: Object.freeze(traces), dropped });
+}
+
 /** Reads the out directory of a finished executor run: its result file, every shard's CLI files and every evidence item. */
 /**
  * `containsCredential` is the host's own predicate for the run's account credentials (also over archives); a capture or log head it flags is held back from the
@@ -217,7 +270,14 @@ export async function snapshotExecutorOutput(outDir: string, result: ExecutorRes
   const assertionAssets = await readBindings(/^asset-[A-Za-z0-9._-]+\.json$/, MAX_ASSET_FILES, "e2e-executor-asset-binding/v1",
     (value) => E2EApplicationAssertionAssetBindingSchema.parse(value));
   return Object.freeze({ result, shardFiles, evidence: Object.freeze(evidence), observationBindings: Object.freeze(observationBindings),
-    assertionAssets: Object.freeze(assertionAssets), reportBytes, executorEvidence: await readExecutorEvidence(outDir, options.containsCredential ?? (() => false)) });
+    assertionAssets: Object.freeze(assertionAssets), reportBytes, executorEvidence: await withAgentEvidence(outDir, options.containsCredential ?? (() => false)) });
+}
+
+/** The log head and captures, plus the agent step's files when the run left any (the field is absent otherwise, so a run without an agent step reads back exactly as before). */
+async function withAgentEvidence(outDir: string, containsCredential: (bytes: Uint8Array) => boolean): Promise<ExecutorOutputEvidence> {
+  const base = await readExecutorEvidence(outDir, containsCredential);
+  const agent = await readAgentEvidence(outDir, containsCredential);
+  return agent === null ? base : Object.freeze({ ...base, agent });
 }
 
 /** The executor's action windows, read once the executor is done: they bind a mock ledger line to the case that was running when it was recorded. */

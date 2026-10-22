@@ -12,7 +12,9 @@ export const E2E_EXECUTOR_HOST_MODULE_PATH = "dist/executor/host-entry.js" as co
  * The host module is one re-export line, so its emitted bytes, and therefore the digest the registry pins, are the same everywhere. The broker takes the
  * descriptor an admission names from here, with no file to read; a test keeps the digest equal to the registry's and the source equal to this line.
  */
-export const E2E_EXECUTOR_HOST_ENTRY_SOURCE = 'export { createE2EApplicationCliHost } from "./host.js";\n' as const;
+// Written in two parts so that no tool reading this file as source takes the line for an import of `./host.js`: this is the text of another file, not an import of this one, and this
+// module is in the worker's import graph, which must never reach the host module and the AI SDK behind it (tests/contract/worker-e2e-import-boundary.test.ts).
+export const E2E_EXECUTOR_HOST_ENTRY_SOURCE = `export { createE2EApplicationCliHost } from ${'"./host.js"'};\n` as const;
 export const E2E_EXECUTOR_HOST_DESCRIPTOR = Object.freeze({ entryPointId: E2E_EXECUTOR_HOST_ENTRY_POINT_ID,
   entryPointManifestDigest: createHash("sha256").update(E2E_EXECUTOR_HOST_ENTRY_SOURCE).digest("hex") });
 const REGISTRY_PATH = "assets/application-runtime-v1/cli-hosts.json";

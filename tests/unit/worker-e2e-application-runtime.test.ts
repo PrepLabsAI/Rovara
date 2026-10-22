@@ -225,9 +225,9 @@ describe("the agent step feature as /ping reports it (Task 4.3a: withheld, with 
     const state = createWorkerServerState(new OperationJournal(root), { execute: () => Promise.resolve(), ...monitor.executor });
     return await (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as Ping;
   };
-  async function monitorFor(options: { environment: NodeJS.ProcessEnv; docker?: ReturnType<typeof readyDocker>; sharedConfigCheck?: () => void; driverInstalled?: boolean }) {
+  async function monitorFor(options: { environment: NodeJS.ProcessEnv; docker?: ReturnType<typeof readyDocker>; sharedConfigCheck?: () => void }) {
     const monitor = createApplicationChecksFeatureMonitor({ environment: options.environment, platform: "linux", arch: "arm64", docker: options.docker ?? readyDocker(), intervalMs: 60_000,
-      sharedConfigCheck: options.sharedConfigCheck ?? quiet, ...(options.driverInstalled === undefined ? {} : { driverInstalled: options.driverInstalled }) });
+      sharedConfigCheck: options.sharedConfigCheck ?? quiet });
     monitor.start();
     // The first check has answered once the availability is no longer the starting value.
     await vi.waitFor(() => expect((monitor.current() as { reason?: string }).reason).not.toBe("not-yet-checked"));
@@ -283,33 +283,27 @@ describe("the agent step feature as /ping reports it (Task 4.3a: withheld, with 
     }
   });
 
-  it("is withheld, whatever else is true, with the reason agent-driver-not-installed: Task 4.3a built the channel and no driver", async () => {
+  // Task 4.3b: the executor ships its driver, so the only reasons left are the ones about this worker's own checks, environment and settings.
+  it("is listed when every other condition holds: the application checks run, nothing can redirect a model call, and the settings make a route (Bedrock, and a keyed provider with its secret)", async () => {
     clean();
     const monitor = await monitorFor({ environment: bedrockEnvironment });
     expect(monitor.current()).toEqual({ status: "ready" });
-    const ping = await pingOf(monitor);
-    expect(ping.invocationFeatures).not.toContain(AGENT);
-    expect(ping.invocationFeatureDiagnostics![AGENT]).toEqual({ status: "unavailable", reason: "agent-driver-not-installed" });
-    // The application checks themselves are listed (they are not what keeps the agent feature off).
-    expect(ping.invocationFeatures).toEqual(expect.arrayContaining(["task.workflowE2EApplicationChecks", "task.workflowE2EBaselineChecks"]));
-    const keyed = await pingOf(await monitorFor({ environment: { EXECUTOR_IMAGE: image, AGENTX_MODEL_PROVIDER: "anthropic", AGENTX_ANTHROPIC_SECRET_ARN: SECRET_ARN, AWS_REGION: "us-east-1" } }));
-    expect(keyed.invocationFeatureDiagnostics![AGENT]).toEqual({ status: "unavailable", reason: "agent-driver-not-installed" });
-  });
-
-  it("would list the feature once a driver is installed and every other condition holds (the mechanism, and 4.3b's one change)", async () => {
-    clean();
-    const monitor = await monitorFor({ environment: bedrockEnvironment, driverInstalled: true });
     expect(monitor.agentSteps()).toEqual({ status: "available" });
     const ping = await pingOf(monitor);
-    expect(ping.invocationFeatures).toContain(AGENT);
+    expect(ping.invocationFeatures).toEqual(expect.arrayContaining([AGENT, "task.workflowE2EApplicationChecks", "task.workflowE2EBaselineChecks"]));
     expect(ping.invocationFeatureDiagnostics?.[AGENT]).toBeUndefined();
-    // And an unsafe environment still withholds it with a driver installed.
-    const unsafe = await monitorFor({ environment: { ...bedrockEnvironment, HTTPS_PROXY: "http://proxy.invalid:3128" }, driverInstalled: true });
-    expect((await pingOf(unsafe)).invocationFeatures).not.toContain(AGENT);
+    const keyed = await pingOf(await monitorFor({ environment: { EXECUTOR_IMAGE: image, AGENTX_MODEL_PROVIDER: "anthropic", AGENTX_ANTHROPIC_SECRET_ARN: SECRET_ARN, AWS_REGION: "us-east-1" } }));
+    expect(keyed.invocationFeatures).toContain(AGENT);
   });
 
-  it("ships with no driver installed", async () => {
-    const { AGENT_DRIVER_INSTALLED } = await import("../../packages/worker/src/workflow-e2e-application-runtime.js");
-    expect(AGENT_DRIVER_INSTALLED).toBe(false);
+  it("is still withheld when the environment can redirect a model call, even though the driver is shipped, and carries no driver reason anywhere", async () => {
+    clean();
+    const unsafe = await monitorFor({ environment: { ...bedrockEnvironment, HTTPS_PROXY: "http://proxy.invalid:3128" } });
+    const ping = await pingOf(unsafe);
+    expect(ping.invocationFeatures).not.toContain(AGENT);
+    expect(ping.invocationFeatureDiagnostics![AGENT]).toMatchObject({ status: "unavailable", reason: "model-environment-unsafe" });
+    const source = await readFile(join(import.meta.dirname, "../../packages/worker/src/workflow-e2e-application-runtime.ts"), "utf8");
+    expect(source).not.toContain("agent-driver-not-installed");
+    expect(source).not.toContain("AGENT_DRIVER_INSTALLED");
   });
 });

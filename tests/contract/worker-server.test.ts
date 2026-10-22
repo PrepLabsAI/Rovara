@@ -122,13 +122,13 @@ describe("worker HTTP contract", () => {
 
   it("withholds the agent step feature (Task 4.3a) from /ping with its reason exactly as it withholds another feature, and lists it once nothing withholds it", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-withheld-agent-"));
-    let withheld: Record<string, unknown> = { "task.workflowE2EAgentSteps.v1": { status: "unavailable", reason: "agent-driver-not-installed" } };
+    let withheld: Record<string, unknown> = { "task.workflowE2EAgentSteps.v1": { status: "unavailable", reason: "agent-route-not-derivable", detail: "no route" } };
     const state = createWorkerServerState(new OperationJournal(root), { execute: () => Promise.resolve(), withheldInvocationFeatures: () => withheld });
     const ping = async () => (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as Promise<{ invocationFeatures: string[]; invocationFeatureDiagnostics?: Record<string, unknown> }>;
     const held = await ping();
     expect(held.invocationFeatures).not.toContain("task.workflowE2EAgentSteps.v1");
     expect(held.invocationFeatures).toContain("task.workflowE2EApplicationChecks");
-    expect(held.invocationFeatureDiagnostics).toMatchObject({ "task.workflowE2EAgentSteps.v1": { status: "unavailable", reason: "agent-driver-not-installed" } });
+    expect(held.invocationFeatureDiagnostics).toMatchObject({ "task.workflowE2EAgentSteps.v1": { status: "unavailable", reason: "agent-route-not-derivable", detail: "no route" } });
     withheld = {};
     expect((await ping()).invocationFeatures).toContain("task.workflowE2EAgentSteps.v1");
     // A withholding check that throws fails closed for the agent feature too, when it is one the executor may withhold.

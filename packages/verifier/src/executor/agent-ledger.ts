@@ -3,6 +3,7 @@ import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeSync } from
 import { join } from "node:path";
 import { E2E_AGENT_ACTIONS_SCHEMA_VERSION, E2EAgentActionLedgerSchema, canonicalJson, e2eAgentValueDigest, e2eAgentValueKeyId,
   type E2EAgentActionLedger } from "@agentx/contracts";
+import { E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "./evidence-paths.js";
 
 /**
  * The action ledger of an agent step (Task 4.3b): what the agent did, written by this executor from the observation it showed the model, the same way for every step, and
@@ -13,12 +14,7 @@ import { E2E_AGENT_ACTIONS_SCHEMA_VERSION, E2EAgentActionLedgerSchema, canonical
  * carries. The file is read by the host as operator evidence and by Task 4.4 through `parseVerifiedE2EAgentActionLedger`, never trusted as is.
  */
 
-/** Under the executor's out directory: one directory per case, named by 16 hex of the digest of the case id (the case id is free text). */
-export const E2E_AGENT_EVIDENCE_DIR = "agent" as const;
-export const E2E_AGENT_LEDGER_FILE = "agent-actions.json" as const;
-export const agentCaseDirectoryName = (caseId: string): string => createHash("sha256").update(caseId, "utf8").digest("hex").slice(0, 16);
-/** Where a kept trace of one step is written, next to the case's ledger. */
-export const agentTraceFileName = (stepIndex: number, keyHash: string): string => `trace-${String(stepIndex)}-${keyHash.slice(0, 16)}.json`;
+export { E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName };
 
 const NAME_MAX = 120;
 const LITERAL_MAX = 256;

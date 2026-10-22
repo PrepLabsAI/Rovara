@@ -67,25 +67,19 @@ export async function workflowE2EApplicationChecksAvailability(environment: Node
   }
 }
 
-/**
- * Whether the executor can drive an `agent` step. Task 4.3a built the model channel (the worker's half and the executor's client) but no driver loads the client, so the feature
- * stays withheld with the reason `agent-driver-not-installed`; Task 4.3b installs the driver and removes this reason.
- */
-export const AGENT_DRIVER_INSTALLED = false as boolean;
-
 /** Why `task.workflowE2EAgentSteps.v1` is not on /ping now, in the order it is judged. Each reason is a fixed code; the detail, where there is one, names a variable or a file and never a value. */
 export type AgentStepsAvailability = Readonly<
   | { status: "available" }
   | { status: "unavailable"; reason: "agent-checks-unavailable"; detail: string }
   | { status: "unavailable"; reason: "model-environment-unsafe"; detail: string }
-  | { status: "unavailable"; reason: "agent-route-not-derivable"; detail: string }
-  | { status: "unavailable"; reason: "agent-driver-not-installed" }>;
+  | { status: "unavailable"; reason: "agent-route-not-derivable"; detail: string }>;
 
 /**
  * The agent step feature is listed only when every one of these holds: application CHECKS run here, nothing in the process environment or the shared AWS files can redirect
- * or re-authenticate a model call, the worker's own settings make a route, and the executor has a driver for the step. The first that fails is the reason.
+ * or re-authenticate a model call, and the worker's own settings make a route. The first that fails is the reason. The executor's driver is part of the executor image this worker
+ * ships with (Task 4.3b), so there is no condition for it; listing the feature does not put `agent` in the catalog or approve a route, so no customer round runs a model.
  */
-export function agentStepsAvailability(input: { checks: WorkflowE2EApplicationChecksAvailability; environment: NodeJS.ProcessEnv; sharedConfigCheck?: () => void; driverInstalled?: boolean }): AgentStepsAvailability {
+export function agentStepsAvailability(input: { checks: WorkflowE2EApplicationChecksAvailability; environment: NodeJS.ProcessEnv; sharedConfigCheck?: () => void }): AgentStepsAvailability {
   if (input.checks.status !== "ready") return { status: "unavailable", reason: "agent-checks-unavailable", detail: input.checks.reason };
   try {
     assertE2EEnvironmentCannotRedirect(input.environment);
@@ -95,7 +89,7 @@ export function agentStepsAvailability(input: { checks: WorkflowE2EApplicationCh
   }
   const derived = deriveE2EAgentRoute(e2eAgentInstallationFromEnvironment(input.environment));
   if (derived.status === "unavailable") return { status: "unavailable", reason: "agent-route-not-derivable", detail: derived.detail };
-  return (input.driverInstalled ?? AGENT_DRIVER_INSTALLED) ? { status: "available" } : { status: "unavailable", reason: "agent-driver-not-installed" };
+  return { status: "available" };
 }
 
 const APPLICATION_CHECKS_FEATURE = "task.workflowE2EApplicationChecks" as const;
@@ -115,14 +109,14 @@ export const APPLICATION_CHECKS_REFRESH_MS = 30_000;
  * /ping from that value alone. It starts as unavailable ("not-yet-checked") until the first check answers, so a worker never advertises what it has not proved.
  */
 export function createApplicationChecksFeatureMonitor(input: { environment?: NodeJS.ProcessEnv; platform?: string; arch?: string; docker?: DockerCli; intervalMs?: number;
-  /** Test seams for the agent step feature (Task 4.3a): the shared AWS files check, and whether the executor has a driver. */
-  sharedConfigCheck?: () => void; driverInstalled?: boolean }) {
+  /** Test seam for the agent step feature (Task 4.3a): the shared AWS files check. */
+  sharedConfigCheck?: () => void }) {
   let latest: WorkflowE2EApplicationChecksAvailability = { status: "unavailable", reason: "not-yet-checked" };
   const judgeAgentSteps = (checks: WorkflowE2EApplicationChecksAvailability): AgentStepsAvailability => {
     // A judgement that fails is never "available".
     try {
       return agentStepsAvailability({ checks, environment: input.environment ?? process.env,
-        ...(input.sharedConfigCheck === undefined ? {} : { sharedConfigCheck: input.sharedConfigCheck }), ...(input.driverInstalled === undefined ? {} : { driverInstalled: input.driverInstalled }) });
+        ...(input.sharedConfigCheck === undefined ? {} : { sharedConfigCheck: input.sharedConfigCheck }) });
     } catch { return { status: "unavailable", reason: "agent-checks-unavailable", detail: "availability-check-failed" }; }
   };
   // Judged with the check, never per ping: it reads two small files, and /ping is asked often. Until the first check answers, the checks are not known to run here.
