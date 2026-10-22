@@ -484,7 +484,7 @@ describe("ec2-ebs delivery", () => {
       it("hands an application admission, unchanged, to a worker that lists the feature", async () => {
         const ref = admission({ kind: "application" });
         const record = checks(ref);
-        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"] });
+        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"], workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
         expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
         expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
       });
@@ -501,7 +501,7 @@ describe("ec2-ebs delivery", () => {
       it("hands a round with AI navigation steps, unchanged, to a worker that lists the agent-steps feature", async () => {
         const ref = admission({ kind: "application", agentSteps: true });
         const record = checks(ref);
-        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"] });
+        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"], workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
         expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
         expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
       });
@@ -547,7 +547,7 @@ describe("ec2-ebs delivery", () => {
 
       it("does not ask for the agent-steps feature when no group has an agent step", async () => {
         const record = checks(admission({ kind: "application" }));
-        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"] });
+        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"], workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
         expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
       });
 
@@ -620,6 +620,13 @@ describe("ec2-ebs delivery", () => {
             expect(olderBaseline.post).not.toHaveBeenCalled();
           });
 
+          it("fails closed when no schema reader is wired: an application admission is treated as version 2, so a worker without .v2 is refused and no round is sent", async () => {
+            const record = checks(admission({ kind: "application" }));
+            const unread = delivery({ workerFeatures: async () => capable });
+            await expect(unread.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${SENTENCE}` });
+            expect(unread.post).not.toHaveBeenCalled();
+          });
+
           it("hands a version 2 admission, unchanged, to a worker that lists both features", async () => {
             const ref = admission({ kind: "application" });
             const record = checks(ref);
@@ -663,7 +670,7 @@ describe("ec2-ebs delivery", () => {
 
         it("never sends a baseline admission to a worker that runs application admissions but not baseline rounds, and says why", async () => {
           const record = checks(baselineRef());
-          const older = delivery({ workerFeatures: async () => applicationOnly });
+          const older = delivery({ workerFeatures: async () => applicationOnly, workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
           const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
           expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
           expect(refusal?.message).toContain("task.workflowE2EBaselineChecks");
@@ -674,11 +681,11 @@ describe("ec2-ebs delivery", () => {
         it("hands a baseline admission, unchanged, to a worker that lists the feature, and a candidate admission still goes to one that lists only application CHECKS", async () => {
           const ref = baselineRef();
           const record = checks(ref);
-          const capable = delivery({ workerFeatures: async () => withBaseline });
+          const capable = delivery({ workerFeatures: async () => withBaseline, workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
           expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
           expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
           const candidate = checks(admission({ kind: "application" }));
-          const older = delivery({ workerFeatures: async () => applicationOnly });
+          const older = delivery({ workerFeatures: async () => applicationOnly, workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
           expect(await older.deliver(candidate, candidate.invocation)).toBe("DELIVERED");
         });
 
