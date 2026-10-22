@@ -12,6 +12,7 @@ import type { E2EAgentModelEvidence } from "../../packages/verifier/src/applicat
 import { encodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps } from "../../packages/verifier/src/application-scenarios.js";
 import { createProcessDockerCli, createDockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
+import { collectOnThisHost } from "../support/linux-web-api-probes.js";
 import type { CandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
@@ -79,7 +80,9 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     for (const file of ORDERS_M14_APP_FILES) await cp(join(ORDERS_M14_ROOT, file), join(appCopy, file), { recursive: true });
     const hosts: Array<ReturnType<typeof createDockerApplicationHost>> = [];
     const config = { executorImage: EXECUTOR_IMAGE, buildImage: ciImage("node-build", WEB_API_BUILD_IMAGE), runRoot } satisfies WorkflowE2EApplicationRuntimeConfig;
-    const application: WorkflowE2EApplicationRuntime = { runRoot, git,
+    // The collector compares the toolchain the executor reported (the image's Node, at its path) with the process reading the result: a CI runner's Node differs in path only, so the
+    // collector is given the executor's path, as the M1.3 journeys and the probe runner do (a worker on the pinned host has the same path).
+    const application: WorkflowE2EApplicationRuntime = { runRoot, git, collect: collectOnThisHost,
       createHost: (input) => {
         const deps = workflowE2EApplicationHostDeps(config, createProcessDockerCli(), () => Date.now(), { ...input, candidateSourceDir: appCopy });
         const channel = deps.modelChannel;

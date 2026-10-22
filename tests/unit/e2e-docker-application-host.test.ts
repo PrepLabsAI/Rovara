@@ -1526,7 +1526,7 @@ describe("docker application host: the model channel", () => {
     });
 
     it("31. a channel that returns something else than a closed channel (nothing, another key, a malformed receipt) is a fault too", async () => {
-      for (const returned of [() => undefined, () => ({ ok: true }), (key: string) => ({ ...closedOf(setupLess(), { valueKey: key.replace(/^./, "0") }) }),
+      for (const returned of [() => undefined, () => ({ ok: true }), (key: string) => ({ ...closedOf(setupLess(), { valueKey: key.replace(/^./, key.startsWith("0") ? "1" : "0") }) }),
         (key: string) => ({ ...closedOf(setupLess(), { valueKey: key }), receipts: [{ receiptId: "x" }] })]) {
         const fake = new FakeDockerCli();
         const port = { async open(input: { valueKey: string }) { return { async close() { return returned(input.valueKey); } }; } };
