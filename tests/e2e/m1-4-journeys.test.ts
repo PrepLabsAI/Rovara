@@ -113,13 +113,15 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     // What the worker uploaded for the group, as the broker read it back from storage, and the aggregate it sent last.
     const groupSaved = saved.find((item) => item.groupRunId === runId);
     const aggregateSaved = saved.find((item) => item.groupRunId === undefined);
-    const group = groupSaved === undefined ? undefined : JSON.parse(groupSaved.bytes.toString("utf8")) as { groupRun: { actual: { collection: { receivedAt: string }; collectionInputs: { agentModel?: E2EAgentModelEvidence } } | null } };
+    const group = groupSaved === undefined ? undefined : JSON.parse(groupSaved.bytes.toString("utf8")) as { groupRun: { unavailableReason?: string | null; collection?: { status?: string; reason?: string };
+      actual: { collection: { receivedAt: string }; collectionInputs: { agentModel?: E2EAgentModelEvidence } } | null } };
     const agentModel = group?.groupRun.actual?.collectionInputs.agentModel;
     const ledgerEntry = agentModel?.ledgers.find((item) => item.caseDirectory === agentCaseDirectoryName(caseId));
     const ledger = ledgerEntry === undefined ? null : E2EAgentActionLedgerSchema.parse(JSON.parse(Buffer.from(ledgerEntry.bytesBase64, "base64").toString("utf8")));
     // Everything a failing journey left to explain it: the worker's result and the host's logs.
     const why = (() => { const logs = hosts[0]?.readDiagnostics(runId);
-      return `result: ${JSON.stringify(result).slice(0, 2000)}\nbuild log: ${logs?.buildLogTail || "(empty)"}\napp log: ${logs?.appLogTail || "(empty)"}\nexecutor log: ${logs?.executorLogTail || "(empty)"}`; })();
+      const collectorSaid = group === undefined ? "(no group evidence uploaded)" : JSON.stringify({ unavailableReason: group.groupRun.unavailableReason, collection: group.groupRun.collection });
+      return `result: ${JSON.stringify(result).slice(0, 2000)}\nwhat the worker's collector said: ${collectorSaid.slice(0, 2000)}\nbuild log: ${logs?.buildLogTail || "(empty)"}\napp log: ${logs?.appLogTail || "(empty)"}\nexecutor log: ${logs?.executorLogTail || "(empty)"}`; })();
     /** The broker's verdict on exactly the bytes the worker uploaded, against the admission and the registry's definition of the admitted route revision. */
     const verdict = () => {
       if (group === undefined || aggregateSaved === undefined) throw new Error(`the worker uploaded no group evidence or no aggregate\n${why}`);
