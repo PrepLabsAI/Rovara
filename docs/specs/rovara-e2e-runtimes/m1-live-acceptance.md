@@ -168,6 +168,13 @@ Record: the head SHA, the exit code, and the `--json` line (the "before" `--chec
 
 ### 2. Requalify the runner with the 14 probes (Task 4.9 step 4)
 
+The canary of step 3 runs on this runner, so it must be launched from a head that has the canary hook (boot.sh) and the worker image with `e2e-model-canary-cli.js`, and the canary's two object keys must be granted first. Add the grant once (a guarded add-only change set: it adds the policy `E2eQualificationTransportCanary` beside the deployed `E2eQualificationTransport` and changes nothing else; declared in the head template, so it is under the standing TEST pre-approval):
+
+```sh
+npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only qualification-transport          # plan; read it
+npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only qualification-transport --apply
+```
+
 ```sh
 npx tsx scripts/test-qualify-runtime.ts --env agentxlivetest123 --profile agentx-test            # plan only; read it
 npx tsx scripts/test-qualify-runtime.ts --env agentxlivetest123 --profile agentx-test --apply    # gate G2 (D7)
@@ -193,11 +200,12 @@ Record: run UUID, new instance ID and private IP, volume ID, role unique ID and 
 ### 3. Model canary: one real Bedrock call (Task 4.9 step 5) — gate G1
 
 ```sh
-# TODO: no canary command exists in the repo yet (scripts/ and packages/cli have none). The broker's route registry
-# reserves the row E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest> for it
-# (packages/broker/src/e2e/model-route-registry.ts), and the plan requires one call through the worker route on the
-# installation's provider. Write the command, plan-first like the other scripts, before this step.
+npx tsx scripts/test-model-canary.ts --env agentxlivetest123 --profile agentx-test --instance <runner instance ID from step 2>            # plan only; no AWS call
+npx tsx scripts/test-model-canary.ts --env agentxlivetest123 --profile agentx-test --instance <runner instance ID from step 2> --apply    # gate G1
+# optional: --timeout-minutes <1-30> (default 10), --region <region> (default us-east-1)
 ```
+
+How it works: the script puts `e2e-runtime/<role unique ID>:<instance ID>/canary-request.json` (route id, definition digest, and the bounds: 1 call, input at most 32,000 tokens, output at most 1,024 tokens). The runner's boot hook, after a successful qualification, waits up to 2 hours for that request and runs `e2e-model-canary-cli.js` in the worker container: one call through the governed route (environment guard, credential scan, pinned model, thinking off, effort low, a one-call budget), result in `canary-result.json` (receipt, digests, counts; no text). The script writes `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest>` only for an `ok` receipt within the bounds. A runner serves one canary: a second run against the same runner is refused (`canary-result.json` exists); a failed canary needs a new runner (D7 launch count). Exit codes: 0 recorded, 1 not ok or no result, 2 refused arguments. The call does not go through the project's day budget (no project is involved); it is one call, under one cent.
 
 Before the call: show the owner the canary row and the "worst-case day" row of `m1-4-cost-estimate.md`, and get an explicit OK. The call is one model call with output at most 1024 tokens and input at most 32,000 tokens. Its cost is under one cent.
 
@@ -219,11 +227,10 @@ The publisher first backs up `main` as `backup/pre-m14-<UTC timestamp>`, and sto
 Then approve the setup of `rovara-web-fixture` again, so that the registry writes the route at revision 1 and sets `policy.modelRouteRevision`:
 
 ```sh
-# TODO: confirm the re-approval command. The only CLI path that posts /v1/admin/projects/setup-approvals is the
-# setup confirmation inside `agentx --env agentxlivetest123 project add` (packages/cli/src/setup/project-add.ts),
-# which is documented as registering a new project; check that it re-proposes for an already registered project
-# before using it, or add a re-approval command.
+agentx --env agentxlivetest123 project setup-approve --project-name rovara-web-fixture [--region us-east-1]
 ```
+
+`project add` does not do this: for a registered project it changes nothing and asks nothing. `project setup-approve` (run from the machine that registered the project, which holds its project file) proposes the setup again from the registered repository and default branch through `/v1/admin/projects/setup-proposals`, shows the same single confirmation as `project add` (with the AI navigation sentence, D5), records the decision through `/v1/admin/projects/setup-approvals`, and on approve registers the next project revision with the approved policy (so `policy.modelRouteRevision` is set). A decline is recorded and registers nothing.
 
 Expected result: the setup prompt shows the AI navigation line naming Bedrock and `us.anthropic.claude-haiku-5-5`, the approval is recorded (`decision: "approve"`), and the page shows the route ID and revision 1. Run `--check`: exit 0.
 
@@ -245,10 +252,12 @@ Record: the task ID, the plan approval, every round ID with its candidate SHA an
 ### 6. Audit replay (Task 4.9 step 7)
 
 ```sh
-# TODO: scripts/e2e-replay-round.ts does not exist in the repo yet (Task 4.6 creates it). The plan's shape is:
-# npx tsx scripts/e2e-replay-round.ts --env agentxlivetest123 --task <task id> --round <verified candidate round id>
-# Check its real flags once it lands.
+npx tsx scripts/e2e-replay-round.ts --env agentxlivetest123 --task <task id> --round <verified candidate round id> --profile agentx-test
+# optional: --region <region>, --poll-seconds <1-300> (default 15), --timeout-minutes <1-120> (default 40), --no-wait (start and print the attempt only)
+# read it later: agentx --env agentxlivetest123 admin task e2e-replay show --task <task id> --round <round id>
 ```
+
+It needs the admin sign-in (`agentx --env agentxlivetest123 login --admin`) and a built CLI (`npm run build`). Exit 0 when the replay was recorded (reproduced or not), 1 when it could not be run or did not finish in time, 2 when refused.
 
 Expected result: `replay: { status, reproduced: true, downloadSha256Match: true }`, the same download digest as the verified round, zero receipts, and no model socket in the executor arguments (check the runner's host journal). Publication, `qualifiedRound` and `failedRound` are unchanged. The replay uses one runner round and no model.
 
