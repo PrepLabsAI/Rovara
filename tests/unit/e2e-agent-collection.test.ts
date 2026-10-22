@@ -33,14 +33,14 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
   // The host reads a run back right after it closes it, and the collector wants the collection received within 30 s of that: each test reads its run back when it needs it.
   const readBack = (name: Scenario) => assembleAgentRun(byName[name]);
 
-  it("R1: the report's agent step carries a cache of mode 'missed' with no replayed action, the capture store never confirms a write, and the collector accepts that shape", async () => {
+  it("R1: the report's agent step carries a cache of mode 'missed' with no replayed action, the seal step makes the runner write the recording (Task 4.6a), and the collector accepts that shape", async () => {
     const a = await readBack("ok");
     const report = JSON.parse(Buffer.from(a.actual.shards[0]!.rawReportBytes).toString("utf8")) as { run: { results: Array<{ attempts: Array<{ steps: Array<{ kind: string; cache?: Record<string, unknown> }> }> }> } };
     const cache = report.run.results[0]!.attempts[0]!.steps.find((step) => step.kind === "agent")!.cache!;
     expect(cache).toMatchObject({ mode: "missed", reason: "no-entry", replayedActions: 0, totalActions: 0 });
     expect(cache["entry"]).toMatch(/^[a-f0-9]{64}$/);
-    // The known gap of Ruling M4-A: nothing is ever written to the store, so the write is unconfirmed (or not reported at all).
-    expect([undefined, "unconfirmed"]).toContain(cache["write"]);
+    // Before Task 4.6a nothing was ever written (the write was "unconfirmed"): the approved assertions open first, so none verified after the agent step. The seal step does.
+    expect(cache["write"]).toBe("saved");
     expect(collectAssembled(a).unavailableReason).toBeNull();
   });
 

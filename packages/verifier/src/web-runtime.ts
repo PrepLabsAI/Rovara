@@ -584,6 +584,9 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
           upstreamRunId: protectedObservation.upstreamRunId, observedAt: at, steps: stepResult.steps,
           assertions: assertionResult.assertions, artifacts, terminal });
         await recordJson(ports, caseId, "case-capture", capture, operationSignal);
+        // Task 4.6a (CAPTURE46): the seal. Only a case with an AI navigation step whose assertions all held and whose agent step concluded records it, as one passed step after the agent step
+        // (the runner then keeps the recording). It decides nothing: a case that failed, is unavailable or whose agent stopped records no such step.
+        if (failedIndex < 0 && unavailableIndex < 0 && stepResult.agentStopped === null && scenario.steps.some((item) => item.kind === "agent")) await fixtures[ASSERTION_FIXTURE].confirm();
         return { failedIndex, unavailableIndex, agentStopped: stepResult.agentStopped };
         });
         if (chain.outcome === null) throw chain.error;

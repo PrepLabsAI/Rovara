@@ -8,16 +8,24 @@ import type { EngineFixtureContext } from "e2e/engine";
  * names a failed approved assertion by the step at its own index, which is where the collector looks.
  */
 export const ASSERTION_FIXTURE = "agentxAssertions" as const;
-export type AssertionSteps = Readonly<{ step(index: number, body: () => Promise<void>): Promise<void> }>;
+/**
+ * `confirm` is the seal step of Task 4.6a (CAPTURE46): one more passed `assertion` step that a web case records after its AI navigation step, when every approved assertion held. The
+ * runner writes a step's recording only when a verifying step that started after it passed, and the approved assertions above start first, so without this the recording of an
+ * agent step is never kept.
+ */
+export type AssertionSteps = Readonly<{ step(index: number, body: () => Promise<void>): Promise<void>; confirm(): Promise<void> }>;
+export const ASSERTION_SEAL_LABEL = "approved assertions held" as const;
 
 /** The factory an engine lists under `fixtures`; a fresh surface per attempt, because the runner wraps the declared method in place. */
-export const assertionStepFixture = (context: EngineFixtureContext) => context.fixture<{ step(index: number, body: () => Promise<void>): Promise<void> }>(ASSERTION_FIXTURE,
-  { async step(_index, body) { await body(); } }, { step: { kind: "assertion", label: (index: number) => `approved assertion ${index}`, timeout: false } });
+export const assertionStepFixture = (context: EngineFixtureContext) => context.fixture<{ step(index: number, body: () => Promise<void>): Promise<void>; confirm(): Promise<void> }>(ASSERTION_FIXTURE,
+  { async step(_index, body) { await body(); }, async confirm() { /* the step the runner records is the whole effect */ } },
+  { step: { kind: "assertion", label: (index: number) => `approved assertion ${index}`, timeout: false },
+    confirm: { kind: "assertion", label: () => ASSERTION_SEAL_LABEL, timeout: false } });
 
 /** The fixture a case receives from its engine, or a refusal naming what is missing. */
 export function assertionStepsOf(fixtures: unknown): AssertionSteps {
   const row = (fixtures && typeof fixtures === "object" ? (fixtures as Record<string, unknown>)[ASSERTION_FIXTURE] : undefined) as Partial<AssertionSteps> | undefined;
-  if (!row || typeof row.step !== "function") throw new Error("installed engine did not provide its assertion-step fixture");
+  if (!row || typeof row.step !== "function" || typeof row.confirm !== "function") throw new Error("installed engine did not provide its assertion-step fixture");
   return row as AssertionSteps;
 }
 
