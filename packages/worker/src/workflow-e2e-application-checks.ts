@@ -225,8 +225,11 @@ export type WorkflowE2EModelChannelDependencies = Readonly<{
   invoke?: E2EInvoke;
   assertSharedConfig?: () => void;
   socketOwner?: { uid: number; gid: number };
-  /** Told, when a group's channel closes, how many calls it served (counts only; never a prompt or an answer). */
-  onClosed?(summary: { groupRunId: string; receipts: number; outcomes: Record<string, number> }): void;
+  /**
+   * Told, when a group's channel closes, how many calls it served (counts only; never a prompt or an answer), and the run's value key (Ruling DB-6): the HMAC key the executor's
+   * action ledger was written under. The key is operator evidence for the checks that read that ledger (Task 4.4); it is not logged and not in any file the executor writes.
+   */
+  onClosed?(summary: { groupRunId: string; receipts: number; outcomes: Record<string, number>; valueKey: string }): void;
 }>;
 
 /** Whether a group has an agent step, from its compiled suite: the one question that decides whether it gets a model channel. */
@@ -354,7 +357,7 @@ export async function executeWorkflowE2EApplicationChecks(input: {
           // Counts only, so the line can carry no prompt, answer or credential.
           console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_model_channel_closed", groupRunId, receipts: summary.receipts.length, outcomes,
             droppedRequests: summary.droppedRequests, unscopedRequests: summary.unscopedRequests, overrun: summary.overrun, evidenceErrors: summary.evidenceErrors }));
-          dependencies.onClosed?.({ groupRunId, receipts: summary.receipts.length, outcomes });
+          dependencies.onClosed?.({ groupRunId, receipts: summary.receipts.length, outcomes, valueKey: open.valueKey });
           return summary;
         } };
       } } };

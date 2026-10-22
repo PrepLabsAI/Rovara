@@ -1328,12 +1328,12 @@ describe("docker application host: the model channel", () => {
 
   /** A model channel that records when it was opened relative to the executor, and what it was given. */
   function channel(events: string[], fake: FakeDockerCli, behaviour: { open?: () => void | Promise<void>; close?: () => void | Promise<void> } = {}) {
-    const opened: Array<{ socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; aborted: boolean }> = [];
+    const opened: Array<{ socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; aborted: boolean; valueKey: string }> = [];
     let closes = 0;
-    return { opened, closes: () => closes, port: { async open(input: { socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; signal: AbortSignal }) {
+    return { opened, closes: () => closes, port: { async open(input: { socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; signal: AbortSignal; valueKey: string }) {
       events.push(`open:executor-started=${fake.calls.some((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-executor-"))}`);
       await behaviour.open?.();
-      opened.push({ socketPath: input.socketPath, credentialSet: input.credentialSet, deadlineAt: input.deadlineAt, aborted: input.signal.aborted });
+      opened.push({ socketPath: input.socketPath, credentialSet: input.credentialSet, deadlineAt: input.deadlineAt, aborted: input.signal.aborted, valueKey: input.valueKey });
       return { async close() { closes += 1; events.push("close"); await behaviour.close?.(); } };
     } } };
   }
@@ -1376,8 +1376,31 @@ describe("docker application host: the model channel", () => {
     fake.onExecutor = (outDir) => { planText = readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8"); okOutput(s)(outDir); };
     await runWith(s);
     const plan = E2EExecutorPlanSchema.parse(JSON.parse(planText));
-    expect(plan.modelChannel).toEqual({ protocol: "rovara-e2e-model-channel/v1", socketPath: "/run/rovara/model.sock", ...ROUTE });
+    expect(plan.modelChannel).toEqual({ protocol: "rovara-e2e-model-channel/v1", socketPath: "/run/rovara/model.sock", ...ROUTE, valueKey: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(plan.modelChannel).toMatchObject(plan.admission.modelRoute!);
+  });
+
+  // Task 4.3b (Ruling DB-6): the value key is the host's, made per run; the plan carries it for the executor and the channel's `open` gets the same one for the worker to keep.
+  it("makes a value key per run, writes it into the plan's modelChannel, and hands the same key to the channel's open; two runs never share one", async () => {
+    const keys: string[] = []; const planKeys: string[] = [];
+    for (let run = 0; run < 2; run += 1) {
+      const fake = new FakeDockerCli(); const used = channel([], fake);
+      const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: used.port });
+      fake.onExecutor = (outDir) => { planKeys.push(E2EExecutorPlanSchema.parse(JSON.parse(readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8"))).modelChannel!.valueKey); okOutput(s)(outDir); };
+      await runWith(s);
+      keys.push(used.opened[0]!.valueKey);
+    }
+    expect(keys[0]).toMatch(/^[a-f0-9]{64}$/);
+    expect(planKeys).toEqual(keys);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("puts the value key in no docker argument and in no file of the out directory the host reads back (it is in the read-only plan and the channel's open, nowhere else)", async () => {
+    const fake = new FakeDockerCli(); const used = channel([], fake);
+    const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: used.port }); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    const key = used.opened[0]!.valueKey;
+    expect(fake.calls.map((args) => args.join(" ")).join("\n")).not.toContain(key);
   });
 
   it("closes the channel on every exit: an executor that fails, a deadline, a cancellation, and a close of the lease; and closes it once", async () => {

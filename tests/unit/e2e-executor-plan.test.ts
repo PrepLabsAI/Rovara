@@ -30,7 +30,7 @@ describe("executor plan", () => {
   });
   describe("modelChannel (Task 4.3a)", () => {
     const route = { routeId: "rovara-e2e-default", routeRevision: "r1-0123456789ab" };
-    const channel = { protocol: "rovara-e2e-model-channel/v1", socketPath: "/run/rovara/model.sock", ...route };
+    const channel = { protocol: "rovara-e2e-model-channel/v1", socketPath: "/run/rovara/model.sock", ...route, valueKey: "ab".repeat(32) };
     const routed = (modelRoute: typeof route | null) => {
       const admission = { ...plan.admission, modelRoute };
       return { ...plan, admission: { ...admission, admissionDigest: e2eExecutorAdmissionDigest(admission) }, admissionDigest: e2eExecutorAdmissionDigest(admission) };
@@ -48,7 +48,15 @@ describe("executor plan", () => {
       expect(() => E2EExecutorPlanSchema.parse({ ...routed(null), modelChannel: channel })).toThrow(/pins/);
       expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, socketPath: "/tmp/model.sock" } })).toThrow();
       expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, protocol: "rovara-e2e-model-channel/v2" } })).toThrow();
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, extra: true } })).toThrow();
+    });
+    it("requires the run's value key (Task 4.3b): 32 bytes of hex, never missing, short or in capitals", () => {
+      const { valueKey: _omitted, ...withoutKey } = channel;
+      void _omitted;
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: withoutKey })).toThrow();
       expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, valueKey: "x" } })).toThrow();
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, valueKey: "AB".repeat(32) } })).toThrow();
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, valueKey: "ab".repeat(31) } })).toThrow();
     });
   });
 });

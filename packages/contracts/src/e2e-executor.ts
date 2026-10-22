@@ -69,6 +69,12 @@ export const E2EExecutorPlanSchema = z.object({
     socketPath: z.literal(E2E_MODEL_CHANNEL_SOCKET_PATH),
     routeId: z.string().min(1).max(120),
     routeRevision: z.string().min(1).max(120),
+    /**
+     * The run's HMAC key for the digests the agent's action ledger keeps of what it typed (`e2eAgentValueDigest`), 32 random bytes in hex. The worker makes it for the run and
+     * keeps it (Ruling DB-6); the executor reads it from this read-only plan, and it appears in no file the executor writes. A plan without it is refused (an executor that
+     * could not key its ledger would have no ledger worth reading).
+     */
+    valueKey: z.string().regex(/^[a-f0-9]{64}$/),
   }).strict().optional(),
 }).strict().superRefine((plan, context) => {
   if (plan.admission.admissionDigest !== plan.admissionDigest || e2eExecutorAdmissionDigest(plan.admission) !== plan.admissionDigest) {

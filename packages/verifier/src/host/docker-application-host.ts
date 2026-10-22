@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, cp, lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_DATA_VOLUME_DEFAULT_MIB, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, e2eApplicationRecipeOrigin, readE2EApplicationProjectContract, redactText,
+import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_DATA_VOLUME_DEFAULT_MIB, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, e2eApplicationRecipeOrigin, generateE2EAgentValueKey, readE2EApplicationProjectContract, redactText,
   type E2EApplicationExecutionAdmission, type E2ECollection, type E2EExecutorAccount, type E2EExecutorPlan, type E2EFormLogin, type E2ELease, type E2ERunInput } from "@agentx/contracts";
 import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
@@ -122,7 +122,11 @@ export type DockerApplicationUnavailableReason = "build-failed" | "app-unhealthy
  * proxy must already be listening and is never re-created), mounts the socket into the executor container alone, and calls `close` when the executor is done, whatever its outcome.
  */
 export type DockerApplicationModelChannel = Readonly<{
-  open(input: { socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; signal: AbortSignal }): Promise<{ close(): Promise<unknown> }>;
+  /**
+   * `valueKey` is the run's HMAC key for the agent ledger's digests (Ruling DB-6): the host makes it per run, writes it into the executor's plan, and gives the same key here so the
+   * worker, which owns the receipts, keeps it with them for Task 4.4. It is never put in an argument, an environment variable or a log line.
+   */
+  open(input: { socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; signal: AbortSignal; valueKey: string }): Promise<{ close(): Promise<unknown> }>;
 }>;
 
 export type DockerApplicationHostDeps = Readonly<{
@@ -314,7 +318,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const state = { allocated: false, closed: false, cleanupConfirmed: false, outcome: null as Outcome | null, executing: null as Promise<unknown> | null, startedAt: "", cleanup: null as null | { removedAt: string; containers: string[] },
     appLogTail: "", buildLogTail: "", executorLogTail: "", buildResult: null as DockerBuildResult | null, redactor: createCredentialRedactor([]), createdAt: 0,
     /** The run's account credentials, which the model channel's scan is given and nothing else is. */
-    credentials: { passwords: [] as string[], emails: [] as string[] }, modelChannel: null as null | { close(): Promise<unknown> }, modelChannelClosing: null as Promise<void> | null };
+    credentials: { passwords: [] as string[], emails: [] as string[] }, modelChannel: null as null | { close(): Promise<unknown> }, modelChannelClosing: null as Promise<void> | null,
+    /** The run's agent value key: made at allocation for a group that has an agent step, null for any other. */
+    modelValueKey: null as string | null };
   const redact = (text: string) => tailOf(state.redactor.text(redactText(text)), MAX_TAIL_BYTES);
   const admin = (args: string[], signal: AbortSignal = new AbortController().signal) => docker.run(args, { signal, timeoutMs: ADMIN_TIMEOUT_MS });
   /** A signal that fired at or after the plan deadline is the deadline, not a cancellation. */
@@ -595,7 +601,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     if (deps.modelChannel !== undefined) {
       try {
         state.modelChannel = await deps.modelChannel.open({ socketPath: modelSocket, credentialSet: { passwords: [...state.credentials.passwords], emails: [...state.credentials.emails] },
-          deadlineAt, signal: executorSignal });
+          deadlineAt, signal: executorSignal, valueKey: state.modelValueKey! });
       } catch {
         // What failed is a fixed fact, not the error's own words (a guard names variables, a socket error names paths).
         appendBuildLog("the model channel could not be opened, so the executor was not started\n");
@@ -678,11 +684,13 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const run = createRunAccounts(profiles);
     state.redactor = createCredentialRedactor(run.accounts);
     state.credentials = { passwords: run.accounts.map((account) => account.password), emails: run.accounts.map((account) => account.email) };
+    state.modelValueKey = usesModel ? generateE2EAgentValueKey() : null;
     const plan: E2EExecutorPlan = E2EExecutorPlanSchema.parse({ schemaVersion: "e2e-executor-plan/v1", runId, groupId: deps.groupId, admission: validated.admission,
       admissionDigest: validated.admission.admissionDigest, app: { origin: E2E_EXECUTOR_APP_ORIGIN, health: { path: launch.health.path, expectedStatus: launch.health.expectedStatus,
         timeoutMs: Math.min(launch.start.timeoutMs, 120_000) } }, deadlineAt, accounts: run.accounts,
       // The route is the admission's own: the plan names it and the executor holds it to the admission it decodes.
-      ...(!usesModel ? {} : { modelChannel: { protocol: E2E_MODEL_CHANNEL_SCHEMA_VERSION, socketPath: E2E_MODEL_CHANNEL_SOCKET_PATH, routeId: modelRoute!.routeId, routeRevision: modelRoute!.routeRevision } }) });
+      ...(!usesModel ? {} : { modelChannel: { protocol: E2E_MODEL_CHANNEL_SCHEMA_VERSION, socketPath: E2E_MODEL_CHANNEL_SOCKET_PATH, routeId: modelRoute!.routeId, routeRevision: modelRoute!.routeRevision,
+        valueKey: state.modelValueKey! } }) });
     try {
       await sweepStaleRovaraRuns(docker, STALE_RUN_SWEEP_AGE_MS, { now: deps.now, runRoot: deps.runRoot }).catch(() => 0);
       await mkdir(deps.runRoot, { recursive: true, mode: 0o700 });

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, mkdir, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -530,10 +530,12 @@ describe("workflow E2E application rounds: the model channel", () => {
 
   it("opens the channel for a group with an agent step before its executor starts: the executor sees a listening socket, the day is charged through the broker, and the socket is gone after", async () => {
     const budget = budgetEvents();
-    const closed: Array<{ groupRunId: string; receipts: number; outcomes: Record<string, number> }> = [];
+    const closed: Array<{ groupRunId: string; receipts: number; outcomes: Record<string, number>; valueKey: string }> = [];
+    let planKey = "";
     const s = await setup({ route: SCRIPTED, agent: true });
     let seen: { isSocket: boolean; mounted: boolean; answer: unknown } | undefined;
     s.fake.onExecutor = async (outDir, args) => {
+      planKey = (JSON.parse(readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8")) as { modelChannel: { valueKey: string } }).modelChannel.valueKey;
       const socketPath = join(s.runRoot, s.runId, "model", "model.sock");
       const client = createE2EModelChannelClient({ socketPath, runId: s.runId });
       const caseId = s.fixture.compiled.expectedCases[0]!.caseId;
@@ -552,7 +554,9 @@ describe("workflow E2E application rounds: the model channel", () => {
     expect(budget.sent.map((body) => body.stage)).toEqual(["reserve", "settle"]);
     expect(budget.sent[0]).toMatchObject({ stage: "reserve", groupRunId: s.runId });
     expect(budget.sent[1]).toMatchObject({ stage: "settle", reservationId: budget.sent[0]!.reservationId, actualInputTokens: 300 });
-    expect(closed).toEqual([{ groupRunId: s.runId, receipts: 1, outcomes: { ok: 1 } }]);
+    // The key the worker keeps for Task 4.4 is the one in the executor's plan (Ruling DB-6).
+    expect(planKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(closed).toEqual([{ groupRunId: s.runId, receipts: 1, outcomes: { ok: 1 }, valueKey: planKey }]);
     expect(existsSync(join(s.runRoot, s.runId))).toBe(false);
   });
 
