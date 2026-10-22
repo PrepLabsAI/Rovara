@@ -47,6 +47,16 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   it("renamed export: 'Export the orders as a CSV file' taps 'Download orders'; one download is captured and the ledger shows one ok tap on download-orders", async () => {
     const r = await runAgentProbe({ script: [{ kind: "tap", name: /Download orders/ }, { kind: "done" }] });
     expectRenamedExport(r);
+    // Task 4.6a: the passed step leaves exactly one cleaned recording, and the host uploads it with the group's evidence, bound to the ledger it verified.
+    const traceDir = join(outOf(r), "agent", "traces");
+    expect(readdirSync(traceDir), whyAgent(r)).toHaveLength(1);
+    const bytes = readFileSync(join(traceDir, readdirSync(traceDir)[0]!));
+    console.log(`E2E_AGENT_TRACE_BYTES ${String(bytes.byteLength)}`);
+    const inputs = await r.host.readCollectionInputs(AbortSignal.timeout(30_000));
+    const traces = (inputs as { agentModel?: { traces?: Array<{ stepIndex: number; traceBase64: string; binding: { actionCount: number } }> } }).agentModel?.traces;
+    expect(traces, whyAgent(r)).toHaveLength(1);
+    expect(traces![0]).toMatchObject({ stepIndex: 1, binding: { actionCount: 1 } });
+    expect(Buffer.from(traces![0]!.traceBase64, "base64").equals(bytes)).toBe(true);
     // Judged by the host's own credential predicate over every byte of the run's out directory, and by the plain text: the value key and the account credentials are in no file.
     expect(r.credentialsLeaked).toBe(false);
     const everything = allOutputText(outOf(r));

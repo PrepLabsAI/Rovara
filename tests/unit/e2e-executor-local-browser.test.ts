@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,6 +86,9 @@ describe.runIf(enabled)("executor against a real Chromium and the fixture app (l
     expect(caseStatuses(run.outDir, run.fixture)).toEqual({ "web-csv-positive-v1": "passed" });
     expect(csvRows(run.outDir)).toEqual([["id", "customer", "total", "state"], ["a1", "Ada", "12.5", "ready"], ["a2", "Grace", "23", "ready"]]);
     expect(readReport(run.outDir).run.summary).toMatchObject({ selected: 1, executed: 1, passed: 1, failed: 0 });
+    // Task 4.6a: a round with no AI navigation step is as it was: the case records no seal step and the executor leaves no agent directory.
+    expect(readFileSync(join(run.outDir, "report.json"), "utf8")).not.toContain("approved assertions held");
+    expect(existsSync(join(run.outDir, "agent"))).toBe(false);
     const text = await everything(run.outDir);
     expect(text).not.toContain(run.fixture.account.password);
     expect(text).not.toContain(run.fixture.account.email);
