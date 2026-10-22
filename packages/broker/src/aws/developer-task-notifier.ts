@@ -1772,22 +1772,33 @@ function createAwsNotifierHandler() {
     peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true",
     workflowE2EBlocks: async (task, operations) => {
       void operations;
-      const progress = task.workflow?.e2e;
-      const candidateDigest = task.workflow?.candidate?.digest;
-      const ref = progress?.displayRef;
-      if (candidateDigest === undefined || progress?.currentRoundId === undefined || ref === undefined) return undefined;
-      const view = await readWorkflowE2ENotifierProjection({ ref, ownerKey: task.ownerKey, workspaceId: task.workspaceId, current: { candidateDigest, roundId: progress.currentRoundId,
-        groupRunIds: progress.currentGroupRunIds, admissionSha256: ref.admissionSha256, evidenceSha256: ref.evidenceSha256 },
-      readPrivateObject: async (key, maxBytes) => {
-        if (maxBytes > 262_144 || !/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u.test(key)) return undefined;
-        const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
-        const bytes = response.Body === undefined ? undefined : Buffer.from(await response.Body.transformToByteArray());
-        return bytes !== undefined && bytes.byteLength <= maxBytes ? bytes : undefined;
-      } });
-      return view === undefined ? undefined : renderE2ENotifierSlackBlocks(view.view,
-        { candidateDigest: view.candidateDigest, roundId: view.roundId, capturedAt: view.capturedAt }, taskPageUrlFromBase(reviewUrlBase, task.taskId));
+      return workflowE2ENotifierBlocks({ task, taskPageUrl: taskPageUrlFromBase(reviewUrlBase, task.taskId),
+        readPrivateObject: async (key, maxBytes) => {
+          if (maxBytes > 262_144 || !/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u.test(key)) return undefined;
+          const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
+          const bytes = response.Body === undefined ? undefined : Buffer.from(await response.Body.transformToByteArray());
+          return bytes !== undefined && bytes.byteLength <= maxBytes ? bytes : undefined;
+        } });
     },
   });
+}
+
+/**
+ * The Slack blocks of a task's stored E2E display, or undefined when it has none this reader can use (a different round, changed bytes, or a display schema newer than this
+ * code reads), in which case the notifier says "Open the task page" and states no verdict. A display with scenario rows (schema v2, M1.3) reads as the per-scenario summary.
+ */
+export async function workflowE2ENotifierBlocks(input: { task: Pick<DeveloperTaskRecord, "taskId" | "ownerKey" | "workspaceId" | "workflow">; taskPageUrl?: string | undefined;
+  readPrivateObject: (key: string, maxBytes: number) => Promise<Uint8Array | undefined> }): Promise<unknown[] | undefined> {
+  const { task } = input;
+  const progress = task.workflow?.e2e;
+  const candidateDigest = task.workflow?.candidate?.digest;
+  const ref = progress?.displayRef;
+  if (candidateDigest === undefined || progress?.currentRoundId === undefined || ref === undefined) return undefined;
+  const view = await readWorkflowE2ENotifierProjection({ ref, ownerKey: task.ownerKey, workspaceId: task.workspaceId, current: { candidateDigest, roundId: progress.currentRoundId,
+    groupRunIds: progress.currentGroupRunIds, admissionSha256: ref.admissionSha256, evidenceSha256: ref.evidenceSha256 },
+  readPrivateObject: input.readPrivateObject });
+  return view === undefined ? undefined : renderE2ENotifierSlackBlocks(view.view,
+    { candidateDigest: view.candidateDigest, roundId: view.roundId, capturedAt: view.capturedAt, ...(view.scenarioResults === undefined ? {} : { scenarioResults: view.scenarioResults }) }, input.taskPageUrl);
 }
 
 let awsHandler: ReturnType<typeof createNotifierHandler> | undefined;

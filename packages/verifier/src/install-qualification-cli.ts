@@ -6,7 +6,8 @@ import { RuntimeInstallChallengeSchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJso
 import { containedRuntimeProfileForHost } from "./container-envelope.js";
 import { createProcessDockerCli } from "./host/docker-application-host.js";
 import { WEB_API_BUILD_IMAGE, createWebApiProbeRunner } from "./host/web-api-probe-runner.js";
-import { qualifyInstalledP0Runtime, qualifyInstalledWebApiRuntime, type WebApiQualificationEnvironment } from "./install-qualification.js";
+import { qualificationFailureOf } from "./install-qualification-failure.js";
+import { qualifyInstalledP0Runtime,qualifyInstalledWebApiRuntime, type WebApiQualificationEnvironment } from "./install-qualification.js";
 
 function option(args: readonly string[], name: string): string {
   const index = args.indexOf(name);
@@ -45,21 +46,43 @@ export type QualificationCliDeps = Readonly<{
   createProbeRunner?: (input: WebApiProbeRunnerConfig & { challenge: RuntimeInstallChallenge; evidenceRoot: string }) => ProbeRunner;
 }>;
 
+/**
+ * Runs the qualification. With `--failure-out <file>` a failure is also written there (mode 0600, created new): `{schemaVersion, stage, reasons, summary}` and nothing else.
+ * The reasons are the qualifier's stable rejection codes (for example `probe-wrong-cause:api-egress-denial-v1`), the summary the enum and counter facts of the probes
+ * they name, and any other error is only the stage it happened in. No error message is written; those stay in the log.
+ */
 export async function main(args: readonly string[], deps: QualificationCliDeps = {}): Promise<void> {
+  let stage = "arguments-invalid";
+  let failureOut: string | undefined;
+  try {
+    failureOut = args.includes("--failure-out") ? resolve(option(args, "--failure-out")) : undefined;
+    await qualify(args, deps, (next) => { stage = next; });
+  } catch (error) {
+    if (failureOut !== undefined) await writeFile(failureOut, `${JSON.stringify(qualificationFailureOf(error, stage))}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function qualify(args: readonly string[], deps: QualificationCliDeps, at: (stage: string) => void): Promise<void> {
   const challengePath = resolve(option(args, "--challenge-file"));
   const evidenceRoot = resolve(option(args, "--evidence-root"));
   const outputPath = resolve(option(args, "--out"));
+  at("challenge-invalid");
   const challenge = RuntimeInstallChallengeSchema.parse(JSON.parse(await readFile(challengePath, "utf8")));
+  at("profile-mismatch");
   // Without --profile the standard P0 qualification runs, exactly as before (its own checks bind it to the challenge's profile).
   const profile = args.includes("--profile") ? option(args, "--profile") : undefined;
   if (profile !== undefined && profile !== "linux-arm64-docker-v1" && profile !== WEB_API_RUNTIME_PROFILE_ID) throw new Error(`unsupported runtime qualification profile ${profile}`);
   if (profile !== undefined && challenge.profileId !== profile) throw new Error(`the challenge is for profile ${challenge.profileId}, not ${profile}`);
   let proposal;
   if (profile === WEB_API_RUNTIME_PROFILE_ID) {
+    at("runner-config-invalid");
     const config = { ...webApiProbeRunnerConfig(deps.environment ?? process.env, deps.host?.platform, deps.host?.arch), ...deps.config };
     const runProbe = (deps.createProbeRunner ?? ((input) => createWebApiProbeRunner({ ...input, docker: createProcessDockerCli() })))({ ...config, challenge, evidenceRoot });
+    at("qualification-failed");
     proposal = await qualifyInstalledWebApiRuntime({ challenge, evidenceRoot, runProbe, ...(deps.qualificationEnvironment ? { environment: deps.qualificationEnvironment } : {}) });
-  } else proposal = await qualifyInstalledP0Runtime({ challenge, evidenceRoot });
+  } else { at("qualification-failed"); proposal = await qualifyInstalledP0Runtime({ challenge, evidenceRoot }); }
+  at("proposal-write-failed");
   await writeFile(outputPath, `${canonicalJson(proposal)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
   process.stdout.write(`${canonicalJson({ status: "qualification-complete", profileId: challenge.profileId, proposalPath: outputPath, probeCount: proposal.probes.length, manifestSha256: proposal.manifest.sha256 })}\n`);
 }

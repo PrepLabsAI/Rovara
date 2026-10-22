@@ -365,6 +365,25 @@ describe("runTestQualification", () => {
     expect(text).toMatch(/still running/);
   });
 
+  it("prints the failure codes the hook reported next to qualification-failed-exit-N, and nothing that is not a code", async () => {
+    const withFailure = (failure: unknown) => Buffer.from(JSON.stringify({ state: "FAILED", reason: "qualification-failed-exit-1", finishedAt: "2026-10-19T12:00:00Z", failure }));
+    const options = { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" };
+    const { effects, calls } = harness({ statuses: [withFailure({ codes: ["qualification-rejected", "probe-wrong-cause:api-egress-denial-v1", "api-egress-denial-v1:sinkhole-0"] })] });
+    await expect(runTestQualification(plan(), effects, options)).rejects.toThrow(
+      "the worker reported FAILED: qualification-failed-exit-1 (failure: qualification-rejected, probe-wrong-cause:api-egress-denial-v1, api-egress-denial-v1:sinkhole-0)");
+    expect(calls.some((call) => call.startsWith("register"))).toBe(false);
+    // The status object is read from a bucket: free text in it is not printed, and more than 16 codes are cut.
+    const hostile = harness({ statuses: [withFailure({ codes: ["Error: secret AKIAIOSFODNN7EXAMPLE", "probe-wrong-cause:ok", "has space", 7, ...Array.from({ length: 30 }, (_, index) => `c-${index}`)] })] });
+    const error = await runTestQualification(plan(), hostile.effects, options).then(() => new Error("unexpectedly passed"), (thrown: Error) => thrown);
+    expect(error.message).toBe(`the worker reported FAILED: qualification-failed-exit-1 (failure: probe-wrong-cause:ok, ${Array.from({ length: 15 }, (_, index) => `c-${index}`).join(", ")})`);
+    expect(error.message).not.toMatch(/AKIA|secret|space/);
+    // A failure object that is not an object of codes is ignored, as is a status without one.
+    for (const failure of [undefined, null, "x", { codes: "x" }, { codes: [] }]) {
+      const quiet = harness({ statuses: [withFailure(failure)] });
+      await expect(runTestQualification(plan(), quiet.effects, options)).rejects.toThrow(/^the worker reported FAILED: qualification-failed-exit-1$/);
+    }
+  });
+
   it("never registers on a malformed, unrecognised or SUCCEEDED-looking-but-wrong status", async () => {
     for (const status of [Buffer.from("not json"), Buffer.from(JSON.stringify({ state: "DONE" })), Buffer.from(JSON.stringify({ state: "succeeded", reason: "x", finishedAt: "t" })), Buffer.from(JSON.stringify({ state: "SUCCEEDED" }))]) {
       const { effects, calls } = harness({ statuses: [status] });

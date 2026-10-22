@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { readWorkflowE2ENotifierProjection, workflowE2EDisplayRef } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
-import { handler as notifierLambdaHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { renderE2ENotifierSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
+import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection, workflowE2EDisplayRef } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
+import { handler as notifierLambdaHandler, workflowE2ENotifierBlocks } from "../../packages/broker/src/aws/developer-task-notifier.js";
+import { renderE2ENotifierSlackBlocks, renderE2EUnavailableSlackBlock } from "../../packages/broker/src/e2e-presentation.js";
+import { readLegacyWorkflowE2ENotifierProjection } from "../support/legacy-display-v1-reader.js";
+import { failedBaseline, failedViewerRow, results, row } from "../support/e2e-scenario-results.js";
 
 const current = { candidateDigest: "a".repeat(64), roundId: "11111111-1111-4111-8111-111111111111",
   groupRunIds: ["22222222-2222-4222-8222-222222222222"], admissionSha256: "b".repeat(64), evidenceSha256: "c".repeat(64) };
@@ -84,5 +86,91 @@ describe("notifier E2E display projection", () => {
   it("creates a bounded ref under the notifier's existing private namespace", () => {
     expect(workflowE2EDisplayRef({ ...current, ownerKey: "owner", workspaceId: "workspace", bytes }).key)
       .toMatch(/^private\/owner\/workspace\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u);
+  });
+
+  describe("display schema v2 (M1.3 Task 3.7: one row per scenario)", () => {
+    const owner = { ownerKey: "owner", workspaceId: "workspace" };
+    const shared = { schemaVersion: 1 as const, setup: view.setup, e2e: view.e2e, actions: view.actions };
+    const capturedAtV2 = "2026-10-21T12:00:00.000Z";
+    const readerOf = (bytes: Uint8Array) => async (key: string, max: number) => (key.startsWith("private/owner/workspace/workflow-e2e-display/") && bytes.byteLength <= max ? bytes : undefined);
+    const make = (scenarioResults = results({ baseline: failedBaseline() })) => {
+      const object = createWorkflowE2EDisplayObject({ ...owner, view: shared, capturedAt: capturedAtV2, current, scenarioResults })!;
+      return { ...object, parsed: JSON.parse(Buffer.from(object.bytes).toString("utf8")) as Record<string, unknown> };
+    };
+
+    it("writes displaySchemaVersion 2 with the rows and the baseline, and the current reader reads them back", async () => {
+      const made = make();
+      expect(made.parsed.displaySchemaVersion).toBe(2);
+      const loaded = await readWorkflowE2ENotifierProjection({ ref: made.ref, ...owner, current, readPrivateObject: readerOf(made.bytes) });
+      expect(loaded?.scenarioResults?.scenarios.map((item) => item.scenarioId)).toEqual(results().scenarios.map((item) => item.scenarioId));
+      expect(loaded?.scenarioResults?.baseline?.status).toBe("FAILED");
+      expect(loaded?.view.e2e.status).toBe("UNKNOWN");
+    });
+
+    it("still writes displaySchemaVersion 1 for a round with no scenario rows, which any reader reads", async () => {
+      const object = createWorkflowE2EDisplayObject({ ...owner, view: shared, capturedAt: capturedAtV2, current })!;
+      expect((JSON.parse(Buffer.from(object.bytes).toString("utf8")) as { displaySchemaVersion: number }).displaySchemaVersion).toBe(1);
+      // The reader that shipped before M1.3 (pinned verbatim from 3dd0d549, with its own schemas): it reads a version 1 display as it always did.
+      const stale = await readLegacyWorkflowE2ENotifierProjection({ ref: object.ref, ...owner, current, readPrivateObject: readerOf(object.bytes) });
+      expect(stale?.view.e2e.status).toBe("UNKNOWN");
+    });
+
+    it("is not read at all by the pre-M1.3 reader: it gets nothing, never a verdict, and the notifier then says 'Open the task page'", async () => {
+      const made = make();
+      expect(await readLegacyWorkflowE2ENotifierProjection({ ref: made.ref, ...owner, current, readPrivateObject: readerOf(made.bytes) })).toBeUndefined();
+      // The pinned reader is the real one: it refuses the version 2 object because of its schema (a literal version 1, strict), and reads the same object once it is a version 1.
+      const asV1 = Buffer.from(JSON.stringify({ ...made.parsed, displaySchemaVersion: 1, scenarios: undefined, baseline: undefined }), "utf8");
+      const v1Ref = workflowE2EDisplayRef({ ...current, ...owner, bytes: asV1 });
+      expect((await readLegacyWorkflowE2ENotifierProjection({ ref: v1Ref, ...owner, current, readPrivateObject: readerOf(asV1) }))?.view.e2e.status).toBe("UNKNOWN");
+      expect(renderE2EUnavailableSlackBlock("https://agentx.test/review/t/task", true).text.text).toContain("Open the task page");
+    });
+
+    it("the notifier built for v2 shows the failure in the words of the row, with the counts, what was mocked, the baseline and the page", async () => {
+      const made = make();
+      const task = { taskId: "11111111-1111-4111-8111-111111111111", ...owner, workflow: { candidate: { digest: current.candidateDigest }, e2e: { currentRoundId: current.roundId,
+        currentGroupRunIds: current.groupRunIds, displayRef: made.ref } } };
+      const blocks = (await workflowE2ENotifierBlocks({ task: task as never, readPrivateObject: readerOf(made.bytes), taskPageUrl: "https://agentx.test/review/11111111-1111-4111-8111-111111111111/task" }))!;
+      const text = blocks.map((block) => JSON.stringify(block)).join("\n");
+      expect(text).toContain("Browser and API checks: 4 passed, 1 failed, 0 incomplete");
+      expect(text).toContain("Viewer can't export — failed: expected hidden, was visible (orders-viewer)");
+      expect(text).toContain("Mocked: inventory-v1");
+      expect(text).toContain("Before the change: 2 of 5 failed, as expected for new behaviour.");
+      expect(text).toContain("https://agentx.test/review/11111111-1111-4111-8111-111111111111/task");
+      expect(text).not.toContain("Captured portable source/mock observations");
+    });
+
+    it("the extra-order defect reads 'Owner export — failed: expected 2 rows, received 3'", async () => {
+      const made = make({ scenarios: [row({ status: "FAILED", reason: "expected 2 rows, received 3", failedAssertion: { kind: "csv", expected: "2 rows", actual: "3 rows; row 3: a3,Lin,99,ready" } })] });
+      const task = { taskId: "11111111-1111-4111-8111-111111111111", ...owner, workflow: { candidate: { digest: current.candidateDigest }, e2e: { currentRoundId: current.roundId,
+        currentGroupRunIds: current.groupRunIds, displayRef: made.ref } } };
+      const text = JSON.stringify(await workflowE2ENotifierBlocks({ task: task as never, readPrivateObject: readerOf(made.bytes) }));
+      expect(text).toContain("Owner export — failed: expected 2 rows, received 3 (orders-owner)");
+    });
+
+    it("falls back to 'Open the task page' (no blocks at all from the reader) for a display it cannot use: a different round, tampered bytes, or a row an older release wrote", async () => {
+      const made = make();
+      const task = { taskId: "11111111-1111-4111-8111-111111111111", ...owner, workflow: { candidate: { digest: current.candidateDigest }, e2e: { currentRoundId: current.roundId,
+        currentGroupRunIds: current.groupRunIds, displayRef: made.ref } } };
+      const stale = { ...task, workflow: { ...task.workflow, e2e: { ...task.workflow.e2e, currentRoundId: "33333333-3333-4333-8333-333333333333" } } };
+      expect(await workflowE2ENotifierBlocks({ task: stale as never, readPrivateObject: readerOf(made.bytes) })).toBeUndefined();
+      expect(await workflowE2ENotifierBlocks({ task: task as never, readPrivateObject: readerOf(Uint8Array.from([...made.bytes, 0])) })).toBeUndefined();
+      // A v2 object with a field this reader does not know is refused whole, not read for the part it understands.
+      const extra = Buffer.from(JSON.stringify({ ...made.parsed, scenarios: [{ ...(made.parsed.scenarios as unknown[])[0] as object, verdict: "PASS" }] }), "utf8");
+      const ref = workflowE2EDisplayRef({ ...current, ...owner, bytes: extra });
+      expect(await readWorkflowE2ENotifierProjection({ ref, ...owner, current, readPrivateObject: readerOf(extra) })).toBeUndefined();
+    });
+
+    it("never writes an email or a credential into the stored rows, even if one reaches a free-text field", () => {
+      const dirty = results({ scenarios: [row({ status: "FAILED", title: "Export for ops@tenant-a.example", reason: "received password=hunter2-secret and ops@tenant-a.example",
+        failedAssertion: { kind: "text", expected: "ops@tenant-a.example", actual: "token=abc123secretvalue9999 ops@tenant-a.example" } }), failedViewerRow()] });
+      const stored = Buffer.from(make(dirty).bytes).toString("utf8");
+      for (const secret of ["ops@tenant-a.example", "hunter2-secret", "abc123secretvalue9999"]) expect(stored).not.toContain(secret);
+    });
+
+    it("refuses to write a display that no longer fits its bound, rather than a partial one", () => {
+      const huge = results({ scenarios: Array.from({ length: 64 }, (_, index) => row({ scenarioId: `s-${index}`, mockedOrigins: Array.from({ length: 32 }, (_, origin) => `${"o".repeat(190)}-${origin}`) })),
+        baseline: { status: "PASSED", scenarios: Array.from({ length: 64 }, (_, index) => row({ scenarioId: `b-${index}`, mockedOrigins: Array.from({ length: 32 }, (_, origin) => `${"o".repeat(190)}-${origin}`) })) } });
+      expect(createWorkflowE2EDisplayObject({ ...owner, view: shared, capturedAt: capturedAtV2, current, scenarioResults: huge })).toBeUndefined();
+    });
   });
 });

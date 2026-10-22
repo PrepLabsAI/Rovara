@@ -17,6 +17,25 @@ export function readShardReport(path: string) {
   return parsed.report;
 }
 
+/** Every shard's report of a run: the one report of a single-shard run, or each report of the merged multi-shard file. */
+export function readAllReports(outDir: string) {
+  const raw = JSON.parse(readFileSync(join(outDir, "report.json"), "utf8")) as { schemaVersion?: string; shards?: { report: unknown }[] };
+  const bodies = raw.schemaVersion === "e2e-executor-multi-report/v1" ? raw.shards!.map((shard) => Buffer.from(JSON.stringify(shard.report))) : [readFileSync(join(outDir, "report.json"))];
+  return bodies.map((body) => {
+    const parsed = parseE2EApplicationReport(body);
+    if (parsed.kind !== "parsed") throw new Error(parsed.reason);
+    return parsed.report;
+  });
+}
+
+/** Scenario id to upstream status for a run of any number of shards, joined through the compiled expected cases. */
+export function caseStatusesAll(outDir: string, fixture: OrdersExecutorFixture): Record<string, string> {
+  return Object.fromEntries(readAllReports(outDir).flatMap((report) => report.run.results).map((result) => {
+    const expected = fixture.compiled.expectedCases.find((item) => item.upstreamTestId === result.testId);
+    return [expected?.scenarioId ?? result.testId, result.status];
+  }));
+}
+
 /** Scenario id to upstream status, joined through the compiled expected cases. */
 export function caseStatuses(outDir: string, fixture: OrdersExecutorFixture): Record<string, string> {
   const report = readReport(outDir);

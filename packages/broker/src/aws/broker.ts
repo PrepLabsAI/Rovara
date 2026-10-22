@@ -218,6 +218,7 @@ import {
   E2E_AGENT_UNAVAILABLE_REASONS, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
   E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
+  type E2EScenarioResults, type E2ESharedView,
   type E2EApplicationExecutionAdmission,
   type E2ERegisteredRuntime,
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
@@ -227,7 +228,10 @@ import {
   workflowPublicationContextDigest,
 } from "@agentx/contracts";
 import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
-import { renderE2EMcpProjection, renderE2EPageHtml, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
+import { renderE2EMcpProjection, renderE2EPageHtml, renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
+import type { DisplayArtifact } from "../e2e/application-display.js";
+import { loadStoredScenarioResults, loadWorkflowE2EArtifact as loadStoredWorkflowE2EArtifact, resultsWithStoredArtifacts, storeWorkflowE2EArtifacts } from "./workflow-e2e-artifacts.js";
+import { readWorkflowE2EBaseline, requestWorkflowE2EBaselineRound, type WorkflowE2EBaselineRunner } from "./workflow-e2e-baseline.js";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { outcomeMetric } from "./admin-change-audit.js";
@@ -290,7 +294,7 @@ import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsR
 import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
-import { applicationEvidenceLimits, verifyApplicationE2EEvidence } from "../e2e/application-evidence.js";
+import { applicationEvidenceLimits, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification } from "../e2e/application-evidence.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
@@ -485,6 +489,8 @@ interface AwsBrokerDependencies {
    * setup approval and again at dispatch (M1.4 Task 4.2). Absent, or throwing, the route cannot be derived and agent steps stay unavailable with `agent-route-not-approved`.
    */
   e2eAgentInstallation?: () => Promise<E2EAgentInstallation>;
+  /** Owner decision D2: starts the informational baseline round (the approved scenarios on the unchanged code) when an application plan is approved. Absent: no baseline is asked for. */
+  e2eBaselineRound?: WorkflowE2EBaselineRunner;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
@@ -5647,6 +5653,11 @@ export function workflowApplicationRouteDependencies(dependencies: AwsBrokerDepe
   return {
     workflowE2EPresentation: (input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }) => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
     workflowE2EPublicationChecks: (input: { task: DeveloperTaskRecord; operations: readonly unknown[] }) => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+    // M1.3 Task 3.7: the task page's rows, the screenshot behind a row, and the baseline round asked for when an application plan is approved.
+    workflowE2EScenarioResults: (input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }) => loadWorkflowE2EScenarioResults(dependencies, input.task, input.operations, input.actor),
+    workflowE2EArtifact: (input: { task: DeveloperTaskRecord; sha256: string }) => loadWorkflowE2EArtifact(dependencies, input.task, input.sha256),
+    startWorkflowE2EBaseline: (input: { task: DeveloperTaskRecord }) => requestWorkflowE2EBaselineRound({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+      ...(dependencies.e2eBaselineRound === undefined ? {} : { startBaseline: dependencies.e2eBaselineRound }) }, input.task),
     validateWorkflowE2EApplicationPlan: (input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string }; reapproval?: boolean }) =>
       validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact, input.reapproval === true ? { reapproval: true } : {}),
     registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : (url: string) => dependencies.githubPullRequests.getRepositoryIdentity!(url),
@@ -7232,6 +7243,9 @@ async function verifyProjectSetupSmokeEvidence(
   }
 }
 
+/** What a verification hands the presentation: the authenticated plan and round, the broker's own re-collected results, and (for a browser and API round) the display rows derived from them. */
+type WorkflowE2EProjection = { plan?: unknown; round?: unknown; results: unknown[]; allowStaleProjection?: boolean; display?: NonNullable<ApplicationEvidenceVerification["display"]> };
+
 export interface WorkflowE2EVerificationDiagnostic {
   reason?: string;
   /** Set when the evidence verified was an application round's, whose reasons are safe and useful to show the owner. */
@@ -7294,7 +7308,7 @@ function workflowE2ETerminalReceiptAt(
 /** Independently recompiles and collects every group; worker-supplied verdict fields are ignored. */
 async function verifyWorkflowE2EEvidence(
   dependencies: AwsBrokerDependencies, operation: OperationRecord, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>,
-  projection?: { plan?: unknown; round?: unknown; results: unknown[]; allowStaleProjection?: boolean },
+  projection?: WorkflowE2EProjection,
   diagnostic?: WorkflowE2EVerificationDiagnostic,
   /** How the CHECKS operation is ending, when its stored record has not been written yet (the result callback verifies before it writes the terminal state). */
   options?: { terminalStatus?: "SUCCEEDED" | "FAILED" },
@@ -7724,7 +7738,7 @@ const APPLICATION_VERDICT_REASON_MAX_CHARS = 240;
  */
 async function verifyApplicationWorkflowE2EEvidence(input: {
   dependencies: AwsBrokerDependencies; operation: OperationRecord; task: DeveloperTaskRecord; candidate: ReturnType<typeof CandidateManifestSchema.parse>;
-  reference: E2EWorkflowAdmissionRef; admissionText: string; projection: { plan?: unknown; round?: unknown; results: unknown[]; allowStaleProjection?: boolean } | undefined;
+  reference: E2EWorkflowAdmissionRef; admissionText: string; projection: WorkflowE2EProjection | undefined;
   diagnostic: WorkflowE2EVerificationDiagnostic | undefined; unavailable: (reason: string) => "UNKNOWN"; terminalStatus?: "SUCCEEDED" | "FAILED";
 }): Promise<"PASS" | "FAILED" | "UNKNOWN"> {
   const { dependencies, operation, task, candidate, reference, admissionText, projection, diagnostic, unavailable } = input;
@@ -7781,7 +7795,10 @@ async function verifyApplicationWorkflowE2EEvidence(input: {
   if (projection !== undefined) {
     if (verified.plan !== undefined) projection.plan = verified.plan;
     if (verified.round !== undefined) projection.round = verified.round;
-    if (authorityValid) projection.results.push(...verified.results);
+    if (authorityValid) {
+      projection.results.push(...verified.results);
+      if (verified.display !== undefined) projection.display = verified.display;
+    }
   }
   if (!authorityValid) return unavailable(diagnostic?.reason ?? "current-owner-policy-source-or-runtime-authority");
   if (verified.verdict !== "PASS" && diagnostic !== undefined) {
@@ -7931,6 +7948,29 @@ async function workflowE2EPresentation(
   /** A CHECKS operation whose terminal state is being written by the caller and is not yet in its stored record. */
   ending?: { operationId: string; status: "SUCCEEDED" | "FAILED" },
 ): Promise<NonNullable<DeveloperTaskView["e2ePresentation"]> | undefined> {
+  return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor, ending))?.presentation;
+}
+
+/** The page HTML and Slack blocks of a presentation with the rows added: the rows' section joins the page HTML only while the whole stays within the presentation's bound. */
+function presentationWithResults(taskId: string, shared: E2ESharedView, results: E2EScenarioResults | undefined): { pageHtml: string; slackBlocks: unknown[] } {
+  const artifactPath = (sha256: string) => `/review/${taskId}/task/api/e2e/artifacts/${sha256}`;
+  const base = renderE2EPageHtml(shared);
+  const candidates = results === undefined ? [] : [results, ...(results.baseline === undefined ? [] : [{ scenarios: results.scenarios }])];
+  const section = candidates.map((candidate) => renderE2EScenarioRowsHtml(candidate, { artifactPath })).find((html) => base.length + html.length <= 65_536) ?? "";
+  return { pageHtml: `${base}${section}`, slackBlocks: [...(results === undefined ? [] : renderE2EScenarioSlackBlocks(results)), ...renderE2ESlackBlocks(shared)].slice(0, 16) };
+}
+
+/**
+ * The presentation of a task's current browser and API or portable round, and (for a browser and API round) its per-scenario rows and the screenshots behind them. The rows
+ * are derived by the verification from evidence the broker re-collected itself; the baseline, when there is one, is the record of the informational round on the unchanged code.
+ */
+async function workflowE2EPresentationDetailed(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  operations: readonly unknown[],
+  actor: "owner" | "viewer",
+  ending?: { operationId: string; status: "SUCCEEDED" | "FAILED" },
+): Promise<{ presentation: NonNullable<DeveloperTaskView["e2ePresentation"]>; scenarioResults?: E2EScenarioResults; artifacts: readonly DisplayArtifact[] } | undefined> {
   const workflow = task.workflow;
   const progress = workflow?.e2e;
   const candidateResult = CandidateManifestSchema.safeParse(workflow?.candidate);
@@ -7974,11 +8014,16 @@ async function workflowE2EPresentation(
       : `Current eligibility unavailable: task closed. Recorded historical ${history.view.e2e.status} at ${history.capturedAt}, candidate ${history.candidateDigest}, round ${history.roundId}; groups ${history.view.e2e.receivedGroups}/${history.view.e2e.expectedGroups}, cases ${history.view.e2e.executedCases}, criteria ${history.view.e2e.qualifiedCriteria}/${history.view.e2e.requiredCriteria}; these counts are historical only.`;
     const currentHtml = `<section aria-labelledby="e2e-current-eligibility"><h2 id="e2e-current-eligibility">Current E2E eligibility</h2><p>Unavailable because the task is closed. No current run counts are available.</p></section>`;
     const currentSlack = { type: "section", text: { type: "mrkdwn", text: "*Current E2E eligibility: UNKNOWN*\nTask closed. No current run counts are available." } };
-    return { shared: current,
+    // A closed task keeps showing the rows its display recorded, as history: they are not current eligibility either.
+    const recordedRows = history?.scenarioResults;
+    const recordedRowsHtml = recordedRows === undefined ? "" : renderE2EScenarioRowsHtml(recordedRows, { artifactPath: (sha256) => `/review/${task.taskId}/task/api/e2e/artifacts/${sha256}` });
+    const closedPageHtml = `${currentHtml}${historicalHtml}`;
+    return { presentation: { shared: current,
       slackBlocks: [currentSlack, ...(history === undefined ? [] : renderE2ENotifierSlackBlocks(history.view,
-        { candidateDigest: history.candidateDigest, roundId: history.roundId, capturedAt: history.capturedAt }))].slice(0, 16),
-      pageHtml: `${currentHtml}${historicalHtml}`.slice(0, 65_536),
-      mcp: { ...renderE2EMcpProjection(current), scope: `${renderE2EMcpProjection(current).scope} ${scope}`.slice(0, 2_000) } };
+        { candidateDigest: history.candidateDigest, roundId: history.roundId, capturedAt: history.capturedAt, ...(recordedRows === undefined ? {} : { scenarioResults: recordedRows }) }))].slice(0, 16),
+      pageHtml: (closedPageHtml.length + recordedRowsHtml.length <= 65_536 ? `${closedPageHtml}${recordedRowsHtml}` : closedPageHtml).slice(0, 65_536),
+      mcp: { ...renderE2EMcpProjection(current), scope: `${renderE2EMcpProjection(current).scope} ${scope}`.slice(0, 2_000) } },
+      ...(recordedRows === undefined ? {} : { scenarioResults: recordedRows }), artifacts: [] };
   }
   const failedRound = progress.failedRound;
   const staleFailure = workflow.stage === "IMPLEMENT" && failedRound?.status === "FAILED"
@@ -7996,7 +8041,7 @@ async function workflowE2EPresentation(
     if (staleFailure && (operation.workflowE2EEvidenceRef === undefined || failedRound.admissionSha256 !== admission.admissionRef.sha256
       || failedRound.evidenceSha256 !== operation.workflowE2EEvidenceRef.sha256
       || canonicalJson(failedRound.groupRunIds) !== canonicalJson(admission.groupRunIds))) continue;
-    const projection: { plan?: unknown; round?: unknown; results: unknown[]; allowStaleProjection: boolean } = { results: [], allowStaleProjection: staleFailure };
+    const projection: WorkflowE2EProjection & { allowStaleProjection: boolean } = { results: [], allowStaleProjection: staleFailure };
     await verifyWorkflowE2EEvidence(dependencies, operation, task, candidateResult.data, projection, undefined, ending?.operationId === operation.id ? { terminalStatus: ending.status } : undefined);
     if (projection.plan === undefined || projection.round === undefined) return undefined;
     const selectedTargetIds: string[] = [];
@@ -8017,9 +8062,41 @@ async function workflowE2EPresentation(
       actor,
       control: { policyPresent: true, workflowPhase: "e2e", ownerActionProposals: [] },
     });
-    return { shared, slackBlocks: renderE2ESlackBlocks(shared), pageHtml: renderE2EPageHtml(shared), mcp: renderE2EMcpProjection(shared) };
+    // The per-scenario rows of a browser and API round (display schema v2), shown for the task's current round only: after SendBack the old round's rows are not shown as
+    // current. The baseline is the informational record of the round on the unchanged code, read apart from this round and never able to change it.
+    const rows = staleFailure || projection.display === undefined || projection.display.scenarios.length === 0 ? undefined : projection.display;
+    const baseline = rows === undefined ? undefined : await readWorkflowE2EBaseline(dependencies, task).catch(() => undefined);
+    const scenarioResults: E2EScenarioResults | undefined = rows === undefined ? undefined : { scenarios: [...rows.scenarios], ...(baseline === undefined ? {} : { baseline }) };
+    const shown = presentationWithResults(task.taskId, shared, scenarioResults);
+    return { presentation: { shared, slackBlocks: shown.slackBlocks, pageHtml: shown.pageHtml, mcp: renderE2EMcpProjection(shared) },
+      ...(scenarioResults === undefined ? {} : { scenarioResults }), artifacts: rows?.artifacts ?? [] };
   }
   return undefined;
+}
+
+/**
+ * The per-scenario rows of the task's current browser and API round (and the baseline round's), for the task page. Read-only; undefined when the task has none.
+ * The rows are those of the stored display, which the result callback wrote from the broker's own verification when the round ended: the page does not verify the evidence
+ * again on every render, every link on it is one the artifact route serves (the screenshots were stored before the display that names them), and a baseline recorded after
+ * the display shows from the next display. A closed task keeps its recorded rows through the presentation, which reads the same display.
+ */
+export async function loadWorkflowE2EScenarioResults(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  operations: readonly unknown[],
+  actor: "owner" | "viewer" = "viewer",
+): Promise<E2EScenarioResults | undefined> {
+  if (task.closedAt !== undefined) return (await workflowE2EPresentationDetailed(dependencies, task, operations, actor))?.scenarioResults;
+  return loadStoredScenarioResults({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task);
+}
+
+/** A screenshot behind a row of the task's current display, by its digest; undefined for a digest the display does not name. The caller has already checked who may read it. */
+export async function loadWorkflowE2EArtifact(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  sha256: string,
+): Promise<{ contentType: "image/jpeg"; bytes: Uint8Array } | undefined> {
+  return loadStoredWorkflowE2EArtifact({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task, sha256);
 }
 
 /** Reloads the exact current CHECKS evidence for publication and returns its final-effect fences. */
@@ -11287,9 +11364,18 @@ async function completedWorkflowItems(
     && operation.workflowE2EAdmission !== undefined && operation.workflowE2EEvidenceRef !== undefined
     && next.e2e !== undefined && task.workflow.candidate !== undefined) {
     const rawOperations = await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#");
-    const presentation = await workflowE2EPresentation(dependencies, task, rawOperations, "viewer", { operationId: operation.id, status: terminalStatus === "SUCCEEDED" ? "SUCCEEDED" : "FAILED" });
+    const detailed = await workflowE2EPresentationDetailed(dependencies, task, rawOperations, "viewer", { operationId: operation.id, status: terminalStatus === "SUCCEEDED" ? "SUCCEEDED" : "FAILED" });
+    const presentation = detailed?.presentation;
+    // The screenshots behind the rows are private objects by digest, stored before the display that links them; a row whose screenshot could not be stored loses its link, and
+    // storing never decides anything (the baseline's were stored when it was recorded).
+    let scenarioResults = detailed?.scenarioResults;
+    if (scenarioResults !== undefined && detailed !== undefined) {
+      const stored = await storeWorkflowE2EArtifacts({ s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task, detailed.artifacts).catch(() => new Set<string>());
+      scenarioResults = { ...resultsWithStoredArtifacts({ scenarios: scenarioResults.scenarios }, stored), ...(scenarioResults.baseline === undefined ? {} : { baseline: scenarioResults.baseline }) };
+    }
     const display = presentation === undefined ? undefined : createWorkflowE2EDisplayObject({ ownerKey: task.ownerKey, workspaceId: task.workspaceId, capturedAt: new Date(now).toISOString(),
-      view: presentation.shared, current: { candidateDigest: task.workflow.candidate.digest, roundId: operation.workflowE2EAdmission.roundId,
+      view: presentation.shared, ...(scenarioResults === undefined ? {} : { scenarioResults }),
+      current: { candidateDigest: task.workflow.candidate.digest, roundId: operation.workflowE2EAdmission.roundId,
         groupRunIds: [...operation.workflowE2EAdmission.groupRunIds],
         admissionSha256: operation.workflowE2EAdmission.admissionRef.sha256, evidenceSha256: operation.workflowE2EEvidenceRef.sha256 } });
     if (display !== undefined) {

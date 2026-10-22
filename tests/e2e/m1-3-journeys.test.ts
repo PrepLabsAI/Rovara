@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID, sign as cryptoSign } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,11 +9,12 @@ import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkerInvocationSchema, createCandidateManifest, e2eApiSchemaComponentId, workspaceSessionKey,
-  type E2EScenario, type E2ESourceSnapshot, type WorkerInvocation,
+  E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkerInvocationSchema, createCandidateManifest, canonicalJson, e2eApiSchemaComponentId, readE2EApplicationProjectContract, workflowSendBackOffered,
+  workspaceSessionKey, type E2EScenario, type E2ESourceSnapshot, type WorkerInvocation,
 } from "@agentx/contracts";
 import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
-import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
+import { accountRegistryEntriesFromRows, latestAccountRef } from "../../packages/broker/src/e2e/application-account-registry.js";
+import { baselineOf } from "../../packages/broker/src/e2e/application-display.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator } from "../../packages/broker/src/aws/dispatcher.js";
@@ -20,7 +22,7 @@ import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js
 import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
 import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
-import { createDockerApplicationHost, createProcessDockerCli } from "@agentx/verifier";
+import { createDockerApplicationHost, createProcessDockerCli, type DockerCli } from "@agentx/verifier";
 import { OperationJournal } from "../../packages/worker/src/journal.js";
 import { createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/server.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
@@ -37,11 +39,14 @@ import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import type { binding as projectBinding} from "../support/e2e-application-plan-fixtures.js";
 import { PROFILE, shaCanonical, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { ACCOUNTS_APP_FILES, ACCOUNTS_FIXTURE_ROOT, webAccountScenarios } from "../support/e2e-accounts-fixture.js";
 
 // M1.3 native journeys. Each case is a whole path of an application round on a real Docker host, gated like `m1-web-journey.test.ts`: it needs Docker and the executor image, so it runs
 // where the CI `linux-runtime` job provides them (ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE) and skips cleanly everywhere else. Locally, colima's Docker works too
 // (DOCKER_HOST=unix:///Users/<you>/.colima/default/docker.sock), with TMPDIR and CONTAINED_FOUNDATION_EVIDENCE_DIR under the home folder, because the run directories are shared with the VM.
 const dockerReady = process.env.ROVARA_DOCKER === "1";
+/** The process Docker CLI, with each command's arguments shown to `observe` just before it runs. */
+const observed = (cli: DockerCli, observe: ((args: string[]) => void) | undefined): DockerCli => (observe === undefined ? cli : { run: (args, opts) => { observe(args); return cli.run(args, opts); } });
 const EXECUTOR_IMAGE = process.env.ROVARA_EXECUTOR_IMAGE ?? "rovara-e2e-executor:ci";
 const FIXTURE_ROOT = join(import.meta.dirname, "../fixtures/e2e-web-api-app");
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8",
@@ -58,6 +63,29 @@ const collectLikeTheWorker: typeof collectOnThisHost = (input) => {
 
 /** The files of the fixture app a candidate carries: the app itself, and the inventory service's OpenAPI document and mock fixture that the project approves. */
 const APP_FILES = ["package.json", "server.mjs", "public", "fixtures", "defects", "inventory", "e2e"];
+/** The fixture app with one of its fixed defect records as its default, as a coder's candidate carries a defect: in its source. */
+const DEFECT_HOOK = "const defect = readOptionalJson(process.env.ORDERS_TEST_DEFECT_FILE);";
+const withDefaultDefect = (name: "dependency-route" | "extra-order") => (server: string) => {
+  if (!server.includes(DEFECT_HOOK)) throw new Error("the fixture's defect hook moved; update the journey's candidates");
+  return server.replace(DEFECT_HOOK, `const defect = readOptionalJson(process.env.ORDERS_TEST_DEFECT_FILE) ?? JSON.parse(readFileSync(join(root, "defects/${name}.json"), "utf8"));`);
+};
+/**
+ * The viewer's refused export answers 401 instead of 403: the fixture's own `viewer-access` defect would let the viewer download a file that no assertion of a refusal references
+ * (the collector rightly calls that round incomplete), but a different refusal status fails the viewer's `text` assertion cleanly, with no download.
+ */
+const VIEWER_REFUSAL = 'if (account.role !== "owner" && !viewerBypass) return json(403, { error: "owner role required" });';
+const withViewerRefusedAs401 = (server: string) => {
+  if (!server.includes(VIEWER_REFUSAL)) throw new Error("the fixture's viewer refusal moved; update the journey's candidates");
+  return server.replace(VIEWER_REFUSAL, VIEWER_REFUSAL.replace("json(403", "json(401"));
+};
+/** A candidate that copies the password of the last sign-in into the first row of the owner's export: a bare credential value in an asserted observation. */
+const SIGN_IN_FAILURE = 'if (!matches) return json(401, { error: "invalid credentials" });';
+const OWNER_ROWS = "let rows = orders.orders.filter((item) => item.tenantId === account.tenantId);";
+const withPasswordEchoedIntoExport = (server: string) => {
+  if (!server.includes(SIGN_IN_FAILURE) || !server.includes(OWNER_ROWS)) throw new Error("the fixture's sign-in or export moved; update the journey's candidates");
+  return server.replace(SIGN_IN_FAILURE, `${SIGN_IN_FAILURE} globalThis.lastSignInPassword = body.password;`)
+    .replace(OWNER_ROWS, "let rows = orders.orders.filter((item) => item.tenantId === account.tenantId).map((item, index) => (index === 0 && globalThis.lastSignInPassword ? { ...item, customer: globalThis.lastSignInPassword } : item));");
+};
 async function stageCandidate(root: string, name: string, edit?: (server: string) => string) {
   const dir = join(root, name);
   await mkdir(dir, { recursive: true });
@@ -66,16 +94,26 @@ async function stageCandidate(root: string, name: string, edit?: (server: string
   return dir;
 }
 
+type PlanningContext = Extract<ReturnType<typeof buildFeatureE2EPlanningContext>, { status: "available" }>;
+/** What a journey varies: the fixture app whose files the repository holds, the task, and the plan the planner writes for it. */
+type JourneyInput = Readonly<{ fixtureRoot: string; planningFiles: readonly string[]; instructions: string;
+  /** Called with the arguments of every docker command the worker's host issues, just before it runs (a test reads what a mount holds at that moment). */
+  observeDocker?: (args: string[]) => void;
+  /** Gives the broker a baseline runner (owner decision D2) that only records that it was asked; see `baselineAsks`. */
+  baselineRound?: boolean;
+  plan(context: PlanningContext): { title: string; claims: Array<{ id: string; text: string }>; plannerIntent: object } | Promise<{ title: string; claims: Array<{ id: string; text: string }>; plannerIntent: object }> }>;
+
 describe.runIf(dockerReady)("M1.3 native journeys", () => {
   const roots: string[] = [];
   afterAll(async () => { for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }, 120_000);
 
   /**
-   * One planned scenario on the owner account of the fixture app, whose inventory service is an external origin: the plan approves the app's own OpenAPI document and mock fixture for
-   * that service, the coder's candidate is the fixture app (optionally with a defect in the call it makes to the service), the broker admits one round, the worker runs it on the
-   * production Docker host with the approved mock and the sinkhole, and the broker verifies what came back on its own.
+   * Everything the journeys share, up to a planned and approved task waiting for its coder: a repository with the app's project contract (and whatever else setup approval reads), the broker
+   * with the project registered and its setup approved on the qualified web profile, a task whose plan is the one `input.plan` writes from the planning context, and the worker (the real task
+   * runner behind the real server, delivery and callbacks; only the model transport is scripted). It hands back the closures that drive an operation through the ordinary route.
    */
-  async function inventoryJourney(variant: "mocked-origin" | "unmocked-call") {
+  async function startJourney(journeyInput: JourneyInput) {
+    const input = journeyInput;
     const base = await realpath(process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR ?? tmpdir());
     const root = await mkdtemp(join(await realpath(tmpdir()), "m1-3-journey-"));
     roots.push(root);
@@ -89,25 +127,23 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const repository = join(workerWorkspace, "repo", "demo");
     await mkdir(repository, { recursive: true });
     git(repository, "init", "--quiet", "--initial-branch=main");
-    const planningFiles = ["package.json", "inventory/openapi.json", "e2e/mocks/inventory-v1.json"];
-    for (const file of planningFiles) { await mkdir(join(repository, file, ".."), { recursive: true }); await cp(join(FIXTURE_ROOT, file), join(repository, file)); }
+    const planningFiles = [...input.planningFiles];
+    for (const file of planningFiles) { await mkdir(join(repository, file, ".."), { recursive: true }); await cp(join(input.fixtureRoot, file), join(repository, file)); }
     git(repository, "add", ...planningFiles);
-    git(repository, "commit", "--quiet", "-m", "project contract and inventory contract");
+    git(repository, "commit", "--quiet", "-m", "project contract and what setup approval reads");
     git(repository, "remote", "add", "origin", "https://github.com/example/demo.git");
     const baseCommit = git(repository, "rev-parse", "HEAD");
     const baseTree = git(repository, "rev-parse", "HEAD^{tree}");
-    const sources = await Promise.all(planningFiles.map(async (path) => { const text = await readFile(join(FIXTURE_ROOT, path), "utf8");
+    const sources = await Promise.all(planningFiles.map(async (path) => { const text = await readFile(join(input.fixtureRoot, path), "utf8");
       return { path, sha256: createHash("sha256").update(text).digest("hex"), bytes: Buffer.from(text), kind: "blob" as const }; }));
     const snapshot: E2ESourceSnapshot = { candidate: createCandidateManifest([{ repositoryId: "example/demo", commitSha: baseCommit, treeSha: baseTree }]), commitSha: baseCommit, treeSha: baseTree,
       treeComplete: true, treePaths: [...planningFiles].sort(), sources };
-    const candidate = variant === "mocked-origin" ? await stageCandidate(root, "candidate")
-      // The coder's call to the inventory service goes to a path that service's contract does not have (the fixture app's own dependency-route defect, as its default).
-      : await stageCandidate(root, "candidate", (server) => server.replace('const defect = readOptionalJson(process.env.ORDERS_TEST_DEFECT_FILE);',
-        'const defect = readOptionalJson(process.env.ORDERS_TEST_DEFECT_FILE) ?? JSON.parse(readFileSync(join(root, "defects/dependency-route.json"), "utf8"));'));
-    if (variant === "unmocked-call") expect(await readFile(join(candidate, "server.mjs"), "utf8")).toContain("defects/dependency-route.json");
 
     // The broker, with the project registered and its setup approved on the qualified web profile (one admin proposal, approval and registration, as `agentx admin` makes them).
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture: async () => snapshot }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+    // A journey that asks for it also gives the broker a baseline runner (owner decision D2), which only records that it was asked: see the baseline step of that journey.
+    const baselineAsks: Array<{ purpose: string; taskId: string }> = [];
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture: async () => snapshot }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog",
+      ...(input.baselineRound === true ? { e2eBaselineRound: async (ask: { purpose: string; task: { taskId: string } }) => { baselineAsks.push({ purpose: ask.purpose, taskId: ask.task.taskId }); } } : {}) } });
     const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     const runtimeBinding = projectRow().runtimeBinding as typeof projectBinding;
     const webRowKey = e2eRegisteredRuntimeKey("catalog", PROFILE, "web");
@@ -132,7 +168,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const policy = E2EPolicySchema.parse(proposalResponse.body.policy);
 
     // Plan and approve one web scenario for the owner account: open the page, ask for the stock status of an order, and the page must show what the inventory service says.
-    const start = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Show each order's stock status from the inventory service", client: "m1-3-journeys", workflow: true, workflowPath: "QUICK" });
+    const start = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: input.instructions, client: "m1-3-journeys", workflow: true, workflowPath: "QUICK" });
     expect(start.status, JSON.stringify(start.body)).toBe(200);
     const taskId = String((start.body.task as { taskId: string }).taskId);
     const taskKey = { pk: `DEVTASK#${taskId}`, sk: "META" };
@@ -143,27 +179,12 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const planning = operationRows((row) => row.workflowMode === "PLAN")[0]!;
     const readyWeb = { kind: "web" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedSteps,
       supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions };
-    // The account profiles the plan may use are the project's registered synthetic accounts (Task 3.1), as the broker reads them; the owner account is one of them.
+    // The accounts the setup approval registered, as the broker shows them to the planner: a plan's account references are the registry's (Task 3.1).
     const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [readyWeb],
       accountRegistry: accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments")) });
     if (context.status !== "available") throw new Error(context.reason);
-    const target = context.targets.find((item) => item.kind === "web" && item.accountProfileId === "orders-owner");
-    expect(target, JSON.stringify(context.targets)).toBeDefined();
-    // The planner is offered the inventory mock because the app's OpenAPI document and a source-backed fixture for it are in the repository.
-    const mock = context.mockFixtures.find((item) => item.requestedTargetId === target!.targetId);
-    expect(mock, JSON.stringify(context.mockFixtures)).toMatchObject({ componentId: e2eApiSchemaComponentId("inventory/openapi.json"), contractPath: "inventory/openapi.json", sourcePath: "e2e/mocks/inventory-v1.json" });
-    const scenario: E2EScenario = { scenarioId: "show-stock-status", requirementId: "orders-stock-status", requestedTargetIds: [target!.targetId], required: true, accountProfileId: target!.accountProfileId,
-      minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "navigate", path: "/" }, { kind: "click", testId: "check-inventory" }],
-      assertions: [{ kind: "text", testId: "inventory-status", equals: "in-stock" }] };
-    const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target!.targetId], portableOperationRefs: [],
-      mockFixtureRefs: [{ componentId: mock!.componentId, requestedTargetId: mock!.requestedTargetId, operationId: mock!.operationId, sourcePath: mock!.sourcePath, sourceSha256: mock!.sourceSha256 }],
-      accountContextRefs: context.accountContextRefs.filter((ref) => ref.applicationId === target!.applicationId && ref.profileId === target!.accountProfileId),
-      scenarios: [scenario], semanticExportDeltas: [],
-      applicationRuntimeRefs: context.runtimeRefs!.filter((ref) => ref.targetId === target!.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! })),
-      runtimeAccountRefs: context.runtimeAccountRefs!.filter((ref) => ref.applicationId === target!.applicationId && ref.profileId === target!.accountProfileId), unavailableTargetRefs: [] });
-    const { portableOperationRefs: _portable, unavailableTargetRefs: _unavailable, ...plannerIntent } = intent;
-    void _portable; void _unavailable;
-    await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(planDocument({ title: "Show each order's stock status", claims: [{ id: "1", text: "The orders page shows an order's stock status from the inventory service." }], e2e: plannerIntent as never })));
+    const planned = await input.plan(context);
+    await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(planDocument({ title: planned.title, claims: planned.claims, e2e: planned.plannerIntent as never })));
     await harness.finish(workspaceId, String(planning.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
     const workflowNow = () => (harness.db.get(taskKey.pk, taskKey.sk) as { workflow: { revision: number; stage: string; state: string; blockReason?: string; artifacts: Array<{ sha256: string }>;
       candidate?: { digest: string }; e2e?: Record<string, unknown> } }).workflow;
@@ -187,9 +208,16 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     };
     const sinksFor = (invocation: WorkerInvocation) => createWorkerCallbackSinks({ controlPlaneUrl: "https://cp.example.test", invocation, fetchImplementation: workerFetch });
     const { modelRuntime, faux } = await fauxModelRuntime();
+    /** The runs this journey started, by the labels its host put on their resources: another session's runs on the same Docker are none of this journey's business. */
+    const seenRuns = new Set<string>();
+    // The host's own credential scan (it holds the run's passwords, which nothing else does), kept to ask it about what the broker stored once the run is over.
+    let hostCredentialScan: ((bytes: Uint8Array) => boolean) | undefined;
     const applicationRuntime: WorkflowE2EApplicationRuntime = { runRoot, collect: collectLikeTheWorker,
-      createHost: (input) => createDockerApplicationHost(workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: WEB_API_BUILD_IMAGE, runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
-        createProcessDockerCli(), () => Date.now(), input)) };
+      createHost: (hostInput) => {
+        const hostDeps = workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: WEB_API_BUILD_IMAGE, runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
+          observed(createProcessDockerCli(), (args) => { for (const value of args) if (value.startsWith("rovara.run=")) seenRuns.add(value.slice("rovara.run=".length)); journeyInput.observeDocker?.(args); }), () => Date.now(), hostInput);
+        return createDockerApplicationHost({ ...hostDeps, onRunOutput: async (run) => { hostCredentialScan = (bytes) => run.containsCredential(bytes); await hostDeps.onRunOutput?.(run); } });
+      } };
     const workerState = createWorkerServerState(journal, {
       execute: async (invocation) => {
         const sinks = sinksFor(invocation);
@@ -235,8 +263,8 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
         ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":queued": "QUEUED" } }));
     } });
     /** The ordinary route a queued operation takes: publish its outbox row, dispatch it to the worker, and wait for the worker's terminal result. */
-    async function runOperation(workflowMode: "IMPLEMENT" | "CHECKS") {
-      const outbox = harness.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === workspaceId
+    async function runOperation(workflowMode: "IMPLEMENT" | "CHECKS", after?: string) {
+      const outbox = harness.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === workspaceId && item.operationId !== after
         && (item.invocation as { kind?: string; payload?: { workflowMode?: string } } | undefined)?.kind === "task"
         && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === workflowMode
         && item.status === "PENDING").at(-1);
@@ -275,15 +303,231 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       harness.db.set({ ...workspaceSessionKey(workspaceId), entityType: "SESSION", workspaceId, state: "READY", sessionState: "READY", generation: 7, privateIp: "10.42.128.10", lastActivityAt: new Date().toISOString() });
       await harness.handler({ source: "agentx.workflow-dispatch-recovery" });
     }
-    /** Nothing of the round is left behind: no container (the mocks and the sinkhole included), network or volume still carries the run label, and the run directory is empty. */
+    /** Nothing of the round is left behind: no container (the mocks and the sinkhole included), network or volume still carries the label of a run this journey started, and the run directory is empty. */
     const nothingLeftBehind = async () => {
-      const labelled = (kind: "ps" | "network" | "volume") => docker(...(kind === "ps" ? ["ps", "-a", "--filter", "label=rovara.run", "--format", "{{.Names}}"]
-        : [kind, "ls", "--filter", "label=rovara.run", "--format", "{{.Name}}"]));
+      expect(seenRuns.size, "the journey's host started at least one run").toBeGreaterThan(0);
+      const labelled = (kind: "ps" | "network" | "volume") => [...seenRuns].map((runId) => docker(...(kind === "ps" ? ["ps", "-a", "--filter", `label=rovara.run=${runId}`, "--format", "{{.Names}}"]
+        : [kind, "ls", "--filter", `label=rovara.run=${runId}`, "--format", "{{.Name}}"]))).filter((names) => names !== "").join("\n");
       expect({ containers: labelled("ps"), networks: labelled("network"), volumes: labelled("volume") }).toEqual({ containers: "", networks: "", volumes: "" });
       expect(await readdir(runRoot)).toEqual([]);
     };
     const creator = harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META");
     if (creator !== undefined) harness.db.set({ ...creator, entityType: "DEVELOPER" });
+    return { root, runRoot, repository, baseCommit, snapshot, harness, policy, taskId, taskKey, workspaceId, faux, workflowNow, operationRows, runOperation, writePreparationManifest, completeReadiness, nothingLeftBehind, evidenceRoot, baselineAsks, hostCredentialScan: () => hostCredentialScan };
+  }
+
+  /**
+   * One planned scenario on the owner account of the fixture app, whose inventory service is an external origin: the plan approves the app's own OpenAPI document and mock fixture for
+   * that service, the coder's candidate is the fixture app (optionally with a defect in the call it makes to the service), the broker admits one round, the worker runs it on the
+   * production Docker host with the approved mock and the sinkhole, and the broker verifies what came back on its own.
+   */
+  async function inventoryJourney(variant: "mocked-origin" | "unmocked-call" | "results" | "credential-echo") {
+    const journey = await startJourney({ fixtureRoot: FIXTURE_ROOT, planningFiles: ["package.json", "inventory/openapi.json", "e2e/mocks/inventory-v1.json"],
+      instructions: "Show each order's stock status from the inventory service", baselineRound: variant === "results",
+      plan: async (context) => {
+        const targetOf = (profileId: string) => context.targets.find((item) => item.kind === "web" && item.accountProfileId === profileId);
+        const target = targetOf("orders-owner");
+        expect(target, JSON.stringify(context.targets)).toBeDefined();
+        const viewerTarget = variant === "results" ? targetOf("orders-viewer") : undefined;
+        if (variant === "results") expect(viewerTarget, JSON.stringify(context.targets)).toBeDefined();
+        // The planner is offered the inventory mock because the app's OpenAPI document and a source-backed fixture for it are in the repository.
+        const mock = context.mockFixtures.find((item) => item.requestedTargetId === target!.targetId);
+        expect(mock, JSON.stringify(context.mockFixtures)).toMatchObject({ componentId: e2eApiSchemaComponentId("inventory/openapi.json"), contractPath: "inventory/openapi.json", sourcePath: "e2e/mocks/inventory-v1.json" });
+        const scenario: E2EScenario = { scenarioId: "show-stock-status", requirementId: "orders-stock-status", requestedTargetIds: [target!.targetId], required: true, accountProfileId: target!.accountProfileId,
+          minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "navigate", path: "/" }, { kind: "click", testId: "check-inventory" }],
+          assertions: [{ kind: "text", testId: "inventory-status", equals: "in-stock" }] };
+        const ordersOfOwner = (JSON.parse(await readFile(join(FIXTURE_ROOT, "fixtures/orders.json"), "utf8")) as { orders: Array<{ id: string; tenantId: string; customer: string; total: number; state: string }> }).orders
+          .filter((order) => order.tenantId === "tenant-a").map((order) => [order.id, order.customer, String(order.total), order.state]);
+        // `results`: five scenarios of the export, on the owner's account and the viewer's, with no external origin.
+        const web = (scenarioId: string, requirementId: string, who: NonNullable<typeof target>, steps: E2EScenario["steps"], assertions: E2EScenario["assertions"]): E2EScenario =>
+          ({ scenarioId, requirementId, requestedTargetIds: [who.targetId], required: true, accountProfileId: who.accountProfileId, minimumEvidence: "runtime", requiredRealComponentIds: [], steps, assertions });
+        const openAndExport: E2EScenario["steps"] = [{ kind: "navigate", path: "/" }, { kind: "click", testId: "download-orders" }];
+        const resultsScenarios: E2EScenario[] = variant !== "results" ? [] : [
+          web("owner-export", "orders-export", target!, openAndExport, [{ kind: "csv", downloadName: "orders.csv", columns: ["id", "customer", "total", "state"], rows: ordersOfOwner }]),
+          web("viewer-access", "orders-export-viewer", viewerTarget!, openAndExport, [{ kind: "text", testId: "orders-access-error", equals: "Access refused (403)" }]),
+          web("owner-sees-export-button", "orders-export-visible-owner", target!, [{ kind: "navigate", path: "/" }], [{ kind: "visible", testId: "download-orders", equals: true }]),
+          web("viewer-sees-export-button", "orders-export-visible", viewerTarget!, [{ kind: "navigate", path: "/" }], [{ kind: "visible", testId: "download-orders", equals: true }]),
+          web("owner-export-status", "orders-export-status", target!, openAndExport, [{ kind: "text", testId: "orders-export-status", equals: "Orders exported" }]),
+        ];
+        const planTargets = variant === "results" ? [target!, viewerTarget!] : [target!];
+        // `credential-echo`: the owner's export, whose first row the candidate fills with the password the owner signed in with.
+        const echoScenarios = variant !== "credential-echo" ? [] : [web("owner-export", "orders-export", target!, openAndExport, [{ kind: "csv", downloadName: "orders.csv", columns: ["id", "customer", "total", "state"], rows: ordersOfOwner }])];
+        const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: planTargets.map((item) => item.targetId), portableOperationRefs: [],
+          mockFixtureRefs: variant === "results" || variant === "credential-echo" ? [] : [{ componentId: mock!.componentId, requestedTargetId: mock!.requestedTargetId, operationId: mock!.operationId, sourcePath: mock!.sourcePath, sourceSha256: mock!.sourceSha256 }],
+          accountContextRefs: planTargets.flatMap((who) => context.accountContextRefs.filter((ref) => ref.applicationId === who.applicationId && ref.profileId === who.accountProfileId)),
+          scenarios: variant === "results" ? resultsScenarios : variant === "credential-echo" ? echoScenarios : [scenario], semanticExportDeltas: [],
+          applicationRuntimeRefs: planTargets.flatMap((who) => context.runtimeRefs!.filter((ref) => ref.targetId === who.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! }))),
+          runtimeAccountRefs: planTargets.flatMap((who) => context.runtimeAccountRefs!.filter((ref) => ref.applicationId === who.applicationId && ref.profileId === who.accountProfileId)), unavailableTargetRefs: [] });
+        const { portableOperationRefs: _portable, unavailableTargetRefs: _unavailable, ...plannerIntent } = intent;
+        void _portable; void _unavailable;
+        return { title: "Show each order's stock status", claims: [{ id: "1", text: "The orders page shows an order's stock status from the inventory service." }], plannerIntent };
+      } });
+    const { root, harness, taskId, taskKey, faux, workflowNow, operationRows, runOperation, writePreparationManifest, completeReadiness, nothingLeftBehind, baselineAsks } = journey;
+    const candidate = variant === "mocked-origin" || variant === "results" ? await stageCandidate(root, "candidate")
+      : variant === "credential-echo" ? await stageCandidate(root, "candidate", withPasswordEchoedIntoExport)
+      // The coder's call to the inventory service goes to a path that service's contract does not have (the fixture app's own dependency-route defect, as its default).
+      : await stageCandidate(root, "candidate", withDefaultDefect("dependency-route"));
+    if (variant === "unmocked-call") expect(await readFile(join(candidate, "server.mjs"), "utf8")).toContain("defects/dependency-route.json");
+
+    /**
+     * `results`: what the task page and Slack show, round by round. The same five scenarios run on three states of the code, in real Chromium on the Docker host:
+     *  - the starter with its `extra-order` defect, standing in for the unchanged code. The broker's baseline runner (owner decision D2) is asked at APPROVE; running the base commit is that
+     *    runner's work and is not part of this task, so this journey plays it: the first round's verified rows are recorded as the baseline, through the same recorder a runner uses;
+     *  - candidate 1, whose refusal of the viewer's export answers 401 where the plan approved 403: FAILED on `viewer-access`, on the viewer's account, with a screenshot and expected
+     *    versus actual (see `withViewerRefusedAs401` for why it is not the fixture's own `viewer-access` defect);
+     *  - candidate 2, as the fixture ships: PASS, publishable; the baseline recorded beside it changed nothing.
+     */
+    async function resultsFlow() {
+      const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+      const baselineModule = await import("../../packages/broker/src/aws/workflow-e2e-baseline.js");
+      const notifierModule = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+      const taskNow = () => harness.db.get(taskKey.pk, taskKey.sk) as never;
+      const resultsNow = () => brokerModule.loadWorkflowE2EScenarioResults(harness.brokerInput as never, taskNow(), operationRows(() => true), "owner");
+      const presentation = () => brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, taskNow(), operationRows(() => true), "owner");
+      const byScenario = (rows: Array<{ scenarioId: string }>) => Object.fromEntries(rows.map((row) => [row.scenarioId, row])) as Record<string, (typeof rows)[number] & { status: string; reason?: string; screenshotRef?: { sha256: string; contentType: string }; failedAssertion?: { kind: string; expected: string; actual: string }; mockedOrigins: string[] }>;
+      const sessionId = randomUUID();
+      harness.db.set({ pk: `SESSION#${sessionId}`, sk: "META", sessionId, developerId: MAYA.developerId, amr: MAYA.provider, startedAt: new Date(Date.now() - 60_000).toISOString(),
+        endsAt: Math.floor(Date.now() / 1000) + 3600, reviewExpiresAt: Math.floor(Date.now() / 1000) + 3600 });
+      const getArtifact = async (sha256: string) => (await harness.handler({ version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: `/review/${taskId}/task/api/e2e/artifacts/${sha256}`, rawQueryString: "",
+        headers: { host: "abc123.execute-api.us-east-1.amazonaws.com", cookie: `__Host-agentx_review_session=${sessionId}` }, requestContext: { requestId: randomUUID(), http: { method: "GET" } } })) as unknown as
+        { statusCode: number; body: string; headers: Record<string, string> };
+      const implement = async (dir: string, message: string) => {
+        faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${dir}/." repo/demo/` })]), fauxAssistantMessage(message)]);
+        const done = await runOperation("IMPLEMENT");
+        expect(done.operation.status, JSON.stringify(done.operation)).toBe("SUCCEEDED");
+        expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+        await completeReadiness();
+        const checks = await runOperation("CHECKS");
+        expect(checks.operation.status, JSON.stringify({ operation: checks.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
+        return checks;
+      };
+      const e2eNow = () => workflowNow().e2e as { failedRound?: { status: string }; qualifiedRound?: unknown };
+      const sendBack = async (instructions: string) => {
+        const sentBack = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/send-back`, { requestId: randomUUID(), expectedRevision: workflowNow().revision, instructions });
+        expect(sentBack.status, JSON.stringify(sentBack.body)).toBe(200);
+        expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "IMPLEMENT" });
+      };
+      const unchanged = await stageCandidate(root, "candidate-unchanged", withDefaultDefect("extra-order"));
+      const first = await stageCandidate(root, "candidate-1", withViewerRefusedAs401);
+      const fixed = await stageCandidate(root, "candidate-2");
+
+      // Approval asked the broker's baseline runner for the informational round, once, for this task.
+      expect(baselineAsks).toEqual([{ purpose: "baseline", taskId }]);
+      await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
+
+      // The unchanged code: the export holds an order that is not the owner's. One row FAILED, with a screenshot, and the CSV's expected and actual in words.
+      await implement(unchanged, "Starting point.");
+      expect(workflowNow().blockReason).toBe("one or more admitted E2E groups failed");
+      const unchangedRows = (await resultsNow())!;
+      expect(unchangedRows.scenarios).toHaveLength(5);
+      expect(byScenario(unchangedRows.scenarios)["owner-export"]).toMatchObject({ status: "FAILED", reason: "expected 2 rows, received 3", failedAssertion: { kind: "csv", expected: "2 rows" } });
+      expect(byScenario(unchangedRows.scenarios)["owner-export"]!.screenshotRef).toMatchObject({ contentType: "image/jpeg" });
+      expect(unchangedRows.scenarios.filter((row) => row.status === "PASSED").map((row) => row.scenarioId).sort())
+        .toEqual(["owner-export-status", "owner-sees-export-button", "viewer-access", "viewer-sees-export-button"]);
+      // The baseline: these verified rows, with their screenshots, recorded beside the task.
+      const baselineArtifacts = [];
+      for (const row of unchangedRows.scenarios) {
+        if (row.screenshotRef === undefined) continue;
+        const stored = await brokerModule.loadWorkflowE2EArtifact(harness.brokerInput as never, taskNow(), row.screenshotRef.sha256);
+        expect(stored?.contentType).toBe("image/jpeg");
+        baselineArtifacts.push({ sha256: row.screenshotRef.sha256, bytes: stored!.bytes, contentType: stored!.contentType });
+      }
+      await baselineModule.recordWorkflowE2EBaseline(harness.brokerInput, taskNow(), { baseline: baselineOf(unchangedRows.scenarios), artifacts: baselineArtifacts });
+      await sendBack("The exported CSV holds an order that is not the owner's: a3. Export only the owner's tenant's orders.");
+
+      // Candidate 1: the export is right, but the viewer's refusal answers 401 where 403 is approved. FAILED on that one row, on the viewer's account, with expected versus actual
+      // and a screenshot of the page as it was.
+      await implement(first, "I fixed the export.");
+      expect(workflowNow().blockReason).toBe("one or more admitted E2E groups failed");
+      expect(e2eNow().failedRound).toMatchObject({ status: "FAILED" });
+      expect(e2eNow().qualifiedRound).toBeUndefined();
+      const firstRows = (await resultsNow())!;
+      expect(firstRows.scenarios).toHaveLength(5);
+      const stateRow = byScenario(firstRows.scenarios)["viewer-access"]!;
+      expect(stateRow).toMatchObject({ status: "FAILED", kind: "web", accountLabel: "orders-viewer",
+        reason: 'expected "Access refused (403)", received "Access refused (401)"', failedAssertion: { kind: "text", expected: "Access refused (403)", actual: "Access refused (401)" } });
+      expect(stateRow.screenshotRef).toMatchObject({ contentType: "image/jpeg" });
+      expect(firstRows.scenarios.filter((row) => row.status === "FAILED").map((row) => row.scenarioId)).toEqual(["viewer-access"]);
+      expect(byScenario(firstRows.scenarios)["owner-export"]).toMatchObject({ status: "PASSED", accountLabel: "orders-owner" });
+      expect(firstRows.baseline?.status).toBe("FAILED");
+      expect(byScenario(firstRows.baseline!.scenarios)["owner-export"]!.screenshotRef).toBeDefined();
+      // The screenshots are behind the page's session: the owner reads them as JPEGs, someone else is refused.
+      const shot = await getArtifact(stateRow.screenshotRef!.sha256);
+      expect(shot.statusCode, shot.body.slice(0, 200)).toBe(200);
+      expect(shot.headers["content-type"]).toBe("image/jpeg");
+      expect(Buffer.from(shot.body, "base64").subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+      expect((await getArtifact("0".repeat(64))).statusCode).toBe(404);
+      const slackText = JSON.stringify(await notifierModule.workflowE2ENotifierBlocks({ task: taskNow(), taskPageUrl: `https://agentx.example.test/review/${taskId}/task`,
+        readPrivateObject: async (key) => { const text = harness.s3.objects.get(key); return text === undefined ? undefined : Buffer.from(text, "utf8"); } }));
+      expect(slackText).toContain("Browser and API checks: 4 passed, 1 failed, 0 incomplete");
+      expect(slackText).toContain("Viewer access — failed: expected");
+      expect(slackText).toContain("Access refused (401)");
+      expect(slackText).toContain("(orders-viewer)");
+      expect(slackText).toContain("Before the change: 1 of 5 failed, as expected for new behaviour.");
+      await sendBack("The viewer's refused export must answer 403.");
+
+      // Candidate 2: as the fixture ships. Every row passes; the page lists five rows and the baseline apart; the task goes on to review. The baseline changed nothing about that.
+      await implement(fixed, "I made the refusal a 403 again.");
+      expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "REVIEW" });
+      expect(e2eNow().qualifiedRound).toBeDefined();
+      expect(e2eNow().failedRound).toBeUndefined();
+      const lastRows = (await resultsNow())!;
+      expect(lastRows.scenarios.map((row) => row.status)).toEqual(Array(5).fill("PASSED"));
+      expect(lastRows.baseline?.status).toBe("FAILED");
+      const page = (await presentation())!.pageHtml;
+      expect(page.match(/<tr[^>]*data-e2e-row=/gu)).toHaveLength(5);
+      expect(page.match(/<tr[^>]*data-e2e-baseline-row=/gu)).toHaveLength(5);
+      expect(page).toContain("Browser and API checks: 5 passed, 0 failed, 0 incomplete");
+      expect((await presentation())!.shared.e2e.status).toBe("PASS");
+      // The baseline's screenshot is still the task's to read.
+      const baselineShot = byScenario(lastRows.baseline!.scenarios)["owner-export"]!.screenshotRef!;
+      expect((await getArtifact(baselineShot.sha256)).statusCode).toBe(200);
+    }
+
+    /**
+     * `credential-echo`: the broker redacts by pattern and cannot know a run's passwords; what keeps a bare password out of a row, the stored display and Slack is the Docker
+     * host's own scan, which holds them. A candidate copies the password the owner signed in with into the first row of the owner's export, which the CSV assertion observes.
+     * Whatever the round makes of that, no surface the broker stores or shows carries the password, by the host's own predicate (every spelling it knows, base64 included).
+     */
+    async function credentialEchoFlow() {
+      const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+      const notifierModule = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+      faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidate}/." repo/demo/` })]), fauxAssistantMessage("I added the export.")]);
+      await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
+      const implemented = await runOperation("IMPLEMENT");
+      expect(implemented.operation.status, JSON.stringify(implemented.operation)).toBe("SUCCEEDED");
+      await completeReadiness();
+      const checks = await runOperation("CHECKS");
+      expect(checks.operation.status, JSON.stringify({ operation: checks.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
+      const scan = journey.hostCredentialScan();
+      expect(scan, "the host scanned the run's output").toBeDefined();
+      // The echo took effect: the export no longer holds the owner's orders, so the round is not a pass.
+      expect((workflowNow().e2e as { qualifiedRound?: unknown }).qualifiedRound).toBeUndefined();
+      const task = harness.db.get(taskKey.pk, taskKey.sk) as never;
+      const operations = operationRows(() => true);
+      const rows = await brokerModule.loadWorkflowE2EScenarioResults(harness.brokerInput as never, task, operations, "owner");
+      expect(rows?.scenarios.map((row) => row.status), JSON.stringify(rows)).not.toContain("PASSED");
+      const presentation = (await brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, task, operations, "owner"))!;
+      const displayRef = (workflowNow().e2e as { displayRef?: { key: string } }).displayRef;
+      const slack = await notifierModule.workflowE2ENotifierBlocks({ task, taskPageUrl: `https://agentx.example.test/review/${taskId}/task`,
+        readPrivateObject: async (key) => { const text = harness.s3.objects.get(key); return text === undefined ? undefined : Buffer.from(text, "utf8"); } });
+      const surfaces: Record<string, string> = { rows: JSON.stringify(rows), page: presentation.pageHtml, slack: JSON.stringify(slack), presentationSlack: JSON.stringify(presentation.slackBlocks),
+        shared: JSON.stringify(presentation.shared), workflow: JSON.stringify(workflowNow()), display: displayRef === undefined ? "" : harness.s3.objects.get(displayRef.key) ?? "" };
+      expect(surfaces.display, "a display was stored").not.toBe("");
+      for (const [name, text] of Object.entries(surfaces)) expect(scan!(Buffer.from(text, "utf8")), `the ${name} carries a run credential`).toBe(false);
+    }
+
+    if (variant === "credential-echo") {
+      await credentialEchoFlow();
+      await nothingLeftBehind();
+      return;
+    }
+
+    if (variant === "results") {
+      await resultsFlow();
+      await nothingLeftBehind();
+      return;
+    }
 
     // The coder implements the feature (the fixture app as it ships, or with its dependency-route defect); the broker admits one round; the worker runs it; the broker verifies the evidence itself.
     faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidate}/." repo/demo/` })]), fauxAssistantMessage("I added the stock status.")]);
@@ -327,6 +571,144 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     await nothingLeftBehind();
   }
 
+  /** A copy of the accounts fixture app a coder would produce, optionally edited (the viewer-access defect on by default is how candidate 1 differs from candidate 2). */
+  async function stageAccountsCandidate(root: string, name: string, edit?: (server: string) => string) {
+    const dir = join(root, name);
+    await mkdir(dir, { recursive: true });
+    for (const file of ACCOUNTS_APP_FILES) await cp(join(ACCOUNTS_FIXTURE_ROOT, file), join(dir, file), { recursive: true });
+    if (edit) await writeFile(join(dir, "server.mjs"), edit(await readFile(join(dir, "server.mjs"), "utf8")));
+    return dir;
+  }
+
+  /**
+   * Task 3.2, whole: three accounts in two tenants (a viewer and an owner of tenant-a, the owner of tenant-b) planned as three scenarios of one application, all in one group of one round.
+   * The accounts are seeded by the app's own recipe from the accounts file the host writes, and sign in through the app's own form. Candidate 1 lets a viewer export (the
+   * viewer-access defect): the viewer's case is FAILED on its visible assertion, the other two pass, and the broker offers send-back. Candidate 2 is fixed: PASS. Each case's account ref
+   * is the one the registry resolves for (applicationId, accountProfileId). No byte the broker or the worker stored holds a seeded password, email or email local part.
+   */
+  async function accountsJourney() {
+    const secrets: string[] = [];
+    const accountsFileOf = (args: string[]): string | null => {
+      if (!args.some((value, index) => args[index - 1] === "--name" && value.startsWith("rovara-seed-"))) return null;
+      const mount = args.find((value, index) => args[index - 1] === "-v" && value.endsWith(":/app/.owned:ro"));
+      return mount === undefined ? null : join(mount.slice(0, -":/app/.owned:ro".length), "rovara-accounts.json");
+    };
+    let plannedRefs: Array<{ applicationId: string; profileId: string; revision: number; definitionDigest: string }> = [];
+    const journey = await startJourney({ fixtureRoot: ACCOUNTS_FIXTURE_ROOT, planningFiles: ["package.json"], instructions: "Only owners may export orders, and each tenant sees only its own",
+      // What the seeded accounts are, read from the accounts file at the moment the seed container is started (the host removes the file with the run).
+      observeDocker: (args) => {
+        const file = accountsFileOf(args);
+        if (file === null) return;
+        for (const account of (JSON.parse(readFileSync(file, "utf8")) as { accounts: Array<{ email: string; password: string }> }).accounts) secrets.push(account.password, account.email, account.email.slice(0, account.email.indexOf("@")));
+      },
+      plan: (context) => {
+        const profiles = ["orders-viewer", "orders-owner", "orders-owner-b"] as const;
+        const targets = profiles.map((profileId) => context.targets.find((item) => item.kind === "web" && item.accountProfileId === profileId));
+        for (const target of targets) expect(target, JSON.stringify(context.targets)).toBeDefined();
+        const scenarios = [webAccountScenarios.viewer, webAccountScenarios.owner, webAccountScenarios.ownerB].map((item, index) => item.scenario(targets[index]!.targetId));
+        const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: targets.map((item) => item!.targetId), portableOperationRefs: [], mockFixtureRefs: [],
+          accountContextRefs: targets.flatMap((item) => context.accountContextRefs.filter((ref) => ref.applicationId === item!.applicationId && ref.profileId === item!.accountProfileId)),
+          scenarios, semanticExportDeltas: [],
+          applicationRuntimeRefs: targets.flatMap((item) => context.runtimeRefs!.filter((ref) => ref.targetId === item!.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! }))),
+          runtimeAccountRefs: targets.flatMap((item) => context.runtimeAccountRefs!.filter((ref) => ref.applicationId === item!.applicationId && ref.profileId === item!.accountProfileId)), unavailableTargetRefs: [] });
+        plannedRefs = [...intent.runtimeAccountRefs];
+        const { portableOperationRefs: _portable, mockFixtureRefs: _mocks, unavailableTargetRefs: _unavailable, ...plannerIntent } = intent;
+        void _portable; void _mocks; void _unavailable;
+        return { title: "Only owners export orders", claims: [{ id: "1", text: "A viewer cannot export orders; an owner exports its tenant's orders; one tenant never sees another's." }], plannerIntent };
+      } });
+    const { root, harness, snapshot, taskKey, faux, workflowNow, operationRows, runOperation, writePreparationManifest, completeReadiness, nothingLeftBehind, evidenceRoot } = journey;
+    // Candidate 1: the app with the viewer-access defect as its default; candidate 2: the app as it ships.
+    const defective = await stageAccountsCandidate(root, "candidate-defective", (server) => server.replace("defect: readDefect() });", 'defect: readDefect() ?? JSON.parse(readFileSync(join(root, "defects/viewer-access.json"), "utf8")) });'));
+    expect(await readFile(join(defective, "server.mjs"), "utf8")).toContain("defects/viewer-access.json");
+    const fixed = await stageAccountsCandidate(root, "candidate-fixed");
+    const implementation = (candidate: string) => fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidate}/." repo/demo/` })]);
+    const brokerModule = await import("../../packages/broker/src/aws/broker.js");
+    const presentation = () => brokerModule.loadWorkflowE2EPresentation(harness.brokerInput as never, harness.db.get(taskKey.pk, taskKey.sk) as never, operationRows(() => true), "owner");
+    type CaseResult = { caseId: string; status: string; reason: string; accountContextId: string; accountContextDigest: string; assertionReceipts: Array<{ assertionIndex: number; status: string }> };
+    const casesOf = (operation: Record<string, unknown>): CaseResult[] => (operation.workflowE2EGroupEvidenceRefs as Array<{ evidenceRef: { key: string } }>).flatMap((ref) =>
+      (JSON.parse(harness.s3.objects.get(ref.evidenceRef.key)!) as { groupRun: { collection: { result: { cases: CaseResult[] } } } }).groupRun.collection.result.cases);
+
+    // Round 1: candidate 1.
+    faux.setResponses([implementation(defective), fauxAssistantMessage("I added the orders export.")]);
+    await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
+    const first = await runOperation("IMPLEMENT");
+    expect(first.operation.status, JSON.stringify(first.operation)).toBe("SUCCEEDED");
+    const firstCandidateDigest = workflowNow().candidate!.digest;
+    await completeReadiness();
+    const checks1 = await runOperation("CHECKS");
+    expect(checks1.operation.status, JSON.stringify({ operation: checks1.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
+    expect(workflowNow().blockReason, "round 1 must be FAILED by the broker (an assertion mismatch), not UNKNOWN").toBe("one or more admitted E2E groups failed");
+    expect(workflowNow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    const e2e1 = workflowNow().e2e as { failedRound?: { status: string; candidateDigest: string; roundId: string }; qualifiedRound?: unknown };
+    expect(e2e1.failedRound).toMatchObject({ status: "FAILED", candidateDigest: firstCandidateDigest });
+    expect(e2e1.qualifiedRound).toBeUndefined();
+    expect(workflowSendBackOffered(workflowNow() as never)).toBe(true);
+    const cases1 = casesOf(checks1.operation);
+    expect(cases1, "three accounts, three cases, one group").toHaveLength(3);
+    expect((checks1.operation.workflowE2EGroupEvidenceRefs as unknown[]), "one group").toHaveLength(1);
+    // Exactly one case failed, on its one assertion; the other two (the owner exporting, the other tenant's owner seeing none of tenant-a's rows) passed.
+    expect(cases1.filter((item) => item.status === "failed").map((item) => item.assertionReceipts.map((receipt) => [receipt.assertionIndex, receipt.status]))).toEqual([[[0, "failed"]]]);
+    expect(cases1.filter((item) => item.status === "passed")).toHaveLength(2);
+    expect((await presentation())?.shared.e2e.status).toBe("FAILED");
+
+    // Each case's account ref is the registry's own for (applicationId, accountProfileId): three different accounts of one application.
+    const contract = readE2EApplicationProjectContract(snapshot, plannedRefs[0]!.applicationId)!;
+    const entries = accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments"));
+    expect(plannedRefs.map((ref) => ref.profileId).sort()).toEqual(["orders-owner", "orders-owner-b", "orders-viewer"]);
+    expect(new Set(plannedRefs.map((ref) => ref.applicationId)).size).toBe(1);
+    for (const ref of plannedRefs) {
+      expect(latestAccountRef({ contract, entries, applicationId: ref.applicationId, profileId: ref.profileId, now: Date.now() }), ref.profileId).toEqual(ref);
+    }
+    expect(new Set(plannedRefs.map((ref) => ref.definitionDigest)).size).toBe(3);
+    expect(new Set(cases1.map((item) => item.accountContextId)).size, "each case has its own account context").toBe(3);
+    // And each is the context of the right account: the registry's ref for (applicationId, accountProfileId) gives the context id the collector must attribute to that account's case.
+    // The failed case is the viewer's (and no one else's), and the three contexts are exactly the three accounts' own, so no two cases were given each other's.
+    const contextIdOf = (ref: { applicationId: string; profileId: string; revision: number; definitionDigest: string }) =>
+      `app-account-${createHash("sha256").update(canonicalJson([ref.applicationId, ref.profileId, ref.revision, ref.definitionDigest])).digest("hex")}`.slice(0, 120);
+    const refOf = (profileId: string) => plannedRefs.find((ref) => ref.profileId === profileId)!;
+    expect(cases1.find((item) => item.status === "failed")!.accountContextId, "the failed case is the viewer's").toBe(contextIdOf(refOf("orders-viewer")));
+    expect(cases1.filter((item) => item.status === "passed").map((item) => item.accountContextId).sort(), "the two passing cases are the two owners'")
+      .toEqual([contextIdOf(refOf("orders-owner")), contextIdOf(refOf("orders-owner-b"))].sort());
+
+    // Round 2: send it back, and candidate 2 passes all three.
+    const sentBack = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${journey.taskId}/workflow/send-back`, { requestId: randomUUID(), expectedRevision: workflowNow().revision,
+      instructions: "A viewer can export. Only an owner may." });
+    expect(sentBack.status, JSON.stringify(sentBack.body)).toBe(200);
+    faux.setResponses([implementation(fixed), fauxAssistantMessage("Only owners can export now.")]);
+    const second = await runOperation("IMPLEMENT");
+    expect(second.operation.status, JSON.stringify(second.operation)).toBe("SUCCEEDED");
+    const secondCandidateDigest = workflowNow().candidate!.digest;
+    expect(secondCandidateDigest).not.toBe(firstCandidateDigest);
+    await completeReadiness();
+    const checks2 = await runOperation("CHECKS", checks1.invocation.operationId);
+    expect(checks2.operation.status, JSON.stringify({ operation: checks2.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
+    expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "REVIEW" });
+    const e2e2 = workflowNow().e2e as { failedRound?: unknown; qualifiedRound?: { candidateDigest: string; roundId: string } };
+    expect(e2e2.qualifiedRound).toMatchObject({ candidateDigest: secondCandidateDigest });
+    expect(e2e2.failedRound).toBeUndefined();
+    const cases2 = casesOf(checks2.operation);
+    expect(cases2).toHaveLength(3);
+    expect(cases2.every((item) => item.status === "passed" && item.assertionReceipts.every((receipt) => receipt.status === "passed"))).toBe(true);
+    expect(cases2.map((item) => item.accountContextId).sort(), "round 2 attributes the same three accounts").toEqual(plannedRefs.map(contextIdOf).sort());
+    expect([...new Set(cases2.map((item) => item.accountContextId))].sort()).toEqual([...new Set(cases1.map((item) => item.accountContextId))].sort());
+    expect((await presentation())?.shared.e2e.status).toBe("PASS");
+
+    // The credentials the host seeded appear in no byte either round stored: not in the group evidence, not in any row, not in the worker's own evidence files.
+    expect(secrets.length, "the seed's accounts file was read for both rounds").toBeGreaterThanOrEqual(12);
+    const stored = [JSON.stringify(harness.db.find(() => true)), ...[...harness.s3.objects.values()].map((value) => (typeof value === "string" ? value : Buffer.from(value as Uint8Array).toString("latin1")))];
+    for (const entry of await readdir(evidenceRoot, { recursive: true, withFileTypes: true })) if (entry.isFile()) stored.push((await readFile(join(entry.parentPath, entry.name))).toString("latin1"));
+    expect(stored.join("\n").length).toBeGreaterThan(10_000);
+    // Every spelling an encoder could leave: as is, base64 and base64url, percent-encoded, hex (either case), and JSON-escaped.
+    const spellings = (secret: string) => [["as is", secret], ["base64", Buffer.from(secret).toString("base64")], ["base64url", Buffer.from(secret).toString("base64url")],
+      ["percent-encoded", encodeURIComponent(secret)], ["hex", Buffer.from(secret).toString("hex")], ["HEX", Buffer.from(secret).toString("hex").toUpperCase()], ["JSON", JSON.stringify(secret).slice(1, -1)]] as const;
+    for (const secret of new Set(secrets)) {
+      for (const [form, spelling] of spellings(secret)) {
+        for (const text of stored) expect(text.includes(spelling), `a stored byte holds a seeded credential (${secret.length} characters, ${secret.startsWith("rovara-") ? "an email part" : "a password"}) as ${form}`).toBe(false);
+      }
+    }
+    await nothingLeftBehind();
+  }
+
   it("mocked-origin: the round is PASS with the inventory origin served by its approved mock, named on the result as mockedOrigins [inventory-v1]", async () => {
     await inventoryJourney("mocked-origin");
   }, 600_000);
@@ -334,4 +716,16 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
   it("unmocked-call: a candidate that calls a path the inventory contract does not have gets UNKNOWN for unmocked-external-call, never PASS", async () => {
     await inventoryJourney("unmocked-call");
   }, 600_000);
+
+  it("credential-echo: a password the candidate copies into an observed export reaches no row, no stored display and no Slack text (the host's scan, end to end)", async () => {
+    await inventoryJourney("credential-echo");
+  }, 600_000);
+
+  it("results: five scenarios on three states of the code show a row each with its account and kind, a failure with a screenshot and expected versus actual, the baseline apart, and a passing round publishes", async () => {
+    await inventoryJourney("results");
+  }, 1_800_000);
+
+  it("accounts: three accounts in two tenants in one group; the viewer-access defect is FAILED and sent back, the fixed candidate is PASS, and no seeded credential is stored anywhere", async () => {
+    await accountsJourney();
+  }, 1_800_000);
 });

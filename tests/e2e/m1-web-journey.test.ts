@@ -20,7 +20,7 @@ import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js
 import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
 import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
-import { createDockerApplicationHost, createProcessDockerCli } from "@agentx/verifier";
+import { createDockerApplicationHost, createProcessDockerCli, type DockerCli } from "@agentx/verifier";
 import { OperationJournal } from "../../packages/worker/src/journal.js";
 import { createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/server.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
@@ -53,6 +53,11 @@ const FIXTURE_ROOT = join(import.meta.dirname, "../fixtures/e2e-web-api-app");
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8",
   env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test" } }).trim();
 const docker = (...args: string[]) => execFileSync("docker", args, { encoding: "utf8" }).trim();
+/** The process Docker CLI, noting the run label of every command it is given. */
+const observedDocker = (cli: DockerCli, seenRuns: Set<string>): DockerCli => ({ run: (args, opts) => {
+  for (const value of args) if (value.startsWith("rovara.run=")) seenRuns.add(value.slice("rovara.run=".length));
+  return cli.run(args, opts);
+} });
 
 /**
  * The worker's collector holds the toolchain the executor reported (a Linux Node in the executor image) against the process reading the result, which is the worker
@@ -212,9 +217,11 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     const { modelRuntime, faux } = await fauxModelRuntime();
     // The production Docker application runtime of the worker, on this machine's Docker: the hardened host, the executor image, and the same collector (it only
     // compares the node path the executor reports with this process's, which differ on a CI runner and a Mac, exactly as the Linux runtime tests handle it).
+    /** The runs this journey started, by the labels its host put on their resources: another session's runs on the same Docker are none of this journey's business. */
+    const seenRuns = new Set<string>();
     const applicationRuntime: WorkflowE2EApplicationRuntime = { runRoot, collect: collectLikeTheWorker,
       createHost: (input) => createDockerApplicationHost(workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: WEB_API_BUILD_IMAGE, runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
-        createProcessDockerCli(), () => Date.now(), input)) };
+        observedDocker(createProcessDockerCli(), seenRuns), () => Date.now(), input)) };
     const workerState = createWorkerServerState(journal, {
       execute: async (invocation) => {
         const sinks = sinksFor(invocation);
@@ -301,10 +308,11 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
       await harness.handler({ source: "agentx.workflow-dispatch-recovery" });
     }
 
-    /** Nothing of any round is left behind: no container, network or volume still carries the run label, and the run directory is empty. */
+    /** Nothing of any round is left behind: no container, network or volume still carries the label of a run this journey started, and the run directory is empty. */
     const nothingLeftBehind = async () => {
-      const labelled = (kind: "ps" | "network" | "volume") => docker(...(kind === "ps" ? ["ps", "-a", "--filter", "label=rovara.run", "--format", "{{.Names}}"]
-        : [kind, "ls", "--filter", "label=rovara.run", "--format", "{{.Name}}"]));
+      expect(seenRuns.size, "the journey's host started at least one run").toBeGreaterThan(0);
+      const labelled = (kind: "ps" | "network" | "volume") => [...seenRuns].map((runId) => docker(...(kind === "ps" ? ["ps", "-a", "--filter", `label=rovara.run=${runId}`, "--format", "{{.Names}}"]
+        : [kind, "ls", "--filter", `label=rovara.run=${runId}`, "--format", "{{.Name}}"]))).filter((names) => names !== "").join("\n");
       expect({ containers: labelled("ps"), networks: labelled("network"), volumes: labelled("volume") }).toEqual({ containers: "", networks: "", volumes: "" });
       expect(await readdir(runRoot)).toEqual([]);
     };

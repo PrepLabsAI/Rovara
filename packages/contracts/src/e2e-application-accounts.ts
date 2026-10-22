@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { copyBoundedE2EJsonData } from "./e2e-safe-data.js";
-import { E2EAppRecipeSchema, E2ETargetSchema, type E2ETarget } from "./e2e.js";
+import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_FORM_LOGIN_AUTH_PROFILE, E2EAppRecipeSchema, E2EFormLoginSchema, E2ETargetSchema, type E2ETarget } from "./e2e.js";
 import { E2ERuntimeAccountRefSchema, type E2ERuntimeAccountRef } from "./e2e-application.js";
 import { E2EApplicationExternalConnectionRefSchema } from "./e2e-application-services.js";
 import { E2EApplicationServiceContractSchema } from "./e2e-application-services.js";
@@ -13,7 +13,9 @@ const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const boundedId = (max = 120) => z.string().trim().min(1).max(max);
 const profileSchema = z.object({ profileId: boundedId(), scope: z.enum(["synthetic-test", "external-test"]), authProfileId: boundedId(),
-  seedProfileId: boundedId(), tenantRef: boundedId(200), roleRef: boundedId(200), identityProbeId: boundedId() }).strict();
+  seedProfileId: boundedId(), tenantRef: boundedId(200), roleRef: boundedId(200), identityProbeId: boundedId(),
+  /** The login form of a `rovara-form-login/v1` account. Part of the account digest, so changing it re-versions the account. */
+  login: E2EFormLoginSchema.optional() }).strict();
 export const E2EApplicationProjectContractSchema = z.object({
   schemaVersion: z.literal("e2e-application-project/v1"), recipe: E2EAppRecipeSchema,
   service: E2EApplicationServiceContractSchema.nullable(),
@@ -27,6 +29,11 @@ export const E2EApplicationProjectContractSchema = z.object({
     || value.accountProfiles.some((item) => !value.recipe.accountProfileIds.includes(item.profileId))
     || value.recipe.accountProfileIds.some((profileId) => !profiles.has(profileId))) context.addIssue({ code: "custom", path: ["recipe", "accountProfileIds"], message: "recipe and account profile inventory must match exactly" });
   if (value.accountProfiles.some((item) => item.seedProfileId !== value.recipe.seedProfileId)) context.addIssue({ code: "custom", path: ["accountProfiles"], message: "account seed profiles must match the recipe's approved seed profile" });
+  value.accountProfiles.forEach((item, index) => {
+    if ((item.authProfileId === E2E_FORM_LOGIN_AUTH_PROFILE) !== (item.login !== undefined)) context.addIssue({ code: "custom", path: ["accountProfiles", index, "login"], message: `a login form is declared exactly for ${E2E_FORM_LOGIN_AUTH_PROFILE} accounts` });
+  });
+  if (value.recipe.seed !== undefined && value.recipe.seedProfileId !== E2E_ACCOUNTS_FILE_SEED_PROFILE) context.addIssue({ code: "custom", path: ["recipe", "seed"], message: `a seed command belongs to the ${E2E_ACCOUNTS_FILE_SEED_PROFILE} seed profile` });
+  if (value.recipe.dataSizeMiB !== undefined && value.recipe.seedProfileId !== E2E_ACCOUNTS_FILE_SEED_PROFILE) context.addIssue({ code: "custom", path: ["recipe", "dataSizeMiB"], message: `a data volume belongs to the ${E2E_ACCOUNTS_FILE_SEED_PROFILE} seed profile` });
   if (value.service === null && value.recipe.launch.kind === "service") context.addIssue({ code: "custom", path: ["service"], message: "service recipe requires a source service contract" });
   if (value.service !== null && value.recipe.launch.kind !== "service") context.addIssue({ code: "custom", path: ["service"], message: "source service contract requires a service launch recipe" });
   const origins = value.service?.originBindings ?? [];

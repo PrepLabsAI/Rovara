@@ -1,4 +1,5 @@
-import type { E2ESharedView } from "../../contracts/src/e2e-view.js";
+import type { E2EDisplayBaseline, E2EDisplayScenario, E2EScenarioResults, E2ESharedView } from "../../contracts/src/e2e-view.js";
+import { displayText, summarizeScenarios } from "./e2e/application-display.js";
 
 const LIST_LIMIT = 8;
 const SCOPE_NOTE = "Portable source and mock checks are scoped evidence. Browser, native, live-service, authentication, and internal-callable behavior remain unverified unless separately qualified.";
@@ -44,10 +45,18 @@ export function renderE2EUnavailableSlackBlock(taskPageUrl?: string, roundStarte
   return { type: "section", text: { type: "mrkdwn", text: `${words} ${taskLink}` } };
 }
 
-/** Renders a hashed notification snapshot without implying that it is current readiness. */
-export function renderE2ENotifierSlackBlocks(view: E2ESharedView, captured: { candidateDigest: string; roundId: string; capturedAt: string }, taskPageUrl?: string): E2ESlackBlock[] {
+/**
+ * Renders a hashed notification snapshot without implying that it is current readiness. A snapshot that carries scenario rows (display schema v2) is a browser and API
+ * round: it shows those rows, and says that it is a snapshot.
+ */
+export function renderE2ENotifierSlackBlocks(view: E2ESharedView, captured: { candidateDigest: string; roundId: string; capturedAt: string; scenarioResults?: E2EScenarioResults },
+  taskPageUrl?: string): E2ESlackBlock[] {
   const taskLink = taskPageUrl === undefined ? "Open the task for current status." : `<${slackBounded(taskPageUrl, 1800)}|Open the task for current status.>`;
   const { e2e } = view;
+  if (captured.scenarioResults !== undefined && captured.scenarioResults.scenarios.length > 0) {
+    return [...renderE2EScenarioSlackBlocks(captured.scenarioResults, taskPageUrl === undefined ? {} : { taskPageUrl }),
+      { type: "section", text: { type: "mrkdwn", text: `Recorded ${slackBounded(captured.capturedAt, 80)} for candidate ${slackBounded(captured.candidateDigest.slice(0, 12), 12)}; this is a snapshot, not a recheck.` } }];
+  }
   return [
     { type: "section", text: { type: "mrkdwn", text: `*Captured portable source/mock observations: ${e2e.status}*\n${slackBounded(e2e.label, 140)}\nCandidate ${slackBounded(captured.candidateDigest, 128)} · round ${slackBounded(captured.roundId, 80)} · captured ${slackBounded(captured.capturedAt, 80)}. Current readiness is UNKNOWN; it was not rechecked in this notification. ${taskLink}` } },
     { type: "section", text: { type: "mrkdwn", text: `Captured groups ${e2e.receivedGroups}/${e2e.expectedGroups} · cases ${e2e.executedCases} · criteria ${e2e.qualifiedCriteria}/${e2e.requiredCriteria} · required unavailable ${e2e.unavailableCriteria} · unmet required ${slackBounded(e2e.requiredUnexercisedCriteriaIds.join(", ") || "none", 300)}` } },
@@ -107,4 +116,89 @@ function slackBounded(value: string, limit: number): string {
 
 function html(value: string): string {
   return value.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;").replace(/"/gu, "&quot;").replace(/'/gu, "&#39;");
+}
+
+// ---------------------------------------------------------------------------------------------
+// M1.3 Task 3.7: the per-scenario results of a browser and API round, on the task page and in Slack
+// ---------------------------------------------------------------------------------------------
+
+/** One Slack message part stays well inside Slack's 3000-character limit for a section's text. */
+const SLACK_RESULTS_MAX_CHARS = 3000;
+const BASELINE_UNAVAILABLE = "Couldn't run the checks on the unchanged code.";
+
+/** `Browser and API checks: 4 passed, 1 failed, 0 incomplete`. */
+export function e2eScenarioSummary(rows: readonly Pick<E2EDisplayScenario, "status">[]): string {
+  const counts = summarizeScenarios(rows);
+  return `Browser and API checks: ${counts.passed} passed, ${counts.failed} failed, ${counts.incomplete} incomplete`;
+}
+
+/** The badge for a mocked origin: its service name from the origin reference (`inventory-v1` is "Inventory service mocked"). */
+export function e2eMockedBadge(originRef: string): string {
+  const name = displayText(originRef.replace(/-v\d+$/u, "").replace(/[-_]+/gu, " "), 60);
+  const words = name === "" ? "external" : name;
+  return `${words.charAt(0).toUpperCase()}${words.slice(1)} service mocked`;
+}
+
+/** The one-line sentence of a row, from fields the schema bounds; scrubbed again here because a stored row is not trusted to be clean. */
+function rowSentence(row: E2EDisplayScenario): string {
+  const title = displayText(row.title, 120);
+  const reason = row.reason === undefined ? "" : displayText(row.reason, 300);
+  const word = row.status === "PASSED" ? "passed" : row.status === "FAILED" ? "failed" : "incomplete";
+  return `${title} — ${word}${reason === "" ? "" : `: ${reason}`} (${displayText(row.accountLabel, 60)})`;
+}
+
+/** What the unchanged code did, in a sentence for the page and Slack. Information only: it never says anything about the change itself. */
+function baselineSentence(baseline: E2EDisplayBaseline): string {
+  if (baseline.status === "UNAVAILABLE") return BASELINE_UNAVAILABLE;
+  const counts = summarizeScenarios(baseline.scenarios);
+  const total = baseline.scenarios.length;
+  if (baseline.status === "FAILED") return `Before the change: ${counts.failed} of ${total} failed, as expected for new behaviour.`;
+  if (baseline.status === "PASSED") return `Before the change: all ${total} passed.`;
+  return `Before the change: ${counts.incomplete} of ${total} could not be checked.`;
+}
+
+const originsOf = (rows: readonly E2EDisplayScenario[]) => [...new Set(rows.flatMap((row) => row.mockedOrigins.map((origin) => displayText(origin, 200))).filter((origin) => origin !== ""))].sort();
+
+/**
+ * The text-only Slack summary of a browser and API round: the counts, the first failed row (else the first incomplete one), what was mocked, what the unchanged code did
+ * and a link to the task page, in at most 3000 characters. No image is uploaded: candidate-app pixels stay on the page behind the session (owner decision D3).
+ */
+export function renderE2EScenarioSlackBlocks(results: E2EScenarioResults, options: { taskPageUrl?: string } = {}): E2ESlackBlock[] {
+  const rows = results.scenarios;
+  const lines = [e2eScenarioSummary(rows)];
+  const first = rows.find((row) => row.status === "FAILED") ?? rows.find((row) => row.status === "UNKNOWN");
+  if (first !== undefined) lines.push(slackBounded(rowSentence(first), 600));
+  const origins = originsOf(rows);
+  if (origins.length > 0) lines.push(slackBounded(`Mocked: ${origins.join(", ")}`, 500));
+  if (results.baseline !== undefined) lines.push(slackBounded(baselineSentence(results.baseline), 200));
+  if (options.taskPageUrl !== undefined) lines.push(`<${slackBounded(options.taskPageUrl, 1500)}|Open the task page>`);
+  return [{ type: "section", text: { type: "mrkdwn", text: lines.join("\n").slice(0, SLACK_RESULTS_MAX_CHARS) } }];
+}
+
+function rowsTable(rows: readonly E2EDisplayScenario[], rowAttribute: string, artifactPath: (sha256: string) => string): string {
+  const body = rows.map((row) => {
+    const reason = row.reason === undefined ? "" : html(displayText(row.reason, 300));
+    const badges = row.mockedOrigins.map((origin) => `<span class="tag">${html(e2eMockedBadge(origin))}</span>`).join(" ");
+    const shot = row.screenshotRef === undefined ? "" : `<a href="${html(artifactPath(row.screenshotRef.sha256))}">View screenshot</a>`;
+    const details = [reason, badges, shot].filter((part) => part !== "").join(" ");
+    const status = row.status === "PASSED" ? "Passed" : row.status === "FAILED" ? "Failed" : "Incomplete";
+    return `<tr ${rowAttribute}="${html(displayText(row.scenarioId, 120))}" data-status="${row.status}"><td>${html(displayText(row.title, 120))} <span class="muted">(${row.kind === "web" ? "Browser" : "API"})</span></td>`
+      + `<td>${status}</td><td>${html(displayText(row.accountLabel, 60))}</td><td>${details}</td></tr>`;
+  }).join("");
+  return `<table class="e2e-rows"><thead><tr><th scope="col">Check</th><th scope="col">Result</th><th scope="col">Account</th><th scope="col">Details</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
+/**
+ * The task page's section of the per-scenario results: a row for each scenario (status, account, what failed, a "<service> mocked" badge, a link to the screenshot) and, apart,
+ * what the unchanged code did. A screenshot is a link to the page's API, never an inline image. Empty when there is nothing to show.
+ */
+export function renderE2EScenarioRowsHtml(results: E2EScenarioResults, options: { artifactPath: (sha256: string) => string }): string {
+  if (results.scenarios.length === 0 && results.baseline === undefined) return "";
+  const baseline = results.baseline;
+  const baselineHtml = baseline === undefined ? ""
+    : `<h3>Before the change</h3><p>${html(baselineSentence(baseline))}</p>`
+      + (baseline.status === "UNAVAILABLE" ? "" : `<p class="muted">This ran on the unchanged code, for information only. It does not decide anything about this change.</p>${rowsTable(baseline.scenarios, "data-e2e-baseline-row", options.artifactPath)}`);
+  return `<section id="e2e-results" aria-label="Browser and API results"><h2>Browser and API results</h2>`
+    + (results.scenarios.length === 0 ? "" : `<p>${html(e2eScenarioSummary(results.scenarios))}</p>${rowsTable(results.scenarios, "data-e2e-row", options.artifactPath)}`)
+    + `${baselineHtml}</section>`;
 }

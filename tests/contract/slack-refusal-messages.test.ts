@@ -33,3 +33,29 @@ describe("what a Slack press hears when the broker refuses it", () => {
     expect(slackRefusalMessage("CONFIG_INVALID", OUT_OF_DATE, "the application E2E plan cannot be approved: <!channel> & more")).toBe("The application E2E plan cannot be approved: &lt;!channel&gt; &amp; more.");
   });
 });
+
+// M1.3 Task 3.7 (Ruling AU): the two refusals M1.3 introduces are said as plain sentences too, and only their opening words are said: what follows is data (account and
+// application names, dates) and never reaches Slack.
+describe("what a Slack press hears when the test accounts or an outside service's mock changed", () => {
+  const ACCOUNTS = "The test accounts changed since this plan was approved. Retry the checks to approve the plan again with the accounts that are registered now.";
+  const MOCK = "The mock for an outside service changed since this plan was approved. Retry the checks to approve the plan again with the mock that is approved now.";
+
+  it.each([
+    ["CONFIG_INVALID", "accounts-changed-reapprove: account profile orders-viewer of application demo expires at 2026-12-01T00:00:00.000Z, before this round can finish", ACCOUNTS],
+    ["RUNTIME_UNAVAILABLE", "accounts-changed-reapprove: the registered record of account profile orders-owner cannot be read; an administrator must register the project again", ACCOUNTS],
+    ["CONFIG_INVALID", "the application E2E plan cannot be approved: accounts-changed-reapprove: account profile orders-viewer of application demo is not the registered one. Request changes so the plan is written against the test accounts registered now", ACCOUNTS],
+    ["CONFIG_INVALID", "the plan cannot be approved again here: mock-fixture-changed-reapprove: the fixture for inventory-v1 differs from the approved one", MOCK],
+    ["CONFIG_INVALID", "mock-fixture-changed-reapprove: the fixture for inventory-v1 differs from the approved one", MOCK],
+    ["RUNTIME_UNAVAILABLE", "mock-fixture-changed-reapprove: the fixture for inventory-v1 differs from the approved one", MOCK],
+  ])("says the sentence for %s: %s", (code, reason, sentence) => {
+    expect(slackRefusalMessage(code, OUT_OF_DATE, reason)).toBe(sentence);
+  });
+
+  it("does not say the data after the opening words, and does not take a lookalike for them", () => {
+    const said = slackRefusalMessage("CONFIG_INVALID", OUT_OF_DATE, "accounts-changed-reapprove: <!channel> orders-viewer@tenant-a.example") ?? "";
+    expect(said).not.toContain("channel");
+    expect(said).not.toContain("tenant-a.example");
+    expect(slackRefusalMessage("CONFIG_INVALID", OUT_OF_DATE, "the accounts-changed-reapprove: nothing")).toBe(OUT_OF_DATE);
+    expect(slackRefusalMessage("CONFIG_INVALID", OUT_OF_DATE, "mock-fixture-changed: x")).toBe(OUT_OF_DATE);
+  });
+});

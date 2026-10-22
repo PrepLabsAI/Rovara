@@ -167,7 +167,11 @@ describe.runIf(process.env.ROVARA_DOCKER === "1")("external-origin mocks and unm
       const address = await docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", name);
       const script = "(async () => { const get = async (url) => { try { const r = await fetch(url); return r.status + ' ' + await r.text(); } catch (e) { return 'error ' + (e.cause?.code ?? e.code ?? e.message); } };"
         + "console.log(await get('http://payments.undeclared.example.org/charge')); console.log(await get('https://payments.undeclared.example.org/charge')); console.log(await get('http://app:4317/')); })();";
-      const answers = (await docker("run", "--rm", "--pull=never", "--network", network, "--dns", address, "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--entrypoint", "node", EXECUTOR_IMAGE, "-e", script)).split("\n");
+      // Exactly how the host points the app at the sinkhole: a read-only resolv.conf of its own naming the sinkhole, not `--dns` (which a Docker 25 daemon does not forward to for a container that
+      // is only on internal networks), and a hosts entry for the sinkhole's own alias, which the embedded resolver no longer answers.
+      await writeFile(join(root, "resolv.conf"), `nameserver ${address}\noptions ndots:0 timeout:2 attempts:2\n`, { mode: 0o644 });
+      const answers = (await docker("run", "--rm", "--pull=never", "--network", network, "--read-only", "-v", `${join(root, "resolv.conf")}:/etc/resolv.conf:ro`, "--add-host", `mock-unbound:${address}`,
+        "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--entrypoint", "node", EXECUTOR_IMAGE, "-e", script)).split("\n");
       expect(answers[0]).toBe('599 {"error":"rovara-unmocked"}');
       expect(answers[1]).toMatch(/^error /);
       const lines = (await readFile(join(root, "out", "unbound.jsonl"), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { variantId: string | null; status: number; remoteAddress: string; method: string; path: string });

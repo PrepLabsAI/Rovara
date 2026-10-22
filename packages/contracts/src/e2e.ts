@@ -269,8 +269,31 @@ const CommandRecipeSchema = z.object({ program: id(256), args: z.array(z.string(
   if (/(^|[/\\])(?:sh|bash|zsh|cmd|powershell|pwsh)(\.exe)?$/i.test(command.program) || command.args.some((arg) => /(^|\s)(?:\||&&|;|>|<|\$\(|`)/.test(arg))) context.addIssue({ code: "custom", message: "shell wrappers and shell-interpreted arguments are forbidden" });
 });
 export type E2ECommandRecipe = z.infer<typeof CommandRecipeSchema>;
-export const E2EAppRecipeSchema = z.object({ schemaVersion: z.literal(1), recipeDigest: digest, build: z.array(CommandRecipeSchema).max(16), launch: z.discriminatedUnion("kind", [z.object({ kind: z.literal("service"), start: CommandRecipeSchema, health: z.object({ path: sameOriginAppPath, expectedStatus: z.number().int().min(100).max(599) }).strict() }).strict(), z.object({ kind: z.literal("application"), appId: id(200), artifactRef: id(500), arguments: z.array(z.string().max(8192)).max(100) }).strict(), z.object({ kind: z.literal("contract"), adapterProfileId: id(120), operationIds: ids(200) }).strict()]), serviceProfileIds: z.array(id(120)).max(8), seedProfileId: id(120), accountProfileIds: ids(32), allowedOrigins: z.array(id(200)).max(64) }).strict();
+/** The smallest, largest and default size of the data volume a recipe may ask for, in MiB. */
+export const E2E_DATA_VOLUME_MIN_MIB = 16;
+export const E2E_DATA_VOLUME_MAX_MIB = 1024;
+export const E2E_DATA_VOLUME_DEFAULT_MIB = 256;
+/** The longest a recipe's seed command may run (Task 3.2). */
+export const E2E_SEED_COMMAND_MAX_TIMEOUT_MS = 60_000;
+export const E2EAppRecipeSchema = z.object({ schemaVersion: z.literal(1), recipeDigest: digest, build: z.array(CommandRecipeSchema).max(16), launch: z.discriminatedUnion("kind", [z.object({ kind: z.literal("service"), start: CommandRecipeSchema, health: z.object({ path: sameOriginAppPath, expectedStatus: z.number().int().min(100).max(599) }).strict() }).strict(), z.object({ kind: z.literal("application"), appId: id(200), artifactRef: id(500), arguments: z.array(z.string().max(8192)).max(100) }).strict(), z.object({ kind: z.literal("contract"), adapterProfileId: id(120), operationIds: ids(200) }).strict()]), serviceProfileIds: z.array(id(120)).max(8), seedProfileId: id(120), accountProfileIds: ids(32), allowedOrigins: z.array(id(200)).max(64),
+  /** Seeds the app's own data from the accounts file (`rovara-accounts-file/v1`) before the app starts; at most a minute. Part of the recipe digest, so a change re-versions every account that runs under it. */
+  seed: CommandRecipeSchema.refine((command) => command.timeoutMs <= E2E_SEED_COMMAND_MAX_TIMEOUT_MS, "the seed command may run for at most 60000 ms").optional(),
+  /** The size of the run's data volume (a tmpfs) under `rovara-accounts-file/v1`, in MiB; 256 when not stated. Part of the recipe digest. */
+  dataSizeMiB: z.number().int().min(E2E_DATA_VOLUME_MIN_MIB).max(E2E_DATA_VOLUME_MAX_MIB).optional() }).strict();
 export type E2EAppRecipe = z.infer<typeof E2EAppRecipeSchema>;
+/** The seed profile whose accounts file the host writes for the app (`/app/.owned/rovara-accounts.json`) and the recipe's `seed` command reads (Task 3.2). */
+export const E2E_ACCOUNTS_FILE_SEED_PROFILE = "rovara-accounts-file/v1" as const;
+/** The auth profile whose accounts sign in through the app's own login form (Task 3.2). */
+export const E2E_FORM_LOGIN_AUTH_PROFILE = "rovara-form-login/v1" as const;
+/** How long the executor waits for the signed-in marker after submitting the login form. */
+export const E2E_FORM_LOGIN_SUCCESS_TIMEOUT_MS = 10_000;
+/**
+ * The login form of `rovara-form-login/v1`: the executor opens `path` in a fresh browser context, fills the field named by `usernameTestId` with the account's email and the
+ * one named by `passwordTestId` with its password, clicks `submitTestId`, and waits for `successTestId` to be visible. All four are `data-testid` values.
+ */
+export const E2EFormLoginSchema = z.object({ kind: z.literal("form"), path: sameOriginAppPath, usernameTestId: id(256), passwordTestId: id(256),
+  submitTestId: id(256), successTestId: id(256) }).strict();
+export type E2EFormLogin = z.infer<typeof E2EFormLoginSchema>;
 
 const stepSchemas = [
   z.object({ kind: z.literal("navigate"), path: sameOriginAppPath }), z.object({ kind: z.literal("fill"), testId: id(256), value: z.string().max(8192) }), z.object({ kind: z.literal("click"), testId: id(256) }),
