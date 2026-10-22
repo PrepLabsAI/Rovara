@@ -158,6 +158,16 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
     expect(extraLedger.qualification!.status).toBe("PASS");
   });
 
+  it("an AI-navigated case whose receipts do not agree is UNKNOWN even when its CSV assertion failed: a model it cannot account for never moves a case to FAILED (decision D3 holds for a clean agent part only)", async () => {
+    const a = await readBack("decoy");
+    expect(collectAssembled(a).qualification!.status).toBe("FAILED");
+    const dirty = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, channel: { ...a.agentModel.channel, unscopedRequests: 1 } } });
+    expect(dirty.qualification!.status).toBe("UNKNOWN");
+    expect(firstCase(dirty)).toMatchObject({ status: "unavailable", reason: "model-receipts-mismatch" });
+    const forged = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, receipts: a.agentModel.receipts.slice(0, 1) } });
+    expect(forged.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+  });
+
   it("a channel that failed to close makes the evidence say so: UNKNOWN, with the mismatch code on the case", async () => {
     const a = await readBack("ok");
     const faulty = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, route: null, receipts: [], channel: { droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 1 } } });
