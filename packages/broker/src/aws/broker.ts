@@ -11014,7 +11014,7 @@ async function startBaselineApplicationRound(
 async function startReplayApplicationRound(
   dependencies: AwsBrokerDependencies,
   routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
-  input: { task: DeveloperTaskRecord; caller: Parameters<typeof startTaskWorkflowReviewFromSystem>[3]; sourceRoundId: string },
+  input: { task: DeveloperTaskRecord; sourceRoundId: string; admin: { issuer: string; subject: string; ownerKey: string; displayName?: string } },
 ): Promise<{ sourceRoundId: string; attempt: number; operationId: string; roundId: string; state: "STARTED" }> {
   const { task, sourceRoundId } = input;
   const refuse = (code: E2EReplayRefusal, detail: string) => agentXError(code === "replay-in-progress" ? "TASK_BUSY" : "CONFIG_INVALID", `${code}: ${detail}`);
@@ -11035,8 +11035,12 @@ async function startReplayApplicationRound(
     if ((latest.state === "REQUESTED" || latest.state === "STARTED") && !lapsed) throw refuse("replay-in-progress", "a replay of this round is still running");
     if (lapsed) await markWorkflowE2EReplayUnavailable(store, task, { sourceRoundId, attempt: latest.attempt }, latest.state === "REQUESTED" ? "start-failed" : "timed-out", { from: [latest.state as "REQUESTED" | "STARTED"] });
   }
+  // The attempt number is the next unused one; the cap counts the attempts that got going. A start that was refused before anything ran (the record says `start-failed`, or the request
+  // that lapsed just now) used no runner and spent nothing, so it does not count (Task FU2, REPLAYCAP); the records those leave are bounded on their own.
   const attempt = (latest?.attempt ?? 0) + 1;
-  if (attempt > E2E_REPLAY_ATTEMPTS_MAX) throw refuse("replay-attempts-exhausted", `a round is replayed at most ${E2E_REPLAY_ATTEMPTS_MAX} times`);
+  const neverRan = (record: ReplayRecord) => (record.state === "UNAVAILABLE" && record.reason === "start-failed") || (record === latest && record.state === "REQUESTED");
+  const ran = records.filter((record) => !neverRan(record)).length;
+  if (ran >= E2E_REPLAY_ATTEMPTS_MAX || records.length >= E2E_REPLAY_RECORDS_MAX) throw refuse("replay-attempts-exhausted", `a round is replayed at most ${E2E_REPLAY_ATTEMPTS_MAX} times`);
 
   // The source round, verified again by the broker.
   const source = await reverifyQualifiedRound(dependencies, task, qualified);
@@ -11090,7 +11094,9 @@ async function startReplayApplicationRound(
   }
 
   // Past every refusal: the record is asked for (once per round and attempt), then the operation and the record's start commit together.
-  if (await requestWorkflowE2EReplay(store, task, { sourceRoundId, attempt }) === "ALREADY") throw refuse("replay-in-progress", "a replay of this round is already being started");
+  if (await requestWorkflowE2EReplay(store, task, { sourceRoundId, attempt, requestedBy: input.admin.ownerKey }) === "ALREADY") throw refuse("replay-in-progress", "a replay of this round is already being started");
+  // Who asked, for the audit trail (the administrator's owner key only; the task's developer is the task's owner, not the requester).
+  console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_replay_requested", taskId: task.taskId, sourceRoundId, attempt, adminOwnerKey: input.admin.ownerKey }));
   try {
     const admissionRef = E2EWorkflowAdmissionRefSchema.parse({ schemaVersion: 1, kind: "application", taskId: task.taskId, workflowRevision: workflow.revision, candidateDigest: candidate.digest,
       roundId: built.roundId, groupRunIds: built.groupRunIds, admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength },
@@ -11098,7 +11104,7 @@ async function startReplayApplicationRound(
     await storeWorkflowE2EAdmission(dependencies, { key: admissionRef.admissionRef.key, sha256: built.sha256, bytes: built.bytes, taskId: task.taskId, candidateDigest: candidate.digest });
     const outcome = await startTaskWorkflowE2EReplayFromSystem(routeDependencies, task.taskId, { sourceRoundId, candidateDigest: candidate.digest }, admissionRef, operationId,
       [replayStartItem(store, task, { sourceRoundId, attempt, operationId, roundId: built.roundId, admissionSha256: built.sha256, startedAt: new Date().toISOString(), deadlineAt: built.admission.round.deadlineAt })],
-      input.caller);
+      { issuer: input.admin.issuer, subject: input.admin.subject, ...(input.admin.displayName === undefined ? {} : { displayName: input.admin.displayName }) });
     if (outcome === "STALE") {
       await markWorkflowE2EReplayUnavailable(store, task, { sourceRoundId, attempt }, "start-failed", { from: ["REQUESTED"] });
       throw refuse("replay-not-qualified", "the task moved on while the replay was being started");
@@ -11113,6 +11119,8 @@ async function startReplayApplicationRound(
 
 /** How long a replay that was asked for and never started holds the next attempt back. */
 const REPLAY_REQUEST_GRACE_MS = 10 * 60_000;
+/** The most records one round's replays may leave, whatever their end: attempts that never started are not counted against the attempt cap, so this bounds them. */
+const E2E_REPLAY_RECORDS_MAX = 20;
 
 /**
  * Loads the task's qualified round by the content addresses `qualifiedRound` binds (its admission and its evidence), verifies it again as the broker verified it, with the registry's own
@@ -13199,14 +13207,17 @@ async function adminTaskE2EReplay(dependencies: AwsBrokerDependencies, identity:
     return { sourceRoundId: roundId.data, replays: records.map(replayRecordView) };
   }
   const { roundId } = z.object({ roundId: z.string().uuid() }).strict().parse(value);
+  // The route dependencies act for the task's developer (the task's owner); the request is the administrator's, and is recorded as theirs (Task FU2, REPLAYACTOR).
   const caller = { developerId: task.developerId, sessionId: "replay-admin", amr: task.provider, name: task.developerName };
+  const claimed = [identity.claims.name, identity.claims.email].find((claim): claim is string => typeof claim === "string" && claim.trim() !== "");
   const routeDependencies = developerTaskRouteDependencies({
     documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
     now: Date.now, tasks: developerTaskActions(dependencies), refreshTaskFeedback: (id) => refreshTaskFeedbackForOwnerDecision(dependencies, id),
     workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
     workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
   }, caller, undefined, null);
-  return { replay: await startReplayApplicationRound(dependencies, routeDependencies, { task, caller, sourceRoundId: roundId }) };
+  return { replay: await startReplayApplicationRound(dependencies, routeDependencies, { task, sourceRoundId: roundId,
+    admin: { issuer: identity.issuer, subject: identity.subject, ownerKey: identity.ownerKey, ...(claimed === undefined ? {} : { displayName: claimed.trim() }) } }) };
 }
 
 /** What the operator reads of a replay record: its state, when, and the broker's own result; never an id of an operation or an object. */

@@ -29,6 +29,8 @@ export type ReplayUnavailableReason = "start-failed" | "run-failed" | "unverifie
 
 export type ReplayRecord = Readonly<{
   taskId: string; sourceRoundId: string; attempt: number; state: ReplayState; requestedAt: string;
+  /** The administrator who asked for it (their owner key), kept for the audit trail; absent on a record written before it was kept. */
+  requestedBy?: string;
   operationId?: string; roundId?: string; admissionSha256?: string; startedAt?: string; deadlineAt?: string; recordedAt?: string; reason?: string; replay?: E2EReplayResult;
 }>;
 
@@ -36,12 +38,14 @@ const keyOf = (taskId: string, sourceRoundId: string, attempt: number) => ({ pk:
 const expiryOf = (at: string) => indexExpiresAt(at);
 
 /** Asks for the replay: the REQUESTED record is written only if there is none for this round and attempt. */
-export async function requestWorkflowE2EReplay(store: WorkflowE2EReplayStore, task: Pick<DeveloperTaskRecord, "taskId">, input: { sourceRoundId: string; attempt: number }): Promise<"REQUESTED" | "ALREADY"> {
+export async function requestWorkflowE2EReplay(store: WorkflowE2EReplayStore, task: Pick<DeveloperTaskRecord, "taskId">,
+  input: { sourceRoundId: string; attempt: number; requestedBy?: string }): Promise<"REQUESTED" | "ALREADY"> {
   const requestedAt = new Date().toISOString();
   try {
     await store.documentClient.send(new PutCommand({ TableName: store.tableName, ConditionExpression: "attribute_not_exists(pk)",
       Item: { ...keyOf(task.taskId, input.sourceRoundId, input.attempt), entityType: "WORKFLOW_E2E_REPLAY", schemaVersion: 1, taskId: task.taskId, sourceRoundId: input.sourceRoundId,
-        purpose: E2E_REPLAY_PURPOSE, attempt: input.attempt, state: "REQUESTED", requestedAt, [INDEX_EXPIRY_ATTRIBUTE]: expiryOf(requestedAt) } }));
+        purpose: E2E_REPLAY_PURPOSE, attempt: input.attempt, state: "REQUESTED", requestedAt, ...(input.requestedBy === undefined ? {} : { requestedBy: input.requestedBy }),
+        [INDEX_EXPIRY_ATTRIBUTE]: expiryOf(requestedAt) } }));
     return "REQUESTED";
   } catch (error) {
     if (isConditional(error)) return "ALREADY";
@@ -182,7 +186,7 @@ function recordOf(item: Record<string, unknown> | undefined, taskId: string): Re
   const replay = item.replay === undefined ? undefined : E2EReplayResultSchema.safeParse(item.replay);
   // A recorded result that is not a result of the contract is no record: nothing is shown of part of one.
   if (state === "RECORDED" && replay?.success !== true) return undefined;
-  return { taskId, sourceRoundId: item.sourceRoundId, attempt: item.attempt, state, requestedAt: item.requestedAt, ...text("operationId"), ...text("roundId"), ...text("admissionSha256"),
+  return { taskId, sourceRoundId: item.sourceRoundId, attempt: item.attempt, state, requestedAt: item.requestedAt, ...text("requestedBy"), ...text("operationId"), ...text("roundId"), ...text("admissionSha256"),
     ...text("startedAt"), ...text("deadlineAt"), ...text("recordedAt"), ...text("reason"), ...(replay?.success === true ? { replay: replay.data } : {}) };
 }
 

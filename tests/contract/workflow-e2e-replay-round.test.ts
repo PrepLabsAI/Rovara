@@ -9,6 +9,8 @@ import { MAYA } from "../support/developer-task-broker.js";
 import { failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
 import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
 import type { DurableOutboxRecord } from "../../packages/broker/src/aws/lambda.js";
+import { startTaskWorkflowE2EReplayFromSystem } from "../../packages/broker/src/aws/developer-tasks.js";
+import { replayStartItem, requestWorkflowE2EReplay } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
 
 // M1.4 Task 4.6b (tests 16 and 17) on the real broker: the operator's request to replay a task's qualified round refuses before a runner is started or anything is recorded, for each of its
 // reasons; and a replay round, whatever its result, changes nothing in the workflow, the qualification, send-back or publication.
@@ -101,6 +103,38 @@ describe("the operator's request to replay a qualified round refuses before anyt
     expect(messageOf(await replayCall(exhausted, "POST", { body: { roundId: roundIdOf(exhausted) } }))).toMatch(/^replay-attempts-exhausted/);
   });
 
+  it("REPLAYCAP: a start that was refused before anything ran does not count toward the five-attempt cap, and a round whose attempts all ran does", async () => {
+    const failedStart = { state: "UNAVAILABLE", reason: "start-failed", replay: undefined };
+    // Five attempts that never started (a busy workspace, a fault): the next request goes on to the source checks instead of being refused as exhausted.
+    const neverStarted = await qualified();
+    for (const attempt of [1, 2, 3, 4, 5]) record(neverStarted, attempt, failedStart);
+    expect(messageOf(await replayCall(neverStarted, "POST", { body: { roundId: roundIdOf(neverStarted) } }))).toMatch(/^replay-no-recording/);
+    // Four that ran and one that never started: four count.
+    const four = await qualified();
+    for (const attempt of [1, 2, 3, 4]) record(four, attempt);
+    record(four, 5, failedStart);
+    expect(messageOf(await replayCall(four, "POST", { body: { roundId: roundIdOf(four) } }))).toMatch(/^replay-no-recording/);
+    // A request that was made and lapsed before it started is one that never ran, too.
+    const lapsed = await qualified();
+    for (const attempt of [1, 2, 3, 4]) record(lapsed, attempt);
+    record(lapsed, 5, { state: "REQUESTED", requestedAt: "2026-10-22T10:00:00.000Z", replay: undefined });
+    expect(messageOf(await replayCall(lapsed, "POST", { body: { roundId: roundIdOf(lapsed) } }))).toMatch(/^replay-no-recording/);
+    expect(lapsed.harness.db.get(`DEVTASK#${lapsed.taskId}`, `E2E_REPLAY#${roundIdOf(lapsed)}#5`)).toMatchObject({ state: "UNAVAILABLE", reason: "start-failed" });
+    // Five that ran (recorded, or timed out and so did run) are the cap, whatever else is there.
+    const ran = await qualified();
+    for (const attempt of [1, 2, 3, 4]) record(ran, attempt);
+    record(ran, 5, { state: "UNAVAILABLE", reason: "timed-out", replay: undefined });
+    record(ran, 6, failedStart);
+    expect(messageOf(await replayCall(ran, "POST", { body: { roundId: roundIdOf(ran) } }))).toMatch(/^replay-attempts-exhausted/);
+    // The records that never-started attempts leave are bounded on their own: twenty of them end the requests.
+    const many = await qualified();
+    for (let attempt = 1; attempt <= 20; attempt += 1) record(many, attempt, failedStart);
+    expect(messageOf(await replayCall(many, "POST", { body: { roundId: roundIdOf(many) } }))).toMatch(/^replay-attempts-exhausted/);
+    const nineteen = await qualified();
+    for (let attempt = 1; attempt <= 19; attempt += 1) record(nineteen, attempt, failedStart);
+    expect(messageOf(await replayCall(nineteen, "POST", { body: { roundId: roundIdOf(nineteen) } }))).toMatch(/^replay-no-recording/);
+  });
+
   it("a replay that never answered (past its deadline and the grace) does not hold the next one: it is marked timed-out and the request goes on to the source checks", async () => {
     const round = await qualified();
     record(round, 1, { state: "STARTED", operationId: "op", roundId: randomUUID(), admissionSha256: "a".repeat(64), startedAt: "2026-10-22T10:00:00.000Z", deadlineAt: "2026-10-22T10:25:00.000Z", replay: undefined });
@@ -128,6 +162,49 @@ describe("the operator's request to replay a qualified round refuses before anyt
     expect(replays[1]!.replay).toEqual({ status: "PASS", reproduced: true, downloadSha256Match: true });
     expect(JSON.stringify(read.body)).not.toMatch(/secret-id|eeeeeeee/);
     expect((await replayCall(round, "GET", { query: "", user: { subject: "someone" } })).status).toBe(403);
+  });
+});
+
+// Task FU2 (REPLAYACTOR): a replay is the administrator's request, and the task's own turn log says so. The task's developer stays the owner of the turn; the administrator who asked is its
+// `admin`. (Started directly: a round with a recording to replay needs a real agent run, which the Docker journeys make.)
+describe("who a replay is recorded under (Task FU2)", () => {
+  it("the turn of a started replay names the requesting administrator as its admin, keeps the task's developer as its owner, and the record keeps the administrator's owner key", async () => {
+    const round = await qualified();
+    const sourceRoundId = roundIdOf(round);
+    const task = round.taskNow() as { developerId: string; workflow: { revision: number; candidate: { digest: string } } };
+    const base = round.operationNow().workflowE2EAdmission as Record<string, unknown>;
+    const replayRoundId = randomUUID();
+    const operationId = randomUUID();
+    // The checks have ended; the workspace is idle for the next operation.
+    const workspace = round.harness.db.get(`WORKSPACE#${round.workspaceId}`, "META")!;
+    const { activeOperationId: _active, ...idle } = workspace; void _active;
+    round.harness.db.set({ ...idle, status: "READY" });
+    const store = { documentClient: round.harness.db as never, tableName: "state" };
+    expect(await requestWorkflowE2EReplay(store, task as never, { sourceRoundId, attempt: 1, requestedBy: "owner-key-of-the-admin" })).toBe("REQUESTED");
+    const deps = { documentClient: round.harness.db, tableName: "state", now: Date.now, actions: round.harness.actions };
+    const admin = { issuer: "https://admin.example", subject: "admin-subject", displayName: "Ada Administrator" };
+    const outcome = await startTaskWorkflowE2EReplayFromSystem(deps as never, round.taskId, { sourceRoundId, candidateDigest: task.workflow.candidate.digest },
+      { ...base, roundId: replayRoundId, workflowRevision: task.workflow.revision, purpose: "replay", sourceRoundId, attempt: 1 } as never, operationId,
+      [replayStartItem(store, task as never, { sourceRoundId, attempt: 1, operationId, roundId: replayRoundId, admissionSha256: String((base.admissionRef as { sha256: string }).sha256),
+        startedAt: new Date().toISOString(), deadlineAt: new Date(Date.now() + 600_000).toISOString() })], admin);
+    expect(outcome).toBe("STARTED");
+    const turns = round.harness.db.find((item) => item.requestText === "Run audit replay of a verified round");
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ origin: "ai_tool", admin: { issuer: admin.issuer, subject: admin.subject, displayName: admin.displayName }, developer: { developerId: task.developerId } });
+    expect(turns[0]!.developer).not.toMatchObject({ developerId: admin.subject });
+    expect(round.harness.db.get(`DEVTASK#${round.taskId}`, `E2E_REPLAY#${sourceRoundId}#1`)).toMatchObject({ state: "STARTED", requestedBy: "owner-key-of-the-admin" });
+  });
+
+  it("a request refused before anything starts records nobody and logs nobody as the requester", async () => {
+    const round = await qualified();
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => { logs.push(String(line)); });
+    try {
+      // Past the source checks the request stops at the missing recording, before anything is requested: no record, and no line saying who asked.
+      expect(messageOf(await replayCall(round, "POST", { body: { roundId: roundIdOf(round) } }))).toMatch(/^replay-no-recording/);
+    } finally { log.mockRestore(); }
+    expect(replayRows(round)).toEqual([]);
+    expect(logs.filter((line) => line.includes("workflow.e2e_replay_requested"))).toEqual([]);
   });
 });
 

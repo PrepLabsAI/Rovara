@@ -3171,7 +3171,7 @@ export async function startTaskWorkflowE2EReplayFromSystem(
   admission: E2EWorkflowAdmissionRef,
   operationId: string,
   extra: TransactItems,
-  actor?: DeveloperCaller,
+  requestedBy: ShareAdmin,
 ): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
   const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
   const workflow = task?.workflow;
@@ -3196,7 +3196,8 @@ export async function startTaskWorkflowE2EReplayFromSystem(
       ExpressionAttributeValues: { ":revision": workflow.revision, ":candidate": expected.candidateDigest, ":required": true, ":round": expected.sourceRoundId },
     } },
     putNew(turnTable(deps), aiToolTurn({
-      party: actor === undefined ? partyOfTask(task) : partyOfTaskActor(task, actor), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+      // The task's developer stays the task's owner field of the turn; the administrator who asked for the replay is the turn's `admin`, as for any administrator's action on the task.
+      party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", admin: requestedBy,
       receivedAt, finishedAt: iso(deps), request: "Run audit replay of a verified round", response: `Broker-admitted audit replay (no model) started as operation ${operation.id}.`, operationId: operation.id,
     })),
     ...extra,
