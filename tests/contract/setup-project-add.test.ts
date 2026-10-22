@@ -660,6 +660,20 @@ describe("agentx project add on the command line", () => {
     expect(setup.regions).toEqual(["us-east-1"]);
     expect(plane.registered).toHaveLength(1);
   });
+
+  it("project setup-approve proposes a registered project's setup again and registers the approved next revision (M1.4 Task 4.9)", async () => {
+    const plane = fakeControlPlane();
+    const setup = fakeSetupContext(plane);
+    const io = { setup, stdout: { write: () => undefined }, stderr: { write: () => undefined } };
+    expect(await executeCli(["project", "add", "--env", "staging", "--repository", "acme/payments-api", "--project-name", "payments-api"], io)).toBe(0);
+    const stderr: string[] = [];
+    const code = await executeCli(["project", "setup-approve", "--env", "staging", "--region", "us-east-1", "--project-name", "payments-api"], { ...io, stderr: { write: (text: string) => stderr.push(text) } });
+    expect(stderr.join("")).toBe("");
+    expect(code).toBe(0);
+    expect(plane.registered).toHaveLength(2);
+    expect((plane.registered[1] as { definition: { revision: number } }).definition.revision).toBe(2);
+    expect(plane.requests.filter((request) => request.path === "/v1/admin/projects/setup-approvals")).toHaveLength(2);
+  });
 });
 
 describe("the real setup command context", () => {

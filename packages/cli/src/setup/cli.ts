@@ -12,7 +12,7 @@ import { addJira } from "./connectors/jira.js";
 import { addLinear } from "./connectors/linear.js";
 import { addMcp, type McpAddFlags } from "./connectors/mcp.js";
 import type { ConnectorAddInput } from "./connectors/revision.js";
-import { addProject } from "./project-add.js";
+import { addProject, reapproveProjectSetup } from "./project-add.js";
 import { installationToken } from "./project-files.js";
 import { waitForThreadedReply } from "./reply-watch.js";
 
@@ -46,6 +46,18 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
       const flags = definedEntries<ProjectAddFlags>({ repository: options.repository, projectName: options.projectName, setupCommand: options.setupCommand, testCommand: options.testCommand });
       const result = await addProject({ env: run.env, session: run.session, githubToken, prompter: run.prompter, write: run.write, services: run.services, flags });
       run.print(result, `Registered project ${result.name} (revision ${result.revision}); file ${result.file}\n`);
+    });
+
+  withRegion(project
+    .command("setup-approve")
+    .description("propose the setup of a project registered from this machine again and approve or decline it (pins the installation's AI navigation route when approved)"))
+    .requiredOption("--project-name <name>", "the registered project's name")
+    .action(async (options: { projectName: string; region?: string }, command: Command) => {
+      const run = await context.open(command);
+      const result = await reapproveProjectSetup({ env: run.env, session: run.session, prompter: run.prompter, write: run.write, services: run.services, projectName: options.projectName });
+      run.print(result, result.decision === "approve"
+        ? `Approved the setup of ${result.name}; revision ${result.revision}${result.modelRouteRevision === null ? ", no AI navigation route" : `, AI navigation route ${result.modelRouteRevision}`}; file ${result.file}\n`
+        : `Declined the setup of ${result.name}; revision ${result.revision} unchanged\n`);
     });
 
   const channel = program.command("channel").description("Slack channels bound to AgentX projects");
