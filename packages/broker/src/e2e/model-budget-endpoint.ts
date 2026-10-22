@@ -27,6 +27,8 @@ export interface E2EModelBudgetDependencies {
   e2eAgentInstallation?: () => Promise<E2EAgentInstallation>;
   /** Milliseconds since the epoch. */
   now(): number;
+  /** Where fixed event codes go (never a value from a request). */
+  log?(entry: { event: string; code: string }): void;
 }
 
 /** The part of an operation record the callback reads. */
@@ -135,14 +137,16 @@ async function correct(dependencies: E2EModelBudgetDependencies, operation: E2EM
   if (stored.status === (settling ? "settled" : "released")) return answer(body.reservationId, settling ? "settled" : "released");
   if (stored.status !== "open") throw forbidden(`the model budget reservation was already ${String(stored.status)}`);
   const dayKey = e2eModelBudgetKey(project, stored.day);
-  const delta = settling ? body.actualInputTokens - reserved : -reserved;
+  // The reservation was taken against the day's cap, so a settle charges at most what was reserved: an actual above it is clamped (and logged as a code), never added on top.
+  const charged = settling ? Math.min(body.actualInputTokens, reserved) : 0;
+  const delta = settling ? charged - reserved : -reserved;
   const names = { "#tokens": "inputTokens", "#calls": "calls", "#status": "status" };
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: { TableName: dependencies.tableName, Key: e2eModelBudgetReservationKey(project, body.reservationId),
         UpdateExpression: settling ? "SET #status = :next, settledInputTokens = :actual" : "SET #status = :next",
         ConditionExpression: "attribute_exists(pk) AND #status = :open", ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":next": settling ? "settled" : "released", ":open": "open", ...(settling ? { ":actual": body.actualInputTokens } : {}) } } },
+        ExpressionAttributeValues: { ":next": settling ? "settled" : "released", ":open": "open", ...(settling ? { ":actual": charged } : {}) } } },
       { Update: { TableName: dependencies.tableName, Key: dayKey,
         // The day's row must exist and hold at least what is taken back, so a counter can never go below zero.
         UpdateExpression: settling ? "ADD #tokens :delta" : "ADD #tokens :delta, #calls :minusOne",
@@ -150,6 +154,7 @@ async function correct(dependencies: E2EModelBudgetDependencies, operation: E2EM
         ExpressionAttributeNames: settling ? { "#tokens": names["#tokens"] } : { "#tokens": names["#tokens"], "#calls": names["#calls"] },
         ExpressionAttributeValues: { ":delta": delta, ":tokenFloor": delta < 0 ? -delta : 0, ...(settling ? {} : { ":minusOne": -1, ":callFloor": 1 }) } } },
     ] }));
+    if (settling && body.actualInputTokens > reserved) dependencies.log?.({ event: "e2e_model_budget.settle_clamped", code: "settled-above-reserved" });
     return answer(body.reservationId, settling ? "settled" : "released");
   } catch (error) {
     const reasons = cancelledReasons(error);

@@ -87,6 +87,7 @@ export function createE2EModelDayBudgetClient(options: E2EModelDayBudgetClientOp
       void _limits;
       if (!Number.isSafeInteger(inputTokens) || inputTokens < 1 || inputTokens > E2E_MODEL_BUDGET_MAX_CALL_TOKENS) throw new BudgetUnavailable();
       const reservationId = newReservationId();
+      // Fail closed: a reserve that times out after the broker wrote its row stays charged until the day's end (the worker cannot know to release it); an unknown is never a free call.
       const answer = await attempt({ schemaVersion: E2E_MODEL_BUDGET_SCHEMA_VERSION, stage: "reserve", reservationId, groupRunId: options.groupRunId, inputTokens }, reservationId);
       if (answer.status === "exhausted") return null;
       if (answer.status !== "reserved") throw new BudgetUnavailable();

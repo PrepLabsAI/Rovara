@@ -135,13 +135,39 @@ describe("settle and release", () => {
     expect(dayRow(db)).toMatchObject({ inputTokens: 900, calls: 1 });
   });
 
-  it("settles an overrun in full (the call was billed), bounded at 64000 by the schema", async () => {
-    const { db, call } = fixture();
+  it("never charges more than was reserved: a settle above the reservation is clamped to it (the day total cannot pass its cap), logged as a code, and bounded at 64000 by the schema", async () => {
+    const { db, call, dependencies } = fixture();
+    const logged: Array<Record<string, unknown>> = [];
+    const logging = (body: unknown) => handleE2EModelBudgetCallback({ ...dependencies, log: (entry) => logged.push(entry) }, fixture().operation, body);
     const id = randomUUID();
     await call(reserveBody(id, 4_000));
-    await call(settleBody(id, 64_000));
-    expect(dayRow(db)).toMatchObject({ inputTokens: 64_000 });
+    await logging(settleBody(id, 64_000));
+    expect(dayRow(db)).toMatchObject({ inputTokens: 4_000, calls: 1 });
+    expect(reservationRow(db, id)).toMatchObject({ status: "settled", settledInputTokens: 4_000 });
+    expect(logged).toEqual([{ event: "e2e_model_budget.settle_clamped", code: "settled-above-reserved" }]);
     await expect(call(settleBody(randomUUID(), 64_001))).rejects.toThrow();
+  });
+
+  it("a settle above the reservation cannot push the day total past its cap", async () => {
+    const { db, call } = fixture();
+    const second = randomUUID();
+    // The day already holds all but 1000 tokens of its cap (other calls, as a row a long day would have built).
+    db.set({ ...e2eModelBudgetKey("payments", DAY), entityType: "E2E_MODEL_BUDGET", inputTokens: CAPS.tokens - 1_000, calls: 3 });
+    await call(reserveBody(second, 1_000));
+    expect(dayRow(db)).toMatchObject({ inputTokens: CAPS.tokens });
+    await call(settleBody(second, 60_000));
+    expect(dayRow(db)).toMatchObject({ inputTokens: CAPS.tokens });
+    expect(dayRow(db)!.inputTokens as number).toBeLessThanOrEqual(CAPS.tokens);
+  });
+
+  it("a settle at or below the reservation logs nothing", async () => {
+    const { dependencies, operation } = fixture();
+    const logged: unknown[] = [];
+    const withLog = { ...dependencies, log: (entry: Record<string, unknown>) => logged.push(entry) };
+    const id = randomUUID();
+    await handleE2EModelBudgetCallback(withLog, operation, reserveBody(id, 4_000));
+    await handleE2EModelBudgetCallback(withLog, operation, settleBody(id, 4_000));
+    expect(logged).toEqual([]);
   });
 
   it("release gives back the tokens and the call, once; a repeat is a no-op", async () => {

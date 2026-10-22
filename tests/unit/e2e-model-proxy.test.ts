@@ -802,6 +802,58 @@ describe("e2e model proxy: step markers (POST /v1/step)", () => {
     await proxy.close();
   });
 
+  it("each allowed step may begin once: a second begin of the same step is refused and brings no cookie values", async () => {
+    const invoke = vi.fn(okInvoke());
+    const { proxy } = await start(invoke, { begin: false, allowedSteps: steps(0, 1) });
+    const later = "bGF0ZXItbGVhcm5lZC1zZXNzaW9uLXZhbHVl";
+    const withLater = (stepIndex: number) => channelRequest({ stepIndex, callOverride: call(`#n1 button "Export orders"\nsession ${later}`) });
+    expect((await stepPost(marker())).status).toBe(200);
+    expect((await stepPost(marker({ marker: "end" }))).status).toBe(200);
+    // The same step again, with a cookie value that would otherwise be learned: refused, and the value is not learned.
+    expect(await stepStatus(marker({ cookieValues: [`session=${later}`] }))).toEqual({ schemaVersion: "rovara-e2e-model-channel/v1", status: "refused", code: "step-already-begun" });
+    expect((await stepPost(marker({ cookieValues: [`session=${later}`] }))).status).toBe(409);
+    // Nothing is running after the refusal, and the other step still begins; the unlearned value is an ordinary prompt.
+    expect((await post(channelRequest({ callIndex: 0 }))).body.result).toMatchObject({ status: "error", code: "refused-protocol" });
+    expect((await stepPost(marker({ stepIndex: 1 }))).status).toBe(200);
+    expect((await post(withLater(1))).body.result.status).toBe("ok");
+    expect((await stepPost(marker({ marker: "end", stepIndex: 1 }))).status).toBe(200);
+    expect((await stepPost(marker({ stepIndex: 1 }))).status).toBe(409);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    await proxy.close();
+  });
+
+  it("the cookie values a run can bring are bounded by 32 for each allowed step, because a step begins once", async () => {
+    const { proxy } = await start(okInvoke(), { begin: false, allowedSteps: steps(0, 1) });
+    const values = (tag: string) => Array.from({ length: 32 }, (_, i) => `${tag}${i}=abcdef123456${tag}${i}`);
+    expect((await stepPost(marker({ cookieValues: values("a") }))).status).toBe(200);
+    expect((await stepPost(marker({ marker: "end" }))).status).toBe(200);
+    expect((await stepPost(marker({ stepIndex: 1, cookieValues: values("b") }))).status).toBe(200);
+    expect((await stepPost(marker({ marker: "end", stepIndex: 1 }))).status).toBe(200);
+    // Both steps have used their 32; no marker can bring more.
+    expect((await stepPost(marker({ cookieValues: values("c") }))).status).toBe(409);
+    expect((await stepPost(marker({ stepIndex: 1, cookieValues: values("d") }))).status).toBe(409);
+    await proxy.close();
+  });
+
+  it("refuses an end marker while a call for that step is in flight, and accepts it once the call is answered", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const first = new Promise<void>((resolve) => { entered = resolve; });
+    const invoke: E2EInvoke = async () => { entered(); await new Promise<void>((resolve) => { release = resolve; }); return tapAnswer(); };
+    const { proxy } = await start(invoke, { begin: false, allowedSteps: steps(0) });
+    expect((await stepPost(marker())).status).toBe(200);
+    const call0 = post(channelRequest());
+    await first;
+    expect(await stepStatus(marker({ marker: "end" }))).toEqual({ schemaVersion: "rovara-e2e-model-channel/v1", status: "refused", code: "call-in-flight" });
+    expect((await stepPost(marker({ marker: "end" }))).status).toBe(409);
+    release();
+    expect((await call0).body.result.status).toBe("ok");
+    // The step is still the running one, so its next call is served and the end now lands.
+    expect((await stepPost(marker({ marker: "end" }))).status).toBe(200);
+    expect((await post(channelRequest({ callIndex: 1 }))).body.result).toMatchObject({ status: "error", code: "refused-protocol" });
+    await proxy.close();
+  });
+
   it("POST /v1/generate without a begun step is refused, and the socket takes no marker once the proxy is closed", async () => {
     const invoke = vi.fn(okInvoke());
     const { proxy } = await start(invoke, { begin: false, allowedSteps: steps(0) });

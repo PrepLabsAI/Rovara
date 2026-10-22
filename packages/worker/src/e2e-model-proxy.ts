@@ -365,6 +365,8 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
   /** The size of a step marker the proxy reads: a marker is a position and at most 32 cookie values. */
   const MAX_MARKER_BYTES = 262_144;
   const allowed = new Set((options.allowedSteps ?? []).map((position) => stepKey(position)));
+  /** The steps a begin marker has already started. Each allowed step begins once, so the cookie values a run can bring are at most 32 for each allowed step (the schema's bound per marker). */
+  const begun = new Set<string>();
   const markerReply = (status: number, code: string): { status: number; body: unknown } => ({ status, body: status === 200
     ? { schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, status: "ok" } : { schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, status: "refused", code } });
 
@@ -385,12 +387,16 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     const position: Position = { caseId: marker.caseId, stepIndex: marker.stepIndex };
     if (marker.marker === "begin") {
       if (!allowed.has(stepKey(position))) return markerReply(403, "step-not-admitted");
+      if (begun.has(stepKey(position))) return markerReply(409, "step-already-begun");
       if (current !== null) return markerReply(409, "step-running");
+      begun.add(stepKey(position));
       if (marker.cookieValues !== undefined && marker.cookieValues.length > 0) doAddCredentialValues({ cookieValues: marker.cookieValues });
       doBeginStep(position);
       return markerReply(200, "ok");
     }
     if (current === null || stepKey(current.position) !== stepKey(position)) return markerReply(409, "step-not-running");
+    // A call still in flight belongs to this step; ending it now would let its receipt and the next step's calls interleave.
+    if (inFlight !== null) return markerReply(409, "call-in-flight");
     doEndStep();
     return markerReply(200, "ok");
   }

@@ -91,7 +91,7 @@ function iniEntries(text: string): IniEntry[] {
 }
 
 /** The keys of a profile section that name a credential source of their own, which the instance role must not be shadowed by. */
-const isCredentialSourceKey = (key: string): boolean => key === "aws_access_key_id" || key === "credential_process" || key.startsWith("sso_");
+const isCredentialSourceKey = (key: string): boolean => key === "aws_access_key_id" || key === "credential_process" || key === "role_arn" || key === "credential_source" || key === "web_identity_token_file" || key.startsWith("sso_");
 const isDefaultSection = (section: string): boolean => section === "default" || section === "profile default";
 
 /**
@@ -99,7 +99,7 @@ const isDefaultSection = (section: string): boolean => section === "default" || 
  *
  * - `~/.aws/config`: `endpoint_url` anywhere (a profile or a `services` section), or `max_attempts` other than 1 (the AWS SDK would retry a billed call), or a credential source
  *   in the `[default]` profile;
- * - `~/.aws/credentials`: a `[default]` entry with `aws_access_key_id`, `credential_process` or `sso_*`, which the SDK reads before the instance role (Ruling DB-11).
+ * - `~/.aws/credentials`: a `[default]` entry with `aws_access_key_id`, `credential_process`, `sso_*`, `role_arn`, `credential_source` or `web_identity_token_file`, which the SDK reads before the instance role (Ruling DB-11).
  *
  * A missing file is no setting. A file that exists and cannot be read is a refusal, since what it holds is unknown. The error names the file and the key and never a value.
  */

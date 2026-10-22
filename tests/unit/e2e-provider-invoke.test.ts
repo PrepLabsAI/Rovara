@@ -542,6 +542,22 @@ describe("the shared AWS files guard (assertE2ESharedAwsConfigCannotRedirect)", 
     expect(refusal(home({ credentials: "[default]\nregion = us-east-1\n" }))).toBeUndefined();
   });
 
+  it("refuses an assume-role or web-identity source in [default] (role_arn, credential_source, web_identity_token_file) in either file, naming the key and never the value", () => {
+    for (const key of ["role_arn", "credential_source", "web_identity_token_file"]) {
+      const inConfig = refusal(home({ config: `[default]\nregion = us-east-1\n${key} = ROLEVALUE-arn:aws:iam::123456789012:role/x\n` }));
+      expect(inConfig, key).toContain(key);
+      expect(inConfig, key).not.toContain("ROLEVALUE");
+      expect(inConfig, key).not.toContain("123456789012");
+      const inProfileDefault = refusal(home({ config: `[profile default]\n${key} = ROLEVALUE\n` }));
+      expect(inProfileDefault, key).toContain(key);
+      const inCredentials = refusal(home({ credentials: `[default]\n${key} = ROLEVALUE\n` }));
+      expect(inCredentials, key).toContain(key);
+      expect(inCredentials, key).not.toContain("ROLEVALUE");
+      // Another profile may name a role: only [default] is what the SDK reads before the instance role.
+      expect(refusal(home({ config: `[profile other]\n${key} = ROLEVALUE\n` })), key).toBeUndefined();
+    }
+  });
+
   it("refuses a credential source in the config's [default] profile, and a file that exists but cannot be read", () => {
     expect(refusal(home({ config: "[default]\nsso_start_url = https://example.invalid/start\n" }))).toMatch(/sso_\*/);
     expect(refusal(home({ config: "[profile default]\ncredential_process = x\n" }))).toMatch(/credential_process/);

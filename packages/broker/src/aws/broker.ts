@@ -6202,6 +6202,7 @@ async function handleCallback(
   }
   if (action === "e2e-model-budget") {
     return json(await handleE2EModelBudgetCallback({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now,
+      log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
       ...(dependencies.e2eAgentInstallation === undefined ? {} : { e2eAgentInstallation: dependencies.e2eAgentInstallation }) }, operation, body), request.requestId);
   }
   if (action === "feedback-bundles") {
