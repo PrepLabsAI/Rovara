@@ -412,7 +412,7 @@ export function webApiProbeDriver(probeId: string): WebApiProbeDriver {
     case "web-agent-scripted-v1": return { probe: "web-agent-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null, agent: { script: webApiAgentProbeScript(probeId) } };
     // The double concludes at once without acting, so no file is downloaded: the case is UNKNOWN `agent-no-download`.
     case "web-agent-wrong-action-v1": return { probe: "web-agent-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null, agent: { script: webApiAgentProbeScript(probeId) } };
-    // The scripted run again, with the app started behind a guard that tries every path to the model while the channel is open for the executor (the asset's start command).
+    // The scripted run again, with the app started behind a guard that keeps checking every path to the model (socket, model proxy, gateway) for as long as the app runs, and again before it answers each request, so a check runs inside the window where the channel is open for the executor (the asset's start command).
     case "web-agent-app-isolation-v1": return { probe: "web-agent-isolation-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAgentIsolationGuardArgs(), agent: { script: webApiAgentProbeScript(probeId) } };
     case "app-host-denial-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAppStartGuardArgs() };
     default: throw new Error(`no probe plan for ${probeId}`);
