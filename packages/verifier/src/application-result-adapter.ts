@@ -13,7 +13,7 @@ import { compareE2EApplicationPublicList, E2EApplicationSelectionPacketSchema } 
 import { expectedE2EApplicationReporterDigest } from "./application-runtime-assets.js";
 import { isPinnedRovaraHttpEngine } from "./rovara-http-engine-descriptor.js";
 import { SINKHOLE_ORIGIN_REF, planApplicationOrigins } from "./application-mocks.js";
-import { E2EAgentModelEvidenceSchema, evaluateE2EAgentCase, type E2EAgentCaseResult, type E2EAgentModelEvidence } from "./application-agent-result.js";
+import { E2EAgentModelEvidenceSchema, evaluateE2EAgentCase, type E2EAgentCaseResult, type E2EAgentModelEvidence, type E2EAgentUnknownCode } from "./application-agent-result.js";
 import { agentCaseDirectoryName } from "./executor/evidence-paths.js";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
@@ -1078,7 +1078,12 @@ export type E2EApplicationMockSummary = Readonly<{ consumptions: Readonly<{ succ
  */
 export type E2EApplicationCaseFacts = Readonly<{ caseId: string; csvSha256: string | null;
   agentSteps: ReadonlyArray<Readonly<{ stepIndex: number; whole: boolean; replayedActions: number; totalActions: number; stopCode: string | null }>> }>;
-export type E2EApplicationQualification = E2EStructuralQualification & Readonly<{ mockSummary?: E2EApplicationMockSummary; caseFacts?: ReadonlyArray<E2EApplicationCaseFacts> }>;
+export type E2EApplicationQualification = E2EStructuralQualification & Readonly<{ mockSummary?: E2EApplicationMockSummary; caseFacts?: ReadonlyArray<E2EApplicationCaseFacts>;
+  /**
+   * Task FU2 (AGENTCODES): every fixed code the AI navigation of a case matched, in precedence order, for the cases that matched any (the case's reason is the first). Codes only, for the
+   * worker's structured log; never a verdict and never read by the broker.
+   */
+  agentCodes?: ReadonlyArray<Readonly<{ caseId: string; codes: ReadonlyArray<E2EAgentUnknownCode> }>> }>;
 export type E2EApplicationCollectionResult = Readonly<{ collection: E2EApplicationCollection | null; oracle: E2EApplicationCollectionOracle | null;
   qualification: E2EApplicationQualification | null; unavailableReason: string | null }>;
 type E2EApplicationReportStep = E2EApplicationReport["run"]["results"][number]["attempts"][number]["steps"][number];
@@ -1243,6 +1248,13 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
       if (agentModel === null) return unknown("model-receipts-mismatch: no model receipts or action ledgers came with the group's AI navigation steps", oracle.binding.runId);
     } else if (agentModel !== null) return unknown("model-receipts-mismatch: model evidence came with a group that has no AI navigation step", oracle.binding.runId);
     const agentReceipts = agentModel?.receipts ?? [];
+    if (agentModel !== null) {
+      // Task FU2 (AGENTSTRAY): the worker's record is one transcript record per receipt and one ledger per case. A record that no receipt names, or a second ledger filed for a case,
+      // is ambiguous input, so the group is UNKNOWN rather than read around (the per-case checks only ever look at the records that name their own receipts).
+      const receiptIds = new Set(agentReceipts.map((receipt) => receipt.receiptId));
+      if (agentModel.transcriptDigests.some((digest) => !receiptIds.has(digest.receiptId))) return unknown("model-receipts-mismatch: a transcript record names no model receipt of the group", oracle.binding.runId);
+      if (new Set(agentModel.ledgers.map((entry) => entry.caseDirectory)).size !== agentModel.ledgers.length) return unknown("model-receipts-mismatch: two action ledgers came for one case", oracle.binding.runId);
+    }
     if (agentReceipts.some((receipt) => !agentCaseIds.has(receipt.caseId) || receipt.runId !== oracle.binding.runId)) {
       return unknown("model-receipts-mismatch: a model receipt is attributed to a case with no AI navigation step, or to another run", oracle.binding.runId);
     }
@@ -1391,6 +1403,7 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
     const summaryUnmocked = new Map<string, string>();
     const summaryOrigins = new Set<string>();
     const caseFactRows: E2EApplicationCaseFacts[] = [];
+    const agentCodeRows: Array<{ caseId: string; codes: E2EAgentUnknownCode[] }> = [];
     const normalizedCases = oracle.expectedCases.map((expected) => {
       const capture = captures.get(expected.caseId)!;
       const facts = oracle.applicationIdsByCase.find((item) => item.caseId === expected.caseId)!;
@@ -1531,6 +1544,7 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
             channel: agentModel!.channel, csvDownload });
       }
       const agentBlocked = (agentResult !== null && agentResult.verdict.kind === "unknown") || replayCode !== null;
+      if (agentResult !== null && agentResult.matched.length > 0) agentCodeRows.push({ caseId: expected.caseId, codes: [...agentResult.matched] });
       const agentOperationCount = agentResult?.ledger?.steps.reduce((total, step) => total + step.actions.length, 0) ?? 0;
       const deterministicActionCount = capture.steps.filter((step) => step.kind !== "agent").length;
       if (capture.steps.length > facts.scenario.steps.length || deterministicActionCount + agentOperationCount > oracle.round.limits.maxActionsPerCase
@@ -1735,7 +1749,7 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
         mocked: unmockedByOrigin.filter((origin) => origin !== SINKHOLE_ORIGIN_REF).length }, mockedOrigins } : undefined;
     return { status: anyFailed ? "FAILED" : allPassed ? "PASS" : "UNKNOWN",
       reason: !anyFailed && !allPassed && unmockedCases ? UNMOCKED_EXTERNAL_CALL_REASON : "structural application observations remain exploratory pending independent producer authentication",
-      runId: oracle.binding.runId, rawReportSha256: reportHash, result, ...(mockSummary ? { mockSummary } : {}), caseFacts: caseFactRows };
+      runId: oracle.binding.runId, rawReportSha256: reportHash, result, ...(mockSummary ? { mockSummary } : {}), caseFacts: caseFactRows, ...(agentCodeRows.length === 0 ? {} : { agentCodes: agentCodeRows }) };
   } catch (error) { return unknown(error instanceof Error ? error.message : "application collection unavailable", oracleInput?.binding?.runId ?? null); }
 }
 

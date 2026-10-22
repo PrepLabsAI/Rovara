@@ -95,6 +95,22 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
     expect(collected.qualification!.status).toBe("UNKNOWN");
     expect(firstCase(collected)).toMatchObject({ status: "unavailable", reason: "model-unavailable" });
     expect(collected.qualification!.result!.modelReceiptIds).toEqual([]);
+    // AGENTCODES: the codes the case matched ride on the qualification (for the worker's log), and a clean case has none.
+    expect(collected.qualification!.agentCodes).toEqual([{ caseId: a.run.caseId, codes: ["model-unavailable"] }]);
+    expect(collectAssembled(await readBack("ok")).qualification!.agentCodes).toBeUndefined();
+  });
+
+  it("AGENTSTRAY: a transcript record that no receipt names, and a second ledger for one case, make the group UNKNOWN with the mismatch code", async () => {
+    const a = await readBack("ok");
+    expect(collectAssembled(a).qualification!.status).toBe("PASS");
+    const stray = { receiptId: "no-such-receipt", promptSha256: null, responseSha256: null, omitted: "budget" as const };
+    const withStray = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, transcriptDigests: [...a.agentModel.transcriptDigests, stray] } });
+    expect(withStray.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+    expect(withStray.unavailableReason).toMatch(/^model-receipts-mismatch: a transcript record names no model receipt of the group/);
+    // An identical second ledger for the case used to be read as its first; now it is refused.
+    const withTwin = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, ledgers: [...a.agentModel.ledgers, { ...a.agentModel.ledgers[0]! }] } });
+    expect(withTwin.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+    expect(withTwin.unavailableReason).toMatch(/^model-receipts-mismatch: two action ledgers came for one case/);
   });
 
   it("21. a group with an agent step and no model evidence is UNKNOWN with the mismatch code, never a pass", async () => {

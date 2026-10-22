@@ -653,6 +653,8 @@ describe("workflow E2E application rounds: the model channel", () => {
         const s = await setup(agent ? { route: SCRIPTED, agent: true } : {});
         s.collect.mockImplementation((() => ({ collection: { marker: "wire-collection" }, oracle: {}, unavailableReason: "x",
           qualification: { status: "UNKNOWN", reason: "x", runId: null, rawReportSha256: null,
+            // AGENTCODES: a case that matched two codes, one that matched a text that is not a code (never logged), and one with none.
+            agentCodes: [{ caseId: "c1", codes: ["model-prompt-credential-match", "agent-timeout"] }, { caseId: "c2", codes: ["the model said: hello (free text)"] }],
             result: { cases: [{ reason: "model-unavailable" }, { reason: "structural-application-observations-complete" }, { reason: "the model said: hello (free text)" }] } } })) as never);
         s.fake.onExecutor = s.okOutput;
         await s.run(agent ? { modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment, invoke: async () => { throw new Error("not called"); } } } : {});
@@ -660,7 +662,8 @@ describe("workflow E2E application rounds: the model channel", () => {
       return lines.filter((line) => line.includes("workflow.e2e_agent_verdict"));
     };
     const [line] = await verdictLines(true);
-    expect(JSON.parse(line!)).toMatchObject({ component: "worker", event: "workflow.e2e_agent_verdict", status: "UNKNOWN", codes: ["model-unavailable"] });
+    expect(JSON.parse(line!)).toMatchObject({ component: "worker", event: "workflow.e2e_agent_verdict", status: "UNKNOWN", codes: ["model-unavailable"],
+      matched: [["model-prompt-credential-match", "agent-timeout"]] });
     expect(line).not.toContain("hello");
     expect(await verdictLines(false)).toEqual([]);
   });

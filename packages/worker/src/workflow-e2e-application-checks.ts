@@ -413,7 +413,10 @@ export async function executeWorkflowE2EApplicationChecks(input: {
       // early signal for the operator; the broker's own re-collection decides.
       if (usesModel && qualification !== null) {
         const codes = (qualification.result?.cases ?? []).map((item) => item.reason).filter((code): code is string => (E2E_AGENT_UNKNOWN_CODES as readonly string[]).includes(code));
-        console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_agent_verdict", groupRunId: binding.runId, status: qualification.status, codes }));
+        // Every code a case matched, in precedence order (the case's reason above is the first), one list per case that matched any; filtered to the fixed set so nothing else can be logged.
+        const known = (code: string): code is (typeof E2E_AGENT_UNKNOWN_CODES)[number] => (E2E_AGENT_UNKNOWN_CODES as readonly string[]).includes(code);
+        const matched = (qualification.agentCodes ?? []).map((row) => row.codes.filter(known)).filter((row) => row.length > 0);
+        console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_agent_verdict", groupRunId: binding.runId, status: qualification.status, codes, matched }));
       }
       // The verdict input is only ever what the collector itself qualified; a run that did not get that far is UNKNOWN, whatever its process said.
       const unavailableReason = qualification === null ? reason ?? "application collection unavailable" : qualification.status === "UNKNOWN" ? qualification.reason : null;
