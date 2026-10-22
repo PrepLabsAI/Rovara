@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { cp } from "node:fs/promises";
+import { cp, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
@@ -65,8 +65,12 @@ export class LocalExecutorDocker extends FakeDockerCli {
       server.stderr?.on("data", (chunk: Buffer) => { this.appOutput += chunk.toString(); });
       this.appOutput += `spawn ${command.join(" ")} in ${workDir} on ${port} with ${Object.keys(env).join(",")}\n`;
       this.children.push(server);
+      // A group with an agent step (Task 4.5): the host opened the model channel's socket under the run's workspace, where the container would mount it. The executor reads the socket path
+      // from its plan in a container; run on this machine it takes the test seam instead.
+      const plan = JSON.parse(await readFile(join(workspace, "plan.json"), "utf8")) as { modelChannel?: unknown };
       try {
         const result = await runE2EExecutor({ planPath: join(workspace, "plan.json"), outDir, signal: AbortSignal.timeout(240_000), localAppUpstream: `http://127.0.0.1:${port}`,
+          ...(plan.modelChannel === undefined ? {} : { modelSocketPath: join(workspace, "model", "model.sock") }),
           ...(standInChromiumSandbox ? { inspectChromiumSandbox: standInChromiumSandbox } : {}) });
         this.exitCodeOfExecutor(result.exitCode);
       } finally { server.kill("SIGKILL"); }

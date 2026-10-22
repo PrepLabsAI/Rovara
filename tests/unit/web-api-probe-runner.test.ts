@@ -1,11 +1,10 @@
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, webApiProbeRunId } from "../../packages/contracts/src/index.js";
-import { MAX_BLOCKED_REQUESTS_BYTES, createWebApiProbeRunner, readBlockedRequests, readChromiumSandboxAttestation } from "../../packages/verifier/src/host/web-api-probe-runner.js";
-import { webApiBuildProbeCommand } from "../../packages/verifier/src/host/web-api-probe-plan.js";
+import { WEB_API_AGENT_PROBE_IDS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, webApiProbeRunId } from "../../packages/contracts/src/index.js";
+import { MAX_BLOCKED_REQUESTS_BYTES, createWebApiProbeRunner, readBlockedRequests, readChromiumSandboxAttestation, type WebApiProbeModelChannelRequest } from "../../packages/verifier/src/host/web-api-probe-runner.js";
+import { webApiAgentProbeScript, webApiBuildProbeCommand } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 import { loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";
 import { installedWebApiQualificationAppRoot } from "../../packages/verifier/src/host/web-api-qualification-app.js";
 import { verifyWebApiProbeRecord } from "../../packages/verifier/src/web-api-probe-evidence.js";
@@ -13,15 +12,19 @@ import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.j
 import { webApiChallenge } from "../support/web-api-qualification.js";
 
 const dirs: string[] = [];
-async function temp() { const dir = realpathSync(await mkdtemp(join(tmpdir(), "web-api-runner-"))); dirs.push(dir); return dir; }
+// Short on purpose: an agent probe's model socket sits under the run root, and a unix socket path holds 103 bytes.
+async function temp() { const dir = realpathSync(await mkdtemp("/tmp/rvrn-")); dirs.push(dir); return dir; }
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 const challenge = webApiChallenge(Date.now());
 
-async function setup(overrides: Partial<Parameters<typeof createWebApiProbeRunner>[0]> = {}) {
+async function setup(overrides: Partial<Parameters<typeof createWebApiProbeRunner>[0]> = {}, options: { withoutChannel?: boolean } = {}) {
   const fake = new FakeDockerCli();
   const runRoot = await temp(); const evidenceRoot = await temp();
-  const runner = createWebApiProbeRunner({ docker: fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, evidenceRoot, challenge, ...overrides });
-  return { fake, runRoot, evidenceRoot, runner };
+  const channelRequests: WebApiProbeModelChannelRequest[] = [];
+  // The model channel of an agent probe, as the qualifier supplies it: this stand-in only records what it was asked for (the worker's real one is exercised with a real executor in web-api-probe-runner-local.test.ts).
+  const modelChannelFor = (request: WebApiProbeModelChannelRequest) => { channelRequests.push(request); return { open: async () => { throw new Error("not opened in this test"); } }; };
+  const runner = createWebApiProbeRunner({ docker: fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, evidenceRoot, challenge, ...(options.withoutChannel === true ? {} : { modelChannelFor }), ...overrides });
+  return { fake, runRoot, evidenceRoot, runner, channelRequests };
 }
 
 describe("the production web/API probe runner", () => {
@@ -80,6 +83,31 @@ describe("the production web/API probe runner", () => {
     const { fake, runner } = await setup({ qualificationAppRoot: copy });
     await expect(runner("web-csv-positive-v1")).rejects.toThrow("qualification-app-digest-mismatch");
     expect(fake.calls).toEqual([]);
+  });
+
+  it("does not run an agent probe without a model channel: nothing is staged, nothing is started, and the attempt fails closed", async () => {
+    for (const probeId of WEB_API_AGENT_PROBE_IDS) {
+      const { fake, runRoot, runner } = await setup({}, { withoutChannel: true });
+      await expect(runner(probeId)).rejects.toThrow(`no model channel to run ${probeId}`);
+      expect(fake.calls).toEqual([]);
+      expect(await readdir(runRoot)).toEqual([]);
+    }
+  });
+
+  it("asks for the scripted model channel of an agent probe only: the probe, its run, the asset's script and goal, the pinned route and the group's one AI-navigated step", async () => {
+    const { fake, runner, channelRequests } = await setup();
+    fake.failOn("build", 7);
+    for (const probeId of WEB_API_AGENT_PROBE_IDS) await runner(probeId);
+    expect(channelRequests.map((request) => request.probeId)).toEqual([...WEB_API_AGENT_PROBE_IDS]);
+    for (const request of channelRequests) {
+      expect(request).toMatchObject({ runId: webApiProbeRunId(challenge, request.probeId), goal: "Export the orders as a CSV file", modelRoute: WEB_API_AGENT_PROBE_ROUTE, allowedSteps: [{ stepIndex: 1 }] });
+      expect(request.script).toEqual(webApiAgentProbeScript(request.probeId));
+    }
+    // A probe with no AI navigation never gets a channel (the host refuses one for a group that has no agent step).
+    const other = await setup();
+    other.fake.failOn("build", 7);
+    for (const probe of WEB_API_REQUIRED_PROBES.slice(0, 11)) await other.runner(probe.probeId);
+    expect(other.channelRequests).toEqual([]);
   });
 
   it("refuses a probe the profile does not require", async () => {

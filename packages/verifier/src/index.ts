@@ -72,3 +72,4 @@ export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, Docke
 export { executorContainerArgs } from "./host/executor-container.js";
 export { installedExecutorSeccompProfilePath, verifyExecutorSeccompProfile } from "./host/executor-seccomp.js";
 export { deriveWebApiProbeObservation, verifyWebApiProbeRecord, type WebApiProbeDerivation } from "./web-api-probe-evidence.js";
+export type { WebApiProbeModelChannelFactory, WebApiProbeModelChannelRequest } from "./host/web-api-probe-runner.js";

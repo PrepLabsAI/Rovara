@@ -2,13 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_MAX_ACTIONS, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
   E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimits, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
   selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { compileE2EApplicationScenarios, e2eApplicationGroupUsesModel, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../application-build-source.js";
-import { loadWebApiQualificationProbeAssets } from "../application-runtime-probes.js";
+import { loadWebApiQualificationProbeAssets, type E2EAgentProbeScriptTurn } from "../application-runtime-probes.js";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../rovara-http-engine-descriptor.js";
 import { webApiApplicationLaunchTarget } from "../web-api-launch-target.js";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID } from "../executor/host-registry.js";
@@ -43,7 +43,7 @@ function gitTreeSha(entries: readonly { path: string; mode: string; objectId: st
 export const WEB_API_PROBE_APP_ORIGIN = E2E_EXECUTOR_COMPILED_ORIGIN;
 
 /** The scenarios a probe runs. Each is an ordinary source-style scenario that the real compiler turns into a CLI suite. */
-export type WebApiProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1" | "api-status-mismatch-v1" | "api-egress-denial-v1" | "web-inventory-status-v1" | "web-inventory-csv-v1";
+export type WebApiProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1" | "api-status-mismatch-v1" | "api-egress-denial-v1" | "web-inventory-status-v1" | "web-inventory-csv-v1" | "web-agent-v1";
 /** The CSV the positive probe expects, from the installed probe asset (the same bytes the pinned asset digest covers). */
 function csvOracle(): { columns: string[]; rows: string[][] } {
   const oracle = loadWebApiQualificationProbeAssets().find((asset) => asset.probeId === "web-csv-positive-v1")!.probe.oracle;
@@ -57,6 +57,13 @@ function scenarioFor(probe: WebApiProbeName, targetId: string, accountProfileId:
   if (probe === "web-csv-positive-v1") {
     const oracle = csvOracle();
     return { ...common, scenarioId: probe, steps: [{ kind: "navigate" as const, path: "/" }, { kind: "click" as const, testId: "download-orders" }],
+      assertions: [{ kind: "csv" as const, downloadName: "orders.csv", columns: oracle.columns, rows: oracle.rows }] };
+  }
+  if (probe === "web-agent-v1") {
+    // The CSV export again, but asked for in words: an AI-navigated step names a goal, not the button (Task 4.5). The scripted model finds the button; what the case shows is what the CSV assertion
+    // observes in the one download the step caused. The three agent probes run this scenario and differ only in the script and in how the app is started.
+    const oracle = csvOracle();
+    return { ...common, scenarioId: probe, steps: [{ kind: "navigate" as const, path: "/" }, { kind: "agent" as const, goal: WEB_API_AGENT_PROBE_GOAL, maxActions: WEB_API_AGENT_PROBE_MAX_ACTIONS }],
       assertions: [{ kind: "csv" as const, downloadName: "orders.csv", columns: oracle.columns, rows: oracle.rows }] };
   }
   if (probe === "web-egress-denial-v1") {
@@ -100,7 +107,7 @@ function registeredRuntime(kind: "web" | "api", profileId: string, now: number, 
     host: { os: "linux", arch: "arm64" }, engine: web ? { name: "web", version: "0.14.0", spiVersion: 1 } : { name: ROVARA_HTTP_ENGINE_DESCRIPTOR.name, version: ROVARA_HTTP_ENGINE_DESCRIPTOR.version, spiVersion: 1 },
     runtimeManifestDigest: (web ? "a" : "f").repeat(64), supportedSteps: web ? ["navigate", "click", "fill", ...(agent ? ["agent"] : [])] : ["request"],
     supportedAssertions: web ? ["text", "visible", "csv", "state"] : ["http-status", "state"], evidenceScopes: ["runtime"], mocks: ["source-backed-api-fixtures/v1"],
-    networkPolicyDigest: "1".repeat(64), ...(web ? { browsers: ["chromium"] } : { protocols: ["http"] }) });
+    networkPolicyDigest: "1".repeat(64), ...(web ? { browsers: ["chromium"], ...(agent ? { modelChannel: E2E_MODEL_CHANNEL_SCHEMA_VERSION } : {}) } : { protocols: ["http"] }) });
   const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
     subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" as const };
   const runnerEnvironment = { ci: true as const, trustNoticeShown: false as const, ...(runner?.environment ?? { os: "linux 6.8.0", arch: "arm64", runtime: "node v22.23.2" }) };
@@ -354,7 +361,9 @@ export type WebApiProbeDriver = Readonly<{ probe: WebApiProbeName; /** A defect 
   /** Replaces the arguments of the app's start command (the program stays `node`); null starts the app as its recipe says. */
   startArgs: readonly string[] | null;
   /** True when the probe's plan approves the app's inventory mock for its target; absent means no mock is approved. */
-  mock?: boolean }>;
+  mock?: boolean;
+  /** Present on the agent probes (Task 4.5): the scripted model's turns, from the installed probe asset. The plan then pins the scripted route and the runner needs a model channel for it. */
+  agent?: Readonly<{ script: readonly E2EAgentProbeScriptTurn[] }> }>;
 
 export function webApiProbeDriver(probeId: string): WebApiProbeDriver {
   switch (probeId) {
@@ -372,9 +381,33 @@ export function webApiProbeDriver(probeId: string): WebApiProbeDriver {
     case "build-lateral-denial-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: [webApiBuildProbeCommand("build-lateral-denial-v1")], startArgs: null };
     // The CSV scenario again: what makes this probe is that its run must also carry the executor's Chromium sandbox attestation (the pin's `chromiumSandbox`).
     case "chromium-sandbox-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null };
+    // Task 4.5: the CSV export as an AI-navigated step, under the scripted route. The script is the asset's, so the pinned asset digest covers what the double does.
+    case "web-agent-scripted-v1": return { probe: "web-agent-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null, agent: { script: webApiAgentProbeScript(probeId) } };
+    // The double concludes at once without acting, so no file is downloaded: the case is UNKNOWN `agent-no-download`.
+    case "web-agent-wrong-action-v1": return { probe: "web-agent-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null, agent: { script: webApiAgentProbeScript(probeId) } };
+    // The scripted run again, with the app started behind a guard that tries every path to the model while the channel is open for the executor (the asset's start command).
+    case "web-agent-app-isolation-v1": return { probe: "web-agent-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAgentIsolationGuardArgs(), agent: { script: webApiAgentProbeScript(probeId) } };
     case "app-host-denial-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAppStartGuardArgs() };
     default: throw new Error(`no probe plan for ${probeId}`);
   }
+}
+
+/** The scripted model's turns for an agent probe, from its installed asset (so the pinned asset digest covers them). */
+export function webApiAgentProbeScript(probeId: string): readonly E2EAgentProbeScriptTurn[] {
+  const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === probeId);
+  const oracle = asset?.probe.oracle;
+  if (oracle === undefined || (oracle.kind !== "agent-scripted" && oracle.kind !== "agent-wrong-action" && oracle.kind !== "agent-app-isolation")) throw new Error(`the ${probeId} probe asset has no script`);
+  return oracle.script.map((turn) => ({ ...turn }));
+}
+
+/**
+ * The start command arguments of `web-agent-app-isolation-v1`, from the installed probe asset. The app is started behind a guard that looks for `/run/rovara/model.sock`, tries to
+ * connect to `model-proxy:8080` (unless the name leads only to the run's own sinkhole) and to the gateway on 8080, and starts the app only when every attempt fails.
+ */
+export function webApiAgentIsolationGuardArgs(): readonly string[] {
+  const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "web-agent-app-isolation-v1")!;
+  if (asset.probe.oracle.kind !== "agent-app-isolation") throw new Error("the app isolation probe asset has no start guard");
+  return Object.freeze([...asset.probe.oracle.appStart.args]);
 }
 
 /** The build command and its expected exit code come from the installed probe asset, so the probe the qualifier records is the one that ran. */

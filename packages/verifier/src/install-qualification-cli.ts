@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import { RuntimeInstallChallengeSchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, type RuntimeInstallChallenge, type WebApiProbeRun } from "@agentx/contracts";
 import { containedRuntimeProfileForHost } from "./container-envelope.js";
 import { createProcessDockerCli } from "./host/docker-application-host.js";
-import { WEB_API_BUILD_IMAGE, createWebApiProbeRunner } from "./host/web-api-probe-runner.js";
+import { WEB_API_BUILD_IMAGE, createWebApiProbeRunner, type WebApiProbeModelChannelFactory } from "./host/web-api-probe-runner.js";
 import { qualificationFailureOf } from "./install-qualification-failure.js";
 import { qualifyInstalledP0Runtime,qualifyInstalledWebApiRuntime, type WebApiQualificationEnvironment } from "./install-qualification.js";
 
@@ -34,7 +34,21 @@ export function webApiProbeRunnerConfig(environment: NodeJS.ProcessEnv, platform
   return { executorImage, buildImage: WEB_API_BUILD_IMAGE, runRoot: join(scratch, "web-api-probes") };
 }
 
+/**
+ * The scripted model channel the agent probes run behind, from the installed worker: the proxy, the route checks and the receipts are the worker's, which this package cannot import.
+ * The worker's build sits beside this one in the installed runtime. A worker that cannot supply it gives none, and the agent probes then do not run (the qualification is refused), so
+ * the `agent` capability is never listed without them.
+ */
+export async function installedScriptedModelChannelFactory(workerBuild = new URL("../../worker/dist/e2e-qualification-model-channel.js", import.meta.url)): Promise<WebApiProbeModelChannelFactory | undefined> {
+  try {
+    const loaded = await import(workerBuild.href) as { createScriptedQualificationModelChannel?: unknown };
+    return typeof loaded.createScriptedQualificationModelChannel === "function" ? loaded.createScriptedQualificationModelChannel as WebApiProbeModelChannelFactory : undefined;
+  } catch { return undefined; }
+}
+
 export type QualificationCliDeps = Readonly<{
+  /** Test seam: the scripted model channel the agent probes run behind, where the installed worker's would otherwise be loaded. */
+  modelChannelFor?: WebApiProbeModelChannelFactory;
   environment?: NodeJS.ProcessEnv;
   /** Test seam: the platform and architecture the run root is looked up for. The default is this host. */
   host?: Readonly<{ platform: string; arch: string }>;
@@ -78,7 +92,8 @@ async function qualify(args: readonly string[], deps: QualificationCliDeps, at: 
   if (profile === WEB_API_RUNTIME_PROFILE_ID) {
     at("runner-config-invalid");
     const config = { ...webApiProbeRunnerConfig(deps.environment ?? process.env, deps.host?.platform, deps.host?.arch), ...deps.config };
-    const runProbe = (deps.createProbeRunner ?? ((input) => createWebApiProbeRunner({ ...input, docker: createProcessDockerCli() })))({ ...config, challenge, evidenceRoot });
+    const modelChannelFor = deps.modelChannelFor ?? await installedScriptedModelChannelFactory();
+    const runProbe = (deps.createProbeRunner ?? ((input) => createWebApiProbeRunner({ ...input, docker: createProcessDockerCli(), ...(modelChannelFor === undefined ? {} : { modelChannelFor }) })))({ ...config, challenge, evidenceRoot });
     at("qualification-failed");
     proposal = await qualifyInstalledWebApiRuntime({ challenge, evidenceRoot, runProbe, ...(deps.qualificationEnvironment ? { environment: deps.qualificationEnvironment } : {}) });
   } else { at("qualification-failed"); proposal = await qualifyInstalledP0Runtime({ challenge, evidenceRoot }); }
