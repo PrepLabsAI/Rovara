@@ -85,6 +85,8 @@ export type RoundOptions = {
   baselinePin?: "other";
   /** What GitHub says the tree of the pinned base commit is (the broker holds the exported tree to it): the exported one, another, or nothing (GitHub cannot be asked). Absent: GitHub is not consulted. */
   githubBaseTree?: "match" | "mismatch" | "unreachable";
+  /** Runs once the candidate is committed and exported, just before the first dispatch (to seed a row the dispatch reads, say). */
+  beforeDispatch?: (harness: RoundBrokerHarness) => void;
 };
 
 const READY_API = { kind: "api" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedSteps,
@@ -232,6 +234,7 @@ export async function startApplicationRound(options: RoundOptions = {}) {
     status: "COMPLETE", createdAt: at, buildSource: real.stored });
 
   const runDispatch = async () => { await harness.handler({ source: "agentx.workflow-dispatch-recovery" }); };
+  options.beforeDispatch?.(harness as unknown as RoundBrokerHarness);
   await runDispatch();
   const checksOperations = () => operationRows((row) => row.workflowMode === "CHECKS");
   const checks = checksOperations();

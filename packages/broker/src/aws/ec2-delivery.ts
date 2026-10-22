@@ -186,8 +186,10 @@ const PORTABLE_ADMISSION_SCHEMA = "workflow-e2e-admission/v1";
  * without `kind` that names an application admission would bypass the gate, and one marked application that names a portable admission is a broker defect. Both are refused.
  */
 async function checkAdmissionKind(invocation: WorkerInvocation, read: Ec2DeliveryDependencies["workflowE2EAdmissionSchemaVersion"]): Promise<string | undefined> {
-  if (read === undefined || invocation.kind !== "task" || invocation.payload.workflowE2EAdmission === undefined) return undefined;
+  if (invocation.kind !== "task" || invocation.payload.workflowE2EAdmission === undefined) return undefined;
   const reference = invocation.payload.workflowE2EAdmission;
+  // Fail closed: with no reader wired the version of an application admission is unknown, so it is treated as needing the newest worker feature.
+  if (read === undefined) return reference.kind === "application" ? E2E_APPLICATION_ADMISSION_SCHEMA_V2 : undefined;
   let schemaVersion: string | undefined;
   try { schemaVersion = await read(reference); } catch { schemaVersion = undefined; }
   if (schemaVersion === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "could not read the E2E admission to check its kind against the reference; no round was sent");
