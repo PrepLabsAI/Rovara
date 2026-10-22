@@ -117,6 +117,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/e2e/model-budget-endpoint.ts",
       // The baseline round's record (M1.3 Task 3.7b, owner decision D4): it expires 30 days after it was last written.
       "packages/broker/src/aws/workflow-e2e-baseline.ts",
+      // The audit replay's record (M1.4 Task 4.6b) has the baseline record's expiry: 30 days after it was last written.
+      "packages/broker/src/aws/workflow-e2e-replay.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
