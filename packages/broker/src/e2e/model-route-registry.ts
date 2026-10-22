@@ -22,7 +22,9 @@ export { deriveE2EAgentRoute, type E2EAgentInstallation, type DerivedE2EAgentRou
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE#<routeId>#REV#<n>`: the definition of revision n, written once and never changed;
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_LATEST#<routeId>`: `{ revisionNumber, revision, definitionDigest }`, moved only from the previous revision;
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest>`: written by the live canary (Task 4.9) for a provisional route;
- * - `PROJECT#<project> / E2E_MODEL_BUDGET#<yyyy-mm-dd>`: `{ inputTokens, calls }` of the project's UTC day, moved only by conditional increments.
+ * - `PROJECT#<project> / E2E_MODEL_BUDGET#<yyyy-mm-dd>`: `{ inputTokens, calls }` of the project's UTC day, moved only by conditional increments;
+ * - `PROJECT#<project> / E2E_MODEL_BUDGET_RESERVATION#<reservationId>`: one call's reservation against that day (`open`, then `settled` or `released` once), kept by the worker's
+ *   budget callback (`model-budget-endpoint.ts`, Task 4.3a), which is the budget the worker path uses.
  * None of these is a membership row or a project revision row, and nothing here writes to either.
  */
 
@@ -53,6 +55,8 @@ export const e2eModelRouteRevisionKey = (routeId: string, revisionNumber: number
 export const e2eModelRouteLatestKey = (routeId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_LATEST#${routeId}` });
 export const e2eModelRouteCanaryKey = (routeId: string, definitionDigest: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_CANARY#${routeId}#${definitionDigest}` });
 export const e2eModelBudgetKey = (projectName: string, day: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET#${day}` });
+/** One reservation of a call's tokens against the project's day (`model-budget-endpoint.ts`): written with the day's increment, settled or released once. */
+export const e2eModelBudgetReservationKey = (projectName: string, reservationId: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET_RESERVATION#${reservationId}` });
 
 export interface E2EModelRouteStore {
   documentClient: DynamoDBDocumentClient;

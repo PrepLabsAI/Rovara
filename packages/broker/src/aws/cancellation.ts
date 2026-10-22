@@ -116,7 +116,7 @@ export interface CallbackClaims {
   workspaceId: string;
   operationId: string;
   fence: number;
-  actions: Array<"events" | "artifacts" | "result" | "candidate-export" | "candidate-build-source" | "baseline-source" | "e2e-admission" | "e2e-evidence" | "feedback-bundles" | "feedback-approval" | "pull-request" | "pull-request-update" | "codebuild" | "chatgpt-token" | "chatgpt-status">;
+  actions: Array<"events" | "artifacts" | "result" | "candidate-export" | "candidate-build-source" | "baseline-source" | "e2e-admission" | "e2e-evidence" | "e2e-model-budget" | "feedback-bundles" | "feedback-approval" | "pull-request" | "pull-request-update" | "codebuild" | "chatgpt-token" | "chatgpt-status">;
   expiresAt: number;
 }
 
@@ -219,6 +219,7 @@ export function issueCapability(
   allowChatGptToken = false,
   allowCandidateExport = false,
   allowWorkflowE2E = false,
+  allowE2EModelBudget = false,
 ): string {
   const claims: CallbackClaims = {
     workspaceId,
@@ -230,6 +231,8 @@ export function issueCapability(
       "result",
       ...(allowCandidateExport ? ["candidate-export" as const, "candidate-build-source" as const, "baseline-source" as const] : []),
       ...(allowWorkflowE2E ? ["e2e-admission" as const, "e2e-evidence" as const] : []),
+      // M1.4 Task 4.3a: only a round whose admission has AI navigation steps charges the project's day budget.
+      ...(allowE2EModelBudget ? ["e2e-model-budget" as const] : []),
       ...(allowFeedbackBundles ? ["feedback-bundles" as const] : []),
       ...(allowFeedbackApproval ? ["feedback-approval" as const] : []),
       // #341: only a task that runs on its owner's ChatGPT plan may ask for the owner's access token.
