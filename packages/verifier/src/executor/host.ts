@@ -3,11 +3,10 @@ import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join, sep } from "node:path";
 import { z } from "zod";
-import { E2E_AGENT_STOP_CODES, E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, canonicalJson } from "@agentx/contracts";
-import { isAgentError } from "e2e/agent";
+import { E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, canonicalJson } from "@agentx/contracts";
 import type { BrowserContext } from "playwright-core";
 import { createAPIApplicationCliHost, type E2EApiRuntimePorts } from "../api-runtime.js";
-import { createWebApplicationCliHost, type E2EWebAgentPorts, type E2EWebRuntimePorts } from "../web-runtime.js";
+import { createWebApplicationCliHost, type E2EWebRuntimePorts } from "../web-runtime.js";
 import type { E2EApplicationCliHost, E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
 import { readE2EApplicationInstalledFileFixture } from "../application-runtime-assets.js";
 import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStateProbeAsset } from "../application-state-probes.js";
@@ -15,7 +14,8 @@ import { isPinnedRovaraHttpEngine } from "../rovara-http-engine-descriptor.js";
 import { createExecutorSessionStore } from "./accounts.js";
 import { createRovaraE2EAgentExecutor } from "./agent-executor.js";
 import { createE2EAgentCaptureStore, persistE2EAgentTrace } from "./agent-capture-store.js";
-import { createE2EAgentLedgerWriter, type E2EAgentLedgerWriter } from "./agent-ledger.js";
+import type { E2EAgentLedgerWriter } from "./agent-ledger.js";
+import { createE2EAgentStepDriver } from "./agent-step-driver.js";
 import { createE2EAgentModelAdapter } from "./agent-model-adapter.js";
 import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
 import { createE2EModelChannelClient } from "./model-channel.js";
@@ -189,52 +189,14 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const agent = channelPlan === undefined ? null : (() => {
     const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId });
     const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
-    const ledgers = new Map<string, E2EAgentLedgerWriter>();
     const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position });
-    const stopCodes: ReadonlySet<string> = new Set(E2E_AGENT_STOP_CODES);
     const origin = declaration.originByApplicationId.find((item) => item.applicationId === launchContext.selectedTarget.applicationId)?.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN;
     const store = createE2EAgentCaptureStore({
       scan: (bytes) => agentRedactor.contains(bytes),
       persist: (keyHash, bytes) => persistE2EAgentTrace(context.outDir, keyHash, bytes),
     });
     const executor = createRovaraE2EAgentExecutor({ position: () => current.position, ledger: () => current.ledger, origin: () => origin });
-    const runStep: E2EWebAgentPorts["runStep"] = async (request) => {
-      const position = { caseId: request.caseId, stepIndex: request.stepIndex };
-      let caseLedger = ledgers.get(request.caseId);
-      if (caseLedger === undefined) {
-        caseLedger = createE2EAgentLedgerWriter({ outDir: context.outDir, runId: plan.runId, caseId: request.caseId, valueKey: channelPlan.valueKey });
-        ledgers.set(request.caseId, caseLedger);
-      }
-      // The session values the browser holds are told to the worker's scan at the start of the step, so a page that shows one is refused before a model sees it.
-      const cookieValues = sessionSecrets.slice(-32);
-      await client.beginStep({ ...position, ...(cookieValues.length === 0 ? {} : { cookieValues }) }, request.signal);
-      let verdict: "concluded" | "failed" = "concluded";
-      let stopCode: string | null = null;
-      let thrown: unknown;
-      let receiptIds: string[] = [];
-      let begun = false;
-      try {
-        caseLedger.beginStep(position.stepIndex, request.goal);
-        begun = true;
-        current.position = position; current.ledger = caseLedger;
-        try { await request.act(request.goal, { maxSteps: request.maxActions, maxModelCalls: request.maxActions + 4, timeout: request.timeoutMs }); }
-        catch (error) {
-          verdict = "failed";
-          if (isAgentError(error)) stopCode = stopCodes.has(error.code) ? error.code : "ACTION_FAILED";
-          else { stopCode = "ACTION_FAILED"; thrown = error; }
-        }
-      } finally {
-        current.position = null; current.ledger = null;
-        receiptIds = adapter.takeReceiptIds(position);
-        // The step is over for the worker whatever happened to it, and the ledger says how it ended.
-        let endFailure: unknown;
-        try { if (begun) caseLedger.endStep(position.stepIndex, { verdict, stopCode: stopCode as never, receiptIds }); } catch (error) { endFailure = error; }
-        try { await client.endStep(position, AbortSignal.timeout(10_000)); } catch (error) { endFailure ??= error; }
-        if (endFailure !== undefined) thrown ??= endFailure;
-      }
-      if (thrown !== undefined) throw thrown;
-      return { verdict, stopCode, receiptIds };
-    };
+    const runStep = createE2EAgentStepDriver({ client, adapter, current, runId: plan.runId, valueKey: channelPlan.valueKey, outDir: context.outDir, sessionSecrets: () => sessionSecrets });
     return { adapter, store, executor, runStep };
   })();
   const agentParts = agent === null ? {} : { modelFactory: () => agent.adapter as never, agentExecutor: agent.executor, agentCacheStore: agent.store };
