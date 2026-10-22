@@ -13,6 +13,17 @@ import { ledgerName, ledgerRole } from "./agent-ledger.js";
  * end anchors as postconditions. Replaced: every prose summary, by a fixed sentence (the recorded run's own is model text). Removed: a target's text, placeholder, selector, container,
  * position and input purpose; an anchor's selector, container, position and input purpose; the scroll `spans`. Refused (the trace is dropped): an off-origin URL, a query, a fragment or a
  * credential in a URL; any other action; a truncated recording; more anchors or longer anchor text than the owner's bound.
+ *
+ * Paths: `navigate.url`, `startPath` and `endPath` are stored as app paths only (`/x/y`: no scheme, host, query or fragment). A same-origin absolute URL is rewritten to its path; the
+ * origin is not kept, and a replay must use the run's own application origin, never one read from a trace.
+ *
+ * Residuals and what is not echo-scanned (Q1 and Q4; operator-only private evidence, never displayed):
+ * - Anchor `text`, `name`, `placeholder` and a target `name` are screen text of the candidate and are kept (Q1). The echo check (`agent-capture-store.ts`) looks for a typed value in its raw,
+ *   JSON-escaped, percent-encoded, base64, and (from four characters) base64url and hex forms. It does not detect a case-folded or truncated echo, or base64 at another offset, so a model-chosen value
+ *   shown on screen in a changed form can stay. The exposure is bounded: at most 16 anchors of 300 characters, target names of 120, and the recording goes to the operator's private evidence only.
+ * - Strings that are not echo-scanned, and why: a press key is a named key, goal text, or a keyed digest (it is never free text); `executor.name` and `version` are the executor's own fixed
+ *   identity, bounded to 120/60; `keyedBy.*` and `recordedFor.targetId` / `agent` / `testId` are e2e's key context and identifiers (digests, platform and engine names, the case id), bounded
+ *   to 600 and written by e2e from the run's own configuration, not from the page or the model. The strict file schema bounds every one of them, and the broker's review repeats it.
  */
 type Rec = Record<string, unknown>;
 const isRec = (value: unknown): value is Rec => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -95,7 +106,11 @@ function cleanAnchors(raw: unknown, options: TraceCleanOptions): Rec[] | undefin
   return anchors;
 }
 
-/** A navigated URL as it may be kept: an app path, or exactly the application's origin followed by one. */
+/**
+ * A navigated URL as it may be kept: the application path alone (Ruling DQ). An absolute URL is accepted only when its origin is the application's own, and is then written as its path;
+ * any other origin, a query, a fragment or credentials drop the trace. The origin is never stored: a replay (Task 4.6b) navigates to the run's own application origin plus this path,
+ * and never to anything taken from the trace.
+ */
 function cleanUrl(raw: unknown, origin: string | undefined): string | undefined {
   const url = bounded(raw, 600);
   if (url === undefined) return undefined;
@@ -106,8 +121,8 @@ function cleanUrl(raw: unknown, origin: string | undefined): string | undefined 
   let expected: URL;
   try { expected = new URL(origin); } catch { return undefined; }
   if (parsed.origin !== expected.origin || parsed.username !== "" || parsed.password !== "" || parsed.search !== "" || parsed.hash !== "" || !APP_PATH.test(parsed.pathname)) return undefined;
-  // Spelled as the browser spelled it, so the kept URL is a plain concatenation of the origin and a path and nothing else.
-  return url === `${parsed.origin}${parsed.pathname}` ? url : undefined;
+  // Spelled as the browser spelled it: the URL is the origin and a path and nothing else.
+  return url === `${parsed.origin}${parsed.pathname}` ? parsed.pathname : undefined;
 }
 
 function cleanAction(raw: unknown, options: TraceCleanOptions): Rec | undefined {

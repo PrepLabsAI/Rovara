@@ -376,9 +376,11 @@ describe("trace hygiene: what the capture store keeps (Task 4.6a, test case 4)",
       { name: "scroll", summary: "The scroll action.", direction: "down", times: 2, target: { role: "button", name: "Download orders", testId: "download-orders" } }]);
   });
 
-  it("keeps a same-origin path (relative, or the application's origin and a path) and drops the trace for a query, a fragment, another origin, credentials in the URL or a bad location", async () => {
+  it("stores a navigation as its app path alone (a same-origin absolute URL is rewritten to its path, Ruling DQ) and drops the trace for a query, a fragment, another origin, credentials in the URL or a bad location", async () => {
     const store = make();
-    expect(await keptOf(store, rec([{ name: "navigate", summary: "went", url: `${ORIGIN}/orders` }, { name: "navigate", summary: "went", url: "/orders/2" }], { startPath: "/", endPath: "/orders/2" }))).toBeDefined();
+    const paths = await keptOf(store, rec([{ name: "navigate", summary: "went", url: `${ORIGIN}/orders` }, { name: "navigate", summary: "went", url: "/orders/2" }], { startPath: "/", endPath: "/orders/2" }));
+    expect(paths!["actions"].map((action) => action["url"])).toEqual(["/orders", "/orders/2"]);
+    expect(JSON.stringify(paths)).not.toContain("127.0.0.1");
     for (const url of [`${ORIGIN}/orders?token=abc`, "/orders?token=abc", "/orders#frag", "https://evil.example/orders", "//evil.example/orders", `${ORIGIN}@evil.example/x`,
       `http://user:pw@127.0.0.1:4317/orders`, "javascript:alert(1)", "orders", `${ORIGIN}/orders/../x?a`, ""]) {
       expect(await store.write("b".repeat(64), rec([{ name: "navigate", summary: "went", url }])), url).toBeUndefined();
@@ -490,6 +492,9 @@ describe("trace hygiene: what the capture store keeps (Task 4.6a, test case 4)",
       ["prose in an action summary", { ...ok, actions: [{ ...(ok["actions"] as Record<string, unknown>[])[0], summary: "tapped the secret" }] }],
       ["a query in the end path", { ...ok, endPath: "/x?token=1" }],
       ["a long name", { ...ok, actions: [{ ...(ok["actions"] as Record<string, unknown>[])[0], target: { role: "button", name: "n".repeat(121) } }] }],
+      ["a same-origin absolute navigate URL", { ...ok, actions: [{ name: "navigate", summary: "The navigate action.", url: `${ORIGIN}/orders` }] }],
+      ["an off-origin navigate URL", { ...ok, actions: [{ name: "navigate", summary: "The navigate action.", url: "https://other.example/orders" }] }],
+      ["an absolute end path", { ...ok, endPath: "https://other.example/" }],
       ["a ninth action", { ...ok, actions: Array.from({ length: 9 }, () => (ok["actions"] as unknown[])[0]) }],
       ["an extra field", { ...ok, model: "x" }],
       ["a selector on an anchor", { ...ok, endAnchors: [{ text: "x", selector: "#s" }] }],

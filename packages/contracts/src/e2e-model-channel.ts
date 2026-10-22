@@ -697,8 +697,7 @@ const scrollDirections: ReadonlySet<string> = new Set(E2E_AGENT_SCROLL_DIRECTION
 const cleanText = (max: number) => z.string().min(1).max(max);
 /** A target as the ledger holds a node: a normalised role, a name of at most 120 characters, a test id of at most 120. */
 const cleanTarget = z.object({ role: z.string().regex(/^[a-z]{1,32}$/), name: cleanText(E2E_LEDGER_NAME_MAX).optional(), testId: cleanText(E2E_LEDGER_NAME_MAX).optional() }).strict();
-/** An app path, or the application's origin and a path: no query, fragment or credentials. */
-const cleanUrl = z.string().max(600).regex(/^(?:https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?)?\/(?!\/)[^\s\\?#@]*$/);
+/** An app path alone (Ruling DQ): one leading slash, no scheme or host, no query, no fragment. A replay uses the run's own application origin, never one from a trace. */
 const cleanPath = z.string().max(600).regex(/^\/(?!\/)[^\s\\?#]*$/);
 const anchorText = cleanText(E2E_AGENT_TRACE_ANCHOR_TEXT_MAX);
 const cleanAnchor = z.object({ role: anchorText.optional(), name: anchorText.optional(), text: anchorText.optional(), testId: anchorText.optional(), placeholder: anchorText.optional(),
@@ -711,7 +710,7 @@ const cleanAction = z.discriminatedUnion("name", [
   z.object({ name: z.literal("select"), summary: actionSummary("select"), target: cleanTarget, value: z.string().max(4096) }).strict(),
   z.object({ name: z.literal("press"), summary: actionSummary("press"), target: cleanTarget, key: z.string().min(1).max(80) }).strict(),
   z.object({ name: z.literal("scroll"), summary: actionSummary("scroll"), direction: z.enum(E2E_AGENT_SCROLL_DIRECTIONS), target: cleanTarget.optional(), times: z.number().int().min(1).max(50).optional() }).strict(),
-  z.object({ name: z.literal("navigate"), summary: actionSummary("navigate"), url: cleanUrl }).strict(),
+  z.object({ name: z.literal("navigate"), summary: actionSummary("navigate"), url: cleanPath }).strict(),
 ]);
 const identifier = z.string().min(1).max(600);
 /**

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { E2E_AGENT_TRACE_FILE_MAX_BYTES, canonicalJson, E2E_AGENT_TRACE_SUMMARY, reviewCapturedE2EAgentTrace } from "@agentx/contracts";
+import { E2E_AGENT_TRACE_FILE_MAX_BYTES, canonicalJson, E2E_AGENT_TRACE_SUMMARY, e2eAgentValueKeyId, reviewCapturedE2EAgentTrace } from "@agentx/contracts";
 import { agentRunnable, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { AGENT_GOAL } from "../support/orders-m14-agent.js";
 import { asLinuxRun, assembleAgentRun, brokerRoundFor, collectAssembled, firstCase } from "../support/agent-collection.js";
@@ -152,6 +152,8 @@ describe.runIf(agentRunnable)("the recording of a passed AI navigation step (Tas
       ["a selector on a target", (trace) => { trace.actions[0]!.target["selector"] = "main > button"; }],
       ["a prose summary", (trace) => { trace["summary"] = "The model said the export worked."; }],
       ["a query in the end path", (trace) => { trace.endPath = "/orders?token=abc"; }],
+      ["an off-origin end path", (trace) => { trace.endPath = "https://other.example/orders"; }],
+      ["an absolute start path", (trace) => { trace["startPath"] = "https://other.example/"; }],
       ["a target name past 120 characters", (trace) => { trace.actions[0]!.target["name"] = "n".repeat(121); }],
       ["a field the cleaner does not produce", (trace) => { trace["modelNotes"] = "x"; }],
       ["an anchor input value that is text the model chose", (trace) => { trace.endAnchors![0]!["value"] = "typed by the model"; }],
@@ -249,6 +251,8 @@ describe.runIf(agentRunnable)("the recording of a passed AI navigation step (Tas
       ["a selector on a target", (traces) => rebound(traces, (file) => { file.trace.actions[0]!.target["selector"] = "main > button"; })],
       ["a prose summary", (traces) => rebound(traces, (file) => { file.trace["summary"] = "The model said the export worked."; })],
       ["a query in the end path", (traces) => rebound(traces, (file) => { file.trace.endPath = "/orders?token=abc"; })],
+      ["an off-origin end path", (traces) => rebound(traces, (file) => { file.trace.endPath = "https://other.example/orders"; })],
+      ["an absolute start path", (traces) => rebound(traces, (file) => { file.trace["startPath"] = "https://other.example/"; })],
       ["an anchor input value that is text the model chose", (traces) => rebound(traces, (file) => { file.trace.endAnchors![0]!["value"] = "typed by the model"; })],
       ["a field the cleaner does not produce", (traces) => rebound(traces, (file) => { file.trace["modelNotes"] = "x"; })],
     ];
@@ -291,5 +295,30 @@ describe.runIf(agentRunnable)("the recording of a passed AI navigation step (Tas
     const failing = verifyApplicationE2EEvidence(fixture("failing"));
     expect(failing.verdict).toBe("FAILED");
     expect(failing.agentTraces).toBeUndefined();
+  });
+});
+
+// Task 4.6a fix round 2 (Ruling DQ): a navigation is an app path alone. The file review the host and the broker share holds it, against a ledger with a navigate action.
+describe("a recorded navigation is a path, never a URL of any host (Task 4.6a fix 2)", () => {
+  const GOAL = "Open the orders page";
+  const KEY = "5a".repeat(32);
+  const RUN = "7f1c2a4e-5b6d-4c8e-9f01-23456789abcd";
+  const CASE = "case-nav";
+  const ledger = verifiedAgentCaseLedger({ valueKey: KEY, runId: RUN, caseId: CASE, steps: [{ stepIndex: 1, goal: GOAL }],
+    ledgerBytes: Buffer.from(JSON.stringify({ schemaVersion: "rovara-agent-actions/v1", runId: RUN, caseId: CASE, valueKeyId: e2eAgentValueKeyId(KEY),
+      steps: [{ stepIndex: 1, goalDigest: createHash("sha256").update(GOAL).digest("hex"), verdict: "concluded", stopCode: null, receiptIds: [],
+        actions: [{ tool: "navigate", node: null, valueDigest: null, valueLiteral: null, url: "/orders", snapshotSha256: "a".repeat(64), outcome: "ok" }] }] })) });
+  const cases: E2EAgentTraceCase[] = [{ caseId: CASE, steps: [{ stepIndex: 1, goal: GOAL }], ledger }];
+  const file = (url: string) => Buffer.from(JSON.stringify({ schemaVersion: "rovara-agent-trace-file/v1", keyHash: "b".repeat(64),
+    trace: { actions: [{ name: "navigate", summary: "The navigate action.", url }], summary: E2E_AGENT_TRACE_SUMMARY, executor: { name: "rovara-e2e-agent", version: "1" },
+      recordedFor: { testId: `x.test.ts::${CASE}`, targetId: "t", instructionDigest: agentInstructionDigest(GOAL), callIndex: 0 } } }));
+
+  it("keeps the path, and refuses an absolute URL of any host (also the application's own), at the file review both sides use", () => {
+    expect(ledger).not.toBeNull();
+    const review = (url: string) => reviewAgentTraceFile({ bytes: file(url), cases, valueKey: KEY });
+    expect(review("/orders")).toMatchObject({ keep: true, stepIndex: 1 });
+    for (const url of ["https://other.example/orders", "http://127.0.0.1:4317/orders", "https://orders.example:8443/orders", "//other.example/orders", "/orders?token=1", "/orders#top"]) {
+      expect(review(url), url).toEqual({ keep: false, reason: "trace-file-malformed" });
+    }
   });
 });
