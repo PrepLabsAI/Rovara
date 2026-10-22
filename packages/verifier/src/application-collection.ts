@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { E2ERoundSchema, E2ERunBindingSchema, ProjectSetupRunnerToolchainSchema, canonicalJson } from "@agentx/contracts";
 import type { E2EApplicationEvidenceRef, E2ERound, E2ERunBinding, ProjectSetupRunnerToolchain } from "@agentx/contracts";
-import { collectE2EApplicationRun as collect, encodeE2EApplicationSupervisorReadback, e2eApplicationPrivateTransferMaxBytes,
+import { collectE2EApplicationRun as collect, encodeE2EApplicationSupervisorReadback, e2eApplicationErrorReason, e2eApplicationPrivateTransferMaxBytes,
   normalizeE2EApplicationPublicList, readE2EApplicationSupervisorProof } from "./application-result-adapter.js";
 import type { E2EApplicationCaseCapture, E2EApplicationSupervisorReadback } from "./application-result-adapter.js";
 import { validateE2ECompiledApplicationAdmission, type E2ECompiledApplicationSuite } from "./application-scenarios.js";
@@ -95,6 +95,6 @@ export function collectE2EApplicationRun(input: { actual: E2EActualApplicationRu
       observationBindings: input.observationBindings, assertionAssets: input.assertionAssets, governedModelReceipts: input.governedModelReceipts,
       ...(input.agentModel == null ? {} : { agentModel: input.agentModel }), ...(input.roundScope === undefined ? {} : { roundScope: input.roundScope }), ownedClosedAt: input.ownedClosedAt });
   } catch (error) {
-    return { collection: null, oracle: null, qualification: null, unavailableReason: error instanceof Error ? error.message : "application readback unavailable" };
+    return { collection: null, oracle: null, qualification: null, unavailableReason: e2eApplicationErrorReason(error, "application readback unavailable") };
   }
 }

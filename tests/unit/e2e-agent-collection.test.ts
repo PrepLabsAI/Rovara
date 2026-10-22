@@ -113,6 +113,28 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
     expect(withTwin.unavailableReason).toMatch(/^model-receipts-mismatch: two action ledgers came for one case/);
   });
 
+  it("AGENTZODKEY: a collection the schema refuses because of a key the executor chose is UNKNOWN under a fixed code and our own path, never under the key's name", async () => {
+    const a = await readBack("ok");
+    const collected = collectAssembled(a);
+    expect(collected.qualification!.status).toBe("PASS");
+    const key = "hunter2-executor-key";
+    const collection = JSON.parse(JSON.stringify(collected.collection)) as { shards: Array<Record<string, unknown>>; applicationCaptures: Array<Record<string, unknown>> };
+    collection.shards[0]![key] = 1;
+    const refused = qualifyE2EApplicationCollection(collected.oracle!, collection as never);
+    expect(refused.status).toBe("UNKNOWN");
+    expect(refused.reason).toMatch(/^schema-error: unrecognized_keys at shards\.\[\]$/);
+    expect(JSON.stringify(refused)).not.toContain(key);
+    // A key under a record, and one in a capture, in the same way.
+    const record = JSON.parse(JSON.stringify(collected.collection)) as { shards: Array<{ fixedAssetDigests: Record<string, unknown> }> };
+    record.shards[0]!.fixedAssetDigests[key] = "not-a-digest";
+    expect(JSON.stringify(qualifyE2EApplicationCollection(collected.oracle!, record as never))).not.toContain(key);
+    const capture = JSON.parse(JSON.stringify(collected.collection)) as { applicationCaptures: Array<Record<string, unknown>> };
+    capture.applicationCaptures[0]![key] = true;
+    const inCapture = qualifyE2EApplicationCollection(collected.oracle!, capture as never);
+    expect(inCapture.status).toBe("UNKNOWN");
+    expect(JSON.stringify(inCapture)).not.toContain(key);
+  });
+
   it("21. a group with an agent step and no model evidence is UNKNOWN with the mismatch code, never a pass", async () => {
     const a = await readBack("ok");
     const withoutAgent = Object.fromEntries(Object.entries(a.inputs).filter(([key]) => key !== "agentModel")) as typeof a.inputs;

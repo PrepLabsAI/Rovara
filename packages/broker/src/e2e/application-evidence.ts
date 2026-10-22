@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_DISPLAY_ASSERTION_KINDS, canonicalJson, e2eModelRouteRevision, e2ePlanHasCompleteRequiredCriteria,
   type E2EAgentTraceBinding, type E2EApplicationExecutionAdmission, type E2EDisplayAgentNavigation, type E2EDisplayScenario, type E2EExecutionPlan, type E2EModelRouteDefinition, type E2ERound, type E2ERoundScope, type E2EQualifiedResult } from "@agentx/contracts";
 import { E2EAgentModelEvidenceSchema, E2E_AGENT_TRACE_BASE64_MAX, createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
-  E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, e2eApplicationAggregateRunUsage, e2eApplicationGroupUsesModel, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
+  E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, e2eApplicationAggregateRunUsage, e2eApplicationGroupUsesModel, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, e2eApplicationSchemaReason, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
   reviewAgentTraceFile, verifiedAgentCaseLedger, type E2EAgentModelEvidence, type E2EAgentTraceCase, type E2EApplicationCaseFacts, type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { readAdmittedE2EModelRoute } from "./model-route-registry.js";
 import { buildScenarioRows, readCaptureScreenshots, type DisplayArtifact, type DisplayGroupInput } from "./application-display.js";
@@ -499,8 +499,8 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     const traces = agentModel.evidence === undefined ? [] : safeReviewedAgentTraces({ suite, binding, evidence: agentModel.evidence });
     return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }), ...shownNavigation, ...caseFacts, agentTraces: traces };
   } catch (error) {
-    // A schema refusal says what it refused (the first issue's own words), never the whole issue list.
-    const said = error instanceof Error && error.name === "ZodError" ? (error as { issues?: Array<{ message?: string }> }).issues?.[0]?.message : error instanceof Error ? error.message : undefined;
+    // A schema refusal says what it refused as a fixed code and a path of our own schema's keys (never a key the sender chose, and never the whole issue list).
+    const said = error instanceof Error && error.name === "ZodError" ? e2eApplicationSchemaReason(error as never) : error instanceof Error ? error.message : undefined;
     return unknown(said !== undefined && said !== "" ? said.slice(0, OWNER_REASON_MAX_CHARS) : "the group's evidence could not be requalified");
   }
 }

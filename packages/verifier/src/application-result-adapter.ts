@@ -1172,10 +1172,59 @@ export function collectE2EApplicationRun(input: { actual: unknown; compiled: E2E
     const qualification = qualifyE2EApplicationCollection(oracle, collection);
     return { collection, oracle, qualification, unavailableReason: qualification.status === "UNKNOWN" ? qualification.reason : null };
   } catch (error) {
-    // A schema refusal says what it refused (the first issue's own words) rather than printing the whole issue list.
-    const message = error instanceof z.ZodError ? error.issues[0]?.message : error instanceof Error ? error.message : undefined;
-    return { collection: null, oracle: null, qualification: null, unavailableReason: message === undefined || message === "" ? "application collection unavailable" : message };
+    // A schema refusal says what it refused as a fixed code and a path of our own schema's keys (e2eApplicationSchemaReason), never the whole issue list or a key the sender chose.
+    const message = e2eApplicationErrorReason(error);
+    return { collection: null, oracle: null, qualification: null, unavailableReason: message === "" ? "application collection unavailable" : message };
   }
+}
+
+/**
+ * Why a value was refused by a schema, as a reason that can be stored and logged (Task FU2, AGENTZODKEY). The executor and the worker choose the keys of the JSON they send, and zod
+ * names them: in the message of an unknown-key issue, and in the path of an issue under a record. So the reason is built from our own schema alone: zod's own issue code (a fixed
+ * word) and the path with every key replaced by `*` unless our schemas declare a key of that name (an index is `[]`). A refusal our own schema words itself (a `custom` issue: a
+ * fixed sentence we wrote, which interpolates only constants) keeps its sentence.
+ */
+export function e2eApplicationSchemaReason(error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (issue === undefined) return "schema-error: unknown";
+  if (issue.code === "custom") return issue.message.slice(0, 300);
+  const own = declaredApplicationSchemaKeys();
+  const path = issue.path.map((segment) => (typeof segment === "number" ? "[]" : typeof segment === "string" && own.has(segment) ? segment : "*")).slice(0, 12).join(".");
+  return `schema-error: ${issue.code}${path === "" ? "" : ` at ${path}`}`;
+}
+/** The reason of any error the collector or the qualifier caught: a schema refusal or unreadable JSON is a fixed code (neither names a key or quotes the input), our own errors keep their sentence. */
+export function e2eApplicationErrorReason(error: unknown, fallback = "application collection unavailable"): string {
+  if (error instanceof z.ZodError) return e2eApplicationSchemaReason(error);
+  if (error instanceof SyntaxError) return "schema-error: unreadable-json";
+  return error instanceof Error ? error.message : fallback;
+}
+let declaredKeys: ReadonlySet<string> | undefined;
+function declaredApplicationSchemaKeys(): ReadonlySet<string> {
+  if (declaredKeys !== undefined) return declaredKeys;
+  const keys = new Set<string>(); const seen = new Set<unknown>();
+  const walk = (schema: unknown): void => {
+    if (typeof schema !== "object" || schema === null || seen.has(schema)) return;
+    seen.add(schema);
+    const def = (schema as { def?: Record<string, unknown> }).def;
+    if (def === undefined) return;
+    switch (def.type) {
+      case "object": for (const [key, value] of Object.entries((def.shape ?? {}) as Record<string, unknown>)) { keys.add(key); walk(value); } break;
+      case "array": walk(def.element); break;
+      case "record": walk(def.keyType); walk(def.valueType); break;
+      case "optional": case "nullable": case "default": case "prefault": case "readonly": case "nonoptional": case "catch": walk(def.innerType); break;
+      case "union": for (const option of (def.options ?? []) as unknown[]) walk(option); break;
+      case "intersection": walk(def.left); walk(def.right); break;
+      case "pipe": walk(def.in); walk(def.out); break;
+      case "tuple": for (const item of (def.items ?? []) as unknown[]) walk(item); break;
+      case "lazy": if (typeof def.getter === "function") walk((def.getter as () => unknown)()); break;
+      default: break;
+    }
+  };
+  for (const root of [E2EApplicationCollectionSchema, E2EApplicationCollectionOracleSchema, E2EApplicationSupervisorReadbackSchema, E2EApplicationCaseCaptureSchema, E2EApplicationAssertionObservationSchema,
+    E2EApplicationAgentOperationObservationSchema, E2EApplicationAccountIdentityProjectionSchema, E2EApplicationSubjectIdentityProjectionSchema, E2EApplicationProofBytesSchema,
+    E2EApplicationObservationBindingSchema, E2EApplicationAssertionAssetBindingSchema, E2EAgentModelEvidenceSchema, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema]) walk(root);
+  declaredKeys = keys;
+  return keys;
 }
 
 export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationCollectionOracle, collectionInput: E2EApplicationCollection): E2EApplicationQualification {
@@ -1750,7 +1799,7 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
     return { status: anyFailed ? "FAILED" : allPassed ? "PASS" : "UNKNOWN",
       reason: !anyFailed && !allPassed && unmockedCases ? UNMOCKED_EXTERNAL_CALL_REASON : "structural application observations remain exploratory pending independent producer authentication",
       runId: oracle.binding.runId, rawReportSha256: reportHash, result, ...(mockSummary ? { mockSummary } : {}), caseFacts: caseFactRows, ...(agentCodeRows.length === 0 ? {} : { agentCodes: agentCodeRows }) };
-  } catch (error) { return unknown(error instanceof Error ? error.message : "application collection unavailable", oracleInput?.binding?.runId ?? null); }
+  } catch (error) { return unknown(e2eApplicationErrorReason(error), oracleInput?.binding?.runId ?? null); }
 }
 
 /**
