@@ -65,10 +65,13 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   const appProbe = [
     "const fs=require('fs'),net=require('net');",
     "const rows=fs.readFileSync('/proc/net/route','utf8').split('\\n').slice(1).map(l=>l.split('\\t'));",
-    "const route=rows.find(f=>f[1]==='00000000');const v=parseInt(route[2],16);const gateway=[v&255,v>>8&255,v>>16&255,(v>>>24)].join('.');",
+    // An --internal network has no default route; the bridge's own address (the subnet's first host) is then the host side to probe.
+    "const ip=(h)=>{const v=parseInt(h,16);return [v&255,v>>8&255,v>>16&255,(v>>>24)]};const rt=rows.filter(f=>f.length>2&&/^[0-9A-F]{8}$/.test(f[1]));",
+    "const def=rt.find(f=>f[1]==='00000000');const net0=rt.find(f=>f[1]!=='00000000');",
+    "const gateway=def?ip(def[2]).join('.'):net0?ip(net0[1]).map((o,i)=>i===3?o+1:o).join('.'):'127.0.0.1';const hasDefaultRoute=def!==undefined;",
     "const reach=(h,p)=>new Promise(o=>{const s=net.connect({host:h,port:p,timeout:3000});s.on('connect',()=>{s.destroy();o('open')}).on('timeout',()=>{s.destroy();o('timeout')}).on('error',e=>o(e.code))});",
     "Promise.all([reach('model-proxy',8080),reach(gateway,8080)]).then(([proxy,gate])=>{",
-    "console.log('MODEL_WALL '+JSON.stringify({socket:fs.existsSync('/run/rovara/model.sock'),runRovara:fs.existsSync('/run/rovara'),proxy,gateway:gate}));",
+    "console.log('MODEL_WALL '+JSON.stringify({socket:fs.existsSync('/run/rovara/model.sock'),runRovara:fs.existsSync('/run/rovara'),proxy,gateway:gate,hasDefaultRoute}));",
     "import('/app/server.mjs')})",
   ].join("");
 
@@ -119,10 +122,12 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // The app container saw no socket, and reached neither the proxy by name nor the gateway on the proxy's port.
     const wallLine = diagnostics.appLogTail.split("\n").find((line) => line.startsWith("MODEL_WALL "));
     expect(wallLine, diagnostics.appLogTail).toBeDefined();
-    const wall = JSON.parse(wallLine!.slice("MODEL_WALL ".length)) as { socket: boolean; proxy: string; gateway: string };
+    const wall = JSON.parse(wallLine!.slice("MODEL_WALL ".length)) as { socket: boolean; proxy: string; gateway: string; hasDefaultRoute: boolean };
     expect(wall.socket).toBe(false);
     expect(wall.proxy).not.toBe("open");
-    expect(wall.gateway).toBe("timeout");
+    // The run network is --internal: no way out, and the host side of the bridge never answers on the proxy's port.
+    expect(wall.hasDefaultRoute).toBe(false);
+    expect(wall.gateway).not.toBe("open");
 
     // Nothing is left: the socket is unlinked on close, the run directory is gone, and no container or network of the run remains.
     await expect(stat(socketAtOpen)).rejects.toMatchObject({ code: "ENOENT" });
