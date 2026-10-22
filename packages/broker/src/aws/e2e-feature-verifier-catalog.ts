@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import {
-  canonicalJson, Ec2RuntimeBindingSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema, type Ec2RuntimeBinding,
+  canonicalJson, E2E_MODEL_CHANNEL_SCHEMA_VERSION, Ec2RuntimeBindingSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema, type Ec2RuntimeBinding,
   E2ERegisteredRuntimeSchema, E2ERuntimeCapabilityDescriptorSchema, WEB_API_NETWORK_POLICY_DIGEST, WEB_API_RUNTIME_PROFILE_ID,
-  e2eRuntimeCapabilityDigest, type E2ERegisteredRuntime, type E2ERuntimeCapabilityDescriptor, type WebApiRuntimeInstallProposal,
+  e2eRuntimeCapabilityDigest, webApiProposalQualifiesAgent, type E2ERegisteredRuntime, type E2ERuntimeCapabilityDescriptor, type WebApiRuntimeInstallProposal,
 } from "@agentx/contracts";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "@agentx/verifier";
 import { z } from "zod";
@@ -77,15 +77,19 @@ const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)
  * What each kind of the qualified runtime actually implements, not what the engine could do: the web runtime executes navigate, fill,
  * click and choose-file and observes text, visibility and the downloaded CSV; the API runtime issues requests and judges status, JSON
  * and the one installed read-only state probe. Anything beyond that stays unavailable to planning.
+ *
+ * The web runtime lists the AI navigation step (`agent`), with the model channel protocol it speaks, only when asked to: the registrar asks only for a qualification that holds all
+ * three agent probes (M1.4 Task 4.5), so a runner qualified before them, or whose agent probes were not all accepted, never promises it. The API runtime never lists it.
  */
-export function webApiRuntimeCapabilities(kind: "web" | "api", runtimeManifestDigest: string): E2ERuntimeCapabilityDescriptor {
+export function webApiRuntimeCapabilities(kind: "web" | "api", runtimeManifestDigest: string, options: Readonly<{ agent?: boolean }> = {}): E2ERuntimeCapabilityDescriptor {
+  if (options.agent === true && kind !== "web") throw new Error("only the web runtime can list the AI navigation step");
   const common = { schemaVersion: "e2e-runtime-capabilities/v1", profileId: WEB_API_RUNTIME_PROFILE_ID, kind, host: { os: "linux", arch: "arm64" },
     runtimeManifestDigest, evidenceScopes: ["runtime"], networkPolicyDigest: WEB_API_NETWORK_POLICY_DIGEST,
     // The host serves an approved source-backed API fixture to the app as an in-network mock of its declared origin, and records every call no mock matched.
     mocks: ["source-backed-api-fixtures/v1"] };
   return E2ERuntimeCapabilityDescriptorSchema.parse(kind === "web"
-    ? { ...common, engine: { ...WEB_API_WEB_ENGINE }, supportedSteps: ["navigate", "fill", "click", "choose-file"],
-      supportedAssertions: ["text", "visible", "csv"], browsers: ["chromium"] }
+    ? { ...common, engine: { ...WEB_API_WEB_ENGINE }, supportedSteps: ["navigate", "fill", "click", "choose-file", ...(options.agent === true ? ["agent"] : [])],
+      supportedAssertions: ["text", "visible", "csv"], browsers: ["chromium"], ...(options.agent === true ? { modelChannel: E2E_MODEL_CHANNEL_SCHEMA_VERSION } : {}) }
     : { ...common, engine: { name: ROVARA_HTTP_ENGINE_DESCRIPTOR.name, version: ROVARA_HTTP_ENGINE_DESCRIPTOR.version, spiVersion: 1 },
       supportedSteps: ["request"], supportedAssertions: ["http-status", "json", "state"], protocols: ["http"] });
 }
@@ -103,8 +107,10 @@ export function e2eWebApiRuntimeRecords(input: {
   const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.parse(proposal.runnerEnvironment);
   const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(proposal.runnerToolchain);
   const expiresAt = new Date(Math.min(Date.parse(proposal.challenge.expiresAt) + 30 * 24 * 60 * 60_000, Date.parse(input.qualifiedAt) + 7 * 24 * 60 * 60_000)).toISOString();
+  // The proposal already parsed, so its agent probes (all three or none) are judged; the descriptor promises AI navigation only to a qualification that holds them.
+  const agent = webApiProposalQualifiesAgent(proposal);
   const rowFor = (kind: "web" | "api"): E2ERegisteredRuntime => {
-    const capabilities = webApiRuntimeCapabilities(kind, proposal.manifest.sha256);
+    const capabilities = webApiRuntimeCapabilities(kind, proposal.manifest.sha256, kind === "web" && agent ? { agent: true } : {});
     const capabilityDigest = e2eRuntimeCapabilityDigest(capabilities);
     const probes = proposal.probes.filter((probe) => probe.kind === kind || probe.kind === "build");
     const probeBody = { schemaVersion: "e2e-runtime-probe-manifest/v1" as const, profileId: WEB_API_RUNTIME_PROFILE_ID, capabilityDigest,

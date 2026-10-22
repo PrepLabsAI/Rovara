@@ -1,12 +1,14 @@
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { E2E_CHROMIUM_SANDBOX_FILE, WEB_API_REQUIRED_PROBES, canonicalJson, webApiProbeRunId, type RuntimeInstallChallenge, type WebApiProbeEvidence, type WebApiProbeRun } from "@agentx/contracts";
+import { E2E_CHROMIUM_SANDBOX_FILE, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_LIMITS, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, canonicalJson, webApiProbeRunId, type RuntimeInstallChallenge, type WebApiProbeEvidence,
+  type WebApiProbeRun } from "@agentx/contracts";
 import { collectE2EApplicationRun } from "../application-collection.js";
-import { loadWebApiQualificationProbeAssets } from "../application-runtime-probes.js";
+import { loadWebApiQualificationProbeAssets, type E2EAgentProbeScriptTurn } from "../application-runtime-probes.js";
+import { e2eApplicationGroupAgentSteps } from "../application-scenarios.js";
 import { runIsolatedE2EApplication } from "../application-runtime.js";
 import { resolveE2EExecutorSuite } from "../executor/suite.js";
 import { deriveWebApiProbeObservation } from "../web-api-probe-evidence.js";
-import { WEB_API_BUILD_IMAGE, createDockerApplicationHost, e2eRunNetworks, type DockerCli } from "./docker-application-host.js";
+import { WEB_API_BUILD_IMAGE, createDockerApplicationHost, e2eRunNetworks, type DockerApplicationModelChannel, type DockerCli } from "./docker-application-host.js";
 import { createWebApiProbePlan, webApiProbeDriver, webApiProbeRunInput } from "./web-api-probe-plan.js";
 import { installedWebApiQualificationAppRoot, stageWebApiQualificationApp, verifyWebApiQualificationApp } from "./web-api-qualification-app.js";
 
@@ -19,7 +21,18 @@ const MAX_CHROMIUM_SANDBOX_BYTES = 49_152;
 const CLEANUP_TIMEOUT_MS = 30_000;
 const DEFECT_FILE_IN_OWNED_MOUNT = "/app/.owned/defect.json";
 
+/**
+ * What an agent probe's model channel is opened from (Task 4.5): the probe, the run it is for, the scripted model's turns, and the AI navigation steps of its one group. The channel it
+ * returns answers from the script under the scripted route, as the worker's model session does for a real group; the verifier cannot build it (the proxy and the budgets are the
+ * worker's), so whoever starts the qualification supplies it, and an agent probe with none is not run.
+ */
+export type WebApiProbeModelChannelRequest = Readonly<{ probeId: string; runId: string; script: readonly E2EAgentProbeScriptTurn[]; goal: string;
+  modelRoute: Readonly<{ routeId: string; routeRevision: string }>; allowedSteps: ReadonlyArray<Readonly<{ caseId: string; stepIndex: number }>> }>;
+export type WebApiProbeModelChannelFactory = (request: WebApiProbeModelChannelRequest) => DockerApplicationModelChannel;
+
 export type WebApiProbeRunnerDeps = Readonly<{
+  /** Opens the scripted model channel of an agent probe. Without it an agent probe does not run (its attempt is `probe-run-failed`), so `agent` can never be qualified by accident. */
+  modelChannelFor?: WebApiProbeModelChannelFactory;
   docker: DockerCli;
   /** The executor image the worker pulled at boot (`EXECUTOR_IMAGE`). */
   executorImage: string;
@@ -57,6 +70,7 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
   return async (probeId) => {
     const driver = webApiProbeDriver(probeId);
     if (!WEB_API_REQUIRED_PROBES.some((probe) => probe.probeId === probeId)) throw new Error(`no probe plan for ${probeId}`);
+    if (driver.agent !== undefined && deps.modelChannelFor === undefined) throw new Error(`no model channel to run ${probeId}`);
     // The probe assets the plan is built from are the pinned ones, or nothing starts.
     loadWebApiQualificationProbeAssets(deps.probeAssetsRoot);
     const runId = webApiProbeRunId(deps.challenge, probeId);
@@ -68,7 +82,9 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
     // The app is verified against the pinned tree before anything is built; a changed installed app never reaches Docker.
     await stageWebApiQualificationApp(appRoot, staged);
     try {
+      // The qualification policy of an agent probe pins the scripted route (no spend, no provider) and the limits the broker derives from its budgets.
       const plan = createWebApiProbePlan({ probe: driver.probe, appRoot: staged, runId, ...(driver.mock === true ? { mock: true } : {}),
+        ...(driver.agent === undefined ? {} : { modelRoute: { ...WEB_API_AGENT_PROBE_ROUTE }, routeLimits: { ...WEB_API_AGENT_PROBE_LIMITS } }),
         recipeStart: { env: { ...(driver.defect ? { ORDERS_TEST_DEFECT_FILE: DEFECT_FILE_IN_OWNED_MOUNT } : {}), ...driver.appEnv }, ...(driver.startArgs ? { args: [...driver.startArgs] } : {}) },
         ...(driver.recipeBuild ? { recipeBuild: driver.recipeBuild.map((command) => ({ ...command, args: [...command.args], env: { ...command.env } })) } : {}) });
       let blockedRequests: Uint8Array | null = null;
@@ -76,6 +92,8 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
       const retainsSandbox = WEB_API_REQUIRED_PROBES.find((probe) => probe.probeId === probeId)?.chromiumSandbox === true;
       const host = createDockerApplicationHost({ docker: deps.docker, executorImage: deps.executorImage, buildImage: deps.buildImage, runRoot: deps.runRoot, now,
         admission: plan.plan.admission, groupId: plan.plan.groupId, candidateSourceDir: staged,
+        ...(driver.agent === undefined ? {} : { modelChannel: deps.modelChannelFor!({ probeId, runId, script: driver.agent.script, goal: WEB_API_AGENT_PROBE_GOAL, modelRoute: { ...WEB_API_AGENT_PROBE_ROUTE },
+          allowedSteps: e2eApplicationGroupAgentSteps(plan.compiled) }) }),
         ...(driver.defect ? { ownedFiles: { "defect.json": await readFile(join(staged, "defects", driver.defect)) } } : {}),
         // The executor's blocked-requests file leaves the run only here, before the run's directory is removed.
         async onRunOutput(run) {

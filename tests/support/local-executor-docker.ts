@@ -1,9 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { cp } from "node:fs/promises";
+import { cp, mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
 import type { InspectChromiumSandboxInput } from "../../packages/verifier/src/executor/chromium-sandbox.js";
+import { localGuardInvocation } from "./agent-probe-guard.js";
 import { FakeDockerCli } from "./fake-docker-cli.js";
 
 async function freePort(): Promise<number> {
@@ -47,7 +49,10 @@ export class LocalExecutorDocker extends FakeDockerCli {
       // The app-host probe starts the app behind a guard that reads this container's route table and times out against the host firewall. This double has
       // neither, so it starts the app itself, which is all the guard does once the host is walled off; the real guard runs only in the Linux CI job.
       const started = app.slice(image + 1);
-      const command = started[1] === "--input-type=module" ? ["node", "server.mjs"] : started;
+      // The isolation probe's guard is run here too, on this machine's seams (see `localGuardInvocation`): the guard is what serves the page that probe ends on.
+      const guardScript = started[1] === "--input-type=module" && started[3]?.includes("model-proxy") ? started[3] : null;
+      const guard = guardScript === null ? null : localGuardInvocation(guardScript, await mkdtemp(join(tmpdir(), "rovara-local-guard-")));
+      const command = guard !== null ? ["node", ...guard.args] : started[1] === "--input-type=module" ? ["node", "server.mjs"] : started;
       const workDir = app.at(app.indexOf("-w") + 1)!.replace(/^\/app/, join(workspace, "app"));
       // The read-only owned mount is a directory inside the app, where the app expects it.
       await cp(join(workspace, "owned"), join(workspace, "app", ".owned"), { recursive: true });
@@ -60,13 +65,18 @@ export class LocalExecutorDocker extends FakeDockerCli {
         if (text !== "") env[name!] = text.replace("/app/.owned/", `${join(workspace, "app", ".owned")}/`);
       });
       env.APP_PORT = String(port);
+      if (guard !== null) Object.assign(env, guard.env);
       const server = spawn(command[0] === "node" ? process.execPath : command[0]!, command.slice(1), { cwd: workDir, env, stdio: ["ignore", "pipe", "pipe"] });
       server.stdout?.on("data", (chunk: Buffer) => { this.appOutput += chunk.toString(); });
       server.stderr?.on("data", (chunk: Buffer) => { this.appOutput += chunk.toString(); });
       this.appOutput += `spawn ${command.join(" ")} in ${workDir} on ${port} with ${Object.keys(env).join(",")}\n`;
       this.children.push(server);
+      // A group with an agent step (Task 4.5): the host opened the model channel's socket under the run's workspace, where the container would mount it. The executor reads the socket path
+      // from its plan in a container; run on this machine it takes the test seam instead.
+      const plan = JSON.parse(await readFile(join(workspace, "plan.json"), "utf8")) as { modelChannel?: unknown };
       try {
         const result = await runE2EExecutor({ planPath: join(workspace, "plan.json"), outDir, signal: AbortSignal.timeout(240_000), localAppUpstream: `http://127.0.0.1:${port}`,
+          ...(plan.modelChannel === undefined ? {} : { modelSocketPath: join(workspace, "model", "model.sock") }),
           ...(standInChromiumSandbox ? { inspectChromiumSandbox: standInChromiumSandbox } : {}) });
         this.exitCodeOfExecutor(result.exitCode);
       } finally { server.kill("SIGKILL"); }

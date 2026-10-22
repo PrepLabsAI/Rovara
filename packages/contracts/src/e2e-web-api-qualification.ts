@@ -13,17 +13,41 @@ export const WEB_API_RUNTIME_SCOPE = "application-web-api/v1" as const;
 /** The build commands of `build-imds-denial-v1` and `build-lateral-denial-v1` exit with this code when what they try to reach is unreachable. */
 export const WEB_API_IMDS_DENIAL_EXIT_CODE = 7 as const;
 
+/**
+ * The route the three agent qualification probes (M1.4 Task 4.5) run under: the scripted double `rovara-scripted/v1`, which answers from a script, never reaches a provider and never
+ * spends. A test keeps the revision equal to the one derived from the scripted route's definition, and the limits equal to those the broker derives from its budgets.
+ */
+export const WEB_API_AGENT_PROBE_ROUTE = Object.freeze({ routeId: "rovara-scripted/v1", routeRevision: "r1-51628bfc25fa" });
+export const WEB_API_AGENT_PROBE_LIMITS = Object.freeze({ runTimeoutMs: 1_200_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 300_000, maxActionsPerCase: 54,
+  maxModelRequests: 40, maxInputTokens: 400_000, maxOutputTokens: 40_960, maxSpendUsd: null });
+/** The goal of the one AI-navigated step every agent probe runs, and its bound on actions. The scripted double is keyed by this goal's digest; the probe assets pin it too. */
+export const WEB_API_AGENT_PROBE_GOAL = "Export the orders as a CSV file";
+export const WEB_API_AGENT_PROBE_MAX_ACTIONS = 4;
+/**
+ * The page the isolation probe's guard serves itself, and the marker it carries once the guard has checked an earlier request before answering it. The probe's last step loads the page
+ * and asserts the marker is visible, after the AI-navigated step (which runs with the model channel open), so the probe passes only if the guard's in-request checks ran.
+ */
+export const WEB_API_AGENT_GUARD_PAGE_PATH = "/__rovara-guard";
+export const WEB_API_AGENT_GUARD_MARKER_TESTID = "guard-in-request-checks";
+
 /** What a probe must show for it to count as its expected failure; anything else is a different failure. */
 type ExpectedFailureCause =
   | Readonly<{ kind: "assertion"; assertionKind: "csv" | "http-status" }>
   | Readonly<{ kind: "blocked-host"; host: string }>
   | Readonly<{ kind: "build-failed" }>
+  /** The case is UNKNOWN with this one code as its only reason, the run available, no assertion failed, and the pinned receipts and downloads (Task 4.5). */
+  | Readonly<{ kind: "agent-unknown"; code: string }>
   /**
    * The case is UNKNOWN because the app called an origin no approved mock matched: here, exactly one call, to the sinkhole. `failedAssertionKinds` is the exact list of assertion kinds that
    * must also have failed: none for the probe whose every assertion holds, and `http-status` for the API egress probe, whose failed assertion proves that the IP literal it dialed was blocked.
    */
   | Readonly<{ kind: "unmocked-external-call"; /** The reason the run must give; for a web probe it is the `expectedReason` of the installed asset, and a test keeps the two equal. */ reason: string;
     failedAssertionKinds: readonly string[] }>;
+/**
+ * What an agent probe's run must show of the AI navigation, beyond the collector's verdict: the scripted route, how many model calls were made (every one `ok`), how many of
+ * them the report accounts for (the receipts of a case that is not blocked), how many downloads were captured, and the only reasons a case may give for not passing.
+ */
+type AgentPin = Readonly<{ receipts: number; verifiedReceipts: number; downloads: number; caseReasons: readonly string[] }>;
 type RequiredProbe = Readonly<{ probeId: string; /** sha256 of the installed probe asset file; a test keeps it equal to the shipped bytes. */ assetDigest: string; kind: "web" | "api" | "build"; expectedOutcome: "PASS" | "EXPECTED_FAILURE"; cause: ExpectedFailureCause | null;
   /** sha256 of the canonical scenario the probe runs through the real collector; null for the build probe. A test recomputes it from the production plan builder. */
   scenarioDigest: string | null;
@@ -33,6 +57,8 @@ type RequiredProbe = Readonly<{ probeId: string; /** sha256 of the installed pro
   buildCommandDigest: string | null;
   /** True when the probe's retained evidence must carry the executor's Chromium sandbox attestation, and the registrar re-judges it. */
   chromiumSandbox?: true;
+  /** Present on the agent probes (Task 4.5): the observation then also carries the agent facts, and the pinned ones are what the oracle holds them to. */
+  agent?: AgentPin;
   /** Present on the probes that exercise an external-origin mock: the observation then also carries the mock consumptions and unmocked calls the collector derived. */
   mock?: true }>;
 
@@ -60,9 +86,26 @@ const requiredProbes: RequiredProbe[] = [
   // The executor's own Chromium runs with its sandbox on: the retained evidence carries what the kernel showed about the renderers (a seccomp filter, a PID namespace and a user
   // namespace of their own), and the executor refuses to run a case in a browser that does not show it, so a `--no-sandbox` runner fails this probe. It runs the CSV scenario.
   { probeId: "chromium-sandbox-v1", assetDigest: "e27ceecc03c241669c31cd91dca1088a62d2e47cecadf9eca0b8e2abe44284de", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "7469c1ac56ae5f5453d41d8c66a6f5e5be07a921530268e0976f22165b8652d8", scenarioDigest: "a7cd24dfbb78f5760995b3d8ac1a977a422ccf7d5601cfbaaafd6e0f8201cf5e", buildCommandDigest: null, chromiumSandbox: true },
+  // M1.4 Task 4.5: three scripted-model probes of AI navigation. All run the CSV export as an agent step ("Export the orders as a CSV file") against the same app, under the scripted
+  // route, so the scripted and wrong-action probes share one scenario and one bundle (the isolation probe adds the guard's page as a last step). The scripted double taps the button the goal does not name, or concludes without acting.
+  { probeId: "web-agent-scripted-v1", assetDigest: "a3d89fd815a62edde8d7158fffe5005714dde457700a815beb7e162eac516a89", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "16b5bc8973ef966ff24c43ff50ee034d359bd986bc267a71613f028d5f3899e4", scenarioDigest: "a855f45a9439b1a4af9850f2363cd7051d2ad19fad6dc1962f79d682c6c934ad",
+    buildCommandDigest: null, agent: { receipts: 2, verifiedReceipts: 2, downloads: 1, caseReasons: [] } },
+  // The double concludes at once without acting: no download, so the case is UNKNOWN `agent-no-download`. A different cause, even a different UNKNOWN, is not this probe's outcome.
+  { probeId: "web-agent-wrong-action-v1", assetDigest: "43fd4060986488dc59f3c0da6e55f04550ad078236dd937c64e03abef86fc295", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "agent-unknown", code: "agent-no-download" },
+    bundleDigest: "16b5bc8973ef966ff24c43ff50ee034d359bd986bc267a71613f028d5f3899e4", scenarioDigest: "a855f45a9439b1a4af9850f2363cd7051d2ad19fad6dc1962f79d682c6c934ad", buildCommandDigest: null, agent: { receipts: 1, verifiedReceipts: 0, downloads: 0, caseReasons: ["agent-no-download"] } },
+  // The app starts behind a guard that looks for the model socket and tries `model-proxy:8080` and the gateway on 8080, and starts only if every attempt fails. The host starts the app before it
+  // opens the model channel, so the guard goes on checking for the app's whole life: on a short interval (a socket mounted later ends the app) and before it answers each request. The last
+  // step of the case loads the guard's own page, after the AI-navigated step, and asserts the marker the guard puts there once an earlier request was checked: the probe passes only if the
+  // app started, stayed up while the executor drove it with the channel open, and the in-request checks ran. The `model-proxy` leg proves the name leads nowhere but the run's sinkhole.
+  { probeId: "web-agent-app-isolation-v1", assetDigest: "f383a9b102cd3d88d5377cbe4902b21b5a11ae1a960d7c93ba162fb2707bad4d", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "33716f10c5b021ec2845cc4e1fd8ab9d097ab897a066f2e8f23338d958dfd572", scenarioDigest: "efa380e5702e62cbbbd35acaff53f0a5766114368fa65183513485a43389d506",
+    buildCommandDigest: null, agent: { receipts: 2, verifiedReceipts: 2, downloads: 1, caseReasons: [] } },
 ];
 export const WEB_API_REQUIRED_PROBES: readonly RequiredProbe[] = Object.freeze(requiredProbes.map((probe) => Object.freeze(probe)));
 export const WEB_API_REQUIRED_PROBE_IDS = WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId) as [string, ...string[]];
+/** The probes M1.3 qualified runners with, in order: a qualification record from before the agent probes carries exactly these. */
+export const WEB_API_BASE_PROBE_COUNT = 11;
+/** The agent probes of Task 4.5. A runtime descriptor lists the `agent` step only for a qualification that holds all three. */
+export const WEB_API_AGENT_PROBE_IDS = Object.freeze(WEB_API_REQUIRED_PROBES.filter((probe) => probe.agent !== undefined).map((probe) => probe.probeId));
 const probeIdSchema = z.enum(WEB_API_REQUIRED_PROBE_IDS);
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -93,6 +136,16 @@ export const WebApiProbeObservationSchema = z.object({
   unmockedCalls: z.object({ sinkhole: z.number().int().min(0).max(100_000), mocked: z.number().int().min(0).max(100_000) }).strict().optional(),
   /** Only on the probes that pin `mock`: the reason the verified result gave for the run (for example `unmocked-external-call`). */
   runReason: z.string().min(1).max(500).optional(),
+  /**
+   * Only on the agent probes: what the collector verified of the AI navigation, derived from the retained oracle and collection. `routeId` is the route the receipts were made under,
+   * `receipts` all the worker's receipts for the group and `okReceipts` those that answered; `verifiedReceipts` are the receipts the report accounts for in a case that is not
+   * blocked; `downloads` the csv assertions whose download was captured; `caseReasons` the reason of every case that did not pass; `unmockedCalls` what no approved mock matched.
+   */
+  agent: z.object({
+    routeId: z.string().min(1).max(120).nullable(), receipts: z.number().int().min(0).max(300), okReceipts: z.number().int().min(0).max(300), verifiedReceipts: z.number().int().min(0).max(300),
+    downloads: z.number().int().min(0).max(64), caseReasons: z.array(z.string().min(1).max(200)).max(16),
+    unmockedCalls: z.object({ sinkhole: z.number().int().min(0).max(100_000), mocked: z.number().int().min(0).max(100_000) }).strict(),
+  }).strict().optional(),
   attempts: z.number().int().min(1).max(100),
   skipped: z.number().int().min(0).max(1000),
   flaky: z.number().int().min(0).max(1000),
@@ -159,7 +212,15 @@ export function evaluateWebApiProbeObservation(probeId: string, observationInput
   const passed = observation.collectorStatus === "PASS" && observation.runUnavailableReason === null;
   const consumptions = observation.mockConsumptions; const unmocked = observation.unmockedCalls;
   const noConsumption = consumptions !== undefined && consumptions.success === 0 && consumptions.refusal === 0 && consumptions.invalidData === 0;
+  const agentPin = probe.agent;
+  const agentFacts = observation.agent;
+  // An agent probe shows exactly the pinned AI navigation: the scripted route, every receipt ok, the receipts and downloads and case reasons pinned, and no call that no mock matched.
+  const agentAsPinned = agentPin !== undefined && agentFacts !== undefined && observation.blockedHosts.length === 0 && agentFacts.routeId === WEB_API_AGENT_PROBE_ROUTE.routeId
+    && agentFacts.receipts === agentPin.receipts && agentFacts.okReceipts === agentPin.receipts && agentFacts.verifiedReceipts === agentPin.verifiedReceipts
+    && agentFacts.downloads === agentPin.downloads && sameList(agentFacts.caseReasons, agentPin.caseReasons)
+    && agentFacts.unmockedCalls.sinkhole === 0 && agentFacts.unmockedCalls.mocked === 0;
   if (probe.expectedOutcome === "PASS") {
+    if (agentPin !== undefined) return passed && observation.failedAssertionKinds.length === 0 && agentAsPinned ? { ok: true } : { ok: false, reason: `positive-probe-failed:${probeId}` };
     // A mock probe passes only on exactly one `success` consumption and not one call that no mock matched.
     const mocked = probe.mock !== true || (consumptions !== undefined && consumptions.success === 1 && consumptions.refusal === 0 && consumptions.invalidData === 0
       && unmocked !== undefined && unmocked.sinkhole === 0 && unmocked.mocked === 0);
@@ -172,6 +233,10 @@ export function evaluateWebApiProbeObservation(probeId: string, observationInput
     // UNKNOWN for the pinned reason, with the run itself available, exactly the pinned assertions failed (none, or a different list, is a different cause), one call recorded in the sinkhole and nothing else served or refused.
     return observation.collectorStatus === "UNKNOWN" && observation.runUnavailableReason === null && sameList(observation.failedAssertionKinds, cause.failedAssertionKinds) && observation.runReason === cause.reason
       && unmocked !== undefined && unmocked.sinkhole === 1 && unmocked.mocked === 0 && noConsumption ? { ok: true } : wrongCause;
+  }
+  if (cause.kind === "agent-unknown") {
+    return observation.collectorStatus === "UNKNOWN" && observation.runUnavailableReason === null && observation.failedAssertionKinds.length === 0 && agentAsPinned
+      && sameList(agentFacts?.caseReasons ?? [], [cause.code]) ? { ok: true } : wrongCause;
   }
   if (cause.kind === "assertion") {
     return observation.collectorStatus === "FAILED" && observation.runUnavailableReason === null
@@ -198,8 +263,12 @@ export const WebApiRuntimeInstallProposalSchema = z.object({
   profileId: z.literal(WEB_API_RUNTIME_PROFILE_ID), scope: z.literal(WEB_API_RUNTIME_SCOPE),
   challenge: RuntimeInstallChallengeSchema, createdAt: z.string().datetime(), manifest: RuntimeInstallManifestSchema,
   runnerEnvironment: ProjectSetupRunnerEnvironmentSchema, runnerToolchain: ProjectSetupRunnerToolchainSchema,
-  probes: z.array(ProbeRecordSchema).length(WEB_API_REQUIRED_PROBES.length),
+  // A record from before the agent probes (M1.3 and M1.4 up to Task 4.4) carries the eleven base probes and no more; a record of Task 4.5 or later carries all fourteen. Nothing between.
+  probes: z.array(ProbeRecordSchema).min(WEB_API_BASE_PROBE_COUNT).max(WEB_API_REQUIRED_PROBES.length),
 }).strict().superRefine((proposal, context) => {
+  if (proposal.probes.length !== WEB_API_BASE_PROBE_COUNT && proposal.probes.length !== WEB_API_REQUIRED_PROBES.length) {
+    context.addIssue({ code: "custom", path: ["probes"], message: `a qualification holds the ${WEB_API_BASE_PROBE_COUNT} base probes or all ${WEB_API_REQUIRED_PROBES.length}, never part of the agent probes` });
+  }
   if (proposal.challenge.profileId !== WEB_API_RUNTIME_PROFILE_ID) context.addIssue({ code: "custom", path: ["challenge", "profileId"], message: "challenge profile must be the web/API runtime profile" });
   if (Date.parse(proposal.createdAt) < Date.parse(proposal.challenge.issuedAt) || Date.parse(proposal.createdAt) >= Date.parse(proposal.challenge.expiresAt)) {
     context.addIssue({ code: "custom", path: ["createdAt"], message: "proposal must be created during its challenge window" });
@@ -229,6 +298,15 @@ export const WebApiRuntimeInstallProposalSchema = z.object({
   });
 });
 export type WebApiRuntimeInstallProposal = z.infer<typeof WebApiRuntimeInstallProposalSchema>;
+
+/**
+ * Whether a qualification proposal holds all three agent probes, each accepted (the schema re-judges every recorded observation, so a parsed proposal that has them has them
+ * accepted). Only then may the web runtime descriptor list the `agent` step; a record from before Task 4.5 does not, and stays valid without it.
+ */
+export function webApiProposalQualifiesAgent(proposal: Pick<WebApiRuntimeInstallProposal, "probes">): boolean {
+  const held = new Set(proposal.probes.map((probe) => probe.probeId));
+  return WEB_API_AGENT_PROBE_IDS.every((probeId) => held.has(probeId));
+}
 
 export function webApiRuntimeInstallProposalSha256(value: unknown): string {
   return createHash("sha256").update(canonicalJson(WebApiRuntimeInstallProposalSchema.parse(value))).digest("hex");
