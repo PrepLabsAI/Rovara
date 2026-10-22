@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
-  E2EModelRouteDefinitionSchema, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
-  INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, SECRET_ARN_PATTERN, WORKER_SETTING_PARAMETERS, canonicalJson, indexExpiresAt, e2eModelRouteRevision, isKeyedModelProvider,
+  E2EModelRouteDefinitionSchema, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE,
+  INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, canonicalJson, indexExpiresAt, e2eModelRouteRevision, isKeyedModelProvider,
   type E2EModelRouteDefinition, type ModelProvider,
 } from "@agentx/contracts";
-import { DEFAULT_E2E_AGENT_MODELS } from "@agentx/model-runtime/config";
+import { deriveE2EAgentRoute, type E2EAgentInstallation, type DerivedE2EAgentRoute } from "@agentx/model-runtime/e2e-route-derive";
 import type { E2EDayBudget, E2EDayLimits, E2EDayReservation } from "@agentx/model-runtime";
+
+// The route derivation moved to model-runtime (`./e2e-route-derive`), so the worker derives the very same route; the broker keeps its names for it.
+export { deriveE2EAgentRoute, type E2EAgentInstallation, type DerivedE2EAgentRoute };
 
 /**
  * The model route registry and the project's day budget for the AI browser-test agent (M1.4 Task 4.2), in the broker's one state table.
@@ -19,7 +22,9 @@ import type { E2EDayBudget, E2EDayLimits, E2EDayReservation } from "@agentx/mode
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE#<routeId>#REV#<n>`: the definition of revision n, written once and never changed;
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_LATEST#<routeId>`: `{ revisionNumber, revision, definitionDigest }`, moved only from the previous revision;
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest>`: written by the live canary (Task 4.9) for a provisional route;
- * - `PROJECT#<project> / E2E_MODEL_BUDGET#<yyyy-mm-dd>`: `{ inputTokens, calls }` of the project's UTC day, moved only by conditional increments.
+ * - `PROJECT#<project> / E2E_MODEL_BUDGET#<yyyy-mm-dd>`: `{ inputTokens, calls }` of the project's UTC day, moved only by conditional increments;
+ * - `PROJECT#<project> / E2E_MODEL_BUDGET_RESERVATION#<reservationId>`: one call's reservation against that day (`open`, then `settled` or `released` once), kept by the worker's
+ *   budget callback (`model-budget-endpoint.ts`, Task 4.3a), which is the budget the worker path uses.
  * None of these is a membership row or a project revision row, and nothing here writes to either.
  */
 
@@ -50,21 +55,12 @@ export const e2eModelRouteRevisionKey = (routeId: string, revisionNumber: number
 export const e2eModelRouteLatestKey = (routeId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_LATEST#${routeId}` });
 export const e2eModelRouteCanaryKey = (routeId: string, definitionDigest: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_CANARY#${routeId}#${definitionDigest}` });
 export const e2eModelBudgetKey = (projectName: string, day: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET#${day}` });
+/** One reservation of a call's tokens against the project's day (`model-budget-endpoint.ts`): written with the day's increment, settled or released once. */
+export const e2eModelBudgetReservationKey = (projectName: string, reservationId: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET_RESERVATION#${reservationId}` });
 
 export interface E2EModelRouteStore {
   documentClient: DynamoDBDocumentClient;
   tableName: string;
-}
-
-/** What the installation says about its worker's model, read from its worker settings (SSM `worker-model-provider`, `worker-<provider>-secret-arn`, `worker-openrouter-providers`). */
-export interface E2EAgentInstallation {
-  provider?: string | undefined;
-  /** The configured secret ARN of the installation's provider (keyed providers only). An ARN, never a value. */
-  secretArn?: string | undefined;
-  /** `worker-openrouter-providers`: the comma-separated OpenRouter provider allowlist. */
-  openRouterProviders?: string | undefined;
-  /** The AWS region the Bedrock call goes to (the worker's region). */
-  region?: string | undefined;
 }
 
 /**
@@ -95,41 +91,7 @@ export async function e2eAgentInstallationFromParameters(
 /** A provider whose small-model id has not been shown live: its route stays unapproved until a canary on an installation of that provider records one (owner decision O5). */
 const PROVISIONAL_PROVIDERS: ReadonlySet<string> = new Set(["openrouter"]);
 
-export type DerivedE2EAgentRoute =
-  | { status: "available"; definition: E2EModelRouteDefinition }
-  | { status: "unavailable"; reason: typeof E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved; detail: string };
-
 const unavailable = (detail: string): Extract<DerivedE2EAgentRoute, { status: "unavailable" }> => ({ status: "unavailable", reason: E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved, detail });
-
-/** The route the installation's settings give, as revision `revision`. A provider without what it needs (a secret, a region) has no route, and agent steps stay unavailable. */
-export function deriveE2EAgentRoute(installation: E2EAgentInstallation, revision = 1): DerivedE2EAgentRoute {
-  const provider = installation.provider;
-  if (provider === undefined || provider === "") return unavailable("the installation has no model provider setting");
-  if (!(MODEL_PROVIDERS as readonly string[]).includes(provider)) return unavailable(`${provider} is not a provider an installation can configure`);
-  const modelProvider = provider as ModelProvider;
-  let secretArn: string | null = null;
-  let region: string | null = null;
-  let openRouter: E2EModelRouteDefinition["openRouter"] = null;
-  if (isKeyedModelProvider(modelProvider)) {
-    const label = KEYED_MODEL_PROVIDERS[modelProvider].label;
-    if (installation.secretArn === undefined || installation.secretArn === "") return unavailable(`${label} has no configured secret, so there is no key for the AI navigation model`);
-    if (!SECRET_ARN_PATTERN.test(installation.secretArn)) return unavailable(`the configured ${label} secret is not a Secrets Manager ARN`);
-    secretArn = installation.secretArn;
-    if (modelProvider === "openrouter") {
-      const only = (installation.openRouterProviders ?? "").split(",").map((name) => name.trim()).filter(Boolean);
-      if (only.some((name) => !/^[a-z0-9][a-z0-9_/-]{0,79}$/.test(name))) return unavailable("the OpenRouter provider allowlist must be comma-separated provider slugs");
-      openRouter = { allowFallbacks: false, requireParameters: true, dataCollection: "deny", only };
-    }
-  } else {
-    if (installation.region === undefined || installation.region === "") return unavailable("the Bedrock region of the installation is unknown");
-    region = installation.region;
-  }
-  const parsed = E2EModelRouteDefinitionSchema.safeParse({
-    routeId: E2E_DEFAULT_MODEL_ROUTE_ID, revision, scope: "standard", provider: modelProvider, region, modelId: DEFAULT_E2E_AGENT_MODELS[modelProvider], inferenceProfileArn: null, secretArn, openRouter,
-    budgets: { ...E2E_MODEL_ROUTE_DEFAULT_BUDGETS }, promptProtocol: "e2e-0.20.0-act/v1", sampling: "provider-default", thinking: "off", effort: modelProvider === "openai" ? null : "low", vision: false,
-  });
-  return parsed.success ? { status: "available", definition: parsed.data } : unavailable(`the installation's settings do not make a valid route: ${parsed.error.issues[0]?.message ?? "invalid"}`);
-}
 
 /**
  * The policy limits a project that pins this route runs under (D2). The round holds a group's model requests, tokens and time to them, so they come from the route's budgets: a

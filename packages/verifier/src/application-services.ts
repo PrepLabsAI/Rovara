@@ -14,7 +14,7 @@ import { e2eBindingDigest, e2ePolicyDigest, E2EExpectedCaseSchema, E2ERoundSchem
   type E2EExpectedCase, type E2ERound, type E2EScenario, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import type { E2EApplicationCliLaunchContext } from "./application-runtime-bootstrap.js";
 import type { E2EApplicationRuntimePorts } from "./application-runtime.js";
-import { e2eCompiledRuntime, type E2ECompiledApplicationSuite } from "./application-scenarios.js";
+import { e2eApplicationGroupUsesModel, e2eCompiledRuntime, type E2ECompiledApplicationSuite } from "./application-scenarios.js";
 import { E2EAssertionSchema } from "@agentx/contracts";
 import { E2EMockSpecSchema, type E2EMockSpec } from "@agentx/contracts";
 import { E2EApplicationAccountIdentityProjectionSchema, E2EApplicationObservationBindingSchema, E2EApplicationProofBytesSchema,
@@ -494,7 +494,8 @@ export function createE2EApplicationRuntimePorts(input: {
   const binding = E2ERunBindingSchema.parse(input.runInput.binding);
   if (!/^[a-f0-9]{64}$/.test(input.admissionDigest) || input.accountSessionRefs.length > 32
     || input.accountSessionRefs.some((ref) => !ref.trim()) || new Set(input.accountSessionRefs).size !== input.accountSessionRefs.length
-    || (input.compiled.runtimeAdmissionContext.modelRoute === null) !== (input.modelProxyRef === null)
+    // The model proxy is the group's: a group with an agent step has one, a group without does not, whatever route the project's policy pinned (Ruling DB-1).
+    || e2eApplicationGroupUsesModel(input.compiled) !== (input.modelProxyRef !== null)
     || (input.modelProxyRef !== null && !input.modelProxyRef.trim())) {
     throw new Error("application supervisor composition has an invalid admission, account-session, or model-proxy identity");
   }

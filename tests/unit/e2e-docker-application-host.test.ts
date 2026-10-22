@@ -26,7 +26,8 @@ type Setup = Awaited<ReturnType<typeof setup>>;
 
 async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; deadlineMs?: number; recipeBuild?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeBuild"];
   recipeStart?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeStart"]; runRoot?: string; role?: "owner" | "viewer"; probe?: Parameters<typeof createOrdersExecutorPlan>[0]["probe"]; mock?: boolean; mockReadyMs?: number;
-  onRunOutput?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["onRunOutput"]>; fixture?: OrdersExecutorFixture; ownedFiles?: Record<string, string> }) {
+  onRunOutput?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["onRunOutput"]>; fixture?: OrdersExecutorFixture; ownedFiles?: Record<string, string>;
+  modelChannel?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["modelChannel"]> }) {
   const fixture: OrdersExecutorFixture = options.fixture ?? createOrdersExecutorPlan({ probe: options.probe ?? "web-csv-positive-v1", ...(options.mock ? { mock: true } : {}), ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
     ...(options.recipeBuild ? { recipeBuild: options.recipeBuild } : {}), ...(options.recipeStart ? { recipeStart: options.recipeStart } : {}), ...(options.role ? { role: options.role } : {}) });
   const source = await temp("candidate-source-"); await writeFile(join(source, "package.json"), "{}");
@@ -35,7 +36,7 @@ async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; 
   const assembleCollectionInputs = vi.fn<(input: unknown) => never>(() => collectionSentinel as never);
   const host = createDockerApplicationHost({ docker: options.fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(),
     admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: source, appPollMs: 10, deadlineGraceMs: 60, ...(options.mockReadyMs ? { mockReadyMs: options.mockReadyMs } : {}), assemble, assembleCollectionInputs, ...(options.imagePullRetryMs ? { imagePullRetryMs: options.imagePullRetryMs } : {}),
-    ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}), ...(options.ownedFiles ? { ownedFiles: options.ownedFiles } : {}) });
+    ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}), ...(options.ownedFiles ? { ownedFiles: options.ownedFiles } : {}), ...(options.modelChannel ? { modelChannel: options.modelChannel } : {}) });
   const { compiled, plan } = fixture;
   const binding = plan.admission.round.groupBindings[0]!;
   const ref = compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs[0]!;
@@ -1311,5 +1312,168 @@ describe("docker application host: an inferred-recipe app and the anonymous prof
     expect((await runWith(s)).unavailableReason).toBeNull();
     expect(profiles).toEqual([["rovara-anonymous"]]);
     expect(seen.planText).not.toMatch(/"password"|"email"/);
+  });
+});
+
+// Task 4.3a, test case 8 (Ruling DB-1): the model channel is the executor container's, for a group that has an agent step, and no other container's.
+describe("docker application host: the model channel", () => {
+  const ROUTE = { routeId: "rovara-e2e-default", routeRevision: "r1-0123456789ab" };
+  const agentScenario = (targetId: string) => ({ scenarioId: "agent-export", requirementId: "orders-export", requestedTargetIds: [targetId], required: true, accountProfileId: "orders-owner",
+    minimumEvidence: "runtime" as const, requiredRealComponentIds: [], steps: [{ kind: "agent" as const, goal: "Export the orders as a CSV file", maxActions: 4 }],
+    assertions: [{ kind: "csv" as const, downloadName: "orders.csv", columns: ["id", "total"], rows: [["1", "10"]] }] });
+  const agentFixture = () => createOrdersExecutorPlan({ probe: "web-csv-positive-v1", modelRoute: ROUTE, accountScenarios: [{ accountProfileId: "orders-owner", scenario: agentScenario }] });
+  const MODEL_SOCKET = (runRoot: string, runId: string) => join(runRoot, runId, "model", "model.sock");
+  /** A unix socket path is short (about 100 bytes): a run with a model channel runs in a short root. */
+  const shortRoot = async () => { const dir = realpathSync(await mkdtemp(join("/tmp", "rr-"))); roots.push(dir); return dir; };
+
+  /** A model channel that records when it was opened relative to the executor, and what it was given. */
+  function channel(events: string[], fake: FakeDockerCli, behaviour: { open?: () => void | Promise<void>; close?: () => void | Promise<void> } = {}) {
+    const opened: Array<{ socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; aborted: boolean }> = [];
+    let closes = 0;
+    return { opened, closes: () => closes, port: { async open(input: { socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; signal: AbortSignal }) {
+      events.push(`open:executor-started=${fake.calls.some((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-executor-"))}`);
+      await behaviour.open?.();
+      opened.push({ socketPath: input.socketPath, credentialSet: input.credentialSet, deadlineAt: input.deadlineAt, aborted: input.signal.aborted });
+      return { async close() { closes += 1; events.push("close"); await behaviour.close?.(); } };
+    } } };
+  }
+
+  it("mounts exactly one model socket into the executor container, and into no other, and the executor's arguments carry no cloud or credential names", async () => {
+    const fake = new FakeDockerCli(); const events: string[] = []; const used = channel(events, fake);
+    const fixture = agentFixture();
+    const s = await setup({ fake, fixture, runRoot: await shortRoot(), modelChannel: used.port }); fake.onExecutor = okOutput(s);
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBeNull();
+    const mounts = fake.mountsFor("executor");
+    expect(mounts.filter((mount) => mount.endsWith(":/run/rovara/model.sock"))).toEqual([`${MODEL_SOCKET(s.runRoot, s.runId)}:/run/rovara/model.sock`]);
+    const executorArgs = fake.argsFor("executor");
+    expect(executorArgs.join(" ")).not.toMatch(/AWS_|AGENTX_|TOKEN|SECRET|bedrock|amazonaws/i);
+    // Only the executor's arguments name the model; the app, seed, build, mock and keeper containers never do.
+    for (const args of fake.calls.filter((call) => call[0] === "run" && !call[call.indexOf("--name") + 1]?.startsWith("rovara-executor-"))) {
+      expect(args.join(" "), args.join(" ")).not.toMatch(/model/i);
+    }
+    expect(fake.mountsFor("app").some((mount) => mount.includes("model"))).toBe(false);
+  });
+
+  it("opens the channel before the executor container exists, with the run's own socket path, account credentials and deadline, and closes it when the executor is done", async () => {
+    const fake = new FakeDockerCli(); const events: string[] = []; const used = channel(events, fake);
+    const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: used.port }); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    expect(events).toEqual(["open:executor-started=false", "close"]);
+    expect(used.opened).toHaveLength(1);
+    const [opened] = used.opened;
+    expect(opened!.socketPath).toBe(MODEL_SOCKET(s.runRoot, s.runId));
+    expect(opened!.credentialSet.passwords).toHaveLength(1);
+    expect(opened!.credentialSet.emails[0]).toMatch(/^rovara-orders-owner-[0-9a-f]{6}@example\.test$/);
+    expect(opened!.deadlineAt).toBe(s.fixture.plan.deadlineAt);
+    expect(used.closes()).toBe(1);
+  });
+
+  it("writes the plan's modelChannel from the admission's own route, and the executor schema accepts it", async () => {
+    const fake = new FakeDockerCli(); const fixture = agentFixture();
+    let planText = "";
+    const s = await setup({ fake, fixture, runRoot: await shortRoot(), modelChannel: channel([], fake).port });
+    fake.onExecutor = (outDir) => { planText = readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8"); okOutput(s)(outDir); };
+    await runWith(s);
+    const plan = E2EExecutorPlanSchema.parse(JSON.parse(planText));
+    expect(plan.modelChannel).toEqual({ protocol: "rovara-e2e-model-channel/v1", socketPath: "/run/rovara/model.sock", ...ROUTE });
+    expect(plan.modelChannel).toMatchObject(plan.admission.modelRoute!);
+  });
+
+  it("closes the channel on every exit: an executor that fails, a deadline, a cancellation, and a close of the lease; and closes it once", async () => {
+    for (const how of ["exit-2", "cancelled", "close-only"] as const) {
+      const fake = new FakeDockerCli(); const events: string[] = []; const used = channel(events, fake);
+      const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: used.port });
+      if (how === "exit-2") { fake.exitCodeOfExecutor(2); fake.onExecutor = (outDir) => writeExecutorOutput(outDir, { exitCode: 2, reason: "x", runId: s.runId, groupId: s.groupId }); await runWith(s); }
+      else if (how === "cancelled") {
+        const abort = new AbortController(); fake.onExecutor = () => abort.abort(new Error("stop")); await runWith(s, abort.signal);
+      } else {
+        const signal = new AbortController().signal;
+        const lease = await s.host.allocate(s.input as never, signal);
+        await lease.close(signal);
+      }
+      expect(used.closes(), how).toBe(how === "close-only" ? 0 : 1);
+      expect(events.filter((event) => event === "close"), how).toHaveLength(how === "close-only" ? 0 : 1);
+    }
+  });
+
+  it("is unavailable, and starts no executor, when the channel cannot be opened; what it says is a fixed sentence, not the error's words", async () => {
+    const fake = new FakeDockerCli(); const events: string[] = [];
+    const used = channel(events, fake, { open: () => { throw new Error("this worker's environment can redirect model calls (AWS_ACCESS_KEY_ID=AKIASECRET)"); } });
+    const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: used.port });
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBe("model-channel-unavailable");
+    expect(fake.calls.some((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-executor-"))).toBe(false);
+    const diagnostics = s.host.readDiagnostics(s.runId);
+    expect(diagnostics.buildLogTail).toContain("model channel could not be opened");
+    expect(JSON.stringify(diagnostics)).not.toMatch(/AKIASECRET|AWS_ACCESS_KEY_ID/);
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
+  it("gives a group with no agent step no mount, and refuses to be built with a channel", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    let planText = "";
+    fake.onExecutor = (outDir) => { planText = readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8"); okOutput(s)(outDir); };
+    await runWith(s);
+    expect(fake.argsFor("executor").join(" ")).not.toMatch(/model/i);
+    expect(fake.mountsFor("executor").some((mount) => mount.includes("model.sock"))).toBe(false);
+    expect(E2EExecutorPlanSchema.parse(JSON.parse(planText)).modelChannel).toBeUndefined();
+    expect(existsSync(join(s.runRoot, s.runId, "model"))).toBe(false);
+    await expect(setup({ fake: new FakeDockerCli(), modelChannel: channel([], fake).port })).rejects.toThrow(/no AI navigation step and must not get the model channel/);
+  });
+
+  it("refuses a run root so deep that the model socket path could not be bound, at construction", async () => {
+    const deep = join(await temp("deep-"), "x".repeat(60));
+    await expect(setup({ fake: new FakeDockerCli(), fixture: agentFixture(), runRoot: deep, modelChannel: channel([], new FakeDockerCli()).port })).rejects.toThrow(/too deep for the model socket/);
+    // The worker's own run root leaves the path room to spare.
+    const production = "/mnt/agentx-runtime/candidates/web-api-runs";
+    expect(Buffer.byteLength(join(production, "11111111-1111-4111-8111-111111111111", "model", "model.sock"))).toBeLessThanOrEqual(103);
+  });
+
+  it("refuses to be built for an agent group without a channel", async () => {
+    await expect(setup({ fake: new FakeDockerCli(), fixture: agentFixture() })).rejects.toThrow(/needs the model channel/);
+  });
+
+  it("removes /d/model with the rest of the workspace through the labeled root container", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: channel([], fake).port });
+    const locked = join(s.runRoot, s.runId, "out", "locked");
+    fake.onExecutor = (outDir) => { writeExecutorOutput(outDir, { exitCode: 0, reason: null, runId: s.runId, groupId: s.groupId });
+      mkdirSync(join(outDir, "locked")); writeFileSync(join(outDir, "locked", "file"), "x"); chmodSync(join(outDir, "locked"), 0o555); };
+    try {
+      await runWith(s);
+      const root = fake.calls.find((args) => args[0] === "run" && args.includes("--entrypoint") && args[args.indexOf("--entrypoint") + 1] === "rm")!;
+      expect(root.slice(root.indexOf("-rf"))).toEqual(["-rf", "/d/app", "/d/out", "/d/owned", "/d/mock", "/d/mock-out", "/d/model"]);
+    } finally { await chmod(locked, 0o755).catch(() => undefined); }
+  });
+
+  it("sweeps a model socket left behind by a worker that was killed, once it is older than the sweep age, and leaves a fresh one and a file that is not a socket", async () => {
+    const { createServer } = await import("node:net");
+    const { renameSync, mkdtempSync } = await import("node:fs");
+    const runRoot = await temp("sweep-model-");
+    const now = Date.now();
+    const servers: Array<{ close(): void }> = [];
+    // A unix socket path is limited to about 100 bytes, so each socket is made at a short path and moved to where the run left it.
+    const shortDir = mkdtempSync(join("/tmp", "rsw-"));
+    roots.push(shortDir);
+    const makeSocket = async (root: string, runId: string) => {
+      const short = join(shortDir, `${runId}.sock`);
+      const server = createServer();
+      await new Promise<void>((resolve) => server.listen(short, resolve));
+      servers.push(server);
+      mkdirSync(join(root, runId, "model"), { recursive: true });
+      renameSync(short, join(root, runId, "model", "model.sock"));
+    };
+    await makeSocket(runRoot, "old-run");
+    mkdirSync(join(runRoot, "not-a-socket", "model"), { recursive: true }); writeFileSync(join(runRoot, "not-a-socket", "model", "model.sock"), "x");
+    try {
+      // "Old" is by the clock the sweep is given; the sweep age is an hour.
+      expect(await sweepStaleRovaraRuns(new FakeDockerCli(), 3_600_000, { now: () => now + 3_700_000, runRoot })).toBe(1);
+      expect(existsSync(join(runRoot, "old-run", "model"))).toBe(false);
+      expect(existsSync(join(runRoot, "not-a-socket", "model", "model.sock"))).toBe(true);
+      const fresh = await temp("sweep-model-fresh-");
+      await makeSocket(fresh, "fresh-run");
+      expect(await sweepStaleRovaraRuns(new FakeDockerCli(), 3_600_000, { now: () => Date.now(), runRoot: fresh })).toBe(0);
+      expect(existsSync(join(fresh, "fresh-run", "model", "model.sock"))).toBe(true);
+    } finally { for (const server of servers) server.close(); }
   });
 });

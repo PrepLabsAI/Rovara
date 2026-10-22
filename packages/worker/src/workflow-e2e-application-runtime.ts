@@ -1,4 +1,6 @@
 import { join } from "node:path";
+import { E2E_AGENT_STEPS_FEATURE } from "@agentx/contracts";
+import { assertE2EEnvironmentCannotRedirect, assertE2ESharedAwsConfigCannotRedirect, deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment } from "@agentx/model-runtime";
 import { WEB_API_BUILD_IMAGE, containedRuntimeProfileForHost, createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHostDeps, type DockerCli } from "@agentx/verifier";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
 
@@ -20,13 +22,14 @@ export function workflowE2EApplicationRuntimeConfig(environment: NodeJS.ProcessE
 }
 
 /**
- * The host's dependencies: the worker's configuration, plus exactly the three things a group supplies. The keys are picked one by one, so nothing a caller
+ * The host's dependencies: the worker's configuration, plus exactly the things a group supplies (its admission, its id, its staged source, and the model channel of a group that has an agent step). The keys are picked one by one, so nothing a caller
  * adds (another image, run root, Docker, seccomp profile or hook) can reach the host.
  */
 export function workflowE2EApplicationHostDeps(config: WorkflowE2EApplicationRuntimeConfig, docker: DockerCli, now: () => number,
   input: Parameters<WorkflowE2EApplicationRuntime["createHost"]>[0]): DockerApplicationHostDeps {
   return { docker, executorImage: config.executorImage, buildImage: config.buildImage, runRoot: config.runRoot, now,
-    admission: input.admission, groupId: input.groupId, candidateSourceDir: input.candidateSourceDir };
+    admission: input.admission, groupId: input.groupId, candidateSourceDir: input.candidateSourceDir,
+    ...(input.modelChannel === undefined ? {} : { modelChannel: input.modelChannel }) };
 }
 
 /** The production Docker application runtime: one Docker application host per group, on the real Docker CLI. */
@@ -64,6 +67,37 @@ export async function workflowE2EApplicationChecksAvailability(environment: Node
   }
 }
 
+/**
+ * Whether the executor can drive an `agent` step. Task 4.3a built the model channel (the worker's half and the executor's client) but no driver loads the client, so the feature
+ * stays withheld with the reason `agent-driver-not-installed`; Task 4.3b installs the driver and removes this reason.
+ */
+export const AGENT_DRIVER_INSTALLED = false as boolean;
+
+/** Why `task.workflowE2EAgentSteps.v1` is not on /ping now, in the order it is judged. Each reason is a fixed code; the detail, where there is one, names a variable or a file and never a value. */
+export type AgentStepsAvailability = Readonly<
+  | { status: "available" }
+  | { status: "unavailable"; reason: "agent-checks-unavailable"; detail: string }
+  | { status: "unavailable"; reason: "model-environment-unsafe"; detail: string }
+  | { status: "unavailable"; reason: "agent-route-not-derivable"; detail: string }
+  | { status: "unavailable"; reason: "agent-driver-not-installed" }>;
+
+/**
+ * The agent step feature is listed only when every one of these holds: application CHECKS run here, nothing in the process environment or the shared AWS files can redirect
+ * or re-authenticate a model call, the worker's own settings make a route, and the executor has a driver for the step. The first that fails is the reason.
+ */
+export function agentStepsAvailability(input: { checks: WorkflowE2EApplicationChecksAvailability; environment: NodeJS.ProcessEnv; sharedConfigCheck?: () => void; driverInstalled?: boolean }): AgentStepsAvailability {
+  if (input.checks.status !== "ready") return { status: "unavailable", reason: "agent-checks-unavailable", detail: input.checks.reason };
+  try {
+    assertE2EEnvironmentCannotRedirect(input.environment);
+    (input.sharedConfigCheck ?? (() => assertE2ESharedAwsConfigCannotRedirect()))();
+  } catch (error) {
+    return { status: "unavailable", reason: "model-environment-unsafe", detail: (error instanceof Error ? error.message : "the environment can redirect model calls").slice(0, 400) };
+  }
+  const derived = deriveE2EAgentRoute(e2eAgentInstallationFromEnvironment(input.environment));
+  if (derived.status === "unavailable") return { status: "unavailable", reason: "agent-route-not-derivable", detail: derived.detail };
+  return (input.driverInstalled ?? AGENT_DRIVER_INSTALLED) ? { status: "available" } : { status: "unavailable", reason: "agent-driver-not-installed" };
+}
+
 const APPLICATION_CHECKS_FEATURE = "task.workflowE2EApplicationChecks" as const;
 /**
  * M1.3 Task 3.4: a version 2 application admission (runtime rows keyed by profile and kind, so one plan can run web and API groups). A worker lists it beside the feature above, and the two
@@ -80,8 +114,19 @@ export const APPLICATION_CHECKS_REFRESH_MS = 30_000;
  * Keeps the last known availability of application CHECKS, checked at boot and again on an interval, and gives the worker server what it needs to list the feature on
  * /ping from that value alone. It starts as unavailable ("not-yet-checked") until the first check answers, so a worker never advertises what it has not proved.
  */
-export function createApplicationChecksFeatureMonitor(input: { environment?: NodeJS.ProcessEnv; platform?: string; arch?: string; docker?: DockerCli; intervalMs?: number }) {
+export function createApplicationChecksFeatureMonitor(input: { environment?: NodeJS.ProcessEnv; platform?: string; arch?: string; docker?: DockerCli; intervalMs?: number;
+  /** Test seams for the agent step feature (Task 4.3a): the shared AWS files check, and whether the executor has a driver. */
+  sharedConfigCheck?: () => void; driverInstalled?: boolean }) {
   let latest: WorkflowE2EApplicationChecksAvailability = { status: "unavailable", reason: "not-yet-checked" };
+  const judgeAgentSteps = (checks: WorkflowE2EApplicationChecksAvailability): AgentStepsAvailability => {
+    // A judgement that fails is never "available".
+    try {
+      return agentStepsAvailability({ checks, environment: input.environment ?? process.env,
+        ...(input.sharedConfigCheck === undefined ? {} : { sharedConfigCheck: input.sharedConfigCheck }), ...(input.driverInstalled === undefined ? {} : { driverInstalled: input.driverInstalled }) });
+    } catch { return { status: "unavailable", reason: "agent-checks-unavailable", detail: "availability-check-failed" }; }
+  };
+  // Judged with the check, never per ping: it reads two small files, and /ping is asked often. Until the first check answers, the checks are not known to run here.
+  let agentSteps: AgentStepsAvailability = judgeAgentSteps(latest);
   let running = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   const check = async (): Promise<void> => {
@@ -98,6 +143,7 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
     } catch {
       latest = { status: "unavailable", reason: "executor-image-not-on-host" };
     } finally { running = false; }
+    agentSteps = judgeAgentSteps(latest);
   };
   return {
     current: (): WorkflowE2EApplicationChecksAvailability => latest,
@@ -110,9 +156,14 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
     },
     stop(): void { if (timer !== undefined) { clearInterval(timer); timer = undefined; } },
     /** The parts of a WorkerExecutor that keep the feature off /ping while it is unavailable. */
+    /** Why the agent step feature is on or off /ping now (Task 4.3a). */
+    agentSteps: (): AgentStepsAvailability => agentSteps,
     executor: {
-      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE] as const,
-      withheldInvocationFeatures: () => latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest, [APPLICATION_CHECKS_V2_FEATURE]: latest, [BASELINE_CHECKS_FEATURE]: latest },
+      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE, E2E_AGENT_STEPS_FEATURE] as const,
+      withheldInvocationFeatures: () => ({
+        ...(latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest, [APPLICATION_CHECKS_V2_FEATURE]: latest, [BASELINE_CHECKS_FEATURE]: latest }),
+        ...(agentSteps.status === "available" ? {} : { [E2E_AGENT_STEPS_FEATURE]: agentSteps }),
+      }),
     },
   };
 }

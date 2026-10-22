@@ -181,7 +181,7 @@ jobs:
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
-        run: npx vitest run tests/linux --exclude tests/linux/e2e-docker25-dns.test.ts
+        run: npx vitest run tests/linux --exclude tests/linux/e2e-docker25-dns.test.ts --exclude tests/linux/e2e-model-channel.test.ts
       # The EC2 worker runs Docker 25 (the only version Amazon Linux 2023 ships), which does not forward an internal-only container's DNS queries to a --dns server; this runner's
       # Docker is newer and does, so the step above cannot see that. This one starts Docker 25.0.5 in Docker (a privileged container with its own network namespace, no change to this
       # runner) and runs the production host against it: the app's lookup of an undeclared name must reach the sinkhole, and a mock's alias must resolve.
@@ -190,6 +190,13 @@ jobs:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run tests/linux/e2e-docker25-dns.test.ts
+      # M1.4 Task 4.3a: the worker <-> executor model channel on this Docker host (a scripted model route): the executor container's client reaches the proxy through the mounted
+      # socket and the receipt is written, the app container sees neither the socket nor the proxy, and no socket is left behind. It builds a small derived executor image.
+      - name: Model channel (scripted route)
+        env:
+          ROVARA_DOCKER: "1"
+          ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
+        run: npx vitest run tests/linux/e2e-model-channel.test.ts
       # The browser path end to end through the real worker, broker and this Docker host: a failing round, send-back, a passing round, publication.
       # It skips unless Docker and the executor image are provided, so it is a native-suite file that only this job runs.
       - name: Native browser journey

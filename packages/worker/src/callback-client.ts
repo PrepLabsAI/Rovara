@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   CodeBuildCheckResultSchema,
+  E2EModelDayBudgetRequestSchema,
+  E2EModelDayBudgetResponseSchema,
   WorkflowFeedbackBundleRefSchema,
   WorkflowFeedbackApprovalBindingSchema,
   WorkflowFeedbackTaskChecksSchema,
@@ -9,6 +11,8 @@ import {
   type WorkerInvocation,
   type WorkflowFeedbackApprovalBinding,
   type WorkflowFeedbackTaskChecks,
+  type E2EModelDayBudgetRequest,
+  type E2EModelDayBudgetResponse,
   type E2EWorkflowAdmissionRef,
 } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
@@ -94,6 +98,8 @@ export function createWorkerCallbackSinks(input: {
   baselineSourceSink: (source: BaselineSourceExport) => Promise<void>;
   workflowE2EAdmissionReader: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
   workflowE2EEvidenceSink: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
+  /** M1.4 Task 4.3a: one reserve, settle or release of the project's day budget for a model call (the broker keeps the rows). Only a round whose admission has AI navigation steps holds the claim. */
+  workflowE2EModelBudget: (body: E2EModelDayBudgetRequest, signal?: AbortSignal) => Promise<E2EModelDayBudgetResponse>;
   feedbackBundleReader: FeedbackBundleReader;
   authorizeFeedbackApproval: FeedbackApprovalAuthorizer;
   /** #341: the task owner's ChatGPT access token, for a task that runs on their plan (unparsed; see chatgpt-token.ts). */
@@ -232,6 +238,14 @@ export function createWorkerCallbackSinks(input: {
       || (finalized as { sha256?: unknown }).sha256 !== sha256) throw agentXError("RUNTIME_UNAVAILABLE", "native E2E evidence finalization is invalid");
     return { key: (finalized as { key: string }).key, sha256 };
   };
+  const workflowE2EModelBudget = async (body: E2EModelDayBudgetRequest, signal?: AbortSignal): Promise<E2EModelDayBudgetResponse> => {
+    const response = await fetchImplementation(`${prefix}/e2e-model-budget`, { method: "POST", ...(signal === undefined ? {} : { signal }),
+      headers: { "content-type": "application/json", "x-agentx-callback-capability": input.invocation.callbackCapability }, body: JSON.stringify(E2EModelDayBudgetRequestSchema.parse(body)) });
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `worker callback e2e-model-budget failed with HTTP ${response.status}`);
+    // The broker's reply carries its request id beside the answer, as every callback reply does; the answer is the rest.
+    const reply: unknown = await response.json();
+    return E2EModelDayBudgetResponseSchema.parse(typeof reply === "object" && reply !== null ? Object.fromEntries(Object.entries(reply).filter(([key]) => key !== "requestId")) : reply);
+  };
   return {
     eventSink: async (events) => post("events", { events }),
     chatGptToken: async () => postForResult("chatgpt-token", {}),
@@ -319,5 +333,6 @@ export function createWorkerCallbackSinks(input: {
     baselineSourceSink,
     workflowE2EAdmissionReader,
     workflowE2EEvidenceSink,
+    workflowE2EModelBudget,
   };
 }

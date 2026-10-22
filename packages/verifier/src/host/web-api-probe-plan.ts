@@ -4,9 +4,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
   E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
-  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
+  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimits, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
   selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
-import { compileE2EApplicationScenarios, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
+import { compileE2EApplicationScenarios, e2eApplicationGroupUsesModel, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../application-build-source.js";
 import { loadWebApiQualificationProbeAssets } from "../application-runtime-probes.js";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../rovara-http-engine-descriptor.js";
@@ -92,11 +92,11 @@ function scenarioFor(probe: WebApiProbeName, targetId: string, accountProfileId:
     assertions: [{ kind: "state" as const, probeId: "api-state-positive/v1", equals: { orders: "ready", version: 1 }, pollTimeoutMs: 5_000 }] };
 }
 
-function registeredRuntime(kind: "web" | "api", profileId: string, now: number) {
+function registeredRuntime(kind: "web" | "api", profileId: string, now: number, agent = false) {
   const web = kind === "web";
   const capabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ schemaVersion: "e2e-runtime-capabilities/v1", profileId, kind,
     host: { os: "linux", arch: "arm64" }, engine: web ? { name: "web", version: "0.14.0", spiVersion: 1 } : { name: ROVARA_HTTP_ENGINE_DESCRIPTOR.name, version: ROVARA_HTTP_ENGINE_DESCRIPTOR.version, spiVersion: 1 },
-    runtimeManifestDigest: (web ? "a" : "f").repeat(64), supportedSteps: web ? ["navigate", "click", "fill"] : ["request"],
+    runtimeManifestDigest: (web ? "a" : "f").repeat(64), supportedSteps: web ? ["navigate", "click", "fill", ...(agent ? ["agent"] : [])] : ["request"],
     supportedAssertions: web ? ["text", "visible", "csv", "state"] : ["http-status", "state"], evidenceScopes: ["runtime"], mocks: ["source-backed-api-fixtures/v1"],
     networkPolicyDigest: "1".repeat(64), ...(web ? { browsers: ["chromium"] } : { protocols: ["http"] }) });
   const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
@@ -158,7 +158,12 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
    * Plans an app that has no `agentx.e2e` project contract (Task 3.3): `appRoot` holds its `package.json` and `package-lock.json` at the repository root, and discovery infers the
    * launch recipe (`npm ci`, `npm start`, health on `/`). Its scenarios are `rovara-anonymous` ones, which need no account, so the plan carries none.
    */
-  inferred?: boolean }): WebApiProbePlan {
+  inferred?: boolean;
+  /**
+   * Plans a web group whose scenarios may have `agent` steps (Task 4.3a): the runtime declares the step, and the policy, the compilation context, the run binding and the admission
+   * all pin this route, as the broker's admission does for a project that approved AI navigation. Pair it with `accountScenarios` for the scenario that has the step.
+   */
+  modelRoute?: { routeId: string; routeRevision: string } }): WebApiProbePlan {
   const kind = options.probe.startsWith("web-") ? "web" as const : "api" as const;
   const inferred = options.inferred === true;
   if (inferred && (options.recipeBuild || options.recipeStart || options.mock)) throw new Error("an inferred-recipe app has no recipe to edit and no mock to approve");
@@ -218,7 +223,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const runtimeProfileId = E2E_EXECUTOR_HOST_PROFILE_ID;
-  const runtime = registeredRuntime(kind, runtimeProfileId, nowMs);
+  const runtime = registeredRuntime(kind, runtimeProfileId, nowMs, options.modelRoute !== undefined && kind === "web");
   // The approved mock: the inventory fixture of the app tree, linked by the inventory origin's contract (its OpenAPI document) to the discovery component of that document.
   const [openApiFile, fixtureFile] = mockFiles;
   const mockComponentId = openApiFile === undefined ? "" : e2eApiSchemaComponentId(openApiFile.path);
@@ -238,7 +243,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const applicationApprovalBinding = deriveE2EApplicationApprovalBinding({ preparedSnapshot: snapshot, intent, artifactId: semanticApproval.artifactId,
     artifactSha256: semanticApproval.digest, planDigest, setupProposal, setupApproval });
   const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: scenarios.map((item) => item.scenarioId),
-    targets: withE2EAnonymousTargets(setupProposal.targets, discovery.anonymous), defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
+    targets: withE2EAnonymousTargets(setupProposal.targets, discovery.anonymous), defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: options.modelRoute?.routeRevision ?? null,
     // The real web engine reports screenshot and video capability, and the compiler binds the launch descriptor to the capture policy.
     capture: { screenshots: kind === "web", traces: false, video: kind === "web", downloads: false },
     limits: { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 60_000, caseTimeoutMs: 120_000,
@@ -280,18 +285,21 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     .sort((left, right) => (left.targetId < right.targetId ? -1 : left.targetId > right.targetId ? 1 : 0));
   const bundleBody = { schemaVersion: 1 as const, planDigest, templateVersion: "trusted-e2e-application/v1" as const, scenarios, bundleDigest: "0".repeat(64) };
   const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
-  const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets, modelRoute: null, cliHostsByProfile,
+  const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets, modelRoute: options.modelRoute ?? null, cliHostsByProfile,
     preparedEnvironmentsByGroup: new Map([[group.groupId, { preparedEnvironmentDigest, originByApplicationId: [{ applicationId: application.applicationId, origin: WEB_API_PROBE_APP_ORIGIN }] }]]) };
   const compiled = compileE2EApplicationScenarios({ context, groupId: group.groupId });
   const roundId = randomUUID();
+  // As the control plane admits a round: a route-pinned policy's round with no agent step runs under the model-free limits, and its deadline fits them (Task 4.3a).
+  const roundLimits = options.modelRoute === undefined ? policy.limits : e2eEffectiveRoundLimits(policy.limits, e2eApplicationGroupUsesModel(compiled));
+  const deadlineSpanMs = options.deadlineMs ?? Math.min(300_000, roundLimits.runTimeoutMs);
   const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId: options.runId ?? randomUUID(), roundId, taskId: options.taskId ?? "task-orders", operationId: randomUUID(), operationFence: 1,
     workflowRevision: 1, groupId: group.groupId, executionPlanDigest: executionPlan.digest, executionMode: group.mode, mockManifestDigest: group.mockManifestDigest,
     authorizationRevision: "orders-auth-r1", candidateDigest: candidate.digest, planDigest, policyDigest: e2ePolicyDigest(policy), bundleDigest: bundle.bundleDigest,
     appBuildDigest: hash(canonicalJson(compiled.inventory)), environmentDigest: preparedEnvironmentDigest, runtimeManifestDigest: runtime.manifestDigest,
-    modelRouteRevision: null, expectedCases: compiled.expectedCases, admittedAt: now, deadlineAt: new Date(nowMs + (options.deadlineMs ?? 300_000)).toISOString() });
+    modelRouteRevision: options.modelRoute?.routeRevision ?? null, expectedCases: compiled.expectedCases, admittedAt: now, deadlineAt: new Date(nowMs + deadlineSpanMs).toISOString() });
   const round = E2ERoundSchema.parse({ schemaVersion: 1, roundId, taskId: binding.taskId, operationId: binding.operationId, operationFence: binding.operationFence,
     workflowRevision: binding.workflowRevision, executionPlanDigest: executionPlan.digest, admittedAt: now, deadlineAt: binding.deadlineAt,
-    limits: policy.limits, groupBindings: [binding] });
+    limits: roundLimits, groupBindings: [binding] });
   const sourceSnapshotWire = { candidate: snapshot.candidate, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, treeComplete: true as const,
     treePaths: snapshot.treePaths, sources: snapshot.sources.map((item) => ({ path: item.path, sha256: item.sha256,
       bytesBase64: Buffer.from(item.bytes).toString("base64"), kind: "blob" as const })) };
@@ -305,7 +313,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     sourceSnapshot: sourceSnapshotWire, intent, intentDigest: hash(canonicalJson(intent)),
     selectionInput: { ...selectionInput, sourceSnapshot: sourceSnapshotWire }, applicationApprovalBinding,
     applicationBindings: [...applicationBindings].map(([key, value]) => ({ key, value })).sort((a, b) => a.key.localeCompare(b.key)),
-    runtimeBindings: [...runtimeBindings].map(([key, value]) => ({ key, value })), launchTargets, modelRoute: null,
+    runtimeBindings: [...runtimeBindings].map(([key, value]) => ({ key, value })), launchTargets, modelRoute: options.modelRoute ?? null,
     cliHosts: [...cliHostsByProfile].map(([profileId, descriptor]) => ({ profileId, descriptor })),
     preparedEnvironments: [{ groupId: group.groupId, preparedEnvironmentDigest, originByApplicationId: compiled.originByApplicationId }],
     policy, bundle, executionPlan, portableProjection: null, round, groups: [groupAdmission] };

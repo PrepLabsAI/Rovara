@@ -1,13 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { type E2EScenario, E2EApplicationPlanIntentSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V1, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
+import { type E2EScenario, E2EApplicationPlanIntentSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V1, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, E2E_MODEL_FREE_LIMITS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
+  WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
   deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, e2eRuntimeBindingKey, E2ESetupProposalSchema, createCandidateManifest, inspectE2ERepository, proposeE2ESetup, verifyE2ESetupProposal } from "@agentx/contracts";
 import { registryFor } from "../support/e2e-account-registry-fixtures.js";
-import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, e2eCompiledRuntime, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
+import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, e2eCompiledRuntime,
+  validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
 import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/broker/src/e2e/application-admission.js";
-import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
+import { ApplicationBaselineSkipped, ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
+import { baselineStartFailureReason } from "../../packages/broker/src/aws/workflow-e2e-baseline.js";
+import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { builtWebAndApiAdmission } from "../support/e2e-web-and-api-admission.js";
@@ -428,19 +432,25 @@ describe("setup proposals stored before Task 3.3", () => {
 });
 
 // Ruling CX (the M1.3 -> M1.4 merge): a baseline round never runs agent steps and carries no model route, even where the project's policy pins one; a candidate round keeps it.
+// Ruling DD (Task 4.3a): a baseline of a plan that has AI navigation scenarios runs the rest of the plan under the model-free limits; a plan that is only such scenarios has none.
 describe("a baseline round's admission on a project whose policy pins a model route", () => {
   const ROUTE = "r1-0123456789ab";
+  const ROUTE_LIMITS = e2eAgentRoutePolicyLimits(E2E_MODEL_ROUTE_DEFAULT_BUDGETS);
   const agentScenario: E2EScenario = { ...csvScenario, scenarioId: "agent-orders", steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }],
     assertions: [{ kind: "visible", testId: "orders", equals: true }] };
   const agentRow = () => webApiRow("web", {}, (value) => ({ ...value, supportedSteps: [...value.supportedSteps, "agent" as const] }));
-  async function routed(options: { baseline: boolean; agent?: boolean }) {
-    const fx = planFixture({ modelRouteRevision: ROUTE, ...(options.agent === true ? { extraScenarios: [agentScenario] } : {}) });
+  /** `plan`: "plain" (the csv scenario only), "mixed" (the csv scenario and an agent scenario), "agent-only" (the agent scenario alone). */
+  async function routed(options: { baseline: boolean; plan?: "plain" | "mixed" | "agent-only" }) {
+    const plan = options.plan ?? "plain";
+    const fx = planFixture({ modelRouteRevision: ROUTE, ...(plan === "mixed" ? { extraScenarios: [agentScenario] } : plan === "agent-only" ? { scenario: agentScenario } : {}) });
     const candidate = await candidateOf(ordersTree);
     const rows = [agentRow()];
+    // The policy of a project that pinned a route carries limits sized for agent steps.
+    const policy = { ...fx.policy, limits: ROUTE_LIMITS };
     const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
       runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
-      setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding,
-      buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection(fx, rows),
+      setupApproval: fx.setup.setupApproval, policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding,
+      buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection({ ...fx, policy }, rows),
       ...(options.baseline ? { baseline: { baseCommitSha: candidate.snapshot.commitSha, attempt: 1 } } : {}) };
     return () => buildApplicationExecutionAdmission(input);
   }
@@ -448,30 +458,123 @@ describe("a baseline round's admission on a project whose policy pins a model ro
     s3: { send: async () => ({ Body: { transformToString: async () => built.bytes.toString("utf8") } }) }, bucket: "b" })({ schemaVersion: 1, kind: "application",
     taskId: "11111111-1111-4111-8111-111111111111", workflowRevision: 7, candidateDigest: built.admission.candidateDigest, roundId: built.roundId, groupRunIds: built.groupRunIds,
     admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } });
+  const agentScenarioIds = (decoded: ReturnType<typeof decodeE2EApplicationExecutionAdmission>) => decoded.bundle.scenarios.filter((scenario) => scenario.steps.some((step) => step.kind === "agent")).map((scenario) => scenario.scenarioId);
 
   it("the candidate round carries the pinned route, and with an agent step its reference must say agentSteps (the positive controls)", async () => {
     const decoded = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false }))().bytes);
     expect(decoded.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: ROUTE });
     expect(decoded.round.groupBindings.every((item) => item.modelRouteRevision === ROUTE)).toBe(true);
-    const withAgent = (await routed({ baseline: false, agent: true }))();
+    const withAgent = (await routed({ baseline: false, plan: "mixed" }))();
     expect(decodeE2EApplicationExecutionAdmission(withAgent.bytes).executionPlan.unavailableCriteria).toEqual([]);
     await expect(agentStepsOf(withAgent)).resolves.toBe(true);
   });
 
-  it("the baseline round carries modelRoute null and group bindings with modelRouteRevision null, the worker's validator accepts it, and it has no agent step (agentSteps false)", async () => {
-    const built = (await routed({ baseline: true }))();
-    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
-    expect(decoded.baseline).toMatchObject({ purpose: "baseline" });
-    expect(decoded.modelRoute).toBeNull();
-    expect(decoded.policy.modelRouteRevision).toBeNull();
-    expect(decoded.round.groupBindings.length).toBeGreaterThan(0);
-    expect(decoded.round.groupBindings.every((item) => item.modelRouteRevision === null)).toBe(true);
-    expect(() => validateE2EApplicationExecutionAdmission(decoded)).not.toThrow();
-    await expect(agentStepsOf(built)).resolves.toBe(false);
+  it("names the agent steps of a compiled group by case and step index, and a group with none uses no model (the helpers the model channel is decided by)", async () => {
+    const plain = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "plain" }))().bytes)).applicationSuites[0]!;
+    expect(e2eApplicationGroupAgentSteps(plain)).toEqual([]);
+    expect(e2eApplicationGroupUsesModel(plain)).toBe(false);
+    const mixed = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "mixed" }))().bytes)).applicationSuites[0]!;
+    const agentCase = mixed.expectedCases.find((item) => item.scenarioId === "agent-orders")!;
+    expect(e2eApplicationGroupAgentSteps(mixed)).toEqual([{ caseId: agentCase.caseId, stepIndex: 0 }]);
+    expect(e2eApplicationGroupUsesModel(mixed)).toBe(true);
   });
 
-  it("a baseline of a plan with an agent step is refused with agent-route-not-approved: it never runs the agent step (the baseline is then unavailable, and never gates)", async () => {
-    expect(refusalOf(await routed({ baseline: true, agent: true }))).toMatch(/scenario agent-orders on target web-1: agent-route-not-approved/);
+  // Checklist 3: an admission the control plane wrote before Task 4.3a (tests/fixtures/admission-before-task-4-3a.json, written by the code at the commit before step 8 of Task 4.3a: a
+  // route-pinned policy with agent-sized limits, a round with no agent step) was admitted with the policy's limits for its round and its shards. The new worker still validates it.
+  describe("an admission written before Task 4.3a", () => {
+    const stored = () => readFileSync(new URL("../fixtures/admission-before-task-4-3a.json", import.meta.url));
+
+    it("is a route-pinned no-agent round under the policy's own (agent-sized) limits, and the worker's validator still accepts it", () => {
+      const decoded = decodeE2EApplicationExecutionAdmission(stored());
+      expect(decoded.policy.modelRouteRevision).toBe(ROUTE);
+      expect(decoded.round.limits).toEqual(ROUTE_LIMITS);
+      expect(decoded.round.limits).not.toEqual(E2E_MODEL_FREE_LIMITS);
+      expect(agentScenarioIds(decoded)).toEqual([]);
+      const validated = validateE2EApplicationExecutionAdmission(decoded);
+      expect(validated.applicationSuites).toHaveLength(1);
+    });
+
+    it("is refused when its round no longer says it ran under the policy's limits (the allowance is for admissions that did, not a way around the model-free limits)", () => {
+      const { admissionDigest: _digest, ...body } = JSON.parse(stored().toString("utf8")) as { round: { limits: { caseTimeoutMs: number } }; admissionDigest: string };
+      void _digest;
+      // A round that ran under narrower limits than its policy (still within it) is not the older shape: its shards are compiled under the current rule and no longer match.
+      body.round.limits = { ...body.round.limits, caseTimeoutMs: body.round.limits.caseTimeoutMs - 1 };
+      // Sealed again, so the refusal is the shard comparison and not the digest.
+      const resealed = { ...body, admissionDigest: createHash("sha256").update(canonicalJson(body)).digest("hex") };
+      expect(() => validateE2EApplicationExecutionAdmission(resealed)).toThrow(/differs from fresh shard compilation/);
+    });
+
+    it("is not what the current control plane writes: a candidate round of the same plan carries the model-free limits and validates too (the positive control)", async () => {
+      const built = (await routed({ baseline: false, plan: "plain" }))();
+      expect(built.admission.round.limits).toEqual(E2E_MODEL_FREE_LIMITS);
+      expect(() => validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(built.bytes))).not.toThrow();
+    });
+  });
+
+  it("the baseline round carries modelRoute null and group bindings with modelRouteRevision null, the worker's validator accepts it, it has no agent scenario, and its round limits are the model-free limits (case 13)", async () => {
+    for (const plan of ["plain", "mixed"] as const) {
+      const built = (await routed({ baseline: true, plan }))();
+      const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+      expect(decoded.baseline).toMatchObject({ purpose: "baseline" });
+      expect(decoded.modelRoute).toBeNull();
+      expect(decoded.policy.modelRouteRevision).toBeNull();
+      expect(decoded.round.groupBindings.length).toBeGreaterThan(0);
+      expect(decoded.round.groupBindings.every((item) => item.modelRouteRevision === null)).toBe(true);
+      expect(agentScenarioIds(decoded), plan).toEqual([]);
+      expect(decoded.round.limits).toEqual(E2E_MODEL_FREE_LIMITS);
+      expect(decoded.policy.limits).toEqual(E2E_MODEL_FREE_LIMITS);
+      expect(() => validateE2EApplicationExecutionAdmission(decoded)).not.toThrow();
+      await expect(agentStepsOf(built)).resolves.toBe(false);
+    }
+  });
+
+  it("a baseline of a plan with an AI navigation scenario drops that scenario and runs the rest, instead of being refused whole (Ruling DD)", async () => {
+    const built = (await routed({ baseline: true, plan: "mixed" }))();
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    expect(decoded.bundle.scenarios.map((scenario) => scenario.scenarioId)).toEqual(["export-csv"]);
+    expect(decoded.intent.scenarios.map((scenario) => scenario.scenarioId)).toEqual(["export-csv"]);
+    expect(decoded.executionPlan.groups.flatMap((group) => group.expectedCases.map((item) => item.scenarioId))).toEqual(["export-csv"]);
+    // The candidate round of the same plan keeps both scenarios, under the agent-sized limits (the positive control).
+    const candidate = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "mixed" }))().bytes);
+    expect(candidate.bundle.scenarios.map((scenario) => scenario.scenarioId).sort()).toEqual(["agent-orders", "export-csv"]);
+    expect(candidate.round.limits).toEqual(ROUTE_LIMITS);
+  });
+
+  it("a baseline of a plan that is only AI navigation scenarios has nothing to run: it is skipped with its own reason, which is not a refusal of the plan", async () => {
+    const build = await routed({ baseline: true, plan: "agent-only" });
+    let failure: unknown;
+    try { build(); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(ApplicationBaselineSkipped);
+    expect(failure).not.toBeInstanceOf(ApplicationDispatchRefusal);
+    expect((failure as ApplicationBaselineSkipped).reason).toBe("agent-steps-only");
+    expect(baselineStartFailureReason(failure)).toBe("agent-steps-only");
+    expect(baselineStartFailureReason(new ApplicationDispatchRefusal("refused"))).toBe("refused");
+    expect(baselineStartFailureReason(new Error("boom"))).toBe("start-failed");
+    // The candidate round of the same plan is admitted: the baseline is the only thing that is skipped.
+    expect(decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "agent-only" }))().bytes).bundle.scenarios.map((scenario) => scenario.scenarioId)).toEqual(["agent-orders"]);
+  });
+
+  it("a candidate round of a route-pinned project with no AI navigation step runs under the model-free limits, and with one keeps the agent-sized limits", async () => {
+    const plain = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "plain" }))().bytes);
+    expect(plain.round.limits).toEqual(E2E_MODEL_FREE_LIMITS);
+    expect(plain.policy.limits).toEqual(ROUTE_LIMITS);
+    const mixed = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "mixed" }))().bytes);
+    expect(mixed.round.limits).toEqual(ROUTE_LIMITS);
+  });
+
+  it("a project that pinned no route keeps the limits it was approved with, whatever they are", async () => {
+    const fx = planFixture({});
+    const candidate = await candidateOf(ordersTree);
+    const rows = [webApiRow("web")];
+    const limits = { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 180_000, caseTimeoutMs: 90_000, maxActionsPerCase: 30, maxModelRequests: 60, maxInputTokens: 200_000, maxOutputTokens: 20_000, maxSpendUsd: null };
+    const policy = { ...fx.policy, limits };
+    const built = buildApplicationExecutionAdmission({ taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+      runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource,
+      planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection({ ...fx, policy }, rows) });
+    expect(decodeE2EApplicationExecutionAdmission(built.bytes).round.limits).toEqual(limits);
+  });
+});
   });
 });
 

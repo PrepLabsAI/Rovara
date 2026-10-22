@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EModelDayBudgetRequest, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -79,6 +79,8 @@ export async function runTaskInvocation(
     workflowE2EAdmissionReader?: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
     workflowE2EEvidenceSink?: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
     workflowE2EEvidenceRoot?: string;
+    /** M1.4 Task 4.3a: the project's day budget callback, for a round whose admission has AI navigation steps. Only the worker's own wiring sets it. */
+    workflowE2EModelBudget?: (body: E2EModelDayBudgetRequest, signal?: AbortSignal) => Promise<unknown>;
     /** Fixed worker installation root that contains the pinned public E2E CLI package. */
     workflowE2ERuntimeRoot?: string;
     /** The Docker application runtime application admissions run on (or how to build it once needed); only the worker's own wiring sets it. */
@@ -258,6 +260,7 @@ export async function runTaskInvocation(
           evidenceRoot: dependencies.workflowE2EEvidenceRoot!,
           candidateRepositoryRoot: (repositoryId) => repositories.find((repository) => repository.repositoryId === repositoryId)?.directory,
           ...(dependencies.workflowE2EApplicationRuntime === undefined ? {} : { application: dependencies.workflowE2EApplicationRuntime }),
+          ...(dependencies.workflowE2EModelBudget === undefined ? {} : { modelBudget: dependencies.workflowE2EModelBudget }),
           signal: stop.signal,
           ...(dependencies.workflowE2EOnOwnedContainerRunning === undefined ? {} : { onOwnedContainerRunning: dependencies.workflowE2EOnOwnedContainerRunning }),
         });

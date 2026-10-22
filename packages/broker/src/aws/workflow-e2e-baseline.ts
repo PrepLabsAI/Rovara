@@ -2,6 +2,7 @@ import { GetCommand, PutCommand, UpdateCommand, type DynamoDBDocumentClient } fr
 import { E2EDisplayBaselineSchema, INDEX_EXPIRY_ATTRIBUTE, indexExpiresAt, type E2EDisplayBaseline } from "@agentx/contracts";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { UNAVAILABLE_BASELINE, baselineOf, scrubScenarioResults, type DisplayArtifact } from "../e2e/application-display.js";
+import { ApplicationBaselineSkipped, ApplicationDispatchRefusal, ApplicationPlanDefect } from "../e2e/application-dispatch-check.js";
 import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../e2e/application-evidence.js";
 import { isConditional } from "./broker-shared.js";
 import { resultsWithStoredArtifacts, storeWorkflowE2EArtifacts, type WorkflowE2EArtifactStore } from "./workflow-e2e-artifacts.js";
@@ -30,7 +31,14 @@ export const E2E_BASELINE_RUN_GRACE_MS = 5 * 60_000;
 export type WorkflowE2EBaselineStore = Readonly<{ documentClient: Pick<DynamoDBDocumentClient, "send">; tableName: string }>;
 export type BaselineState = "REQUESTED" | "STARTED" | "RECORDED" | "UNAVAILABLE";
 /** Why a baseline has no result, as a code for the record and the log; the owner reads one fixed sentence. */
-export type BaselineUnavailableReason = "not-exported" | "refused" | "start-failed" | "run-failed" | "unverified" | "timed-out" | "stopped" | "cancel-unconfirmed";
+/** `agent-steps-only` (Ruling DD): every scenario of the plan has an AI navigation step, which a baseline never runs, so there was nothing to run. */
+export type BaselineUnavailableReason = "not-exported" | "refused" | "start-failed" | "run-failed" | "unverified" | "timed-out" | "stopped" | "cancel-unconfirmed" | "agent-steps-only";
+
+/** Why a baseline round could not be started, from what building its admission threw: a plan that is only AI navigation scenarios is skipped (it gates nothing), a refused plan or input is `refused`, anything else `start-failed`. */
+export function baselineStartFailureReason(error: unknown): BaselineUnavailableReason {
+  if (error instanceof ApplicationBaselineSkipped) return error.reason;
+  return error instanceof ApplicationDispatchRefusal || error instanceof ApplicationPlanDefect ? "refused" : "start-failed";
+}
 
 export type BaselineRecord = Readonly<{
   taskId: string; contractDigest: string; attempt: number; state: BaselineState; requestedAt: string;

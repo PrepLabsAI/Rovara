@@ -4,6 +4,15 @@ import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import * as barrel from "../../packages/contracts/src/index.js";
 import {
   E2E_AGENT_TOOL_NAMES,
+  E2E_MODEL_CHANNEL_SOCKET_PATH,
+  E2E_MODEL_CHANNEL_STEP_PATH,
+  E2E_MODEL_FREE_LIMITS,
+  E2EModelChannelStepMarkerSchema,
+  E2EModelDayBudgetRequestSchema,
+  E2EModelDayBudgetResponseSchema,
+  e2eEffectiveRoundLimits,
+  e2eModelRouteRevisionNumber,
+  e2eScannableEmailLocalPart,
   E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES,
   E2E_MODEL_CHANNEL_MAX_RESPONSE_BYTES,
   E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
@@ -848,6 +857,73 @@ describe("captured ActionTrace review (M4-A trace bound to the verified ledger)"
       expect(() => review({ trace: input })).not.toThrow();
       expect(review({ trace: input }).keep).toBe(false);
     }
+  });
+});
+
+// Task 4.3a, test case 1: the contracts of the worker <-> executor channel and of the budget callback.
+describe("the step marker, the budget callback and the effective round limits (Task 4.3a)", () => {
+  const marker = { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "begin", caseId: CASE_ID, stepIndex: 1 };
+
+  it("fixes the socket and step paths", () => {
+    expect(E2E_MODEL_CHANNEL_SOCKET_PATH).toBe("/run/rovara/model.sock");
+    expect(E2E_MODEL_CHANNEL_STEP_PATH).toBe("/v1/step");
+  });
+
+  it("the marker schema refuses unknown keys, cookie values on an end marker, more than 32 values, and a bad run id or position", () => {
+    expect(E2EModelChannelStepMarkerSchema.safeParse(marker).success).toBe(true);
+    expect(E2EModelChannelStepMarkerSchema.safeParse({ ...marker, cookieValues: ["sid=abcdef123456"] }).success).toBe(true);
+    expect(E2EModelChannelStepMarkerSchema.safeParse({ ...marker, marker: "end" }).success).toBe(true);
+    expect(E2EModelChannelStepMarkerSchema.safeParse({ ...marker, extra: 1 }).success).toBe(false);
+    expect(E2EModelChannelStepMarkerSchema.safeParse({ ...marker, marker: "end", cookieValues: ["sid=abcdef123456"] }).success).toBe(false);
+    expect(E2EModelChannelStepMarkerSchema.safeParse({ ...marker, cookieValues: Array.from({ length: 32 }, (_, i) => `c${i}=value-${i}-xxxx`) }).success).toBe(true);
+    expect(E2EModelChannelStepMarkerSchema.safeParse({ ...marker, cookieValues: Array.from({ length: 33 }, (_, i) => `c${i}=value-${i}-xxxx`) }).success).toBe(false);
+    expect(E2EModelChannelStepMarkerSchema.safeParse({ ...marker, runId: "nope" }).success).toBe(false);
+    expect(E2EModelChannelStepMarkerSchema.safeParse({ ...marker, stepIndex: 256 }).success).toBe(false);
+    expect(E2EModelChannelStepMarkerSchema.safeParse({ ...marker, marker: "pause" }).success).toBe(false);
+  });
+
+  it("the budget schema refuses 0 tokens, more than 64000, a missing group run, and keys it does not know", () => {
+    const base = { schemaVersion: "rovara-e2e-model-budget/v1", reservationId: RUN_ID };
+    const reserve = { ...base, stage: "reserve", groupRunId: RUN_ID, inputTokens: 1_000 };
+    expect(E2EModelDayBudgetRequestSchema.safeParse(reserve).success).toBe(true);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...reserve, inputTokens: 0 }).success).toBe(false);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...reserve, inputTokens: 64_000 }).success).toBe(true);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...reserve, inputTokens: 64_001 }).success).toBe(false);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...reserve, groupRunId: undefined }).success).toBe(false);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...reserve, project: "other" }).success).toBe(false);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...base, stage: "settle", actualInputTokens: 0 }).success).toBe(false);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...base, stage: "settle", actualInputTokens: 64_001 }).success).toBe(false);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...base, stage: "settle", actualInputTokens: 64_000 }).success).toBe(true);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...base, stage: "release" }).success).toBe(true);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...base, stage: "release", inputTokens: 5 }).success).toBe(false);
+    expect(E2EModelDayBudgetRequestSchema.safeParse({ ...base, stage: "reserve", groupRunId: RUN_ID, inputTokens: 1_000, reservationId: "not-a-uuid" }).success).toBe(false);
+    expect(E2EModelDayBudgetResponseSchema.safeParse({ ...base, status: "exhausted" }).success).toBe(true);
+    expect(E2EModelDayBudgetResponseSchema.safeParse({ ...base, status: "free" }).success).toBe(false);
+  });
+
+  it("e2eEffectiveRoundLimits: model-free is the model-free limits, a model group keeps the policy", () => {
+    const routeLimits = { runTimeoutMs: 1_200_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 300_000, maxActionsPerCase: 54,
+      maxModelRequests: 40, maxInputTokens: 400_000, maxOutputTokens: 40_960, maxSpendUsd: null };
+    expect(e2eEffectiveRoundLimits(routeLimits, false)).toEqual(E2E_MODEL_FREE_LIMITS);
+    expect(E2E_MODEL_FREE_LIMITS).toMatchObject({ caseTimeoutMs: 10_000, runTimeoutMs: 60_000, maxActionsPerCase: 10 });
+    expect(e2eEffectiveRoundLimits(routeLimits, true)).toEqual(routeLimits);
+    // It never raises a limit a policy already lowered.
+    expect(e2eEffectiveRoundLimits({ ...routeLimits, caseTimeoutMs: 5_000, maxSpendUsd: 2 }, false)).toMatchObject({ caseTimeoutMs: 5_000, runTimeoutMs: 60_000, maxSpendUsd: 2 });
+  });
+
+  it("e2eScannableEmailLocalPart: short and word-like local parts are not scanned, the host-generated form is", () => {
+    expect(e2eScannableEmailLocalPart("test@x.io")).toBeNull();
+    expect(e2eScannableEmailLocalPart("a.b@x.io")).toBeNull();
+    expect(e2eScannableEmailLocalPart("administrator@x.io")).toBeNull();
+    expect(e2eScannableEmailLocalPart("rovara-owner-a1b2c3@example.test")).toBe("rovara-owner-a1b2c3");
+    expect(e2eScannableEmailLocalPart("jane.doe+42@x.io")).toBe("jane.doe+42");
+    expect(e2eScannableEmailLocalPart("abcdefg1@x.io")).toBe("abcdefg1");
+  });
+
+  it("e2eModelRouteRevisionNumber reads r<n>-<12 hex> and nothing else", () => {
+    expect(e2eModelRouteRevisionNumber("r1-0123456789ab")).toBe(1);
+    expect(e2eModelRouteRevisionNumber("r42-0123456789ab")).toBe(42);
+    for (const bad of ["r0-0123456789ab", "r1-0123456789a", "1-0123456789ab", "r1-0123456789AB", "r1-0123456789abc", "", "r1234567-0123456789ab"]) expect(e2eModelRouteRevisionNumber(bad), bad).toBeNull();
   });
 });
 

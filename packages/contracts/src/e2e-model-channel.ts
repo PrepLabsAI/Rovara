@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
+import type { E2ELimits } from "./e2e.js";
 import { MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN } from "./model-providers.js";
 
 /**
@@ -8,7 +9,8 @@ import { MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN } from "./mo
  *
  * Four records, all strict and all bounded:
  * - the route definition the broker pins at setup approval (its digest is the route revision);
- * - the channel request and response the executor exchanges with the worker over the Unix socket;
+ * - the channel request and response the executor exchanges with the worker over the Unix socket (`POST /v1/generate`), and the step markers it sends beside them (`POST /v1/step`,
+ *   Task 4.3a) to say which agent step is running; the worker's day budget callback (`e2e-model-budget`) is in the last section;
  * - the receipt the worker writes for every call (the executor never writes one);
  * - the action ledger kept for every agent step, so a round can be audited and replayed without the model.
  *
@@ -203,6 +205,14 @@ export const E2E_AGENT_APPROVAL_REFUSALS = Object.freeze({
 } as const);
 /** The code the owner sees when the installation's AI navigation settings changed after the route was approved. */
 export const E2E_MODEL_ROUTE_CHANGED_REAPPROVE = "model-route-changed-reapprove" as const;
+
+/**
+ * The revision number inside a route revision id (`r<n>-<12 hex>`), or null for anything else. The worker uses it to derive the route of the revision an admission names.
+ */
+export function e2eModelRouteRevisionNumber(revision: string): number | null {
+  const match = /^r([1-9][0-9]{0,5})-[a-f0-9]{12}$/.exec(revision);
+  return match === null ? null : Number(match[1]);
+}
 
 /** `"r" + revision + "-" + sha256(canonicalJson(parsed))[0:12]`. Computed from the parsed form, so key order and padding never matter. */
 export function e2eModelRouteRevision(definition: unknown): string {
@@ -728,4 +738,110 @@ export function reviewCapturedE2EAgentTrace(input: { stepIndex: number; trace: u
   } catch {
     return { keep: false, reason: "trace-malformed" };
   }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The wire between the executor and the worker (Task 4.3a)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** Where the executor container sees the worker's per-run model socket (a file bind mount of `<workspace>/model/model.sock`). Only the executor container gets it. */
+export const E2E_MODEL_CHANNEL_SOCKET_PATH = "/run/rovara/model.sock" as const;
+/** The step marker path on the same socket as `/v1/generate`: the executor says which agent step is running, the worker attributes calls to it. */
+export const E2E_MODEL_CHANNEL_STEP_PATH = "/v1/step" as const;
+/** The path a call is made on. */
+export const E2E_MODEL_CHANNEL_GENERATE_PATH = "/v1/generate" as const;
+/** The cookie values one begin marker may report. */
+export const E2E_MODEL_CHANNEL_MAX_COOKIE_VALUES = 32;
+
+/**
+ * The executor's marker that an agent step began or ended. A `begin` may carry the `Set-Cookie` values the executor learned since the last step, so the worker scans later
+ * prompts for them. A marker names a step position only; the worker accepts it only for a position the admission holds (`allowedSteps`) and for this run.
+ */
+export const E2EModelChannelStepMarkerSchema = z.object({
+  schemaVersion: z.literal(E2E_MODEL_CHANNEL_SCHEMA_VERSION),
+  runId: z.string().uuid(),
+  marker: z.enum(["begin", "end"]),
+  caseId: id(160),
+  stepIndex: nonNegativeInt.max(255),
+  cookieValues: z.array(z.string().min(1).max(4_096)).max(E2E_MODEL_CHANNEL_MAX_COOKIE_VALUES).optional(),
+}).strict().superRefine((marker, context) => {
+  if (marker.marker === "end" && marker.cookieValues !== undefined) context.addIssue({ code: "custom", path: ["cookieValues"], message: "an end marker carries no cookie values" });
+});
+export type E2EModelChannelStepMarker = z.infer<typeof E2EModelChannelStepMarkerSchema>;
+
+/** The client the executor holds for the socket (Task 4.3b drives it). Every failure is a plain non-retryable error, so a caller never re-sends a call on its own. */
+export interface E2EModelChannelClient {
+  beginStep(position: { caseId: string; stepIndex: number; cookieValues?: readonly string[] }, signal?: AbortSignal): Promise<void>;
+  generate(request: { caseId: string; stepIndex: number; callIndex: number; call: E2EModelChannelRequest["call"] }, signal?: AbortSignal): Promise<E2EModelChannelResponse>;
+  endStep(position: { caseId: string; stepIndex: number }, signal?: AbortSignal): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The project's day budget callback (worker -> broker)
+// ---------------------------------------------------------------------------------------------------------------------
+
+export const E2E_MODEL_BUDGET_SCHEMA_VERSION = "rovara-e2e-model-budget/v1" as const;
+/** The most input tokens one call is reserved or settled for. It is the receipt's ceiling, so a settle is bounded. */
+export const E2E_MODEL_BUDGET_MAX_CALL_TOKENS = 64_000;
+const budgetTokens = z.number().int().min(1).max(E2E_MODEL_BUDGET_MAX_CALL_TOKENS);
+const budgetBase = { schemaVersion: z.literal(E2E_MODEL_BUDGET_SCHEMA_VERSION), reservationId: z.string().uuid() };
+
+/**
+ * What the worker may ask the broker about the project's day budget. The project, the day and the caps are never in it: the broker takes the project from the operation and
+ * derives the caps from the route itself.
+ */
+export const E2EModelDayBudgetRequestSchema = z.discriminatedUnion("stage", [
+  z.object({ ...budgetBase, stage: z.literal("reserve"), groupRunId: z.string().uuid(), inputTokens: budgetTokens }).strict(),
+  z.object({ ...budgetBase, stage: z.literal("settle"), actualInputTokens: budgetTokens }).strict(),
+  z.object({ ...budgetBase, stage: z.literal("release") }).strict(),
+]);
+export type E2EModelDayBudgetRequest = z.infer<typeof E2EModelDayBudgetRequestSchema>;
+
+export const E2EModelDayBudgetResponseSchema = z.object({
+  schemaVersion: z.literal(E2E_MODEL_BUDGET_SCHEMA_VERSION),
+  reservationId: z.string().uuid(),
+  status: z.enum(["reserved", "exhausted", "settled", "released"]),
+}).strict();
+export type E2EModelDayBudgetResponse = z.infer<typeof E2EModelDayBudgetResponseSchema>;
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Limits of a group that uses no model, and the scan of an account's email
+// ---------------------------------------------------------------------------------------------------------------------
+
+/**
+ * The limits of a round that runs no model call: the small limits a setup that pins no route keeps. A project that pinned a route has policy limits sized for agent steps
+ * (`e2eAgentRoutePolicyLimits`); a round or a group that has no agent step runs under these instead.
+ */
+export const E2E_MODEL_FREE_LIMITS: E2ELimits = Object.freeze({
+  runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
+  maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null,
+});
+
+/** The limits a round or group runs under: the policy's when it uses the model, else no larger than the model-free limits (each limit the smaller of the two). */
+export function e2eEffectiveRoundLimits(policy: E2ELimits, usesModel: boolean): E2ELimits {
+  if (usesModel) return policy;
+  const free = E2E_MODEL_FREE_LIMITS;
+  return {
+    runTimeoutMs: Math.min(policy.runTimeoutMs, free.runTimeoutMs), startupTimeoutMs: Math.min(policy.startupTimeoutMs, free.startupTimeoutMs),
+    preparationTimeoutMs: Math.min(policy.preparationTimeoutMs, free.preparationTimeoutMs), caseTimeoutMs: Math.min(policy.caseTimeoutMs, free.caseTimeoutMs),
+    maxActionsPerCase: Math.min(policy.maxActionsPerCase, free.maxActionsPerCase), maxModelRequests: Math.min(policy.maxModelRequests, free.maxModelRequests),
+    maxInputTokens: Math.min(policy.maxInputTokens, free.maxInputTokens), maxOutputTokens: Math.min(policy.maxOutputTokens, free.maxOutputTokens),
+    maxSpendUsd: policy.maxSpendUsd === null || free.maxSpendUsd === null ? (policy.maxSpendUsd ?? free.maxSpendUsd) : Math.min(policy.maxSpendUsd, free.maxSpendUsd),
+  };
+}
+
+/** The shortest local part of an account email that is scanned for and redacted on its own. A shorter one would match too much ordinary text. */
+export const E2E_SCANNABLE_LOCAL_PART_MIN_LENGTH = 8;
+
+/**
+ * The part of an account email before the `@` that the model channel's credential scan (the worker) and the executor's redactor look for on its own, or null when it is not
+ * worth scanning for: shorter than 8 characters, or a plain word made of letters only (`support`, `administrator`), which is ordinary page text. The host's generated accounts
+ * (`rovara-<profile>-<hex>`) are returned. The full email is always scanned for; this decides only the local part, and both sides call it, so they agree.
+ */
+export function e2eScannableEmailLocalPart(email: string): string | null {
+  const at = email.lastIndexOf("@");
+  const local = at < 0 ? email : email.slice(0, at);
+  if (local.length < E2E_SCANNABLE_LOCAL_PART_MIN_LENGTH) return null;
+  if (/^[A-Za-z]+$/.test(local)) return null;
+  return local;
 }

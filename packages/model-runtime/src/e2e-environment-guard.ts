@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type E2EModelRouteDefinition } from "@agentx/contracts";
 
 /**
@@ -63,4 +66,67 @@ export function assertE2ERouteMatchesInstallation(definition: Pick<E2EModelRoute
   if (!isKeyedModelProvider(definition.provider)) return;
   const secret = setting(KEYED_MODEL_PROVIDERS[definition.provider].secretArnVariable);
   if (secret === "" || secret !== definition.secretArn) throw reapprove("the route's provider secret is not this worker's provider secret");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The shared AWS files (Task 4.3a, Rulings M4-Q and DB-11)
+// ---------------------------------------------------------------------------------------------------------------------
+
+type IniEntry = { section: string; key: string; value: string };
+
+/** The `key = value` lines of an AWS shared file with the section each sits in. Comments (`#`, `;`) and blank lines are skipped; nothing here is a secret that is kept or returned. */
+function iniEntries(text: string): IniEntry[] {
+  const entries: IniEntry[] = [];
+  let section = "";
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith(";")) continue;
+    const header = /^\[([^\]]*)\]/.exec(line);
+    if (header !== null) { section = (header[1] ?? "").trim(); continue; }
+    const equals = line.indexOf("=");
+    if (equals < 0) continue;
+    entries.push({ section, key: line.slice(0, equals).trim().toLowerCase(), value: line.slice(equals + 1).trim() });
+  }
+  return entries;
+}
+
+/** The keys of a profile section that name a credential source of their own, which the instance role must not be shadowed by. */
+const isCredentialSourceKey = (key: string): boolean => key === "aws_access_key_id" || key === "credential_process" || key === "role_arn" || key === "credential_source" || key === "web_identity_token_file" || key.startsWith("sso_");
+const isDefaultSection = (section: string): boolean => section === "default" || section === "profile default";
+
+/**
+ * Refuses to start the model route when the shared AWS files of the worker's user can redirect or re-authenticate the call (the environment checks above cannot see them):
+ *
+ * - `~/.aws/config`: `endpoint_url` anywhere (a profile or a `services` section), or `max_attempts` other than 1 (the AWS SDK would retry a billed call), or a credential source
+ *   in the `[default]` profile;
+ * - `~/.aws/credentials`: a `[default]` entry with `aws_access_key_id`, `credential_process`, `sso_*`, `role_arn`, `credential_source` or `web_identity_token_file`, which the SDK reads before the instance role (Ruling DB-11).
+ *
+ * A missing file is no setting. A file that exists and cannot be read is a refusal, since what it holds is unknown. The error names the file and the key and never a value.
+ */
+export function assertE2ESharedAwsConfigCannotRedirect(options: { homedir?: string; readFile?: (path: string) => string | undefined } = {}): void {
+  const home = options.homedir ?? homedir();
+  const read = options.readFile ?? ((path: string): string | undefined => {
+    try { return readFileSync(path, "utf8"); } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") return undefined;
+      throw error;
+    }
+  });
+  const found: string[] = [];
+  const check = (name: string, relative: string, judge: (entry: IniEntry) => string | undefined): void => {
+    const path = join(home, relative);
+    let text: string | undefined;
+    try { text = read(path); } catch { found.push(`${name} cannot be read`); return; }
+    if (text === undefined) return;
+    for (const entry of iniEntries(text)) { const why = judge(entry); if (why !== undefined) found.push(`${name} sets ${why}`); }
+  };
+  check("~/.aws/config", join(".aws", "config"), (entry) => {
+    if (entry.key === "endpoint_url") return "endpoint_url";
+    if (entry.key === "max_attempts" && entry.value !== "1") return "max_attempts";
+    if (isDefaultSection(entry.section) && isCredentialSourceKey(entry.key)) return entry.key.startsWith("sso_") ? "sso_*" : entry.key;
+    return undefined;
+  });
+  check("~/.aws/credentials", join(".aws", "credentials"), (entry) => (isDefaultSection(entry.section) && isCredentialSourceKey(entry.key) ? (entry.key.startsWith("sso_") ? "sso_*" : entry.key) : undefined));
+  if (found.length === 0) return;
+  throw agentXError("RUNTIME_UNAVAILABLE", `this worker's shared AWS files can redirect or re-authenticate model calls (${[...new Set(found)].join("; ")}); the AI navigation agent does not start`);
 }

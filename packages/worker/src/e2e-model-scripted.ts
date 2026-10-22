@@ -1,9 +1,4 @@
 import { createHash } from "node:crypto";
-import {
-  E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
-  E2EModelRouteDefinitionSchema,
-  type E2EModelRouteDefinition,
-} from "@agentx/contracts";
 import type { E2EInvoke, E2EInvokeInput, E2EInvokeOutput } from "@agentx/model-runtime";
 
 /**
@@ -21,21 +16,8 @@ import type { E2EInvoke, E2EInvokeInput, E2EInvokeOutput } from "@agentx/model-r
  * `Goal: ...` line, or pass `goalCandidates`.
  */
 
-export const SCRIPTED_E2E_ROUTE_ID = "rovara-scripted/v1";
-export const SCRIPTED_E2E_MODEL_ID = "rovara-scripted-v1";
-
-/** The scripted route is admitted only for a qualification policy, or when the CI harness sets `ROVARA_E2E_SCRIPTED_MODEL=1`. The registry refuses it for project setups. */
-export function isScriptedE2EModelAdmissible(input: { policyScope: "standard" | "qualification"; environment: NodeJS.ProcessEnv }): boolean {
-  return input.policyScope === "qualification" || input.environment["ROVARA_E2E_SCRIPTED_MODEL"] === "1";
-}
-
-export function scriptedE2ERouteDefinition(overrides: Partial<Pick<E2EModelRouteDefinition, "revision" | "budgets">> = {}): E2EModelRouteDefinition {
-  return E2EModelRouteDefinitionSchema.parse({
-    routeId: SCRIPTED_E2E_ROUTE_ID, revision: 1, scope: "qualification", provider: "rovara-scripted", region: null,
-    modelId: SCRIPTED_E2E_MODEL_ID, inferenceProfileArn: null, secretArn: null, openRouter: null, budgets: { ...E2E_MODEL_ROUTE_DEFAULT_BUDGETS },
-    promptProtocol: "e2e-0.20.0-act/v1", sampling: "provider-default", thinking: "off", effort: null, vision: false, ...overrides,
-  });
-}
+// The scripted route's definition and its admission rule live in model-runtime (`e2e-route-derive`), where the worker's check of an admission's route also reads them.
+export { SCRIPTED_E2E_MODEL_ID, SCRIPTED_E2E_ROUTE_ID, isScriptedE2EModelAdmissible, scriptedE2ERouteDefinition } from "@agentx/model-runtime";
 
 export type ScriptedTurn =
   | { kind: "tap"; name: RegExp }

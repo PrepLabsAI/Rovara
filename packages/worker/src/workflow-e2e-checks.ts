@@ -7,7 +7,7 @@ import {
   canonicalJson, e2eScenarioBundleDigest, isE2EApplicationAdmissionSchemaVersion, selectE2EExecutionPlan, verifyE2ESourceSnapshot,
   type E2ESourceSnapshot, type E2EWorkflowAdmissionRef, type WorkerInvocation,
 } from "@agentx/contracts";
-import { executeWorkflowE2EApplicationChecks, type WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
+import { executeWorkflowE2EApplicationChecks, type WorkflowE2EApplicationRuntime, type WorkflowE2EModelChannelDependencies } from "./workflow-e2e-application-checks.js";
 import { collectE2EActualCliRun, compileE2EScenarios, e2ePrivateTransferMaxBytes, e2eSnapshotSourceDigest, observeInstalledRuntimeManifestForHost, runE2EActualCli } from "@agentx/verifier";
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -65,6 +65,9 @@ export async function executeWorkflowE2EChecks(input: {
   application?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime);
   /** The local directory of the candidate repository with this id, to stage the candidate commit from (`git ls-tree` and `git cat-file`). An application admission needs it; there is no fallback to `sourceRoot`. */
   candidateRepositoryRoot?: (repositoryId: string) => string | undefined;
+  /** M1.4 Task 4.3a: the day budget callback and the model channel's seams, for an application admission with AI navigation steps. */
+  modelBudget?: WorkflowE2EModelChannelDependencies["budget"];
+  modelChannel?: Omit<WorkflowE2EModelChannelDependencies, "budget">;
 }): Promise<{ evidenceRef: { key: string; sha256: string }; candidateDigest: string; roundId: string; processStatus: "SUCCEEDED" | "FAILED" }> {
   const { invocation } = input;
   const reference = invocation.payload.workflowE2EAdmission;
@@ -88,7 +91,8 @@ export async function executeWorkflowE2EChecks(input: {
       },
       candidateRepositoryRoot: input.candidateRepositoryRoot ?? (() => undefined),
       saveEvidence: input.saveEvidence, ...(input.deadlineAt === undefined ? {} : { deadlineAt: input.deadlineAt }),
-      ...(input.signal === undefined ? {} : { signal: input.signal }), throwIfCancelled });
+      ...(input.signal === undefined ? {} : { signal: input.signal }), throwIfCancelled,
+      ...(input.modelBudget === undefined ? {} : { modelChannel: { ...input.modelChannel, budget: input.modelBudget } }) });
   }
   const admission = parsedAdmission;
   if (admission.schemaVersion !== "workflow-e2e-admission/v1" || admission.taskId !== reference.taskId

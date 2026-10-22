@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, cp, lstat, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_DATA_VOLUME_DEFAULT_MIB, E2E_EXECUTOR_APP_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, e2eApplicationRecipeOrigin, readE2EApplicationProjectContract, redactText,
+import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_DATA_VOLUME_DEFAULT_MIB, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, e2eApplicationRecipeOrigin, readE2EApplicationProjectContract, redactText,
   type E2EApplicationExecutionAdmission, type E2ECollection, type E2EExecutorAccount, type E2EExecutorPlan, type E2EFormLogin, type E2ELease, type E2ERunInput } from "@agentx/contracts";
 import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
-import { validateE2EApplicationExecutionAdmission } from "../application-scenarios.js";
+import { e2eApplicationGroupUsesModel, validateE2EApplicationExecutionAdmission } from "../application-scenarios.js";
 import { createCredentialRedactor } from "../executor/redact.js";
 import { executorContainerArgs } from "./executor-container.js";
 import { verifyExecutorSeccompProfile } from "./executor-seccomp.js";
@@ -80,6 +80,10 @@ export const DEFAULT_DEADLINE_GRACE_MS = 15_000;
 /** The pinned Node base image that builds a web/API candidate and runs it. */
 export const WEB_API_BUILD_IMAGE = "public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5";
 const ADMIN_TIMEOUT_MS = 30_000;
+/** The longest model socket path the host accepts: the smaller of the two platforms' unix socket limits, so a test on a Mac binds what a Linux worker does. */
+export const MODEL_SOCKET_PATH_MAX_BYTES = 103;
+/** Where the worker's proxy listens for a run: `<runRoot>/<runId>/model/model.sock`. The host and the tests that bound the production run root share this one layout. */
+export function e2eModelSocketPath(runRoot: string, runId: string): string { return join(runRoot, runId, "model", "model.sock"); }
 const MAX_TAIL_BYTES = 64 * 1024;
 const APP_PORT = 4317;
 const BUILD_COPY_TIMEOUT_MS = 120_000;
@@ -110,7 +114,16 @@ const IPV4 = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}
 const sha = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
 export type DockerApplicationUnavailableReason = "build-failed" | "app-unhealthy" | "app-exited" | "deadline-exceeded" | "executor-failed"
-  | "executor-result-mismatch" | "mock-unavailable" | "seed-failed" | "login-failed" | "cancelled";
+  | "executor-result-mismatch" | "mock-unavailable" | "seed-failed" | "login-failed" | "model-channel-unavailable" | "cancelled";
+
+/**
+ * The worker's model channel for one group (M1.4 Task 4.3a): given a socket path under the run's workspace and the run's account credentials (which the model must never be shown), it
+ * starts the per-run proxy there and returns what closes it. The host calls `open` once, before it starts the executor container (a bind mount of the socket pins the file, so the
+ * proxy must already be listening and is never re-created), mounts the socket into the executor container alone, and calls `close` when the executor is done, whatever its outcome.
+ */
+export type DockerApplicationModelChannel = Readonly<{
+  open(input: { socketPath: string; credentialSet: { passwords: string[]; emails: string[] }; deadlineAt: number; signal: AbortSignal }): Promise<{ close(): Promise<unknown> }>;
+}>;
 
 export type DockerApplicationHostDeps = Readonly<{
   docker: DockerCli;
@@ -151,6 +164,11 @@ export type DockerApplicationHostDeps = Readonly<{
    * happen for a run that is then stopped by the deadline or a cancellation, so it never implies a result, let alone PASS.
    */
   onRunOutput?(run: { outDir: string; accountProfileIds: readonly string[]; containsCredential(bytes: Uint8Array): boolean }): Promise<void>;
+  /**
+   * The model channel of a group that has an `agent` step, and only of such a group: building a host for a group with an agent step without it, or for a group without one with it,
+   * throws. It is the real gate between a pinned route and a running proxy (Ruling DB-1); the worker supplies it per group and only after it re-derived the route.
+   */
+  modelChannel?: DockerApplicationModelChannel;
   /** Test seams: build the lifecycle's readback and the collector's protected inputs once cleanup is confirmed. */
   assemble?: typeof assembleExecutorActualRun;
   assembleCollectionInputs?: typeof assembleDockerCollectionInputs;
@@ -224,6 +242,12 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   if (!foundSuite || !foundBinding) throw new Error("docker application host group is not a runnable application group of its admission");
   const compiled = foundSuite;
   const binding = foundBinding;
+  // The model channel belongs to the group that has an agent step and to no other (Ruling DB-1): the mount, the plan field and the proxy are all decided by this one question.
+  const usesModel = e2eApplicationGroupUsesModel(compiled);
+  const modelRoute = validated.admission.modelRoute;
+  if (usesModel && deps.modelChannel === undefined) throw new Error("docker application host group has an AI navigation step and needs the model channel");
+  if (!usesModel && deps.modelChannel !== undefined) throw new Error("docker application host group has no AI navigation step and must not get the model channel");
+  if (usesModel && modelRoute === null) throw new Error("docker application host group has an AI navigation step but its admission pins no model route");
   if (!SAFE_RUN_ID.test(binding.runId)) throw new Error("docker application host run id is not a plain identifier");
   const runId = binding.runId;
   const applicationIds = compiled.originByApplicationId.map((item) => item.applicationId);
@@ -273,7 +297,12 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const workspace = join(deps.runRoot, runId);
   // The mock fixtures (read-only to the mocks) and the mock ledgers (written by the mocks alone) sit apart from the executor's out directory, which the executor and the app never see.
   const dirs = { app: join(workspace, "app"), owned: join(workspace, "owned"), out: join(workspace, "out"), plan: join(workspace, "plan.json"),
-    mock: join(workspace, "mock"), mockOut: join(workspace, "mock-out"), resolv: join(workspace, "resolv.conf") };
+    mock: join(workspace, "mock"), mockOut: join(workspace, "mock-out"), resolv: join(workspace, "resolv.conf"), model: join(workspace, "model") };
+  /** Where the worker's proxy listens for this run; only the executor container gets it, at `E2E_MODEL_CHANNEL_SOCKET_PATH`. */
+  const modelSocket = e2eModelSocketPath(deps.runRoot, runId);
+  // A unix socket path is limited to 107 bytes on Linux and 103 on macOS. The worker's run root leaves this one 97, so a deeper root is a configuration error to say at once, not an
+  // address the proxy fails to bind in the middle of a run.
+  if (usesModel && Buffer.byteLength(modelSocket) > MODEL_SOCKET_PATH_MAX_BYTES) throw new Error("docker application host run root is too deep for the model socket path");
   const mockContainers = [{ origin: SINKHOLE_ORIGIN, componentId: null as string | null, fixture: null as (typeof originPlan.mocked)[number]["fixture"] | null },
     ...originPlan.mocked.map((item) => ({ origin: item.originRef, componentId: item.componentId, fixture: item.fixture }))]
     .map((item) => ({ ...item, name: `rovara-mock-${runId}-${item.origin}`, alias: `mock-${item.origin}` }));
@@ -283,7 +312,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const deadlineAt = Date.parse(binding.deadlineAt);
 
   const state = { allocated: false, closed: false, cleanupConfirmed: false, outcome: null as Outcome | null, executing: null as Promise<unknown> | null, startedAt: "", cleanup: null as null | { removedAt: string; containers: string[] },
-    appLogTail: "", buildLogTail: "", executorLogTail: "", buildResult: null as DockerBuildResult | null, redactor: createCredentialRedactor([]), createdAt: 0 };
+    appLogTail: "", buildLogTail: "", executorLogTail: "", buildResult: null as DockerBuildResult | null, redactor: createCredentialRedactor([]), createdAt: 0,
+    /** The run's account credentials, which the model channel's scan is given and nothing else is. */
+    credentials: { passwords: [] as string[], emails: [] as string[] }, modelChannel: null as null | { close(): Promise<unknown> }, modelChannelClosing: null as Promise<void> | null };
   const redact = (text: string) => tailOf(state.redactor.text(redactText(text)), MAX_TAIL_BYTES);
   const admin = (args: string[], signal: AbortSignal = new AbortController().signal) => docker.run(args, { signal, timeoutMs: ADMIN_TIMEOUT_MS });
   /** A signal that fired at or after the plan deadline is the deadline, not a cancellation. */
@@ -298,7 +329,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     // A throwaway root container with no network and only this directory mounted removes what this user cannot. The executor image
     // is the one image certain to be on the host already.
     await docker.run(["run", "--rm", "--pull=never", "--label", label, "--network", "none", "--user", "0:0", "--entrypoint", "rm", "-v", `${workspace}:/d`, ...BLANKED_ENV,
-      deps.executorImage, "-rf", "/d/app", "/d/out", "/d/owned", "/d/mock", "/d/mock-out"],
+      deps.executorImage, "-rf", "/d/app", "/d/out", "/d/owned", "/d/mock", "/d/mock-out", "/d/model"],
       { signal: new AbortController().signal, timeoutMs: ADMIN_TIMEOUT_MS }).catch(() => undefined);
     await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -319,6 +350,14 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const left = [containersLeft, networksLeft, ...volumesLeft].some((result) => result.code !== 0 || result.stdout.trim() !== "");
     const workspaceGone = await lstat(workspace).then(() => false, () => true);
     return { confirmed: !left && workspaceGone, containers };
+  }
+
+  /** Closes the model channel once, whoever asks first and however many times; a failure to close is not a verdict, and the workspace removal unlinks the socket in any case. */
+  function closeModelChannel(): Promise<void> {
+    const channel = state.modelChannel;
+    if (channel === null) return Promise.resolve();
+    state.modelChannelClosing ??= (async () => { try { await channel.close(); } catch { /* the socket directory goes with the workspace */ } })();
+    return state.modelChannelClosing;
   }
 
   /** The CLI's 124 (timed out) and 130 (stopped) are not exit codes of the command, which never got to finish. */
@@ -551,12 +590,26 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const executorStop = new AbortController();
     const executorSignal = AbortSignal.any([signal, executorStop.signal]);
     const remaining = Math.max(1, deadlineAt - deps.now()) + graceMs;
+    // The model channel is listening before the executor container exists: a bind mount of the socket file pins that file, so the proxy opens first and is never re-created. A
+    // channel that cannot be opened is a run that cannot start; no executor runs without the model it was admitted with.
+    if (deps.modelChannel !== undefined) {
+      try {
+        state.modelChannel = await deps.modelChannel.open({ socketPath: modelSocket, credentialSet: { passwords: [...state.credentials.passwords], emails: [...state.credentials.emails] },
+          deadlineAt, signal: executorSignal });
+      } catch {
+        // What failed is a fixed fact, not the error's own words (a guard names variables, a socket error names paths).
+        appendBuildLog("the model channel could not be opened, so the executor was not started\n");
+        return { kind: "unavailable", reason: signal.aborted ? stopReason() : "model-channel-unavailable" };
+      }
+    }
     let appGone = false;
     const watching = new AbortController();
     const executorRun = docker.run(["run", "--name", executorName, "--pull=never", "--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`, "--network", network,
       // The executor's sandbox and limits are one shared definition (the image smoke test runs with the same). Only the executor leaves Docker's default seccomp
       // profile, and only for the namespace syscalls Chromium's own sandbox needs; no capability is added.
-      ...executorContainerArgs(seccompProfile), "-v", `${dirs.plan}:/run/rovara/plan.json:ro`, "-v", `${dirs.out}:/out`, ...BLANKED_ENV,
+      ...executorContainerArgs(seccompProfile), "-v", `${dirs.plan}:/run/rovara/plan.json:ro`, "-v", `${dirs.out}:/out`,
+      // The executor container alone holds the socket; the app, the seed, the build, the mocks and the keeper never do.
+      ...(usesModel ? ["-v", `${modelSocket}:${E2E_MODEL_CHANNEL_SOCKET_PATH}`] : []), ...BLANKED_ENV,
       deps.executorImage], { signal: executorSignal, timeoutMs: remaining });
     const watch = (async () => {
       while (!watching.signal.aborted && !executorSignal.aborted) {
@@ -571,6 +624,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const executor = await executorRun;
     watching.abort();
     await watch.catch(() => undefined);
+    // The executor is done (or killed): the socket closes now, so a straggler cannot make a call that no step is waiting for.
+    await closeModelChannel();
     // `docker run` prints nothing of why the executor exited 2: that is in the executor's own log in the out directory. A code other than 0 or 1 is a run
     // without a trustworthy result, so its log tail and the code itself are kept to explain it (a refused or failed `docker run` shows in stderr and the code).
     // 124 and 130 mean the docker CLI was killed (the deadline, the caller) and its container may still be running, so nothing is read from the out directory then.
@@ -622,9 +677,12 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     state.createdAt = deps.now();
     const run = createRunAccounts(profiles);
     state.redactor = createCredentialRedactor(run.accounts);
+    state.credentials = { passwords: run.accounts.map((account) => account.password), emails: run.accounts.map((account) => account.email) };
     const plan: E2EExecutorPlan = E2EExecutorPlanSchema.parse({ schemaVersion: "e2e-executor-plan/v1", runId, groupId: deps.groupId, admission: validated.admission,
       admissionDigest: validated.admission.admissionDigest, app: { origin: E2E_EXECUTOR_APP_ORIGIN, health: { path: launch.health.path, expectedStatus: launch.health.expectedStatus,
-        timeoutMs: Math.min(launch.start.timeoutMs, 120_000) } }, deadlineAt, accounts: run.accounts });
+        timeoutMs: Math.min(launch.start.timeoutMs, 120_000) } }, deadlineAt, accounts: run.accounts,
+      // The route is the admission's own: the plan names it and the executor holds it to the admission it decodes.
+      ...(!usesModel ? {} : { modelChannel: { protocol: E2E_MODEL_CHANNEL_SCHEMA_VERSION, socketPath: E2E_MODEL_CHANNEL_SOCKET_PATH, routeId: modelRoute!.routeId, routeRevision: modelRoute!.routeRevision } }) });
     try {
       await sweepStaleRovaraRuns(docker, STALE_RUN_SWEEP_AGE_MS, { now: deps.now, runRoot: deps.runRoot }).catch(() => 0);
       await mkdir(deps.runRoot, { recursive: true, mode: 0o700 });
@@ -672,6 +730,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
         const running = (async (): Promise<Outcome> => {
           try { return await execute(executeSignal); }
           catch { return { kind: "unavailable", reason: executeSignal.aborted ? stopReason() : "executor-failed" }; }
+          finally { await closeModelChannel(); }
         })();
         state.executing = running;
         let outcome = await running;
@@ -689,6 +748,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
         // An execution still in flight (stopped by the deadline or a cancellation) settles first: it is bounded by its own kills, and
         // nothing may snapshot the out directory or record an outcome while the run's resources are being removed.
         await state.executing?.catch(() => undefined);
+        await closeModelChannel();
         const removed = await removeOwned();
         state.closed = true;
         state.cleanupConfirmed = removed.confirmed;
@@ -755,5 +815,20 @@ export async function sweepStaleRovaraRuns(docker: DockerCli, olderThanMs: numbe
   for (const row of staleVolumes) await docker.run(["volume", "rm", "-f", row.name], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
   const runIds = new Set([...staleContainers, ...staleNetworks, ...staleVolumes].map((row) => row.runId));
   if (options.runRoot) for (const runId of runIds) await rm(join(options.runRoot, runId), { recursive: true, force: true }).catch(() => undefined);
+  // A worker that was killed while a run's model proxy listened leaves its socket behind, with no container to find it by. A model socket older than the sweep age belongs to no live run
+  // (every deadline is below it), so its directory is removed, and the run counts as swept.
+  if (options.runRoot) for (const runId of await staleModelSocketRuns(options.runRoot, olderThanMs, now)) { await rm(join(options.runRoot, runId, "model"), { recursive: true, force: true }).catch(() => undefined); runIds.add(runId); }
   return runIds.size;
+}
+
+/** The run ids under `runRoot` whose model socket is older than `olderThanMs`. A name that is not a plain run id, a socket that is not a socket, or an unreadable entry is left alone. */
+async function staleModelSocketRuns(runRoot: string, olderThanMs: number, now: number): Promise<string[]> {
+  const names = await readdir(runRoot).catch(() => [] as string[]);
+  const stale: string[] = [];
+  for (const name of names) {
+    if (!SAFE_RUN_ID.test(name)) continue;
+    const info = await lstat(join(runRoot, name, "model", "model.sock")).catch(() => null);
+    if (info !== null && info.isSocket() && now - Math.max(info.mtimeMs, info.ctimeMs) > olderThanMs) stale.push(name);
+  }
+  return stale;
 }

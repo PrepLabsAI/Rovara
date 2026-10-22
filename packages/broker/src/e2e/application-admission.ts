@@ -1,20 +1,20 @@
 import { createHash } from "node:crypto";
 import {
-  E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
+  E2EApplicationPlanIntentSchema, E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
   e2eRuntimeBindingKey,
-  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, inspectE2EApplicationRepository, validateE2EAppBuildBinding, withE2EAnonymousTargets,
+  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimits, e2ePolicyDigest, inspectE2EApplicationRepository, validateE2EAppBuildBinding, withE2EAnonymousTargets,
   type E2ECreatorAuthority, type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
   type E2EApplicationLaunchTarget, type E2EApplicationPlanIntent, type E2EAppArtifactRef, type E2EAppBuildManifest, type E2ERegisteredRuntime, type E2ERound,
   type E2EApplicationSelectionRecord, type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
 } from "@agentx/contracts";
 import {
   DEFAULT_DEADLINE_GRACE_MS, E2E_EXECUTOR_HOST_DESCRIPTOR, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, compileE2EApplicationScenarios, decodeE2EApplicationExecutionAdmission,
-  encodeE2EApplicationExecutionAdmission, validateE2EApplicationBuildSourceManifest, validateE2EApplicationExecutionAdmission, webApiApplicationLaunchTarget,
+  e2eApplicationGroupUsesModel, encodeE2EApplicationExecutionAdmission, validateE2EApplicationBuildSourceManifest, validateE2EApplicationExecutionAdmission, webApiApplicationLaunchTarget,
   type E2EApplicationCompilationContext,
 } from "@agentx/verifier";
-import { ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal } from "./application-dispatch-check.js";
+import { ApplicationBaselineSkipped, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal } from "./application-dispatch-check.js";
 import { definitionOfAccountRef, type E2EAccountRegistryEntry } from "./application-account-registry.js";
-import { evaluateApplicationPlanApproval } from "./application-plan-approval.js";
+import { applicationIntentDigest, evaluateApplicationPlanApproval } from "./application-plan-approval.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 
@@ -73,6 +73,27 @@ const refusal = applicationRoundRefusal;
 const failure = (error: unknown) => (error instanceof Error ? error.message : "unreadable input");
 
 /**
+ * The plan a baseline round runs (Ruling DD): the approved plan without the scenarios that have an `agent` step, which a baseline never runs (it has no model route), and
+ * with the targets, runtime references, accounts, source-backed mocks and unavailable references that only those scenarios used dropped with them. A plan with no AI navigation
+ * step is returned as it is. A plan whose every scenario has one has nothing to run: `ApplicationBaselineSkipped`.
+ */
+export function baselineIntentOf(intent: E2EApplicationPlanIntent): E2EApplicationPlanIntent {
+  const kept = intent.scenarios.filter((scenario) => !scenario.steps.some((step) => step.kind === "agent"));
+  if (kept.length === intent.scenarios.length) return intent;
+  if (kept.length === 0) throw new ApplicationBaselineSkipped();
+  const targetIds = new Set(kept.flatMap((scenario) => scenario.requestedTargetIds));
+  const runtimeRefs = intent.applicationRuntimeRefs.filter((ref) => targetIds.has(ref.targetId));
+  const unavailableRefs = (intent.unavailableTargetRefs ?? []).filter((ref) => targetIds.has(ref.targetId));
+  const mockRefs = (intent.mockFixtureRefs ?? []).filter((ref) => targetIds.has(ref.requestedTargetId));
+  const parsed = E2EApplicationPlanIntentSchema.safeParse({ ...intent, scenarios: kept, requestedTargetIds: intent.requestedTargetIds.filter((targetId) => targetIds.has(targetId)),
+    applicationRuntimeRefs: runtimeRefs, ...(intent.unavailableTargetRefs === undefined ? {} : { unavailableTargetRefs: unavailableRefs }),
+    ...(intent.mockFixtureRefs === undefined ? {} : { mockFixtureRefs: mockRefs }),
+    runtimeAccountRefs: intent.runtimeAccountRefs.filter((account) => runtimeRefs.some((ref) => ref.applicationId === account.applicationId && ref.accountProfileId === account.profileId)) });
+  if (!parsed.success) throw refusal(`the plan without its AI navigation steps is not a plan a baseline can run: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+  return parsed.data;
+}
+
+/**
  * Builds the application admission a worker decodes (`decodeE2EApplicationExecutionAdmission`) for one round, from the approved intent, the exported
  * candidate and the approved setup, and checks it with the worker's own validator before returning it. Every input that is missing or does not agree is a
  * refusal (an `ApplicationDispatchRefusal`) with a specific reason: nothing is defaulted, and nothing falls back to the portable path.
@@ -88,11 +109,17 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
       const stored = E2EPolicySchema.parse(input.policy);
       // Ruling CX: a baseline round never runs agent steps. Its policy is the model-free projection of the pinned one, so its selection leaves agent scenarios unavailable
       // (`agent-route-not-approved`), and its admission carries `modelRoute: null` and group bindings with `modelRouteRevision: null`. A candidate round keeps the pinned route.
-      const routed = input.baseline === undefined ? stored : { ...stored, modelRouteRevision: null };
+      // Its limits are the model-free ones too (Ruling DD): a route-pinned policy carries limits sized for agent steps, which a round that runs none does not get.
+      const routed = input.baseline === undefined ? stored : { ...stored, modelRouteRevision: null,
+        limits: stored.modelRouteRevision === null ? stored.limits : e2eEffectiveRoundLimits(stored.limits, false) };
       return { ...routed, targets: withE2EAnonymousTargets(routed.targets, inspectE2EApplicationRepository(input.snapshot, input.snapshot.candidate).anonymous) };
     } catch (error) { throw refusal(`the pinned project policy is not valid: ${failure(error)}`); }
   })();
-  const refs = input.intent.applicationRuntimeRefs;
+  // Ruling DD: a baseline runs the approved plan without its AI navigation scenarios; a plan that is only such scenarios has no baseline (ApplicationBaselineSkipped, which gates nothing).
+  const intent = input.baseline === undefined ? input.intent : baselineIntentOf(input.intent);
+  const droppedForBaseline = intent !== input.intent;
+  const baselinePolicy = droppedForBaseline ? { ...policy, baselineScenarioIds: policy.baselineScenarioIds.filter((id) => intent.scenarios.some((scenario) => scenario.scenarioId === id)) } : policy;
+  const refs = intent.applicationRuntimeRefs;
   if (refs.length === 0) throw new ApplicationPlanDefect("the approved plan has no target that can run application scenarios, so there is nothing to run");
 
   // A profile registers a web row and an API row, so the rows are told apart by kind (Task 3.4): the verifier gets the READY row of each kind the plan runs, and no other.
@@ -101,8 +128,8 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   const roundKinds = (kinds as Array<"web" | "api">).sort();
   const rows = input.registeredRuntimes.filter((row) => (row.capabilities.kind === "web" || row.capabilities.kind === "api") && roundKinds.includes(row.capabilities.kind));
 
-  const evaluation = evaluateApplicationPlanApproval({ intent: input.intent, taskId: input.taskId, artifact: input.artifact, snapshot: input.snapshot, setupProposal: input.setupProposal,
-    setupApproval: input.setupApproval, policy, registeredRuntimes: rows, runtimeCatalogId: input.runtimeCatalogId, runtimeBinding: input.runtimeBinding, now: input.now,
+  const evaluation = evaluateApplicationPlanApproval({ intent, taskId: input.taskId, artifact: input.artifact, snapshot: input.snapshot, setupProposal: input.setupProposal,
+    setupApproval: input.setupApproval, policy: baselinePolicy, registeredRuntimes: rows, runtimeCatalogId: input.runtimeCatalogId, runtimeBinding: input.runtimeBinding, now: input.now,
     planDigest: input.planDigest, accounts: { entries: input.accountEntries, mode: "current", pinned: input.recordedSelection.accountRefs } });
   if (!evaluation.ok) {
     throw evaluation.scope === "runtime" ? applicationRuntimeRefusal(evaluation.reason) : evaluation.scope === "plan" ? new ApplicationPlanDefect(evaluation.reason)
@@ -111,9 +138,15 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   // The selection derived here, for the candidate and this round, must be the one the Owner approved on what decides what runs: the targets, the runtime rows and the intent.
   const approved = input.recordedSelection;
   const derived = evaluation.selection;
-  const differs = canonicalJson([...derived.executableTargetIds].sort()) !== canonicalJson([...approved.executableTargetIds].sort()) ? "the executable targets"
-    : canonicalJson(derived.runtimeRows) !== canonicalJson(approved.runtimeRows) ? "the runtime rows"
-      : derived.intentDigest !== approved.intentDigest ? "the plan intent" : undefined;
+  // A baseline without its AI navigation scenarios runs a part of what was approved: its targets and rows are among the approved ones, and the plan it was cut from is the approved one.
+  const approvedRows = new Set(approved.runtimeRows.map((row) => canonicalJson(row)));
+  const differs = droppedForBaseline
+    ? (derived.executableTargetIds.some((targetId) => !approved.executableTargetIds.includes(targetId)) ? "the executable targets"
+      : derived.runtimeRows.some((row) => !approvedRows.has(canonicalJson(row))) ? "the runtime rows"
+        : applicationIntentDigest(input.intent) !== approved.intentDigest ? "the plan intent" : undefined)
+    : canonicalJson([...derived.executableTargetIds].sort()) !== canonicalJson([...approved.executableTargetIds].sort()) ? "the executable targets"
+      : canonicalJson(derived.runtimeRows) !== canonicalJson(approved.runtimeRows) ? "the runtime rows"
+        : derived.intentDigest !== approved.intentDigest ? "the plan intent" : undefined;
   if (differs !== undefined) throw refusal(`the selection derived for this candidate differs from the one that was approved in ${differs}`);
   const { derivation } = evaluation;
   const selection = derivation.selectionInput;
@@ -166,7 +199,11 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   const signedBaseline = input.baseline === undefined ? undefined : { purpose: "baseline" as const, baseCommitSha: input.baseline.baseCommitSha, attempt: input.baseline.attempt };
   const admittedAtMs = input.now;
   const admittedAt = new Date(admittedAtMs).toISOString();
-  const spanMs = Math.min(policy.limits.runTimeoutMs, E2E_HARD_LIMITS.runTimeoutMs);
+  // A project that pinned a route has policy limits sized for agent steps; a round with no group that has an agent step runs under the model-free limits (Task 4.3a). A policy
+  // that pinned no route keeps the limits it was approved with.
+  const roundUsesModel = groups.some((group) => e2eApplicationGroupUsesModel({ bundle: derivation.bundle, expectedCases: group.expectedCases }));
+  const roundLimits = selection.policy.modelRouteRevision === null ? selection.policy.limits : e2eEffectiveRoundLimits(selection.policy.limits, roundUsesModel);
+  const spanMs = Math.min(roundLimits.runTimeoutMs, E2E_HARD_LIMITS.runTimeoutMs);
   // The run is torn down at its deadline plus the host's grace; the stale-run sweep must never reach a live run.
   if (spanMs + DEFAULT_DEADLINE_GRACE_MS >= STALE_RUN_SWEEP_AGE_MS) throw applicationRuntimeRefusal("the round's allowed run time is not shorter than the stale-run sweep");
   const deadlineAt = new Date(admittedAtMs + spanMs).toISOString();
@@ -252,7 +289,7 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     return { binding, admitted };
   });
   const round: E2ERound = E2ERoundSchema.parse({ schemaVersion: 1, roundId: input.roundId, taskId: input.taskId, operationId: input.operationId, operationFence: input.operationFence,
-    workflowRevision: input.workflowRevision, executionPlanDigest: plan.digest, admittedAt, deadlineAt, limits: selection.policy.limits, groupBindings: groupRuns.map((item) => item.binding) });
+    workflowRevision: input.workflowRevision, executionPlanDigest: plan.digest, admittedAt, deadlineAt, limits: roundLimits, groupBindings: groupRuns.map((item) => item.binding) });
 
   const wire = { candidate: input.snapshot.candidate, commitSha: input.snapshot.commitSha, treeSha: input.snapshot.treeSha, treeComplete: true as const,
     treePaths: input.snapshot.treePaths, sources: input.snapshot.sources.map((source) => {

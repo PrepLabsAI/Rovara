@@ -223,6 +223,7 @@ import {
   type E2ERegisteredRuntime,
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
+  E2E_MODEL_FREE_LIMITS,
   WorkerInvocationSchema,
   workflowPublicationContext,
   workflowPublicationContextDigest,
@@ -233,7 +234,7 @@ import type { DisplayArtifact } from "../e2e/application-display.js";
 import { loadStoredScenarioResults, loadWorkflowE2EArtifact as loadStoredWorkflowE2EArtifact, resultsWithStoredArtifacts, storeWorkflowE2EArtifacts } from "./workflow-e2e-artifacts.js";
 import { BaselineSourceBodySchema, BaselineSourceWireSchema, StoredBaselineSourceSchema, assessBaselineSource, parseBaselineExport, type ReadyBaselineSource, type StoredBaselineSource } from "./baseline-source.js";
 import {
-  E2E_BASELINE_ATTEMPT, E2E_BASELINE_PURPOSE, E2E_BASELINE_RUN_GRACE_MS, baselineStartItem, markWorkflowE2EBaselineUnavailable, projectE2EBaselineWanted, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord,
+  E2E_BASELINE_ATTEMPT, E2E_BASELINE_PURPOSE, E2E_BASELINE_RUN_GRACE_MS, baselineStartFailureReason, baselineStartItem, markWorkflowE2EBaselineUnavailable, projectE2EBaselineWanted, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord,
   recordWorkflowE2EBaseline, requestWorkflowE2EBaselineRound, verifyBaselineEvidence, type BaselineRecord, type BaselineUnavailableReason,
 } from "./workflow-e2e-baseline.js";
 import type { AuthenticatedIdentity } from "../auth.js";
@@ -296,6 +297,7 @@ import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationR
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
+import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
 import { applicationEvidenceLimits, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification } from "../e2e/application-evidence.js";
@@ -378,8 +380,7 @@ function projectSetupPolicy(proposal: E2ESetupProposal, agentRoute?: { revision:
     capture: PROJECT_SETUP_CAPTURE_POLICY,
     // A setup that pins a route runs under limits derived from the route's budgets (D2); one that pins none keeps the small model-free limits.
     limits: agentRoute === undefined
-      ? { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
-        maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null }
+      ? { ...E2E_MODEL_FREE_LIMITS }
       : e2eAgentRoutePolicyLimits(agentRoute.definition.budgets),
   });
 }
@@ -1059,7 +1060,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|baseline-source|e2e-admission|e2e-evidence|e2e-model-budget|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -4223,7 +4224,7 @@ async function taskOperationParts(
     workspaceId: workspace.id,
     fence,
     projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined, chatgpt !== undefined, input.workflowMode === "IMPLEMENT", input.workflowE2EAdmission !== undefined),
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined, chatgpt !== undefined, input.workflowMode === "IMPLEMENT", input.workflowE2EAdmission !== undefined, input.workflowE2EAdmission?.agentSteps === true),
     payload: {
       conversationId: input.conversationId,
       prompt,
@@ -6198,6 +6199,11 @@ async function handleCallback(
       throw agentXError("CALLBACK_FORBIDDEN", "E2E evidence upload requires the active server-assigned CHECKS operation");
     }
     return json(await handleWorkflowE2EEvidenceUpload(dependencies, operation, parseBody(request.body)), request.requestId);
+  }
+  if (action === "e2e-model-budget") {
+    return json(await handleE2EModelBudgetCallback({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now,
+      log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+      ...(dependencies.e2eAgentInstallation === undefined ? {} : { e2eAgentInstallation: dependencies.e2eAgentInstallation }) }, operation, body), request.requestId);
   }
   if (action === "feedback-bundles") {
     const { acceptedRequirementsDigests: _accepted, ...inputs } = await readFeedbackBundlesForCritic(dependencies, operation, body);
@@ -10912,8 +10918,10 @@ async function startBaselineApplicationRound(
     return outcome === "STALE" ? "GO" : "WAIT";
   } catch (error) {
     // The candidate goes on: its own dispatch makes the same checks and, for a plan that cannot run, blocks the workflow with the reason. The baseline only says it could not be checked.
-    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_not_started", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }));
-    return unavailable(error instanceof ApplicationDispatchRefusal || error instanceof ApplicationPlanDefect ? "refused" : "start-failed");
+    // A plan that is only AI navigation scenarios has nothing to run on the unchanged code (Ruling DD): that is said as its own reason, and it gates nothing.
+    const reason = baselineStartFailureReason(error);
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_not_started", taskId: task.taskId, reason, errorName: error instanceof Error ? error.name : "unknown" }));
+    return unavailable(reason);
   }
 }
 

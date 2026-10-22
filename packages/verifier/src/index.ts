@@ -3,7 +3,8 @@ export const VERIFIER_PROTOCOL = "trusted-e2e/v1" as const;
 export { compileE2EScenarios } from "./scenarios.js";
 export type { E2ECompiledSuite, E2EImmutableCompilationContext } from "./scenarios.js";
 export { compileE2EApplicationScenarios, e2eCompiledRuntime, validateE2ECompiledApplicationAdmission, createE2EApplicationPortableChildBindings,
-  encodeE2EApplicationExecutionAdmission, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "./application-scenarios.js";
+  encodeE2EApplicationExecutionAdmission, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission,
+  e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel } from "./application-scenarios.js";
 export type { E2EApplicationCompilationContext, E2ECompiledApplicationSuite, ValidatedE2EApplicationAdmission } from "./application-scenarios.js";
 export { createE2EApplicationSelectionPacket, compareE2EApplicationPublicList } from "./application-identity.js";
 export { buildE2EApplication } from "./application-build.js";
@@ -62,8 +63,8 @@ export type { E2EApiRuntimePorts, E2EApiRuntimeResponse } from "./api-runtime.js
 export { prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment } from "./application-services.js";
 export type { E2EApplicationPreparationInputs, E2EApplicationEnvironmentPorts } from "./application-services.js";
 export { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRuns, dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest, dockerOwnedCleanupReceipt,
-  e2eRunNetworks, ROVARA_RUN_LABEL, ROVARA_CREATED_LABEL, STALE_RUN_SWEEP_AGE_MS, DEFAULT_DEADLINE_GRACE_MS, WEB_API_BUILD_IMAGE } from "./host/docker-application-host.js";
-export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, DockerApplicationUnavailableReason, DockerBuildResult } from "./host/docker-application-host.js";
+  e2eRunNetworks, e2eModelSocketPath, MODEL_SOCKET_PATH_MAX_BYTES, ROVARA_RUN_LABEL, ROVARA_CREATED_LABEL, STALE_RUN_SWEEP_AGE_MS, DEFAULT_DEADLINE_GRACE_MS, WEB_API_BUILD_IMAGE } from "./host/docker-application-host.js";
+export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, DockerApplicationModelChannel, DockerApplicationUnavailableReason, DockerBuildResult } from "./host/docker-application-host.js";
 export { executorContainerArgs } from "./host/executor-container.js";
 export { installedExecutorSeccompProfilePath, verifyExecutorSeccompProfile } from "./host/executor-seccomp.js";
 export { deriveWebApiProbeObservation, verifyWebApiProbeRecord, type WebApiProbeDerivation } from "./web-api-probe-evidence.js";

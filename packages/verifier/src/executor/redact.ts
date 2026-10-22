@@ -1,4 +1,4 @@
-import type { E2EExecutorAccount } from "@agentx/contracts";
+import { e2eScannableEmailLocalPart, type E2EExecutorAccount } from "@agentx/contracts";
 
 /**
  * Pieces of the base64 (and base64url) text of `value` that stay the same wherever the value sits in a longer encoded string. Base64 groups three bytes into four
@@ -34,12 +34,6 @@ function unwrapBase64Lines(bytes: Buffer): Buffer | null {
   return unwrapped.length === text.length ? null : Buffer.from(unwrapped, "latin1");
 }
 
-/**
- * The part of an email before the `@` (`rovara-PROFILE-HEX`) is a credential too: an app that shows only that part must not leak it either. A short one is left out,
- * since it would be redacted from everything.
- */
-const localPartOf = (email: string): string => { const part = email.slice(0, email.lastIndexOf("@")); return part.length >= 8 ? part : email; };
-
 /** What replaces a session secret in text. */
 export const SESSION_REDACTION_LABEL = "<session>";
 /**
@@ -67,7 +61,10 @@ export type CredentialRedactor = Readonly<{
  * through this: logs and diagnostics are redacted, evidence that carries a credential is refused.
  */
 export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]): CredentialRedactor {
-  const rules: Rule[] = accounts.flatMap((account) => [account.password, account.email, localPartOf(account.email)]
+  // The part of an email before the `@` is a credential too: an app that shows only that part must not leak it either. Which local parts are looked for on their own is the
+  // contracts' one rule (`e2eScannableEmailLocalPart`), shared with the worker's model-channel credential scan; a short one would be redacted from everything.
+  const rules: Rule[] = accounts.flatMap((account) => [account.password, account.email, e2eScannableEmailLocalPart(account.email)]
+    .flatMap((secret) => (secret === null ? [] : [secret]))
     .flatMap((secret) => spellings(secret).map((form) => ({ form, label: `<account:${account.profileId}>`, bytes: true, session: false }))));
   rules.sort((a, b) => b.form.length - a.form.length);
   return Object.freeze({
