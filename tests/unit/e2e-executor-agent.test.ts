@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentError } from "e2e/agent";
-import { E2EAgentActionLedgerSchema, e2eAgentValueDigest, e2eAgentValueKeyId, generateE2EAgentValueKey, parseVerifiedE2EAgentActionLedger, reviewCapturedE2EAgentTrace,
+import { E2EAgentActionLedgerSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_AGENT_TRACE_SUMMARY, e2eAgentValueDigest, e2eAgentValueKeyId, generateE2EAgentValueKey, parseVerifiedE2EAgentActionLedger, reviewCapturedE2EAgentTrace,
   type E2EModelChannelClient, type E2EModelChannelRequest, type E2EModelChannelResponse } from "@agentx/contracts";
 import { createRovaraE2EAgentExecutor, appRelativePath, elideSupersededScreens, parseScreen, parseScreenLine, E2E_AGENT_MESSAGES_SOFT_BUDGET_BYTES } from "../../packages/verifier/src/executor/agent-executor.js";
 import { createE2EAgentLedgerWriter, E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "../../packages/verifier/src/executor/agent-ledger.js";
@@ -27,6 +27,10 @@ const SCREEN = [
   '#n3 button "Download invoices" testid="download-invoices"',
   '#n4 textbox "File name" placeholder="name"',
 ].join("\n");
+
+/** A recording as e2e hands it to the store (Task 4.6a): the actions and the provenance a real trace carries. */
+const rec = (actions: unknown[], extra: Record<string, unknown> = {}) => ({ actions, executor: { name: "rovara-e2e-agent", version: "1" }, summary: "Done.", ...extra });
+const TAP_ORDERS = { name: "tap", summary: 'tap button "Download orders"', target: { role: "button", name: "Download orders", testId: "download-orders" } };
 
 const dirs: string[] = [];
 const temp = () => { const dir = mkdtempSync(join(tmpdir(), "agent-unit-")); dirs.push(dir); return dir; };
@@ -273,24 +277,29 @@ describe("the capture-only cache store (Task 4.3b, test case 3)", () => {
     const store = createE2EAgentCaptureStore();
     expect(store.writable).toBe(true);
     expect(await store.read("a".repeat(64))).toEqual({ status: "miss" });
-    const written = await store.write("a".repeat(64), { actions: [{ name: "tap" }] });
+    const written = await store.write("a".repeat(64), rec([TAP_ORDERS]));
     expect(written!.bytes).toBeGreaterThan(10);
     // A read after the write still misses: a candidate round never replays.
     expect(await store.read("a".repeat(64))).toEqual({ status: "miss" });
     await store.delete("a".repeat(64));
-    expect(store.taken()).toEqual([{ keyHash: "a".repeat(64), trace: { actions: [{ name: "tap" }] } }]);
+    const taken = store.taken();
+    expect(taken).toHaveLength(1);
+    expect(taken[0]).toMatchObject({ keyHash: "a".repeat(64), trace: { actions: [{ name: "tap", target: { role: "button", name: "Download orders", testId: "download-orders" } }] } });
     expect(store.taken()).toEqual([]);
   });
-  it("refuses a trace past the 1 MiB ceiling and more than sixteen held, and replaces a trace written again for the same key", async () => {
-    const store = createE2EAgentCaptureStore();
-    expect(await store.write("b".repeat(64), { actions: [], pad: "x".repeat(1_100_000) })).toBeUndefined();
-    for (let index = 0; index < 16; index += 1) expect(await store.write(String(index).padStart(64, "0"), { actions: [] })).toBeDefined();
-    expect(await store.write("c".repeat(64), { actions: [] })).toBeUndefined();
-    expect(await store.write("0".repeat(64), { actions: [], summary: "again" })).toBeDefined();
-    expect(store.taken()).toHaveLength(16);
-    expect(store.taken()).toEqual([]);
-    expect(await store.write("0".repeat(64), { actions: [], summary: "third" })).toBeDefined();
-    expect(store.taken()).toEqual([{ keyHash: "0".repeat(64), trace: { actions: [], summary: "third" } }]);
+  it("refuses a file past the 128 KiB ceiling and more than three held (a group's agent step cap), and replaces a trace written again for the same key", async () => {
+    const store = createE2EAgentCaptureStore({ maxFileBytes: 700 });
+    expect(await store.write("b".repeat(64), rec([{ ...TAP_ORDERS, target: { role: "button", name: "x".repeat(300), testId: "y".repeat(300) } }, { ...TAP_ORDERS, target: { role: "button", name: "z".repeat(300) } }]))).toBeUndefined();
+    const big = createE2EAgentCaptureStore();
+    for (let index = 0; index < 3; index += 1) expect(await big.write(String(index).padStart(64, "0"), rec([]))).toBeDefined();
+    expect(await big.write("c".repeat(64), rec([]))).toBeUndefined();
+    expect(await big.write("0".repeat(64), rec([], { summary: "again" }))).toBeDefined();
+    expect(big.taken()).toHaveLength(3);
+    expect(big.taken()).toEqual([]);
+    expect(await big.write("0".repeat(64), rec([TAP_ORDERS]))).toBeDefined();
+    expect(big.taken()).toMatchObject([{ keyHash: "0".repeat(64), trace: { actions: [{ name: "tap" }] } }]);
+    expect(E2E_AGENT_TRACE_FILE_MAX_BYTES).toBe(131_072);
+    expect(E2E_AGENT_TRACES_PER_GROUP_MAX).toBe(3);
   });
   it("hands a trace that matches the verified ledger to the review, which keeps it, and discards one the credential scan flagged without touching the ledger", async () => {
     const t = build([{ tool: "tap", input: { target: "n2" } }, DONE]);
@@ -314,30 +323,132 @@ describe("the capture-only store with the host's credential scan and file hook (
     const outDir = temp();
     const redactor = createCredentialRedactor([account]);
     const store = createE2EAgentCaptureStore({ scan: (bytes) => redactor.contains(bytes), persist: (keyHash, bytes) => persistE2EAgentTrace(outDir, keyHash, bytes) });
-    const keyHash = "k".repeat(64);
-    expect(await store.write(keyHash, { actions: [{ name: "tap" }] })).toBeDefined();
+    const keyHash = "1".repeat(64);
+    expect(await store.write(keyHash, rec([TAP_ORDERS]))).toBeDefined();
     const path = agentTraceFilePath(outDir, keyHash);
     expect(path).toMatch(/\/agent\/traces\/trace-[a-f0-9]{16}\.json$/);
-    expect(path).not.toContain("kkkk");
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ actions: [{ name: "tap" }] });
+    expect(path).not.toContain("1111");
+    // The file is the wrapper (Task 4.6a): its key, and the trace cleaned to what the ledger's rules allow.
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ schemaVersion: "rovara-agent-trace-file/v1", keyHash,
+      trace: { actions: [{ name: "tap", summary: "The tap action.", target: { role: "button", name: "Download orders", testId: "download-orders" } }], summary: E2E_AGENT_TRACE_SUMMARY, executor: { name: "rovara-e2e-agent", version: "1" } } });
   });
 
   it("drops a trace that carries an account password (also as base64) or a session value learned later: no file, no held trace, the verdict inputs untouched", async () => {
     const outDir = temp();
     const redactor = createCredentialRedactor([account]);
     const store = createE2EAgentCaptureStore({ scan: (bytes) => redactor.contains(bytes), persist: (keyHash, bytes) => persistE2EAgentTrace(outDir, keyHash, bytes) });
-    expect(await store.write("a".repeat(64), { actions: [{ name: "type", value: PASSWORD }] })).toBeUndefined();
-    expect(await store.write("b".repeat(64), { actions: [{ name: "type", value: Buffer.from(PASSWORD).toString("base64") }] })).toBeUndefined();
+    const typing = (value: string) => rec([{ name: "type", value, summary: "typed", target: { role: "textbox", name: "Password" } }]);
+    expect(await store.write("a".repeat(64), typing(PASSWORD))).toBeUndefined();
+    expect(await store.write("b".repeat(64), typing(Buffer.from(PASSWORD).toString("base64")))).toBeUndefined();
     redactor.addSessionSecret("session-cookie-value-123456");
-    expect(await store.write("c".repeat(64), { actions: [{ name: "type", value: "session-cookie-value-123456" }] })).toBeUndefined();
+    expect(await store.write("c".repeat(64), typing("session-cookie-value-123456"))).toBeUndefined();
     expect(store.taken()).toEqual([]);
     expect(existsSync(agentTraceFilePath(outDir, "a".repeat(64)))).toBe(false);
     expect(existsSync(agentTraceFilePath(outDir, "c".repeat(64)))).toBe(false);
     // A clean trace is still taken afterwards (the scan is per trace), and a failing hook loses the file and nothing more.
     const failing = createE2EAgentCaptureStore({ persist: () => { throw new Error("disk full"); } });
-    expect(await failing.write("d".repeat(64), { actions: [] })).toBeDefined();
+    expect(await failing.write("d".repeat(64), rec([]))).toBeDefined();
     expect(failing.taken()).toHaveLength(1);
-    expect(await store.write("e".repeat(64), { actions: [] })).toBeDefined();
+    expect(await store.write("e".repeat(64), rec([]))).toBeDefined();
+  });
+});
+
+describe("trace hygiene: what the capture store keeps (Task 4.6a, test case 4)", () => {
+  const PASSWORD = "pw-Zk39-very-secret-value";
+  const account = { profileId: "orders-owner", email: "rovara-owner-a1b2c3@example.test", password: PASSWORD };
+  const redactor = createCredentialRedactor([account]);
+  const make = (extra: Parameters<typeof createE2EAgentCaptureStore>[0] = {}) => createE2EAgentCaptureStore({ scan: (bytes) => redactor.contains(bytes), origin: ORIGIN, goals: () => [GOAL], valueKey: generateE2EAgentValueKey(), ...extra });
+  const keptOf = async (store: ReturnType<typeof make>, trace: unknown) => { const written = await store.write("a".repeat(64), trace); return written === undefined ? undefined : store.taken()[0]!.trace as Record<string, unknown>; };
+  const dirtyTarget = { role: "button", name: "Download orders", testId: "download-orders", text: "Download the orders", placeholder: "ph", selector: "main > button:nth-child(2)", inputPurpose: "email",
+    within: "row-7", position: { index: 1, of: 2 } };
+
+  it("replaces every summary by a fixed sentence and keeps an action target to role, name and testId only", async () => {
+    const trace = await keptOf(make(), rec([{ name: "tap", summary: "tapped the button because the page said the admin password is hunter2", target: dirtyTarget },
+      { name: "scroll", summary: "scrolled", direction: "down", times: 2, spans: 0.9, target: dirtyTarget }], { summary: "The model said: all went well for ada@example.com" }));
+    expect(trace).toBeDefined();
+    expect(trace!["summary"]).toBe(E2E_AGENT_TRACE_SUMMARY);
+    expect(JSON.stringify(trace)).not.toMatch(/hunter2|ada@example|because the page/);
+    expect(trace!["actions"]).toEqual([
+      { name: "tap", summary: "The tap action.", target: { role: "button", name: "Download orders", testId: "download-orders" } },
+      { name: "scroll", summary: "The scroll action.", direction: "down", times: 2, target: { role: "button", name: "Download orders", testId: "download-orders" } }]);
+  });
+
+  it("keeps a same-origin path (relative, or the application's origin and a path) and drops the trace for a query, a fragment, another origin, credentials in the URL or a bad location", async () => {
+    const store = make();
+    expect(await keptOf(store, rec([{ name: "navigate", summary: "went", url: `${ORIGIN}/orders` }, { name: "navigate", summary: "went", url: "/orders/2" }], { startPath: "/", endPath: "/orders/2" }))).toBeDefined();
+    for (const url of [`${ORIGIN}/orders?token=abc`, "/orders?token=abc", "/orders#frag", "https://evil.example/orders", "//evil.example/orders", `${ORIGIN}@evil.example/x`,
+      `http://user:pw@127.0.0.1:4317/orders`, "javascript:alert(1)", "orders", `${ORIGIN}/orders/../x?a`, ""]) {
+      expect(await store.write("b".repeat(64), rec([{ name: "navigate", summary: "went", url }])), url).toBeUndefined();
+    }
+    for (const bad of [{ startPath: "/x?token=abc" }, { endPath: "/x#frag" }, { endPath: "https://evil.example/" }, { startPath: "http://127.0.0.1:4317/x" }]) {
+      expect(await store.write("c".repeat(64), rec([TAP_ORDERS], bad)), JSON.stringify(bad)).toBeUndefined();
+    }
+    // A relative path is the only form a store with no known origin keeps.
+    const noOrigin = make({ origin: undefined as never });
+    expect(await noOrigin.write("d".repeat(64), rec([{ name: "navigate", summary: "w", url: `${ORIGIN}/orders` }]))).toBeUndefined();
+    expect(await noOrigin.write("d".repeat(64), rec([{ name: "navigate", summary: "w", url: "/orders" }]))).toBeDefined();
+  });
+
+  it("drops a trace with an action the ledger has no verb for, a truncated one, one with more than eight actions, a key or direction out of vocabulary, or a target with nothing in it", async () => {
+    const store = make();
+    for (const action of [{ name: "upload", summary: "u", target: dirtyTarget, paths: ["/etc/passwd"] }, { name: "typeSecret", summary: "s", target: dirtyTarget, secret: "login" }, { name: "tapAt", summary: "t", point: { x: 1, y: 2 }, viewport: { width: 1, height: 1 } },
+      { name: "typeText", summary: "t", value: "x", replace: false }, { name: "press", summary: "p", key: "a long key name that is not a key at all", target: dirtyTarget }, { name: "scroll", summary: "s", direction: "sideways" },
+      { name: "tap", summary: "t", target: { selector: "button" } }, { name: "tap", summary: "t" }]) {
+      expect(await store.write("e".repeat(64), rec([action])), JSON.stringify(action)).toBeUndefined();
+    }
+    expect(await store.write("e".repeat(64), rec([TAP_ORDERS], { truncated: true }))).toBeUndefined();
+    expect(await store.write("e".repeat(64), rec(Array.from({ length: 9 }, () => TAP_ORDERS)))).toBeUndefined();
+    expect(await store.write("e".repeat(64), rec(Array.from({ length: 8 }, () => TAP_ORDERS)))).toBeDefined();
+    expect(await store.write("1".repeat(64), rec([{ name: "press", summary: "p", key: "Enter", target: dirtyTarget }]))).toBeDefined();
+  });
+
+  it("keeps end anchors as postconditions within the owner's bound (16 in all, 300 characters each), without selector, container or position, and drops the trace past it", async () => {
+    const store = make();
+    const anchor = { role: "status", name: "Export", text: "Orders exported", testId: "orders-export-status", selector: "#s", within: "r", position: { index: 0, of: 1 }, inputPurpose: "x", states: ["checked"] };
+    const trace = await keptOf(store, rec([TAP_ORDERS], { endAnchors: [anchor], goneAnchors: [{ text: "Exporting" }] }));
+    expect(trace!["endAnchors"]).toEqual([{ role: "status", name: "Export", text: "Orders exported", testId: "orders-export-status", states: ["checked"] }]);
+    expect(trace!["goneAnchors"]).toEqual([{ text: "Exporting" }]);
+    const many = (count: number) => Array.from({ length: count }, (_, index) => ({ text: `row ${index}` }));
+    expect(await store.write("2".repeat(64), rec([TAP_ORDERS], { endAnchors: many(8), goneAnchors: many(8) }))).toBeDefined();
+    expect(await store.write("3".repeat(64), rec([TAP_ORDERS], { endAnchors: many(9) }))).toBeUndefined();
+    expect(await store.write("3".repeat(64), rec([TAP_ORDERS], { endAnchors: many(8), goneAnchors: many(9) }))).toBeUndefined();
+    expect(await store.write("4".repeat(64), rec([TAP_ORDERS], { endAnchors: [{ text: "x".repeat(300) }] }))).toBeDefined();
+    expect(await store.write("5".repeat(64), rec([TAP_ORDERS], { endAnchors: [{ text: "x".repeat(301) }] }))).toBeUndefined();
+    expect(await store.write("5".repeat(64), rec([TAP_ORDERS], { endAnchors: [{ selector: "#only-a-selector" }] }))).toBeUndefined();
+  });
+
+  it("holds an anchor's input value to the ledger's rule: text of a goal stays, any other becomes its keyed digest, and the trace is dropped when there is no key to make one", async () => {
+    const valueKey = generateE2EAgentValueKey();
+    const typed = "a value the model made up 4711";
+    const trace = await keptOf(make({ valueKey }), rec([TAP_ORDERS], { endAnchors: [{ role: "textbox", name: "File name", value: "orders" }, { role: "textbox", name: "Other", value: typed }] }));
+    expect(trace!["endAnchors"]).toEqual([{ role: "textbox", name: "File name", value: "orders" }, { role: "textbox", name: "Other", value: `hmac-sha256:${e2eAgentValueDigest(valueKey, typed)}` }]);
+    expect(JSON.stringify(trace)).not.toContain(typed);
+    expect(await make({ valueKey: undefined as never }).write("6".repeat(64), rec([TAP_ORDERS], { endAnchors: [{ role: "textbox", value: typed }] }))).toBeUndefined();
+  });
+
+  it("never lets an account password (raw, base64, in an anchor, a target or a URL) or a session value learned later reach the held trace or the file", async () => {
+    const outDir = temp();
+    const store = make({ persist: (keyHash, bytes) => persistE2EAgentTrace(outDir, keyHash, bytes) });
+    const spots: Array<[string, unknown]> = [
+      ["anchor text", rec([TAP_ORDERS], { endAnchors: [{ text: `Your password is ${PASSWORD}` }] })],
+      ["anchor text base64", rec([TAP_ORDERS], { endAnchors: [{ text: Buffer.from(PASSWORD).toString("base64") }] })],
+      ["target name", rec([{ ...TAP_ORDERS, target: { role: "button", name: PASSWORD } }])],
+      ["email local part in a target", rec([{ ...TAP_ORDERS, target: { role: "button", name: account.email } }])],
+    ];
+    redactor.addSessionSecret("session-cookie-value-123456");
+    spots.push(["session value", rec([TAP_ORDERS], { endAnchors: [{ text: "token session-cookie-value-123456" }] })]);
+    for (const [index, [where, trace]] of spots.entries()) expect(await store.write(String(index + 1).repeat(64), trace), where).toBeUndefined();
+    expect(store.taken()).toEqual([]);
+    for (let index = 1; index <= spots.length; index += 1) expect(existsSync(agentTraceFilePath(outDir, String(index).repeat(64)))).toBe(false);
+    // Positive control: the same store keeps a clean trace, so the drops above are the scan's.
+    expect(await store.write("a".repeat(64), rec([TAP_ORDERS], { endAnchors: [{ text: "Orders exported" }] }))).toBeDefined();
+  });
+
+  it("keeps provenance only as identifiers and digests, and drops what e2e adds that this module does not know", async () => {
+    const provenance = { testId: ".agentx/e2e/generated-application.test.ts::case-1", targetId: "account-target-1", instructionDigest: "a".repeat(64), paramsDigest: "b".repeat(64), callIndex: 0, agent: "default" };
+    const keyedBy = { cacheSchema: "trace-1", policyVersion: "conservative/6", project: "c".repeat(64), platform: "web", engineName: "web", engineSpiVersion: 1, appIdentity: "d".repeat(64), agentContextDigest: "e".repeat(64) };
+    const trace = await keptOf(make(), rec([TAP_ORDERS], { recordedFor: provenance, keyedBy, endWaitMs: 10_214, startPath: "/", endPath: "/", futureField: "free text the model wrote", model: { reasoning: "x" } }));
+    expect(trace).toEqual({ actions: [expect.objectContaining({ name: "tap" })], summary: E2E_AGENT_TRACE_SUMMARY, executor: { name: "rovara-e2e-agent", version: "1" }, recordedFor: provenance, keyedBy, endWaitMs: 10_214, startPath: "/", endPath: "/" });
   });
 });
 
@@ -438,27 +549,25 @@ describe("fix round 1 (Task 4.3b review)", () => {
     const outDir = temp();
     const store = createE2EAgentCaptureStore({ valueKey, goals: () => [GOAL], persist: (keyHash, bytes) => persistE2EAgentTrace(outDir, keyHash, bytes) });
     const typed = "a value the model made up 4711";
-    expect(await store.write("a".repeat(64), { actions: [{ name: "type", value: "orders", target: { role: "textbox" }, summary: "typed" },
-      { name: "typeText", value: typed, replace: true, summary: "typed text" }, { name: "select", value: typed, target: { role: "combobox" }, summary: "chose" }] })).toBeDefined();
+    const field = { role: "textbox", name: "File name", testId: "file-name" };
+    expect(await store.write("a".repeat(64), rec([{ name: "type", value: "orders", target: field, summary: "typed" },
+      { name: "select", value: typed, target: { role: "combobox", name: "Kind" }, summary: "chose" }, { name: "type", value: typed, target: field, summary: "typed" }]))).toBeDefined();
     const kept = readFileSync(agentTraceFilePath(outDir, "a".repeat(64)), "utf8");
     expect(kept).not.toContain(typed);
-    const parsed = JSON.parse(kept) as { actions: Array<{ value: string }> };
-    expect(parsed.actions.map((action) => action.value)).toEqual(["orders", `hmac-sha256:${e2eAgentValueDigest(valueKey, typed)}`, `hmac-sha256:${e2eAgentValueDigest(valueKey, typed)}`]);
+    const parsed = JSON.parse(kept) as { trace: { actions: Array<{ value: string }> } };
+    expect(parsed.trace.actions.map((action) => action.value)).toEqual(["orders", `hmac-sha256:${e2eAgentValueDigest(valueKey, typed)}`, `hmac-sha256:${e2eAgentValueDigest(valueKey, typed)}`]);
     expect(JSON.stringify(store.taken())).not.toContain(typed);
     // The typed action's own summary and an anchor's input value that is the typed value are rewritten with it; the trace is kept with no copy of the value.
-    expect(await store.write("f".repeat(64), { actions: [{ name: "type", value: typed, summary: `typed "${typed}"`, target: { role: "textbox", value: typed } }],
-      endAnchors: [{ role: "textbox", value: typed }] })).toBeDefined();
+    expect(await store.write("f".repeat(64), rec([{ name: "type", value: typed, summary: `typed "${typed}"`, target: field }], { endAnchors: [{ role: "textbox", name: "File name", value: typed }] }))).toBeDefined();
     expect(readFileSync(agentTraceFilePath(outDir, "f".repeat(64)), "utf8")).not.toContain(typed);
-    // The value shows somewhere else (another action's summary, screen text): the trace is dropped whole.
-    expect(await store.write("b".repeat(64), { actions: [{ name: "type", value: typed, summary: "typed" }, { name: "tap", summary: `tapped "${typed}"`, target: { role: "button" } }] })).toBeUndefined();
-    expect(existsSync(agentTraceFilePath(outDir, "b".repeat(64)))).toBe(false);
-    expect(await store.write("g".repeat(64), { actions: [{ name: "type", value: typed, summary: "typed" }], endAnchors: [{ role: "text", name: `Hello ${typed}` }] })).toBeUndefined();
+    // The value shows somewhere else (an anchor's screen text, a URL): the trace is dropped whole.
+    expect(await store.write("9".repeat(64), rec([{ name: "type", value: typed, summary: "typed", target: field }], { endAnchors: [{ role: "text", name: `Hello ${typed}` }] }))).toBeUndefined();
     // Percent-encoded in a later URL: dropped too.
-    expect(await store.write("c".repeat(64), { actions: [{ name: "type", value: typed, summary: "typed" }, { name: "navigate", url: `/search?q=${encodeURIComponent(typed)}`, summary: "went" }] })).toBeUndefined();
+    expect(await store.write("c".repeat(64), rec([{ name: "type", value: typed, summary: "typed", target: field }, { name: "navigate", url: `/search/${encodeURIComponent(typed)}`, summary: "went" }]))).toBeUndefined();
     // With no value key, any value that is not text of a goal drops the trace.
     const keyless = createE2EAgentCaptureStore({ goals: () => [GOAL] });
-    expect(await keyless.write("d".repeat(64), { actions: [{ name: "type", value: typed, summary: "typed" }] })).toBeUndefined();
-    expect(await keyless.write("e".repeat(64), { actions: [{ name: "type", value: "orders", summary: "typed" }] })).toBeDefined();
+    expect(await keyless.write("d".repeat(64), rec([{ name: "type", value: typed, summary: "typed", target: field }]))).toBeUndefined();
+    expect(await keyless.write("e".repeat(64), rec([{ name: "type", value: "orders", summary: "typed", target: field }]))).toBeDefined();
   });
 
   it("a trace whose typed value the store kept as its keyed digest still matches the verified ledger in the review", async () => {
@@ -469,7 +578,7 @@ describe("fix round 1 (Task 4.3b review)", () => {
     const parsed = parseVerifiedE2EAgentActionLedger(t.readLedger(), { goals: new Map([[0, GOAL]]), valueKey: t.valueKey, runId: RUN_ID, caseId: CASE_ID });
     if (!parsed.ok) throw new Error(parsed.reason);
     const store = createE2EAgentCaptureStore({ valueKey: t.valueKey, goals: () => [GOAL] });
-    expect(await store.write("a".repeat(64), { actions: [{ name: "type", value: typed, summary: "typed", target: { role: "textbox", name: "File name" } }] })).toBeDefined();
+    expect(await store.write("a".repeat(64), rec([{ name: "type", value: typed, summary: "typed", target: { role: "textbox", name: "File name" } }]))).toBeDefined();
     const [held] = store.taken();
     expect(JSON.stringify(held)).not.toContain(typed);
     expect(reviewCapturedE2EAgentTrace({ stepIndex: 0, trace: held!.trace, ledger: parsed.ledger, valueKey: t.valueKey, credentialScanHit: false })).toMatchObject({ keep: true });

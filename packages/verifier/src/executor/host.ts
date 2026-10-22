@@ -197,7 +197,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     const store = createE2EAgentCaptureStore({
       scan: (bytes) => agentRedactor.contains(bytes),
       persist: (keyHash, bytes) => persistE2EAgentTrace(context.outDir, keyHash, bytes),
-      valueKey: channelPlan.valueKey, goals: () => goals,
+      valueKey: channelPlan.valueKey, goals: () => goals, origin,
     });
     const executor = createRovaraE2EAgentExecutor({ position: () => current.position, ledger: () => current.ledger, origin: () => origin });
     const driveStep = createE2EAgentStepDriver({ client, adapter, current, runId: plan.runId, valueKey: channelPlan.valueKey, outDir: context.outDir, sessionSecrets: () => sessionSecrets });

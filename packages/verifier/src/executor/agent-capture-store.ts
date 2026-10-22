@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { E2E_AGENT_TRACE_MAX_BYTES, e2eAgentValueDigest } from "@agentx/contracts";
+import { E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_AGENT_TRACE_FILE_SCHEMA_VERSION, e2eAgentValueDigest } from "@agentx/contracts";
+import { cleanE2EAgentTrace } from "./agent-trace-clean.js";
 import { E2E_AGENT_EVIDENCE_DIR } from "./evidence-paths.js";
 
 /**
@@ -11,6 +12,10 @@ import { E2E_AGENT_EVIDENCE_DIR } from "./evidence-paths.js";
  * model always navigates. `write` keeps the trace the runner hands over, and the runner only does that after a later deterministic verification step of the attempt passed, which is
  * the "verified round" this feature wants. Nothing here reads a file or the network; the traces stay in this process until the host takes them, scans them for credentials, and
  * writes the clean ones to the out directory as operator evidence. `delete` does nothing: an eviction can never remove what a verified round produced.
+ *
+ * Task 4.6a (CAPTURE46): the recording is first reduced to what the ledger's rules allow (`cleanE2EAgentTrace`: a fixed summary, targets as `{ role, name, testId }`, same-origin app
+ * paths only, the owner's anchor bound), and a recording that cannot be reduced is dropped. What is kept is written as `{ schemaVersion, keyHash, trace }` (at most 128 KiB, at most
+ * three per group): the file the group uploads and the broker re-reviews.
  *
  * A trace holds what the agent typed verbatim. The ledger's rule applies to it before it is held or written: a typed value that is text of one of the run's goals stays as it is, any
  * other becomes `hmac-sha256:<its keyed digest>` (the same digest the ledger records, so the trace still matches the ledger), and a trace that shows such a value anywhere else (a
@@ -25,8 +30,8 @@ export interface E2EAgentCaptureStore {
   taken(): ReadonlyArray<{ keyHash: string; trace: unknown }>;
 }
 
-/** More recordings than a group can have steps; anything past this is refused instead of held. */
-const MAX_HELD_TRACES = 16;
+/** More recordings than a group can have agent steps; anything past this is refused instead of held. */
+const MAX_HELD_TRACES = E2E_AGENT_TRACES_PER_GROUP_MAX;
 
 /** Where a kept recording is written: named by a digest of its cache key, which is derived from the step's instruction, never from a value. */
 export const agentTraceFilePath = (outDir: string, keyHash: string): string => join(outDir, E2E_AGENT_EVIDENCE_DIR, "traces", `trace-${createHash("sha256").update(keyHash, "utf8").digest("hex").slice(0, 16)}.json`);
@@ -47,6 +52,10 @@ export interface E2EAgentCaptureStoreOptions {
   valueKey?: string;
   /** The goals of the agent steps this process has run; a typed value that is text of one is kept as it is. */
   goals?: () => readonly string[];
+  /** The application's origin, for a recording that navigated to an absolute URL of it. Without one, only a relative path is kept. */
+  origin?: string;
+  /** The ceiling of a kept file in bytes (the contract's 128 KiB; a test lowers it). */
+  maxFileBytes?: number;
 }
 
 /** The recorded actions whose `value` is what the agent typed or chose (e2e's `ActionTrace`). */
@@ -97,16 +106,21 @@ export function createE2EAgentCaptureStore(options: E2EAgentCaptureStoreOptions 
     async write(keyHash: string, received: unknown): Promise<{ bytes: number } | undefined> {
       let serialized: string | undefined;
       let trace: unknown;
-      try { trace = hideTypedValues(JSON.parse(JSON.stringify(received)) as unknown, options); serialized = trace === undefined ? undefined : JSON.stringify(trace); } catch { return undefined; }
-      if (serialized === undefined) return undefined;
+      try {
+        const cleaned = cleanE2EAgentTrace(JSON.parse(JSON.stringify(received)) as unknown, { goals: options.goals?.() ?? [], ...(options.origin === undefined ? {} : { origin: options.origin }),
+          ...(options.valueKey === undefined ? {} : { valueKey: options.valueKey }) });
+        trace = cleaned === undefined ? undefined : hideTypedValues(cleaned, options);
+        serialized = trace === undefined ? undefined : JSON.stringify({ schemaVersion: E2E_AGENT_TRACE_FILE_SCHEMA_VERSION, keyHash, trace });
+      } catch { return undefined; }
+      if (serialized === undefined || !/^[a-f0-9]{64}$/.test(keyHash)) return undefined;
       const bytes = Buffer.byteLength(serialized, "utf8");
-      // The same wire ceiling e2e's own stores hold, and the one the review of a captured trace holds. A trace for a key already held replaces it: the runner settles one
-      // recording per step and the latest is the one that was confirmed.
-      if (bytes > E2E_AGENT_TRACE_MAX_BYTES || (!held.has(keyHash) && held.size >= MAX_HELD_TRACES)) return undefined;
+      // The ceiling of the file that is uploaded and re-reviewed. A trace for a key already held replaces it: the runner settles one recording per step and the latest is the one that
+      // was confirmed.
+      if (bytes > (options.maxFileBytes ?? E2E_AGENT_TRACE_FILE_MAX_BYTES) || (!held.has(keyHash) && held.size >= MAX_HELD_TRACES)) return undefined;
       const encoded = Buffer.from(serialized, "utf8");
-      // A trace carries typed values and screen text verbatim. One that carries a credential is dropped whole: it can only lose a replay input, never change a verdict.
+      // A trace carries typed values and screen text. One that carries a credential is dropped whole: it can only lose a replay input, never change a verdict.
       if (options.scan?.(encoded) === true) return undefined;
-      held.set(keyHash, { trace: JSON.parse(serialized) as unknown, fresh: true });
+      held.set(keyHash, { trace: JSON.parse(JSON.stringify(trace)) as unknown, fresh: true });
       try { options.persist?.(keyHash, encoded); } catch { /* the file is operator evidence; its loss changes nothing */ }
       return { bytes };
     },

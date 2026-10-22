@@ -673,6 +673,22 @@ export type E2EAgentTraceBinding = z.infer<typeof E2EAgentTraceBindingSchema>;
 
 export const E2E_AGENT_TRACE_MAX_BYTES = 1_048_576;
 
+/**
+ * The cleaned recording that a verified round keeps and uploads (Task 4.6a, CAPTURE46). The file is `{ schemaVersion, keyHash, trace }`: the trace is e2e's `ActionTrace` reduced to what
+ * the ledger's rules allow (see `agent-trace-clean.ts` in the verifier), and `keyHash` is the cache key it is stored under. Its bytes are bounded by `E2E_AGENT_TRACE_FILE_MAX_BYTES`, a
+ * group holds at most `E2E_AGENT_TRACES_PER_GROUP_MAX` (the group's agent step cap), and the end anchors (screen text of the candidate, operator-only private evidence, never displayed)
+ * hold to the owner's bound: `E2E_AGENT_TRACE_ANCHORS_MAX` in all, each text at most `E2E_AGENT_TRACE_ANCHOR_TEXT_MAX` characters (owner decision, 2026-10-22).
+ */
+export const E2E_AGENT_TRACE_FILE_SCHEMA_VERSION = "rovara-agent-trace-file/v1" as const;
+export const E2E_AGENT_TRACE_FILE_MAX_BYTES = 131_072;
+export const E2E_AGENT_TRACES_PER_GROUP_MAX = caps.maxAgentStepsPerGroup;
+export const E2E_AGENT_TRACE_ANCHORS_MAX = 16;
+export const E2E_AGENT_TRACE_ANCHOR_TEXT_MAX = 300;
+/** The only prose a kept trace carries: the recorded run's own summary is model text, so it is replaced before anything is digested. */
+export const E2E_AGENT_TRACE_SUMMARY = "The recorded AI navigation concluded.";
+export const E2EAgentTraceFileSchema = z.object({ schemaVersion: z.literal(E2E_AGENT_TRACE_FILE_SCHEMA_VERSION), keyHash: digest, trace: z.record(z.string(), z.unknown()) }).strict();
+export type E2EAgentTraceFile = z.infer<typeof E2EAgentTraceFileSchema>;
+
 export type CapturedTraceReview =
   | { keep: true; binding: E2EAgentTraceBinding }
   | { keep: false; reason: "ledger-not-verified" | "credential-scan-hit" | "trace-malformed" | "trace-too-large" | "trace-ledger-mismatch" };
