@@ -13,6 +13,9 @@ import {
   type E2EModelReceipt,
 } from "../../packages/contracts/src/e2e-model-channel.js";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget, type E2EInvoke } from "../../packages/model-runtime/src/e2e-route.js";
+import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
+import { createE2ECredentialGuard } from "../../packages/worker/src/e2e-model-credential-guard.js";
+import { e2eScannableEmailLocalPart } from "../../packages/contracts/src/e2e-model-channel.js";
 import { startE2EModelProxy, type E2EModelEvidenceSink, type E2EModelProxy, type E2EModelTranscript } from "../../packages/worker/src/e2e-model-proxy.js";
 import { CASE_ID, MODEL_ID, RUN_ID, bedrockRoute, call, channelRequest, installationEnvironment, keyedRoute, loweredBudgets, tapAnswer } from "../support/e2e-model-fixtures.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
@@ -808,5 +811,28 @@ describe("e2e model proxy: step markers (POST /v1/step)", () => {
     const closing = proxy.close();
     await closing;
     await expect(stepPost(marker())).rejects.toBeDefined();
+  });
+});
+
+// Task 4.3a, test case 14 (Ruling DB-9): the executor's redactor and the worker's model-channel scan look for the same email local parts.
+describe("the host redactor and the worker's credential guard agree on which local parts are scanned", () => {
+  const emails = ["test@example.test", "a.b@example.test", "abc1234@example.test", "administrator@example.test", "support@example.test", "abcdefg1@example.test",
+    "qa.tester.orders@example.test", "rovara-owner-a1b2c3@example.test", "rovara-anonymous-ffee00@example.test", "jane.doe+42@example.test"];
+
+  it.each(emails)("%s", (email) => {
+    const local = email.slice(0, email.lastIndexOf("@"));
+    const scanned = e2eScannableEmailLocalPart(email) !== null;
+    const redactor = createCredentialRedactor([{ profileId: "owner", email, password: "Pa55word-Pa55word-1" }]);
+    const guard = createE2ECredentialGuard({ passwords: [], emails: [email], cookieValues: [] });
+    // The local part on its own, in a place the agent typed it (the guard refuses it as account identity) and in bytes an executor wrote (the redactor finds it).
+    const typedByAgent = guard.inspect({ prompt: [{ role: "assistant", content: [{ type: "text", text: `I will type ${local} now` }] }] });
+    expect({ email, guardScansLocalPart: typedByAgent.refuse, redactorScansLocalPart: redactor.contains(Buffer.from(`user ${local} logged in`)) }).toEqual({ email, guardScansLocalPart: scanned, redactorScansLocalPart: scanned });
+    // The whole address is always scanned by both.
+    expect(redactor.contains(Buffer.from(`user ${email} logged in`))).toBe(true);
+    expect(guard.inspect({ prompt: [{ role: "assistant", content: [{ type: "text", text: `I will type ${email} now` }] }] }).refuse).toBe(true);
+  });
+
+  it("is the one function: the host-generated form rovara-<profile>-<hex> is always scanned", () => {
+    expect(e2eScannableEmailLocalPart("rovara-owner-0a1b2c@example.test")).toBe("rovara-owner-0a1b2c");
   });
 });

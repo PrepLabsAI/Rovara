@@ -1,5 +1,5 @@
 import type { E2EModelChannelRequest } from "@agentx/contracts";
-import { redactText } from "@agentx/contracts";
+import { e2eScannableEmailLocalPart, redactText } from "@agentx/contracts";
 
 /**
  * The credential scan of the e2e model proxy (M1.4 Task 4.1). It runs on the prompt bytes before every provider call.
@@ -25,7 +25,6 @@ export interface E2ECredentialSet {
 }
 
 export const MIN_SCANNABLE_SECRET_LENGTH = 6;
-const MIN_LOCAL_PART_LENGTH = 4;
 const PLACEHOLDER_SECRET = "[REDACTED]";
 const PLACEHOLDER_EMAIL = "[account-email]";
 const PLACEHOLDER_USER = "[account-user]";
@@ -94,7 +93,8 @@ export function createE2ECredentialGuard(set: E2ECredentialSet, guardOptions: E2
   });
   const cookies = scanned(cookieSeeds, "cookie value");
   const emails = [...new Set(set.emails.filter((email) => email !== ""))];
-  const localParts = [...new Set(emails.map((email) => email.split("@")[0] ?? "").filter((local) => local.length >= MIN_LOCAL_PART_LENGTH))];
+  // The same rule as the executor's redactor (`e2eScannableEmailLocalPart`): a short or word-like local part is ordinary page text and is not looked for on its own.
+  const localParts = [...new Set(emails.flatMap((email) => e2eScannableEmailLocalPart(email) ?? []))];
   const emailPattern = emails.length === 0 ? undefined : new RegExp(emails.map(escapeRegExp).join("|"), "gi");
   const localPattern = localParts.length === 0 ? undefined : new RegExp(`(?<![A-Za-z0-9])(?:${localParts.map(escapeRegExp).join("|")})(?![A-Za-z0-9])`, "gi");
 
