@@ -7,7 +7,8 @@ import { readObjectText } from "../developer/plan-artifacts.js";
  * `schemaVersion`. Anything it cannot establish (missing, changed, not JSON, no string schemaVersion) answers undefined, which the dispatcher treats as a refusal to deliver.
  */
 /**
- * Whether the application admission a reference names has an `agent` step in its scenario bundle, read the same way (held to the reference's size and sha256). Anything it
+ * Whether the application admission a reference names has an `agent` step in its scenario bundle, read the same way (held to the reference's size and sha256), and is not an audit
+ * replay (Task 4.6b): a replay runs those steps with no model channel, so it never needs the worker to list the agent-steps feature and its reference never carries the flag. Anything it
  * cannot establish answers undefined, which the dispatcher treats as a refusal.
  */
 export function createWorkflowE2EAdmissionAgentStepsReader(input: { s3: { send(command: never): Promise<unknown> }; bucket: string }) {
@@ -18,8 +19,10 @@ export function createWorkflowE2EAdmissionAgentStepsReader(input: { s3: { send(c
     const bytes = Buffer.from(text, "utf8");
     if (bytes.byteLength !== byteLength || createHash("sha256").update(bytes).digest("hex") !== sha256) return undefined;
     try {
-      const scenarios = (JSON.parse(text) as { bundle?: { scenarios?: unknown } } | null)?.bundle?.scenarios;
+      const parsed = JSON.parse(text) as { bundle?: { scenarios?: unknown }; replay?: unknown } | null;
+      const scenarios = parsed?.bundle?.scenarios;
       if (!Array.isArray(scenarios)) return undefined;
+      if (parsed?.replay !== undefined) return false;
       return scenarios.some((scenario) => Array.isArray((scenario as { steps?: unknown })?.steps)
         && ((scenario as { steps: Array<{ kind?: unknown }> }).steps).some((step) => step?.kind === "agent"));
     } catch { return undefined; }

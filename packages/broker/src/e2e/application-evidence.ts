@@ -3,7 +3,7 @@ import { E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_
   type E2EAgentTraceBinding, type E2EApplicationExecutionAdmission, type E2EDisplayAgentNavigation, type E2EDisplayScenario, type E2EExecutionPlan, type E2EModelRouteDefinition, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
 import { E2EAgentModelEvidenceSchema, E2E_AGENT_TRACE_BASE64_MAX, createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
   E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, e2eApplicationAggregateRunUsage, e2eApplicationGroupUsesModel, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
-  reviewAgentTraceFile, verifiedAgentCaseLedger, type E2EAgentModelEvidence, type E2EAgentTraceCase, type E2ECompiledApplicationSuite } from "@agentx/verifier";
+  reviewAgentTraceFile, verifiedAgentCaseLedger, type E2EAgentModelEvidence, type E2EAgentTraceCase, type E2EApplicationCaseFacts, type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { readAdmittedE2EModelRoute } from "./model-route-registry.js";
 import { buildScenarioRows, readCaptureScreenshots, type DisplayArtifact, type DisplayGroupInput } from "./application-display.js";
 import { agentCaseDirectory, agentNavigationOf } from "./application-agent-display.js";
@@ -34,7 +34,7 @@ export type ApplicationEvidenceInput = Readonly<{
    * What the round is for. A `baseline` round (the unchanged code, for information only) shows a screenshot on every row; its display is the same derivation, and it is
    * never read as a verdict by anything that gates.
    */
-  purpose?: "candidate" | "baseline";
+  purpose?: "candidate" | "baseline" | "replay";
   /**
    * The definition the model route registry stores for the route revision the admission names (Task 4.4a, ruling DJ), read by the async caller with one GetItem; absent when the
    * caller had no route to read (the admission names none, or no group uses the model). The route a group's receipts are judged against is this one and nothing a worker uploads;
@@ -81,7 +81,9 @@ export async function modelRouteForAdmission(read: (key: { pk: string; sk: strin
  */
 export type VerifiedAgentTrace = Readonly<{ runId: string; caseId: string; stepIndex: number; keyHash: string; binding: E2EAgentTraceBinding; bytes: Uint8Array }>;
 
-export type ApplicationGroupVerification = Readonly<{ runId: string; groupId: string; verdict: E2EVerdict; reason: string }>;
+export type ApplicationGroupVerification = Readonly<{ runId: string; groupId: string; verdict: E2EVerdict; reason: string;
+  /** What the collector saw of each case beyond its verdict (the CSV bytes' hash, and for a replay how each AI navigation step ended); absent when the group did not requalify far enough. */
+  caseFacts?: ReadonlyArray<E2EApplicationCaseFacts> }>;
 export type ApplicationEvidenceVerification = Readonly<{
   verdict: E2EVerdict; reason: string;
   /** Present once the admission itself verified: what the round was meant to cover. */
@@ -127,9 +129,11 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     const admission = decodeE2EApplicationExecutionAdmission(input.admissionBytes);
     // M1.3 Task 3.7b: a baseline round is signed as one. It is read only as a baseline and a candidate round only as a candidate's, so evidence of the unchanged code can never become
     // a verdict on the candidate, whatever else about the operation is true.
-    const signedPurpose = admission.baseline === undefined ? "candidate" : "baseline";
+    // M1.4 Task 4.6b: an audit replay is signed as one too, and is read only as one.
+    const signedPurpose = admission.baseline !== undefined ? "baseline" : admission.replay !== undefined ? "replay" : "candidate";
     if (signedPurpose !== (input.purpose ?? "candidate")) {
-      refuse(signedPurpose === "baseline" ? "the admission is a baseline round (the unchanged code), not a candidate round" : "the admission is a candidate round, not a baseline round (the purpose differs)");
+      refuse(signedPurpose === "baseline" ? "the admission is a baseline round (the unchanged code), not a candidate round"
+        : signedPurpose === "replay" ? "the admission is an audit replay, not a candidate round" : "the admission is a candidate round, not a baseline or replay round (the purpose differs)");
     }
     const subject = input.subject;
     // A repeated outer run id is refused by validateE2EApplicationExecutionAdmission, which ties each outer binding to the round's own bindings (whose run ids
@@ -175,7 +179,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       const groupRun = readGroupEnvelope(envelope, admission, subject, planGroup, binding);
       if (aggregateRuns !== undefined && !same(aggregateRuns.get(binding.runId), groupRun)) refuse("the aggregate differs from a group result accepted on its own");
       const verified = requalifyGroup({ suite, groupRun, binding, round: admission.round, receivedAt: input.receivedAt.get(binding.runId), modelRouteDefinition: input.modelRouteDefinition });
-      groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: verified.verdict, reason: verified.reason });
+      groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: verified.verdict, reason: verified.reason, ...(verified.caseFacts === undefined ? {} : { caseFacts: verified.caseFacts }) });
       if (verified.result !== undefined) results.push(verified.result);
       if (verified.verdict === "PASS" && verified.agentTraces !== undefined) agentTraces.push(...verified.agentTraces);
       displayGroups.push({ runId: binding.runId, group: { ...displayBase, verdict: verified.verdict, reason: verified.reason, observed: verified.observed ?? new Map(),
@@ -190,7 +194,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     const shown = authoritative ? results : results.map((result): E2EQualifiedResult => ({ ...result, status: "unavailable", reason: "application-round-not-complete" }));
     const reasonOf = (verdict: E2EVerdict) => groups.filter((group) => group.verdict === verdict).map((group) => `${group.groupId}: ${group.reason}`).join("; ");
     // The rows are held to the same rule as the verdict: shown only for a round the broker accepted whole, and never able to change what the verdict decided.
-    const display = displayOf({ plan, authoritative, purpose: input.purpose ?? "candidate", groups: displayGroups, shown });
+    const display = displayOf({ plan, authoritative, purpose: input.purpose === "baseline" ? "baseline" : "candidate", groups: displayGroups, shown });
     if (aggregateRuns === undefined) {
       return { verdict: "UNKNOWN", reason: "the round's aggregate evidence has not been accepted, so no group result is authoritative", plan, round, groups, results: shown, ...display };
     }
@@ -247,6 +251,7 @@ function readGroupEnvelope(envelope: unknown, admission: ReturnType<typeof decod
 }
 
 type Requalified = { verdict: E2EVerdict; reason: string; result?: E2EQualifiedResult; agentTraces?: readonly VerifiedAgentTrace[]; observed?: ReadonlyMap<string, ObservedAssertion[]>;
+  caseFacts?: ReadonlyArray<E2EApplicationCaseFacts>;
   /** How the AI navigated each case the broker decided on its assertions, from the verified action ledger (Task 4.4b); absent for a group with no AI navigation step. */
   agentNavigation?: ReadonlyMap<string, E2EDisplayAgentNavigation> };
 type ObservedAssertion = { assertionIndex: number; outcome: string; value: unknown };
@@ -420,6 +425,8 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     const agentModel = (() => {
       const supplied = inputs.agentModel;
       const present = supplied !== undefined && supplied !== null;
+      // An audit replay (Task 4.6b) has no model channel, so model evidence of any kind with it means a model was in the run.
+      if (suite.runtimeAdmissionContext.replay !== undefined) return present ? ({ refuse: "replay-model-called: model evidence came with an audit replay" } as const) : ({ evidence: undefined } as const);
       if (!e2eApplicationGroupUsesModel(suite)) return present ? ({ refuse: "model-receipts-mismatch: model evidence came with a group that has no AI navigation step" } as const) : ({ evidence: undefined } as const);
       const admitted = suite.runtimeAdmissionContext.modelRoute;
       if (admitted === null) return { refuse: "agent-route-not-approved: the group has AI navigation steps and the admission pins no model route" } as const;
@@ -475,7 +482,8 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     // How the AI navigated, for the cases the broker decided, from the ledger verified against the registry-bound receipts (never shown for a group the qualifier did not carry to a result).
     const navigation = promoted === undefined || agentModel.evidence === undefined ? undefined : safeAgentNavigations({ suite, binding, evidence: agentModel.evidence, result: promoted });
     const shownNavigation = navigation === undefined || navigation.size === 0 ? {} : { agentNavigation: navigation };
-    if (qualification.status !== "PASS") return { verdict: qualification.status, reason: qualification.reason.slice(0, OWNER_REASON_MAX_CHARS), ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }), ...shownNavigation };
+    const caseFacts = qualification.caseFacts === undefined ? {} : { caseFacts: qualification.caseFacts };
+    if (qualification.status !== "PASS") return { verdict: qualification.status, reason: qualification.reason.slice(0, OWNER_REASON_MAX_CHARS), ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }), ...shownNavigation, ...caseFacts };
     // A pass also needs the host's own lifecycle to say the run ended cleanly: confirmed cleanup, no timeout or abort, a zero exit code, and no unavailable reason.
     const lifecycle = isObject(groupRun.lifecycle) ? groupRun.lifecycle : undefined;
     const processResult = isObject(lifecycle?.process) ? lifecycle.process : undefined;
@@ -484,7 +492,7 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
         ...(promoted === undefined ? {} : { result: { ...promoted, status: "unavailable", reason: "application-lifecycle-unconfirmed" } }), ...(observed === undefined ? {} : { observed }) };
     }
     const traces = agentModel.evidence === undefined ? [] : safeReviewedAgentTraces({ suite, binding, evidence: agentModel.evidence });
-    return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }), ...shownNavigation, agentTraces: traces };
+    return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }), ...shownNavigation, ...caseFacts, agentTraces: traces };
   } catch (error) {
     // A schema refusal says what it refused (the first issue's own words), never the whole issue list.
     const said = error instanceof Error && error.name === "ZodError" ? (error as { issues?: Array<{ message?: string }> }).issues?.[0]?.message : error instanceof Error ? error.message : undefined;

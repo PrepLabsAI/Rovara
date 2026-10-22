@@ -3,7 +3,7 @@ import {
   E2EApplicationPlanIntentSchema, E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
   e2eRuntimeBindingKey,
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimits, e2ePolicyDigest, inspectE2EApplicationRepository, validateE2EAppBuildBinding, withE2EAnonymousTargets,
-  type E2ECreatorAuthority, type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
+  type E2EApplicationReplay, type E2ECreatorAuthority, type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
   type E2EApplicationLaunchTarget, type E2EApplicationPlanIntent, type E2EAppArtifactRef, type E2EAppBuildManifest, type E2ERegisteredRuntime, type E2ERound,
   type E2EApplicationSelectionRecord, type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
 } from "@agentx/contracts";
@@ -52,6 +52,11 @@ export type ApplicationAdmissionInput = Readonly<{
    * The admission signs the purpose, the base commit and the attempt, so it can be nothing but a baseline.
    */
   baseline?: { baseCommitSha: string; attempt: number };
+  /**
+   * M1.4 Task 4.6b: set for an audit replay of a verified round (the same candidate run again with no model, for an operator's check). The admission names no model route, signs the
+   * round it replays, what that round showed and the recordings it serves, and keeps the policy as it was pinned, so the AI navigation steps compile and the limits are the ones sized for them.
+   */
+  replay?: Omit<E2EApplicationReplay, "purpose">;
   now: number;
 }>;
 
@@ -115,6 +120,7 @@ export function baselineSkippedScenarios(intent: E2EApplicationPlanIntent): Arra
  * the setup was approved is refused ("replan"). Only the READY rows of the kinds the plan runs go into the admission, keyed by profile and kind.
  */
 export function buildApplicationExecutionAdmission(input: ApplicationAdmissionInput): ApplicationAdmission {
+  if (input.replay !== undefined && input.baseline !== undefined) throw refusal("a round is a baseline or a replay, not both");
   // The pinned policy holds the base targets; each qualified base web or API target also offers the signed-out visitor, derived here from the candidate's discovery (Ruling AZ).
   const policy = (() => {
     try {
@@ -276,11 +282,15 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
 
   // The route the project's policy pinned at setup approval (Task 4.2). The run binding carries the same revision, so a pinned policy always has route metadata; whether this round
   // starts a model channel is a matter of whether any group has an agent step (Task 4.3), and whether the route is still the installation's was checked before this admission.
-  const modelRoute = selection.policy.modelRouteRevision === null ? null : { routeId: E2E_DEFAULT_MODEL_ROUTE_ID, routeRevision: selection.policy.modelRouteRevision };
+  const pinnedRoute = selection.policy.modelRouteRevision === null ? null : { routeId: E2E_DEFAULT_MODEL_ROUTE_ID, routeRevision: selection.policy.modelRouteRevision };
+  // An audit replay names no model route whatever the policy pinned: it runs the same steps with no model (the policy's revision stays, so the limits and the run bindings are as approved).
+  const modelRoute = input.replay === undefined ? pinnedRoute : null;
   const context: E2EApplicationCompilationContext = { selectionInput: selection, executionPlan: plan, bundle: derivation.bundle,
     applicationBindings: new Map(applicationBindings.map((item) => [item.key, item.value])), runtimeBindings: new Map(runtimeBindings.map((item) => [item.key, item.value])),
     launchTargets, modelRoute, cliHostsByProfile: new Map(cliHosts.map((item) => [item.profileId, item.descriptor])),
-    preparedEnvironmentsByGroup: new Map(preparedEnvironments.map(({ groupId, ...facts }) => [groupId, facts])) };
+    preparedEnvironmentsByGroup: new Map(preparedEnvironments.map(({ groupId, ...facts }) => [groupId, facts])),
+    ...(input.replay === undefined ? {} : { replay: { bindings: input.replay.traces.map((trace) => ({ caseId: trace.caseId, stepIndex: trace.stepIndex, keyHash: trace.keyHash,
+      traceSha256: trace.binding.traceSha256, actionCount: trace.binding.actionCount })) } }) };
 
   const policyDigest = e2ePolicyDigest(selection.policy);
   const groupRuns = groups.map((group) => {
@@ -300,6 +310,14 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
         configDigest: shard.expectedConfigDigest, expectedCaseIds: [...shard.expectedCaseIds] })) };
     return { binding, admitted };
   });
+  if (input.replay !== undefined) {
+    // A case id is bound to the runtime row and the plan. The round to replay ran the cases whose recordings are carried here; if this candidate would run others now (the runtime was
+    // qualified again, the plan changed), the recordings are for cases that do not exist and the replay cannot be run.
+    const roundCases = groupRuns.flatMap((item) => item.binding.expectedCases.map((expected) => expected.caseId)).sort();
+    if (canonicalJson(roundCases) !== canonicalJson(input.replay.sourceCases.map((item) => item.caseId).sort()) || input.replay.traces.some((trace) => !roundCases.includes(trace.caseId))) {
+      throw refusal("replay-source-unavailable: the round to replay ran other cases than this candidate would run now (the runtime or the plan moved since)");
+    }
+  }
   const round: E2ERound = E2ERoundSchema.parse({ schemaVersion: 1, roundId: input.roundId, taskId: input.taskId, operationId: input.operationId, operationFence: input.operationFence,
     workflowRevision: input.workflowRevision, executionPlanDigest: plan.digest, admittedAt, deadlineAt, limits: roundLimits, groupBindings: groupRuns.map((item) => item.binding) });
 
@@ -313,7 +331,8 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     sourceSnapshot: wire, intent: selection.intent, intentDigest: selection.intentDigest, selectionInput: { ...selection, sourceSnapshot: wire },
     applicationApprovalBinding: approval, applicationBindings, runtimeBindings, launchTargets: [...launchTargets].sort((left, right) => (left.targetId < right.targetId ? -1 : 1)),
     modelRoute, cliHosts, preparedEnvironments, policy: selection.policy, bundle: derivation.bundle, executionPlan: plan,
-    ...(input.creatorAuthority === undefined ? {} : { creatorAuthority: input.creatorAuthority }), ...(signedBaseline === undefined ? {} : { baseline: signedBaseline }), portableProjection: null, round,
+    ...(input.creatorAuthority === undefined ? {} : { creatorAuthority: input.creatorAuthority }), ...(signedBaseline === undefined ? {} : { baseline: signedBaseline }),
+    ...(input.replay === undefined ? {} : { replay: { purpose: "replay" as const, ...input.replay } }), portableProjection: null, round,
     groups: groupRuns.map((item) => item.admitted).sort((left, right) => (left.outerBinding.groupId < right.outerBinding.groupId ? -1 : 1)) };
   let bytes: Buffer;
   let admission: E2EApplicationExecutionAdmission;

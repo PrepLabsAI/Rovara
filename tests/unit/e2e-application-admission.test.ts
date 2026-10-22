@@ -635,6 +635,105 @@ describe("a baseline round's admission on a project whose policy pins a model ro
   });
 });
 
+// M1.4 Task 4.6b: an audit replay's admission. The same candidate, plan and accounts, with no model route, the policy as it was pinned (so the AI navigation steps compile and keep the limits
+// sized for them), and the recordings and the source round's facts signed in.
+describe("an audit replay's admission on a project whose policy pins a model route (Task 4.6b)", () => {
+  const ROUTE = "r1-0123456789ab";
+  const ROUTE_LIMITS = e2eAgentRoutePolicyLimits(E2E_MODEL_ROUTE_DEFAULT_BUDGETS);
+  const agentScenario: E2EScenario = { ...csvScenario, scenarioId: "agent-orders", steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] };
+  const agentRow = () => webApiRow("web", {}, (value) => ({ ...value, supportedSteps: [...value.supportedSteps, "agent" as const] }));
+  const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+  const recording = (caseId: string, stepIndex: number, hidden = false) => {
+    const trace = { actions: [{ name: "tap", summary: "The tap action.", target: { role: "button", name: "Orders", testId: "orders" } }], summary: "The recorded AI navigation concluded.",
+      executor: { name: "rovara-e2e-agent", version: "1" }, startPath: "/", endPath: "/", ...(hidden ? { endAnchors: [{ role: "textbox", name: "q", value: `hmac-sha256:${sha("v")}` }] } : {}) };
+    const keyHash = sha(`${caseId}:${stepIndex}`);
+    return { caseId, stepIndex, keyHash, traceBase64: Buffer.from(JSON.stringify({ schemaVersion: "rovara-agent-trace-file/v1", keyHash, trace })).toString("base64"),
+      binding: { schemaVersion: "rovara-agent-trace/v1" as const, runId: randomUUID(), caseId, stepIndex, traceSha256: sha(canonicalJson(trace)), ledgerSha256: sha("ledger"), actionCount: 1 } };
+  };
+  async function setup() {
+    const fx = planFixture({ modelRouteRevision: ROUTE, extraScenarios: [agentScenario] });
+    const candidate = await candidateOf(ordersTree);
+    const rows = [agentRow()];
+    const policy = { ...fx.policy, limits: ROUTE_LIMITS };
+    const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+      runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding,
+      buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection({ ...fx, policy }, rows) };
+    const candidateRound = buildApplicationExecutionAdmission(input);
+    const cases = candidateRound.admission.round.groupBindings.flatMap((group) => group.expectedCases);
+    const agentCase = cases.find((item) => item.scenarioId === "agent-orders")!;
+    const replayOf = (overrides: Record<string, unknown> = {}) => ({ sourceRoundId: randomUUID(), sourceAdmissionSha256: sha("source admission"), sourceEvidenceSha256: sha("source evidence"), attempt: 1,
+      sourceCases: cases.map((item) => ({ caseId: item.caseId, assertionOutcomes: item.assertionDigests.map(() => "passed" as const), csvSha256: null })),
+      traces: [recording(agentCase.caseId, 0)], ...overrides });
+    return { input, candidateRound, cases, agentCase, replayOf, replayRound: (overrides: Record<string, unknown> = {}) => buildApplicationExecutionAdmission({ ...input, replay: replayOf(overrides) }) };
+  }
+
+  it("names no model route, keeps the policy's route revision in the run bindings and its agent-sized limits, and signs the recordings and the source round's facts", async () => {
+    const s = await setup();
+    const replay = s.replayRound();
+    const decoded = decodeE2EApplicationExecutionAdmission(replay.bytes);
+    expect(decoded.modelRoute).toBeNull();
+    expect(decoded.replay?.purpose).toBe("replay");
+    expect(decoded.replay?.traces).toHaveLength(1);
+    expect(decoded.policy.modelRouteRevision).toBe(ROUTE);
+    expect(decoded.round.groupBindings.every((item) => item.modelRouteRevision === ROUTE)).toBe(true);
+    expect(decoded.round.limits).toEqual(ROUTE_LIMITS);
+    // Control: the same plan as a candidate round pins the route, and signs no replay.
+    expect(s.candidateRound.admission.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: ROUTE });
+    expect(s.candidateRound.admission.replay).toBeUndefined();
+    expect(replay.admissionDigest).not.toBe(s.candidateRound.admissionDigest);
+  });
+
+  it("is accepted by the worker's own decoder and validator, and its agent group uses no model channel (the candidate's does), with its own config digest", async () => {
+    const s = await setup();
+    const replay = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(s.replayRound().bytes)).applicationSuites[0]!;
+    const candidate = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(s.candidateRound.bytes)).applicationSuites[0]!;
+    expect(e2eApplicationGroupAgentSteps(replay)).toEqual(e2eApplicationGroupAgentSteps(candidate));
+    expect(e2eApplicationGroupUsesModel(replay)).toBe(false);
+    expect(e2eApplicationGroupUsesModel(candidate)).toBe(true);
+    expect(replay.runtimeAdmissionContext.modelRoute).toBeNull();
+    expect(replay.shards[0]!.expectedConfigDigest).not.toBe(candidate.shards[0]!.expectedConfigDigest);
+    // Every case id is the candidate round's: a case id does not depend on the kind of round.
+    expect(replay.expectedCases.map((item) => item.caseId)).toEqual(candidate.expectedCases.map((item) => item.caseId));
+  });
+
+  it("is not a model round to the dispatcher: the reader that holds a reference's agentSteps flag to its admission answers no for a replay and yes for the candidate round", async () => {
+    const s = await setup();
+    const reader = (built: { bytes: Buffer; sha256: string }) => createWorkflowE2EAdmissionAgentStepsReader({ s3: { send: async () => ({ Body: { transformToString: async () => built.bytes.toString("utf8") } }) }, bucket: "b" })({
+      schemaVersion: 1, kind: "application", taskId: "11111111-1111-4111-8111-111111111111", workflowRevision: 7, candidateDigest: "a".repeat(64), roundId: randomUUID(), groupRunIds: [randomUUID()],
+      admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } });
+    await expect(reader(s.replayRound())).resolves.toBe(false);
+    await expect(reader(s.candidateRound)).resolves.toBe(true);
+  });
+
+  it("refuses, before anything is stored, a recording for a case this candidate would not run, source facts for other cases, and a round that is both a baseline and a replay", async () => {
+    const s = await setup();
+    expect(refusalOf(() => s.replayRound({ traces: [recording("case-that-does-not-exist", 0)] }))).toMatch(/replay-source-unavailable/);
+    expect(refusalOf(() => s.replayRound({ sourceCases: [{ caseId: "other", assertionOutcomes: ["passed"], csvSha256: null }] }))).toMatch(/replay-source-unavailable/);
+    expect(refusalOf(() => buildApplicationExecutionAdmission({ ...s.input, replay: s.replayOf(), baseline: { baseCommitSha: s.input.snapshot.commitSha, attempt: 1 } }))).toMatch(/baseline or a replay/);
+  });
+
+  it("refuses a recording that is not the one its binding digests, or that is not for an AI navigation step, when the worker's validator reads the admission", async () => {
+    const s = await setup();
+    const good = recording(s.agentCase.caseId, 0);
+    const other = recording(s.agentCase.caseId, 0, true);
+    // The file of one recording under the binding of another: the trace's digest is not the binding's.
+    expect(() => s.replayRound({ traces: [{ ...good, traceBase64: other.traceBase64 }] })).toThrow(/did not validate|binding digests|key/);
+    // A step that is not an agent step of the case.
+    expect(() => s.replayRound({ traces: [recording(s.agentCase.caseId, 1)] })).toThrow(/did not validate|AI navigation step/);
+    // A recording of the contract with a binding that counts other actions than the file holds.
+    expect(() => s.replayRound({ traces: [{ ...good, binding: { ...good.binding, actionCount: 2 } }] })).toThrow(/did not validate|binding digests/);
+  });
+
+  it("does not move a candidate round: the same input without `replay` builds exactly the admission it built before (no replay key, the pinned route, the model channel for the agent group)", async () => {
+    const s = await setup();
+    const decoded = decodeE2EApplicationExecutionAdmission(s.candidateRound.bytes);
+    expect("replay" in decoded).toBe(false);
+    expect(decoded.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: ROUTE });
+    expect(validateE2EApplicationExecutionAdmission(decoded).applicationSuites.some((suite) => e2eApplicationGroupUsesModel(suite))).toBe(true);
+  });
+});
+
 describe("an admission for a plan that runs web and API checks together (Task 3.4)", () => {
   const BOTH_ROWS = () => [webApiRow("web"), webApiRow("api")];
   const sha256Of = (value: string) => createHash("sha256").update(value).digest("hex");

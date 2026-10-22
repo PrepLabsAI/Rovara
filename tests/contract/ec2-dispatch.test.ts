@@ -663,6 +663,46 @@ describe("ec2-ebs delivery", () => {
         expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EApplicationChecks.v2");
       });
 
+      // M1.4 Task 4.6b, test 18: a replay (no model) goes only to a worker that lists task.workflowE2EReplayChecks.v1; an older worker is never handed one.
+      describe("audit replay rounds (Task 4.6b)", () => {
+        const replayRef = () => admission({ kind: "application", purpose: "replay", sourceRoundId: "5".repeat(8) + "-5555-4555-8555-" + "5".repeat(12), attempt: 1 });
+        const applicationOnly = [...checksFeatures, "task.workflowE2EApplicationChecks"];
+        const withReplay = [...applicationOnly, "task.workflowE2EReplayChecks.v1"];
+        const schema = async () => "workflow-e2e-application-admission/v1";
+
+        it("never sends a replay admission to a worker that runs application admissions (even AI navigation steps and baselines) but does not list the replay feature, and says why", async () => {
+          const record = checks(replayRef());
+          const older = delivery({ workerFeatures: async () => [...applicationOnly, "task.workflowE2EBaselineChecks", "task.workflowE2EAgentSteps.v1"], workflowE2EAdmissionSchemaVersion: schema });
+          const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+          expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+          expect(refusal?.message).toContain("task.workflowE2EReplayChecks.v1");
+          expect(refusal?.message).toMatch(/replay/i);
+          expect(older.post).not.toHaveBeenCalled();
+        });
+
+        it("hands a replay admission, unchanged, to a worker that lists the feature (and needs no agent-steps feature: a replay has no model), and other admissions still go as before", async () => {
+          const ref = replayRef();
+          const record = checks(ref);
+          const capable = delivery({ workerFeatures: async () => withReplay, workflowE2EAdmissionSchemaVersion: schema });
+          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
+          const candidate = checks(admission({ kind: "application" }));
+          const older = delivery({ workerFeatures: async () => applicationOnly, workflowE2EAdmissionSchemaVersion: schema });
+          expect(await older.deliver(candidate, candidate.invocation)).toBe("DELIVERED");
+        });
+
+        it("fails closed for a replay admission when the worker cannot be asked which features it lists", async () => {
+          const record = checks(replayRef());
+          const failing = delivery({ workerFeatures: async () => { throw new Error("ping down"); } });
+          await expect(failing.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+          expect(failing.post).not.toHaveBeenCalled();
+        });
+
+        it("is advertised by the worker's own /ping feature list", () => {
+          expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EReplayChecks.v1");
+        });
+      });
+
       describe("baseline rounds (Task 3.7b)", () => {
         const baselineRef = () => admission({ kind: "application", purpose: "baseline", baseCommitSha: "c".repeat(40), attempt: 1 });
         const applicationOnly = [...checksFeatures, "task.workflowE2EApplicationChecks"];

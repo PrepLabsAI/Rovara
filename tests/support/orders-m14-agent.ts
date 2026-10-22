@@ -83,7 +83,8 @@ export type OrdersM14AppProcess = Readonly<{ upstream: string; directory: string
  * The m14 app as the host would run it, but on this machine: the accounts file written for the plan's accounts, the recipe's seed command run for real against it, then the app on a
  * loopback port reading the records the seed built. For executor tests that run the real CLI and a real local Chromium without Docker.
  */
-export async function startOrdersM14App(fixture: WebApiProbePlan, options: { renamed?: boolean } = {}): Promise<OrdersM14AppProcess> {
+export type OrdersM14Variant = "lf-csv" | "changed-csv";
+export async function startOrdersM14App(fixture: WebApiProbePlan, options: { renamed?: boolean; variant?: OrdersM14Variant } = {}): Promise<OrdersM14AppProcess> {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "orders-m14-app-")));
   const app = join(directory, "app");
   await mkdir(app, { recursive: true });
@@ -95,6 +96,18 @@ export async function startOrdersM14App(fixture: WebApiProbePlan, options: { ren
     const renamed = source.replace('data-testid="download-orders"', 'data-testid="get-orders-file"').replace(">Download orders<", ">Fetch the orders file<");
     if (renamed === source) throw new Error("the m14 app has no download button to rename");
     await writeFile(server, renamed);
+  }
+  // A candidate whose export changed under the replay (Task 4.6b): the same file with other line ends (the assertion still holds, the bytes differ) or other data (the assertion fails).
+  if (options.variant !== undefined) {
+    const server = join(app, "server.mjs");
+    const source = await readFile(server, "utf8");
+    const edits: Record<OrdersM14Variant, [string, string]> = {
+      "lf-csv": ['.join("\\r\\n") + "\\r\\n"', '.join("\\n") + "\\n"'],
+      "changed-csv": ["rows.map((row) => [row.id, row.customer, row.total, row.state, row.inventory])", 'rows.map((row) => [row.id, row.customer + "!", row.total, row.state, row.inventory])'],
+    };
+    const [from, to] = edits[options.variant];
+    if (!source.includes(from)) throw new Error("the m14 app has no export to change");
+    await writeFile(server, source.replace(from, to));
   }
   const applicationId = fixture.compiled.originByApplicationId[0]!.applicationId;
   const contract = readE2EApplicationProjectContract(fixture.compiled.runtimeAdmissionContext.selectionInput.sourceSnapshot, applicationId)!;
