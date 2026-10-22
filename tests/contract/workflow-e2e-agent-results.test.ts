@@ -189,6 +189,24 @@ describe("evaluateE2EAgentCase: anything that does not agree is model-receipts-m
     expect(codeOf(concluded({ report: { actionSteps: 2 } }))).toBe("model-receipts-mismatch");
   });
 
+  it("AGENTCOUNT: the ledger's actions and the report's count agree both ways; only a refused off-origin navigation or the action that met an exhausted budget may be uncounted", () => {
+    // More in the ledger than the report counted (an added action), fewer (a hidden one).
+    expect(codeOf(concluded({ step: { actions: [tap(), tap()] }, report: { actionSteps: 1 } }))).toBe("model-receipts-mismatch");
+    expect(codeOf(concluded({ step: { actions: [tap(), tap()] }, report: { actionSteps: 2 } }))).toBe("deterministic");
+    expect(codeOf(concluded({ step: { actions: [tap()] }, report: { actionSteps: 2 } }))).toBe("model-receipts-mismatch");
+    expect(codeOf(concluded({ step: { actions: [] }, report: { actionSteps: 1 }, csvDownload: "none" }))).toBe("model-receipts-mismatch");
+    // A navigation to another origin is recorded by the executor but never dispatched, so the SDK does not count it.
+    const offOrigin = { ...tap(), tool: "navigate" as const, node: null, url: "/", outcome: "policy-denied" as const };
+    expect(codeOf(concluded({ step: { actions: [offOrigin as never, tap()] }, report: { actionSteps: 1 } }))).toBe("deterministic");
+    // It excuses only itself: a second, ordinary action that the report does not count is still a mismatch.
+    expect(codeOf(concluded({ step: { actions: [offOrigin as never, tap(), tap()] }, report: { actionSteps: 1 } }))).toBe("model-receipts-mismatch");
+    // A failed action met the exhausted budget: the report stopped at the budget and the ledger has one row more, but only in a step that ended STEP_BUDGET_EXHAUSTED.
+    const failedTap = { ...tap(), outcome: "action-failed" as const };
+    expect(codeOf(stopped("STEP_BUDGET_EXHAUSTED", [ok(1, 0), ok(1, 1)], { step: { verdict: "failed", stopCode: "STEP_BUDGET_EXHAUSTED", actions: [tap(), failedTap as never] }, report: { actionSteps: 1 } }))).toBe("agent-budget-exhausted");
+    expect(codeOf(stopped("STEP_TIMEOUT", [ok(1, 0)], { step: { verdict: "failed", stopCode: "STEP_TIMEOUT", actions: [tap(), failedTap as never] }, report: { actionSteps: 1 } }))).toBe("model-receipts-mismatch");
+    expect(codeOf(stopped("STEP_BUDGET_EXHAUSTED", [ok(1, 0), ok(1, 1)], { step: { verdict: "failed", stopCode: "STEP_BUDGET_EXHAUSTED", actions: [tap(), tap()] }, report: { actionSteps: 1 } }))).toBe("model-receipts-mismatch");
+  });
+
   it("16. a kept transcript whose prompt or response digest is not the receipt's is a mismatch; a body omitted for budget changes nothing", () => {
     const receipts = [ok(1, 0), ok(1, 1)];
     const digests = digestsFor(receipts);
