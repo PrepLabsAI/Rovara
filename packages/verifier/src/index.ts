@@ -37,9 +37,9 @@ export { E2EApplicationProducerSchema, E2EApplicationProofBytesSchema, E2EApplic
   qualifyE2EApplicationCollection, mapE2EApplicationGroupResult, UNMOCKED_EXTERNAL_CALL_REASON, e2eApplicationHostedMockOrigins } from "./application-result-adapter.js";
 export type { E2EApplicationProducer, E2EApplicationProofBytes, E2EApplicationSupervisorReadback, E2EApplicationOwnedSubject, E2EApplicationCaseCapture,
   E2EApplicationMockConsumption, E2EApplicationCollection, E2EApplicationCollectionOracle, E2EApplicationGroupResultEnvelope, E2EApplicationMockSummary,
-  E2EApplicationQualification, E2EApplicationUnmockedCall } from "./application-result-adapter.js";
+  E2EApplicationQualification, E2EApplicationCaseFacts, E2EApplicationUnmockedCall } from "./application-result-adapter.js";
 export { collectE2EApplicationRun } from "./application-collection.js";
-export { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } from "./application-templates.js";
+export { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, E2E_REPLAY_EXECUTOR_NAME, E2E_REPLAY_EXECUTOR_VERSION } from "./application-templates.js";
 export { E2E_AGENT_TRACE_BASE64_MAX, evaluateE2EAgentCase, E2EAgentModelEvidenceSchema, E2E_AGENT_UNKNOWN_CODES, E2E_AGENT_LEDGER_MAX_BYTES, E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION } from "./application-agent-result.js";
 export { agentInstructionDigest, mapAgentTraceToStep, reviewAgentTraceFile, selectAgentTraceUploads, verifiedAgentCaseLedger } from "./application-agent-traces.js";
 export type { E2EAgentTraceCase, E2EAgentTraceReview, E2EAgentTraceUpload } from "./application-agent-traces.js";

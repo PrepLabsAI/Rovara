@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { types } from "node:util";
 import { z } from "zod";
-import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, canonicalJson, e2eModelRouteRevision, e2eRuntimeBindingOf, copyBoundedE2EJsonData, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema,
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, canonicalJson, e2eModelRouteRevision, e2eRuntimeBindingOf, copyBoundedE2EJsonData, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema, E2E_REPLAY_STOP_CODES,
   E2EExpectedCaseSchema, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAssertionSchema,
   E2EScenarioSchema, E2ERuntimeAccountRefSchema, E2EAppArtifactRefSchema, E2EMockSpecSchema, isE2EAnonymousSessionRef, readE2EApplicationProjectContract, type E2EApplicationEvidenceRef, type E2ECaseCoverage, type E2EQualifiedResult,
   type E2ERound, type E2ERunBinding, type E2ERuntimeAccountRef } from "@agentx/contracts";
@@ -265,7 +265,7 @@ function schemaMatches(value: unknown, schema: unknown, depth = 0): boolean {
 }
 export function evaluateE2EApplicationAssertionObservation(input: { assertion: z.infer<typeof E2EAssertionSchema>;
   observation: E2EApplicationAssertionObservation; proofBytes: ReadonlyMap<string, E2EApplicationProofBytes>;
-  assetBinding: E2EApplicationAssertionAssetBinding | null }): { supported: boolean; passed: boolean; value: unknown } {
+  assetBinding: E2EApplicationAssertionAssetBinding | null }): { supported: boolean; passed: boolean; value: unknown; /** A CSV assertion: SHA-256 of the bytes of the download it read. */ contentSha256?: string } {
   const observation = E2EApplicationAssertionObservationSchema.parse(input.observation);
   const assertion = E2EAssertionSchema.parse(input.assertion);
   if (observation.kind === "text" && assertion.kind === "text") {
@@ -283,12 +283,13 @@ export function evaluateE2EApplicationAssertionObservation(input: { assertion: z
     return { supported: true, passed: observation.method === assertion.method && observation.path === assertion.path && observation.status === assertion.equals, value: observation.status };
   }
   if (observation.kind === "csv" && assertion.kind === "csv") {
-    const body = new TextDecoder("utf-8", { fatal: true }).decode(proofBytesFor(input.proofBytes, observation.contentRef));
+    const csvBytes = proofBytesFor(input.proofBytes, observation.contentRef);
+    const body = new TextDecoder("utf-8", { fatal: true }).decode(csvBytes);
     const rows = parseCsv(body);
     const [columns, ...data] = rows;
     const value = { columns: columns ?? [], rows: data, downloadName: observation.downloadName };
     return { supported: true, passed: observation.downloadName === assertion.downloadName && canonicalJson(value) === canonicalJson({
-      columns: assertion.columns, rows: assertion.rows, downloadName: assertion.downloadName }), value };
+      columns: assertion.columns, rows: assertion.rows, downloadName: assertion.downloadName }), value, contentSha256: createHash("sha256").update(csvBytes).digest("hex") };
   }
   if (observation.kind === "json" && assertion.kind === "json") {
     if (!input.assetBinding || input.assetBinding.kind !== "json-schema" || input.assetBinding.id !== assertion.schemaRef
@@ -827,6 +828,11 @@ export const E2EApplicationCollectionOracleSchema = z.object({ protocol: z.liter
    * with no agent step, and for every oracle built before Task 4.4a. The route in it is the one the oracle's `modelRoute` names (the broker puts the registry's definition there).
    */
   agentModel: E2EAgentModelEvidenceSchema.nullable().optional(),
+  /**
+   * Present only for the oracle of an audit replay (Task 4.6b): the group runs with no model route, so its AI navigation steps are judged from the runner's account of them (a step is
+   * whole only when it is replayed in full from the recording it is bound to) and no model evidence may come with it. The bindings are the admission's.
+   */
+  replay: z.object({ bindings: z.array(z.object({ caseId: id(160), stepIndex: z.number().int().min(0).max(255), keyHash: sha, traceSha256: sha, actionCount: z.number().int().min(0).max(8) }).strict()).max(12) }).strict().optional(),
   sourceDigest: sha, environment: z.record(id(256), boundedData), usage: z.record(id(256), z.number().nonnegative()), limits: z.record(id(256), z.number().nonnegative()),
   createdAt: utc }).strict().superRefine((oracle, context) => {
     const expectedCasesById = new Map(oracle.expectedCases.map((item) => [item.caseId, item]));
@@ -866,7 +872,8 @@ export const E2EApplicationCollectionOracleSchema = z.object({ protocol: z.liter
       if (Object.keys(rows).length > max) context.addIssue({ code: "custom", path: [name], message: "oracle fact map exceeds its bounded key count" });
     }
     const agentRoute = oracle.agentModel?.route ?? null;
-    if (oracle.agentModel != null && (oracle.modelRoute === null || !oracle.applicationIdsByCase.some((fact) => fact.scenario.steps.some((step) => step.kind === "agent"))
+    // An audit replay (Task 4.6b) has no route: model evidence with one is refused by the qualifier as `replay-model-called`, not as a malformed oracle.
+    if (oracle.replay === undefined && oracle.agentModel != null && (oracle.modelRoute === null || !oracle.applicationIdsByCase.some((fact) => fact.scenario.steps.some((step) => step.kind === "agent"))
       || (agentRoute !== null && (agentRoute.routeId !== oracle.modelRoute.routeId || e2eModelRouteRevision(agentRoute) !== oracle.modelRoute.routeRevision)))) {
       context.addIssue({ code: "custom", path: ["agentModel"], message: "model-receipts-mismatch: the model evidence is not for a group with AI navigation steps under the admitted route" });
     }
@@ -1016,6 +1023,7 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
     preparedEnvironmentDigest: input.compiled.preparedEnvironmentDigest, originByApplicationId: input.compiled.originByApplicationId,
     fixedAssetDigestsByShard: input.compiled.shards.map((item) => ({ shardId: item.shardId, digests: { compilerInventory: item.inventory.digest } })),
     modelRoute: input.compiled.runtimeAdmissionContext.modelRoute, ...(input.agentModel == null ? {} : { agentModel: input.agentModel }),
+    ...(input.compiled.runtimeAdmissionContext.replay === undefined ? {} : { replay: { bindings: input.compiled.runtimeAdmissionContext.replay.bindings.map((item) => ({ ...item })) } }),
     sourceDigest: input.compiled.runtimeAdmission.sourceSnapshotDigest,
     environment: input.environment, usage: input.usage, limits: input.limits, createdAt: input.now ?? new Date().toISOString() });
   if (body.observationBindings !== null) {
@@ -1058,7 +1066,13 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
 /** What the verified mock evidence of a run shows, for the people who read the result: how often each variant was served and what no mock matched. Derived from verified bytes only. */
 export type E2EApplicationMockSummary = Readonly<{ consumptions: Readonly<{ success: number; refusal: number; invalidData: number }>;
   unmockedCalls: Readonly<{ sinkhole: number; mocked: number }>; mockedOrigins: readonly string[] }>;
-export type E2EApplicationQualification = E2EStructuralQualification & Readonly<{ mockSummary?: E2EApplicationMockSummary }>;
+/**
+ * What the collector saw of one case beyond its verdict (Task 4.6b): the SHA-256 of the CSV bytes the case's download assertion read (null when it has none or read none), and, for
+ * a replay, how each AI navigation step ended. The broker compares a replay's facts with those of the round it replays. Facts only: they are never a verdict.
+ */
+export type E2EApplicationCaseFacts = Readonly<{ caseId: string; csvSha256: string | null;
+  agentSteps: ReadonlyArray<Readonly<{ stepIndex: number; whole: boolean; replayedActions: number; totalActions: number; stopCode: string | null }>> }>;
+export type E2EApplicationQualification = E2EStructuralQualification & Readonly<{ mockSummary?: E2EApplicationMockSummary; caseFacts?: ReadonlyArray<E2EApplicationCaseFacts> }>;
 export type E2EApplicationCollectionResult = Readonly<{ collection: E2EApplicationCollection | null; oracle: E2EApplicationCollectionOracle | null;
   qualification: E2EApplicationQualification | null; unavailableReason: string | null }>;
 type E2EApplicationReportStep = E2EApplicationReport["run"]["results"][number]["attempts"][number]["steps"][number];
@@ -1207,12 +1221,18 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
       || new Set(expectedModelRows.map((item) => item.requestId)).size !== expectedModelRows.length
       || new Set(expectedModelRows.map((item) => item.receiptId)).size !== expectedModelRows.length
       || expectedModelRows.some((item) => !caseById.has(item.caseId)))) return unknown("protected model receipt projection inventory is duplicated or exceeds its original budget", oracle.binding.runId);
+    // Task 4.6b: an audit replay has no model. Anything of a model's in its evidence (receipts, tokens, a call in the report) is a replay that was not one.
+    const replay = oracle.replay;
+    if (replay !== undefined && expectedModelRows?.length) return unknown("replay-model-called: model receipts came with an audit replay", oracle.binding.runId);
     if (oracle.modelRoute === null && expectedModelRows?.length) return unknown("model receipts were supplied for a null governed model route", oracle.binding.runId);
     // Task 4.4a: the AI navigation steps are judged from the worker's receipts and the executor's ledgers (`evaluateE2EAgentCase`), not from per-action frames or projection rows.
     if (expectedModelRows?.length) return unknown("model-receipts-mismatch: governed model receipt projections are not how AI navigation steps are read", oracle.binding.runId);
     const agentCaseIds = new Set(oracle.applicationIdsByCase.filter((fact) => fact.scenario.steps.some((step) => step.kind === "agent")).map((fact) => fact.caseId));
     const agentModel = oracle.agentModel ?? null;
-    if (agentCaseIds.size > 0) {
+    if (replay !== undefined) {
+      // A replay's AI navigation steps need no route and no evidence of a model; model evidence of any kind means a model was in the run.
+      if (agentModel !== null) return unknown("replay-model-called: model evidence came with an audit replay", oracle.binding.runId);
+    } else if (agentCaseIds.size > 0) {
       if (oracle.modelRoute === null) return unknown("agent-route-not-approved: the group has AI navigation steps and the admission pins no model route", oracle.binding.runId);
       if (agentModel === null) return unknown("model-receipts-mismatch: no model receipts or action ledgers came with the group's AI navigation steps", oracle.binding.runId);
     } else if (agentModel !== null) return unknown("model-receipts-mismatch: model evidence came with a group that has no AI navigation step", oracle.binding.runId);
@@ -1304,7 +1324,8 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
       for (const tuple of expectedPacket.tuples.filter((item) => item.disposition === "run")) {
         const row = rows.find((item) => item.id === tuple.upstreamResultId);
         const attempt = row?.attempts[0];
-        const cacheClean = attempt?.steps.every((step) => step.cache === undefined || (step.cache.mode === "missed" && step.cache.replayedActions === 0)) ?? false;
+        // A replay's AI navigation steps may show any cache outcome (they are judged from it below); every other step is as clean as it ever was.
+        const cacheClean = attempt?.steps.every((step) => step.cache === undefined || (step.cache.mode === "missed" && step.cache.replayedActions === 0) || (replay !== undefined && step.kind === "agent")) ?? false;
         const reportFailure = attempt?.error;
         if (!row || !attempt || row.attempts.length !== 1 || row.repeat !== 0 || !["passed", "failed"].includes(row.status)
           || row.skip !== undefined || attempt.status !== row.status || attempt.cleanup !== "complete"
@@ -1338,6 +1359,10 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
       const shardReceiptCount = agentReceipts.filter((receipt) => receipt.outcome === "ok" && shardCaseIds.has(receipt.caseId)).length;
       const modelTokens = parsed.report.run.usage.modelTokens;
       const maxModelCallsInStep = parsed.report.run.usage.maxModelCallsInStep;
+      if (replay !== undefined && (shardModelCalls > 0 || shardInputTokens > 0 || shardOutputTokens > 0 || (modelTokens ?? 0) > 0 || (maxModelCallsInStep ?? 0) > 0
+        || attemptSteps.some((step) => step.model !== undefined))) {
+        return unknown("replay-model-called: the replay's report shows a model call or model tokens", oracle.binding.runId, parsed.rawSha256);
+      }
       if (typeof modelTokens !== "number" || typeof maxModelCallsInStep !== "number"
         || !e2eApplicationModelUseWithinRound({ steps: attemptSteps, usage: { modelTokens, maxModelCallsInStep }, modelRoutePresent: oracle.modelRoute !== null,
         maxModelRequests: oracle.round.limits.maxModelRequests, maxInputTokens: oracle.round.limits.maxInputTokens,
@@ -1359,6 +1384,7 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
     const summaryConsumptions = { success: 0, refusal: 0, invalidData: 0 };
     const summaryUnmocked = new Map<string, string>();
     const summaryOrigins = new Set<string>();
+    const caseFactRows: E2EApplicationCaseFacts[] = [];
     const normalizedCases = oracle.expectedCases.map((expected) => {
       const capture = captures.get(expected.caseId)!;
       const facts = oracle.applicationIdsByCase.find((item) => item.caseId === expected.caseId)!;
@@ -1442,14 +1468,33 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
       for (const declaredStepIndex of declaredAgentSteps) {
         const sdkStep = reportAgentSteps[declaredAgentSteps.indexOf(declaredStepIndex)];
         const declaredCaptureStep = capture.steps.find((item) => item.declaredStepIndex === declaredStepIndex);
-        if (!declaredCaptureStep || declaredCaptureStep.agentOperationRefs.length !== 0 || !sdkStep || sdkStep.kind !== "agent" || !sdkStep.metrics
-          || (sdkStep.cache !== undefined && (sdkStep.cache.mode !== "missed" || sdkStep.cache.replayedActions !== 0))) agentOperationsValid = false;
+        if (!declaredCaptureStep || declaredCaptureStep.agentOperationRefs.length !== 0 || !sdkStep || sdkStep.kind !== "agent" || (replay === undefined && !sdkStep.metrics)
+          || (replay === undefined && sdkStep.cache !== undefined && (sdkStep.cache.mode !== "missed" || sdkStep.cache.replayedActions !== 0))) agentOperationsValid = false;
       }
       if (!agentOperationsValid) throw new Error("model-receipts-mismatch: an AI navigation step differs from the e2e report's account of it or carries M1-era operation frames");
       // The agent part of the case: the verdict the receipts and the ledger allow. Null for a case with no agent step.
       let agentResult: E2EAgentCaseResult | null = null;
+      // Task 4.6b: in an audit replay there is no model and no ledger. A step is whole only when the runner replayed it in full from the recording it is bound to; any other end of a step is
+      // a replay that could not go on, with the fixed code the step recorded (a value the model chose, else that it needed a model).
+      let replayCode: string | null = null;
+      const replaySteps: Array<{ stepIndex: number; whole: boolean; replayedActions: number; totalActions: number; stopCode: string | null }> = [];
+      if (replay !== undefined && agentCaseIds.has(expected.caseId)) {
+        for (const declaredStepIndex of declaredAgentSteps) {
+          const sdk = reportAgentSteps[declaredAgentSteps.indexOf(declaredStepIndex)]!;
+          const captured = capture.steps.find((item) => item.declaredStepIndex === declaredStepIndex)!;
+          const bound = replay.bindings.find((item) => item.caseId === expected.caseId && item.stepIndex === declaredStepIndex);
+          const cache = sdk.cache;
+          const whole = captured.outcome === "completed" && sdk.status === "passed" && cache?.mode === "self-finalized" && bound !== undefined
+            && cache.replayedActions === cache.totalActions && cache.totalActions === bound.actionCount && cache.entry === bound.keyHash;
+          const frameCode = whole ? null : replayStopCodeOf(captured.evidenceRefs, proofById);
+          replaySteps.push({ stepIndex: declaredStepIndex, whole, replayedActions: cache?.replayedActions ?? 0, totalActions: cache?.totalActions ?? 0, stopCode: frameCode });
+          replayCode ??= whole ? null : frameCode ?? "replay-needs-model";
+        }
+      }
       // A case that never reached its agent step (an earlier step stopped it) has nothing of the model's to judge, and no receipt may name it.
-      if (agentCaseIds.has(expected.caseId) && declaredAgentSteps.length === 0) {
+      if (replay !== undefined) {
+        // judged above
+      } else if (agentCaseIds.has(expected.caseId) && declaredAgentSteps.length === 0) {
         if (agentReceipts.some((receipt) => receipt.caseId === expected.caseId)) throw new Error("model-receipts-mismatch: a model receipt is attributed to a case that never reached its AI navigation step");
         const channel = agentModel!.channel;
         agentResult = channel.droppedRequests !== 0 || channel.unscopedRequests !== 0 || channel.overrun || channel.evidenceErrors !== 0
@@ -1479,7 +1524,7 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
             transcriptDigests: agentModel!.transcriptDigests.filter((digest) => agentReceipts.some((receipt) => receipt.receiptId === digest.receiptId && receipt.caseId === expected.caseId)),
             channel: agentModel!.channel, csvDownload });
       }
-      const agentBlocked = agentResult !== null && agentResult.verdict.kind === "unknown";
+      const agentBlocked = (agentResult !== null && agentResult.verdict.kind === "unknown") || replayCode !== null;
       const agentOperationCount = agentResult?.ledger?.steps.reduce((total, step) => total + step.actions.length, 0) ?? 0;
       const deterministicActionCount = capture.steps.filter((step) => step.kind !== "agent").length;
       if (capture.steps.length > facts.scenario.steps.length || deterministicActionCount + agentOperationCount > oracle.round.limits.maxActionsPerCase
@@ -1659,9 +1704,11 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
         executedCandidateParts: expectedCandidateParts, realComponentIds: [], mockedComponentIds: [...expectedMockComponents].sort(),
         observedMockedComponentIds: [...new Set(observedMocks)].sort(),
         unexercisedBehaviors: capture.assertions.filter((item) => item.outcome !== "passed").map((item) => item.digest) };
+      const csvAssertionIndex = facts.scenario.assertions.findIndex((assertion) => assertion.kind === "csv");
+      caseFactRows.push({ caseId: expected.caseId, csvSha256: csvAssertionIndex < 0 ? null : evaluated[csvAssertionIndex]?.contentSha256 ?? null, agentSteps: replaySteps });
       return { caseId: expected.caseId, executionDescriptorDigest: expected.executionDescriptorDigest, accountContextId: expected.accountContextId,
         accountContextDigest: expected.accountContextDigest, status, reason: status === "passed" ? "structural-application-observations-complete" : status === "failed" ? "observed-application-assertion-failure"
-          : caseUnmockedCalls.length > 0 ? UNMOCKED_EXTERNAL_CALL_REASON : agentResult?.verdict.kind === "unknown" ? agentResult.verdict.code : "application-evidence-floor-unmet",
+          : caseUnmockedCalls.length > 0 ? UNMOCKED_EXTERNAL_CALL_REASON : agentResult?.verdict.kind === "unknown" ? agentResult.verdict.code : replayCode !== null ? replayCode : "application-evidence-floor-unmet",
         attemptCount: 1, assertionDigest: expected.assertionDigest, assertionReceipts, artifacts: [], coverage,
         ...(caseMockedOrigins.length > 0 ? { mockedOrigins: caseMockedOrigins } : {}) };
     });
@@ -1682,8 +1729,24 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
         mocked: unmockedByOrigin.filter((origin) => origin !== SINKHOLE_ORIGIN_REF).length }, mockedOrigins } : undefined;
     return { status: anyFailed ? "FAILED" : allPassed ? "PASS" : "UNKNOWN",
       reason: !anyFailed && !allPassed && unmockedCases ? UNMOCKED_EXTERNAL_CALL_REASON : "structural application observations remain exploratory pending independent producer authentication",
-      runId: oracle.binding.runId, rawReportSha256: reportHash, result, ...(mockSummary ? { mockSummary } : {}) };
+      runId: oracle.binding.runId, rawReportSha256: reportHash, result, ...(mockSummary ? { mockSummary } : {}), caseFacts: caseFactRows };
   } catch (error) { return unknown(error instanceof Error ? error.message : "application collection unavailable", oracleInput?.binding?.runId ?? null); }
+}
+
+/**
+ * The fixed code an AI navigation step of an audit replay recorded for why it did not go on (Task 4.6b): read from the step's retained observation, and only ever one of the two codes
+ * the replay port writes; anything else, or nothing readable, is no code (the caller then says the replay needed a model).
+ */
+function replayStopCodeOf(refs: readonly E2EApplicationEvidenceRef[], proofById: ReadonlyMap<string, E2EApplicationProofBytes>): string | null {
+  for (const ref of refs) {
+    try {
+      const proof = proofById.get(ref.artifactId);
+      if (proof === undefined || evidenceKey(proof.ref) !== evidenceKey(ref)) continue;
+      const frame = z.object({ agent: z.object({ stopCode: z.string().nullable() }).passthrough() }).passthrough().safeParse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(proof.bytes)));
+      if (frame.success && frame.data.agent.stopCode !== null && (E2E_REPLAY_STOP_CODES as readonly string[]).includes(frame.data.agent.stopCode)) return frame.data.agent.stopCode;
+    } catch { /* an unreadable frame names no code */ }
+  }
+  return null;
 }
 
 function scenarioActionsMatch(scenarioInput: unknown, capture: E2EApplicationCaseCapture): boolean {

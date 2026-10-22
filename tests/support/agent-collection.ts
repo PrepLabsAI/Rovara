@@ -6,6 +6,7 @@ import type { E2EApplicationCollectionResult } from "../../packages/verifier/src
 import type { E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
 import { collectE2EApplicationRun } from "../../packages/verifier/src/application-collection.js";
 import type { AgentRun } from "./agent-executor-run.js";
+import type { ReplayRun } from "./agent-replay-run.js";
 import { withModelChannel } from "./orders-m14-agent.js";
 import { createHash } from "node:crypto";
 import { e2eCompiledRuntime } from "../../packages/verifier/src/application-scenarios.js";
@@ -32,8 +33,22 @@ export async function assembleAgentRun(run: AgentRun) {
   return { run, snapshot, plan, resolved, cleanup, actual, inputs, agentModel };
 }
 
+/** What the collector and the broker's verification need of a run read back: the same for a round with a model and for an audit replay (which has none). */
+export type AssembledRun = Pick<AssembledAgentRun, "resolved" | "actual" | "inputs" | "cleanup"> & { run: { fixture: AgentRun["fixture"]; result: { exitCode: number } } };
+
+/** An audit replay (Task 4.6b) read back the way the Docker host reads it: no model channel, so no model evidence in the inputs. */
+export async function assembleReplayRun(run: ReplayRun): Promise<AssembledRun & { snapshot: ExecutorOutputSnapshot }> {
+  const snapshot: ExecutorOutputSnapshot = await snapshotExecutorOutput(run.out, await readExecutorResultFile(run.out));
+  const resolved = resolveE2EExecutorSuite(run.fixture.plan);
+  const inventory = dockerOwnedResourceInventory(resolved.binding.runId, []);
+  const cleanup = { removedAt: new Date().toISOString(), containers: inventory.containers, network: inventory.network, mockOrigins: [] as string[] };
+  const actual = assembleExecutorActualRun({ snapshot, compiled: resolved.suite, binding: resolved.binding, cleanup, evidenceDirectory: "/out" });
+  const inputs: DockerCollectionInputs = assembleDockerCollectionInputs({ snapshot, binding: resolved.binding, cleanup });
+  return { run, snapshot, resolved, cleanup, actual, inputs };
+}
+
 /** The post-close join the worker performs: the host's actual run and protected inputs through the real collector, with `inputs` replaced as a test needs. */
-export function collectAssembled(assembled: AssembledAgentRun, inputs: DockerCollectionInputs | (Omit<DockerCollectionInputs, "agentModel"> & { agentModel?: E2EAgentModelEvidence | null }) = assembled.inputs): E2EApplicationCollectionResult {
+export function collectAssembled(assembled: AssembledRun, inputs: DockerCollectionInputs | (Omit<DockerCollectionInputs, "agentModel"> & { agentModel?: E2EAgentModelEvidence | null }) = assembled.inputs): E2EApplicationCollectionResult {
   const { resolved } = assembled;
   return collectE2EApplicationRun({ actual: assembled.actual, compiled: resolved.suite, binding: resolved.binding, round: resolved.round, ...inputs });
 }
@@ -56,7 +71,7 @@ export type BrokerRound = { admission: E2EApplicationExecutionAdmission; binding
  * broker holds to the admitted runtime's (Linux). Rewrites the report's environment to that, with the digest the process record keeps of the report and the inputs' copy, and nothing
  * else: the limits (the model ceiling the config pins), the receipts, ledgers, captures and cleanup are the real ones.
  */
-export function asLinuxRun(a: AssembledAgentRun): AssembledAgentRun {
+export function asLinuxRun<T extends AssembledRun>(a: T): T {
   const environment = e2eCompiledRuntime(a.resolved.suite)!.runnerEnvironment;
   const shards = a.actual.shards.map((shard) => {
     const report = JSON.parse(Buffer.from(shard.rawReportBytes).toString("utf8")) as { run: { environment: unknown } };
@@ -67,7 +82,7 @@ export function asLinuxRun(a: AssembledAgentRun): AssembledAgentRun {
   return { ...a, actual: { ...a.actual, shards }, inputs: { ...a.inputs, environment } };
 }
 
-export function brokerRoundFor(a: AssembledAgentRun, options: { inputs?: Parameters<typeof collectAssembled>[1]; modelRouteDefinition?: E2EModelRouteDefinition | null | undefined; terminalStatus?: "SUCCEEDED" | "FAILED";
+export function brokerRoundFor(a: AssembledRun, options: { inputs?: Parameters<typeof collectAssembled>[1]; modelRouteDefinition?: E2EModelRouteDefinition | null | undefined; terminalStatus?: "SUCCEEDED" | "FAILED";
   editGroupRun?: (groupRun: Record<string, unknown>) => void } = {}): BrokerRound {
   const admission: E2EApplicationExecutionAdmission = a.run.fixture.plan.admission;
   const validated = validateE2EApplicationExecutionAdmission(admission);
