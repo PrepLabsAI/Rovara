@@ -4,7 +4,7 @@ import { z } from "zod";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, canonicalJson, e2eModelRouteRevision, e2eRuntimeBindingOf, copyBoundedE2EJsonData, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema, E2E_REPLAY_STOP_CODES,
   E2EExpectedCaseSchema, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAssertionSchema,
   E2EScenarioSchema, E2ERuntimeAccountRefSchema, E2EAppArtifactRefSchema, E2EMockSpecSchema, isE2EAnonymousSessionRef, readE2EApplicationProjectContract, type E2EApplicationEvidenceRef, type E2ECaseCoverage, type E2EQualifiedResult,
-  type E2ERound, type E2ERunBinding, type E2ERuntimeAccountRef } from "@agentx/contracts";
+  type E2ERound, type E2ERoundScope, type E2ERunBinding, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import { E2E_REPORT_MAX_BYTES, E2E_APP_RPC_FRAME_MAX_BYTES, e2ePrivateTransferMaxBytes, type E2EStructuralQualification } from "./result-adapter.js";
 import { parseE2EApplicationReport, type E2EApplicationReport } from "./application-report-schema.js";
 import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
@@ -829,6 +829,12 @@ export const E2EApplicationCollectionOracleSchema = z.object({ protocol: z.liter
    */
   agentModel: E2EAgentModelEvidenceSchema.nullable().optional(),
   /**
+   * The scope of the round the oracle is for (Task FU2, AGENTSCOPE): a receipt of the scripted model double is admissible only in a `qualification` round. It comes from the caller that
+   * runs the round (the qualification runner), never from the route's own scope, so a registry row that claims `qualification` cannot make scripted receipts count in a customer
+   * round. Absent means `standard` (every oracle built before this field, and every customer round).
+   */
+  roundScope: z.enum(["standard", "qualification"]).optional(),
+  /**
    * Present only for the oracle of an audit replay (Task 4.6b): the group runs with no model route, so its AI navigation steps are judged from the runner's account of them (a step is
    * whole only when it is replayed in full from the recording it is bound to) and no model evidence may come with it. The bindings are the admission's.
    */
@@ -964,7 +970,7 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
   environment: Environment; usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
   expectedSupervisorReceiptRefs: readonly E2EApplicationEvidenceRef[]; ownedResourceInventoryDigest: string;
   observationBindings: readonly E2EApplicationObservationBinding[] | null; assertionAssets: readonly E2EApplicationAssertionAssetBinding[];
-  governedModelReceipts: readonly E2EApplicationGovernedModelReceiptRow[] | null; agentModel?: E2EAgentModelEvidence | null; ownedClosedAt: string | null; now?: string }): E2EApplicationCollectionOracle {
+  governedModelReceipts: readonly E2EApplicationGovernedModelReceiptRow[] | null; agentModel?: E2EAgentModelEvidence | null; roundScope?: E2ERoundScope; ownedClosedAt: string | null; now?: string }): E2EApplicationCollectionOracle {
   if (!/^[a-f0-9]{64}$/.test(input.ownedResourceInventoryDigest)) throw new Error("protected cleanup inventory expectation is required");
   const expectedSupervisorReceiptRefs = snapshotSupervisorReceiptRefs(input.expectedSupervisorReceiptRefs);
   const binding = E2ERunBindingSchema.parse(input.binding); const round = E2ERoundSchema.parse(input.round);
@@ -1022,7 +1028,7 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
     applicationIdsByCase: [...appIds.values()],
     preparedEnvironmentDigest: input.compiled.preparedEnvironmentDigest, originByApplicationId: input.compiled.originByApplicationId,
     fixedAssetDigestsByShard: input.compiled.shards.map((item) => ({ shardId: item.shardId, digests: { compilerInventory: item.inventory.digest } })),
-    modelRoute: input.compiled.runtimeAdmissionContext.modelRoute, ...(input.agentModel == null ? {} : { agentModel: input.agentModel }),
+    modelRoute: input.compiled.runtimeAdmissionContext.modelRoute, ...(input.agentModel == null ? {} : { agentModel: input.agentModel }), ...(input.roundScope === undefined ? {} : { roundScope: input.roundScope }),
     ...(input.compiled.runtimeAdmissionContext.replay === undefined ? {} : { replay: { bindings: input.compiled.runtimeAdmissionContext.replay.bindings.map((item) => ({ ...item })) } }),
     sourceDigest: input.compiled.runtimeAdmission.sourceSnapshotDigest,
     environment: input.environment, usage: input.usage, limits: input.limits, createdAt: input.now ?? new Date().toISOString() });
@@ -1154,7 +1160,7 @@ export function collectE2EApplicationRun(input: { actual: unknown; compiled: E2E
   environment: Environment; usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
   expectedSupervisorReceiptRefs: readonly E2EApplicationEvidenceRef[]; ownedResourceInventoryDigest: string;
   observationBindings: readonly E2EApplicationObservationBinding[] | null; assertionAssets: readonly E2EApplicationAssertionAssetBinding[];
-  governedModelReceipts: readonly E2EApplicationGovernedModelReceiptRow[] | null; agentModel?: E2EAgentModelEvidence | null; ownedClosedAt: string | null }): E2EApplicationCollectionResult {
+  governedModelReceipts: readonly E2EApplicationGovernedModelReceiptRow[] | null; agentModel?: E2EAgentModelEvidence | null; roundScope?: E2ERoundScope; ownedClosedAt: string | null }): E2EApplicationCollectionResult {
   try {
     const collection = E2EApplicationCollectionSchema.parse(input.actual);
     const oracle = createE2EApplicationCollectionOracleFromCompiledSuite(input);
@@ -1513,7 +1519,7 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
           : csvCaptured?.outcome === "unavailable" && csvCaptured.reason === "ambiguous-download" ? "multiple" as const
             : csvCaptured?.outcome === "unavailable" && (csvCaptured.reason === "agent-no-download" || csvCaptured.reason === "download-not-observed") ? "none" as const : "not-applicable" as const;
         agentResult = agentModel!.route === null ? { verdict: { kind: "unknown", code: "model-receipts-mismatch" }, ledger: null, verifiedReceiptIds: [], matched: ["model-receipts-mismatch"] }
-          : evaluateE2EAgentCase({ roundScope: agentModel!.route.scope, runId: capture.runId, caseId: expected.caseId, route: agentModel!.route,
+          : evaluateE2EAgentCase({ roundScope: oracle.roundScope ?? "standard", runId: capture.runId, caseId: expected.caseId, route: agentModel!.route,
             agentSteps: declaredAgentSteps.map((declaredStepIndex, position) => {
               const step = facts.scenario.steps[declaredStepIndex] as Extract<(typeof facts.scenario.steps)[number], { kind: "agent" }>;
               const sdk = reportAgentSteps[position]!;

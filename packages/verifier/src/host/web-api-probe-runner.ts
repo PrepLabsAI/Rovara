@@ -113,7 +113,7 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
       else {
         const inputs = await host.readCollectionInputs(signal);
         const resolved = resolveE2EExecutorSuite(plan.plan);
-        const collected = collect({ actual: run.actualRun, compiled: resolved.suite, binding: resolved.binding, round: resolved.round, ...inputs });
+        const collected = collect({ actual: run.actualRun, compiled: resolved.suite, binding: resolved.binding, round: resolved.round, ...inputs, roundScope: "qualification" });
         evidence = collected.collection === null || collected.oracle === null ? unavailable(collected.unavailableReason ?? "collector-unavailable")
           : { kind: "collected", runId, scenarioBundle: JSON.parse(JSON.stringify(plan.compiled.bundle)) as Record<string, unknown>,
             collection: JSON.parse(JSON.stringify(collected.collection)) as Record<string, unknown>, oracle: JSON.parse(JSON.stringify(collected.oracle)) as Record<string, unknown>,

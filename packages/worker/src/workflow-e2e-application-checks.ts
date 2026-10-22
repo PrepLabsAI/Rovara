@@ -400,7 +400,7 @@ export async function executeWorkflowE2EApplicationChecks(input: {
       if (run.actualRun !== null && reason === null) {
         try {
           collectionInputs = await host!.readCollectionInputs(controller.signal);
-          const result = collect({ actual: run.actualRun, compiled, binding, round, ...collectionInputs });
+          const result = collect({ actual: run.actualRun, compiled, binding, round, ...collectionInputs, roundScope: input.modelChannel?.policyScope ?? "standard" });
           if (result.qualification !== null && result.collection !== null) { qualification = result.qualification; collected = result.collection; }
           else reason = result.unavailableReason ?? "application collection unavailable";
         } catch (error) {

@@ -10,7 +10,7 @@ import type { ReplayRun } from "./agent-replay-run.js";
 import { withModelChannel } from "./orders-m14-agent.js";
 import { createHash } from "node:crypto";
 import { e2eCompiledRuntime } from "../../packages/verifier/src/application-scenarios.js";
-import type { E2EApplicationExecutionAdmission, E2EModelRouteDefinition } from "@agentx/contracts";
+import type { E2EApplicationExecutionAdmission, E2EModelRouteDefinition, E2ERoundScope } from "@agentx/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { encodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput, type ApplicationEvidenceVerification } from "../../packages/broker/src/e2e/application-evidence.js";
@@ -48,9 +48,11 @@ export async function assembleReplayRun(run: ReplayRun): Promise<AssembledRun & 
 }
 
 /** The post-close join the worker performs: the host's actual run and protected inputs through the real collector, with `inputs` replaced as a test needs. */
-export function collectAssembled(assembled: AssembledRun, inputs: DockerCollectionInputs | (Omit<DockerCollectionInputs, "agentModel"> & { agentModel?: E2EAgentModelEvidence | null }) = assembled.inputs): E2EApplicationCollectionResult {
+export function collectAssembled(assembled: AssembledRun, inputs: DockerCollectionInputs | (Omit<DockerCollectionInputs, "agentModel"> & { agentModel?: E2EAgentModelEvidence | null }) = assembled.inputs,
+  roundScope: E2ERoundScope | null = "qualification"): E2EApplicationCollectionResult {
   const { resolved } = assembled;
-  return collectE2EApplicationRun({ actual: assembled.actual, compiled: resolved.suite, binding: resolved.binding, round: resolved.round, ...inputs });
+  // These runs drive the scripted double, which only a qualification round admits; a test of a customer round passes `"standard"`, or `null` for the caller that names no scope.
+  return collectE2EApplicationRun({ actual: assembled.actual, compiled: resolved.suite, binding: resolved.binding, round: resolved.round, ...inputs, ...(roundScope === null ? {} : { roundScope }) });
 }
 
 /** The first case's result in a collection, or undefined when the collector gave none. */
@@ -83,12 +85,14 @@ export function asLinuxRun<T extends AssembledRun>(a: T): T {
 }
 
 export function brokerRoundFor(a: AssembledRun, options: { inputs?: Parameters<typeof collectAssembled>[1]; modelRouteDefinition?: E2EModelRouteDefinition | null | undefined; terminalStatus?: "SUCCEEDED" | "FAILED";
-  editGroupRun?: (groupRun: Record<string, unknown>) => void } = {}): BrokerRound {
+  /** The scope the broker verifies the round under. These runs drive the scripted double, so a qualification round by default; a customer round passes `"standard"`. */
+  roundScope?: E2ERoundScope; editGroupRun?: (groupRun: Record<string, unknown>) => void } = {}): BrokerRound {
   const admission: E2EApplicationExecutionAdmission = a.run.fixture.plan.admission;
   const validated = validateE2EApplicationExecutionAdmission(admission);
   const binding = admission.groups[0]!.outerBinding;
   const inputs = options.inputs ?? a.inputs;
-  const collected = collectAssembled(a, inputs);
+  const roundScope = options.roundScope ?? "qualification";
+  const collected = collectAssembled(a, inputs, roundScope);
   const planGroup = validated.executionPlan.groups.find((item) => item.groupId === binding.groupId);
   // As the worker packs it: the collection it qualified, the inputs it read, the host's own account of how the process ended.
   const qualified = collected.qualification !== null;
@@ -108,6 +112,6 @@ export function brokerRoundFor(a: AssembledRun, options: { inputs?: Parameters<t
     aggregate: aggregateEvidenceEnvelope({ admission, admissionSha256, groupRuns: [groupRun] }),
     groupEvidence: new Map([[binding.runId, groupEvidenceEnvelope({ admission, admissionSha256, groupRun })]]), receivedAt: new Map([[binding.runId, receivedAt]]),
     terminalStatus: options.terminalStatus ?? "SUCCEEDED",
-    ...(routeDefinition === undefined ? {} : { modelRouteDefinition: routeDefinition }) };
+    roundScope, ...(routeDefinition === undefined ? {} : { modelRouteDefinition: routeDefinition }) };
   return { admission, binding, collected, groupRun, input, verify: () => verifyApplicationE2EEvidence(input) };
 }

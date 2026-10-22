@@ -61,6 +61,21 @@ describe.runIf(agentRunnable)("the broker's verdict on real agent runs", () => {
     expect(slackText(verdict.display!.scenarios)).toContain("AI navigation: 1 step, 2 model calls (checks decide)");
   });
 
+  it("AGENTSCOPE: the broker verifies a round under the scope it is given, and a customer round (the default) does not accept the scripted double's receipts even when the registry row claims qualification", async () => {
+    const a = await readBack("ok");
+    expect(SCRIPTED_REGISTRY_ROUTE.scope).toBe("qualification");
+    expect(brokerRoundFor(a, { roundScope: "qualification" }).verify().verdict).toBe("PASS");
+    const customer = brokerRoundFor(a, { roundScope: "standard" });
+    expect(customer.input.roundScope).toBe("standard");
+    const verdict = customer.verify();
+    expect(verdict.verdict).toBe("UNKNOWN");
+    expect(verdict.results[0]!.cases[0]).toMatchObject({ status: "unavailable", reason: "model-receipts-mismatch" });
+    // What the production caller passes (nothing) is the customer round.
+    const { roundScope: _unused, ...withoutScope } = brokerRoundFor(a).input;
+    void _unused;
+    expect(verifyApplicationE2EEvidence(withoutScope).verdict).toBe("UNKNOWN");
+  });
+
   it("33. agent-wrong-action: FAILED on the deterministic CSV mismatch alone (decision D3), with the case failed and no UNKNOWN code", async () => {
     const verdict = brokerRoundFor(await readBack("decoy")).verify();
     expect(verdict.verdict).toBe("FAILED");

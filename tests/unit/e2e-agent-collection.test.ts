@@ -6,6 +6,7 @@ import { agentRunnable, runAgentCase, type AgentRun } from "../support/agent-exe
 import { assembleAgentRun, collectAssembled, firstCase } from "../support/agent-collection.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
 import type { E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
+import { E2EApplicationCollectionOracleSchema, qualifyE2EApplicationCollection } from "../../packages/verifier/src/application-result-adapter.js";
 
 // Task 4.4a: the real collector over real agent runs (the real executor and Chromium, the worker's proxy and the scripted model), read back the way the Docker host reads them, with the
 // worker's receipts and the executor's ledgers that the host now carries. The pure function is tests/contract/workflow-e2e-agent-results.test.ts; the broker's side is
@@ -187,5 +188,25 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
     const withDropped = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, channel: { ...a.agentModel.channel, droppedRequests: 1 } } });
     expect(withDropped.qualification!.status).toBe("UNKNOWN");
     expect(withDropped.qualification!.result!.cases[0]!.reason).toBe("model-receipts-mismatch");
+  });
+  it("AGENTSCOPE: the scope of the round decides whether scripted receipts count, never the scope the route's own definition claims", async () => {
+    const a = await readBack("ok");
+    // The evidence's route says `qualification` (the scripted double's own definition), as a registry row that claimed it would.
+    expect(a.agentModel.route!.scope).toBe("qualification");
+    // As a qualification round (the runner's) the run passes.
+    const asQualification = collectAssembled(a, a.inputs, "qualification");
+    expect(asQualification.qualification!.status).toBe("PASS");
+    // As a customer round (no scope given, or standard) the same bytes are not accepted: the receipts are the scripted double's.
+    for (const scope of [null, "standard"] as const) {
+      const asCustomer = collectAssembled(a, a.inputs, scope);
+      expect(asCustomer.qualification!.status).toBe("UNKNOWN");
+      expect(firstCase(asCustomer)).toMatchObject({ status: "unavailable", reason: "model-receipts-mismatch" });
+    }
+    // Stored data: an oracle written before the field existed has none, still parses, and is read as a customer round (fail closed).
+    expect(asQualification.oracle!.roundScope).toBe("qualification");
+    const { roundScope: _gone, ...legacyOracle } = asQualification.oracle!;
+    void _gone;
+    expect(E2EApplicationCollectionOracleSchema.parse(legacyOracle).roundScope).toBeUndefined();
+    expect(qualifyE2EApplicationCollection(E2EApplicationCollectionOracleSchema.parse(legacyOracle), asQualification.collection!).status).toBe("UNKNOWN");
   });
 });

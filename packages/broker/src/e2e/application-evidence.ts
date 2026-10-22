@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_DISPLAY_ASSERTION_KINDS, canonicalJson, e2eModelRouteRevision, e2ePlanHasCompleteRequiredCriteria,
-  type E2EAgentTraceBinding, type E2EApplicationExecutionAdmission, type E2EDisplayAgentNavigation, type E2EDisplayScenario, type E2EExecutionPlan, type E2EModelRouteDefinition, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
+  type E2EAgentTraceBinding, type E2EApplicationExecutionAdmission, type E2EDisplayAgentNavigation, type E2EDisplayScenario, type E2EExecutionPlan, type E2EModelRouteDefinition, type E2ERound, type E2ERoundScope, type E2EQualifiedResult } from "@agentx/contracts";
 import { E2EAgentModelEvidenceSchema, E2E_AGENT_TRACE_BASE64_MAX, createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
   E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, e2eApplicationAggregateRunUsage, e2eApplicationGroupUsesModel, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
   reviewAgentTraceFile, verifiedAgentCaseLedger, type E2EAgentModelEvidence, type E2EAgentTraceCase, type E2EApplicationCaseFacts, type E2ECompiledApplicationSuite } from "@agentx/verifier";
@@ -41,6 +41,11 @@ export type ApplicationEvidenceInput = Readonly<{
    * a group with an AI navigation step is UNKNOWN when the admission names a route and this is null (not in the registry) or absent.
    */
   modelRouteDefinition?: E2EModelRouteDefinition | null;
+  /**
+   * The scope of the round (Task FU2, AGENTSCOPE). Absent means `standard`, which is every customer round: a scripted-model receipt is not admissible in it, whatever the registry's route
+   * row says about its own scope. Only a test harness that drives the scripted double through this verifier names `qualification`; no production caller does.
+   */
+  roundScope?: E2ERoundScope;
 }>;
 
 /**
@@ -178,7 +183,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       }
       const groupRun = readGroupEnvelope(envelope, admission, subject, planGroup, binding);
       if (aggregateRuns !== undefined && !same(aggregateRuns.get(binding.runId), groupRun)) refuse("the aggregate differs from a group result accepted on its own");
-      const verified = requalifyGroup({ suite, groupRun, binding, round: admission.round, receivedAt: input.receivedAt.get(binding.runId), modelRouteDefinition: input.modelRouteDefinition });
+      const verified = requalifyGroup({ suite, groupRun, binding, round: admission.round, receivedAt: input.receivedAt.get(binding.runId), modelRouteDefinition: input.modelRouteDefinition, ...(input.roundScope === undefined ? {} : { roundScope: input.roundScope }) });
       groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: verified.verdict, reason: verified.reason, ...(verified.caseFacts === undefined ? {} : { caseFacts: verified.caseFacts }) });
       if (verified.result !== undefined) results.push(verified.result);
       if (verified.verdict === "PASS" && verified.agentTraces !== undefined) agentTraces.push(...verified.agentTraces);
@@ -397,7 +402,7 @@ const OWNER_REASON_MAX_CHARS = 300;
  * anything it supplies that should equal an expected value must equal it, or the group is UNKNOWN.
  */
 function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: Json; binding: ApplicationEvidenceBinding; round: E2ERound; receivedAt: string | undefined;
-  modelRouteDefinition: E2EModelRouteDefinition | null | undefined }): Requalified {
+  modelRouteDefinition: E2EModelRouteDefinition | null | undefined; roundScope?: E2ERoundScope }): Requalified {
   const { suite, groupRun, binding, round } = input;
   const actual = groupRun.actual;
   if (actual === null || actual === undefined) {
@@ -473,7 +478,7 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     if (!same(suppliedAssets, wanted)) return unknown("the group's assertion assets are not the installed assertion assets");
     const oracle = createE2EApplicationCollectionOracleFromCompiledSuite({ compiled: suite, binding, round, environment: runtime.runnerEnvironment, usage, limits: runnerLimits,
       expectedSupervisorReceiptRefs, ownedResourceInventoryDigest: inventoryDigest, observationBindings: inputs.observationBindings as never,
-      assertionAssets: inputs.assertionAssets as never, governedModelReceipts: [], ...(agentModel.evidence === undefined ? {} : { agentModel: agentModel.evidence }), ownedClosedAt: inputs.ownedClosedAt });
+      assertionAssets: inputs.assertionAssets as never, governedModelReceipts: [], ...(agentModel.evidence === undefined ? {} : { agentModel: agentModel.evidence }), ...(input.roundScope === undefined ? {} : { roundScope: input.roundScope }), ownedClosedAt: inputs.ownedClosedAt });
     const qualification = qualifyE2EApplicationCollection(oracle, { ...collection, receivedAt: new Date(receivedAt).toISOString() } as never);
     const promoted = qualification.result === null ? undefined : { ...qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted" as const };
     // What the assertions observed is read only from a collection the qualifier carried through to a result: it checked every captured value against the raw observation bytes

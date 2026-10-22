@@ -1039,7 +1039,7 @@ describe("application collection contracts", () => {
       evidenceDirectory: "/offline-two-shard-fixture" };
     const options = { actual, compiled, binding, round, environment: reportEnvironment, usage: aggregateUsage,
       limits: reportLimits, expectedSupervisorReceiptRefs: positive.expectedRefs, ownedResourceInventoryDigest: sha,
-      observationBindings: positive.bindings, assertionAssets: [], governedModelReceipts: [], agentModel: agentEvidence([1, 0]), ownedClosedAt: timeAt(900) };
+      observationBindings: positive.bindings, assertionAssets: [], governedModelReceipts: [], agentModel: agentEvidence([1, 0]), roundScope: "qualification" as const, ownedClosedAt: timeAt(900) };
     const qualified = collectE2EApplicationRun(options as never);
     expect(qualified.collection).not.toBeNull();
     expect(qualified.oracle?.usage).toEqual(aggregateUsage);
