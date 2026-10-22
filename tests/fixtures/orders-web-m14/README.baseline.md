@@ -9,7 +9,7 @@ A small Node HTTP application for exercising browser and API checks. It has no r
 - a sign-in form (email, password) and a signed-in identity line (display name and role);
 - the signed-in tenant's orders table, one row per order, with an inventory column;
 - an owner-only button that downloads the tenant's orders as a CSV file (viewers do not see it);
-- an orders state panel and an access-error line.
+- an access-error line.
 
 ## API
 
@@ -29,28 +29,23 @@ A small Node HTTP application for exercising browser and API checks. It has no r
 
 ```sh
 node --test
-ORDERS_TEST_SEED_FILE=.owned/seed.json INVENTORY_ORIGIN=http://localhost:4400 APP_PORT=4317 node server.mjs
+ROVARA_ACCOUNTS_FILE=accounts.json ROVARA_DATA_DIR=.owned node scripts/seed.mjs
+ROVARA_DATA_DIR=.owned INVENTORY_ORIGIN=http://localhost:4400 APP_PORT=4317 node server.mjs
 ```
 
-## Seed
+## Accounts
 
-The repository contains no accounts or passwords. The account seed is supplied at runtime through the `ORDERS_TEST_SEED_FILE` environment variable, which must point to a JSON file under `.owned/` in the application directory. Never commit `.owned/` (it is in `.gitignore`).
+The repository contains no accounts or passwords. `scripts/seed.mjs` builds the application's user records at run time. It reads the accounts file named by `ROVARA_ACCOUNTS_FILE`, writes `users.json` to the directory named by `ROVARA_DATA_DIR`, and stores only a sha256 digest of each password. The application reads those records when it starts. Never commit `.owned/` (it is in `.gitignore`).
 
-Minimal seed shape (placeholder values, `passwordDigest` is the sha256 hex of the password):
+Accounts file shape (placeholder values):
 
 ```json
 {
+  "schemaVersion": "rovara-accounts/v1",
   "accounts": [
-    {
-      "email": "kzr41@a.example",
-      "passwordDigest": "0000000000000000000000000000000000000000000000000000000000000000",
-      "subjectId": "subject-1",
-      "tenantId": "tenant-a",
-      "role": "owner",
-      "displayName": "Owner A"
-    }
+    { "profileId": "orders-owner", "email": "kzr41@a.example", "password": "change-me", "tenantRef": "tenant-a", "roleRef": "owner" }
   ]
 }
 ```
 
-The tests in `test/` build the application with their own in-test seed.
+The tests in `test/` build the application with their own in-test accounts.

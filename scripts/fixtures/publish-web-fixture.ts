@@ -79,7 +79,8 @@ const LOCAL_ONLY_END = "fixture-variant:local-only:end";
  *
  * "m14" is the live baseline of M1.4: the M1.3 reference state after its demo (viewer refusal, tenant isolation and the inventory column are in
  * place) with the owner button still `export-csv` / "Export CSV" and no `download-invoices` decoy. The local Linux fixture (the directory itself)
- * has the renamed button and the decoy, and is never published.
+ * has the renamed button and the decoy, and is never published. It is the m13 directory plus tests/fixtures/orders-web-m13-to-m14.patch
+ * (a contract test checks that), so the live baseline is the M1.3 fixture after its demo.
  */
 export const FIXTURE_VARIANTS: Readonly<Record<string, FixtureVariant>> = {
   m13: { directory: M13_DIRECTORY, exclude: [], renames: {}, localOnlyBlocks: null, edits: [], forbidden: [LOCAL_ONLY_BEGIN, LOCAL_ONLY_END] },
@@ -91,12 +92,13 @@ export const FIXTURE_VARIANTS: Readonly<Record<string, FixtureVariant>> = {
     renames: { "README.baseline.md": "README.md" },
     localOnlyBlocks: 1,
     forbidden: ["download-invoices", "Download invoices", "/api/invoices.csv", "invoices.csv"],
+    // The page is rendered by server.mjs, so the buttons are edited there. The decoy is the second line of the owner's button list.
     edits: [
-      { file: "public/index.html", from: 'data-testid="download-orders"', to: 'data-testid="export-csv"' },
-      { file: "public/index.html", from: ">Download orders</button>", to: ">Export CSV</button>" },
+      { file: "server.mjs", from: 'data-testid="download-orders"', to: 'data-testid="export-csv"' },
+      { file: "server.mjs", from: ">Download orders</button>", to: ">Export CSV</button>" },
       {
-        file: "public/index.html",
-        from: '<button data-testid="download-invoices" data-download="/api/invoices.csv" data-filename="invoices.csv" data-done="Invoices exported" type="button" hidden>Download invoices</button>',
+        file: "server.mjs",
+        from: `\n          + '<button data-testid="download-invoices" data-download="/api/invoices.csv" data-filename="invoices.csv" data-done="Invoices exported" type="button">Download invoices</button>'`,
         to: "",
       },
     ],

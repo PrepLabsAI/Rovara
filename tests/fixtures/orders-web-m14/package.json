@@ -2,13 +2,13 @@
   "name": "@agentx/orders-web-api-fixture",
   "version": "1.0.0",
   "type": "module",
-  "scripts": { "start": "node server.mjs" },
+  "scripts": { "start": "node server.mjs", "seed": "node scripts/seed.mjs" },
   "agentx": {
     "e2e": {
       "schemaVersion": "e2e-application-project/v1",
       "recipe": {
         "schemaVersion": 1,
-        "recipeDigest": "228e7a2904a09a9a1434c8ae0c678a8ed41ed0636e4da307e464d92797bc75cd",
+        "recipeDigest": "62f07dfd46a6f35d4cddaeaed5b481e2320db8fe43507efc882c7d6a622959c8",
         "build": [],
         "launch": {
           "kind": "service",
@@ -16,22 +16,26 @@
           "health": { "path": "/health", "expectedStatus": 200 }
         },
         "serviceProfileIds": ["node-http/v1"],
-        "seedProfileId": "orders-seed/v1",
+        "seedProfileId": "rovara-accounts-file/v1",
         "accountProfileIds": ["orders-owner", "orders-viewer", "orders-owner-b"],
-        "allowedOrigins": ["orders-api", "inventory-v1"]
+        "allowedOrigins": ["orders-api", "inventory-v1"],
+        "seed": { "program": "node", "args": ["scripts/seed.mjs"], "cwd": ".", "timeoutMs": 30000, "env": {} }
       },
       "service": {
         "listenPort": 4317,
         "portEnv": "APP_PORT",
         "originBindings": [
-          { "originRef": "orders-api", "envName": "ORDERS_API_ORIGIN" },
-          { "originRef": "inventory-v1", "envName": "INVENTORY_ORIGIN" }
+          { "originRef": "orders-api", "envName": "ORDERS_SERVICE_ORIGIN" },
+          { "originRef": "inventory-v1", "envName": "INVENTORY_ORIGIN", "contractPath": "inventory/openapi.json" }
         ]
       },
       "accountProfiles": [
-        { "profileId": "orders-owner", "scope": "synthetic-test", "authProfileId": "orders-auth/v1", "seedProfileId": "orders-seed/v1", "tenantRef": "tenant-a", "roleRef": "owner", "identityProbeId": "orders-identity/v1" },
-        { "profileId": "orders-viewer", "scope": "synthetic-test", "authProfileId": "orders-auth/v1", "seedProfileId": "orders-seed/v1", "tenantRef": "tenant-a", "roleRef": "viewer", "identityProbeId": "orders-identity/v1" },
-        { "profileId": "orders-owner-b", "scope": "synthetic-test", "authProfileId": "orders-auth/v1", "seedProfileId": "orders-seed/v1", "tenantRef": "tenant-b", "roleRef": "owner", "identityProbeId": "orders-identity/v1" }
+        { "profileId": "orders-owner", "scope": "synthetic-test", "authProfileId": "rovara-form-login/v1", "seedProfileId": "rovara-accounts-file/v1", "tenantRef": "tenant-a", "roleRef": "owner", "identityProbeId": "orders-identity/v1",
+          "login": { "kind": "form", "path": "/", "usernameTestId": "email", "passwordTestId": "password", "submitTestId": "login-submit", "successTestId": "identity" } },
+        { "profileId": "orders-viewer", "scope": "synthetic-test", "authProfileId": "rovara-form-login/v1", "seedProfileId": "rovara-accounts-file/v1", "tenantRef": "tenant-a", "roleRef": "viewer", "identityProbeId": "orders-identity/v1",
+          "login": { "kind": "form", "path": "/", "usernameTestId": "email", "passwordTestId": "password", "submitTestId": "login-submit", "successTestId": "identity" } },
+        { "profileId": "orders-owner-b", "scope": "synthetic-test", "authProfileId": "rovara-form-login/v1", "seedProfileId": "rovara-accounts-file/v1", "tenantRef": "tenant-b", "roleRef": "owner", "identityProbeId": "orders-identity/v1",
+          "login": { "kind": "form", "path": "/", "usernameTestId": "email", "passwordTestId": "password", "submitTestId": "login-submit", "successTestId": "identity" } }
       ],
       "targetAccounts": [
         { "baseTargetId": "web-1", "profileId": "orders-owner" },

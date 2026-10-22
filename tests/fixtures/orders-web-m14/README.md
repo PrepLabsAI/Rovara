@@ -14,16 +14,16 @@ This directory is the **local Linux fixture** of Rovara M1.4. The same sources a
 
 The live baseline is the reference state after the M1.3 demo: viewers are refused, each tenant sees only its own orders, and the orders table and CSV carry an inventory column. The decoy is not added live, so the demo keeps one clear goal.
 
-The live baseline is generated from this directory by `scripts/fixtures/publish-web-fixture.ts --variant m14`. It renames the button back, removes the decoy markup, the `/api/invoices.csv` route (the lines between the `fixture-variant:local-only` markers in `server.mjs`) and `test/invoices.test.mjs`. It refuses to publish if one of those edits no longer matches exactly once.
+The live baseline is generated from this directory by `scripts/fixtures/publish-web-fixture.ts --variant m14`. It renames the button back and removes the decoy button (both in the page markup in `server.mjs`), the `/api/invoices.csv` route (the lines between the `fixture-variant:local-only` markers in `server.mjs`) and `test/invoices.test.mjs`. It refuses to publish if one of those edits no longer matches exactly once.
 
 ## The orders page
 
 `GET /` serves a single page with:
 
-- a sign-in form (email, password) and a signed-in identity line (display name and role; the account email is never rendered);
-- the signed-in tenant's orders table (`data-testid="orders-table"`, one `order-row-<id>` per order) with an inventory column;
-- the owner-only download buttons described above, hidden for a viewer;
-- an orders state panel and an access-error line.
+- a sign-in form (`email`, `password`, `login-submit`) and a signed-in identity line (`identity`: display name and role; the account email is never rendered). The page is rendered by the server for the signed-in account, so a visitor who is not signed in gets the form and nothing else;
+- the signed-in tenant's orders table (`orders-table`, one `order-row-<id>` per order) with an inventory column;
+- the owner-only download buttons described above, absent for a viewer, with a status line (`orders-export-status`);
+- an access-error line (`orders-access-error`).
 
 ## API
 
@@ -44,28 +44,23 @@ The live baseline is generated from this directory by `scripts/fixtures/publish-
 
 ```sh
 node --test
-ORDERS_TEST_SEED_FILE=.owned/seed.json INVENTORY_ORIGIN=http://localhost:4400 APP_PORT=4317 node server.mjs
+ROVARA_ACCOUNTS_FILE=accounts.json ROVARA_DATA_DIR=.owned node scripts/seed.mjs
+ROVARA_DATA_DIR=.owned INVENTORY_ORIGIN=http://localhost:4400 APP_PORT=4317 node server.mjs
 ```
 
-## Seed
+## Accounts
 
-The repository contains no accounts or passwords. Rovara supplies the account seed at runtime through the `ORDERS_TEST_SEED_FILE` environment variable, which must point to a JSON file under `.owned/` in the application directory. Never commit `.owned/` (it is in `.gitignore`).
+The repository contains no accounts or passwords. `scripts/seed.mjs` builds the application's user records at run time. It reads the accounts file named by `ROVARA_ACCOUNTS_FILE`, writes `users.json` to the directory named by `ROVARA_DATA_DIR`, and stores only a sha256 digest of each password. The application reads those records when it starts. Never commit `.owned/` (it is in `.gitignore`).
 
-Minimal seed shape (placeholder values, `passwordDigest` is the sha256 hex of the password):
+Accounts file shape (placeholder values):
 
 ```json
 {
+  "schemaVersion": "rovara-accounts/v1",
   "accounts": [
-    {
-      "email": "kzr41@a.example",
-      "passwordDigest": "0000000000000000000000000000000000000000000000000000000000000000",
-      "subjectId": "subject-1",
-      "tenantId": "tenant-a",
-      "role": "owner",
-      "displayName": "Owner A"
-    }
+    { "profileId": "orders-owner", "email": "kzr41@a.example", "password": "change-me", "tenantRef": "tenant-a", "roleRef": "owner" }
   ]
 }
 ```
 
-The tests in `test/` build the application with their own in-test seed.
+The tests in `test/` build the application with their own in-test accounts.

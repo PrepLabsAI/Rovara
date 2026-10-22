@@ -1,6 +1,6 @@
 diff --git a/README.baseline.md b/README.baseline.md
 new file mode 100644
-index 0000000..70ff218
+index 0000000..d796b3d
 --- /dev/null
 +++ b/README.baseline.md
 @@ -0,0 +1,51 @@
@@ -15,7 +15,7 @@ index 0000000..70ff218
 +- a sign-in form (email, password) and a signed-in identity line (display name and role);
 +- the signed-in tenant's orders table, one row per order, with an inventory column;
 +- an owner-only button that downloads the tenant's orders as a CSV file (viewers do not see it);
-+- an orders state panel and an access-error line.
++- an access-error line.
 +
 +## API
 +
@@ -56,7 +56,7 @@ index 0000000..70ff218
 +
 +The tests in `test/` build the application with their own in-test accounts.
 diff --git a/README.md b/README.md
-index 52fcc80..dc92c38 100644
+index 52fcc80..5fe7cea 100644
 --- a/README.md
 +++ b/README.md
 @@ -1,33 +1,44 @@
@@ -77,7 +77,7 @@ index 52fcc80..dc92c38 100644
 +
 +The live baseline is the reference state after the M1.3 demo: viewers are refused, each tenant sees only its own orders, and the orders table and CSV carry an inventory column. The decoy is not added live, so the demo keeps one clear goal.
 +
-+The live baseline is generated from this directory by `scripts/fixtures/publish-web-fixture.ts --variant m14`. It renames the button back, removes the decoy markup, the `/api/invoices.csv` route (the lines between the `fixture-variant:local-only` markers in `server.mjs`) and `test/invoices.test.mjs`. It refuses to publish if one of those edits no longer matches exactly once.
++The live baseline is generated from this directory by `scripts/fixtures/publish-web-fixture.ts --variant m14`. It renames the button back and removes the decoy button (both in the page markup in `server.mjs`), the `/api/invoices.csv` route (the lines between the `fixture-variant:local-only` markers in `server.mjs`) and `test/invoices.test.mjs`. It refuses to publish if one of those edits no longer matches exactly once.
  
  ## The orders page
  
@@ -87,10 +87,10 @@ index 52fcc80..dc92c38 100644
 -- the signed-in tenant's orders table (`orders-table`), one row per order (`order-row-<id>`), with the columns order, customer, total and state;
 -- an export button (`export-csv`) that downloads the tenant's orders as a CSV file, with a status line (`orders-export-status`);
 -- an orders state panel and an access-error line (`orders-access-error`).
-+- a sign-in form (email, password) and a signed-in identity line (display name and role; the account email is never rendered);
-+- the signed-in tenant's orders table (`data-testid="orders-table"`, one `order-row-<id>` per order) with an inventory column;
-+- the owner-only download buttons described above, hidden for a viewer;
-+- an orders state panel and an access-error line.
++- a sign-in form (`email`, `password`, `login-submit`) and a signed-in identity line (`identity`: display name and role; the account email is never rendered). The page is rendered by the server for the signed-in account, so a visitor who is not signed in gets the form and nothing else;
++- the signed-in tenant's orders table (`orders-table`, one `order-row-<id>` per order) with an inventory column;
++- the owner-only download buttons described above, absent for a viewer, with a status line (`orders-export-status`);
++- an access-error line (`orders-access-error`).
  
  ## API
  
@@ -268,7 +268,7 @@ index 0000000..d63ea87
 +  assert.equal((await app.handle({ method: "GET", url: "/api/invoices.csv", headers: {} })).status, 401);
 +});
 diff --git a/test/orders.test.mjs b/test/orders.test.mjs
-index 549f3c0..f7fffba 100644
+index 549f3c0..26ca42f 100644
 --- a/test/orders.test.mjs
 +++ b/test/orders.test.mjs
 @@ -16,7 +16,20 @@ const seed = {
@@ -349,7 +349,7 @@ index 549f3c0..f7fffba 100644
    assert.equal((await app.handle({ method: "GET", url: "/api/orders.csv?from=yesterday", headers })).status, 400);
  });
  
-@@ -89,15 +105,15 @@ test("orders endpoints require a session", async () => {
+@@ -89,15 +105,16 @@ test("orders endpoints require a session", async () => {
    assert.equal(response.status, 401);
  });
  
@@ -367,11 +367,12 @@ index 549f3c0..f7fffba 100644
 -  assert.doesNotMatch(page, /order-row-b1|mvd58|inventory/i);
 +  const { headers: owner } = await login(app, "kzr41@a.example");
 +  const ownerPage = (await app.handle({ method: "GET", url: "/", headers: owner })).body;
-+  assert.match(ownerPage, /data-testid="download-orders"/);
++  // The owner's orders button is found by what it downloads, so this holds for the button before and after it is renamed.
++  assert.match(ownerPage, /<button[^>]*data-download="\/api\/orders\.csv"/);
 +  assert.match(ownerPage, /<td>in-stock<\/td>/);
 +  assert.doesNotMatch(ownerPage, /order-row-b1|kzr41/);
 +  const { headers: viewer } = await login(app, "mvd58@a.example");
 +  const viewerPage = (await app.handle({ method: "GET", url: "/", headers: viewer })).body;
-+  assert.doesNotMatch(viewerPage, /data-testid="download-(orders|invoices)"/);
++  assert.doesNotMatch(viewerPage, /data-download=/);
 +  assert.match(viewerPage, /data-testid="orders-table"/);
  });

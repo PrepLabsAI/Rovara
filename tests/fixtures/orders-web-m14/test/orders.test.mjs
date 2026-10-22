@@ -104,3 +104,17 @@ test("orders endpoints require a session", async () => {
   const response = await application().handle({ method: "GET", url: "/api/tenants/tenant-a/orders", headers: {} });
   assert.equal(response.status, 401);
 });
+
+test("the page is rendered for the signed-in account: an owner gets the download buttons and the inventory column, a viewer gets no button", async () => {
+  const app = application();
+  const { headers: owner } = await login(app, "kzr41@a.example");
+  const ownerPage = (await app.handle({ method: "GET", url: "/", headers: owner })).body;
+  // The owner's orders button is found by what it downloads, so this holds for the button before and after it is renamed.
+  assert.match(ownerPage, /<button[^>]*data-download="\/api\/orders\.csv"/);
+  assert.match(ownerPage, /<td>in-stock<\/td>/);
+  assert.doesNotMatch(ownerPage, /order-row-b1|kzr41/);
+  const { headers: viewer } = await login(app, "mvd58@a.example");
+  const viewerPage = (await app.handle({ method: "GET", url: "/", headers: viewer })).body;
+  assert.doesNotMatch(viewerPage, /data-download=/);
+  assert.match(viewerPage, /data-testid="orders-table"/);
+});

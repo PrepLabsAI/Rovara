@@ -1,47 +1,16 @@
+// The page itself is rendered by the server for the signed-in account (see server.mjs); this script only signs in through the form and downloads the export.
 const byId = (id) => document.querySelector(`[data-testid="${id}"]`);
-const login = document.querySelector("#login");
-login.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const result = await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
-    email: login.elements.email.value, password: login.elements.password.value,
-  }) });
-  await result.json();
-  if (!result.ok) { byId("orders-access-error").textContent = "Unable to sign in"; return; }
-  byId("orders-access-error").textContent = "";
-  await refresh();
-});
 
-// Shows the signed-in account (its display name and role only), its tenant's orders with their inventory status,
-// and the owner's download buttons. A viewer's buttons stay hidden; the API refuses a viewer's download anyway.
-async function refresh() {
-  const me = await fetch("/api/me");
-  if (!me.ok) return;
-  const account = await me.json();
-  byId("identity").textContent = `${account.displayName} (${account.role})`;
-  // Once signed in, the form is cleared and hidden so that a typed address cannot appear in a page snapshot.
-  login.elements.email.value = "";
-  login.elements.password.value = "";
-  login.hidden = true;
-  const state = await fetch("/api/orders/state").then((response) => response.json());
-  byId("orders-state").textContent = JSON.stringify(state);
-  const list = await fetch(`/api/tenants/${encodeURIComponent(account.tenantId)}/orders`);
-  if (list.ok) {
-    const rows = byId("orders-table").querySelector("tbody");
-    rows.replaceChildren();
-    for (const order of (await list.json()).orders) {
-      const row = document.createElement("tr");
-      row.setAttribute("data-testid", `order-row-${order.id}`);
-      for (const value of [order.id, order.customer, order.total, order.state, order.inventory]) {
-        const cell = document.createElement("td");
-        cell.textContent = String(value);
-        row.append(cell);
-      }
-      rows.append(row);
-    }
-    byId("orders-table").hidden = false;
-  }
-  for (const button of document.querySelectorAll("[data-download]")) button.hidden = account.role !== "owner";
-}
+byId("login-submit")?.form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const result = await fetch("/api/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({
+    email: form.elements.email.value, password: form.elements.password.value,
+  }) });
+  if (!result.ok) { byId("orders-access-error").textContent = "Unable to sign in"; return; }
+  // The server renders the signed-in page, so the form (and what was typed into it) is gone with the reload.
+  location.reload();
+});
 
 for (const button of document.querySelectorAll("[data-download]")) {
   button.addEventListener("click", async () => {
@@ -53,5 +22,3 @@ for (const button of document.querySelectorAll("[data-download]")) {
     byId("orders-export-status").textContent = button.dataset.done;
   });
 }
-
-await refresh();
