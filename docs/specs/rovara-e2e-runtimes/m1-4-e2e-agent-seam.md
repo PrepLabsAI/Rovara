@@ -202,3 +202,21 @@ D2 caps per project per day: 2,000,000 input tokens and 400 calls; worst-case ou
 - **Credential scan limits (defence in depth; e2e masks secure fields and the agent never receives a password).** The scan does not catch a password split across two text parts, a case-changed copy (an accessible name after `text-transform` styling), or an HTML-entity-encoded or unaligned-base64 copy. It matches the email case-insensitively and the password exactly. A short or common-word local part (for example `test`) over-redacts and over-refuses; the seeded-account generator should use high-entropy local parts (carried to 4.3 and 4.7).
 - **Carried to Task 4.3:** `beginStep`/`endStep`, `addCredentialValues` for cookies reported during the run, a 0700 socket directory and `socketOwner`, the prompt shapes the scripted double reads (or `goalCandidates`), a throwing `globalThis.AI_SDK_DEFAULT_PROVIDER` in the executor (`@ai-sdk/gateway` is installed with `ai`), and a check that worker sources never import `@agentx/verifier/executor`. **Carried to Task 4.2:** the broker-backed `E2EDayBudget` (with `reserve` and `settle` failures handled, as the route does). **Carried to Task 4.8:** the provider-aware check.
 - **The gateway.** e2e has no implicit default model; `gateway` appears only in the example text of two error messages in `config/agent.js`. `tests/unit/e2e-agent-model-seam.test.ts` asserts that no e2e runtime source calls it, that a string model is refused, that no model resolves to none with `MODEL_UNAVAILABLE` and no `fetch`, and that the Rovara adapter resolves to provider `agentx-e2e`.
+
+### Measured on the m14 fixture (Task 4.3b, carried item l)
+
+`tests/unit/e2e-executor-agent-run.test.ts` and `tests/linux/e2e-agent.test.ts` run the renamed-export case (the goal "Export the orders as a CSV file" on `tests/fixtures/orders-web-m14`) and print what the worker's route saw. The whole request is the channel call as JSON (system prompt, the seven tool schemas, every message), which is what the route holds to `maxInputTokens - 1024` bytes (30,976 at 32,000):
+
+| Turn | Whole request | Newest screen in it |
+|---|---|---|
+| 1 (goal and first screen) | 5,736 bytes | 954 bytes |
+| 2 (after the tap on "Download orders") | 7,120 bytes | 1,012 bytes |
+
+The fixture's page is small, so the margin is wide (about 4 times the largest request). The executor still holds a large page to the bound without asking the model to cope with it: a screen is cut at 12,288 bytes (with a note), and once the messages pass 20,480 bytes every screen but the newest is replaced by "an earlier screen is left out", oldest first (`elideSupersededScreens` in `agent-executor.ts`, tested in `tests/unit/e2e-executor-agent.test.ts`). The first request is therefore at most about 12 KB of screen plus the 4.5 KB of system prompt and tool schemas, and later requests stay near 12 KB of newest screen, 8 KB of history and the same fixed part: inside 30,976 bytes for any page, not only this fixture.
+
+### What Task 4.3b settled (M4-A, DB-6)
+
+- **Cache.** A group with an agent step has `cache: { mode: "read-write", store: <capture-only store> }` and the agents entry names Rovara's executor (`rovara-e2e-agent`, version 1) and `maxInputTokens: 32000`; every other group keeps `cache: "off"`. `--no-cache` overrides the config, so the executor's parent drops that flag for a plan that carries a model channel (`run.ts`), and only then. The shard config digest of a model group moved (`application-templates.ts`, held to the pinned runner's own digest by `tests/unit/e2e-application-identity.test.ts`); no other group's digest changed.
+- **Recordings.** The runner writes an `ActionTrace` to the store when it settles the attempt (after the case's checks), so the store keeps the recording as it arrives, scans its bytes for the run's credentials and session values, and writes a clean one to `agent/traces/trace-<16 hex of the key hash>.json`. A trace that carries a credential is dropped and nothing else changes.
+- **Value key.** The Docker host (in the worker's process) makes the per-run HMAC key, writes it into `plan.modelChannel.valueKey` and gives the same key to the channel's `open`, so the worker keeps it with the receipts (`onClosed` carries it for Task 4.4). It is in no file the executor writes and in no Docker argument.
+

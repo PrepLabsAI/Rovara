@@ -53,7 +53,7 @@ function scriptedClient(answers: Array<Answer | "error">) {
 }
 
 /** The pieces of a step context the loop and the executor use, with the page stood in for. */
-function stepContext(model: unknown, page: { text: () => string; goal?: string }, spies: { observed: unknown[]; actions: string[]; fail?: (name: string) => Error | undefined }) {
+function stepContext(model: unknown, page: { text: () => string; goal?: string }, spies: { observed: unknown[]; actions: string[]; fail?: ((name: string) => Error | undefined) | undefined }) {
   const act = (name: string) => async (...args: unknown[]) => { spies.actions.push(`${name}:${JSON.stringify(args)}`); const error = spies.fail?.(name); if (error) throw error; };
   return {
     model, providerOptions: undefined, agentContext: undefined, signal: new AbortController().signal, ledger: "", pixelsTainted: false,

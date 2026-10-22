@@ -26,7 +26,10 @@ const sandboxed = async (request: { runId: string; groupId: string }) => ({ sche
 export type AgentRun = {
   fixture: WebApiProbePlan; out: string; result: { exitCode: 0 | 1 | 2; reason: string | null }; receipts: E2EModelReceipt[]; valueKey: string; caseId: string;
   /** The size in bytes of each model request's call, as the worker saw it. */
-  requestBytes: number[]; app: OrdersM14AppProcess; cleanup(): Promise<void>;
+  requestBytes: number[];
+  /** The size in bytes of the newest screen text in each request: the observation the model acted on. */
+  screenBytes: number[];
+  app: OrdersM14AppProcess; cleanup(): Promise<void>;
   readLedger(): ReturnType<typeof E2EAgentActionLedgerSchema.parse> | null;
 };
 
@@ -39,12 +42,13 @@ export async function runAgentCase(options: { script: readonly ScriptedTurn[]; p
   const socketDir = realpathSync(mkdtempSync("/tmp/rva-"));
   const evidence = createE2EModelEvidenceCollector();
   const requestBytes: number[] = [];
+  const screenBytes: number[] = [];
   const scripted = createScriptedE2EInvoke({ scripts: { [sha256Hex(goal)]: options.script } });
   const allowedSteps = e2eApplicationGroupAgentSteps(fixture.compiled);
   const session = await openE2EModelChannelSession({ runId: fixture.plan.runId, modelRoute: SCRIPTED_ROUTE, policyScope: "standard", socketPath: join(socketDir, "m.sock"), allowedSteps,
     credentialSet: { passwords: fixture.plan.accounts.map((item) => item.password), emails: fixture.plan.accounts.map((item) => item.email), cookieValues: [] }, deadlineAt: fixture.plan.deadlineAt,
     dayBudget: createInMemoryE2EDayBudget(), evidence, signal: new AbortController().signal, environment: { ROVARA_E2E_SCRIPTED_MODEL: "1" },
-    invoke: async (input) => { requestBytes.push(Buffer.byteLength(JSON.stringify(input.call), "utf8")); return scripted(input); } });
+    invoke: async (input) => { requestBytes.push(Buffer.byteLength(JSON.stringify(input.call), "utf8")); screenBytes.push(newestScreenBytes(input.call)); return scripted(input); } });
   const valueKey = "5a".repeat(32);
   const plan = withModelChannel(fixture.plan, valueKey);
   const out = join(dir, "out");
@@ -54,12 +58,23 @@ export async function runAgentCase(options: { script: readonly ScriptedTurn[]; p
   const summary = await session.close();
   const caseId = fixture.compiled.expectedCases[0]!.caseId;
   void evidence;
-  return { fixture, out, result, receipts: summary.receipts, valueKey, caseId, requestBytes, app,
+  return { fixture, out, result, receipts: summary.receipts, valueKey, caseId, requestBytes, screenBytes, app,
     readLedger() {
       const path = join(out, E2E_AGENT_EVIDENCE_DIR, agentCaseDirectoryName(caseId), E2E_AGENT_LEDGER_FILE);
       return existsSync(path) ? E2EAgentActionLedgerSchema.parse(JSON.parse(readFileSync(path, "utf8"))) : null;
     },
     async cleanup() { await app.stop(); await rm(dir, { recursive: true, force: true }); await rm(socketDir, { recursive: true, force: true }); } };
+}
+
+/** The byte size of the newest text in a request that holds node lines (`#id role "name"`): a tool result of the latest action, else the first user message. */
+export function newestScreenBytes(call: { prompt: ReadonlyArray<{ role: string; content: unknown }> }): number {
+  const texts: string[] = [];
+  for (const message of call.prompt) {
+    if (message.role === "user") texts.push(...(message.content as Array<{ text: string }>).map((part) => part.text));
+    if (message.role === "tool") texts.push(...(message.content as Array<{ output: { type: string; value: unknown } }>).map((part) => (typeof part.output.value === "string" ? part.output.value : JSON.stringify(part.output.value))));
+  }
+  const newest = [...texts].reverse().find((text) => /^\s*#\S+ /m.test(text));
+  return newest === undefined ? 0 : Buffer.byteLength(newest, "utf8");
 }
 
 export const executorLog = (out: string) => (existsSync(join(out, "executor.log")) ? readFileSync(join(out, "executor.log"), "utf8") : "(no executor log)");

@@ -86,9 +86,12 @@ describe.runIf(agentRunnable)("the agent step end to end, on this machine", () =
   it("(l) keeps every request the model is sent within the channel's input bound, and the measured sizes are recorded", async () => {
     const r = await run({ script: [{ kind: "tap", name: /Download orders/ }, { kind: "done" }] });
     expect(r.result.exitCode, executorLog(r.out)).toBe(0);
-    console.log(`E2E_AGENT_REQUEST_BYTES ${JSON.stringify(r.requestBytes)}`);
+    console.log(`E2E_AGENT_REQUEST_BYTES ${JSON.stringify(r.requestBytes)} SCREEN_BYTES ${JSON.stringify(r.screenBytes)}`);
     expect(r.requestBytes.length).toBe(2);
+    expect(r.screenBytes.every((bytes) => bytes > 100)).toBe(true);
+    // The worker refuses a request whose size plus 1024 passes the 32000-token input ceiling, read as bytes; this fixture is far inside it at every turn.
     for (const bytes of r.requestBytes) expect(bytes).toBeLessThanOrEqual(32_000 - 1024);
+    for (const bytes of r.screenBytes) expect(bytes).toBeLessThanOrEqual(32_000 - 1024);
   }, 300_000);
 });
 void sha256Hex;

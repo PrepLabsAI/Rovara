@@ -23,6 +23,8 @@ export const sha256Hex = (value: string) => createHash("sha256").update(value, "
 /** What the owner's CSV holds when the app's inventory service is not reachable (a run with no mock): the page and the export both read an order's stock as unavailable. */
 export const ORDERS_CSV_COLUMNS = ["id", "customer", "total", "state", "inventory"];
 export const ORDERS_CSV_ROWS = [["a1", "Ada", "12.5", "ready", "unavailable"], ["a2", "Grace", "23", "ready", "unavailable"]];
+/** With the approved inventory mock (the Docker host serves it): the mock answers `a1` with in-stock and refuses `a2`. */
+export const ORDERS_CSV_ROWS_MOCKED = [["a1", "Ada", "12.5", "ready", "in-stock"], ["a2", "Grace", "23", "ready", "unavailable"]];
 
 export type AgentPlanOptions = {
   goal?: string;
@@ -33,16 +35,18 @@ export type AgentPlanOptions = {
   after?: E2EScenario["steps"];
   assertions?: E2EScenario["assertions"];
   deadlineMs?: number;
+  /** Approve the app's inventory mock for the plan (what a Docker host serves; the local runs have no mock). */
+  mock?: boolean;
 };
 
 /** A plan with one web case: open the page, an agent step with `goal`, and (by default) the CSV assertion on the owner's orders export. */
 export function createOrdersM14AgentPlan(options: AgentPlanOptions = {}): WebApiProbePlan {
   const goal = options.goal ?? AGENT_GOAL;
-  return createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot: ORDERS_M14_ROOT, modelRoute: SCRIPTED_ROUTE, healthTimeoutMs: 20_000, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+  return createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot: ORDERS_M14_ROOT, modelRoute: SCRIPTED_ROUTE, healthTimeoutMs: 20_000, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }), ...(options.mock === true ? { mock: true } : {}),
     accountScenarios: [{ accountProfileId: "orders-owner", scenario: (targetId: string): E2EScenario => ({ scenarioId: "agent-export", requirementId: "orders-export", requestedTargetIds: [targetId], required: true,
       accountProfileId: "orders-owner", minimumEvidence: "runtime", requiredRealComponentIds: [],
       steps: [...(options.before ?? [{ kind: "navigate" as const, path: "/" }]), { kind: "agent" as const, goal, maxActions: options.maxActions ?? 4 }, ...(options.after ?? [])],
-      assertions: options.assertions ?? [{ kind: "csv" as const, downloadName: "orders.csv", columns: ORDERS_CSV_COLUMNS, rows: ORDERS_CSV_ROWS }] }) }] });
+      assertions: options.assertions ?? [{ kind: "csv" as const, downloadName: "orders.csv", columns: ORDERS_CSV_COLUMNS, rows: options.mock === true ? ORDERS_CSV_ROWS_MOCKED : ORDERS_CSV_ROWS }] }) }] });
 }
 
 /** The plan as the Docker host writes it for such a group: the fixture's plan plus the model channel (fixed socket path, the admission's route, a fresh value key). */

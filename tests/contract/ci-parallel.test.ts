@@ -65,6 +65,15 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(generic.run).toContain("--exclude tests/linux/e2e-docker25-dns.test.ts");
     // Task 4.3a: the model channel test has a step of its own too (it builds a derived executor image), so the generic step does not run it a second time.
     expect(generic.run).toContain("--exclude tests/linux/e2e-model-channel.test.ts");
+    // Task 4.3b: the agent step tests (twenty real runs of one case among them) have a step of their own, so the generic step does not run them a second time.
+    expect(generic.run).toContain("--exclude tests/linux/e2e-agent.test.ts");
+    const agent = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/e2e-agent.test.ts") && candidate !== generic)!;
+    expect(agent.run).toBe("npx vitest run tests/linux/e2e-agent.test.ts");
+    expect(agent.name).toMatch(/Agent steps/);
+    expect(agent.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
+    const journeys = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/e2e/m1-4-journeys.test.ts"))!;
+    expect(journeys.run).toBe("npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-4-journeys.test.ts");
+    expect(journeys.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
     const model = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/e2e-model-channel.test.ts") && candidate !== generic)!;
     expect(model.run).toBe("npx vitest run tests/linux/e2e-model-channel.test.ts");
     expect(model.name).toMatch(/Model channel/);

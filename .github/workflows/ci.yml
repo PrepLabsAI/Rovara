@@ -128,7 +128,7 @@ jobs:
     needs: scope
     if: needs.scope.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 75
     permissions:
       contents: read
       packages: read
@@ -181,7 +181,7 @@ jobs:
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
-        run: npx vitest run tests/linux --exclude tests/linux/e2e-docker25-dns.test.ts --exclude tests/linux/e2e-model-channel.test.ts
+        run: npx vitest run tests/linux --exclude tests/linux/e2e-docker25-dns.test.ts --exclude tests/linux/e2e-model-channel.test.ts --exclude tests/linux/e2e-agent.test.ts
       # The EC2 worker runs Docker 25 (the only version Amazon Linux 2023 ships), which does not forward an internal-only container's DNS queries to a --dns server; this runner's
       # Docker is newer and does, so the step above cannot see that. This one starts Docker 25.0.5 in Docker (a privileged container with its own network namespace, no change to this
       # runner) and runs the production host against it: the app's lookup of an undeclared name must reach the sinkhole, and a mock's alias must resolve.
@@ -197,6 +197,13 @@ jobs:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run tests/linux/e2e-model-channel.test.ts
+      # M1.4 Task 4.3b: the agent step on this Docker host (a scripted model route, the m14 orders app, the real executor image and Chromium): the renamed export is found by its test
+      # id and downloaded once (twenty times in a row, three at a time), a model that does nothing, a decoy, an outage and a second download each leave their record.
+      - name: Agent steps (scripted route)
+        env:
+          ROVARA_DOCKER: "1"
+          ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
+        run: npx vitest run tests/linux/e2e-agent.test.ts
       # The browser path end to end through the real worker, broker and this Docker host: a failing round, send-back, a passing round, publication.
       # It skips unless Docker and the executor image are provided, so it is a native-suite file that only this job runs.
       - name: Native browser journey
@@ -210,6 +217,12 @@ jobs:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-3-journeys.test.ts
+      # The M1.4 paths with an AI navigation step (scripted model), through the worker's own checks: what the executor and the worker leave. The verdicts are Task 4.4's.
+      - name: Native M1.4 journeys
+        env:
+          ROVARA_DOCKER: "1"
+          ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
+        run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-4-journeys.test.ts
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:

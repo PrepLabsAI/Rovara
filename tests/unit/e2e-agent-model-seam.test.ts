@@ -155,6 +155,8 @@ describe("Step 0: e2e never reaches the Vercel AI Gateway on its own", () => {
   });
 });
 
+const agentConfigOf = () => import(new URL("node_modules/e2e/dist/config/agent.js", root).href) as Promise<{ resolveAgentConfig: (value: unknown, label?: string) => Record<string, unknown> }>;
+
 type Answer = { tool: { id: string; name: string; input: Record<string, unknown> } };
 const TAP: Answer = { tool: { id: "tooluse_a", name: "tap", input: { target: "n1" } } };
 const CONCLUDE: Answer = { tool: { id: "tooluse_b", name: "complete_step", input: { status: "passed", summary: "Tapped the export button." } } };
@@ -228,6 +230,53 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
     expect(second!.messages[2]!.content[0]!.toolResult).toMatchObject({ toolUseId: "tooluse_a", content: [{ text: "Tapped n1." }], status: "success" });
     const summary = await proxy!.close();
     expect(summary.receipts.map((item) => [item.callIndex, item.outcome, item.modelId, item.servedModelId])).toEqual([[0, "ok", MODEL_ID, null], [1, "ok", MODEL_ID, null]]);
+  });
+
+  // Task 4.3b: the same round trip with Rovara's own pieces in place of the test double: the closed-toolset executor, the model adapter and the channel client the executor ships.
+  it("Rovara's agent executor and model adapter, over the real client, round-trip through the proxy and a loopback Bedrock endpoint: one request per turn, the tap reaches the page, the ledger records it", async () => {
+    loopback = await bedrockLoopback((_request, count) => ({ status: 200, body: bedrockStreamBody(count === 1 ? { tool: { id: "tooluse_a", name: "tap", input: { target: "n2" } } } : CONCLUDE) }));
+    const invoke = await createE2EProviderInvokeForTesting(bedrockRoute(), { environment: {} }, { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } });
+    await startProxy(invoke);
+    const { createE2EModelChannelClient } = await import("../../packages/verifier/src/executor/model-channel.js");
+    const { createE2EAgentModelAdapter } = await import("../../packages/verifier/src/executor/agent-model-adapter.js");
+    const { createRovaraE2EAgentExecutor } = await import("../../packages/verifier/src/executor/agent-executor.js");
+    const { createE2EAgentLedgerWriter } = await import("../../packages/verifier/src/executor/agent-ledger.js");
+    const { generateE2EAgentValueKey } = await import("../../packages/contracts/src/e2e-model-channel.js");
+    const client = createE2EModelChannelClient({ socketPath: join(dir, "m.sock"), runId: RUN_ID });
+    const position = { caseId: CASE_ID, stepIndex: 0 };
+    const adapter = createE2EAgentModelAdapter({ client, routeId: "rovara-e2e-default", position: () => position });
+    const ledger = createE2EAgentLedgerWriter({ outDir: dir, runId: RUN_ID, caseId: CASE_ID, valueKey: generateE2EAgentValueKey() });
+    ledger.beginStep(0, "export the orders");
+    const executor = createRovaraE2EAgentExecutor({ position: () => position, ledger: () => ledger, origin: () => "http://127.0.0.1:4317" });
+    const tapped: string[] = [];
+    const context = { ...stepContext(), model: adapter, step: { kind: "act", index: 0, instruction: "export the orders", params: undefined, secrets: [] },
+      target: { name: "web", platform: "web", verbs: new Set(["tap"]) }, ledger: "", pixelsTainted: false, actions: { tap: async (target: { id: string }) => { tapped.push(target.id); } },
+      observe: async () => ({ revision: "1", text: '#n1 heading "Orders"\n#n2 button "Export orders" testid="export"', truncated: false, viewport: { width: 1, height: 1 } }) };
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const verdict = await executor.runStep(context as never);
+    fetchSpy.mockRestore();
+    expect(verdict).toMatchObject({ status: "passed" });
+    expect(tapped).toEqual(["n2"]);
+    expect(loopback.requests).toHaveLength(2);
+    const [first] = loopback.requests.map((request) => request.body as { toolConfig: { tools: Array<{ toolSpec: { name: string } }> }; messages: Array<{ role: string; content: Array<Record<string, unknown>> }> });
+    expect(first!.toolConfig.tools.map((item) => item.toolSpec.name).sort()).toEqual(["complete_step", "navigate", "press", "scroll", "select", "tap", "type"]);
+    expect(JSON.stringify(first!.messages)).toContain("Goal: export the orders");
+    expect(JSON.stringify(first!.messages)).not.toMatch(/"image"|"document"|"video"/);
+    expect(adapter.takeReceiptIds(position)).toHaveLength(2);
+    expect((await proxy!.close()).receipts.map((item) => item.outcome)).toEqual(["ok", "ok"]);
+  });
+
+  it("resolves an agents entry with Rovara's executor, the capture-only store and the 32000-token ceiling, and a string model beside it is still refused", async () => {
+    const { resolveAgentConfig } = await agentConfigOf();
+    const { createRovaraE2EAgentExecutor } = await import("../../packages/verifier/src/executor/agent-executor.js");
+    const { createE2EAgentModelAdapter } = await import("../../packages/verifier/src/executor/agent-model-adapter.js");
+    const executor = createRovaraE2EAgentExecutor({ position: () => null, ledger: () => null, origin: () => "http://127.0.0.1:4317" });
+    const model = createE2EAgentModelAdapter({ client: { beginStep: async () => undefined, endStep: async () => undefined, generate: async () => { throw new Error("unused"); } }, routeId: "rovara-e2e-default", position: () => null });
+    const resolved = resolveAgentConfig({ model, executor, maxInputTokens: 32_000 }, "agents.default") as { executor: { name: string }; maxInputTokens: number; model: { provider: string } };
+    expect(resolved.executor.name).toBe("rovara-e2e-agent");
+    expect(resolved.maxInputTokens).toBe(32_000);
+    expect(resolved.model.provider).toBe("agentx-e2e");
+    expect(() => resolveAgentConfig({ model: "openai/gpt-6-luna-fast", executor }, "agents.default")).toThrow(/must be an AI SDK model instance, not the string/);
   });
 
   const keyed = [
