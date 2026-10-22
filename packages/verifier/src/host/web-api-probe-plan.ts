@@ -92,7 +92,9 @@ function scenarioFor(probe: WebApiProbeName, targetId: string, accountProfileId:
     assertions: [{ kind: "state" as const, probeId: "api-state-positive/v1", equals: { orders: "ready", version: 1 }, pollTimeoutMs: 5_000 }] };
 }
 
-function registeredRuntime(kind: "web" | "api", profileId: string, now: number, agent = false) {
+/** What a registered runtime row records of the machine its runner ran on: the plan fixtures' own (a Linux arm64 host), or a real executor image's (what a journey on a real host registers). */
+export type WebApiProbeRunner = { environment: { os: string; arch: string; runtime: string }; toolchain: { execPath: string; version: "v22.23.2"; platform: "linux" | "darwin" | "win32"; arch: "arm64" | "x64" } };
+function registeredRuntime(kind: "web" | "api", profileId: string, now: number, agent = false, runner?: WebApiProbeRunner) {
   const web = kind === "web";
   const capabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ schemaVersion: "e2e-runtime-capabilities/v1", profileId, kind,
     host: { os: "linux", arch: "arm64" }, engine: web ? { name: "web", version: "0.14.0", spiVersion: 1 } : { name: ROVARA_HTTP_ENGINE_DESCRIPTOR.name, version: ROVARA_HTTP_ENGINE_DESCRIPTOR.version, spiVersion: 1 },
@@ -101,8 +103,8 @@ function registeredRuntime(kind: "web" | "api", profileId: string, now: number, 
     networkPolicyDigest: "1".repeat(64), ...(web ? { browsers: ["chromium"] } : { protocols: ["http"] }) });
   const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
     subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" as const };
-  const runnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: "linux 6.8.0", arch: "arm64", runtime: "node v22.23.2" };
-  const runnerToolchain = { execPath: "/usr/local/bin/node", version: "v22.23.2" as const, platform: "linux" as const, arch: "arm64" as const };
+  const runnerEnvironment = { ci: true as const, trustNoticeShown: false as const, ...(runner?.environment ?? { os: "linux 6.8.0", arch: "arm64", runtime: "node v22.23.2" }) };
+  const runnerToolchain = runner?.toolchain ?? { execPath: "/usr/local/bin/node", version: "v22.23.2" as const, platform: "linux" as const, arch: "arm64" as const };
   const capabilityDigest = e2eRuntimeCapabilityDigest(capabilities);
   const probeBody = { schemaVersion: "e2e-runtime-probe-manifest/v1" as const, profileId, capabilityDigest, runtimeManifestDigest: capabilities.runtimeManifestDigest,
     suiteDigest: "2".repeat(64), fixtureRefs: [{ path: "fixtures/orders.json", sha256: "3".repeat(64) }], positiveProbeIds: ["orders-positive"], negativeProbeIds: ["orders-negative"] };
@@ -168,7 +170,9 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
    * The policy limits of a route-pinned plan, as the broker derives them from the route's budgets (`e2eAgentRoutePolicyLimits`, Task 4.2): a round that makes model calls is held to
    * them, so a plan whose collector must accept model usage needs them. Default: the small model-free ones this builder always used.
    */
-  routeLimits?: E2EPolicy["limits"] }): WebApiProbePlan {
+  routeLimits?: E2EPolicy["limits"];
+  /** The runner the registered runtime row records (default: a Linux 6.8.0 arm64 host). A journey on a real Docker host passes what its executor image reports, as the broker's registration does. */
+  runner?: WebApiProbeRunner }): WebApiProbePlan {
   const kind = options.probe.startsWith("web-") ? "web" as const : "api" as const;
   const inferred = options.inferred === true;
   if (inferred && (options.recipeBuild || options.recipeStart || options.mock)) throw new Error("an inferred-recipe app has no recipe to edit and no mock to approve");
@@ -228,7 +232,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const runtimeProfileId = E2E_EXECUTOR_HOST_PROFILE_ID;
-  const runtime = registeredRuntime(kind, runtimeProfileId, nowMs, options.modelRoute !== undefined && kind === "web");
+  const runtime = registeredRuntime(kind, runtimeProfileId, nowMs, options.modelRoute !== undefined && kind === "web", options.runner);
   // The approved mock: the inventory fixture of the app tree, linked by the inventory origin's contract (its OpenAPI document) to the discovery component of that document.
   const [openApiFile, fixtureFile] = mockFiles;
   const mockComponentId = openApiFile === undefined ? "" : e2eApiSchemaComponentId(openApiFile.path);

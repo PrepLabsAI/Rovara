@@ -8,7 +8,7 @@ import { E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH, E2EExe
   type E2EExecutorPlan, type E2EScenario } from "@agentx/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { createWebApiProbePlan, type WebApiProbePlan } from "../../packages/verifier/src/host/web-api-probe-plan.js";
+import { createWebApiProbePlan, type WebApiProbePlan, type WebApiProbeRunner } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 
 /**
  * Task 4.3b's fixture app and plans: `tests/fixtures/orders-web-m14` (the m13 orders app rebuilt for AI navigation: its export buttons are "Download orders" (test id `download-orders`) and
@@ -42,16 +42,22 @@ export type AgentPlanOptions = {
   mock?: boolean;
   /** The task the admission names (a UUID); a journey that signs an invocation for it needs one. */
   taskId?: string;
+  /** Adds a second case to the group: a plain one with no agent step (open the page, see the identity), for the cases a group's deterministic and AI-navigated cases share. */
+  withDeterministicCase?: boolean;
+  /** The runner the plan's registered runtime records: what the executor image reports on a real host, so the broker's re-collection sees the runtime the run was on. */
+  runner?: WebApiProbeRunner;
 };
 
 /** A plan with one web case: open the page, an agent step with `goal`, and (by default) the CSV assertion on the owner's orders export. */
 export function createOrdersM14AgentPlan(options: AgentPlanOptions = {}): WebApiProbePlan {
   const goal = options.goal ?? AGENT_GOAL;
-  return createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot: ORDERS_M14_ROOT, modelRoute: SCRIPTED_ROUTE, routeLimits: SCRIPTED_ROUTE_LIMITS, healthTimeoutMs: 20_000, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }), ...(options.mock === true ? { mock: true } : {}), ...(options.taskId === undefined ? {} : { taskId: options.taskId }),
+  return createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot: ORDERS_M14_ROOT, modelRoute: SCRIPTED_ROUTE, routeLimits: SCRIPTED_ROUTE_LIMITS, ...(options.runner === undefined ? {} : { runner: options.runner }), healthTimeoutMs: 20_000, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }), ...(options.mock === true ? { mock: true } : {}), ...(options.taskId === undefined ? {} : { taskId: options.taskId }),
     accountScenarios: [{ accountProfileId: "orders-owner", scenario: (targetId: string): E2EScenario => ({ scenarioId: "agent-export", requirementId: "orders-export", requestedTargetIds: [targetId], required: true,
       accountProfileId: "orders-owner", minimumEvidence: "runtime", requiredRealComponentIds: [],
       steps: [...(options.before ?? [{ kind: "navigate" as const, path: "/" }]), { kind: "agent" as const, goal, maxActions: options.maxActions ?? 4 }, ...(options.after ?? [])],
-      assertions: options.assertions ?? [{ kind: "csv" as const, downloadName: "orders.csv", columns: ORDERS_CSV_COLUMNS, rows: options.mock === true ? ORDERS_CSV_ROWS_MOCKED : ORDERS_CSV_ROWS }] }) }] });
+      assertions: options.assertions ?? [{ kind: "csv" as const, downloadName: "orders.csv", columns: ORDERS_CSV_COLUMNS, rows: options.mock === true ? ORDERS_CSV_ROWS_MOCKED : ORDERS_CSV_ROWS }] }) },
+    ...(options.withDeterministicCase === true ? [{ accountProfileId: "orders-owner", scenario: (targetId: string): E2EScenario => ({ scenarioId: "plain-identity", requirementId: "orders-identity", requestedTargetIds: [targetId], required: true,
+      accountProfileId: "orders-owner", minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "identity", equals: true }] }) }] : [])] });
 }
 
 /** The plan as the Docker host writes it for such a group: the fixture's plan plus the model channel (fixed socket path, the admission's route, a fresh value key). */

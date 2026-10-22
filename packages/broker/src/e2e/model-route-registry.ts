@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
   E2EModelRouteDefinitionSchema, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE,
-  INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, canonicalJson, indexExpiresAt, e2eModelRouteRevision, isKeyedModelProvider,
+  INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, canonicalJson, indexExpiresAt, e2eModelRouteRevision, e2eModelRouteRevisionNumber, isKeyedModelProvider,
   type E2EModelRouteDefinition, type ModelProvider,
 } from "@agentx/contracts";
 import { deriveE2EAgentRoute, type E2EAgentInstallation, type DerivedE2EAgentRoute } from "@agentx/model-runtime/e2e-route-derive";
@@ -57,6 +57,28 @@ export const e2eModelRouteCanaryKey = (routeId: string, definitionDigest: string
 export const e2eModelBudgetKey = (projectName: string, day: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET#${day}` });
 /** One reservation of a call's tokens against the project's day (`model-budget-endpoint.ts`): written with the day's increment, settled or released once. */
 export const e2eModelBudgetReservationKey = (projectName: string, reservationId: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET_RESERVATION#${reservationId}` });
+
+/**
+ * The definition the registry stores for the route revision an admission names (Task 4.4a, ruling DJ): one GetItem by key, held to the revision it was read for. A worker's account of
+ * the route it served is never the definition the broker judges a round's receipts against; this is. Null when the revision is not in the registry, or its row is not exactly that
+ * revision's (another route id or number, a definition that does not hash to the revision it is filed under). A fault the read can be expected to get past (throttling, a timeout) is
+ * tried again up to three times; one that persists, or any other, is thrown, so the caller can tell "not there" from "could not be asked".
+ */
+export async function readAdmittedE2EModelRoute(read: (key: { pk: string; sk: string }) => Promise<Record<string, unknown> | undefined>, route: { routeId: string; routeRevision: string },
+  options: { sleep?: (ms: number) => Promise<void> } = {}): Promise<E2EModelRouteDefinition | null> {
+  const revisionNumber = e2eModelRouteRevisionNumber(route.routeRevision);
+  if (revisionNumber === null) return null;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  let row: Record<string, unknown> | undefined;
+  for (let attempt = 1; ; attempt += 1) {
+    try { row = await read(e2eModelRouteRevisionKey(route.routeId, revisionNumber)); break; }
+    catch (error) { if (attempt >= 3 || !isTransientAwsFault(error)) throw error; await sleep(100 * attempt); }
+  }
+  if (row === undefined || row["entityType"] !== "E2E_MODEL_ROUTE" || row["routeId"] !== route.routeId || row["revisionNumber"] !== revisionNumber || row["revision"] !== route.routeRevision) return null;
+  const parsed = E2EModelRouteDefinitionSchema.safeParse(row["definition"]);
+  if (!parsed.success || parsed.data.routeId !== route.routeId || parsed.data.revision !== revisionNumber || e2eModelRouteRevision(parsed.data) !== route.routeRevision) return null;
+  return parsed.data;
+}
 
 export interface E2EModelRouteStore {
   documentClient: DynamoDBDocumentClient;

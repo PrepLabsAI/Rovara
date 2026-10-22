@@ -300,7 +300,7 @@ import { buildApplicationExecutionAdmission } from "../e2e/application-admission
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
-import { applicationEvidenceLimits, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification } from "../e2e/application-evidence.js";
+import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification } from "../e2e/application-evidence.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
@@ -7976,9 +7976,14 @@ async function verifyApplicationWorkflowE2EEvidence(input: {
   if ("unavailable" in loaded) return unavailable(loaded.unavailable);
   const { aggregate, groupEvidence, receivedAt } = loaded;
   const terminalStatus = input.terminalStatus ?? (operation.status === "SUCCEEDED" || operation.status === "FAILED" ? operation.status : undefined);
+  // Task 4.4a (ruling DJ): a round with an AI navigation step is judged against the model route registry's own definition of the revision it was admitted under, never a definition the
+  // worker uploads; one GetItem, only for a round that has such a step. A registry that cannot be asked leaves the round unverifiable, not judged.
+  const route = await modelRouteForAdmission((key) => getItem<Record<string, unknown>>(dependencies, key), admission);
+  if ("unavailable" in route) return unavailable(route.unavailable);
+  const modelRouteDefinition = route.definition;
   const verified = verifyApplicationE2EEvidence({ admissionBytes, subject: { taskId: task.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
     candidateDigest: candidate.digest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
-  aggregate, groupEvidence, receivedAt, terminalStatus });
+  aggregate, groupEvidence, receivedAt, terminalStatus, ...(modelRouteDefinition === undefined ? {} : { modelRouteDefinition }) });
   const authorityValid = await workflowE2EApplicationAuthorityIsValid(dependencies, task, candidate, admission, diagnostic);
   if (projection !== undefined) {
     if (verified.plan !== undefined) projection.plan = verified.plan;

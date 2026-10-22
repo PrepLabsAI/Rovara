@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { e2eAgentValueKeyId, e2eModelRouteRevision, type E2EModelReceipt, type E2EModelRouteDefinition, type E2ERoundScope } from "@agentx/contracts";
+import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, e2eAgentValueKeyId, e2eModelRouteRevision, type E2EModelReceipt, type E2EModelRouteDefinition, type E2ERoundScope } from "@agentx/contracts";
 import { deriveE2EAgentRoute, scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
-import { E2E_AGENT_LEDGER_MAX_BYTES, evaluateE2EAgentCase, type E2EAgentCaseInput, type E2EAgentUnknownCode } from "../../packages/verifier/src/application-agent-result.js";
+import { E2EAgentModelEvidenceSchema, E2E_AGENT_LEDGER_MAX_BYTES, evaluateE2EAgentCase, type E2EAgentCaseInput, type E2EAgentUnknownCode } from "../../packages/verifier/src/application-agent-result.js";
 
 // Task 4.4a: the verdict of the AI-navigation part of one case, as a pure function over receipts, the action ledger, the e2e report's own account of the step and the approved goals.
 // Cases 1-20 of the plan (the adapter end to end is tests/unit/e2e-agent-collection.test.ts).
@@ -24,7 +24,7 @@ function receipt(over: Partial<E2EModelReceipt> & { stepIndex?: number; callInde
   counter += 1;
   return { receiptId: `rcpt-${counter}`, runId: RUN, caseId: CASE, stepIndex: 1, callIndex: 0, routeId: route.routeId, routeRevision: REVISION, provider: route.provider, modelId: route.modelId,
     startedAt: new Date(T0 + (over.callIndex ?? 0) * 1000).toISOString(), inputTokens: refused ? 0 : 100, outputTokens: refused ? 0 : 10, latencyMs: 5, servedModelId: null, servedUpstream: null,
-    promptSha256: sha(`prompt-${counter}`), responseSha256: answered ? sha(`response-${counter}`) : null, outcome, ...over } as E2EModelReceipt;
+    promptSha256: sha(`prompt-${counter}`), responseSha256: answered ? sha(`response-${counter}`) : null, outcome, ...over };
 }
 const ok = (stepIndex: number, callIndex: number) => receipt({ stepIndex, callIndex });
 const tap = (name = "Download orders", testId = "download-orders") => ({ tool: "tap" as const, node: { role: "button", name, testId }, valueDigest: null, valueLiteral: null, url: null,
@@ -39,19 +39,21 @@ const bytesOf = (value: unknown) => new TextEncoder().encode(JSON.stringify(valu
 const digestsFor = (receipts: readonly E2EModelReceipt[]) => receipts.map((item) => ({ receiptId: item.receiptId, promptSha256: item.promptSha256, responseSha256: item.responseSha256, omitted: null }));
 const CLEAN_CHANNEL = { droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 0 };
 
+type CaseOver = Omit<Partial<E2EAgentCaseInput>, "receipts"> & { receipts?: E2EModelReceipt[]; ledgerOver?: Record<string, unknown>; step?: Partial<LedgerStepSpec>;
+  report?: Partial<NonNullable<E2EAgentCaseInput["agentSteps"][number]["report"]>> | null; maxActions?: number };
 /** A case with one agent step (declared index 1) that concluded after one tap and two ok model calls; `over` changes any part of it. */
-function concluded(over: Partial<E2EAgentCaseInput> & { receipts?: E2EModelReceipt[]; ledgerOver?: Record<string, unknown>; step?: Partial<LedgerStepSpec>;
-  report?: Partial<NonNullable<E2EAgentCaseInput["agentSteps"][number]["report"]>> | null; maxActions?: number } = {}): E2EAgentCaseInput {
+function concluded(over: CaseOver = {}): E2EAgentCaseInput {
   const receipts = over.receipts ?? [ok(1, 0), ok(1, 1)];
   const spec: LedgerStepSpec = { stepIndex: 1, goal: GOAL, receipts, ...over.step };
   const failed = (spec.verdict ?? "concluded") === "failed";
   const report = over.report === null ? null : { modelCalls: receipts.filter((item) => item.outcome === "ok").length, actionSteps: (spec.actions ?? [tap()]).length,
     status: (spec.verdict ?? "concluded") === "concluded" ? "passed" : "failed", errorCode: failed ? spec.stopCode ?? null : null, ...over.report };
+  const rest = Object.fromEntries(Object.entries(over).filter(([key]) => !["receipts", "ledgerOver", "step", "report", "maxActions"].includes(key))) as Partial<E2EAgentCaseInput>;
   return { roundScope: "qualification", runId: RUN, caseId: CASE, route, agentSteps: [{ declaredStepIndex: 1, goal: GOAL, maxActions: over.maxActions ?? 4, report }],
-    receipts, ledgerBytes: bytesOf(ledger([spec], over.ledgerOver)), valueKey: KEY, transcriptDigests: digestsFor(receipts), channel: CLEAN_CHANNEL, csvDownload: "captured", ...over } as E2EAgentCaseInput;
+    receipts, ledgerBytes: bytesOf(ledger([spec], over.ledgerOver)), valueKey: KEY, transcriptDigests: digestsFor(receipts), channel: CLEAN_CHANNEL, csvDownload: "captured", ...rest };
 }
 /** The input of a case whose one step ended with `stopCode` (a failed step) and the given receipts. */
-function stopped(stopCode: string, receipts: E2EModelReceipt[], over: Partial<E2EAgentCaseInput> = {}): E2EAgentCaseInput {
+function stopped(stopCode: string, receipts: E2EModelReceipt[], over: CaseOver = {}): E2EAgentCaseInput {
   return concluded({ receipts, step: { verdict: "failed", stopCode, actions: [] }, ...over });
 }
 const codeOf = (input: E2EAgentCaseInput): E2EAgentUnknownCode | "deterministic" => {
@@ -226,7 +228,7 @@ describe("evaluateE2EAgentCase: precedence and shape", () => {
   it("20. raw receipts and their parsed form give one verdict: reordered keys, or a missing servedModelId in place of null", () => {
     const input = concluded({ receipts: [ok(1, 0), ok(1, 1)] });
     const reordered = input.receipts.map((item) => Object.fromEntries(Object.entries(item as Record<string, unknown>).reverse()));
-    const bare = input.receipts.map((item) => { const { servedModelId: _a, servedUpstream: _b, ...rest } = item as Record<string, unknown>; return rest; });
+    const bare = input.receipts.map((item) => Object.fromEntries(Object.entries(item as Record<string, unknown>).filter(([key]) => key !== "servedModelId" && key !== "servedUpstream")));
     expect(codeOf({ ...input, receipts: reordered })).toBe("deterministic");
     expect(codeOf({ ...input, receipts: bare })).toBe("deterministic");
     expect(codeOf({ ...input, receipts: bare, csvDownload: "none" })).toBe("agent-no-download");
@@ -248,5 +250,29 @@ describe("evaluateE2EAgentCase: precedence and shape", () => {
     expect(codeOf({ ...concluded(), receipts: [null, 3, "x"] as never })).toBe("model-receipts-mismatch");
     expect(codeOf({ ...concluded(), agentSteps: [] })).toBe("model-receipts-mismatch");
     expect(codeOf({ ...concluded(), valueKey: "short" })).toBe("model-receipts-mismatch");
+  });
+});
+
+describe("the size of the model evidence a group uploads (risk R5)", () => {
+  it("a group at the structural worst case (3 agent cases with a ledger at the 64 KiB cap, 300 receipts and their digests) weighs under a seventh of the 8 MiB group ceiling, and the schema accepts it", () => {
+    const receipts = Array.from({ length: 300 }, (_, index) => receipt({ callIndex: index % 100, stepIndex: Math.floor(index / 100), servedModelId: route.modelId }));
+    const ledgerBytes = new TextEncoder().encode(`{${" ".repeat(E2E_AGENT_LEDGER_MAX_BYTES - 2)}}`);
+    const worst = { schemaVersion: "rovara-agent-model-evidence/v1", route, valueKey: KEY, receipts, channel: CLEAN_CHANNEL,
+      ledgers: ["a", "b", "c"].map((name) => ({ caseDirectory: sha(name).slice(0, 16), bytesBase64: Buffer.from(ledgerBytes).toString("base64"), sha256: sha(name) })),
+      transcriptDigests: digestsFor(receipts) };
+    expect(E2EAgentModelEvidenceSchema.safeParse(worst).success).toBe(true);
+    const bytes = Buffer.byteLength(JSON.stringify(worst), "utf8");
+    expect(bytes).toBeLessThan(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES / 7);
+  });
+
+  it("the schema refuses more than 300 receipts, more than 64 ledgers, a ledger past the cap, and any key it does not know", () => {
+    const base = { schemaVersion: "rovara-agent-model-evidence/v1", route: null, valueKey: KEY, receipts: [], channel: CLEAN_CHANNEL, ledgers: [], transcriptDigests: [] };
+    expect(E2EAgentModelEvidenceSchema.safeParse(base).success).toBe(true);
+    expect(E2EAgentModelEvidenceSchema.safeParse({ ...base, receipts: Array.from({ length: 301 }, () => receipt()) }).success).toBe(false);
+    const ledgerEntry = { caseDirectory: "0123456789abcdef", bytesBase64: "e30=", sha256: sha("x") };
+    expect(E2EAgentModelEvidenceSchema.safeParse({ ...base, ledgers: Array.from({ length: 65 }, () => ledgerEntry) }).success).toBe(false);
+    expect(E2EAgentModelEvidenceSchema.safeParse({ ...base, ledgers: [{ ...ledgerEntry, bytesBase64: "A".repeat(Math.ceil(E2E_AGENT_LEDGER_MAX_BYTES * 4 / 3) + 8) }] }).success).toBe(false);
+    expect(E2EAgentModelEvidenceSchema.safeParse({ ...base, prompt: "a prompt" }).success).toBe(false);
+    expect(E2EAgentModelEvidenceSchema.safeParse({ ...base, valueKey: "short" }).success).toBe(false);
   });
 });

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { E2EAgentActionLedgerSchema, e2eAgentValueKeyId } from "@agentx/contracts";
 import { agentRunnable, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
-import { assembleAgentRun, collectAssembled, firstCase, type AssembledAgentRun } from "../support/agent-collection.js";
+import { assembleAgentRun, collectAssembled, firstCase } from "../support/agent-collection.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
 import type { E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
 
@@ -21,18 +21,19 @@ const SCRIPTS = {
 
 describe.runIf(agentRunnable)("the collector over real agent runs", () => {
   const runs: AgentRun[] = [];
-  const assembled = {} as Record<Scenario, AssembledAgentRun>;
+  const byName = {} as Record<Scenario, AgentRun>;
   beforeAll(async () => {
     for (const name of Object.keys(SCRIPTS) as Scenario[]) {
-      const run = await runAgentCase({ script: SCRIPTS[name] as never });
-      runs.push(run);
-      assembled[name] = await assembleAgentRun(run);
+      const run = await runAgentCase({ script: SCRIPTS[name] });
+      runs.push(run); byName[name] = run;
     }
   }, 600_000);
   afterAll(async () => { await Promise.all(runs.splice(0).map((run) => run.cleanup())); });
+  // The host reads a run back right after it closes it, and the collector wants the collection received within 30 s of that: each test reads its run back when it needs it.
+  const readBack = (name: Scenario) => assembleAgentRun(byName[name]);
 
-  it("R1: the report's agent step carries a cache of mode 'missed' with no replayed action, the capture store never confirms a write, and the collector accepts that shape", () => {
-    const a = assembled.ok;
+  it("R1: the report's agent step carries a cache of mode 'missed' with no replayed action, the capture store never confirms a write, and the collector accepts that shape", async () => {
+    const a = await readBack("ok");
     const report = JSON.parse(Buffer.from(a.actual.shards[0]!.rawReportBytes).toString("utf8")) as { run: { results: Array<{ attempts: Array<{ steps: Array<{ kind: string; cache?: Record<string, unknown> }> }> }> } };
     const cache = report.run.results[0]!.attempts[0]!.steps.find((step) => step.kind === "agent")!.cache!;
     expect(cache).toMatchObject({ mode: "missed", reason: "no-entry", replayedActions: 0, totalActions: 0 });
@@ -42,8 +43,8 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
     expect(collectAssembled(a).unavailableReason).toBeNull();
   });
 
-  it("1. the renamed export: the collector passes the case, and the verified receipt ids are the two receipts of the step, sorted", () => {
-    const a = assembled.ok;
+  it("1. the renamed export: the collector passes the case, and the verified receipt ids are the two receipts of the step, sorted", async () => {
+    const a = await readBack("ok");
     const collected = collectAssembled(a);
     expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
     expect(collected.qualification!.status).toBe("PASS");
@@ -61,29 +62,29 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
     }
   });
 
-  it("2. the decoy: a wrong click that leaves the CSV different is FAILED on the assertion alone (decision D3), not UNKNOWN", () => {
-    const collected = collectAssembled(assembled.decoy);
+  it("2. the decoy: a wrong click that leaves the CSV different is FAILED on the assertion alone (decision D3), not UNKNOWN", async () => {
+    const collected = collectAssembled(await readBack("decoy"));
     expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
     expect(collected.qualification!.status).toBe("FAILED");
     expect(firstCase(collected)).toMatchObject({ status: "failed", reason: "observed-application-assertion-failure" });
   });
 
-  it("3. a model that finished without acting leaves no download: UNKNOWN agent-no-download on the case, never a pass", () => {
-    const collected = collectAssembled(assembled["no-download"]);
+  it("3. a model that finished without acting leaves no download: UNKNOWN agent-no-download on the case, never a pass", async () => {
+    const collected = collectAssembled(await readBack("no-download"));
     expect(collected.qualification?.result, collected.unavailableReason ?? "").not.toBeNull();
     expect(collected.qualification!.status).toBe("UNKNOWN");
     expect(firstCase(collected)).toMatchObject({ status: "unavailable", reason: "agent-no-download" });
   });
 
-  it("9. two downloads: UNKNOWN ambiguous-download", () => {
-    const collected = collectAssembled(assembled.double);
+  it("9. two downloads: UNKNOWN ambiguous-download", async () => {
+    const collected = collectAssembled(await readBack("double"));
     expect(collected.qualification?.result, collected.unavailableReason ?? "").not.toBeNull();
     expect(collected.qualification!.status).toBe("UNKNOWN");
     expect(firstCase(collected)).toMatchObject({ status: "unavailable", reason: "ambiguous-download" });
   });
 
-  it("6. a provider outage: the executor records the stopped step, and the collector says model-unavailable (it can no longer pass or fail)", () => {
-    const a = assembled.outage;
+  it("6. a provider outage: the executor records the stopped step, and the collector says model-unavailable (it can no longer pass or fail)", async () => {
+    const a = await readBack("outage");
     // The executor leaves a capture for the case whose agent step did not conclude, so the collector can say why.
     expect(a.actual.applicationCaptures).toHaveLength(1);
     expect(a.actual.applicationCaptures[0]!.steps.map((step) => [step.kind, step.outcome])).toEqual([["navigate", "completed"], ["agent", "unavailable"]]);
@@ -94,17 +95,18 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
     expect(collected.qualification!.result!.modelReceiptIds).toEqual([]);
   });
 
-  it("21. a group with an agent step and no model evidence is UNKNOWN with the mismatch code, never a pass", () => {
-    const a = assembled.ok;
-    const { agentModel: _dropped, ...withoutAgent } = a.inputs;
-    const collected = collectAssembled(a, withoutAgent);
+  it("21. a group with an agent step and no model evidence is UNKNOWN with the mismatch code, never a pass", async () => {
+    const a = await readBack("ok");
+    const withoutAgent: Partial<typeof a.inputs> = { ...a.inputs };
+    delete withoutAgent.agentModel;
+    const collected = collectAssembled(a, withoutAgent as typeof a.inputs);
     expect(collected.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
     expect(collected.unavailableReason ?? "").toMatch(/^model-receipts-mismatch:/);
     expect(collectAssembled(a, { ...a.inputs, agentModel: null }).unavailableReason ?? "").toMatch(/^model-receipts-mismatch:/);
   });
 
-  it("23. receipts edited after the fact do not requalify: a flipped outcome, a forged ledger receipt id, a ledger under another key, a missing ledger", () => {
-    const a = assembled.ok;
+  it("23. receipts edited after the fact do not requalify: a flipped outcome, a forged ledger receipt id, a ledger under another key, a missing ledger", async () => {
+    const a = await readBack("ok");
     const agentModel = a.agentModel;
     const asReceipts = (edit: (receipts: E2EAgentModelEvidence["receipts"]) => E2EAgentModelEvidence["receipts"]) => collectAssembled(a, { ...a.inputs, agentModel: { ...agentModel, receipts: edit(agentModel.receipts) } });
     // An ok receipt turned into a provider error: the report counts two calls and the receipts one.
@@ -132,14 +134,38 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
     for (const result of [forged, badDigest, none]) expect(result.qualification!.status).not.toBe("PASS");
   });
 
-  it("a channel that failed to close makes the evidence say so: UNKNOWN, with the mismatch code on the case", () => {
-    const a = assembled.ok;
+  it("19. a deterministic case beside an AI-navigated one keeps its verdict, and receipts attributed to it fail the group with the mismatch code", async () => {
+    const run = await runAgentCase({ script: SCRIPTS.ok, plan: { withDeterministicCase: true } });
+    runs.push(run);
+    const a = await assembleAgentRun(run);
+    const [agentCase, plainCase] = run.fixture.compiled.expectedCases;
+    expect([agentCase!.scenarioId, plainCase!.scenarioId]).toEqual(["agent-export", "plain-identity"]);
+    const collected = collectAssembled(a);
+    expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
+    expect(collected.qualification!.status).toBe("PASS");
+    const byCase = new Map(collected.qualification!.result!.cases.map((item) => [item.caseId, item]));
+    expect(byCase.get(plainCase!.caseId)).toMatchObject({ status: "passed", reason: "structural-application-observations-complete" });
+    expect(byCase.get(agentCase!.caseId)).toMatchObject({ status: "passed", reason: "structural-application-observations-complete" });
+    // Only the AI-navigated case's receipts are the result's.
+    expect(collected.qualification!.result!.modelReceiptIds).toEqual(run.receipts.map((receipt) => receipt.receiptId).sort());
+    expect(a.agentModel.ledgers.map((ledger) => ledger.caseDirectory)).toEqual([agentCaseDirectoryName(agentCase!.caseId)]);
+    // A receipt attributed to the deterministic case: the group is UNKNOWN, not a pass and not a failure.
+    const moved = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, receipts: a.agentModel.receipts.map((receipt, index) => (index === 0 ? { ...receipt, caseId: plainCase!.caseId } : receipt)) } });
+    expect(moved.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+    expect(moved.unavailableReason).toMatch(/^model-receipts-mismatch: a model receipt is attributed to a case with no AI navigation step/);
+    // A ledger filed for the deterministic case is never read for it: the agent case still has its own.
+    const extraLedger = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, ledgers: [...a.agentModel.ledgers, { ...a.agentModel.ledgers[0]!, caseDirectory: agentCaseDirectoryName(plainCase!.caseId) }] } });
+    expect(extraLedger.qualification!.status).toBe("PASS");
+  });
+
+  it("a channel that failed to close makes the evidence say so: UNKNOWN, with the mismatch code on the case", async () => {
+    const a = await readBack("ok");
     const faulty = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, route: null, receipts: [], channel: { droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 1 } } });
     expect(faulty.qualification!.status).toBe("UNKNOWN");
   });
 
-  it("the report's account of each step is held to the receipts: a worker that reports more calls than receipts cannot pass", () => {
-    const a = assembled.ok;
+  it("the report's account of each step is held to the receipts: a worker that reports more calls than receipts cannot pass", async () => {
+    const a = await readBack("ok");
     const withDropped = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, channel: { ...a.agentModel.channel, droppedRequests: 1 } } });
     expect(withDropped.qualification!.status).toBe("UNKNOWN");
     expect(withDropped.qualification!.result!.cases[0]!.reason).toBe("model-receipts-mismatch");

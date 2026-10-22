@@ -39,6 +39,7 @@ export type { E2EApplicationProducer, E2EApplicationProofBytes, E2EApplicationSu
   E2EApplicationMockConsumption, E2EApplicationCollection, E2EApplicationCollectionOracle, E2EApplicationGroupResultEnvelope, E2EApplicationMockSummary,
   E2EApplicationQualification, E2EApplicationUnmockedCall } from "./application-result-adapter.js";
 export { collectE2EApplicationRun } from "./application-collection.js";
+export { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } from "./application-templates.js";
 export { evaluateE2EAgentCase, E2EAgentModelEvidenceSchema, E2E_AGENT_UNKNOWN_CODES, E2E_AGENT_LEDGER_MAX_BYTES, E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION } from "./application-agent-result.js";
 export type { E2EAgentModelEvidence, E2EAgentUnknownCode, E2EAgentCaseVerdict, E2EAgentCaseInput, E2EAgentCaseResult, E2EAgentTranscriptDigest } from "./application-agent-result.js";
 export type { E2EActualApplicationRun, E2EActualApplicationShard } from "./application-collection.js";

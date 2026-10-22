@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EApplicationExecutionAdmission, type E2EDisplayScenario,
-  type E2EExecutionPlan, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
-import { createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
-  e2eApplicationAggregateRunUsage, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, canonicalJson, e2eModelRouteRevision, e2ePlanHasCompleteRequiredCriteria,
+  type E2EApplicationExecutionAdmission, type E2EDisplayScenario, type E2EExecutionPlan, type E2EModelRouteDefinition, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
+import { E2EAgentModelEvidenceSchema, createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
+  E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, e2eApplicationAggregateRunUsage, e2eApplicationGroupUsesModel, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
   type E2ECompiledApplicationSuite } from "@agentx/verifier";
+import { readAdmittedE2EModelRoute } from "./model-route-registry.js";
 import { buildScenarioRows, readCaptureScreenshots, type DisplayArtifact, type DisplayGroupInput } from "./application-display.js";
 import { combineE2EVerdicts, type E2EVerdict } from "./verdict.js";
 
@@ -33,6 +34,12 @@ export type ApplicationEvidenceInput = Readonly<{
    * never read as a verdict by anything that gates.
    */
   purpose?: "candidate" | "baseline";
+  /**
+   * The definition the model route registry stores for the route revision the admission names (Task 4.4a, ruling DJ), read by the async caller with one GetItem; absent when the
+   * caller had no route to read (the admission names none, or no group uses the model). The route a group's receipts are judged against is this one and nothing a worker uploads;
+   * a group with an AI navigation step is UNKNOWN when the admission names a route and this is null (not in the registry) or absent.
+   */
+  modelRouteDefinition?: E2EModelRouteDefinition | null;
 }>;
 
 /**
@@ -47,6 +54,24 @@ export function applicationEvidenceLimits(admission: Pick<E2EApplicationExecutio
       e2eApplicationPrivateTransferMaxBytes(group.outerBinding.expectedCases.length, group.protocol === "trusted-e2e-application/v1" ? group.shards.length : 1)));
   }
   return { byGroup, aggregate: Math.min(E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, [...byGroup.values()].reduce((total, limit) => total + limit, 0)) };
+}
+
+/** Whether any case of the admission runs a scenario with an `agent` step: the one question that decides whether the model route registry is asked about the round. */
+function admissionHasAgentSteps(admission: E2EApplicationExecutionAdmission): boolean {
+  const agentScenarios = new Set(admission.bundle.scenarios.filter((scenario) => scenario.steps.some((step) => step.kind === "agent")).map((scenario) => scenario.scenarioId));
+  return admission.groups.some((group) => group.outerBinding.expectedCases.some((expected) => agentScenarios.has(expected.scenarioId)));
+}
+
+/**
+ * The registry's definition of the route revision an admission names, for a round that has an AI navigation step (Task 4.4a, ruling DJ): one keyed read, retried only for a fault it can
+ * get past. `definition` is undefined when the round needs none (it names no route, or no case has an agent step) and null when the registry does not hold the revision;
+ * `unavailable` when the registry could not be asked, which leaves the round unverifiable rather than judged without it.
+ */
+export async function modelRouteForAdmission(read: (key: { pk: string; sk: string }) => Promise<Record<string, unknown> | undefined>, admission: E2EApplicationExecutionAdmission):
+  Promise<{ definition: E2EModelRouteDefinition | null | undefined } | { unavailable: string }> {
+  if (admission.modelRoute === null || !admissionHasAgentSteps(admission)) return { definition: undefined };
+  try { return { definition: await readAdmittedE2EModelRoute(read, admission.modelRoute) }; }
+  catch { return { unavailable: "model-route-registry-unavailable" }; }
 }
 
 export type ApplicationGroupVerification = Readonly<{ runId: string; groupId: string; verdict: E2EVerdict; reason: string }>;
@@ -136,7 +161,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       }
       const groupRun = readGroupEnvelope(envelope, admission, subject, planGroup, binding);
       if (aggregateRuns !== undefined && !same(aggregateRuns.get(binding.runId), groupRun)) refuse("the aggregate differs from a group result accepted on its own");
-      const verified = requalifyGroup({ suite, groupRun, binding, round: admission.round, receivedAt: input.receivedAt.get(binding.runId) });
+      const verified = requalifyGroup({ suite, groupRun, binding, round: admission.round, receivedAt: input.receivedAt.get(binding.runId), modelRouteDefinition: input.modelRouteDefinition });
       groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: verified.verdict, reason: verified.reason });
       if (verified.result !== undefined) results.push(verified.result);
       displayGroups.push({ runId: binding.runId, group: { ...displayBase, verdict: verified.verdict, reason: verified.reason, observed: verified.observed ?? new Map(),
@@ -251,6 +276,12 @@ export function expectedApplicationAssertionAssets(suite: SuiteAssertions): { ok
 
 /** The limits every application run's runner is configured with (the pinned runner's own, as the broker pins them for portable runs too). */
 const APPLICATION_RUNNER_LIMITS = Object.freeze({ maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 });
+/**
+ * The limits the group's runner is configured with. A group with an agent step runs with the model ceiling its config pins (`maxInputTokens`, Task 4.3b: the route's 32000 per call),
+ * which the runner reports as its own `maxModelTokensPerCall`; every other group keeps the runner's default. (The plan thought the runner limit stayed 64000: it does for a group with
+ * no agent step.)
+ */
+const runnerLimitsFor = (suite: E2ECompiledApplicationSuite) => (e2eApplicationGroupUsesModel(suite) ? Object.freeze({ ...APPLICATION_RUNNER_LIMITS, maxModelTokensPerCall: E2E_AGENT_CONFIG_MAX_INPUT_TOKENS }) : APPLICATION_RUNNER_LIMITS);
 const OWNER_REASON_MAX_CHARS = 300;
 
 /**
@@ -262,7 +293,8 @@ const OWNER_REASON_MAX_CHARS = 300;
  * assets, which the oracle checks against the admitted account, artifact, origin and assertions, and the close time, which is bounded and tied to its receipt);
  * anything it supplies that should equal an expected value must equal it, or the group is UNKNOWN.
  */
-function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: Json; binding: ApplicationEvidenceBinding; round: E2ERound; receivedAt: string | undefined }): Requalified {
+function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: Json; binding: ApplicationEvidenceBinding; round: E2ERound; receivedAt: string | undefined;
+  modelRouteDefinition: E2EModelRouteDefinition | null | undefined }): Requalified {
   const { suite, groupRun, binding, round } = input;
   const actual = groupRun.actual;
   if (actual === null || actual === undefined) {
@@ -282,8 +314,30 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     if (inputs.ownedResourceInventoryDigest !== inventoryDigest) return unknown("the group's owned-resource inventory is not the one its run id derives");
     const runtime = e2eCompiledRuntime(suite);
     if (runtime === undefined || !same(inputs.environment, runtime.runnerEnvironment)) return unknown("the runner's environment is not the admitted runtime's environment");
-    if (!same(inputs.limits, APPLICATION_RUNNER_LIMITS)) return unknown("the runner's limits are not the configured limits");
-    if (!Array.isArray(inputs.governedModelReceipts) || inputs.governedModelReceipts.length !== 0) return unknown("a run with no model route cannot carry model receipts");
+    const runnerLimits = runnerLimitsFor(suite);
+    if (!same(inputs.limits, runnerLimits)) return unknown("the runner's limits are not the configured limits");
+    if (!Array.isArray(inputs.governedModelReceipts) || inputs.governedModelReceipts.length !== 0) return unknown("model-receipts-mismatch: M1-era model receipt rows are not how an AI navigation step is read");
+    // Task 4.4a: what the worker says about its AI navigation steps is accepted exactly when the admission names a route and the group has such a step, and it is judged against the
+    // registry's definition of the admitted revision (ruling DJ), never a definition the worker sends.
+    const agentModel = (() => {
+      const supplied = inputs.agentModel;
+      const present = supplied !== undefined && supplied !== null;
+      if (!e2eApplicationGroupUsesModel(suite)) return present ? ({ refuse: "model-receipts-mismatch: model evidence came with a group that has no AI navigation step" } as const) : ({ evidence: undefined } as const);
+      const admitted = suite.runtimeAdmissionContext.modelRoute;
+      if (admitted === null) return { refuse: "agent-route-not-approved: the group has AI navigation steps and the admission pins no model route" } as const;
+      if (!present) return { refuse: "model-receipts-mismatch: no model receipts or action ledgers came with the group's AI navigation steps" } as const;
+      const parsed = E2EAgentModelEvidenceSchema.safeParse(supplied);
+      if (!parsed.success) return { refuse: "model-receipts-mismatch: the group's model evidence is malformed" } as const;
+      // The route the worker says it served must be the admitted revision (it is then ignored: the registry's definition below is what the receipts are judged against).
+      if (parsed.data.route !== null && (parsed.data.route.routeId !== admitted.routeId || e2eModelRouteRevision(parsed.data.route) !== admitted.routeRevision)) {
+        return { refuse: "model-receipts-mismatch: the route the worker served is not the admitted route revision" } as const;
+      }
+      const definition = input.modelRouteDefinition;
+      if (definition === undefined || definition === null) return { refuse: "agent-route-not-approved: the admitted route revision is not in the model route registry" } as const;
+      if (definition.routeId !== admitted.routeId || e2eModelRouteRevision(definition) !== admitted.routeRevision) return { refuse: "agent-route-not-approved: the registry's definition is not the admitted route revision" } as const;
+      return { evidence: { ...parsed.data, route: definition } } as const;
+    })();
+    if ("refuse" in agentModel) return unknown(agentModel.refuse);
     const shards = Array.isArray(collection.shards) ? collection.shards as unknown[] : [];
     const usageRows = shards.map((shard) => {
       const rawReport = isObject(shard) && isObject(shard.rawReport) && typeof shard.rawReport.bytesBase64 === "string" ? shard.rawReport.bytesBase64 : undefined;
@@ -312,9 +366,9 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     }).sort((left, right) => order({ caseId: String(left.caseId), assertionIndex: Number(left.assertionIndex) }).localeCompare(order({ caseId: String(right.caseId), assertionIndex: Number(right.assertionIndex) })));
     const wanted = expectedAssets.assets.map((asset) => ({ ...asset, mediaType: "application/json", hasHandle: true })).sort((left, right) => order(left).localeCompare(order(right)));
     if (!same(suppliedAssets, wanted)) return unknown("the group's assertion assets are not the installed assertion assets");
-    const oracle = createE2EApplicationCollectionOracleFromCompiledSuite({ compiled: suite, binding, round, environment: runtime.runnerEnvironment, usage, limits: APPLICATION_RUNNER_LIMITS,
+    const oracle = createE2EApplicationCollectionOracleFromCompiledSuite({ compiled: suite, binding, round, environment: runtime.runnerEnvironment, usage, limits: runnerLimits,
       expectedSupervisorReceiptRefs, ownedResourceInventoryDigest: inventoryDigest, observationBindings: inputs.observationBindings as never,
-      assertionAssets: inputs.assertionAssets as never, governedModelReceipts: [], ownedClosedAt: inputs.ownedClosedAt });
+      assertionAssets: inputs.assertionAssets as never, governedModelReceipts: [], ...(agentModel.evidence === undefined ? {} : { agentModel: agentModel.evidence }), ownedClosedAt: inputs.ownedClosedAt });
     const qualification = qualifyE2EApplicationCollection(oracle, { ...collection, receivedAt: new Date(receivedAt).toISOString() } as never);
     const promoted = qualification.result === null ? undefined : { ...qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted" as const };
     // What the assertions observed is read only from a collection the qualifier carried through to a result: it checked every captured value against the raw observation bytes

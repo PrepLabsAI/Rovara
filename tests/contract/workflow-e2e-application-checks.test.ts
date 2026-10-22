@@ -602,6 +602,26 @@ describe("workflow E2E application rounds: the model channel", () => {
     expect(planKey).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  it("logs which fixed outcome the checks gave an AI-navigated group's cases, as codes only, and logs nothing for a group without an agent step (Task 4.4a)", async () => {
+    const verdictLines = async (agent: boolean) => {
+      const lines: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+      try {
+        const s = await setup(agent ? { route: SCRIPTED, agent: true } : {});
+        s.collect.mockImplementation((() => ({ collection: { marker: "wire-collection" }, oracle: {}, unavailableReason: "x",
+          qualification: { status: "UNKNOWN", reason: "x", runId: null, rawReportSha256: null,
+            result: { cases: [{ reason: "model-unavailable" }, { reason: "structural-application-observations-complete" }, { reason: "the model said: hello (free text)" }] } } })) as never);
+        s.fake.onExecutor = s.okOutput;
+        await s.run(agent ? { modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment, invoke: async () => { throw new Error("not called"); } } } : {});
+      } finally { log.mockRestore(); }
+      return lines.filter((line) => line.includes("workflow.e2e_agent_verdict"));
+    };
+    const [line] = await verdictLines(true);
+    expect(JSON.parse(line!)).toMatchObject({ component: "worker", event: "workflow.e2e_agent_verdict", status: "UNKNOWN", codes: ["model-unavailable"] });
+    expect(line).not.toContain("hello");
+    expect(await verdictLines(false)).toEqual([]);
+  });
+
   it("closes the channel when the executor throws, and the socket is gone", async () => {
     const closed: unknown[] = [];
     const s = await setup({ route: SCRIPTED, agent: true });

@@ -65,7 +65,7 @@ export async function runAgentProbe(options: { script: readonly ScriptedTurn[]; 
       // The proxy hands the socket to uid 1000 only when the worker is root (as the EC2 worker is). A CI runner's own user owns it, and the executor image runs as `node` (1000), so the
       // test opens the socket file to every local user for this run; the socket sits in a 0700 directory of the run that nothing else can enter.
       chmodSync(session.socketPath, 0o666);
-      return { close: async () => { closes += 1; return session.close(); } };
+      return { close: async () => { closes += 1; const summary = await session.close(); return { ...summary, transcripts: evidence.transcripts(), valueKey: input.valueKey, definition: session.definition }; } };
     } } });
   const run = await runIsolatedE2EApplication({ input: webApiProbeRunInput(fixture) as never, compiled: fixture.compiled, ports: host, signal: AbortSignal.timeout(280_000) });
   const caseId = fixture.compiled.expectedCases[0]!.caseId;

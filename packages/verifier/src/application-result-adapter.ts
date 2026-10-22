@@ -1146,7 +1146,11 @@ export function collectE2EApplicationRun(input: { actual: unknown; compiled: E2E
     const oracle = createE2EApplicationCollectionOracleFromCompiledSuite(input);
     const qualification = qualifyE2EApplicationCollection(oracle, collection);
     return { collection, oracle, qualification, unavailableReason: qualification.status === "UNKNOWN" ? qualification.reason : null };
-  } catch (error) { return { collection: null, oracle: null, qualification: null, unavailableReason: error instanceof Error ? error.message : "application collection unavailable" }; }
+  } catch (error) {
+    // A schema refusal says what it refused (the first issue's own words) rather than printing the whole issue list.
+    const message = error instanceof z.ZodError ? error.issues[0]?.message : error instanceof Error ? error.message : undefined;
+    return { collection: null, oracle: null, qualification: null, unavailableReason: message === undefined || message === "" ? "application collection unavailable" : message };
+  }
 }
 
 export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationCollectionOracle, collectionInput: E2EApplicationCollection): E2EApplicationQualification {

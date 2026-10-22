@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_HARD_LIMITS, canonicalJson, type E2ECollection, type E2EModelDayBudgetRequest, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
   type WorkerInvocation } from "@agentx/contracts";
 import { resolveE2EAgentRouteForAdmission, type E2EInvoke } from "@agentx/model-runtime";
-import { collectE2EApplicationRun, decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, e2eApplicationPrivateTransferMaxBytes, runIsolatedE2EApplication,
+import { E2E_AGENT_UNKNOWN_CODES, collectE2EApplicationRun, decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, e2eApplicationPrivateTransferMaxBytes, runIsolatedE2EApplication,
   e2eCompiledRuntime, validateE2EApplicationExecutionAdmission, type DockerApplicationHost, type DockerApplicationModelChannel, type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { createE2EModelDayBudgetClient } from "./e2e-model-day-budget-client.js";
 import { createE2EModelEvidenceCollector, openE2EModelChannelSession, type E2EModelChannelSession } from "./e2e-model-channel-session.js";
@@ -401,6 +401,12 @@ export async function executeWorkflowE2EApplicationChecks(input: {
         }
       } else reason ??= "application run produced no readback";
       throwIfStopped();
+      // What the checks made of the group's AI navigation, as codes only (a code names no prompt, answer, page text or path): which case outcomes were the table's fixed ones. This is an
+      // early signal for the operator; the broker's own re-collection decides.
+      if (usesModel && qualification !== null) {
+        const codes = (qualification.result?.cases ?? []).map((item) => item.reason).filter((code): code is string => (E2E_AGENT_UNKNOWN_CODES as readonly string[]).includes(code));
+        console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_agent_verdict", groupRunId: binding.runId, status: qualification.status, codes }));
+      }
       // The verdict input is only ever what the collector itself qualified; a run that did not get that far is UNKNOWN, whatever its process said.
       const unavailableReason = qualification === null ? reason ?? "application collection unavailable" : qualification.status === "UNKNOWN" ? qualification.reason : null;
       const diagnostics = qualification !== null ? null : (() => {

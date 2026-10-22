@@ -1355,7 +1355,7 @@ describe("docker application host: the model channel", () => {
       events.push(`open:executor-started=${fake.calls.some((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-executor-"))}`);
       await behaviour.open?.();
       opened.push({ socketPath: input.socketPath, credentialSet: input.credentialSet, deadlineAt: input.deadlineAt, aborted: input.signal.aborted, valueKey: input.valueKey });
-      return { async close() { closes += 1; events.push("close"); await behaviour.close?.(); } };
+      return { async close() { closes += 1; events.push("close"); await behaviour.close?.(); return undefined as never; } };
     } } };
   }
 
@@ -1513,7 +1513,7 @@ describe("docker application host: the model channel", () => {
     it("31. a channel whose close threw gives evidence that says so (an evidence error, no route), never null and never a pass; the ledger the executor left is still carried", async () => {
       const fake = new FakeDockerCli();
       const port = { async open() { return { async close() { throw new Error("the proxy fell over: /secret/path"); } }; } };
-      const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: port as never });
+      const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: port });
       const ledgerBytes = new TextEncoder().encode("{}");
       fake.onExecutor = withLedger(s, ledgerBytes);
       await runWith(s);

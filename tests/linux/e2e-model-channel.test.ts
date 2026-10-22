@@ -113,7 +113,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
           allowedSteps: [{ caseId: fixture.compiled.expectedCases[0]!.caseId, stepIndex: 0 }], credentialSet: { ...input.credentialSet, cookieValues: [] }, deadlineAt: input.deadlineAt,
           dayBudget: createInMemoryE2EDayBudget(), evidence, signal: input.signal, environment: { ROVARA_E2E_SCRIPTED_MODEL: "1" },
           invoke: createScriptedE2EInvoke({ scripts: { [sha256(GOAL)]: [{ kind: "tap", name: /Download orders/ }] } }) });
-        return { close: async () => { const summary = await session.close(); closes.push(summary); return summary; } };
+        return { close: async () => { const summary = await session.close(); closes.push(summary); return { ...summary, transcripts: evidence.transcripts(), valueKey: input.valueKey, definition: session.definition }; } };
       } } });
     const run = await runIsolatedE2EApplication({ input: linuxRunInput(fixture) as never, compiled: fixture.compiled, ports: host, signal: AbortSignal.timeout(280_000) });
     const diagnostics = host.readDiagnostics(fixture.plan.runId);

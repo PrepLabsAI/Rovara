@@ -6,7 +6,7 @@ import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/confi
 import { E2E_BUDGET_EXHAUSTED_PREFIX, createGovernedE2EModelRoute } from "../../packages/model-runtime/src/e2e-route.js";
 import {
   E2E_MODEL_ROUTE_PARTITION, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, createBrokerE2EDayBudget, deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest,
-  e2eDayBudgetRoom, e2eModelBudgetKey, isTransientAwsFault, e2eModelRouteCanaryKey, e2eModelRouteLatestKey, planE2EAgentRoute, readE2EModelRouteLatest, type E2EAgentInstallation,
+  e2eDayBudgetRoom, e2eModelBudgetKey, isTransientAwsFault, e2eModelRouteCanaryKey, e2eModelRouteLatestKey, e2eModelRouteRevisionKey, planE2EAgentRoute, readAdmittedE2EModelRoute, readE2EModelRouteLatest, type E2EAgentInstallation,
 } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { E2E_MODEL_ROUTE } from "../../scripts/test-deploy-check.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -511,4 +511,65 @@ describe("which read failures a later attempt can get past (Ruling M4-AE)", () =
     ["access denied", named("AccessDeniedException", { $metadata: { httpStatusCode: 400 } })], ["a missing parameter", named("ParameterNotFound")], ["a validation error", named("ValidationException")],
     ["a malformed row", new Error("the stored latest route revision cannot be read")], ["a conditional failure", named("ConditionalCheckFailedException")], ["a string", "boom"], ["nothing", undefined],
   ])("is deterministic: %s", (_label, error) => { expect(isTransientAwsFault(error)).toBe(false); });
+});
+
+describe("the broker reads the definition of the admitted revision from the registry (Task 4.4a, ruling DJ)", () => {
+  const approve = async (db: FakeDynamoDb, installation: E2EAgentInstallation) => {
+    const planned = await planE2EAgentRoute(store(db), installation);
+    if (planned.status !== "available") throw new Error("unavailable");
+    await approveE2EAgentRoute(store(db), installation, planned.revision);
+    return { routeId: E2E_DEFAULT_MODEL_ROUTE_ID, routeRevision: planned.revision, definition: planned.definition };
+  };
+  const read = (db: FakeDynamoDb) => (key: { pk: string; sk: string }) => store(db).documentClient.send({ input: { TableName: TABLE, Key: key }, constructor: { name: "GetCommand" } } as never)
+    .then((result) => (result as { Item?: Record<string, unknown> }).Item);
+  const readFrom = (db: FakeDynamoDb) => (key: { pk: string; sk: string }) => Promise.resolve(db.get(key.pk, key.sk) as Record<string, unknown> | undefined);
+
+  it("returns the stored definition of the revision, with one keyed read and nothing else", async () => {
+    const db = new FakeDynamoDb();
+    const route = await approve(db, anthropic);
+    const keys: Array<{ pk: string; sk: string }> = [];
+    const definition = await readAdmittedE2EModelRoute(async (key) => { keys.push(key); return readFrom(db)(key); }, route);
+    expect(definition).toEqual(route.definition);
+    expect(keys).toEqual([e2eModelRouteRevisionKey(route.routeId, 1)]);
+    void read;
+  });
+
+  it("is null for a revision the registry does not hold, another route id, or a revision that cannot be read", async () => {
+    const db = new FakeDynamoDb();
+    const route = await approve(db, anthropic);
+    expect(await readAdmittedE2EModelRoute(readFrom(db), { routeId: route.routeId, routeRevision: "r2-aaaaaaaaaaaa" })).toBeNull();
+    expect(await readAdmittedE2EModelRoute(readFrom(db), { routeId: "some-other-route", routeRevision: route.routeRevision })).toBeNull();
+    expect(await readAdmittedE2EModelRoute(readFrom(db), { routeId: route.routeId, routeRevision: "not-a-revision" })).toBeNull();
+  });
+
+  it("is null for a row that is not exactly the revision it is filed under: a definition that hashes to another revision, another number, or another entity", async () => {
+    const db = new FakeDynamoDb();
+    const route = await approve(db, anthropic);
+    const key = e2eModelRouteRevisionKey(route.routeId, 1);
+    const row = db.get(key.pk, key.sk) as Record<string, unknown>;
+    const other = available(bedrock, 1);
+    for (const edit of [{ definition: other }, { revisionNumber: 2 }, { revision: "r1-bbbbbbbbbbbb" }, { entityType: "SOMETHING" }, { routeId: "other" }, { definition: { ...route.definition, budgets: { ...route.definition.budgets, maxModelCallsPerGroup: 39 } } }]) {
+      expect(await readAdmittedE2EModelRoute(async () => ({ ...row, ...edit }), route), JSON.stringify(Object.keys(edit))).toBeNull();
+    }
+    // The row as written is accepted (the control for the edits above).
+    expect(await readAdmittedE2EModelRoute(async () => row, route)).toEqual(route.definition);
+  });
+
+  it("tries a fault it can expect to get past (throttling, a timeout) up to three times in all, and throws one that persists, or any other at once", async () => {
+    const db = new FakeDynamoDb();
+    const route = await approve(db, anthropic);
+    const throttled = Object.assign(new Error("slow down"), { name: "ThrottlingException" });
+    let calls = 0; const sleeps: number[] = [];
+    const flaky = async (key: { pk: string; sk: string }) => { calls += 1; if (calls < 3) throw throttled; return readFrom(db)(key); };
+    expect(await readAdmittedE2EModelRoute(flaky, route, { sleep: async (ms) => { sleeps.push(ms); } })).toEqual(route.definition);
+    expect(calls).toBe(3);
+    expect(sleeps).toHaveLength(2);
+    calls = 0;
+    await expect(readAdmittedE2EModelRoute(async () => { calls += 1; throw throttled; }, route, { sleep: async () => undefined })).rejects.toBe(throttled);
+    expect(calls).toBe(3);
+    calls = 0;
+    const denied = Object.assign(new Error("no"), { name: "AccessDeniedException" });
+    await expect(readAdmittedE2EModelRoute(async () => { calls += 1; throw denied; }, route, { sleep: async () => undefined })).rejects.toBe(denied);
+    expect(calls).toBe(1);
+  });
 });
