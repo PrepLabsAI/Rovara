@@ -126,3 +126,77 @@ describe("the sentence for a baseline that did not run shows without any candida
     expect(await readWorkflowE2EBaseline(s, task())).toEqual(recorded);
   });
 });
+
+// M1.4 Task 4.4c (BASEREASON): the reason a baseline did not run, and the AI-navigated scenarios a baseline that did run left out, ride on the record and into the baseline's view.
+describe("the baseline says why it did not run, and which AI-navigated checks it left out (Task 4.4c)", () => {
+  const SKIPPED = [{ scenarioId: "agent-orders", title: "Agent orders" }];
+  const recordOf = async (s: ReturnType<typeof store>) => (await readWorkflowE2EBaselineRecord(s, task()))!;
+
+  it("a plan that is all AI navigation reads agent-steps-only on the page, not the generic sentence", async () => {
+    const s = store();
+    await requestWorkflowE2EBaselineRound(s, task(), { enabled: true });
+    expect(await markWorkflowE2EBaselineUnavailable(s, task(), "agent-steps-only", { from: ["REQUESTED"] })).toBe(true);
+    expect(await recordOf(s)).toMatchObject({ state: "UNAVAILABLE", reason: "agent-steps-only" });
+    expect(workflowE2EBaselineView(await recordOf(s), Date.now())).toEqual({ status: "UNAVAILABLE", scenarios: [], reason: "agent-steps-only" });
+    expect(await readWorkflowE2EBaseline(s, task())).toEqual({ status: "UNAVAILABLE", scenarios: [], reason: "agent-steps-only" });
+  });
+
+  it("every other reason, and a round that never answered, still reads as it did: no reason on the baseline", async () => {
+    for (const reason of ["not-exported", "refused", "start-failed", "run-failed", "unverified", "timed-out", "stopped", "cancel-unconfirmed"] as const) {
+      const s = store();
+      await requestWorkflowE2EBaselineRound(s, task(), { enabled: true });
+      await markWorkflowE2EBaselineUnavailable(s, task(), reason, { from: ["REQUESTED"] });
+      expect(workflowE2EBaselineView(await recordOf(s), Date.now()), reason).toEqual({ status: "UNAVAILABLE", scenarios: [] });
+    }
+  });
+
+  it("carries the skipped list from the start of the round, and a record started without one is exactly what it was", async () => {
+    const withList = store();
+    await requestWorkflowE2EBaselineRound(withList, task(), { enabled: true });
+    await start(withList, { skippedAiScenarios: SKIPPED });
+    expect(await recordOf(withList)).toMatchObject({ state: "STARTED", skippedAiScenarios: SKIPPED });
+    const plain = store();
+    await requestWorkflowE2EBaselineRound(plain, task(), { enabled: true });
+    await start(plain);
+    expect(await recordOf(plain)).not.toHaveProperty("skippedAiScenarios");
+    expect(plain.db.get(key.pk, key.sk)).not.toHaveProperty("skippedAiScenarios");
+    expect(baselineStartItem(plain, task(), started()).Update.UpdateExpression).not.toContain("skippedAiScenarios");
+    // An empty list is no list.
+    const empty = store();
+    await requestWorkflowE2EBaselineRound(empty, task(), { enabled: true });
+    await start(empty, { skippedAiScenarios: [] });
+    expect(empty.db.get(key.pk, key.sk)).not.toHaveProperty("skippedAiScenarios");
+  });
+
+  it("reads a list that is not a bounded list of ids and titles as no list at all, never as part of one", async () => {
+    for (const bad of ["Agent orders", [{ scenarioId: "a" }], [{ scenarioId: "a", title: "b", extra: 1 }], Array.from({ length: 65 }, (_, index) => ({ scenarioId: `s-${index}`, title: "t" })), [{ scenarioId: "a", title: "x".repeat(121) }]]) {
+      const s = store();
+      await requestWorkflowE2EBaselineRound(s, task(), { enabled: true });
+      await start(s);
+      s.db.set({ ...s.db.get(key.pk, key.sk)!, skippedAiScenarios: bad });
+      expect(await recordOf(s), JSON.stringify(bad)).not.toHaveProperty("skippedAiScenarios");
+    }
+  });
+
+  it("shows a recorded baseline with its skipped list as it was recorded, and one recorded before this task as it was", async () => {
+    const s = store();
+    await requestWorkflowE2EBaselineRound(s, task(), { enabled: true });
+    await start(s);
+    const recorded: E2EDisplayBaseline = { ...failedBaseline(), skippedAiScenarios: SKIPPED };
+    s.db.set({ ...s.db.get(key.pk, key.sk)!, state: "RECORDED", baseline: recorded, recordedAt: "2026-10-21T10:10:00.000Z" });
+    expect(await readWorkflowE2EBaseline(s, task())).toEqual(recorded);
+    const before = store();
+    await requestWorkflowE2EBaselineRound(before, task(), { enabled: true });
+    await start(before);
+    before.db.set({ ...before.db.get(key.pk, key.sk)!, state: "RECORDED", baseline: failedBaseline(), recordedAt: "2026-10-21T10:10:00.000Z" });
+    expect(await readWorkflowE2EBaseline(before, task())).toEqual(failedBaseline());
+  });
+
+  it("does not show a skipped list from the record of a round that did not record (a started round has no baseline to attach it to)", async () => {
+    const s = store();
+    await requestWorkflowE2EBaselineRound(s, task(), { enabled: true });
+    await start(s, { skippedAiScenarios: SKIPPED });
+    expect(workflowE2EBaselineView(await recordOf(s), Date.parse("2026-10-21T10:10:00.000Z"))).toBeUndefined();
+    expect(workflowE2EBaselineView(await recordOf(s), Date.parse("2026-10-21T10:25:00.000Z") + E2E_BASELINE_RUN_GRACE_MS + 1)).toEqual({ status: "UNAVAILABLE", scenarios: [] });
+  });
+});

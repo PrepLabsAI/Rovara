@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, canonicalJson, e2eModelRouteRevision, e2ePlanHasCompleteRequiredCriteria,
-  type E2EApplicationExecutionAdmission, type E2EDisplayScenario, type E2EExecutionPlan, type E2EModelRouteDefinition, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_DISPLAY_ASSERTION_KINDS, canonicalJson, e2eModelRouteRevision, e2ePlanHasCompleteRequiredCriteria,
+  type E2EApplicationExecutionAdmission, type E2EDisplayAgentNavigation, type E2EDisplayScenario, type E2EExecutionPlan, type E2EModelRouteDefinition, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
 import { E2EAgentModelEvidenceSchema, createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
   E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, e2eApplicationAggregateRunUsage, e2eApplicationGroupUsesModel, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
-  type E2ECompiledApplicationSuite } from "@agentx/verifier";
+  type E2EAgentModelEvidence, type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { readAdmittedE2EModelRoute } from "./model-route-registry.js";
 import { buildScenarioRows, readCaptureScreenshots, type DisplayArtifact, type DisplayGroupInput } from "./application-display.js";
+import { agentCaseDirectory, agentNavigationOf } from "./application-agent-display.js";
 import { combineE2EVerdicts, type E2EVerdict } from "./verdict.js";
 
 /** What the broker itself knows about the CHECKS operation and the admission it signed. None of it comes from the worker. */
@@ -165,7 +166,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: verified.verdict, reason: verified.reason });
       if (verified.result !== undefined) results.push(verified.result);
       displayGroups.push({ runId: binding.runId, group: { ...displayBase, verdict: verified.verdict, reason: verified.reason, observed: verified.observed ?? new Map(),
-        screenshots: readCaptureScreenshots(groupRun.operatorEvidence, new Set(binding.expectedCases.map((item) => item.caseId))) } });
+        screenshots: readCaptureScreenshots(groupRun.operatorEvidence, new Set(binding.expectedCases.map((item) => item.caseId))), agentNavigation: verified.agentNavigation } });
     }
     if (aggregateRuns !== undefined && !same([...aggregateRuns.keys()].sort(), [...runIds].sort())) refuse("the aggregate does not cover the admitted groups exactly once");
 
@@ -232,7 +233,9 @@ function readGroupEnvelope(envelope: unknown, admission: ReturnType<typeof decod
   return groupRun;
 }
 
-type Requalified = { verdict: E2EVerdict; reason: string; result?: E2EQualifiedResult; observed?: ReadonlyMap<string, ObservedAssertion[]> };
+type Requalified = { verdict: E2EVerdict; reason: string; result?: E2EQualifiedResult; observed?: ReadonlyMap<string, ObservedAssertion[]>;
+  /** How the AI navigated each case the broker decided on its assertions, from the verified action ledger (Task 4.4b); absent for a group with no AI navigation step. */
+  agentNavigation?: ReadonlyMap<string, E2EDisplayAgentNavigation> };
 type ObservedAssertion = { assertionIndex: number; outcome: string; value: unknown };
 
 /** The value and outcome each case's assertions had, from the group's collection (see the note where it is read: only a collection the qualifier accepted may be read). */
@@ -244,6 +247,33 @@ function observedAssertions(collection: Json): Map<string, ObservedAssertion[]> 
       ? [{ assertionIndex: assertion.index as number, outcome: assertion.outcome, value: assertion.value }] : []));
   }
   return observed;
+}
+
+/**
+ * The navigation block of each case that ran AI navigation steps and that the broker decided on its assertions (passed or failed), read from the executor's action ledger. The ledger
+ * is held to this run, this case, the run's value key, the approved goals and the worker's receipts for the case by `agentNavigationOf`; one that is not gives no block. The
+ * receipts and the key are the group's `agentModel` evidence the broker has already judged against the registry's route, so this adds a view of what that judgement accepted and
+ * decides nothing.
+ */
+function agentNavigations(input: { suite: E2ECompiledApplicationSuite; binding: ApplicationEvidenceBinding; evidence: E2EAgentModelEvidence; result: E2EQualifiedResult }): Map<string, E2EDisplayAgentNavigation> {
+  const navigations = new Map<string, E2EDisplayAgentNavigation>();
+  const route = input.evidence.route;
+  if (route === null) return navigations;
+  for (const expected of input.binding.expectedCases) {
+    const decided = input.result.cases.find((item) => item.caseId === expected.caseId);
+    if (decided === undefined || (decided.status !== "passed" && decided.status !== "failed")) continue;
+    const scenario = input.suite.bundle.scenarios.find((item) => item.scenarioId === expected.scenarioId);
+    const agentSteps = scenario === undefined ? [] : scenario.steps.flatMap((step, index) => (step.kind === "agent" ? [{ declaredStepIndex: index, goal: step.goal }] : []));
+    if (scenario === undefined || agentSteps.length === 0) continue;
+    const entry = input.evidence.ledgers.find((item) => item.caseDirectory === agentCaseDirectory(expected.caseId));
+    const decoded = entry === undefined ? undefined : Buffer.from(entry.bytesBase64, "base64");
+    const ledgerBytes = entry === undefined || decoded === undefined || decoded.toString("base64") !== entry.bytesBase64 || sha256(decoded) !== entry.sha256 ? null : new Uint8Array(decoded);
+    const navigation = agentNavigationOf({ ledgerBytes, valueKey: input.evidence.valueKey, runId: input.binding.runId, caseId: expected.caseId, agentSteps,
+      receipts: input.evidence.receipts.filter((receipt) => receipt.caseId === expected.caseId), routeId: route.routeId,
+      decidedBy: scenario.assertions.map((assertion) => assertion.kind).filter((kind): kind is (typeof E2E_DISPLAY_ASSERTION_KINDS)[number] => (E2E_DISPLAY_ASSERTION_KINDS as readonly string[]).includes(kind)) });
+    if (navigation !== undefined) navigations.set(expected.caseId, navigation);
+  }
+  return navigations;
 }
 
 export type ExpectedAssertionAsset = Readonly<{ caseId: string; assertionIndex: number; kind: "state-probe"; id: string; manifestDigest: string; sha256: string; byteLength: number }>;
@@ -374,7 +404,10 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     // What the assertions observed is read only from a collection the qualifier carried through to a result: it checked every captured value against the raw observation bytes
     // it re-derived the value from, and refuses the whole group on any difference. A group without a result shows no observed value.
     const observed = promoted === undefined ? undefined : observedAssertions(collection);
-    if (qualification.status !== "PASS") return { verdict: qualification.status, reason: qualification.reason.slice(0, OWNER_REASON_MAX_CHARS), ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }) };
+    // How the AI navigated, for the cases the broker decided, from the ledger verified against the registry-bound receipts (never shown for a group the qualifier did not carry to a result).
+    const navigation = promoted === undefined || agentModel.evidence === undefined ? undefined : agentNavigations({ suite, binding, evidence: agentModel.evidence, result: promoted });
+    const shownNavigation = navigation === undefined || navigation.size === 0 ? {} : { agentNavigation: navigation };
+    if (qualification.status !== "PASS") return { verdict: qualification.status, reason: qualification.reason.slice(0, OWNER_REASON_MAX_CHARS), ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }), ...shownNavigation };
     // A pass also needs the host's own lifecycle to say the run ended cleanly: confirmed cleanup, no timeout or abort, a zero exit code, and no unavailable reason.
     const lifecycle = isObject(groupRun.lifecycle) ? groupRun.lifecycle : undefined;
     const processResult = isObject(lifecycle?.process) ? lifecycle.process : undefined;
@@ -382,7 +415,7 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
       return { verdict: "UNKNOWN", reason: "the group's lifecycle does not confirm a clean, successful run",
         ...(promoted === undefined ? {} : { result: { ...promoted, status: "unavailable", reason: "application-lifecycle-unconfirmed" } }), ...(observed === undefined ? {} : { observed }) };
     }
-    return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }) };
+    return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }), ...shownNavigation };
   } catch (error) {
     // A schema refusal says what it refused (the first issue's own words), never the whole issue list.
     const said = error instanceof Error && error.name === "ZodError" ? (error as { issues?: Array<{ message?: string }> }).issues?.[0]?.message : error instanceof Error ? error.message : undefined;

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { E2EDisplayBaselineSchema, E2EDisplayScenarioSchema, E2ESharedViewSchema, E2EWorkflowDisplayRefSchema, type E2EScenarioResults, type E2EWorkflowDisplayRef } from "@agentx/contracts";
+import { E2EDisplayBaselineSchema, E2EDisplayBaselineV2Schema, E2EDisplayScenarioSchema, E2EDisplayScenarioV2Schema, E2ESharedViewSchema, E2EWorkflowDisplayRefSchema, type E2EScenarioResults, type E2EWorkflowDisplayRef } from "@agentx/contracts";
 import { canonicalJson } from "@agentx/contracts";
 import { scrubScenarioResults } from "../e2e/application-display.js";
 
@@ -15,12 +15,18 @@ const refFields = {
 
 /** Display schema v1 (M1.2): the shared view and the identity of the round it was captured for. */
 const envelopeV1 = E2ESharedViewSchema.extend({ displaySchemaVersion: z.literal(1), ...refFields }).strict();
-/** Display schema v2 (M1.3): v1 plus one row per scenario, and the baseline round when there was one. A v2 object always has at least one row. */
+/** Display schema v2 (M1.3): v1 plus one row per scenario, and the baseline round when there was one. A v2 object always has at least one row. Strict, as it always was. */
 const envelopeV2 = E2ESharedViewSchema.extend({ displaySchemaVersion: z.literal(2), ...refFields,
+  scenarios: z.array(E2EDisplayScenarioV2Schema).min(1).max(64), baseline: E2EDisplayBaselineV2Schema.optional() }).strict();
+/**
+ * Display schema v3 (M1.4 Tasks 4.4b and 4.4c): v2 plus what the AI did in an AI-navigated row (`agentNavigation`) and, in the baseline, why it did not run (`reason`) and which
+ * AI-navigated scenarios it left out (`skippedAiScenarios`). v2 stays strict, so a reader that knows only v2 refuses a v3 object whole and falls back to "Open the task page".
+ */
+const envelopeV3 = E2ESharedViewSchema.extend({ displaySchemaVersion: z.literal(3), ...refFields,
   scenarios: z.array(E2EDisplayScenarioSchema).min(1).max(64), baseline: E2EDisplayBaselineSchema.optional() }).strict();
 
 /** The newest display schema this code reads. A reader built before a version exists reads nothing of it: it renders its fallback, never a verdict. */
-export const WORKFLOW_E2E_DISPLAY_SCHEMA_VERSION = 2;
+export const WORKFLOW_E2E_DISPLAY_SCHEMA_VERSION = 3;
 const DISPLAY_MAX_BYTES = 262_144;
 
 /** Where the screenshot of a row is kept: private to the task's owner and workspace, by its digest. */
@@ -44,8 +50,8 @@ export async function readWorkflowE2ENotifierProjection(input: {
   try {
     const raw: unknown = JSON.parse(Buffer.from(bytes).toString("utf8"));
     const version = typeof raw === "object" && raw !== null ? (raw as { displaySchemaVersion?: unknown }).displaySchemaVersion : undefined;
-    if (version !== 1 && version !== 2) return undefined;
-    const envelope = version === 2 ? envelopeV2.safeParse(raw) : envelopeV1.safeParse(raw);
+    if (version !== 1 && version !== 2 && version !== 3) return undefined;
+    const envelope = version === 3 ? envelopeV3.safeParse(raw) : version === 2 ? envelopeV2.safeParse(raw) : envelopeV1.safeParse(raw);
     if (!envelope.success || envelope.data.candidateDigest !== input.current.candidateDigest
       || envelope.data.roundId !== input.current.roundId || JSON.stringify(envelope.data.groupRunIds) !== JSON.stringify(input.current.groupRunIds)
       || envelope.data.admissionSha256 !== input.current.admissionSha256
@@ -66,8 +72,10 @@ export function workflowE2EDisplayRef(input: Omit<E2EWorkflowDisplayRef, "schema
 
 /**
  * The bounded display object for a finished round. A portable round (no scenario rows) is written as display schema v1, which every reader reads; a browser and API round
- * is written as v2 with its rows (scrubbed again here, so no email or credential is stored whatever reached a field), and with the baseline when there is one. A display
- * that does not fit its bound loses its baseline first; one that still does not fit is not written, and every reader then falls back to "Open the task page".
+ * is written as v2 with its rows (scrubbed again here, so no email or credential is stored whatever reached a field), and with the baseline when there is one. A round that uses
+ * something v3 added (a row's `agentNavigation`, a baseline's `reason` or `skippedAiScenarios`) is written as v3: a reader that knows only v2 then falls back, once, and a round
+ * that uses none of it is written exactly as before. A display that does not fit its bound loses its baseline first; one that still does not fit is not written, and every
+ * reader then falls back to "Open the task page".
  */
 export function createWorkflowE2EDisplayObject(input: { ownerKey: string; workspaceId: string; view: unknown; capturedAt: string; current: {
   candidateDigest: string; roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string;
@@ -84,9 +92,11 @@ export function createWorkflowE2EDisplayObject(input: { ownerKey: string; worksp
   if (scrubbed === undefined || scrubbed.scenarios.length === 0) {
     bytes = write({ displaySchemaVersion: 1, capturedAt: input.capturedAt, ...input.current, ...view.data });
   } else {
-    const v2 = (baseline: E2EScenarioResults["baseline"]) => write({ displaySchemaVersion: 2, capturedAt: input.capturedAt, ...input.current, ...view.data,
+    const usesV3 = (baseline: E2EScenarioResults["baseline"]) => scrubbed.scenarios.some((item) => item.agentNavigation !== undefined)
+      || (baseline !== undefined && (baseline.reason !== undefined || baseline.skippedAiScenarios !== undefined || baseline.scenarios.some((item) => item.agentNavigation !== undefined)));
+    const versioned = (baseline: E2EScenarioResults["baseline"]) => write({ displaySchemaVersion: usesV3(baseline) ? 3 : 2, capturedAt: input.capturedAt, ...input.current, ...view.data,
       scenarios: scrubbed.scenarios, ...(baseline === undefined ? {} : { baseline }) });
-    bytes = v2(scrubbed.baseline) ?? (scrubbed.baseline === undefined ? undefined : v2(undefined));
+    bytes = versioned(scrubbed.baseline) ?? (scrubbed.baseline === undefined ? undefined : versioned(undefined));
   }
   if (bytes === undefined) return undefined;
   const ref = workflowE2EDisplayRef({ ownerKey: input.ownerKey, workspaceId: input.workspaceId, bytes, ...input.current });

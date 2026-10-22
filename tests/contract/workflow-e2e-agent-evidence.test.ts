@@ -12,6 +12,8 @@ import { deriveE2EAgentRoute } from "../../packages/model-runtime/src/e2e-route-
 import { agentRunnable, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/broker/src/e2e/application-evidence.js";
 import { SCRIPTED_REGISTRY_ROUTE, asLinuxRun, assembleAgentRun, brokerRoundFor } from "../support/agent-collection.js";
+import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
+import { scrubScenarioResults } from "../../packages/broker/src/e2e/application-display.js";
 
 // Task 4.4a at the broker: the same real agent runs as the group evidence a worker uploads, re-collected and requalified by `verifyApplicationE2EEvidence` against the admission and the
 // model route registry's own definition of the admitted revision. The verdicts of the three journeys (agent-renamed-export, agent-wrong-action, agent-model-outage) at verdict level.
@@ -22,6 +24,14 @@ const SCRIPTS = {
   outage: [{ kind: "fail", message: "provider down" }],
   "no-download": [{ kind: "done" }],
 } as const;
+
+const artifactPath = (sha256: string) => `/review/t/task/api/e2e/artifacts/${sha256}`;
+/** The task page's section for these rows as text (entities undone, so a sentence can be matched as the owner reads it). */
+const pageText = (scenarios: readonly never[] | readonly object[], undo = true) => {
+  const page = renderE2EScenarioRowsHtml({ scenarios: scenarios as never }, { artifactPath });
+  return undo ? page.replaceAll("&#39;", "'").replaceAll("&quot;", '"').replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&") : page;
+};
+const slackText = (scenarios: readonly object[]) => renderE2EScenarioSlackBlocks({ scenarios: scenarios as never }, { taskPageUrl: "https://agentx.test/review/t/task" }).map((block) => block.text.text).join("\n");
 
 describe.runIf(agentRunnable)("the broker's verdict on real agent runs", () => {
   const runs: AgentRun[] = [];
@@ -44,6 +54,11 @@ describe.runIf(agentRunnable)("the broker's verdict on real agent runs", () => {
     expect(verdict.results[0]!.modelReceiptIds).toHaveLength(2);
     expect(verdict.display?.scenarios).toHaveLength(1);
     expect(verdict.display!.scenarios[0]).toMatchObject({ scenarioId: "agent-export", status: "PASSED" });
+    // Task 4.4b: the row says how the AI navigated, from the ledger the broker verified: what it clicked, how the step ended, the calls and the route, and which check decided.
+    expect(verdict.display!.scenarios[0]!.agentNavigation).toEqual({ steps: [{ goal: "Export the orders as a CSV file", actedOn: [{ role: "button", name: "Download orders" }], stop: "concluded" }],
+      modelCalls: 2, routeId: SCRIPTED_REGISTRY_ROUTE.routeId, decidedBy: ["csv"] });
+    expect(pageText(verdict.display!.scenarios)).toContain("AI-navigated: the model clicked 'Download orders'; the CSV check decided");
+    expect(slackText(verdict.display!.scenarios)).toContain("AI navigation: 1 step, 2 model calls (checks decide)");
   });
 
   it("33. agent-wrong-action: FAILED on the deterministic CSV mismatch alone (decision D3), with the case failed and no UNKNOWN code", async () => {
@@ -52,6 +67,9 @@ describe.runIf(agentRunnable)("the broker's verdict on real agent runs", () => {
     expect(verdict.results[0]!.cases[0]).toMatchObject({ status: "failed", reason: "observed-application-assertion-failure" });
     // The row is the broker's own, and names the assertion that failed: the CSV of the wrong file.
     expect(verdict.display!.scenarios[0]).toMatchObject({ status: "FAILED", failedAssertion: { kind: "csv", expected: "orders.csv", actual: "invoices.csv" } });
+    // The row names what the model clicked, so the owner can see the model took the wrong button: the decoy, and the CSV check that decided.
+    expect(verdict.display!.scenarios[0]!.agentNavigation?.steps[0]?.actedOn).toEqual([{ role: "button", name: "Download invoices" }]);
+    expect(pageText(verdict.display!.scenarios)).toContain("AI-navigated: the model clicked 'Download invoices'; the CSV check decided");
   });
 
   it("34. agent-model-outage: UNKNOWN, with the case saying model-unavailable, and no pass", async () => {
@@ -60,12 +78,34 @@ describe.runIf(agentRunnable)("the broker's verdict on real agent runs", () => {
     expect(verdict.results[0]!.cases[0]).toMatchObject({ status: "unavailable", reason: "model-unavailable" });
     expect(verdict.display!.scenarios[0]!.status).not.toBe("PASSED");
     expect(verdict.display!.scenarios[0]!.status).not.toBe("FAILED");
+    // Task 4.4b: an outage says so in the owner's words, and no navigation is claimed for a row the broker could not decide.
+    expect(verdict.display!.scenarios[0]).toMatchObject({ status: "UNKNOWN", reason: "The AI model couldn't be reached, so this AI-navigated check could not run; retry the checks" });
+    expect(verdict.display!.scenarios[0]).not.toHaveProperty("agentNavigation");
+    expect(slackText(verdict.display!.scenarios)).not.toContain("AI navigation:");
   });
 
   it("a model that finished without acting leaves a case the broker calls UNKNOWN agent-no-download", async () => {
     const verdict = brokerRoundFor(await readBack("no-download")).verify();
     expect(verdict.verdict).toBe("UNKNOWN");
     expect(verdict.results[0]!.cases[0]).toMatchObject({ status: "unavailable", reason: "agent-no-download" });
+    expect(verdict.display!.scenarios[0]).toMatchObject({ status: "UNKNOWN", reason: "The AI navigator didn't find a way to download the CSV; retry, or check the button exists" });
+  });
+
+  it("29. nothing a run typed, no key, no credential and no digest reaches a row, the page, Slack or the artifact list, for any of the four runs", async () => {
+    for (const name of Object.keys(SCRIPTS) as Scenario[]) {
+      const a = await readBack(name);
+      const verdict = brokerRoundFor(a).verify();
+      const display = verdict.display!;
+      const ledgerText = JSON.stringify(a.run.readLedger() ?? {});
+      const digests = [...ledgerText.matchAll(/"(?:valueDigest|snapshotSha256|goalDigest|valueKeyId)":"([a-f0-9]{64})"/gu)].map((match) => match[1]!);
+      const secrets = [a.run.valueKey, ...a.run.fixture.plan.accounts.flatMap((account) => [account.password, account.email, account.email.split("@")[0]!]), ...digests, ...a.run.receipts.flatMap((receipt) => [receipt.receiptId, receipt.promptSha256])];
+      const stored = scrubScenarioResults({ scenarios: display.scenarios });
+      const everything = [JSON.stringify(display.scenarios), pageText(display.scenarios, false), slackText(display.scenarios), JSON.stringify(display.artifacts.map((artifact) => ({ sha256: artifact.sha256, contentType: artifact.contentType }))), JSON.stringify(stored)].join("\n");
+      for (const secret of secrets) expect(everything, `${name}: ${secret.slice(0, 8)}`).not.toContain(secret);
+      // Positive control: the scan ran over a real display, and over a ledger that has the digests it looks for.
+      expect(everything.length).toBeGreaterThan(200);
+      if (name === "ok") expect(digests.length).toBeGreaterThan(0);
+    }
   });
 
   it("21. model evidence for a group with no admitted route, or none for a group with an agent step, is UNKNOWN model-receipts-mismatch", async () => {

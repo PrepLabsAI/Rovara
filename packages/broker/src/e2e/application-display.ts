@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2EScenarioResultsSchema, E2E_DISPLAY_SCREENSHOT_MAX_BYTES, canonicalJson, redactText,
-  type E2E_DISPLAY_ASSERTION_KINDS, type E2EAssertion, type E2EDisplayBaseline, type E2EDisplayScenario, type E2EScenarioResults } from "@agentx/contracts";
+  type E2E_DISPLAY_ASSERTION_KINDS, type E2EAssertion, type E2EDisplayAgentNavigation, type E2EDisplayBaseline, type E2EDisplayScenario, type E2EScenarioResults } from "@agentx/contracts";
+import { E2E_OWNER_SENTENCES } from "./owner-sentences.js";
 
 /**
  * M1.3 Task 3.7: the rows a browser and API round shows on the task page and in Slack.
@@ -170,6 +171,8 @@ export type DisplayGroupInput = Readonly<{
   observed: ReadonlyMap<string, readonly ObservedAssertion[]>;
   /** Screenshots offered for the group's cases, already checked by `readCaptureScreenshots`. */
   screenshots: ReadonlyMap<string, Readonly<{ sha256: string; data: Uint8Array }>>;
+  /** How the AI navigated each case that has an AI navigation step, derived from the verified action ledger (`agentNavigationOf`) and from nothing else. Absent for a group with none. */
+  agentNavigation?: ReadonlyMap<string, E2EDisplayAgentNavigation> | undefined;
 }>;
 
 export type BuildScenarioRowsInput = Readonly<{
@@ -191,10 +194,37 @@ const PLAIN_REASONS: ReadonlyMap<string, string> = new Map([
 const COULD_NOT_VERIFY = "this check could not be verified";
 const NOT_FINISHED = "the checks have not finished";
 
+/** The sentence for a collector reason code that is an AI navigation code (the closed set of `E2E_AGENT_UNKNOWN_CODES`). */
+const agentSentence = (code: string): string | undefined => (Object.hasOwn(E2E_OWNER_SENTENCES.agentCode, code) ? E2E_OWNER_SENTENCES.agentCode[code as keyof typeof E2E_OWNER_SENTENCES.agentCode] : undefined);
+
+/** The code at the start of a group's reason (`code` or `code: detail`), or undefined when the reason does not start with one. Only the code is ever read; the detail is never shown. */
+const groupReasonCode = (reason: string): string | undefined => /^([a-z][a-z0-9-]{0,62})(?::|$)/u.exec(reason)?.[1];
+
+/**
+ * The sentence for a group's own reason: only a code in the closed maps of `E2E_OWNER_SENTENCES` (the route codes, and the AI navigation codes a whole group can be refused with) is put
+ * into words, matched exactly on the code. A code that is only noted for the operator, and every other reason, give nothing, and the row says "could not be verified".
+ */
+function groupSentence(reason: string, onOperatorOnly: (code: string) => void): string | undefined {
+  const code = groupReasonCode(reason);
+  if (code === undefined) return undefined;
+  if (Object.hasOwn(E2E_OWNER_SENTENCES.groupCode, code)) return E2E_OWNER_SENTENCES.groupCode[code];
+  const agent = agentSentence(code);
+  if (agent !== undefined) return agent;
+  if (E2E_OWNER_SENTENCES.groupCodeOperatorOnly.includes(code)) onOperatorOnly(code);
+  return undefined;
+}
+
+/** One line for the operator's log, with the code only: what the owner is told is "could not be verified", and the operator may need to know why. */
+function logGroupReasonCode(code: string): void {
+  console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_group_reason", code }));
+}
+
 export function buildScenarioRows(input: BuildScenarioRowsInput): { scenarios: E2EDisplayScenario[]; artifacts: DisplayArtifact[] } {
   const scenarios: E2EDisplayScenario[] = [];
   const artifacts = new Map<string, DisplayArtifact>();
   for (const group of input.groups) {
+    let noted = false;
+    const noteOnce = (code: string) => { if (!noted) { noted = true; logGroupReasonCode(code); } };
     for (const item of group.cases) {
       const kind = input.targetKinds.get(item.targetId);
       if (kind === undefined) continue;
@@ -211,9 +241,15 @@ export function buildScenarioRows(input: BuildScenarioRowsInput): { scenarios: E
         if (derived !== undefined) { reason = derived.reason; failedAssertion = { kind: derived.kind, expected: derived.expected, actual: derived.actual }; }
         else reason = "an assertion did not hold";
       } else if (status === "UNKNOWN") {
-        // Only the collector's own reason codes are put into words; a group's reason sentence (which may quote the worker) is never repeated.
-        reason = !input.authoritative ? NOT_FINISHED : PLAIN_REASONS.get(found?.reason ?? "") ?? PLAIN_REASONS.get(group.result?.reason ?? "") ?? COULD_NOT_VERIFY;
+        // Only the collector's own reason codes are put into words; a group's reason sentence (which may quote the worker) is never repeated, except for the closed set of codes
+        // it starts with (`groupSentence`).
+        reason = !input.authoritative ? NOT_FINISHED
+          : PLAIN_REASONS.get(found?.reason ?? "") ?? agentSentence(found?.reason ?? "") ?? PLAIN_REASONS.get(group.result?.reason ?? "") ?? agentSentence(group.result?.reason ?? "")
+            ?? groupSentence(group.reason, noteOnce) ?? COULD_NOT_VERIFY;
       }
+      // The navigation block is the broker's, from the verified ledger; it is shown only for a case the broker decided (passed or failed on its assertions), once the round is whole.
+      // A row the broker could not decide says why in its reason, and has no "the model clicked ..." beside it.
+      const navigation = input.authoritative && found !== undefined && status !== "UNKNOWN" ? group.agentNavigation?.get(item.caseId) : undefined;
       // A screenshot is a claim of the worker's: it is shown only for a row the broker found failed or incomplete (every row for a baseline), once the round is whole.
       const offered = group.screenshots.get(item.caseId);
       const wanted = input.authoritative && offered !== undefined && offered.data.byteLength <= E2E_DISPLAY_SCREENSHOT_MAX_BYTES
@@ -223,6 +259,7 @@ export function buildScenarioRows(input: BuildScenarioRowsInput): { scenarios: E
       scenarios.push({
         scenarioId: displayText(item.scenarioId, 120) || "scenario", title: scenarioTitle(item.scenarioId), kind, accountLabel: accountLabelOf(item.accountProfileId), status,
         ...(reason === undefined ? {} : { reason }), ...(failedAssertion === undefined ? {} : { failedAssertion }),
+        ...(navigation === undefined ? {} : { agentNavigation: navigation }),
         ...(wanted ? { screenshotRef: { sha256: offered.sha256, bytes: offered.data.byteLength, contentType: "image/jpeg" as const } } : {}),
         mockedOrigins: mocked,
       });
@@ -235,6 +272,16 @@ export function summarizeScenarios(rows: readonly Pick<E2EDisplayScenario, "stat
   return { passed: rows.filter((row) => row.status === "PASSED").length, failed: rows.filter((row) => row.status === "FAILED").length, incomplete: rows.filter((row) => row.status === "UNKNOWN").length };
 }
 
+/** The navigation block with its free text scrubbed again (redacted, emails replaced, bounded). The role and the counts are held by the schema. */
+function scrubNavigation(navigation: E2EDisplayAgentNavigation): E2EDisplayAgentNavigation {
+  return {
+    steps: navigation.steps.slice(0, 3).map((step) => ({ goal: displayText(step.goal, 120) || "step", stop: step.stop,
+      actedOn: step.actedOn.slice(0, 8).map((node) => ({ role: node.role, name: displayText(node.name, 60) })) })),
+    modelCalls: navigation.modelCalls, routeId: displayText(navigation.routeId, 120) || "route",
+    ...(navigation.decidedBy === undefined ? {} : { decidedBy: [...navigation.decidedBy] }),
+  };
+}
+
 function scrubRow(row: E2EDisplayScenario): E2EDisplayScenario {
   const reason = row.reason === undefined ? "" : displayText(row.reason, 300);
   return {
@@ -243,8 +290,16 @@ function scrubRow(row: E2EDisplayScenario): E2EDisplayScenario {
     ...(row.failedAssertion === undefined || row.status !== "FAILED" ? {}
       : { failedAssertion: { kind: row.failedAssertion.kind, expected: displayText(row.failedAssertion.expected, 200), actual: displayText(row.failedAssertion.actual, 200) } }),
     ...(row.screenshotRef === undefined ? {} : { screenshotRef: row.screenshotRef }),
+    ...(row.agentNavigation === undefined ? {} : { agentNavigation: scrubNavigation(row.agentNavigation) }),
     mockedOrigins: [...new Set(row.mockedOrigins.map((origin) => displayText(origin, 200)).filter((origin) => origin !== ""))].slice(0, 32),
   };
+}
+
+/** A baseline with its rows and its free text scrubbed again; the reason is a closed code and the skipped list holds ids and titles only. */
+function scrubBaseline(baseline: E2EDisplayBaseline): E2EDisplayBaseline {
+  return { status: baseline.status, scenarios: baseline.scenarios.map(scrubRow),
+    ...(baseline.reason === undefined ? {} : { reason: baseline.reason }),
+    ...(baseline.skippedAiScenarios === undefined ? {} : { skippedAiScenarios: baseline.skippedAiScenarios.map((item) => ({ scenarioId: displayText(item.scenarioId, 120) || "scenario", title: displayText(item.title, 120) || "Scenario" })) }) };
 }
 
 /**
@@ -254,19 +309,25 @@ function scrubRow(row: E2EDisplayScenario): E2EDisplayScenario {
 export function scrubScenarioResults(results: E2EScenarioResults): E2EScenarioResults | undefined {
   const parsed = E2EScenarioResultsSchema.safeParse({
     scenarios: results.scenarios.map(scrubRow),
-    ...(results.baseline === undefined ? {} : { baseline: { status: results.baseline.status, scenarios: results.baseline.scenarios.map(scrubRow) } }),
+    ...(results.baseline === undefined ? {} : { baseline: scrubBaseline(results.baseline) }),
   });
   return parsed.success ? parsed.data : undefined;
 }
 
-/** A baseline from its rows: any FAILED makes it FAILED, else any incomplete row makes it UNKNOWN, else PASSED. */
-export function baselineOf(rows: readonly E2EDisplayScenario[]): E2EDisplayBaseline {
+/**
+ * A baseline from its rows: any FAILED makes it FAILED, else any incomplete row makes it UNKNOWN, else PASSED. `skipped` are the AI-navigated scenarios the baseline left out
+ * (it never runs the model); they are listed by id and title and are never rows.
+ */
+export function baselineOf(rows: readonly E2EDisplayScenario[], skipped: readonly { scenarioId: string; title: string }[] = []): E2EDisplayBaseline {
   const counts = summarizeScenarios(rows);
-  return { status: counts.failed > 0 ? "FAILED" : counts.incomplete > 0 || rows.length === 0 ? "UNKNOWN" : "PASSED", scenarios: [...rows] };
+  return { status: counts.failed > 0 ? "FAILED" : counts.incomplete > 0 || rows.length === 0 ? "UNKNOWN" : "PASSED", scenarios: [...rows],
+    ...(skipped.length === 0 ? {} : { skippedAiScenarios: skipped.slice(0, 64).map((item) => ({ scenarioId: item.scenarioId, title: item.title })) }) };
 }
 
 /** The baseline for a round that could not be run on the unchanged code. */
 export const UNAVAILABLE_BASELINE: E2EDisplayBaseline = Object.freeze({ status: "UNAVAILABLE", scenarios: [] });
+/** The baseline for a plan every scenario of which uses AI navigation: there was nothing to run on the unchanged code, and it says so (BASEREASON). */
+export const AGENT_STEPS_ONLY_BASELINE: E2EDisplayBaseline = Object.freeze({ status: "UNAVAILABLE", scenarios: [], reason: "agent-steps-only" });
 
 // ---------------------------------------------------------------------------------------------
 // Screenshots in a group's operator evidence

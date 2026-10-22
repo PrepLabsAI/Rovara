@@ -554,6 +554,13 @@ describe("a baseline round's admission on a project whose policy pins a model ro
     expect(candidate.round.limits).toEqual(ROUTE_LIMITS);
   });
 
+  it("a baseline names the AI navigation scenarios it leaves out, by id and title; a candidate round and a plan with none leave out nothing (Task 4.4c)", async () => {
+    expect((await routed({ baseline: true, plan: "mixed" }))().skippedAiScenarios).toEqual([{ scenarioId: "agent-orders", title: "Agent orders" }]);
+    expect((await routed({ baseline: false, plan: "mixed" }))().skippedAiScenarios).toEqual([]);
+    expect((await routed({ baseline: true, plan: "plain" }))().skippedAiScenarios).toEqual([]);
+    expect((await routed({ baseline: false, plan: "agent-only" }))().skippedAiScenarios).toEqual([]);
+  });
+
   it("a baseline of a plan that is only AI navigation scenarios has nothing to run: it is skipped with its own reason, which is not a refusal of the plan", async () => {
     const build = await routed({ baseline: true, plan: "agent-only" });
     let failure: unknown;

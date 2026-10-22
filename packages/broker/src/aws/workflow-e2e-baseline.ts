@@ -1,7 +1,8 @@
 import { GetCommand, PutCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { E2EDisplayBaselineSchema, INDEX_EXPIRY_ATTRIBUTE, indexExpiresAt, type E2EDisplayBaseline } from "@agentx/contracts";
+import { z } from "zod";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
-import { UNAVAILABLE_BASELINE, baselineOf, scrubScenarioResults, type DisplayArtifact } from "../e2e/application-display.js";
+import { AGENT_STEPS_ONLY_BASELINE, UNAVAILABLE_BASELINE, baselineOf, scrubScenarioResults, type DisplayArtifact } from "../e2e/application-display.js";
 import { ApplicationBaselineSkipped, ApplicationDispatchRefusal, ApplicationPlanDefect } from "../e2e/application-dispatch-check.js";
 import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../e2e/application-evidence.js";
 import { isConditional } from "./broker-shared.js";
@@ -40,10 +41,14 @@ export function baselineStartFailureReason(error: unknown): BaselineUnavailableR
   return error instanceof ApplicationDispatchRefusal || error instanceof ApplicationPlanDefect ? "refused" : "start-failed";
 }
 
+/** The AI-navigated scenarios a baseline round left out (Task 4.4c): ids and titles only, at most 64, kept on the record from the start of the round to its result. */
+const SkippedAiScenariosSchema = z.array(z.object({ scenarioId: z.string().min(1).max(120), title: z.string().min(1).max(120) }).strict()).max(64);
+export type SkippedAiScenarios = z.infer<typeof SkippedAiScenariosSchema>;
+
 export type BaselineRecord = Readonly<{
   taskId: string; contractDigest: string; attempt: number; state: BaselineState; requestedAt: string;
   baseCommitSha?: string; operationId?: string; roundId?: string; admissionSha256?: string; startedAt?: string; deadlineAt?: string;
-  recordedAt?: string; reason?: string; baseline?: E2EDisplayBaseline;
+  recordedAt?: string; reason?: string; baseline?: E2EDisplayBaseline; skippedAiScenarios?: SkippedAiScenarios;
 }>;
 
 const keyOf = (taskId: string, contractDigest: string) => ({ pk: `DEVTASK#${taskId}`, sk: `E2E_BASELINE#${contractDigest}` });
@@ -84,16 +89,18 @@ export async function requestWorkflowE2EBaselineRound(store: WorkflowE2EBaseline
  * accepts the operation. A record that is not this plan's REQUESTED one (never asked for, already started) fails the condition and so does the transaction: at most one start.
  */
 export function baselineStartItem(store: Pick<WorkflowE2EBaselineStore, "tableName">, task: Pick<DeveloperTaskRecord, "taskId" | "workflow">,
-  started: { baseCommitSha: string; operationId: string; roundId: string; admissionSha256: string; startedAt: string; deadlineAt: string }) {
+  started: { baseCommitSha: string; operationId: string; roundId: string; admissionSha256: string; startedAt: string; deadlineAt: string; skippedAiScenarios?: SkippedAiScenarios }) {
   const contractDigest = baselinePlanDigestOf(task);
   if (contractDigest === undefined) throw new Error("the task has no approved application plan for a baseline to belong to");
+  // The AI-navigated scenarios the round leaves out ride on the record (Task 4.4c); a round that leaves none out writes the record exactly as it was.
+  const skipped = started.skippedAiScenarios === undefined || started.skippedAiScenarios.length === 0 ? undefined : SkippedAiScenariosSchema.parse(started.skippedAiScenarios);
   return { Update: { TableName: store.tableName, Key: keyOf(task.taskId, contractDigest),
-    UpdateExpression: "SET #state = :started, baseCommitSha = :base, operationId = :operation, roundId = :round, admissionSha256 = :admission, startedAt = :startedAt, deadlineAt = :deadline, #expires = :expires",
+    UpdateExpression: `SET #state = :started, baseCommitSha = :base, operationId = :operation, roundId = :round, admissionSha256 = :admission, startedAt = :startedAt, deadlineAt = :deadline, #expires = :expires${skipped === undefined ? "" : ", skippedAiScenarios = :skipped"}`,
     ConditionExpression: "attribute_exists(pk) AND #state = :requested AND attempt = :attempt AND contractDigest = :digest",
     ExpressionAttributeNames: { "#state": "state", "#expires": INDEX_EXPIRY_ATTRIBUTE },
     ExpressionAttributeValues: { ":started": "STARTED", ":requested": "REQUESTED", ":attempt": E2E_BASELINE_ATTEMPT, ":digest": contractDigest, ":base": started.baseCommitSha,
       ":operation": started.operationId, ":round": started.roundId, ":admission": started.admissionSha256, ":startedAt": started.startedAt, ":deadline": started.deadlineAt,
-      ":expires": expiryOf(started.startedAt) } } };
+      ":expires": expiryOf(started.startedAt), ...(skipped === undefined ? {} : { ":skipped": skipped }) } } };
 }
 
 /**
@@ -129,11 +136,12 @@ export type VerifiedBaseline = Readonly<{ [VERIFIED]: true; roundId: string; adm
  * broker), for the purpose it was signed with. The rows are the verification's own display and nothing a worker says about itself. Undefined when the evidence verifies to no rows
  * at all (a refused admission, evidence that could not be read): the baseline is then one that could not be checked.
  */
-export function verifyBaselineEvidence(input: Omit<ApplicationEvidenceInput, "purpose">): VerifiedBaseline | undefined {
-  const verification = verifyApplicationE2EEvidence({ ...input, purpose: E2E_BASELINE_PURPOSE });
+export function verifyBaselineEvidence(input: Omit<ApplicationEvidenceInput, "purpose"> & { skippedAiScenarios?: SkippedAiScenarios }): VerifiedBaseline | undefined {
+  const { skippedAiScenarios, ...evidence } = input;
+  const verification = verifyApplicationE2EEvidence({ ...evidence, purpose: E2E_BASELINE_PURPOSE });
   const display = verification.display;
   if (display === undefined || display.scenarios.length === 0 || verification.round === undefined) return undefined;
-  const scrubbed = scrubScenarioResults({ scenarios: [], baseline: baselineOf(display.scenarios) })?.baseline;
+  const scrubbed = scrubScenarioResults({ scenarios: [], baseline: baselineOf(display.scenarios, skippedAiScenarios) })?.baseline;
   if (scrubbed === undefined) return undefined;
   return { [VERIFIED]: true, roundId: verification.round.roundId, admissionSha256: input.subject.admissionSha256, baseline: scrubbed, artifacts: display.artifacts };
 }
@@ -179,8 +187,11 @@ export async function readWorkflowE2EBaselineRecord(store: WorkflowE2EBaselineSt
   const text = (name: string) => (typeof item[name] === "string" ? { [name]: item[name] } : {});
   const baseline = item.baseline === undefined ? undefined : E2EDisplayBaselineSchema.safeParse(item.baseline);
   if (state === "RECORDED" && baseline?.success !== true) return undefined;
+  // A list that is not a bounded list of ids and titles is no list: a baseline never shows part of one.
+  const skipped = item.skippedAiScenarios === undefined ? undefined : SkippedAiScenariosSchema.safeParse(item.skippedAiScenarios);
   return { taskId: task.taskId, contractDigest, attempt: item.attempt, state, requestedAt: item.requestedAt, ...text("baseCommitSha"), ...text("operationId"), ...text("roundId"), ...text("admissionSha256"),
-    ...text("startedAt"), ...text("deadlineAt"), ...text("recordedAt"), ...text("reason"), ...(baseline?.success === true ? { baseline: baseline.data } : {}) };
+    ...text("startedAt"), ...text("deadlineAt"), ...text("recordedAt"), ...text("reason"), ...(baseline?.success === true ? { baseline: baseline.data } : {}),
+    ...(skipped?.success === true && skipped.data.length > 0 ? { skippedAiScenarios: skipped.data } : {}) };
 }
 
 /**
@@ -189,7 +200,8 @@ export async function readWorkflowE2EBaselineRecord(store: WorkflowE2EBaselineSt
  */
 export function workflowE2EBaselineView(record: BaselineRecord, nowMs: number): E2EDisplayBaseline | undefined {
   if (record.state === "RECORDED") return record.baseline === undefined ? undefined : scrubScenarioResults({ scenarios: [], baseline: record.baseline })?.baseline;
-  if (record.state === "UNAVAILABLE") return UNAVAILABLE_BASELINE;
+  // BASEREASON (Task 4.4c): a plan that is all AI navigation says so; every other reason is the one generic sentence.
+  if (record.state === "UNAVAILABLE") return record.reason === "agent-steps-only" ? AGENT_STEPS_ONLY_BASELINE : UNAVAILABLE_BASELINE;
   if (record.state === "STARTED" && record.deadlineAt !== undefined && nowMs > Date.parse(record.deadlineAt) + E2E_BASELINE_RUN_GRACE_MS) return UNAVAILABLE_BASELINE;
   return undefined;
 }

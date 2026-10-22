@@ -235,7 +235,7 @@ import { loadStoredScenarioResults, loadWorkflowE2EArtifact as loadStoredWorkflo
 import { BaselineSourceBodySchema, BaselineSourceWireSchema, StoredBaselineSourceSchema, assessBaselineSource, parseBaselineExport, type ReadyBaselineSource, type StoredBaselineSource } from "./baseline-source.js";
 import {
   E2E_BASELINE_ATTEMPT, E2E_BASELINE_PURPOSE, E2E_BASELINE_RUN_GRACE_MS, baselineStartFailureReason, baselineStartItem, markWorkflowE2EBaselineUnavailable, projectE2EBaselineWanted, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord,
-  recordWorkflowE2EBaseline, requestWorkflowE2EBaselineRound, verifyBaselineEvidence, type BaselineRecord, type BaselineUnavailableReason,
+  recordWorkflowE2EBaseline, requestWorkflowE2EBaselineRound, verifyBaselineEvidence, type BaselineRecord, type BaselineUnavailableReason, type SkippedAiScenarios,
 } from "./workflow-e2e-baseline.js";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
@@ -8018,7 +8018,7 @@ async function settleBaselineRound(dependencies: AwsBrokerDependencies, operatio
     const unavailable = (reason: BaselineUnavailableReason) => markWorkflowE2EBaselineUnavailable(dependencies, task, reason, { from: ["STARTED"], operationId: operation.id });
     // A baseline cancelled while its record still says it is running was stopped by someone (the system marks the record before it cancels a round that ran out of time).
     if (status !== "SUCCEEDED") { await unavailable(status === "CANCELLED" ? "stopped" : "run-failed"); return; }
-    const verified = await verifyBaselineRound(dependencies, operation, reference);
+    const verified = await verifyBaselineRound(dependencies, operation, reference, record.skippedAiScenarios);
     if (verified === undefined) { await unavailable("unverified"); return; }
     await recordWorkflowE2EBaseline({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task,
       { verified, expected: { operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256, baseCommitSha: reference.baseCommitSha, attempt: reference.attempt } });
@@ -8028,7 +8028,7 @@ async function settleBaselineRound(dependencies: AwsBrokerDependencies, operatio
 }
 
 /** The broker's own verification of a finished baseline round's evidence, or undefined when the admission or the evidence cannot be read or verify to no rows. */
-async function verifyBaselineRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, reference: E2EWorkflowAdmissionRef) {
+async function verifyBaselineRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, reference: E2EWorkflowAdmissionRef, skippedAiScenarios?: SkippedAiScenarios) {
   const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
   if (admissionText === undefined) return undefined;
   const admissionBytes = Buffer.from(admissionText, "utf8");
@@ -8039,7 +8039,7 @@ async function verifyBaselineRound(dependencies: AwsBrokerDependencies, operatio
   if ("unavailable" in loaded) return undefined;
   return verifyBaselineEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
     candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
-  aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED" });
+  aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", ...(skippedAiScenarios === undefined ? {} : { skippedAiScenarios }) });
 }
 
 /**
@@ -10918,7 +10918,8 @@ async function startBaselineApplicationRound(
       purpose: E2E_BASELINE_PURPOSE, baseCommitSha: stored.baseCommitSha, attempt: E2E_BASELINE_ATTEMPT });
     await storeWorkflowE2EAdmission(dependencies, { key: admissionRef.admissionRef.key, sha256: built.sha256, bytes: built.bytes, taskId: task.taskId, candidateDigest: built.admission.candidateDigest });
     const outcome = await startTaskWorkflowE2EBaselineFromSystem(routeDependencies, task.taskId, { workflowRevision: workflow.revision, candidateDigest: candidate.digest }, admissionRef, operationId,
-      [baselineStartItem(store, task, { baseCommitSha: stored.baseCommitSha, operationId, roundId: built.roundId, admissionSha256: built.sha256, startedAt: new Date().toISOString(), deadlineAt: built.admission.round.deadlineAt })],
+      [baselineStartItem(store, task, { baseCommitSha: stored.baseCommitSha, operationId, roundId: built.roundId, admissionSha256: built.sha256, startedAt: new Date().toISOString(), deadlineAt: built.admission.round.deadlineAt,
+        skippedAiScenarios: [...built.skippedAiScenarios] })],
       input.caller);
     return outcome === "STALE" ? "GO" : "WAIT";
   } catch (error) {

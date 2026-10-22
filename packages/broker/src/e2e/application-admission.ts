@@ -15,6 +15,7 @@ import {
 import { ApplicationBaselineSkipped, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal } from "./application-dispatch-check.js";
 import { definitionOfAccountRef, type E2EAccountRegistryEntry } from "./application-account-registry.js";
 import { applicationIntentDigest, evaluateApplicationPlanApproval } from "./application-plan-approval.js";
+import { scenarioTitle } from "./application-display.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 
@@ -67,6 +68,12 @@ export type ApplicationAdmission = Readonly<{
   kinds: Array<"web" | "api">;
   /** What a baseline round signed (purpose, base commit, attempt); absent for a candidate round. */
   baseline?: { purpose: "baseline"; baseCommitSha: string; attempt: number };
+  /**
+   * The AI-navigated scenarios this round leaves out (Task 4.4c): for a baseline round, the plan's scenarios with an `agent` step, by id and title; empty for a candidate round and for a
+   * plan with none. It is not signed (the admission carries the scenarios that run, and a baseline can only run fewer than were approved): the caller keeps it on the baseline's record so
+   * the display can say what was not run.
+   */
+  skippedAiScenarios: ReadonlyArray<Readonly<{ scenarioId: string; title: string }>>;
 }>;
 
 const refusal = applicationRoundRefusal;
@@ -91,6 +98,11 @@ export function baselineIntentOf(intent: E2EApplicationPlanIntent): E2EApplicati
     runtimeAccountRefs: intent.runtimeAccountRefs.filter((account) => runtimeRefs.some((ref) => ref.applicationId === account.applicationId && ref.accountProfileId === account.profileId)) });
   if (!parsed.success) throw refusal(`the plan without its AI navigation steps is not a plan a baseline can run: ${parsed.error.issues[0]?.message ?? "invalid"}`);
   return parsed.data;
+}
+
+/** The scenarios of a plan that a baseline round leaves out because they have an `agent` step (Ruling DD), by id and title, at most 64 (the display's bound). */
+export function baselineSkippedScenarios(intent: E2EApplicationPlanIntent): Array<{ scenarioId: string; title: string }> {
+  return intent.scenarios.filter((scenario) => scenario.steps.some((step) => step.kind === "agent")).slice(0, 64).map((scenario) => ({ scenarioId: scenario.scenarioId, title: scenarioTitle(scenario.scenarioId) }));
 }
 
 /**
@@ -312,5 +324,6 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     validateE2EApplicationExecutionAdmission(admission);
   } catch (error) { throw refusal(`the admission could not be built within its limits or did not validate: ${failure(error)}`); }
   return { admission, bytes, sha256: sha256(bytes), admissionDigest: admission.admissionDigest, roundId: input.roundId,
-    groupRunIds: round.groupBindings.map((binding) => binding.runId), kinds: roundKinds, ...(signedBaseline === undefined ? {} : { baseline: signedBaseline }) };
+    groupRunIds: round.groupBindings.map((binding) => binding.runId), kinds: roundKinds, ...(signedBaseline === undefined ? {} : { baseline: signedBaseline }),
+    skippedAiScenarios: input.baseline === undefined ? [] : baselineSkippedScenarios(input.intent) };
 }

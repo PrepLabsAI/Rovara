@@ -1,5 +1,6 @@
-import type { E2EDisplayBaseline, E2EDisplayScenario, E2EScenarioResults, E2ESharedView } from "../../contracts/src/e2e-view.js";
+import type { E2EDisplayAgentNavigation, E2EDisplayBaseline, E2EDisplayScenario, E2EScenarioResults, E2ESharedView } from "../../contracts/src/e2e-view.js";
 import { accountDisplayName, displayText, summarizeScenarios } from "./e2e/application-display.js";
+import { E2E_OWNER_SENTENCES } from "./e2e/owner-sentences.js";
 
 const LIST_LIMIT = 8;
 const SCOPE_NOTE = "Portable source and mock checks are scoped evidence. Browser, native, live-service, authentication, and internal-callable behavior remain unverified unless separately qualified.";
@@ -125,6 +126,8 @@ function html(value: string): string {
 /** One Slack message part stays well inside Slack's 3000-character limit for a section's text. */
 const SLACK_RESULTS_MAX_CHARS = 3000;
 const BASELINE_UNAVAILABLE = "Couldn't run the checks on the unchanged code.";
+/** The most skipped AI-navigated titles a page or Slack message prints. */
+const SKIPPED_TITLES_LIMIT = 12;
 
 /** `Browser and API checks: 4 passed, 1 failed, 0 incomplete`. */
 export function e2eScenarioSummary(rows: readonly Pick<E2EDisplayScenario, "status">[]): string {
@@ -139,6 +142,19 @@ export function e2eMockedBadge(originRef: string): string {
   return `${words.charAt(0).toUpperCase()}${words.slice(1)} service mocked`;
 }
 
+/** The badge of an AI-navigated row: what the model clicked and which check decided (`E2E_OWNER_SENTENCES.badge`). The names are scrubbed again, because a stored row is not trusted to be clean. */
+export function e2eAgentBadge(navigation: E2EDisplayAgentNavigation): string {
+  const clicked = navigation.steps.flatMap((step) => step.actedOn.map((node) => displayText(node.name, 60)).filter((name) => name !== ""));
+  return E2E_OWNER_SENTENCES.badge({ clicked, decidedBy: navigation.decidedBy ?? [] });
+}
+
+/** The one Slack line for AI navigation across a round's rows, or undefined when no row has a navigation block. */
+export function e2eAgentSlackLine(rows: readonly E2EDisplayScenario[]): string | undefined {
+  const navigated = rows.flatMap((row) => (row.agentNavigation === undefined ? [] : [row.agentNavigation]));
+  if (navigated.length === 0) return undefined;
+  return E2E_OWNER_SENTENCES.slackLine({ steps: navigated.reduce((total, item) => total + item.steps.length, 0), modelCalls: navigated.reduce((total, item) => total + item.modelCalls, 0) });
+}
+
 /** The one-line sentence of a row, from fields the schema bounds; scrubbed again here because a stored row is not trusted to be clean. */
 function rowSentence(row: E2EDisplayScenario): string {
   const title = displayText(row.title, 120);
@@ -149,12 +165,19 @@ function rowSentence(row: E2EDisplayScenario): string {
 
 /** What the unchanged code did, in a sentence for the page and Slack. Information only: it never says anything about the change itself. */
 function baselineSentence(baseline: E2EDisplayBaseline): string {
-  if (baseline.status === "UNAVAILABLE") return BASELINE_UNAVAILABLE;
+  if (baseline.status === "UNAVAILABLE") return baseline.reason === "agent-steps-only" ? E2E_OWNER_SENTENCES.baseline.agentStepsOnly : BASELINE_UNAVAILABLE;
   const counts = summarizeScenarios(baseline.scenarios);
   const total = baseline.scenarios.length;
   if (baseline.status === "FAILED") return `Before the change: ${counts.failed} of ${total} failed, as expected for new behaviour.`;
   if (baseline.status === "PASSED") return `Before the change: all ${total} passed.`;
   return `Before the change: ${counts.incomplete} of ${total} could not be checked.`;
+}
+
+/** The AI-navigated scenarios a baseline that ran left out: the count in words and their titles, never rows. Nothing for a baseline that skipped none. */
+function skippedAiScenarios(baseline: E2EDisplayBaseline): { sentence: string; titles: string[] } | undefined {
+  const skipped = baseline.skippedAiScenarios ?? [];
+  if (baseline.status === "UNAVAILABLE" || skipped.length === 0) return undefined;
+  return { sentence: E2E_OWNER_SENTENCES.baseline.skipped(skipped.length), titles: skipped.map((item) => displayText(item.title, 120)).filter((title) => title !== "").slice(0, SKIPPED_TITLES_LIMIT) };
 }
 
 const originsOf = (rows: readonly E2EDisplayScenario[]) => [...new Set(rows.flatMap((row) => row.mockedOrigins.map((origin) => displayText(origin, 200))).filter((origin) => origin !== ""))].sort();
@@ -166,21 +189,35 @@ const originsOf = (rows: readonly E2EDisplayScenario[]) => [...new Set(rows.flat
 export function renderE2EScenarioSlackBlocks(results: E2EScenarioResults, options: { taskPageUrl?: string } = {}): E2ESlackBlock[] {
   const rows = results.scenarios;
   const lines = [e2eScenarioSummary(rows)];
+  const navigation = e2eAgentSlackLine(rows);
+  if (navigation !== undefined) lines.push(slackBounded(navigation, 200));
   const first = rows.find((row) => row.status === "FAILED") ?? rows.find((row) => row.status === "UNKNOWN");
   if (first !== undefined) lines.push(slackBounded(rowSentence(first), 600));
   const origins = originsOf(rows);
   if (origins.length > 0) lines.push(slackBounded(`Mocked: ${origins.join(", ")}`, 500));
-  if (results.baseline !== undefined) lines.push(slackBounded(baselineSentence(results.baseline), 200));
+  if (results.baseline !== undefined) {
+    lines.push(slackBounded(baselineSentence(results.baseline), 200));
+    const skipped = skippedAiScenarios(results.baseline);
+    if (skipped !== undefined) lines.push(slackBounded(skipped.sentence, 200), slackBounded(`${E2E_OWNER_SENTENCES.baseline.skippedListLead} ${skipped.titles.join(", ")}`, 400));
+  }
   if (options.taskPageUrl !== undefined) lines.push(`<${slackBounded(options.taskPageUrl, 1500)}|Open the task page>`);
   return [{ type: "section", text: { type: "mrkdwn", text: lines.join("\n").slice(0, SLACK_RESULTS_MAX_CHARS) } }];
+}
+
+/** The skipped AI-navigated checks of a baseline as a sentence and a list of titles: not a table, so none of them can read as a result row. */
+function skippedAiHtml(baseline: E2EDisplayBaseline): string {
+  const skipped = skippedAiScenarios(baseline);
+  if (skipped === undefined) return "";
+  return `<p>${html(skipped.sentence)}</p><p class="muted">${html(E2E_OWNER_SENTENCES.baseline.skippedListLead)}</p><ul class="e2e-skipped">${skipped.titles.map((title) => `<li>${html(title)}</li>`).join("")}</ul>`;
 }
 
 function rowsTable(rows: readonly E2EDisplayScenario[], rowAttribute: string, artifactPath: (sha256: string) => string): string {
   const body = rows.map((row) => {
     const reason = row.reason === undefined ? "" : html(displayText(row.reason, 300));
     const badges = row.mockedOrigins.map((origin) => `<span class="tag">${html(e2eMockedBadge(origin))}</span>`).join(" ");
+    const navigated = row.agentNavigation === undefined ? "" : `<span class="tag">${html(e2eAgentBadge(row.agentNavigation))}</span>`;
     const shot = row.screenshotRef === undefined ? "" : `<a href="${html(artifactPath(row.screenshotRef.sha256))}">View screenshot</a>`;
-    const details = [reason, badges, shot].filter((part) => part !== "").join(" ");
+    const details = [reason, navigated, badges, shot].filter((part) => part !== "").join(" ");
     const status = row.status === "PASSED" ? "Passed" : row.status === "FAILED" ? "Failed" : "Incomplete";
     return `<tr ${rowAttribute}="${html(displayText(row.scenarioId, 120))}" data-status="${row.status}"><td>${html(displayText(row.title, 120))} <span class="muted">(${row.kind === "web" ? "Browser" : "API"})</span></td>`
       + `<td>${status}</td><td>${html(displayText(accountDisplayName(row.accountLabel), 60))}</td><td>${details}</td></tr>`;
@@ -197,7 +234,7 @@ export function renderE2EScenarioRowsHtml(results: E2EScenarioResults, options: 
   const baseline = results.baseline;
   const baselineHtml = baseline === undefined ? ""
     : `<h3>Before the change</h3><p>${html(baselineSentence(baseline))}</p>`
-      + (baseline.status === "UNAVAILABLE" ? "" : `<p class="muted">This ran on the unchanged code, for information only. It does not decide anything about this change.</p>${rowsTable(baseline.scenarios, "data-e2e-baseline-row", options.artifactPath)}`);
+      + (baseline.status === "UNAVAILABLE" ? "" : `<p class="muted">This ran on the unchanged code, for information only. It does not decide anything about this change.</p>${skippedAiHtml(baseline)}${rowsTable(baseline.scenarios, "data-e2e-baseline-row", options.artifactPath)}`);
   return `<section id="e2e-results" aria-label="Browser and API results"><h2>Browser and API results</h2>`
     + (results.scenarios.length === 0 ? "" : `<p>${html(e2eScenarioSummary(results.scenarios))}</p>${rowsTable(results.scenarios, "data-e2e-row", options.artifactPath)}`)
     + `${baselineHtml}</section>`;
