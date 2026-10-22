@@ -268,6 +268,11 @@ async function forWorker(
   if (carriesApplicationAdmission && !features.includes("task.workflowE2EApplicationChecks")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "browser and API verification needs a worker that runs application admissions (it must list task.workflowE2EApplicationChecks); this worker predates it or has no executor image on its host, so no application round was sent to it");
   }
+  // M1.3 Task 3.7b: a baseline round is an application round of a kind of its own. A worker that runs application admissions but predates baseline rounds would run it as a
+  // candidate's, and its refusal of the signed purpose would come only after compute was spent, so it is refused here with the reason.
+  if (carriesApplicationAdmission && invocation.kind === "task" && invocation.payload.workflowE2EAdmission?.purpose === "baseline" && !features.includes("task.workflowE2EBaselineChecks")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the baseline round on the unchanged code needs a worker that runs baseline rounds (it must list task.workflowE2EBaselineChecks); this worker predates it or has no executor image on its host, so no baseline round was sent to it");
+  }
   if (carriesProjectSetupSmoke && !features.includes("project.setupSmoke")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "project setup smoke requires a worker that implements project.setupSmoke");
   }
@@ -399,8 +404,8 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
-  const sent = withoutApplicationPlans(anchored, features);
-  if (sent !== anchored) {
+  const planned = withoutApplicationPlans(anchored, features);
+  if (planned !== anchored) {
     console.log(JSON.stringify({
       component: "dispatcher",
       event: "dispatch.application_plan_omitted",
@@ -409,7 +414,27 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
+  // M1.3 Task 3.7b: the request to export the unchanged code is only for a worker that can; an older one runs the coding without it (a baseline never stops the coding), and the
+  // baseline then says it could not be checked.
+  const sent = withoutBaselineSource(planned, features);
+  if (sent !== planned) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.baseline_source_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
   return sent;
+}
+
+/** A coding run without the request to export the unchanged code, for a worker that does not list "task.workflowE2EBaselineSource": it would reject the field. The export reads the repository alone, so this feature is not withheld with the executor image. */
+function withoutBaselineSource(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || invocation.payload.workflowE2EBaselineSource === undefined || features.includes("task.workflowE2EBaselineSource")) return invocation;
+  const { workflowE2EBaselineSource: _request, ...payload } = invocation.payload;
+  void _request;
+  return { ...invocation, payload };
 }
 
 /** A planning prompt that does not ask for anchor lines, for a worker that does not parse them: it would reject a plan that carried one. */

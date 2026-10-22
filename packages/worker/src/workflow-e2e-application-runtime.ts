@@ -65,6 +65,8 @@ export async function workflowE2EApplicationChecksAvailability(environment: Node
 }
 
 const APPLICATION_CHECKS_FEATURE = "task.workflowE2EApplicationChecks" as const;
+/** M1.3 Task 3.7b: running the baseline round needs exactly what an application round needs (the executor image on the host), so the two are listed, and withheld, together. */
+const BASELINE_CHECKS_FEATURE = "task.workflowE2EBaselineChecks" as const;
 /** A check that has not answered by then is an unavailable answer, so one hung Docker cannot stop the refresh for good. */
 const AVAILABILITY_CHECK_LIMIT_MS = IMAGE_INSPECT_TIMEOUT_MS + 5_000;
 export const APPLICATION_CHECKS_REFRESH_MS = 30_000;
@@ -104,8 +106,8 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
     stop(): void { if (timer !== undefined) { clearInterval(timer); timer = undefined; } },
     /** The parts of a WorkerExecutor that keep the feature off /ping while it is unavailable. */
     executor: {
-      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE] as const,
-      withheldInvocationFeatures: () => latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest },
+      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, BASELINE_CHECKS_FEATURE] as const,
+      withheldInvocationFeatures: () => latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest, [BASELINE_CHECKS_FEATURE]: latest },
     },
   };
 }

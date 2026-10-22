@@ -136,6 +136,31 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     } finally { vi.useRealTimers(); }
   });
 
+  it("lists the baseline feature (Task 3.7b) exactly when it lists application CHECKS: both need the executor image on the host, and both are withheld together with the reason", async () => {
+    const BASELINE = "task.workflowE2EBaselineChecks";
+    const docker = { run: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) };
+    const monitor = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "linux", arch: "arm64", docker, intervalMs: 60_000 });
+    expect(monitor.executor.withholdableInvocationFeatures).toEqual([FEATURE, BASELINE]);
+    const before = await pingOf(monitor);
+    expect(before.body.invocationFeatures).not.toContain(BASELINE);
+    expect(before.body.invocationFeatureDiagnostics).toMatchObject({ [BASELINE]: { status: "unavailable", reason: "not-yet-checked" } });
+    monitor.start();
+    await vi.waitFor(() => expect(monitor.current()).toEqual({ status: "ready" }));
+    const ready = await pingOf(monitor);
+    expect(ready.body.invocationFeatures).toEqual(expect.arrayContaining([FEATURE, BASELINE]));
+    monitor.stop();
+    const missing = { run: vi.fn(async () => ({ code: 1, stdout: "", stderr: "" })) };
+    const without = createApplicationChecksFeatureMonitor({ environment: { EXECUTOR_IMAGE: image }, platform: "linux", arch: "arm64", docker: missing, intervalMs: 60_000 });
+    without.start();
+    await vi.waitFor(() => expect(without.current()).toMatchObject({ status: "unavailable" }));
+    const lacking = await pingOf(without);
+    expect(lacking.body.invocationFeatures).not.toContain(BASELINE);
+    // Exporting the unchanged code needs the repository alone, so a host without the executor image still lists it (review 3.7b finding 5).
+    expect(lacking.body.invocationFeatures).toContain("task.workflowE2EBaselineSource");
+    expect(lacking.body.invocationFeatureDiagnostics).toMatchObject({ [BASELINE]: { status: "unavailable", reason: "executor-image-not-on-host" } });
+    without.stop();
+  });
+
   it("does not start a second check while one is still running", async () => {
     vi.useFakeTimers();
     try {

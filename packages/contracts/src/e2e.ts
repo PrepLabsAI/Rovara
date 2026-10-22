@@ -244,7 +244,18 @@ export const E2EWorkflowAdmissionRefSchema = z.object({
     key: z.string().regex(/^workflow-e2e-admissions\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest,
     byteLength: positiveInt.max(24 * 1024 * 1024),
   }).strict(),
-}).strict();
+  /**
+   * M1.3 Task 3.7b: a baseline round (the approved scenarios on the unchanged code, for information only) says so here, with the base commit it runs and the attempt, and the
+   * admission it names signs the same. A reference without these is a candidate round's. Only an application round can be a baseline.
+   */
+  purpose: z.literal("baseline").optional(), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(), attempt: positiveInt.optional(),
+}).strict().superRefine((reference, context) => {
+  const baseline = reference.purpose === "baseline";
+  if (baseline !== (reference.baseCommitSha !== undefined) || baseline !== (reference.attempt !== undefined)) {
+    context.addIssue({ code: "custom", path: ["purpose"], message: "a baseline reference carries its base commit and attempt, and only a baseline reference does" });
+  }
+  if (baseline && reference.kind !== "application") context.addIssue({ code: "custom", path: ["kind"], message: "only an application round can be a baseline" });
+});
 export type E2EWorkflowAdmissionRef = z.infer<typeof E2EWorkflowAdmissionRefSchema>;
 /**
  * What an application round's evidence may weigh (Ruling BV): the worker refuses to upload more (the group is UNKNOWN, "evidence too large"), the broker accepts and reads no more.

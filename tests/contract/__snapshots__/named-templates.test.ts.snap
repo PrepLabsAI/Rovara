@@ -2147,6 +2147,21 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             },
           ],
         },
+        "LifecycleConfiguration": {
+          "Rules": [
+            {
+              "ExpirationInDays": 30,
+              "Id": "ExpireE2EScreenshots",
+              "Status": "Enabled",
+              "TagFilters": [
+                {
+                  "Key": "rovara-retention",
+                  "Value": "e2e-screenshot",
+                },
+              ],
+            },
+          ],
+        },
         "PublicAccessBlockConfiguration": {
           "BlockPublicAcls": true,
           "BlockPublicPolicy": true,

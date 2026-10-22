@@ -6,7 +6,7 @@ type CallbackSinks = ReturnType<typeof createWorkerCallbackSinks>;
 
 /** Keep committed source bytes on their private capability and out of the ordinary/model result callback. */
 export async function postWorkerTerminalResult(
-  callbacks: Pick<CallbackSinks, "candidateSourceExportSink" | "terminalSink"> & Partial<Pick<CallbackSinks, "candidateBuildSourceSink">>,
+  callbacks: Pick<CallbackSinks, "candidateSourceExportSink" | "terminalSink"> & Partial<Pick<CallbackSinks, "candidateBuildSourceSink" | "baselineSourceSink">>,
   result: WorkerTerminalResult,
   invocation: WorkerInvocation,
   log: (event: Record<string, unknown>) => void = (event) => console.log(JSON.stringify(event)),
@@ -31,8 +31,26 @@ export async function postWorkerTerminalResult(
           errorCode: typeof code === "string" ? code : "UNKNOWN", errorMessage: (error instanceof Error ? error.message : "unknown failure").slice(0, 300) });
       }
     }
-    const { workflowCandidateSourceExport: _sourceExport, workflowCandidateBuildSource: _buildSource, ...terminalResult } = reported;
-    void _sourceExport; void _buildSource;
+    // M1.3 Task 3.7b: the unchanged code, for the baseline round, follows the candidate's export on its own request. Like the build source it only informs a round that never
+    // gates, so no failure to deliver it may fail the export or the terminal result: without it the baseline says it could not be checked.
+    const baselineSource = reported.workflowBaselineSource;
+    if (baselineSource !== undefined && callbacks.baselineSourceSink !== undefined) {
+      try { await callbacks.baselineSourceSink(baselineSource as Parameters<NonNullable<CallbackSinks["baselineSourceSink"]>>[0]); }
+      catch (error) {
+        const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+        log({ component: "worker", level: "warn", event: "baseline-source.delivery_failed", operationId: result.operationId,
+          errorCode: typeof code === "string" ? code : "UNKNOWN", errorMessage: (error instanceof Error ? error.message : "unknown failure").slice(0, 300) });
+      }
+    }
+    const { workflowCandidateSourceExport: _sourceExport, workflowCandidateBuildSource: _buildSource, workflowBaselineSource: _baselineSource, ...terminalResult } = reported;
+    void _sourceExport; void _buildSource; void _baselineSource;
+    await callbacks.terminalSink({ ...result, result: terminalResult });
+    return;
+  }
+  // Whatever else it carries, the unchanged code's export never travels on the model-visible result.
+  if (reported?.workflowBaselineSource !== undefined) {
+    const { workflowBaselineSource: _baselineSource, ...terminalResult } = reported;
+    void _baselineSource;
     await callbacks.terminalSink({ ...result, result: terminalResult });
     return;
   }

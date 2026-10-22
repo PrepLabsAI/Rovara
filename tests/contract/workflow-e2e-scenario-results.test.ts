@@ -6,7 +6,7 @@ import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/de
 import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
 import { MAYA } from "../support/developer-task-broker.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
-import { startApplicationRound, type ApplicationRound } from "../support/e2e-application-round-harness.js";
+import { startApplicationRound, type RoundCore } from "../support/e2e-application-round-harness.js";
 import { FAIL, PASS, caseIdsOf, operatorEvidenceWith, runRound } from "../support/e2e-application-round-run.js";
 import { OTHER_SHOT, SHOT, SHOT_SHA } from "../support/e2e-scenario-results.js";
 
@@ -16,13 +16,13 @@ import { OTHER_SHOT, SHOT, SHOT_SHA } from "../support/e2e-scenario-results.js";
 afterEach(disposeRealCandidates);
 
 const brokerModule = () => import("../../packages/broker/src/aws/broker.js");
-const operations = (round: ApplicationRound) => round.operationRows(() => true);
-const scenarioResultsOf = async (round: ApplicationRound, actor: "owner" | "viewer" = "owner") =>
+const operations = (round: RoundCore) => round.operationRows(() => true);
+const scenarioResultsOf = async (round: RoundCore, actor: "owner" | "viewer" = "owner") =>
   (await brokerModule()).loadWorkflowE2EScenarioResults(round.harness.brokerInput as never, round.taskNow() as never, operations(round), actor);
-const presentationOf = async (round: ApplicationRound) =>
+const presentationOf = async (round: RoundCore) =>
   (await brokerModule()).loadWorkflowE2EPresentation(round.harness.brokerInput as never, round.taskNow() as never, operations(round), "owner");
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
-const e2eOf = (round: ApplicationRound) => round.workflowNow().e2e as { qualifiedRound?: unknown; failedRound?: unknown; displayRef?: { key: string; sha256: string } };
+const e2eOf = (round: RoundCore) => round.workflowNow().e2e as { qualifiedRound?: unknown; failedRound?: unknown; displayRef?: { key: string; sha256: string } };
 const SECRETS = ["ops@tenant-a.example", "hunter2-secret", "tenant-a-session-cookie-9f8e7d6c"];
 const dirtyLog = `${SECRETS[0]} signed in with password=${SECRETS[1]} cookie=${SECRETS[2]}`;
 
@@ -171,7 +171,7 @@ describe("the rows of an application round on the real broker", () => {
   });
 
   describe("the page reads its rows from the stored display (Ruling CT: F2, F11)", () => {
-    const pageView = async (round: ApplicationRound) => {
+    const pageView = async (round: RoundCore) => {
       const maya = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: MAYA.provider, name: MAYA.name };
       const input = round.harness.brokerInput as { documentClient: never; tableName: string; developer: never };
       const broker = await brokerModule();
@@ -180,7 +180,7 @@ describe("the rows of an application round on the real broker", () => {
       return getTaskDocumentView(deps, maya, round.taskId);
     };
     type S3Calls = { send: { mock: { calls: Array<[{ input?: { Key?: string } }]> }; mockClear(): void; getMockImplementation(): ((command: unknown) => Promise<unknown>) | undefined; mockImplementation(fn: (command: unknown) => Promise<unknown>): void } };
-    const s3Of = (round: ApplicationRound) => round.harness.s3 as unknown as S3Calls;
+    const s3Of = (round: RoundCore) => round.harness.s3 as unknown as S3Calls;
 
     it("renders a page without reading the round's admission or evidence again", async () => {
       const round = await startApplicationRound();
@@ -193,21 +193,27 @@ describe("the rows of an application round on the real broker", () => {
       expect(keys.filter((key) => /workflow-e2e-(admissions|evidence|group-evidence)\//u.test(key)), JSON.stringify(keys)).toEqual([]);
     });
 
-    it("shows a baseline recorded after the round's display only from the next display, so every link on the page is one the route serves", async () => {
-      const round = await startApplicationRound({ brokerExtra: { e2eBaselineRound: async () => undefined } });
+    it("shows the baseline recorded before the round (Task 3.7b) with the round's rows, and every link on the page is one the route serves", async () => {
+      const baselineRound = await startApplicationRound({ baseline: "source" });
+      const [baselineCase] = caseIdsOf(baselineRound);
+      await runRound(baselineRound, [FAIL], { tweak: (groupRun) => { groupRun.operatorEvidence = operatorEvidenceWith([{ caseId: baselineCase!, bytes: OTHER_SHOT }]); } });
+      const round = await baselineRound.nextRound();
       const [caseId] = caseIdsOf(round);
       await runRound(round, [FAIL], { tweak: (groupRun) => { groupRun.operatorEvidence = operatorEvidenceWith([{ caseId: caseId!, bytes: SHOT }]); } });
-      const baselineModule = await import("../../packages/broker/src/aws/workflow-e2e-baseline.js");
-      await baselineModule.recordWorkflowE2EBaseline(round.harness.brokerInput as never, round.taskNow() as never, {
-        baseline: { status: "FAILED", scenarios: [{ scenarioId: "orders-health-0", title: "Orders health 0", kind: "api", accountLabel: "orders-owner", status: "FAILED", reason: "expected 200, received 503",
-          screenshotRef: { sha256: sha(OTHER_SHOT), bytes: OTHER_SHOT.byteLength, contentType: "image/jpeg" }, mockedOrigins: [] }] },
-        artifacts: [{ sha256: sha(OTHER_SHOT), bytes: OTHER_SHOT, contentType: "image/jpeg" }] });
       const view = await pageView(round);
-      expect(view.e2eResults?.baseline).toBeUndefined();
+      expect(view.e2eResults?.baseline?.status).toBe("FAILED");
       const broker = await brokerModule();
-      const links = (view.e2eResults?.scenarios ?? []).flatMap((item) => (item.screenshotRef === undefined ? [] : [item.screenshotRef.sha256]));
-      expect(links).toEqual([SHOT_SHA]);
+      const links = [...(view.e2eResults?.scenarios ?? []), ...(view.e2eResults?.baseline?.scenarios ?? [])].flatMap((item) => (item.screenshotRef === undefined ? [] : [item.screenshotRef.sha256]));
+      expect(links.sort()).toEqual([SHOT_SHA, sha(OTHER_SHOT)].sort());
       for (const link of links) expect(await broker.loadWorkflowE2EArtifact(round.harness.brokerInput as never, round.taskNow() as never, link)).toBeDefined();
+    });
+
+    it("shows the sentence for a baseline that could not run on a page with no candidate rows yet (F9)", async () => {
+      const round = await startApplicationRound({ baseline: "source" });
+      round.markRunning();
+      await round.harness.finish(round.workspaceId, round.operationId, "FAILED", { error: "the runner died" });
+      const view = await pageView(round);
+      expect(view.e2eResults).toEqual({ scenarios: [], baseline: { status: "UNAVAILABLE", scenarios: [] } });
     });
 
     it("shows no link for a screenshot that could not be stored", async () => {
