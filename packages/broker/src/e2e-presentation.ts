@@ -178,8 +178,10 @@ function skippedAiScenarios(baseline: E2EDisplayBaseline): { sentence: string; t
   const skipped = baseline.skippedAiScenarios ?? [];
   if (baseline.status === "UNAVAILABLE" || skipped.length === 0) return undefined;
   const titles = skipped.map((item) => displayText(item.title, 120)).filter((title) => title !== "");
-  return { sentence: E2E_OWNER_SENTENCES.baseline.skipped(skipped.length), titles: titles.slice(0, SKIPPED_TITLES_LIMIT),
-    more: titles.length > SKIPPED_TITLES_LIMIT ? E2E_OWNER_SENTENCES.baseline.skippedMore(titles.length - SKIPPED_TITLES_LIMIT) : undefined };
+  const shown = titles.slice(0, SKIPPED_TITLES_LIMIT);
+  // "and N more" is the full skipped count less the titles shown: a title that scrubs to nothing is still a skipped check, so it counts here and the number agrees with the sentence.
+  return { sentence: E2E_OWNER_SENTENCES.baseline.skipped(skipped.length), titles: shown,
+    more: skipped.length > shown.length ? E2E_OWNER_SENTENCES.baseline.skippedMore(skipped.length - shown.length) : undefined };
 }
 
 const originsOf = (rows: readonly E2EDisplayScenario[]) => [...new Set(rows.flatMap((row) => row.mockedOrigins.map((origin) => displayText(origin, 200))).filter((origin) => origin !== ""))].sort();
@@ -200,10 +202,16 @@ export function renderE2EScenarioSlackBlocks(results: E2EScenarioResults, option
   if (results.baseline !== undefined) {
     lines.push(slackBounded(baselineSentence(results.baseline), 200));
     const skipped = skippedAiScenarios(results.baseline);
-    if (skipped !== undefined) lines.push(slackBounded(skipped.sentence, 200), slackBounded(`${E2E_OWNER_SENTENCES.baseline.skippedListLead} ${[...skipped.titles, ...(skipped.more === undefined ? [] : [skipped.more])].join(", ")}`, 400));
+    if (skipped !== undefined) lines.push(slackBounded(skipped.sentence, 200), slackSkippedList(skipped.titles, skipped.more));
   }
   if (options.taskPageUrl !== undefined) lines.push(`<${slackBounded(options.taskPageUrl, 1500)}|Open the task page>`);
   return [{ type: "section", text: { type: "mrkdwn", text: lines.join("\n").slice(0, SLACK_RESULTS_MAX_CHARS) } }];
+}
+
+/** The Slack list of skipped checks: the titles are cut to fit 400 characters, the "and N more" tail never is. */
+function slackSkippedList(titles: readonly string[], more: string | undefined): string {
+  const tail = more === undefined ? "" : `${titles.length === 0 ? " " : ", "}${more}`;
+  return `${slackBounded(`${E2E_OWNER_SENTENCES.baseline.skippedListLead} ${titles.join(", ")}`, 400 - tail.length)}${tail}`;
 }
 
 /** The skipped AI-navigated checks of a baseline as a sentence and a list of titles: not a table, so none of them can read as a result row. */

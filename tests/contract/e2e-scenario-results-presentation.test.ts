@@ -181,3 +181,23 @@ describe("the signed-out visitor", () => {
     expect(page).not.toContain("Signed-out visitor");
   });
 });
+
+describe("the skipped AI checks list in Slack", () => {
+  const skippedBaseline = (titles: string[]) => ({ status: "PASSED" as const, scenarios: [row()], skippedAiScenarios: titles.map((title, index) => ({ scenarioId: `ai-${index}`, title })) });
+  const lineOf = (baseline: ReturnType<typeof skippedBaseline>) => textOf(renderE2EScenarioSlackBlocks(results({ baseline }), { taskPageUrl: URL_OF_PAGE })).split("\n").find((line) => line.startsWith("Not run before the change:"))!;
+
+  it("cuts titles, never the 'and N more' tail, when twelve long titles fill the bound", () => {
+    const titles = Array.from({ length: 15 }, (_, index) => `Check number ${index} ${"long title words ".repeat(7)}`.slice(0, 120));
+    const line = lineOf(skippedBaseline(titles));
+    expect(line.length).toBeLessThanOrEqual(400);
+    expect(line.endsWith("and 3 more")).toBe(true);
+  });
+
+  it("counts a title that scrubs to nothing as skipped, so 'and N more' agrees with the count sentence", () => {
+    const titles = ["First check", "\u0000\u0000", ...Array.from({ length: 13 }, (_, index) => `Check ${index}`)];
+    const text = textOf(renderE2EScenarioSlackBlocks(results({ baseline: skippedBaseline(titles) }), { taskPageUrl: URL_OF_PAGE }));
+    expect(text).toContain("15 AI-navigated checks are not run");
+    // 15 skipped, 12 titles shown (the blank one is not shown): 3 more.
+    expect(lineOf(skippedBaseline(titles)).endsWith("and 3 more")).toBe(true);
+  });
+});
