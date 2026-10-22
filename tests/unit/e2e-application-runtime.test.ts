@@ -34,10 +34,15 @@ describe("application actual CLI and lifecycle", () => {
     expect(process.version).toBe("v22.23.2");
     const repoRoot = process.cwd();
     const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
-    const factorySource = `let factoryCalls = 0; let generationCalls = 0; let runCaseCalls = 0;
+    // A route-pinning declaration needs the host's governed step executor and capture store with the model (Task 4.3b). The fixture host takes both from the installed package itself,
+    // so the fresh parent and its fork load Rovara's real executor by the installed path, and the bootstrap's identity check is the one production runs.
+    const factorySource = `import { createRovaraE2EAgentExecutor } from "../../../dist/executor/agent-executor.js";
+import { createE2EAgentCaptureStore } from "../../../dist/executor/agent-capture-store.js";
+let factoryCalls = 0; let generationCalls = 0; let runCaseCalls = 0;
 export function getCounts() { return { factoryCalls, generationCalls, runCaseCalls }; }
 export function createE2EApplicationCliHost({ launchContext }) {
   return { profileId: launchContext.cliHost.profileId, descriptor: launchContext.cliHost.descriptor,
+    agentExecutor: createRovaraE2EAgentExecutor({ position: () => null, ledger: () => null, origin: () => "http://127.0.0.1" }), agentCacheStore: createE2EAgentCaptureStore(),
     modelFactory() { factoryCalls += 1; return { provider: "agentx-e2e", modelId: "fixture-route", specificationVersion: "v4", async doGenerate() { generationCalls += 1; return { installedAdapter: true }; } }; },
     async runCase() { runCaseCalls += 1; } };
 }`;
