@@ -70,9 +70,8 @@ describe.runIf(agentRunnable)("the broker's verdict on real agent runs", () => {
 
   it("21. model evidence for a group with no admitted route, or none for a group with an agent step, is UNKNOWN model-receipts-mismatch", async () => {
     const a = await readBack("ok");
-    const without: Partial<typeof a.inputs> = { ...a.inputs };
-    delete without.agentModel;
-    const missing = brokerRoundFor(a, { inputs: without as typeof a.inputs });
+    const without = Object.fromEntries(Object.entries(a.inputs).filter(([key]) => key !== "agentModel")) as typeof a.inputs;
+    const missing = brokerRoundFor(a, { inputs: without });
     // The worker's collector refuses too, so what is uploaded is its unavailable group; the broker's own re-collection of the same bytes must say the same.
     const verdict = missing.verify();
     expect(verdict.verdict).toBe("UNKNOWN");

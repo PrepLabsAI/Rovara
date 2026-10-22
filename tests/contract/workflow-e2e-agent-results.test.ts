@@ -171,11 +171,13 @@ describe("evaluateE2EAgentCase: anything that does not agree is model-receipts-m
   });
 
   it("a ledger over 64 KiB is not a ledger of this run, however well formed", () => {
-    const padded = new TextEncoder().encode(`${JSON.stringify(ledger([{ stepIndex: 1, goal: GOAL, receipts: [ok(1, 0)] }]))}${" ".repeat(E2E_AGENT_LEDGER_MAX_BYTES)}`);
-    expect(padded.byteLength).toBeGreaterThan(E2E_AGENT_LEDGER_MAX_BYTES);
     const receipts = [ok(1, 0)];
-    const body = concluded({ receipts, ledgerBytes: padded });
-    expect(codeOf({ ...body, receipts, agentSteps: body.agentSteps.map((step) => ({ ...step, report: { ...step.report!, modelCalls: 1 } })) })).toBe("model-receipts-mismatch");
+    const exact = new TextEncoder().encode(JSON.stringify(ledger([{ stepIndex: 1, goal: GOAL, receipts }])));
+    const padded = new TextEncoder().encode(`${new TextDecoder().decode(exact)}${" ".repeat(E2E_AGENT_LEDGER_MAX_BYTES)}`);
+    expect(padded.byteLength).toBeGreaterThan(E2E_AGENT_LEDGER_MAX_BYTES);
+    // The same ledger, byte for byte and for its receipts, is the case's own until it passes the cap.
+    expect(codeOf(concluded({ receipts, ledgerBytes: exact }))).toBe("deterministic");
+    expect(codeOf(concluded({ receipts, ledgerBytes: padded }))).toBe("model-receipts-mismatch");
   });
 
   it("the ledger and the report must tell one story: a concluded ledger over a failed report, a failed ledger over a passed report, or a different stop code", () => {

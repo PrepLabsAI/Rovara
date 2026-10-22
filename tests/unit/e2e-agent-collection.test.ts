@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { E2EAgentActionLedgerSchema, e2eAgentValueKeyId } from "@agentx/contracts";
+import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { agentRunnable, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { assembleAgentRun, collectAssembled, firstCase } from "../support/agent-collection.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
@@ -97,9 +98,8 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
 
   it("21. a group with an agent step and no model evidence is UNKNOWN with the mismatch code, never a pass", async () => {
     const a = await readBack("ok");
-    const withoutAgent: Partial<typeof a.inputs> = { ...a.inputs };
-    delete withoutAgent.agentModel;
-    const collected = collectAssembled(a, withoutAgent as typeof a.inputs);
+    const withoutAgent = Object.fromEntries(Object.entries(a.inputs).filter(([key]) => key !== "agentModel")) as typeof a.inputs;
+    const collected = collectAssembled(a, withoutAgent);
     expect(collected.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
     expect(collected.unavailableReason ?? "").toMatch(/^model-receipts-mismatch:/);
     expect(collectAssembled(a, { ...a.inputs, agentModel: null }).unavailableReason ?? "").toMatch(/^model-receipts-mismatch:/);
@@ -166,6 +166,14 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
     expect(firstCase(dirty)).toMatchObject({ status: "unavailable", reason: "model-receipts-mismatch" });
     const forged = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, receipts: a.agentModel.receipts.slice(0, 1) } });
     expect(forged.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+  });
+
+  it("the route the worker served must be the admitted revision: another definition in the evidence is refused by the worker's own collector too", async () => {
+    const a = await readBack("ok");
+    // The same route id as the admission names, at another revision.
+    const collected = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, route: scriptedE2ERouteDefinition({ revision: 2 }) } });
+    expect(collected.qualification).toBeNull();
+    expect(collected.unavailableReason).toMatch(/^model-receipts-mismatch: the model evidence is not for a group with AI navigation steps under the admitted route/);
   });
 
   it("a channel that failed to close makes the evidence say so: UNKNOWN, with the mismatch code on the case", async () => {

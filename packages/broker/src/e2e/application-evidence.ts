@@ -384,7 +384,9 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     }
     return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }) };
   } catch (error) {
-    return unknown(error instanceof Error && error.message !== "" ? error.message.slice(0, OWNER_REASON_MAX_CHARS) : "the group's evidence could not be requalified");
+    // A schema refusal says what it refused (the first issue's own words), never the whole issue list.
+    const said = error instanceof Error && error.name === "ZodError" ? (error as { issues?: Array<{ message?: string }> }).issues?.[0]?.message : error instanceof Error ? error.message : undefined;
+    return unknown(said !== undefined && said !== "" ? said.slice(0, OWNER_REASON_MAX_CHARS) : "the group's evidence could not be requalified");
   }
 }
 type ApplicationEvidenceBinding = Parameters<typeof createE2EApplicationCollectionOracleFromCompiledSuite>[0]["binding"];
