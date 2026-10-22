@@ -283,6 +283,8 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
         localStorage: session.form.state.origins.filter((item) => item.localStorage.length > 0).map((item) => ({ origin: item.origin, entries: item.localStorage.map((entry) => ({ ...entry })) })) };
     },
     bindSubject(sessionRef: string, subject: E2EApplicationOwnedSubject): void { must(sessionRef).subject = subject; },
+    /** Whether the session is the signed-out visitor's. It holds no credential, so what the application itself sets for a visitor (a visitor id, a cart) is no session secret. */
+    isAnonymous: (sessionRef: string): boolean => sessions.get(sessionRef)?.anonymous === true,
     fetchUrl: (path: string) => urlFor(path),
     fetchImpl,
     sessionFacts(ownedClientRef: string, kind: "browser" | "service"): ExecutorSessionFacts {

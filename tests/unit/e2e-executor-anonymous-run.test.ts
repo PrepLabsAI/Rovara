@@ -6,7 +6,7 @@ import { chromium } from "playwright-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eAnonymousAccountIdDigest, e2eAnonymousRuntimeAccountRef } from "@agentx/contracts";
 import { E2E_EXECUTOR_HOST_MODULE_PATH } from "../../packages/verifier/src/executor/host-registry.js";
-import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { runE2EExecutorSerially as runE2EExecutor } from "../support/executor-run-lock.js";
 import { resolveE2EExecutorSuite } from "../../packages/verifier/src/executor/suite.js";
 import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput } from "../../packages/verifier/src/host/executor-readback.js";
 import { collectHostRun, proveActualRun } from "../support/e2e-actual-run-proof.js";
@@ -82,6 +82,15 @@ describe.runIf(runnable)("the executor against an app with only an inferred laun
     expect(new Set(sources.map((item) => item.caseId)).size).toBe(2);
     expect(new Set(sources.map((item) => item.sessionRef)).size).toBe(2);
     expect(fixture.compiled.expectedCases.every((item) => item.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID)).toBe(true);
+  }, 300_000);
+
+  it("does not take the visitor id the page prints, keeps in a cookie and in local storage for a secret: the case fails on its text assertion, it is not a credential leak (F6)", async () => {
+    const { fixture, out, result } = await runInferred({ scenarios: ["welcome", "echoesVisitorId"] });
+    expect(result, executorLog(out)).toEqual({ exitCode: 1, reason: null });
+    expect(caseStatusesAll(out, fixture)).toEqual({ "visitor-sees-welcome": "passed", "visitor-id-is-shown": "failed" });
+    // The page's text, id included, is in the observation of the failed assertion: nothing of it was registered as a session value.
+    expect(allOutputText(out)).toMatch(/visitor-[0-9a-f-]{36}/);
+    expect(executorLog(out)).not.toContain("removed an output file that carried an account credential or a session value");
   }, 300_000);
 
   it("fails a claim the page cannot meet on its visible assertion, with one screenshot of the visitor's page, and still passes the other scenario", async () => {

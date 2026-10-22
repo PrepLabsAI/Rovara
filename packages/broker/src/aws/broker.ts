@@ -214,7 +214,7 @@ import {
   type PlanApprovalRef,
   type E2EApplicationPlanIntent,
   type E2EApplicationSelectionRecord, type E2ERuntimeAccountRef, type E2EApplicationAccountDefinition, readE2EApplicationProjectContract, e2eSyntheticAccountContractDigest,
-  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema,
+  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eAnonymousTargetId, e2eAnonymousVariantOf,
   E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   type E2EScenarioResults, type E2ESharedView,
@@ -7782,7 +7782,12 @@ export async function workflowE2EApplicationAuthorityIsValid(
     const projectAuthority = await loadCurrentProjectAuthority(dependencies, task, mark, reject);
     if (projectAuthority === undefined) return false;
     const { latestProject, setupApproval, catalogKey, policy } = projectAuthority;
-    if (canonicalJson(policy) !== canonicalJson(admission.policy)) return reject("current-project-policy-or-runtime-changed");
+    // The admitted policy is the project's with the signed-out variants derived from its base targets (Ruling AZ, derived, never stored): held to the project's, each derived target
+    // must be exactly the variant of a base target the project's policy holds.
+    const admittedPolicy = E2EPolicySchema.parse(admission.policy);
+    const derivedVariant = (target: E2EPolicy["targets"][number]) => target.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID
+      && policy.targets.some((base) => base.kind === target.kind && e2eAnonymousTargetId(base.targetId) === target.targetId && canonicalJson(e2eAnonymousVariantOf(base)) === canonicalJson(target));
+    if (canonicalJson(policy) !== canonicalJson({ ...admittedPolicy, targets: admittedPolicy.targets.filter((target) => !derivedVariant(target)) })) return reject("current-project-policy-or-runtime-changed");
     const creator = await loadCurrentCreatorAuthority(dependencies, task, admission.creatorAuthority, mark, reject);
     if (creator === undefined) return false;
     const { creatorAuthority, creatorAccess, creatorMembershipKey, developer } = creator;

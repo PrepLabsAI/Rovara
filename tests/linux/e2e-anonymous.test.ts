@@ -88,6 +88,15 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(await leftovers(r)).toEqual(NOTHING);
   }, 600_000);
 
+  it("does not take the visitor id the storefront prints, sets in a cookie and keeps in local storage for a credential: that case fails on its text, and the run is not a credential leak", async () => {
+    const r = await runInferredProbe({ scenarios: ["welcome", "echoesVisitorId"] });
+    expect(r.run.unavailableReason, why(r)).toBeNull();
+    expect(r.exitCode, why(r)).toBe(1);
+    expect(caseStatusesAll(outOf(r), r.fixture)).toEqual({ "visitor-sees-welcome": "passed", "visitor-id-is-shown": "failed" });
+    expect(allOutputText(outOf(r))).toMatch(/visitor-[0-9a-f-]{36}/);
+    expect(await leftovers(r)).toEqual(NOTHING);
+  }, 600_000);
+
   it("a claim the page cannot meet is FAILED on its visible assertion, with a screenshot of the visitor's page, and the passing scenarios still pass", async () => {
     const r = await runInferredProbe({ scenarios: ["welcome", "expectsAdmin"] });
     expect(r.run.unavailableReason, why(r)).toBeNull();

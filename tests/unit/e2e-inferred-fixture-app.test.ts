@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Server } from "node:http";
@@ -13,6 +14,12 @@ const servers: Server[] = [];
 afterEach(async () => { await Promise.all(servers.splice(0).map((server) => new Promise<void>((done) => { server.close(() => { done(); }); }))); });
 
 describe("the inferred-recipe fixture app", () => {
+  it("does not start without a PORT: it has no default, so a run that serves it proves the host (or the recipe) gave one", () => {
+    const started = spawnSync(process.execPath, [join(INFERRED_FIXTURE_ROOT, "server.mjs")], { env: { PATH: process.env.PATH ?? "" }, encoding: "utf8", timeout: 20_000 });
+    expect(started.status).toBe(1);
+    expect(started.stderr).toContain("PORT is not set");
+  });
+
   const snapshot = (): E2ESourceSnapshot => {
     const candidate = createCandidateManifest([{ repositoryId: "fixture/inferred", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
     const sources = ["package.json", "package-lock.json"].map((path) => {
@@ -28,7 +35,8 @@ describe("the inferred-recipe fixture app", () => {
     expect(recipe).not.toBeNull();
     expect(recipe!.build.map((command) => [command.program, ...command.args])).toEqual([["npm", "ci"]]);
     expect(recipe!.launch).toMatchObject({ kind: "service", start: { program: "npm", args: ["start"] }, health: { path: "/", expectedStatus: 200 } });
-    expect(JSON.stringify(recipe)).not.toContain("PORT");
+    // The recipe keeps the port it always set (so the recipe digest holds); the host sets PORT itself as well.
+    expect(recipe!.launch).toMatchObject({ start: { env: { PORT: "4317" } } });
     expect(INFERRED_APP_FILES).toEqual(["package.json", "package-lock.json", "server.mjs"]);
   });
 
@@ -41,6 +49,8 @@ describe("the inferred-recipe fixture app", () => {
     expect(home.status).toBe(200);
     const html = await home.text();
     expect(html).toContain('data-testid="welcome"');
+    expect(html).toMatch(/data-testid="visitor-id">visitor-[0-9a-f-]{36}</);
+    expect(home.headers.get("set-cookie")).toMatch(/^visitor=visitor-[0-9a-f-]{36}; Path=\/$/);
     expect(html).toContain("You are browsing as a visitor.");
     expect(html).not.toContain("admin-link");
     expect((await fetch(`${base}/api/admin/orders`)).status).toBe(401);

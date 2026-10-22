@@ -117,7 +117,7 @@ async function prepareRound(options: RoundOptions = {}) {
   const accountRegistry = accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments"));
   const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_API], accountRegistry });
   if (context.status !== "available") throw new Error(context.reason);
-  // (Every web and API target also offers the signed-out visitor as a variant of its own; these rounds run the apps' own accounts.)
+  // (Every qualified web and API target also offers the signed-out visitor as a variant of its own; these rounds run the apps' own accounts.)
   const targets = context.targets.filter((item) => item.kind === "api" && item.accountProfileId !== "rovara-anonymous" && (accounts.length === 0 || accounts.includes(item.accountProfileId)))
     .sort((left, right) => left.accountProfileId.localeCompare(right.accountProfileId) || left.targetId.localeCompare(right.targetId));
   const expectedTargets = accounts.length > 0 ? accounts.length : applications;

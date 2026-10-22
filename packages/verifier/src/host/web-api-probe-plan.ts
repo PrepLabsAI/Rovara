@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
   E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
-  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2ERepository, proposeE2ESetup,
+  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
   selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { compileE2EApplicationScenarios, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../application-build-source.js";
@@ -194,7 +194,8 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const candidate = createCandidateManifest([{ repositoryId: "fixture/orders", commitSha: "a".repeat(40), treeSha }]);
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
     treePaths: sourceFiles.map((item) => item.path).sort(), sources: sourceFiles.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
-  const discovery = inspectE2ERepository(snapshot, candidate);
+  // The application path's discovery also offers each base target's signed-out variant; the setup proposal is made from the plain one, as the broker makes it.
+  const discovery = inspectE2EApplicationRepository(snapshot, candidate);
   // One target per account profile; several scenarios of one account share it.
   const accountProfileIds = [...new Set(options.accountScenarios?.map((item) => item.accountProfileId) ?? [options.role === "viewer" ? "orders-viewer" : "orders-owner"])];
   const targets = accountProfileIds.map((profileId) => {
@@ -230,14 +231,14 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
       recipeDigest: application.recipe!.recipeDigest, sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths),
       runtimeProfileId, accountProfileId: accountProfileIds[index]! })), runtimeAccountRefs: accountRefs, unavailableTargetRefs: [] });
   // The probe qualifies the runtime that targets are approved against, so its setup carries that qualified profile like a real approved setup.
-  const setupProposal = proposeE2ESetup({ inspection: discovery.inspection, snapshot, expectedCandidate: candidate, readyProfiles: [{ kind, profileId: runtimeProfileId }] });
+  const setupProposal = proposeE2ESetup({ inspection: inspectE2ERepository(snapshot, candidate).inspection, snapshot, expectedCandidate: candidate, readyProfiles: [{ kind, profileId: runtimeProfileId }] });
   const setupApproval = { artifactId: "setup-approval", digest: hash(canonicalJson(setupProposal)) };
   const planDigest = "c".repeat(64);
   const semanticApproval = { artifactId: "semantic-approval", digest: "d".repeat(64) };
   const applicationApprovalBinding = deriveE2EApplicationApprovalBinding({ preparedSnapshot: snapshot, intent, artifactId: semanticApproval.artifactId,
     artifactSha256: semanticApproval.digest, planDigest, setupProposal, setupApproval });
   const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: scenarios.map((item) => item.scenarioId),
-    targets: setupProposal.targets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
+    targets: withE2EAnonymousTargets(setupProposal.targets, discovery.anonymous), defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
     // The real web engine reports screenshot and video capability, and the compiler binds the launch descriptor to the capture policy.
     capture: { screenshots: kind === "web", traces: false, video: kind === "web", downloads: false },
     limits: { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 60_000, caseTimeoutMs: 120_000,

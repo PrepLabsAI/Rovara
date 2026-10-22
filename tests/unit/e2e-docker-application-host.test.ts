@@ -1018,6 +1018,16 @@ describe("docker application host: the recipe-declared account seed", () => {
     }
   });
 
+  it("gives the seed and the app a home and an npm cache where /tmp is writable, and no registry call of their own (F3, and the unmocked-external-call CI saw)", async () => {
+    const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    for (const args of [fake.argsFor("seed"), fake.argsFor("app")]) {
+      for (const setting of ["HOME=/tmp/home", "npm_config_cache=/tmp/home/.npm", "npm_config_update_notifier=false", "npm_config_audit=false", "npm_config_fund=false", "npm_config_offline=true"]) {
+        expect(args.some((value, index) => args[index - 1] === "-e" && value === setting), setting).toBe(true);
+      }
+    }
+  });
+
   it("runs the recipe's seed command in a seed container with the app container's flags, the data volume and the two file variables, before the app starts", async () => {
     const fake = new FakeDockerCli(); const { s } = await accountsSetup(fake);
     expect((await runWith(s)).unavailableReason).toBeNull();
@@ -1035,7 +1045,6 @@ describe("docker application host: the recipe-declared account seed", () => {
       expect(args.filter((value) => value.endsWith(":/app:ro"))).toHaveLength(1);
       expect(args.filter((value) => value.endsWith(":/app/.owned:ro"))).toHaveLength(1);
       expect(args).not.toContain("ORDERS_TEST_SEED_FILE=/app/.owned/seed.json");
-      expect(args).toContain("--dns");
     }
     expect(seed).not.toContain("--network-alias");
     // The seed finishes before the app exists, and after the mocks and the sinkhole it may need to resolve names through.
@@ -1231,6 +1240,15 @@ describe("docker application host: an inferred-recipe app and the anonymous prof
     expect(commands).toHaveLength(2);
     expect(commands[1]).toEqual(["npm", "ci"]);
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
+  it("starts the inferred app with npm's home and cache in /tmp and no registry call of npm's own: an update check or audit would reach the sinkhole and make the case unmocked-external-call", async () => {
+    const fake = new FakeDockerCli(); const { s } = await inferredSetup(fake);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    const app = fake.argsFor("app");
+    for (const setting of ["HOME=/tmp/home", "npm_config_cache=/tmp/home/.npm", "npm_config_update_notifier=false", "npm_config_audit=false", "npm_config_fund=false", "npm_config_offline=true"]) {
+      expect(app.some((value, index) => app[index - 1] === "-e" && value === setting), setting).toBe(true);
+    }
   });
 
   it("creates no account, no seed, no data volume and no keeper: the plan has no accounts and the owned mount no seed file or accounts file", async () => {

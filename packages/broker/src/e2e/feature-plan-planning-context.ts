@@ -1,6 +1,6 @@
 import {
   E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2EApiMockFixtureSchema, canonicalJson, e2eAnonymousRuntimeAccountRef, createE2EOpenApiFixtureDescriptor, e2eApplicationRecipeIsProjectContract, inspectE2EPortableSource,
-  inspectE2ERepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract, redactSecrets, verifyE2ESourceSnapshot,
+  inspectE2EApplicationRepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract, redactSecrets, verifyE2ESourceSnapshot, withE2EAnonymousTargets,
   type E2EAppRecipe, type E2EApplicationProjectContract, type E2EPolicy, type E2ERuntimeAccountRef, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { E2EAccountRegistryError, latestAccountRef, type E2EAccountRegistryEntry } from "./application-account-registry.js";
@@ -26,6 +26,8 @@ export type FeatureE2EPlanningContext = {
   runtimeRefs?: Array<{ targetId: string; applicationId: string; recipeDigest: string | null; sourceRefs: Array<{ path: string; sha256: string }>;
     runtimeProfileId: string; accountProfileId: string }>;
   unavailableTargetRefs?: Array<{ targetId: string; applicationId: string; accountProfileId: string; sourceRefs: Array<{ path: string; sha256: string }> }>;
+  /** Base targets whose implicit signed-out (`rovara-anonymous`) variant is not offered because the target inventory (12) is full; absent when every variant fits. */
+  anonymousVariantsOmitted?: Array<{ targetId: string; reason: "target-inventory-full" }>;
   /** Why each unavailable target cannot run application scenarios now; kept apart from the refs, which the proposal copies back strictly. */
   unavailableReasons?: Array<{ targetId: string; reason: FeatureE2EUnavailableReason }>;
   /** The step and assertion kinds a READY runtime executes, once per target kind that has an executable target. */
@@ -117,9 +119,15 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       || (preparedCommitSha !== null && preparedCommitSha !== snapshot.commitSha)) {
       return { status: "unknown", reason: "source snapshot identity does not match the prepared commit" };
     }
-    const discovered = inspectE2ERepository(snapshot, snapshot.candidate);
+    const discovered = inspectE2EApplicationRepository(snapshot, snapshot.candidate);
+    // The policy holds the base targets; each base web or API target also offers the signed-out visitor, derived here from the base (Ruling AZ), never stored.
+    // A project whose targets are not approved on the qualified runtime profile reads exactly what it did (Ruling AQ): its targets get no variant in what the planner is shown.
+    const effectiveTargets = withE2EAnonymousTargets(policy.targets, discovered.anonymous)
+      .filter((target) => target.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID || isE2EQualifiedRuntimeProfileId(target.runtimeProfileId));
+    const anonymousVariantsOmitted = discovered.anonymous.omittedBaseTargetIds.filter((id) => policy.targets.some((target) => target.targetId === id && isE2EQualifiedRuntimeProfileId(target.runtimeProfileId)))
+      .map((targetId) => ({ targetId, reason: "target-inventory-full" as const }));
     const sourceByPath = new Map(snapshot.sources.map((source) => [source.path, source]));
-    const targetedApplicationIds = new Set(policy.targets.map((configured) => configured.applicationId));
+    const targetedApplicationIds = new Set(effectiveTargets.map((configured) => configured.applicationId));
     const identitylessApplicationIds = new Set<string>();
     const applicationRefs = discovered.inspection.applications.flatMap((application) => {
       try {
@@ -133,7 +141,7 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
         return [];
       }
     });
-    const targets = policy.targets.flatMap((configured) => {
+    const targets = effectiveTargets.flatMap((configured) => {
       const found = discovered.inspection.proposedTargets.find((target) => target.targetId === configured.targetId
         && target.applicationId === configured.applicationId && target.kind === configured.kind && target.accountProfileId === configured.accountProfileId);
       return found === undefined ? [] : [{ targetId: found.targetId, applicationId: found.applicationId, kind: found.kind, accountProfileId: found.accountProfileId }];
@@ -144,7 +152,7 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     // The runtime profile is the one the project's approved setup assigned (policy targets), not the discovery placeholder; the target is
     // executable for application scenarios only while that profile's runtime is READY for the project now and its recipe is the project's own.
     const readyRuntimes = identity.readyRuntimes ?? [];
-    const configuredTarget = (targetId: string) => policy.targets.find((item) => item.targetId === targetId)!;
+    const configuredTarget = (targetId: string) => effectiveTargets.find((item) => item.targetId === targetId)!;
     const readyRuntimeFor = (target: (typeof targets)[number]): ReadyE2ERuntime | undefined => {
       const profileId = configuredTarget(target.targetId).runtimeProfileId;
       return target.kind === "web" || target.kind === "api" ? readyRuntimes.find((item) => item.kind === target.kind && item.profileId === profileId) : undefined;
@@ -273,7 +281,7 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       baselineScenarioIds: policy.baselineScenarioIds, targets, applicationRefs, runtimeRefs, unavailableTargetRefs,
       // Ruling AQ: a policy with no target on a qualified profile (every P0 project) keeps the pre-2.2 context and prompt exactly.
       ...(targets.some((target) => isE2EQualifiedRuntimeProfileId(configuredTarget(target.targetId).runtimeProfileId)) || unavailableReasons.some((item) => item.reason === "no-source-identity")
-        ? { unavailableReasons, executableKinds, runtimeAccountRefs } : {}),
+        ? { unavailableReasons, executableKinds, runtimeAccountRefs, ...(anonymousVariantsOmitted.length === 0 ? {} : { anonymousVariantsOmitted }) } : {}),
       portableOperations, mockFixtures: mockFixtures.slice(0, 32), accountContextRefs,
     };
     if (Buffer.byteLength(canonicalJson(context), "utf8") > MAX_PLANNING_CONTEXT_BYTES) {

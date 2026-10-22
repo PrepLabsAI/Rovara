@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { E2EScenarioResultsSchema, E2E_DISPLAY_SCREENSHOT_MAX_BYTES, canonicalJson, redactText,
+import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2EScenarioResultsSchema, E2E_DISPLAY_SCREENSHOT_MAX_BYTES, canonicalJson, redactText,
   type E2E_DISPLAY_ASSERTION_KINDS, type E2EAssertion, type E2EDisplayBaseline, type E2EDisplayScenario, type E2EScenarioResults } from "@agentx/contracts";
 
 /**
@@ -41,6 +41,14 @@ export function scenarioTitle(scenarioId: string): string {
   const words = displayText(scenarioId.replace(/[-_]+/gu, " "), 120);
   if (words === "") return "Scenario";
   return `${words.charAt(0).toUpperCase()}${words.slice(1)}`;
+}
+
+/**
+ * What the page and Slack call the account of a row. A row stores the profile id (its schema allows plain ids only, and stored rows are read by older readers); the signed-out
+ * visitor (Ruling AZ) is not an account, so it reads as what it is.
+ */
+export function accountDisplayName(label: string): string {
+  return label === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID ? "Signed-out visitor" : label;
 }
 
 /** An account by its profile id; anything that is not a plain id (an email, say) is only "account". */

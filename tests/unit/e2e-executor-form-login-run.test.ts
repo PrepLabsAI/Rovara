@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { chromium } from "playwright-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { E2E_EXECUTOR_HOST_MODULE_PATH } from "../../packages/verifier/src/executor/host-registry.js";
-import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { runE2EExecutorSerially as runE2EExecutor } from "../support/executor-run-lock.js";
 import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
 import { startAccountsApp, type AccountsAppProcess } from "../support/accounts-app-process.js";
 import { allOutputText, caseStatusesAll as caseStatuses, observations, resultOf } from "../support/e2e-executor-output.js";

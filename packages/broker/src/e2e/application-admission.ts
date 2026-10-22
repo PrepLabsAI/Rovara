@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
-  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, validateE2EAppBuildBinding,
+  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, inspectE2EApplicationRepository, validateE2EAppBuildBinding, withE2EAnonymousTargets,
   type E2ECreatorAuthority, type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
   type E2EApplicationLaunchTarget, type E2EApplicationPlanIntent, type E2EAppArtifactRef, type E2EAppBuildManifest, type E2ERegisteredRuntime, type E2ERound,
   type E2EApplicationSelectionRecord, type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
@@ -74,7 +74,13 @@ const failure = (error: unknown) => (error instanceof Error ? error.message : "u
  * the setup was approved is refused ("replan"). Only the READY row of the plan's one runtime kind goes into the admission.
  */
 export function buildApplicationExecutionAdmission(input: ApplicationAdmissionInput): ApplicationAdmission {
-  const policy = (() => { try { return E2EPolicySchema.parse(input.policy); } catch (error) { throw refusal(`the pinned project policy is not valid: ${failure(error)}`); } })();
+  // The pinned policy holds the base targets; each qualified base web or API target also offers the signed-out visitor, derived here from the candidate's discovery (Ruling AZ).
+  const policy = (() => {
+    try {
+      const stored = E2EPolicySchema.parse(input.policy);
+      return { ...stored, targets: withE2EAnonymousTargets(stored.targets, inspectE2EApplicationRepository(input.snapshot, input.snapshot.candidate).anonymous) };
+    } catch (error) { throw refusal(`the pinned project policy is not valid: ${failure(error)}`); }
+  })();
   const refs = input.intent.applicationRuntimeRefs;
   if (refs.length === 0) throw new ApplicationPlanDefect("the approved plan has no target that can run application scenarios, so there is nothing to run");
 

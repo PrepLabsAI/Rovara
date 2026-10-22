@@ -4,7 +4,7 @@ import {
   E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ERepositoryInspection, type E2ESetupProposal, type E2ETarget,
 } from "./e2e.js";
 import { canonicalJson } from "./canonical-json.js";
-import { bindE2EAnonymousAccountTargets, bindE2EApplicationAccountTargets, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
+import { bindE2EApplicationAccountTargets, e2eAnonymousVariantOf, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
 import { WEB_API_RUNTIME_PROFILE_ID } from "./e2e-web-api-qualification.js";
 import { e2ePackageManifests, e2eRunnerUnsafePath, parseE2EPackageManifest } from "./e2e-package-manifests.js";
@@ -358,12 +358,10 @@ export function verifyE2ESetupProposal(proposal: E2ESetupProposal, snapshot: Ver
   return verified;
 }
 
+const NODE_WEB_PORT = "4317";
 const NODE_LOCKFILES = ["package-lock.json", "npm-shrinkwrap.json"];
 
-/**
- * `npm ci` plus an optional `npm run build`, then `npm start`, for a root package that has a start script and a lockfile; otherwise null. The recipe sets no port: the Docker host
- * owns it (the synthesized service contract of an inferred recipe is `{ listenPort: 4317, portEnv: "PORT" }`), so it gives the app `PORT=4317` itself.
- */
+/** `npm ci` plus an optional `npm run build`, then `npm start`, for a root package that has a start script and a lockfile; otherwise null. */
 function nodeServiceRecipe(manifest: unknown, treePaths: ReadonlySet<string>): E2EAppRecipe | null {
   if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) return null;
   const scripts = (manifest as { scripts?: unknown }).scripts;
@@ -373,7 +371,7 @@ function nodeServiceRecipe(manifest: unknown, treePaths: ReadonlySet<string>): E
   const command = (args: string[], timeoutMs: number) => ({ program: "npm", args, cwd: ".", timeoutMs, env: {} });
   const body = {
     schemaVersion: 1 as const, build: [command(["ci"], 300_000), ...(script("build") ? [command(["run", "build"], 300_000)] : [])],
-    launch: { kind: "service" as const, start: command(["start"], 60_000), health: { path: "/", expectedStatus: 200 } },
+    launch: { kind: "service" as const, start: { ...command(["start"], 60_000), env: { PORT: NODE_WEB_PORT } }, health: { path: "/", expectedStatus: 200 } },
     serviceProfileIds: [], seedProfileId: "synthetic-seed-v1", accountProfileIds: ["synthetic"], allowedOrigins: ["app-origin"],
   };
   return E2EAppRecipeSchema.parse({ ...body, recipeDigest: createHash("sha256").update(canonicalJson(body)).digest("hex") });
@@ -397,11 +395,61 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
   return { inspection, portableOperations };
 }
 
+/** The implicit signed-out variants of a repository's base web and API targets (Ruling AZ): which were derived, and which base targets could not be offered one. */
+export type E2EAnonymousTargets = Readonly<{
+  variants: ReadonlyArray<Readonly<{ baseTargetId: string; targetId: string }>>;
+  /** Base targets whose signed-out variant does not fit: the target inventory (12) is full. */
+  omittedBaseTargetIds: readonly string[];
+}>;
+const MAX_E2E_TARGETS = 12;
+const TARGET_KIND_ORDER: Record<string, number> = { web: 0, api: 1, mobile: 2, desktop: 3 };
+
+/**
+ * Discovery as the application path reads it: the same inspection, plus the implicit `rovara-anonymous` variant of each base web and API target whose application launches from
+ * its project contract or from the recipe inferred from its package (not from the generic start-script fallback). The variants are derived on every read from the base
+ * targets, and are neither stored in a setup proposal nor part of `inspectE2ERepository`, so a proposal stored before they existed still verifies.
+ */
+export function inspectE2EApplicationRepository(snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: CandidateManifest):
+  { inspection: E2ERepositoryInspection; portableOperations: PortableOperation[]; anonymous: E2EAnonymousTargets } {
+  const found = discoverE2ERepository(snapshot, expectedCandidate);
+  const targets = [...found.inspection.proposedTargets];
+  const variants: Array<{ baseTargetId: string; targetId: string }> = [];
+  const omitted: string[] = [];
+  for (const baseTargetId of found.anonymousBaseTargetIds) {
+    const base = found.inspection.proposedTargets.find((target) => target.targetId === baseTargetId);
+    if (base === undefined) continue;
+    if (targets.length >= MAX_E2E_TARGETS) { omitted.push(baseTargetId); continue; }
+    const variant = e2eAnonymousVariantOf(base);
+    targets.push(variant);
+    variants.push({ baseTargetId, targetId: variant.targetId });
+  }
+  targets.sort((a, b) => TARGET_KIND_ORDER[a.kind]! - TARGET_KIND_ORDER[b.kind]! || a.targetId.localeCompare(b.targetId));
+  return { inspection: { ...found.inspection, proposedTargets: targets }, portableOperations: found.portableOperations, anonymous: { variants, omittedBaseTargetIds: omitted } };
+}
+
+/** The targets of a policy or a setup proposal with the derived anonymous variants of the base targets they hold (each copies its base, runtime profile included); none already there is added twice. */
+export function withE2EAnonymousTargets<T extends E2ETarget>(targets: readonly T[], anonymous: E2EAnonymousTargets): T[] {
+  const result = [...targets];
+  for (const variant of anonymous.variants) {
+    const base = targets.find((target) => target.targetId === variant.baseTargetId);
+    if (base === undefined || (base.kind !== "web" && base.kind !== "api") || result.some((target) => target.targetId === variant.targetId) || result.length >= MAX_E2E_TARGETS) continue;
+    result.push(e2eAnonymousVariantOf(base));
+  }
+  return result;
+}
+
+/** Where the launch recipe of an application of the snapshot came from, or null when it has none: its project contract, the recipe inferred from its package, or the generic start-script fallback. */
+export function e2eApplicationRecipeOrigin(snapshot: VerifiedE2ESourceSnapshot, applicationId: string): "project-contract" | "inferred-node" | "start-script" | null {
+  return discoverE2ERepository(snapshot, snapshot.candidate).recipeOrigins.get(applicationId) ?? null;
+}
+
 /** Where an application's discovered recipe came from; only the generic `npm run <script>` fallback is not a source-declared or lockfile-backed launch contract. */
 type RecipeOrigin = "project-contract" | "inferred-node" | "start-script";
 
-function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: CandidateManifest): { inspection: E2ERepositoryInspection; portableOperations: PortableOperation[]; recipeOrigins: ReadonlyMap<string, RecipeOrigin> } {
+function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: CandidateManifest): { inspection: E2ERepositoryInspection; portableOperations: PortableOperation[]; recipeOrigins: ReadonlyMap<string, RecipeOrigin>; anonymousBaseTargetIds: string[] } {
   const recipeOrigins = new Map<string, RecipeOrigin>();
+  /** The base web and API targets whose application launches from its project contract or from the recipe inferred from its package (not the generic start-script fallback). */
+  const anonymousBaseTargetIds: string[] = [];
   const sources = verifySnapshot(snapshot, expectedCandidate);
   const refs = [...sources.values()].filter((source) => !runnerUnsafe.test(source.path)).map(({ path, sha256 }) => ({ path, sha256 })).sort((a, b) => a.path.localeCompare(b.path));
   const applications: E2ERepositoryInspection["applications"] = [];
@@ -534,8 +582,8 @@ function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCand
         if (projectContract === null && !projectContractMalformed) missingInputs.push({ inputId: "recipe-choice-" + (applications.length + 1), targetIds: target ? [target.targetId] : [], kind: "runtime", disposition: "blocking", reason: "The repository declares both start and dev recipes; choose the intended application launch contract", sourcePaths: [manifest.path] });
       }
     }
-    const baseTargets = target ? [target, ...additionalTargets] : [];
-    let appTargets = baseTargets;
+    let appTargets = target ? [target, ...additionalTargets] : [];
+    const baseTargetIds = appTargets.map((item) => item.targetId);
     if (projectContract !== null) {
       try { appTargets = bindE2EApplicationAccountTargets({ contract: projectContract, applicationId: appId, baseTargets: appTargets }); }
       catch {
@@ -549,11 +597,8 @@ function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCand
       if (appTargets.length) missingInputs.push({ inputId: "native-runtime-" + (applications.length + 1), targetIds: appTargets.map((item) => item.targetId), kind: "runtime", disposition: "mock-substitutable", reason: `The ${kind} build and launch runtime profile is unavailable in this phase`, sourcePaths: runtimeSources.length ? runtimeSources : [manifest.path] });
     }
     if (recipe !== null) recipeOrigins.set(appId, projectContract !== null ? "project-contract" : recipeFromInference ? "inferred-node" : "start-script");
-    // Every web and API target with a launch recipe also offers the signed-out visitor (Ruling AZ), as an implicit variant of its own: an application with no project contract can run
-    // those scenarios and no others. The variants are proposed targets, but not portable-operation targets: a signed-out visitor invokes no package export.
-    const appProposedTargets = (kind === "web" || kind === "api") && recipe !== null
-      ? [...appTargets, ...bindE2EAnonymousAccountTargets({ applicationId: appId, baseTargets, otherTargetCount: appTargets.length - baseTargets.length }).slice(baseTargets.length)] : appTargets;
-    addApplication(appId, kind, sourcePaths, appProposedTargets, recipe);
+    addApplication(appId, kind, sourcePaths, appTargets, recipe);
+    if ((kind === "web" || kind === "api") && recipe !== null && recipeOrigins.get(appId) !== "start-script") anonymousBaseTargetIds.push(...baseTargetIds);
     for (const dependency of packageDependencies) {
       const candidates = manifestsByName.get(dependency) ?? [];
       const spec = deps[dependency];
@@ -816,5 +861,5 @@ function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCand
   missingInputs.sort((a, b) => a.inputId.localeCompare(b.inputId));
   portableOperations.sort((a, b) => a.applicationId.localeCompare(b.applicationId) || a.exportName.localeCompare(b.exportName));
   const inspection = E2ERepositoryInspectionSchema.parse({ candidateDigest: snapshot.candidate.digest, sources: refs, applications, proposedTargets, dependencyEdges, proposedScenarios: [], missingInputs });
-  return { inspection, portableOperations, recipeOrigins };
+  return { inspection, portableOperations, recipeOrigins, anonymousBaseTargetIds: anonymousBaseTargetIds.sort() };
 }

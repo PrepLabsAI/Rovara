@@ -277,20 +277,10 @@ export function e2eAnonymousTargetId(baseTargetId: string): string {
 }
 
 /**
- * The base targets and the implicit `rovara-anonymous` variant of each web or API one (Ruling AZ), copied from the base and differing in the target id and the account profile
- * only. A target that is already an anonymous variant gets none, and none is added for a base that already has one. The inventory holds 12 targets: `otherTargetCount` is how many
- * the application has besides these bases (its source-declared account variants), and variants are added only while they all fit.
+ * The implicit `rovara-anonymous` variant of a base web or API target (Ruling AZ): the base's fields, with the target id and the account profile changed. It is derived whenever
+ * targets are read; it is never stored in a setup proposal or in discovery output, so proposals approved before it existed keep verifying.
  */
-export function bindE2EAnonymousAccountTargets(input: { applicationId: string; baseTargets: readonly E2ETarget[]; otherTargetCount?: number }): E2ETarget[] {
-  const result: E2ETarget[] = [...input.baseTargets];
-  const existing = new Set(result.map((target) => target.targetId));
-  const variants: E2ETarget[] = [];
-  for (const base of input.baseTargets) {
-    if (base.applicationId !== input.applicationId) throw new Error("application anonymous variant references a foreign base target");
-    if ((base.kind !== "web" && base.kind !== "api") || base.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) continue;
-    const variantId = e2eAnonymousTargetId(base.targetId);
-    if (existing.has(variantId)) continue;
-    variants.push(E2ETargetSchema.parse({ ...base, targetId: variantId, accountProfileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID }));
-  }
-  return result.length + variants.length + (input.otherTargetCount ?? 0) > 12 ? result : [...result, ...variants];
+export function e2eAnonymousVariantOf<T extends E2ETarget>(base: T): T {
+  if ((base.kind !== "web" && base.kind !== "api") || base.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) throw new Error("only a base web or API target has an anonymous variant");
+  return E2ETargetSchema.parse({ ...base, targetId: e2eAnonymousTargetId(base.targetId), accountProfileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID }) as T;
 }

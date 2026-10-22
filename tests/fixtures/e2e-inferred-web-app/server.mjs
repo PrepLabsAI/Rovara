@@ -1,27 +1,32 @@
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
-// A small storefront for the anonymous-scenario path (Task 3.3). It has no project contract, no accounts and no seed: it listens on the port the host gives it in PORT (4317 when
-// the variable is not set) and shows every visitor the same welcome page. The admin area is behind a sign-in it does not implement, so a signed-out visitor sees the welcome
-// marker and no admin link.
-const port = Number(process.env.PORT ?? 4317);
+// A small storefront for the anonymous-scenario path (Task 3.3). It has no project contract, no accounts and no seed: it listens on the port the host gives it in PORT and shows every
+// visitor the same welcome page. The admin area is behind a sign-in it does not implement, so a signed-out visitor sees the welcome marker and no admin link. Like any storefront it
+// gives each visitor an id, in a cookie and in local storage, and prints it: a visitor id is no credential.
 
-const page = `<!doctype html>
+function page(visitorId) {
+  return `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Inferred shop</title></head>
 <body>
   <h1 data-testid="welcome">Welcome to the shop</h1>
   <p data-testid="visitor">You are browsing as a visitor.</p>
+  <p data-testid="visitor-id">${visitorId}</p>
   <a data-testid="sign-in-link" href="/signin">Sign in</a>
+  <script>localStorage.setItem("visitor_id", ${JSON.stringify(visitorId)});</script>
 </body>
 </html>
 `;
+}
 
 export function createApplication() {
   return createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://shop.invalid");
     if (request.method === "GET" && url.pathname === "/") {
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(page);
+      const visitorId = `visitor-${randomUUID()}`;
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "set-cookie": `visitor=${visitorId}; Path=/` });
+      response.end(page(visitorId));
       return;
     }
     if (request.method === "GET" && url.pathname === "/signin") {
@@ -45,5 +50,11 @@ export function createApplication() {
 }
 
 if (import.meta.url === new URL(process.argv[1] ?? "", "file:").href) {
+  // There is no default port: the host gives the app its port in PORT, and an app started without one does not start.
+  const port = Number(process.env.PORT);
+  if (!Number.isInteger(port) || port < 1) {
+    console.error("PORT is not set: the host gives the app its port");
+    process.exit(1);
+  }
   createApplication().listen(port, "0.0.0.0");
 }

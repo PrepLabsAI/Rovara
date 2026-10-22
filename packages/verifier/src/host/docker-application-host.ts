@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, cp, lstat, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_DATA_VOLUME_DEFAULT_MIB, E2E_EXECUTOR_APP_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, readE2EApplicationProjectContract, redactText,
+import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_DATA_VOLUME_DEFAULT_MIB, E2E_EXECUTOR_APP_ORIGIN, E2E_FORM_LOGIN_AUTH_PROFILE, E2E_SEED_COMMAND_MAX_TIMEOUT_MS, E2EExecutorPlanSchema, e2eApplicationRecipeOrigin, readE2EApplicationProjectContract, redactText,
   type E2EApplicationExecutionAdmission, type E2ECollection, type E2EExecutorAccount, type E2EExecutorPlan, type E2EFormLogin, type E2ELease, type E2ERunInput } from "@agentx/contracts";
 import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
@@ -236,6 +236,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const sourceSnapshot = compiled.runtimeAdmission.sourceSnapshot;
   const contract = readE2EApplicationProjectContract(sourceSnapshot, applicationId);
   // An application with only an inferred launch recipe has no project contract (Ruling AZ): it has no accounts and runs signed-out cases only, under the seed profile discovery gave it.
+  // The generic start-script fallback has the same seed profile and builds nothing, so it is not a launch the host runs without a contract.
+  if (contract === null && e2eApplicationRecipeOrigin(sourceSnapshot, applicationId) !== "inferred-node") throw new Error("docker application host application has neither a project contract nor an inferred launch recipe");
   if (contract === null ? recipe.seedProfileId !== INFERRED_SEED_PROFILE : !SUPPORTED_SEED_PROFILES.includes(recipe.seedProfileId)) throw new Error(`seed profile ${recipe.seedProfileId} is not supported`);
   if (recipe.seed !== undefined && recipe.seedProfileId !== E2E_ACCOUNTS_FILE_SEED_PROFILE) throw new Error(`a seed command belongs to the ${E2E_ACCOUNTS_FILE_SEED_PROFILE} seed profile`);
   /** True for `rovara-accounts-file/v1`: the host writes the accounts file and gives the seed and the app a per-run data volume. */
@@ -488,6 +490,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const appFlags = (command: { cwd: string; env: Readonly<Record<string, string>> }, alias: string | null) => [
       ...hardening(["--network", network, ...(alias === null ? [] : ["--network-alias", alias]), "--dns", sinkholeAddress]), "--read-only",
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`,
+      // The root is read-only, so npm (the inferred recipe starts through it) gets its home and cache where /tmp is writable, as the build container does, and makes no registry call of its own (an update check, an audit, a funding notice): such a call reaches the sinkhole and makes the case UNKNOWN unmocked-external-call. The recipe's literals come after and may override.
+      "-e", "HOME=/tmp/home", "-e", "npm_config_cache=/tmp/home/.npm", "-e", "npm_config_update_notifier=false", "-e", "npm_config_audit=false", "-e", "npm_config_fund=false", "-e", "npm_config_offline=true",
       ...(accountsFileSeed ? ["-v", `${dataVolume}:${DATA_DIR}`] : []), "-w", containerCwd("/app", command.cwd),
       ...Object.entries(command.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
       // Every declared origin is one of the run's own containers: the approved mock when there is one, the sinkhole otherwise. These come after the recipe's literals, so the recipe cannot point an origin elsewhere.

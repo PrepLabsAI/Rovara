@@ -21,6 +21,12 @@ export const anonymousWebScenarios = {
     assertions: [{ kind: "visible", testId: "welcome", equals: true }, { kind: "text", testId: "visitor", equals: "You are browsing as a visitor." }] }) },
   noAdmin: { accountProfileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, scenario: (targetId: string): E2EScenario => ({ ...base("visitor-has-no-admin-link", targetId),
     steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "admin-link", equals: false }] }) },
+  /**
+   * A scenario the page fails on purpose, so that its observation holds the page's own text: the visitor id the storefront prints (36 characters, also in a cookie and in local
+   * storage). A visitor id is no credential, so the case must be FAILED, never a credential leak.
+   */
+  echoesVisitorId: { accountProfileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, scenario: (targetId: string): E2EScenario => ({ ...base("visitor-id-is-shown", targetId),
+    steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "text", testId: "visitor-id", equals: "no visitor id" }] }) },
   /** A claim the storefront cannot meet: the case must be FAILED (an assertion that does not hold), never UNKNOWN. */
   expectsAdmin: { accountProfileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, scenario: (targetId: string): E2EScenario => ({ ...base("visitor-expects-admin-link", targetId),
     steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "admin-link", equals: true }] }) },

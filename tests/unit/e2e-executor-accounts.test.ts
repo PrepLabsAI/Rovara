@@ -310,6 +310,9 @@ describe("the anonymous profile in the executor (rovara-anonymous)", () => {
     const store = createExecutorSessionStore({ plan: anonymous.plan, fetchImpl });
     const opened = await store.open(anonymousOpen(), signal);
     expect(calls).toEqual([]);
+    // The browser port asks, so that what the application sets for a visitor (a visitor id, a cart) is never taken for a session secret (F6).
+    expect(store.isAnonymous(opened.sessionRef)).toBe(true);
+    expect(store.isAnonymous("rovara-session-unknown")).toBe(false);
     expect(opened.sessionRef).toMatch(/^rovara-anonymous-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     expect(opened.accountIdDigest).toBe(e2eAnonymousAccountIdDigest(anonymousApplicationId));
     const facts = store.sessionFacts(opened.sessionRef, "service");

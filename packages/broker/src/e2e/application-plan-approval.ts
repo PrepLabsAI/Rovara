@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, Ec2RuntimeBindingSchema, canonicalJson,
-  E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs, e2eRuntimeKindMatchesTarget, inspectE2ERepository, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract,
-  type E2EApplicationPlanIntent, type E2EApplicationProjectContract, type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type E2ERuntimeAccountRef, type E2ERuntimeAvailability,
+  E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs, e2eRuntimeKindMatchesTarget, inspectE2EApplicationRepository, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract,
+  withE2EAnonymousTargets, type E2EApplicationPlanIntent, type E2EApplicationProjectContract, type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type E2ERuntimeAccountRef, type E2ERuntimeAvailability,
   type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
 } from "@agentx/contracts";
 import { deriveE2EApplicationFeatureExecutionSelection } from "./application-feature-plan-intent.js";
@@ -186,7 +186,10 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     const parsed = E2EApplicationPlanIntentSchema.safeParse(input.intent);
     if (!parsed.success) return refuse(`the application intent is not valid: ${parsed.error.issues[0]?.message ?? "unreadable"}`, "plan");
     const fullIntent = parsed.data;
-    const policy = E2EPolicySchema.parse(input.policy);
+    const storedPolicy = E2EPolicySchema.parse(input.policy);
+    // The pinned policy holds the base targets; each qualified base web or API target also offers the signed-out visitor, derived from it here (Ruling AZ) and never stored.
+    const discovered = inspectE2EApplicationRepository(input.snapshot, input.snapshot.candidate);
+    const policy = { ...storedPolicy, targets: withE2EAnonymousTargets(storedPolicy.targets, discovered.anonymous) };
     const mixed = fullIntent.scenarios.find((scenario) => !isPortableScenario(scenario) && scenario.steps.some((step) => step.kind === "invoke-contract" || step.kind === "inspect-contract"));
     if (mixed !== undefined) return refuse(`scenario ${mixed.scenarioId} cannot mix portable and application steps`, "plan");
     const applicationScenarios = fullIntent.scenarios.filter((scenario) => !isPortableScenario(scenario));
@@ -210,7 +213,6 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     const intent = applicationRoundIntent(fullIntent);
     const applicationPolicy = { ...policy, baselineScenarioIds: policy.baselineScenarioIds.filter((id) => applicationScenarioIds.has(id)) };
     const bindingDigest = sha256(canonicalJson(Ec2RuntimeBindingSchema.parse(input.runtimeBinding)));
-    const discovered = inspectE2ERepository(input.snapshot, input.snapshot.candidate);
     // Ruling BF: an application round carries exactly one runtime kind (the verifier keys its runtime bindings by profile, so a web row and an api row of
     // one profile cannot be admitted together). Kind-aware rounds wait for M1.3.
     const executableKinds = [...new Set(intent.applicationRuntimeRefs.flatMap((ref) => {

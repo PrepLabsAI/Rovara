@@ -57,16 +57,7 @@ EEEEEEEEEEEEEEEEEEEEEEEE = { isa = XCBuildConfiguration; buildSettings = { SDKRO
       candidate: snapshot.candidate, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, treeComplete: true, treePaths: sources.map((source) => source.path), sources,
     };
     const discovered = inspectE2ERepository(mixed, mixed.candidate);
-    expect(discovered.inspection.proposedTargets.map((item) => item.kind)).toEqual(["web", "web", "api", "api", "mobile", "mobile", "desktop", "desktop", "desktop", "desktop"]);
-    // Every web and API target with a launch recipe also offers the signed-out visitor, as a variant of its own (Ruling AZ).
-    const variants = discovered.inspection.proposedTargets.filter((item) => item.accountProfileId === "rovara-anonymous");
-    expect(variants.map((item) => item.kind).sort()).toEqual(["api", "web"]);
-    for (const variant of variants) {
-      const base = discovered.inspection.proposedTargets.find((item) => `${item.targetId}-anonymous` === variant.targetId)!;
-      expect({ ...variant, targetId: base.targetId, accountProfileId: base.accountProfileId }).toEqual(base);
-    }
-    // The variants are not portable-operation targets: a signed-out visitor invokes no package export.
-    expect(discovered.portableOperations.flatMap((item) => item.targetIds).filter((targetId) => targetId.endsWith("-anonymous"))).toEqual([]);
+    expect(discovered.inspection.proposedTargets.map((item) => item.kind)).toEqual(["web", "api", "mobile", "mobile", "desktop", "desktop", "desktop", "desktop"]);
     expect(discovered.inspection.proposedTargets.filter((item) => item.kind === "mobile").map((item) => item.os)).toEqual(["android", "ios"]);
     expect(discovered.inspection.proposedTargets.filter((item) => item.kind === "desktop").map((item) => item.os).sort()).toEqual(["linux", "linux", "macos", "windows"]);
     expect(discovered.inspection.applications.find((item) => item.applicationId === "api-app")?.sourcePaths).toContain("apps/api/openapi.yaml");
@@ -104,36 +95,19 @@ describe("qualified web/API targets and Node launch recipes", () => {
 
   it("assigns the READY profile to a web target and keeps the placeholder when none is ready", () => {
     const source = web({ start: "node server.js" });
-    // (The second target of each is the web target's implicit signed-out variant, on the same runtime profile as its base.)
-    expect(propose(source, [{ kind: "web", profileId: PROFILE }]).targets.map((item) => item.runtimeProfileId)).toEqual([PROFILE, PROFILE]);
-    expect(propose(source, []).targets.map((item) => item.runtimeProfileId)).toEqual(["web-phase-unavailable", "web-phase-unavailable"]);
-    expect(propose(source, [{ kind: "api", profileId: PROFILE }]).targets.map((item) => item.runtimeProfileId)).toEqual(["web-phase-unavailable", "web-phase-unavailable"]);
+    expect(propose(source, [{ kind: "web", profileId: PROFILE }]).targets.map((item) => item.runtimeProfileId)).toEqual([PROFILE]);
+    expect(propose(source, []).targets.map((item) => item.runtimeProfileId)).toEqual(["web-phase-unavailable"]);
+    expect(propose(source, [{ kind: "api", profileId: PROFILE }]).targets.map((item) => item.runtimeProfileId)).toEqual(["web-phase-unavailable"]);
   });
 
   it("assigns the READY api profile to an API target only", () => {
     const source = snapshotOf({ "package.json": JSON.stringify({ name: "shop-api", dependencies: { express: "1" }, scripts: { start: "node s.js" } }) });
-    expect(propose(source, [{ kind: "web", profileId: "other" }, { kind: "api", profileId: PROFILE }]).targets.map((item) => item.runtimeProfileId)).toEqual([PROFILE, PROFILE]);
+    expect(propose(source, [{ kind: "web", profileId: "other" }, { kind: "api", profileId: PROFILE }]).targets.map((item) => item.runtimeProfileId)).toEqual([PROFILE]);
   });
 
   it("leaves mobile, desktop and native targets on their placeholders", () => {
     const source = snapshotOf({ "package.json": JSON.stringify({ name: "desk", dependencies: { electron: "1" }, scripts: { start: "electron ." } }) });
     expect(propose(source, [{ kind: "web", profileId: PROFILE }, { kind: "api", profileId: PROFILE }]).targets.map((item) => item.runtimeProfileId)).toEqual(["electron-phase-unavailable"]);
-  });
-
-  it("proposes an implicit rovara-anonymous variant of every web and API target that has a launch recipe, on the same runtime profile as its base (Ruling AZ)", () => {
-    const source = web({ start: "node server.js" }, { "package-lock.json": "{}" });
-    const proposal = propose(source, [{ kind: "web", profileId: PROFILE }]);
-    expect(proposal.targets.map((item) => [item.targetId, item.kind, item.accountProfileId, item.runtimeProfileId])).toEqual([
-      ["web-1", "web", "synthetic", PROFILE], ["web-1-anonymous", "web", "rovara-anonymous", PROFILE]]);
-    expect(verifyE2ESetupProposal(proposal, source, source.candidate)).toEqual(proposal);
-    const api = snapshotOf({ "package.json": JSON.stringify({ name: "shop-api", dependencies: { express: "1" }, scripts: { start: "node s.js" } }) });
-    expect(propose(api, [{ kind: "api", profileId: PROFILE }]).targets.map((item) => [item.targetId, item.accountProfileId, item.runtimeProfileId])).toEqual([
-      ["api-1", "synthetic", PROFILE], ["api-1-anonymous", "rovara-anonymous", PROFILE]]);
-    // A target with no launch recipe has nothing to run signed out, and a desktop app has no signed-out web visitor.
-    const conflicted = web({ start: "node s.js", dev: "vite" });
-    expect(inspectE2ERepository(conflicted, conflicted.candidate).inspection.proposedTargets.map((item) => item.accountProfileId)).toEqual(["synthetic"]);
-    const desktop = snapshotOf({ "package.json": JSON.stringify({ name: "desk", dependencies: { electron: "1" }, scripts: { start: "electron ." } }) });
-    expect(inspectE2ERepository(desktop, desktop.candidate).inspection.proposedTargets.map((item) => item.accountProfileId)).toEqual(["synthetic"]);
   });
 
   it("round-trips a ready-profile proposal through independent verification and rejects a placeholder that does not match the target kind", () => {
@@ -148,9 +122,7 @@ describe("qualified web/API targets and Node launch recipes", () => {
     const source = web({ start: "node server.js", build: "tsc" }, { "package-lock.json": "{}" });
     const recipe = inferNodeWebRecipe(source)!;
     expect(recipe.build.map((item) => [item.program, ...item.args])).toEqual([["npm", "ci"], ["npm", "run", "build"]]);
-    expect(recipe.launch).toMatchObject({ kind: "service", start: { program: "npm", args: ["start"], cwd: ".", env: {} }, health: { path: "/", expectedStatus: 200 } });
-    // The recipe sets no port: the Docker host owns it and gives the app PORT=4317 itself.
-    expect(JSON.stringify(recipe)).not.toContain("PORT");
+    expect(recipe.launch).toMatchObject({ kind: "service", start: { program: "npm", args: ["start"], cwd: ".", env: { PORT: "4317" } }, health: { path: "/", expectedStatus: 200 } });
     const { recipeDigest, ...body } = recipe;
     expect(recipeDigest).toBe(hash(canonicalJson(body)));
     expect(inspectE2ERepository(source, source.candidate).inspection.applications[0]?.recipe).toEqual(recipe);
@@ -209,13 +181,12 @@ describe("qualified web/API targets and Node launch recipes", () => {
       return { source, proposal: proposeE2ESetup({ inspection: inspectE2ERepository(source, source.candidate).inspection, snapshot: source, expectedCandidate: source.candidate,
         readyProfiles: [{ kind: "web", profileId: "linux-arm64-web-api-v1" }] }) };
     };
-    // The two applications offer four targets (each its signed-out variant too); the profiles listed are given in order and the last one repeats.
     const withProfiles = (proposal: ReturnType<typeof proposed>["proposal"], profiles: string[]) =>
-      ({ ...proposal, targets: proposal.targets.map((item, index) => ({ ...item, runtimeProfileId: profiles[Math.min(index, profiles.length - 1)]! })) });
+      ({ ...proposal, targets: proposal.targets.map((item, index) => ({ ...item, runtimeProfileId: profiles[index]! })) });
 
     it("accepts every web target on the qualified profile", () => {
       const { source, proposal } = proposed();
-      expect(proposal.targets.map((item) => item.runtimeProfileId)).toEqual(Array.from({ length: 4 }, () => "linux-arm64-web-api-v1"));
+      expect(proposal.targets.map((item) => item.runtimeProfileId)).toEqual(["linux-arm64-web-api-v1", "linux-arm64-web-api-v1"]);
       expect(verifyE2ESetupProposal(proposal, source, source.candidate)).toEqual(proposal);
     });
 

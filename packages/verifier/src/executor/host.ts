@@ -183,7 +183,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       // caught by the out scan. Best effort: a closed page has nothing to ask.
       const owned = ownedContexts.get(sessionRef);
       ownedContexts.delete(sessionRef);
-      if (owned) {
+      // The signed-out visitor has no credential, and what an application sets for a visitor (a visitor id, a cart) is not a secret: nothing of it is registered.
+      if (owned && !store.isAnonymous(sessionRef)) {
         try {
           const kept = await owned.storageState();
           for (const cookie of kept.cookies) if (isSessionCookieSecret(cookie)) registerSecret(cookie.value);
@@ -243,7 +244,9 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         await guard(browserContext);
         ownedContexts.set(sessionRef, browserContext);
         // A session cookie the application swaps in while the case runs is registered when its answer arrives.
+        const anonymous = store.isAnonymous(sessionRef);
         browserContext.on("response", (response) => {
+          if (anonymous) return;
           void response.headersArray().then((headers) => {
             for (const header of headers) {
               if (header.name.toLowerCase() !== "set-cookie") continue;

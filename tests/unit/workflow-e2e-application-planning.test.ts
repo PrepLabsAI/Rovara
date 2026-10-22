@@ -403,7 +403,8 @@ describe("planning context for a qualified web target", () => {
 
   it("takes the runtime profile from the approved target and lists the executable step and assertion kinds", () => {
     const context = contextFor(contractSnapshot, ready);
-    expect(context.runtimeRefs).toMatchObject([{ targetId: "web-1", runtimeProfileId: PROFILE }]);
+    // (The target also offers the signed-out visitor, as a variant of its own on the same runtime profile.)
+    expect(context.runtimeRefs).toMatchObject([{ targetId: "web-1", runtimeProfileId: PROFILE }, { targetId: "web-1-anonymous", runtimeProfileId: PROFILE, accountProfileId: "rovara-anonymous" }]);
     expect(context.unavailableTargetRefs).toEqual([]);
     expect(context.unavailableReasons).toEqual([]);
     expect(context.executableKinds).toEqual([{ kind: "web", steps: ["navigate", "fill", "click", "choose-file"], assertions: ["text", "visible", "csv"] }]);
@@ -424,8 +425,8 @@ describe("planning context for a qualified web target", () => {
 
   it("puts the same target in the unavailable list while its runtime is not READY now", () => {
     const context = contextFor(contractSnapshot);
-    expect(context.unavailableTargetRefs).toMatchObject([{ targetId: "web-1" }]);
-    expect(context.unavailableReasons).toEqual([{ targetId: "web-1", reason: "runtime-not-ready" }]);
+    expect(context.unavailableTargetRefs).toMatchObject([{ targetId: "web-1" }, { targetId: "web-1-anonymous" }]);
+    expect(context.unavailableReasons).toEqual([{ targetId: "web-1", reason: "runtime-not-ready" }, { targetId: "web-1-anonymous", reason: "runtime-not-ready" }]);
     expect(context.executableKinds).toEqual([]);
     expect(describeFeatureE2EExecutableKinds(context)).toBe("");
   });
@@ -434,7 +435,8 @@ describe("planning context for a qualified web target", () => {
     const context = contextFor(inferredSnapshot, ready);
     expect(context.unavailableTargetRefs).toMatchObject([{ targetId: "web-1" }]);
     expect(context.unavailableReasons).toEqual([{ targetId: "web-1", reason: "needs-project-contract" }]);
-    expect(context.executableKinds).toEqual([]);
+    // Only its signed-out variant is executable (Ruling AZ).
+    expect(context.executableKinds).toMatchObject([{ kind: "web" }]);
   });
 
   it("states the executable kinds in the planner prompt only for an executable target", () => {
@@ -1814,6 +1816,42 @@ describe("anonymous scenarios and inferred-recipe apps (Ruling AZ)", () => {
     expect(prompt).toContain('"accountProfileId":"rovara-anonymous"');
   });
 
+  it("tells the planner which base targets got no signed-out variant because the 12-target inventory is full (F7)", () => {
+    const manifest = JSON.parse(ordersContractManifest) as { agentx: { e2e: { accountProfiles: Record<string, unknown>[]; targetAccounts: unknown[]; recipe: Record<string, unknown> } } };
+    const e2e = manifest.agentx.e2e;
+    const names = Array.from({ length: 11 }, (_, index) => `acct-${index + 1}`);
+    const profile = e2e.accountProfiles[0]!;
+    e2e.accountProfiles = names.map((profileId) => ({ ...profile, profileId }));
+    const { recipeDigest: _digest, ...recipeBody } = { ...e2e.recipe, accountProfileIds: names } as Record<string, unknown>;
+    void _digest;
+    e2e.recipe = { ...recipeBody, recipeDigest: shaCanonical(recipeBody) };
+    e2e.targetAccounts = names.map((profileId) => ({ baseTargetId: "web-1", profileId }));
+    const full = snapshotOf({ "package.json": JSON.stringify(manifest) });
+    // The repository's discovery holds 12 targets; the policy pins the base alone, to keep the planner's context within its bound.
+    const setup = approvedSetup(full, [{ kind: "web", profileId: PROFILE }], ["web-1"]);
+    expect(setup.proposal.targets).toHaveLength(12);
+    const context = buildFeatureE2EPlanningContext(setup.policy, full, { origin: "approved-setup", preparedCommitSha: null, accountRegistry: registryFor(full), readyRuntimes: readyWeb });
+    if (context.status !== "available") throw new Error(context.reason);
+    expect(context.targets.map((target) => target.accountProfileId)).not.toContain("rovara-anonymous");
+    expect(context.anonymousVariantsOmitted).toEqual([{ targetId: "web-1", reason: "target-inventory-full" }]);
+    expect(planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context })).toContain('"anonymousVariantsOmitted":[{"targetId":"web-1","reason":"target-inventory-full"}]');
+    // Where every variant fits there is nothing to say.
+    const fits = buildFeatureE2EPlanningContext(approvedSetup(inferredSnapshot, [{ kind: "web", profileId: PROFILE }]).policy, inferredSnapshot,
+      { origin: "approved-setup", preparedCommitSha: null, accountRegistry: [], readyRuntimes: readyWeb });
+    if (fits.status !== "available") throw new Error(fits.reason);
+    expect(fits.anonymousVariantsOmitted).toBeUndefined();
+  });
+
+  it("derives the variant from a policy and a setup proposal stored without it, so a project approved before Task 3.3 can plan a signed-out scenario (F1)", () => {
+    const { targetId, scenario } = anonymousOnInferred();
+    const fx = planFixture({ snapshot: inferredSnapshot, targetId, scenario });
+    // What was stored: the base targets alone.
+    expect(fx.setup.proposal.targets.map((target) => target.targetId)).toEqual(["web-1"]);
+    expect(fx.policy.targets.map((target) => target.targetId)).toEqual(["web-1"]);
+    const result = evaluate({ snapshot: inferredSnapshot, targetId, scenario });
+    expect(result.ok, refusal(result)).toBe(true);
+  });
+
   describe("approving the plan", () => {
     it("accepts an anonymous scenario on an inferred target, pins the fixed reference, and needs no registered account", () => {
       const { targetId, scenario } = anonymousOnInferred();
@@ -1843,5 +1881,26 @@ describe("anonymous scenarios and inferred-recipe apps (Ruling AZ)", () => {
         expect(result.ok, `${mode}: ${refusal(result)}`).toBe(true);
       }
     });
+  });
+});
+
+// Ruling CY (review F1): the broker's setup decision for a proposal made on a repository with a web app answers a retry as it always did.
+describe("the setup decision of a project with a web app (nothing stored changed with the signed-out variants)", () => {
+  it("proposes the base targets alone, approves, and answers an approval retried with duplicate: true; the policy it registers holds no variant", async () => {
+    const capture = vi.fn(async () => contractSnapshot);
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+    const admin = { subject: "admin-subject", admin: true };
+    const proposal = await call(harness.handler, { method: "POST", path: "/v1/admin/projects/setup-proposals", user: admin, body: { repositoryUrl: "https://github.com/example/demo.git", ref: "main" } });
+    expect(proposal.status, JSON.stringify(proposal.body)).toBe(200);
+    const policy = E2EPolicySchema.parse(proposal.body.policy);
+    expect(policy.targets.map((target) => target.accountProfileId)).not.toContain("rovara-anonymous");
+    const decide = () => call(harness.handler, { method: "POST", path: "/v1/admin/projects/setup-approvals", user: admin,
+      body: { projectName: "payments", proposalRef: String(proposal.body.proposalRef), proposalSha256: String(proposal.body.proposalSha256), decision: "approve" } });
+    const first = await decide();
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    expect(first.body.duplicate).toBe(false);
+    const retry = await decide();
+    expect(retry.status, JSON.stringify(retry.body)).toBe(200);
+    expect(retry.body.duplicate).toBe(true);
   });
 });

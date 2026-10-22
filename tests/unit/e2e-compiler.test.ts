@@ -429,7 +429,7 @@ describe("trusted E2E compiler", () => {
     });
     const snapshot3: E2ESourceSnapshot = { candidate: candidate3, commitSha: "e".repeat(40), treeSha: "f".repeat(40), treeComplete: true, treePaths: sources3.map((item) => item.path), sources: sources3 };
     const discovered3 = inspectE2ERepository(snapshot3, candidate3);
-    const targets3 = discovered3.inspection.proposedTargets.filter((item) => item.kind === "web" && item.accountProfileId !== "rovara-anonymous");
+    const targets3 = discovered3.inspection.proposedTargets.filter((item) => item.kind === "web");
     const operations3 = discovered3.portableOperations;
     const scenarios3: E2EScenario[] = targets3.map((item, index) => ({ scenarioId: `s${index}`, requirementId: `r${index}`, requestedTargetIds: [item.targetId], required: true, accountProfileId: item.accountProfileId, minimumEvidence: "mock-contract", requiredRealComponentIds: [], steps: [{ kind: "invoke-contract", operationId: operations3.find((operationItem) => operationItem.applicationId === item.applicationId)!.operationId, input: { app: item.applicationId } }], assertions: [{ kind: "state", probeId: "result", equals: { app: item.applicationId }, pollTimeoutMs: 500 }] }));
     scenarios3.push({ ...scenarios3[0]!, scenarioId: "s-one-alt-account", requirementId: "r-one-alt-account", accountProfileId: "synthetic-alt" });

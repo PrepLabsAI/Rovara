@@ -133,7 +133,7 @@ describe("application scenario compilation", () => {
     const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha,
       treeSha, treeComplete: true, treePaths: sourceFiles.map((item) => item.path), sources: sourceFiles };
     const discovered = inspectE2ERepository(snapshot, candidate);
-    const webTargets = discovered.inspection.proposedTargets.filter((item) => item.kind === "web" && item.accountProfileId !== "rovara-anonymous").sort((a, b) => a.applicationId.localeCompare(b.applicationId));
+    const webTargets = discovered.inspection.proposedTargets.filter((item) => item.kind === "web").sort((a, b) => a.applicationId.localeCompare(b.applicationId));
     const target = webTargets.find((item) => item.applicationId === "shop")!;
     const blogTarget = webTargets.find((item) => item.applicationId === "blog")!;
     const docsTarget = webTargets.find((item) => item.applicationId === "docs")!;

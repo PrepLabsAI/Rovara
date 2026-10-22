@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
   E2EApplicationPlanIntentSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
-  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup,
+  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, inspectE2EApplicationRepository, withE2EAnonymousTargets, e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
@@ -61,7 +61,7 @@ export const csvScenario: E2EScenario = { scenarioId: "export-csv", requirementI
 
 /** The id of the implicit `rovara-anonymous` variant of the snapshot's first web or API target (Ruling AZ); every web/API target with a launch recipe offers one. */
 export function anonymousTargetOf(snapshot: E2ESourceSnapshot, kind: "web" | "api" = "web"): string {
-  const found = inspectE2ERepository(snapshot, snapshot.candidate).inspection.proposedTargets.find((item) => item.kind === kind && item.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID);
+  const found = inspectE2EApplicationRepository(snapshot, snapshot.candidate).inspection.proposedTargets.find((item) => item.kind === kind && item.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID);
   if (found === undefined) throw new Error(`the snapshot proposes no anonymous ${kind} target`);
   return found.targetId;
 }
@@ -91,7 +91,8 @@ export function planFixture(input: PlanInput) {
   const snapshot = input.snapshot ?? contractSnapshot;
   const scenario = input.scenario ?? csvScenario;
   const setup = approvedSetup(snapshot, input.setupReady ?? [{ kind: "web", profileId: PROFILE }]);
-  const target = setup.proposal.targets.find((item) => item.targetId === (input.targetId ?? "web-1"))!;
+  // The stored proposal and policy hold the base targets; the signed-out variants are derived from them, as every reader derives them.
+  const target = withE2EAnonymousTargets(setup.proposal.targets, inspectE2EApplicationRepository(snapshot, snapshot.candidate).anonymous).find((item) => item.targetId === (input.targetId ?? "web-1"))!;
   const application = setup.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
   const refs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths)
     .map((ref) => (input.sourceSha === undefined ? ref : { ...ref, sha256: input.sourceSha }));
