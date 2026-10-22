@@ -120,3 +120,153 @@ Live findings fixed on the way (all on the branch, reviewed, CI green):
 5. FX4: Slack "Choose checks and retry" could not re-approve after requalification.
 
 Security hotfix shipped to production the same day (worker git hardening, H3/H3b/H3c backported onto 2deee3d7, release 236bcc99).
+
+## M1.4: AI navigation (agent steps)
+
+M1.4 is accepted when a live web scenario with an `agent` step finds the renamed export button on a real candidate through the governed model route, the deterministic CSV assertion decides PASS, the verified round replays without the model, and the evidence is recorded. This section is the operator runbook for Task 4.9 steps 3 to 7 (`m1-4-plan.md`); the pass criteria are in that plan's "M1.4 live acceptance" section and are not repeated here. The cost of each step is in `m1-4-cost-estimate.md`.
+
+Facts this runbook uses: TEST installation `agentxlivetest123`, account `944937319445`, `us-east-1`; provider Amazon Bedrock; model Claude Haiku 5.5 through the inference profile `us.anthropic.claude-haiku-5-5` (model agreement `AVAILABLE`); fixture project `rovara-web-fixture` (repo `abhishek255/rovara-orders-web-fixture`, Slack `#rovara-web-fixture`). Qualification uses the route `rovara-scripted/v1`, which calls no provider and costs no model spend. The replay (Task 4.6b) runs with no model.
+
+### Owner-approval gates
+
+| Gate | Where | What the owner approves |
+|---|---|---|
+| **G1: first real model call** | Step 3 (the canary) | The first call to Bedrock from Rovara (decision D1). Show the owner the cost table in `m1-4-cost-estimate.md` (and Ruling M4-Q's cost ceiling) before the call. D7 pre-approves model spend within the D2 caps, but not this first call. |
+| G2: runner spend | Step 2 | Covered by D7 (up to 3 qualification runner launches pre-approved, 2026-10-21). Tell the owner when a launch starts; a fourth launch needs a new OK. |
+| G3: fixture push | Step 4 | Covered by D6 (push the m14 baseline to `main` of the fixture repo, close the M1.3 demo PR unmerged). The dry run's file list is shown to the owner first. |
+| G4: Tier 3 | Steps 1 and 3 | Any `iam-missing-grant` the head does not declare, missing Bedrock model access, or a network gap from the runner to `bedrock-runtime`: stop and send the owner one Tier 3 packet. |
+| **G5: merge** | Step 7 | Merging PR E into mainline (D10: no production release). Only after the owner has read the recorded evidence. |
+
+### Preconditions
+
+- PR E is open as a draft with every CI job green, including `linux-runtime` with all `m1-4-journeys` cases, and it has had one full review (Task 4.9 step 2).
+- The PR E head is deployed to TEST with `scripts/test-deploy.ts` (the M1.1 section above, step 1; units `broker,dispatcher,worker-image,executor-image`, plus `control-plane-code` when the head changes other control-plane Lambdas).
+- The owner is signed in to AWS (`aws login --profile agentx-test`) and to Rovara TEST as an administrator (`agentx --env agentxlivetest123 login --admin`).
+- The working tree is clean and `npm run build` has been run (both scripts refuse a dirty tree).
+
+### 1. Check TEST (Task 4.9 step 3)
+
+```sh
+npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --check
+npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --check --json   # same, with the report as one JSON line
+```
+
+Expected result: exit 1 with only these findings, all expected at this point:
+
+- `catalog-not-ready` or a descriptor without `agent`: the rows are still the M1.3 revision (fixed by step 2);
+- `model-route-not-approved` (warning until step 4);
+- `model-access-unverified` (info) if the deploy profile cannot read model availability;
+- `runner-image-mismatch` / `worker-feature-missing` for `task.workflowE2EAgentSteps.v1` on the old runner, which was qualified from an older image (fixed by step 2).
+
+Anything else stops the run:
+
+- `stale-lambda`: deploy again.
+- `iam-missing-grant` that the head template declares: apply it under the standing TEST pre-approval (guarded change set) and tell the owner after.
+- `iam-missing-grant` the head does not declare, `iam-explicit-deny`, `model-agreement-missing` or `model-not-in-catalog`: gate G4, Tier 3 packet.
+
+Record: the head SHA, the exit code, and the `--json` line (the "before" `--check` output for `status.md`).
+
+### 2. Requalify the runner with the 14 probes (Task 4.9 step 4)
+
+```sh
+npx tsx scripts/test-qualify-runtime.ts --env agentxlivetest123 --profile agentx-test            # plan only; read it
+npx tsx scripts/test-qualify-runtime.ts --env agentxlivetest123 --profile agentx-test --apply    # gate G2 (D7)
+```
+
+Spend: one `m6g.large` instance and one 20 GiB gp3 volume. The run waits up to 20 minutes for the worker and up to 60 minutes for the probes. The runner then stays up: it is the runner the demo rounds run on, until it is retired.
+
+Expected result:
+
+- All 14 probes have their expected outcomes. That is the 11 M1.3 probes plus three new ones:
+  - `web-agent-scripted-v1`: PASS (exactly one download, `csv` passes, receipts equal the report);
+  - `web-agent-wrong-action-v1`: EXPECTED_FAILURE, UNKNOWN `agent-no-download`;
+  - `web-agent-app-isolation-v1`: PASS.
+- The registration prints both rows `PROFILE#linux-arm64-web-api-v1#web` and `#api` as `READY`, on a new revision, and the web descriptor lists `agent` with `modelChannel: "rovara-e2e-model-channel/v1"`.
+- The qualification calls no model: its policy uses `rovara-scripted/v1`. Bedrock usage for the account does not move.
+
+Then retire the previous runner, with the commands in the M1.1 section above (`aws ec2 terminate-instances`, then `aws ec2 delete-volume` once the instance is gone). Take its instance and volume IDs from the last requalification entry in `status.md`.
+
+Run `--check` again. It must exit with no findings other than the `model-route-not-approved` warning.
+
+Record: run UUID, new instance ID and private IP, volume ID, role unique ID and the `e2e-runtime/<role unique ID>:<instance ID>/` prefix, challenge ID, `proposalSha256`, both row revisions and their expiry (7 days), the retired runner's IDs and when it was ended. Never paste `challenge.json`.
+
+### 3. Model canary: one real Bedrock call (Task 4.9 step 5) — gate G1
+
+```sh
+# TODO: no canary command exists in the repo yet (scripts/ and packages/cli have none). The broker's route registry
+# reserves the row E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest> for it
+# (packages/broker/src/e2e/model-route-registry.ts), and the plan requires one call through the worker route on the
+# installation's provider. Write the command, plan-first like the other scripts, before this step.
+```
+
+Before the call: show the owner the canary row and the "worst-case day" row of `m1-4-cost-estimate.md`, and get an explicit OK. The call is one model call with output at most 1024 tokens and input at most 32,000 tokens. Its cost is under one cent.
+
+Expected result: one receipt with outcome `ok`, `provider: "amazon-bedrock"`, `modelId: "us.anthropic.claude-haiku-5-5"`, `servedModelId: null` (Bedrock reports none), and non-zero `inputTokens` and `outputTokens`. The payload is accepted with thinking disabled and effort `low`. If Bedrock refuses `output_config`, drop the effort, keep thinking disabled (Ruling M4-Q), and record that.
+
+If model access is refused (AccessDenied, or the agreement is not available) or the runner's subnet cannot reach `bedrock-runtime`: stop. That is gate G4.
+
+Record: the receipt (all fields), `providerPayloadSha256`, the served model (`null` for Bedrock), the latency, and the token counts. This gives the first measured input-token figure for the cost estimate.
+
+### 4. Publish the fixture baseline and approve setup again (Task 4.9 step 6)
+
+```sh
+npx tsx scripts/fixtures/publish-web-fixture.ts --repo abhishek255/rovara-orders-web-fixture --variant m14 --dry-run   # show the owner the file list (G3)
+npx tsx scripts/fixtures/publish-web-fixture.ts --repo abhishek255/rovara-orders-web-fixture --variant m14
+```
+
+The publisher first backs up `main` as `backup/pre-m14-<UTC timestamp>`, and stops without touching `main` if it cannot. Close the M1.3 demo PR unmerged and keep its link (D6). TODO: no script closes it; close it on GitHub by hand, with the owner's OK.
+
+Then approve the setup of `rovara-web-fixture` again, so that the registry writes the route at revision 1 and sets `policy.modelRouteRevision`:
+
+```sh
+# TODO: confirm the re-approval command. The only CLI path that posts /v1/admin/projects/setup-approvals is the
+# setup confirmation inside `agentx --env agentxlivetest123 project add` (packages/cli/src/setup/project-add.ts),
+# which is documented as registering a new project; check that it re-proposes for an already registered project
+# before using it, or add a re-approval command.
+```
+
+Expected result: the setup prompt shows the AI navigation line naming Bedrock and `us.anthropic.claude-haiku-5-5`, the approval is recorded (`decision: "approve"`), and the page shows the route ID and revision 1. Run `--check`: exit 0.
+
+Record: the fixture's new `main` commit SHA and the backup branch, the closed M1.3 PR link, `proposalRef` and `proposalSha256`, the route ID and revision, and the `--check` output.
+
+### 5. Live demo (Task 4.9 step 7)
+
+Post the request in `#rovara-web-fixture`, exactly as written in `m1-4-plan.md` ("M1.4 live acceptance"). Approve the plan when it matches the expected plan there: four scenarios, one of them (`owner-export-ai`) with an `agent` step with `maxActions: 5`, and the route shown as "AI navigation: Bedrock `<model>`; checks decide".
+
+Expected result, in order:
+
+- **Baseline round** on the unchanged code: `owner-export-ai` is skipped and makes no model call (Ruling CX). `owner-toolbar-button` is FAILED (`expected visible, was hidden`).
+- **Candidate round**: broker-verified PASS for every required scenario. The page shows "AI-navigated: the model clicked 'Download orders'; the CSV check decided". `owner-export-ai` has at most 9 receipts (5 + 4), every one `ok`, and their route equals the admission. The candidate's DOM has no `export-csv`.
+- If a candidate fails a check, record it. The send-back loop then runs as usual, and each new candidate round can make up to 9 more calls.
+- The draft PR in the fixture repo has green CI.
+
+Record: the task ID, the plan approval, every round ID with its candidate SHA and verdict, and the operator S3 keys of `agent-actions.json`, the receipts and the redacted transcripts. Also record the total model calls and input/output tokens, against the D2 caps (2,000,000 input tokens and 400 calls per project per UTC day), and the draft PR link. Run a byte scan of the stored transcripts for the seeded credentials; it must find nothing.
+
+### 6. Audit replay (Task 4.9 step 7)
+
+```sh
+# TODO: scripts/e2e-replay-round.ts does not exist in the repo yet (Task 4.6 creates it). The plan's shape is:
+# npx tsx scripts/e2e-replay-round.ts --env agentxlivetest123 --task <task id> --round <verified candidate round id>
+# Check its real flags once it lands.
+```
+
+Expected result: `replay: { status, reproduced: true, downloadSha256Match: true }`, the same download digest as the verified round, zero receipts, and no model socket in the executor arguments (check the runner's host journal). Publication, `qualifiedRound` and `failedRound` are unchanged. The replay uses one runner round and no model.
+
+Record: the replay ID, `reproduced`, the download digest, and the journal line that shows the executor arguments.
+
+### 7. Optional outage drill
+
+The owner decided on 2026-10-21 (D8) that the live outage drill is skipped, and is covered in CI only (journey `agent-model-outage`). Run it live only if the owner asks again:
+
+```sh
+# TODO: no command approves a route revision with a different model ID; route revisions are written only at setup
+# approval (D5). Needs a design before the drill can run live.
+```
+
+Expected result, if run: UNKNOWN `model-unavailable`, publication blocked, a retry offered, no PASS. Then restore the route and approve setup again.
+
+### 8. Finish
+
+- Run `--check` once more (the "after" output). Confirm that no `rovara.run` resources and no `model.sock` remain on the runner.
+- Add one Log entry to `status.md` with everything recorded above, and set M1.4 to done.
+- **Gate G5:** the owner reads the evidence and approves the merge of PR E into mainline. There is no production release (D10).
