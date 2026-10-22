@@ -9,8 +9,8 @@ import { displayText } from "./application-display.js";
  * ledger that is not both gives no block, and the row is still shown.
  *
  * What a block holds: the approved goal (the owner wrote it), the role and name of the page elements the model acted on, how each step ended, the number of model calls and the route.
- * It never holds a typed value, a key, an option label, a scroll direction, a test id, a url, a digest or anything the model wrote; the node of a `type` action is left out altogether,
- * because the element a value was typed into is not something the model "clicked" and its name is the page's, not the owner's.
+ * It never holds a typed value, a key, an option label, a scroll direction, a test id, a digest or anything the model wrote. A `type` action is named by its element (role and name, the label the
+ * page gives it) and the kind of action, never by what was typed; a navigation is named by its app-relative path. `modelCalls` counts the receipts the verified ledger names.
  */
 
 /** The ledger's directory name under `agent/`, as the executor files it (`agentCaseDirectoryName` in the verifier): the first 16 hex of the SHA-256 of the case id. */
@@ -45,17 +45,20 @@ export function agentNavigationOf(input: {
     if (!verified.ok) return undefined;
     if (!crossCheckE2EAgentLedgerReceipts(verified.ledger, input.receipts).ok) return undefined;
     const steps = [...verified.ledger.steps].sort((left, right) => left.stepIndex - right.stepIndex).slice(0, MAX_STEPS).map((step) => {
-      const actedOn: Array<{ role: string; name: string }> = [];
+      const actedOn: Array<{ role: string; name: string; did: (typeof step.actions)[number]["tool"] }> = [];
       for (const action of step.actions) {
-        if (action.outcome !== "ok" || action.node === null || action.tool === "type") continue;
-        const name = displayText(action.node.name, ELEMENT_NAME_LIMIT);
+        if (action.outcome !== "ok") continue;
+        // A navigation has no element: it is named by its app-relative path (no query, no fragment). Any other action is named by its element's role and name; a scroll with no element is not named.
+        const target = action.tool === "navigate" ? (action.url === null ? undefined : { role: "page", name: displayText(action.url, ELEMENT_NAME_LIMIT) })
+          : action.node === null ? undefined : { role: action.node.role, name: displayText(action.node.name, ELEMENT_NAME_LIMIT) };
+        if (target === undefined || target.name === "") continue;
         const previous = actedOn.at(-1);
-        if (name === "" || (previous !== undefined && previous.role === action.node.role && previous.name === name)) continue;
-        if (actedOn.length < MAX_ACTED_ON) actedOn.push({ role: action.node.role, name });
+        if (previous !== undefined && previous.role === target.role && previous.name === target.name && previous.did === action.tool) continue;
+        if (actedOn.length < MAX_ACTED_ON) actedOn.push({ ...target, did: action.tool });
       }
       return { goal: displayText(goals.get(step.stepIndex) ?? "", 120) || "step", actedOn, stop: step.verdict };
     });
     const decidedBy = E2E_DISPLAY_ASSERTION_KINDS.filter((kind) => input.decidedBy.includes(kind));
-    return { steps, modelCalls: input.receipts.length, routeId: displayText(input.routeId, 120) || "route", ...(decidedBy.length === 0 ? {} : { decidedBy }) };
+    return { steps, modelCalls: verified.ledger.steps.reduce((total, step) => total + step.receiptIds.length, 0), routeId: displayText(input.routeId, 120) || "route", ...(decidedBy.length === 0 ? {} : { decidedBy }) };
   } catch { return undefined; }
 }

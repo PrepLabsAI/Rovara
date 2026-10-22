@@ -192,7 +192,7 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     expect(verdict.results[0]!.cases[0]).toMatchObject({ status: "failed", reason: "observed-application-assertion-failure" });
     expect(verdict.display!.scenarios[0]).toMatchObject({ status: "FAILED", failedAssertion: { kind: "csv", expected: "orders.csv", actual: "invoices.csv" } });
     // The row names the button the model took, so the owner can see it was the wrong one.
-    expect(verdict.display!.scenarios[0]!.agentNavigation?.steps[0]?.actedOn).toEqual([{ role: "button", name: "Download invoices" }]);
+    expect(verdict.display!.scenarios[0]!.agentNavigation?.steps[0]?.actedOn).toEqual([{ role: "button", name: "Download invoices", did: "tap" }]);
     expect(pageText(verdict.display!.scenarios)).toContain("AI-navigated: the model clicked 'Download invoices'; the CSV check decided");
   }, 500_000);
 

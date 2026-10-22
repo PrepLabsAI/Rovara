@@ -276,6 +276,18 @@ function agentNavigations(input: { suite: E2ECompiledApplicationSuite; binding: 
   return navigations;
 }
 
+/**
+ * `agentNavigations` for the verdict's path: the block is display data and decides nothing, so a fault while deriving it drops the blocks (the rows are still shown, without a badge) and
+ * leaves what the verifier decided as it is. The operator's log line has the error's name only.
+ */
+function safeAgentNavigations(input: Parameters<typeof agentNavigations>[0]): Map<string, E2EDisplayAgentNavigation> | undefined {
+  try { return agentNavigations(input); }
+  catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_agent_navigation_dropped", errorName: error instanceof Error ? error.name : "unknown" }));
+    return undefined;
+  }
+}
+
 export type ExpectedAssertionAsset = Readonly<{ caseId: string; assertionIndex: number; kind: "state-probe"; id: string; manifestDigest: string; sha256: string; byteLength: number }>;
 type SuiteAssertions = Readonly<{ expectedCases: readonly { caseId: string; scenarioId: string }[];
   bundle: Readonly<{ scenarios: readonly { scenarioId: string; assertions: readonly { kind: string; probeId?: string }[] }[] }> }>;
@@ -405,7 +417,7 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     // it re-derived the value from, and refuses the whole group on any difference. A group without a result shows no observed value.
     const observed = promoted === undefined ? undefined : observedAssertions(collection);
     // How the AI navigated, for the cases the broker decided, from the ledger verified against the registry-bound receipts (never shown for a group the qualifier did not carry to a result).
-    const navigation = promoted === undefined || agentModel.evidence === undefined ? undefined : agentNavigations({ suite, binding, evidence: agentModel.evidence, result: promoted });
+    const navigation = promoted === undefined || agentModel.evidence === undefined ? undefined : safeAgentNavigations({ suite, binding, evidence: agentModel.evidence, result: promoted });
     const shownNavigation = navigation === undefined || navigation.size === 0 ? {} : { agentNavigation: navigation };
     if (qualification.status !== "PASS") return { verdict: qualification.status, reason: qualification.reason.slice(0, OWNER_REASON_MAX_CHARS), ...(promoted === undefined ? {} : { result: promoted }), ...(observed === undefined ? {} : { observed }), ...shownNavigation };
     // A pass also needs the host's own lifecycle to say the run ended cleanly: confirmed cleanup, no timeout or abort, a zero exit code, and no unavailable reason.

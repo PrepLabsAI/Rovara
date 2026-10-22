@@ -55,7 +55,7 @@ describe.runIf(agentRunnable)("the broker's verdict on real agent runs", () => {
     expect(verdict.display?.scenarios).toHaveLength(1);
     expect(verdict.display!.scenarios[0]).toMatchObject({ scenarioId: "agent-export", status: "PASSED" });
     // Task 4.4b: the row says how the AI navigated, from the ledger the broker verified: what it clicked, how the step ended, the calls and the route, and which check decided.
-    expect(verdict.display!.scenarios[0]!.agentNavigation).toEqual({ steps: [{ goal: "Export the orders as a CSV file", actedOn: [{ role: "button", name: "Download orders" }], stop: "concluded" }],
+    expect(verdict.display!.scenarios[0]!.agentNavigation).toEqual({ steps: [{ goal: "Export the orders as a CSV file", actedOn: [{ role: "button", name: "Download orders", did: "tap" }], stop: "concluded" }],
       modelCalls: 2, routeId: SCRIPTED_REGISTRY_ROUTE.routeId, decidedBy: ["csv"] });
     expect(pageText(verdict.display!.scenarios)).toContain("AI-navigated: the model clicked 'Download orders'; the CSV check decided");
     expect(slackText(verdict.display!.scenarios)).toContain("AI navigation: 1 step, 2 model calls (checks decide)");
@@ -68,7 +68,7 @@ describe.runIf(agentRunnable)("the broker's verdict on real agent runs", () => {
     // The row is the broker's own, and names the assertion that failed: the CSV of the wrong file.
     expect(verdict.display!.scenarios[0]).toMatchObject({ status: "FAILED", failedAssertion: { kind: "csv", expected: "orders.csv", actual: "invoices.csv" } });
     // The row names what the model clicked, so the owner can see the model took the wrong button: the decoy, and the CSV check that decided.
-    expect(verdict.display!.scenarios[0]!.agentNavigation?.steps[0]?.actedOn).toEqual([{ role: "button", name: "Download invoices" }]);
+    expect(verdict.display!.scenarios[0]!.agentNavigation?.steps[0]?.actedOn).toEqual([{ role: "button", name: "Download invoices", did: "tap" }]);
     expect(pageText(verdict.display!.scenarios)).toContain("AI-navigated: the model clicked 'Download invoices'; the CSV check decided");
   });
 

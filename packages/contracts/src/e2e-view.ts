@@ -36,6 +36,8 @@ export const E2E_ARTIFACT_RETENTION_TAG = `${E2E_ARTIFACT_RETENTION_TAG_KEY}=${E
 
 /** How an AI-navigated step ended, as the executor's ledger recorded it. */
 export const E2E_DISPLAY_AGENT_STOPS = ["concluded", "cut-short", "failed"] as const;
+/** What the model did to an element (the ledger's tool): the badge picks its verb from it. Absent in a block written before the kinds were recorded. */
+export const E2E_DISPLAY_AGENT_ACTIONS = ["tap", "type", "press", "select", "scroll", "navigate"] as const;
 
 /**
  * Display schema v3 (M1.4 Task 4.4b): what the AI did in an AI-navigated scenario, derived by the broker from the verified action ledger and from nothing the worker says about
@@ -45,7 +47,7 @@ export const E2E_DISPLAY_AGENT_STOPS = ["concluded", "cut-short", "failed"] as c
 export const E2EDisplayAgentNavigationSchema = z.object({
   steps: z.array(z.object({
     goal: z.string().min(1).max(120),
-    actedOn: z.array(z.object({ role: z.string().regex(/^[a-z]{1,32}$/), name: z.string().max(60) }).strict()).max(8),
+    actedOn: z.array(z.object({ role: z.string().regex(/^[a-z]{1,32}$/), name: z.string().max(60), did: z.enum(E2E_DISPLAY_AGENT_ACTIONS).optional() }).strict()).max(8),
     stop: z.enum(E2E_DISPLAY_AGENT_STOPS),
   }).strict()).max(3),
   modelCalls: z.number().int().min(0).max(1000),

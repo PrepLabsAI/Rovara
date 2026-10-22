@@ -202,16 +202,14 @@ const groupReasonCode = (reason: string): string | undefined => /^([a-z][a-z0-9-
 
 /**
  * The sentence for a group's own reason: only a code in the closed maps of `E2E_OWNER_SENTENCES` (the route codes, and the AI navigation codes a whole group can be refused with) is put
- * into words, matched exactly on the code. A code that is only noted for the operator, and every other reason, give nothing, and the row says "could not be verified".
+ * into words, matched exactly on the code. A code that is also noted for the operator is logged by code. Every other reason gives nothing, and the row says "could not be verified".
  */
 function groupSentence(reason: string, onOperatorOnly: (code: string) => void): string | undefined {
   const code = groupReasonCode(reason);
   if (code === undefined) return undefined;
-  if (Object.hasOwn(E2E_OWNER_SENTENCES.groupCode, code)) return E2E_OWNER_SENTENCES.groupCode[code];
-  const agent = agentSentence(code);
-  if (agent !== undefined) return agent;
   if (E2E_OWNER_SENTENCES.groupCodeOperatorOnly.includes(code)) onOperatorOnly(code);
-  return undefined;
+  if (Object.hasOwn(E2E_OWNER_SENTENCES.groupCode, code)) return E2E_OWNER_SENTENCES.groupCode[code];
+  return agentSentence(code);
 }
 
 /** One line for the operator's log, with the code only: what the owner is told is "could not be verified", and the operator may need to know why. */
@@ -276,7 +274,7 @@ export function summarizeScenarios(rows: readonly Pick<E2EDisplayScenario, "stat
 function scrubNavigation(navigation: E2EDisplayAgentNavigation): E2EDisplayAgentNavigation {
   return {
     steps: navigation.steps.slice(0, 3).map((step) => ({ goal: displayText(step.goal, 120) || "step", stop: step.stop,
-      actedOn: step.actedOn.slice(0, 8).map((node) => ({ role: node.role, name: displayText(node.name, 60) })) })),
+      actedOn: step.actedOn.slice(0, 8).map((node) => ({ role: node.role, name: displayText(node.name, 60), ...(node.did === undefined ? {} : { did: node.did }) })) })),
     modelCalls: navigation.modelCalls, routeId: displayText(navigation.routeId, 120) || "route",
     ...(navigation.decidedBy === undefined ? {} : { decidedBy: [...navigation.decidedBy] }),
   };

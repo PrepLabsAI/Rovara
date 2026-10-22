@@ -144,8 +144,8 @@ export function e2eMockedBadge(originRef: string): string {
 
 /** The badge of an AI-navigated row: what the model clicked and which check decided (`E2E_OWNER_SENTENCES.badge`). The names are scrubbed again, because a stored row is not trusted to be clean. */
 export function e2eAgentBadge(navigation: E2EDisplayAgentNavigation): string {
-  const clicked = navigation.steps.flatMap((step) => step.actedOn.map((node) => displayText(node.name, 60)).filter((name) => name !== ""));
-  return E2E_OWNER_SENTENCES.badge({ clicked, decidedBy: navigation.decidedBy ?? [] });
+  const acted = navigation.steps.flatMap((step) => step.actedOn.map((node) => ({ did: node.did, name: displayText(node.name, 60) })).filter((node) => node.name !== ""));
+  return E2E_OWNER_SENTENCES.badge({ acted, decidedBy: navigation.decidedBy ?? [] });
 }
 
 /** The one Slack line for AI navigation across a round's rows, or undefined when no row has a navigation block. */
@@ -174,10 +174,12 @@ function baselineSentence(baseline: E2EDisplayBaseline): string {
 }
 
 /** The AI-navigated scenarios a baseline that ran left out: the count in words and their titles, never rows. Nothing for a baseline that skipped none. */
-function skippedAiScenarios(baseline: E2EDisplayBaseline): { sentence: string; titles: string[] } | undefined {
+function skippedAiScenarios(baseline: E2EDisplayBaseline): { sentence: string; titles: string[]; more: string | undefined } | undefined {
   const skipped = baseline.skippedAiScenarios ?? [];
   if (baseline.status === "UNAVAILABLE" || skipped.length === 0) return undefined;
-  return { sentence: E2E_OWNER_SENTENCES.baseline.skipped(skipped.length), titles: skipped.map((item) => displayText(item.title, 120)).filter((title) => title !== "").slice(0, SKIPPED_TITLES_LIMIT) };
+  const titles = skipped.map((item) => displayText(item.title, 120)).filter((title) => title !== "");
+  return { sentence: E2E_OWNER_SENTENCES.baseline.skipped(skipped.length), titles: titles.slice(0, SKIPPED_TITLES_LIMIT),
+    more: titles.length > SKIPPED_TITLES_LIMIT ? E2E_OWNER_SENTENCES.baseline.skippedMore(titles.length - SKIPPED_TITLES_LIMIT) : undefined };
 }
 
 const originsOf = (rows: readonly E2EDisplayScenario[]) => [...new Set(rows.flatMap((row) => row.mockedOrigins.map((origin) => displayText(origin, 200))).filter((origin) => origin !== ""))].sort();
@@ -198,7 +200,7 @@ export function renderE2EScenarioSlackBlocks(results: E2EScenarioResults, option
   if (results.baseline !== undefined) {
     lines.push(slackBounded(baselineSentence(results.baseline), 200));
     const skipped = skippedAiScenarios(results.baseline);
-    if (skipped !== undefined) lines.push(slackBounded(skipped.sentence, 200), slackBounded(`${E2E_OWNER_SENTENCES.baseline.skippedListLead} ${skipped.titles.join(", ")}`, 400));
+    if (skipped !== undefined) lines.push(slackBounded(skipped.sentence, 200), slackBounded(`${E2E_OWNER_SENTENCES.baseline.skippedListLead} ${[...skipped.titles, ...(skipped.more === undefined ? [] : [skipped.more])].join(", ")}`, 400));
   }
   if (options.taskPageUrl !== undefined) lines.push(`<${slackBounded(options.taskPageUrl, 1500)}|Open the task page>`);
   return [{ type: "section", text: { type: "mrkdwn", text: lines.join("\n").slice(0, SLACK_RESULTS_MAX_CHARS) } }];
@@ -208,7 +210,7 @@ export function renderE2EScenarioSlackBlocks(results: E2EScenarioResults, option
 function skippedAiHtml(baseline: E2EDisplayBaseline): string {
   const skipped = skippedAiScenarios(baseline);
   if (skipped === undefined) return "";
-  return `<p>${html(skipped.sentence)}</p><p class="muted">${html(E2E_OWNER_SENTENCES.baseline.skippedListLead)}</p><ul class="e2e-skipped">${skipped.titles.map((title) => `<li>${html(title)}</li>`).join("")}</ul>`;
+  return `<p>${html(skipped.sentence)}</p><p class="muted">${html(E2E_OWNER_SENTENCES.baseline.skippedListLead)}</p><ul class="e2e-skipped">${[...skipped.titles, ...(skipped.more === undefined ? [] : [skipped.more])].map((title) => `<li>${html(title)}</li>`).join("")}</ul>`;
 }
 
 function rowsTable(rows: readonly E2EDisplayScenario[], rowAttribute: string, artifactPath: (sha256: string) => string): string {

@@ -22,6 +22,13 @@ describe("display schema v3 rows", () => {
     for (const value of bad) expect(E2EDisplayScenarioSchema.safeParse(value).success, JSON.stringify(value)).toBe(false);
   });
 
+  it("names what the model did to an element with a closed verb kind, and refuses any other", () => {
+    const step = (actedOn: unknown[]) => agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn, stop: "concluded" }] }) });
+    for (const did of ["tap", "type", "press", "select", "scroll", "navigate"]) expect(E2EDisplayScenarioSchema.safeParse(step([{ role: "button", name: "A", did }])).success, did).toBe(true);
+    expect(E2EDisplayScenarioSchema.safeParse(step([{ role: "button", name: "A", did: "hover" }])).success).toBe(false);
+    expect(E2EDisplayScenarioSchema.safeParse(step([{ role: "button", name: "A" }])).success).toBe(true);
+  });
+
   it("is not a v2 row: the v2 schema refuses agentNavigation, and still accepts a row without it", () => {
     expect(E2EDisplayScenarioV2Schema.safeParse(agentRow()).success).toBe(false);
     expect(E2EDisplayScenarioV2Schema.safeParse(row()).success).toBe(true);
@@ -97,10 +104,10 @@ describe("test 24: a group that could not run says why for the closed set of rou
     expect(JSON.stringify(withDetail)).not.toContain("ops@tenant-a.example");
   });
 
-  it("says model-environment-unsafe as 'could not be verified' and leaves one operator log line with the code only", () => {
+  it("says model-environment-unsafe in the owner's approved words and leaves one operator log line with the code only", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const rows = rowsOf([group({ reason: "model-environment-unsafe: HTTPS_PROXY is set to http://10.0.0.5:3128 password=hunter2-secret" })]);
-    expect(rows[0]!.reason).toBe("this check could not be verified");
+    expect(rows[0]!.reason).toBe("This check could not be verified.");
     expect(log).toHaveBeenCalledTimes(1);
     const line = String(log.mock.calls[0]![0]);
     expect(JSON.parse(line)).toMatchObject({ component: "broker", event: "workflow.e2e_group_reason", code: "model-environment-unsafe" });
@@ -127,6 +134,11 @@ describe("test 27: a sentence for every agent code, each a fixed string", () => 
       seen.add(row!.reason!);
     }
     expect(seen.size).toBe(E2E_AGENT_UNKNOWN_CODES.length);
+  });
+
+  it("uses the owner's approved words for model-prompt-credential-match", () => {
+    const [row] = rowsOf([group({ result: unavailableCase("model-prompt-credential-match") })]);
+    expect(row!.reason).toBe("The AI navigator stopped because the page showed a test password, which the AI is never allowed to see; this check could not be decided");
   });
 
   it("uses the plan's exact words for agent-no-download", () => {
@@ -221,6 +233,33 @@ describe("test 25: the badge on an AI-navigated row", () => {
     expect(names(["A"], undefined)).toContain("AI-navigated: the model clicked 'A'; the checks decided");
   });
 
+  it("fix1-3: names the verb of the action, not always 'clicked' (the first named action decides)", () => {
+    const badge = (actedOn: Array<{ role: string; name: string; did?: string }>) => pageOf(results({ scenarios: [agentRow({ agentNavigation: agentNavigation({ decidedBy: ["csv"], steps: [{ goal: "g", actedOn, stop: "concluded" }] }) })] }));
+    expect(badge([{ role: "button", name: "Download orders", did: "tap" }])).toContain("AI-navigated: the model clicked 'Download orders'; the CSV check decided");
+    expect(badge([{ role: "combobox", name: "Sort", did: "select" }])).toContain("AI-navigated: the model chose 'Sort'; the CSV check decided");
+    expect(badge([{ role: "textbox", name: "Search", did: "press" }])).toContain("AI-navigated: the model pressed 'Search'; the CSV check decided");
+    expect(badge([{ role: "textbox", name: "Search", did: "type" }])).toContain("AI-navigated: the model typed into 'Search'; the CSV check decided");
+    expect(badge([{ role: "region", name: "Orders", did: "scroll" }])).toContain("AI-navigated: the model scrolled 'Orders'; the CSV check decided");
+    expect(badge([{ role: "page", name: "/orders", did: "navigate" }])).toContain("AI-navigated: the model went to '/orders'; the CSV check decided");
+    // The first named action decides the verb; the rest are only named. An action with no kind (a block written before the kinds) reads as a click.
+    expect(badge([{ role: "textbox", name: "Search", did: "type" }, { role: "button", name: "Go", did: "tap" }])).toContain("AI-navigated: the model typed into 'Search' and 'Go'; the CSV check decided");
+    expect(badge([{ role: "button", name: "Old" }])).toContain("AI-navigated: the model clicked 'Old'; the CSV check decided");
+    expect(badge([])).toContain("AI-navigated: the model navigated; the CSV check decided");
+  });
+
+  it("fix1-4: a quote, a semicolon, a control or formatting character, or a long run of spaces in a name can't break or mislead the badge", () => {
+    const badge = (name: string) => pageOf(results({ scenarios: [agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [{ role: "button", name, did: "tap" }], stop: "concluded" }] }) })] }));
+    expect(badge("x'; the CSV check decided")).toContain("AI-navigated: the model clicked 'x’, the CSV check decided'; the CSV check decided");
+    expect(badge("x'; the CSV check decided").match(/the CSV check decided/gu)).toHaveLength(2);
+    expect(badge("Go\u202e ok\u0000\u200b\n\tnow")).toContain("clicked 'Go ok now'");
+    expect(badge("Say \"hi\"")).toContain("clicked 'Say ”hi”'");
+    expect(badge("a    b")).toContain("clicked 'a b'");
+    // Slack carries no element name at all, so a name can't reach it, whatever it holds.
+    const slack = slackOf(results({ scenarios: [agentRow({ agentNavigation: agentNavigation({ steps: [{ goal: "g", actedOn: [{ role: "button", name: "<!channel> *bold* `x`", did: "tap" }], stop: "concluded" }] }) })] }));
+    expect(slack).not.toContain("channel");
+    expect(slack).not.toContain("bold");
+  });
+
   it("puts no badge on a row without a navigation block, and leaves such a page exactly as it was", () => {
     const page = pageOf(results());
     expect(page).not.toContain("AI-navigated");
@@ -295,12 +334,24 @@ describe("test 30 (BASEREASON): what the unchanged code did, when AI-navigated c
     expect(raw).toContain("<li>&lt;script&gt;alert(1)&lt;/script&gt; &amp; more</li>");
   });
 
-  it("counts several skipped checks in the plural and bounds the list it prints", () => {
+  it("counts several skipped checks in the plural and bounds the list it prints, saying how many more there are", () => {
     const many = Array.from({ length: 12 }, (_, index) => ({ scenarioId: `ai-${index}`, title: `AI check ${index}` }));
     const value = results({ baseline: { status: "FAILED", scenarios: [row({ status: "FAILED" })], skippedAiScenarios: many } });
     expect(slackOf(value)).toContain("12 AI-navigated checks are not run on the unchanged code.");
     expect(pageOf(value)).toContain("12 AI-navigated checks are not run on the unchanged code.");
     expect(pageOf(value).match(/<li>AI check \d+<\/li>/gu)).toHaveLength(12);
+    expect(pageOf(value)).not.toContain("and 0 more");
+    expect(slackOf(value)).not.toContain("more");
+  });
+
+  it("fix1-5: past 12 titles the page and Slack end the list with 'and N more'", () => {
+    const many = Array.from({ length: 15 }, (_, index) => ({ scenarioId: `ai-${index}`, title: `AI check ${index}` }));
+    const value = results({ baseline: { status: "PASSED", scenarios: [row()], skippedAiScenarios: many } });
+    const page = pageOf(value);
+    expect(page.match(/<li>AI check \d+<\/li>/gu)).toHaveLength(12);
+    expect(page).toContain("<li>and 3 more</li>");
+    expect(slackOf(value)).toContain("Not run before the change: AI check 0, AI check 1, AI check 2, AI check 3, AI check 4, AI check 5, AI check 6, AI check 7, AI check 8, AI check 9, AI check 10, AI check 11, and 3 more");
+    expect(page).toContain("15 AI-navigated checks are not run on the unchanged code.");
   });
 
   it("leaves the baseline of an M1.3 plan (nothing skipped) with no mention of AI navigation", () => {

@@ -40,16 +40,34 @@ function input(over: { ledger?: unknown; receipts?: E2EModelReceipt[]; steps?: S
 describe("agentNavigationOf", () => {
   it("builds the block from a verified ledger: the approved goal, the role and name acted on, how the step ended, the model calls, the route", () => {
     const block = agentNavigationOf(input());
-    expect(block).toEqual({ steps: [{ goal: GOAL, actedOn: [{ role: "button", name: "Download orders" }], stop: "concluded" }], modelCalls: 3, routeId: route.routeId, decidedBy: ["csv"] });
+    expect(block).toEqual({ steps: [{ goal: GOAL, actedOn: [{ role: "button", name: "Download orders", did: "tap" }], stop: "concluded" }], modelCalls: 3, routeId: route.routeId, decidedBy: ["csv"] });
     expect(E2EDisplayAgentNavigationSchema.safeParse(block).success).toBe(true);
   });
 
-  it("names a node by role and name only, never a test id, a url, a digest or a typed value, and leaves out the node of a typed value", () => {
+  it("names a node by role, name and the kind of action only, never a test id, a url of a node, a digest or a typed value", () => {
     const receipts = [receipt(1, 0)];
     const block = agentNavigationOf(input({ receipts, steps: [{ stepIndex: 1, goal: GOAL, receipts, actions: [typed("ada"), typed(null), action({ tool: "navigate", node: null, url: "/orders" }), action()] }] }))!;
     const text = JSON.stringify(block);
-    expect(block.steps[0]!.actedOn).toEqual([{ role: "button", name: "Download orders" }]);
-    for (const leak of ["download-orders", "/orders", e2eAgentValueDigest(KEY, "ada"), e2eAgentValueDigest(KEY, "a-value-not-in-the-goal"), "a-value-not-in-the-goal", "Search", KEY]) expect(text, leak).not.toContain(leak);
+    expect(block.steps[0]!.actedOn).toEqual([{ role: "textbox", name: "Search", did: "type" }, { role: "page", name: "/orders", did: "navigate" }, { role: "button", name: "Download orders", did: "tap" }]);
+    for (const leak of ["download-orders", e2eAgentValueDigest(KEY, "ada"), e2eAgentValueDigest(KEY, "a-value-not-in-the-goal"), "a-value-not-in-the-goal", KEY]) expect(text, leak).not.toContain(leak);
+  });
+
+  it("fix1-3: records the kind of each action, folds only a repeat of the same action on the same element, and leaves out a scroll with no element", () => {
+    const receipts = [receipt(1, 0)];
+    const press = action({ tool: "press", node: { role: "textbox", name: "Search", testId: null }, valueDigest: e2eAgentValueDigest(KEY, "Enter"), valueLiteral: null });
+    const select = action({ tool: "select", node: { role: "combobox", name: "Sort", testId: null }, valueDigest: e2eAgentValueDigest(KEY, "newest"), valueLiteral: null });
+    const scrollOn = action({ tool: "scroll", node: { role: "region", name: "Orders", testId: null }, valueDigest: e2eAgentValueDigest(KEY, "down"), valueLiteral: null });
+    const scrollNowhere = action({ tool: "scroll", node: null, valueDigest: e2eAgentValueDigest(KEY, "down"), valueLiteral: null });
+    const block = agentNavigationOf(input({ receipts, steps: [{ stepIndex: 1, goal: GOAL, receipts, actions: [typed(null), press, select, scrollNowhere, scrollOn, action(), action()] }] }))!;
+    expect(block.steps[0]!.actedOn).toEqual([{ role: "textbox", name: "Search", did: "type" }, { role: "textbox", name: "Search", did: "press" }, { role: "combobox", name: "Sort", did: "select" },
+      { role: "region", name: "Orders", did: "scroll" }, { role: "button", name: "Download orders", did: "tap" }]);
+  });
+
+  it("fix1-6: counts only the receipts the verified ledger names, not every receipt the worker attributes to the case", () => {
+    const named = [receipt(1, 0), receipt(1, 1)];
+    const strays = [receipt(1, 2), receipt(2, 0), receipt(1, 3)];
+    const block = agentNavigationOf(input({ receipts: [...named, ...strays], steps: [{ stepIndex: 1, goal: GOAL, receipts: named }] }))!;
+    expect(block.modelCalls).toBe(2);
   });
 
   it("gives nothing for a ledger of more AI steps than a group may have (the contract allows 3)", () => {
@@ -139,7 +157,7 @@ describe("test 29: nothing the model typed reaches a row, the page, Slack or the
   const EMAIL_LOCAL = "maya.owner";
   it("holds none of the typed values, their digests, the run's key, a seeded password or an email", () => {
     const receipts = [receipt(1, 0), receipt(1, 1)];
-    const actions = [typed(null), typed("ada"), action({ tool: "type", node: { role: "textbox", name: `Password ${PASSWORD}`, testId: "password" }, valueDigest: e2eAgentValueDigest(KEY, PASSWORD), valueLiteral: null }),
+    const actions = [typed(null), typed("ada"), action({ tool: "type", node: { role: "textbox", name: "Secret field", testId: "password" }, valueDigest: e2eAgentValueDigest(KEY, PASSWORD), valueLiteral: null }),
       action({ tool: "select", node: { role: "combobox", name: "Sort", testId: null }, valueDigest: e2eAgentValueDigest(KEY, "newest-first"), valueLiteral: null }),
       action({ tool: "press", node: { role: "textbox", name: "Search", testId: null }, valueDigest: e2eAgentValueDigest(KEY, "Enter"), valueLiteral: null }), action()];
     const block = agentNavigationOf(input({ receipts, steps: [{ stepIndex: 1, goal: GOAL, receipts, actions }] }))!;
