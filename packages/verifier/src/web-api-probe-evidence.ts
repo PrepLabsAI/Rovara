@@ -83,7 +83,9 @@ export function deriveWebApiProbeObservation(input: Readonly<{ challenge: Runtim
   if (required.chromiumSandbox === true ? !sandboxedAttestation(evidence.chromiumSandboxBase64, { runId: evidence.runId, groupId: oracle.data.groupId })
     : evidence.chromiumSandboxBase64 !== undefined) return mismatch(required.probeId);
 
-  const qualification = qualifyE2EApplicationCollection(oracle.data, collection.data);
+  // This is the qualification's own verifier: its rounds are qualification rounds, whatever scope the retained oracle carries (Task FU2: the scope is the verifier's input, not the evidence's;
+  // evidence retained before the oracle had a scope verifies as it did).
+  const qualification = qualifyE2EApplicationCollection({ ...oracle.data, roundScope: "qualification" }, collection.data);
   const hosts = blockedHostsOf(evidence.blockedRequestsBase64, { runId: evidence.runId, groupId: oracle.data.groupId,
     upstreamRunIds: collection.data.shards.map((shard) => shard.runStart.runId) });
   if (hosts === null) return mismatch(required.probeId);

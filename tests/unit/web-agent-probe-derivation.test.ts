@@ -37,6 +37,16 @@ describe("the agent probes' retained evidence", () => {
     }
   });
 
+  it("pins stored evidence: the retained oracles (written before the oracle had a round scope) verify, and the qualification verifier reads them as qualification rounds whatever scope they carry (Task FU2)", () => {
+    for (const probeId of WEB_API_AGENT_PROBE_IDS) {
+      const evidence = collected(probeId);
+      expect(evidence.oracle).not.toHaveProperty("roundScope");
+      const claimsStandard = structuredClone(evidence);
+      (claimsStandard.oracle as Record<string, unknown>).roundScope = "standard";
+      expect(observationOf(probeId, claimsStandard).agent).toEqual(observationOf(probeId, evidence).agent);
+    }
+  });
+
   it("does not let the evidence of one agent probe stand for another: the run id is derived from the probe", () => {
     for (const probeId of WEB_API_AGENT_PROBE_IDS) {
       for (const other of WEB_API_AGENT_PROBE_IDS.filter((item) => item !== probeId)) {
