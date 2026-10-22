@@ -1,0 +1,103 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { createOrdersApplication } from "../server.mjs";
+
+const digest = (value) => createHash("sha256").update(value, "utf8").digest("hex");
+const orders = JSON.parse(readFileSync(fileURLToPath(new URL("../fixtures/orders.json", import.meta.url)), "utf8"));
+// Local parts are distinctive on purpose: a common word such as "owner" would be redacted out of ordinary page text.
+const seed = {
+  accounts: [
+    { email: "kzr41@a.example", passwordDigest: digest("pw-first"), subjectId: "subject-1", tenantId: "tenant-a", role: "owner", displayName: "Owner A" },
+    { email: "mvd58@a.example", passwordDigest: digest("pw-second"), subjectId: "subject-2", tenantId: "tenant-a", role: "viewer", displayName: "Viewer A" },
+    { email: "jxp23@b.example", passwordDigest: digest("pw-third"), subjectId: "subject-3", tenantId: "tenant-b", role: "owner", displayName: "Owner B" },
+  ],
+};
+const passwords = { "kzr41@a.example": "pw-first", "mvd58@a.example": "pw-second", "jxp23@b.example": "pw-third" };
+const application = () => createOrdersApplication({ seed, orders });
+
+async function login(app, email) {
+  const response = await app.handle({ method: "POST", url: "/api/login", headers: {}, body: { email, password: passwords[email] } });
+  const cookie = String(response.headers["set-cookie"] ?? "").split(";")[0];
+  return { response, headers: { cookie } };
+}
+
+test("health reports ready", async () => {
+  const response = await application().handle({ method: "GET", url: "/health", headers: {} });
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(response.body), { status: "ready" });
+});
+
+test("sign-in answers with the display name and role only, and /api/me never returns the email", async () => {
+  const app = application();
+  const { response, headers } = await login(app, "kzr41@a.example");
+  assert.equal(response.status, 200);
+  assert.deepEqual(JSON.parse(response.body), { displayName: "Owner A", role: "owner" });
+  const me = await app.handle({ method: "GET", url: "/api/me", headers });
+  assert.deepEqual(JSON.parse(me.body), { subjectId: "subject-1", tenantId: "tenant-a", role: "owner", displayName: "Owner A" });
+  assert.ok(!me.body.includes("kzr41"));
+});
+
+test("wrong password is refused", async () => {
+  const response = await application().handle({ method: "POST", url: "/api/login", headers: {}, body: { email: "kzr41@a.example", password: "wrong" } });
+  assert.equal(response.status, 401);
+});
+
+test("an owner downloads their tenant's orders", async () => {
+  const app = application();
+  const { headers } = await login(app, "kzr41@a.example");
+  const response = await app.handle({ method: "GET", url: "/api/orders.csv", headers });
+  assert.equal(response.status, 200);
+  assert.match(response.headers["content-type"], /^text\/csv/);
+  assert.equal(response.body, "id,customer,total,state\r\na1,Ada,12.5,ready\r\na2,Grace,23,ready\r\n");
+});
+
+test("the download needs a session", async () => {
+  assert.equal((await application().handle({ method: "GET", url: "/api/orders.csv", headers: {} })).status, 401);
+});
+
+test("each tenant only ever sees its own orders", async () => {
+  const app = application();
+  const { headers: first } = await login(app, "mvd58@a.example");
+  assert.equal((await app.handle({ method: "GET", url: "/api/tenants/tenant-b/orders", headers: first })).status, 403);
+  const own = await app.handle({ method: "GET", url: "/api/tenants/tenant-a/orders", headers: first });
+  assert.deepEqual(JSON.parse(own.body).orders.map((order) => order.id), ["a1", "a2"]);
+  const { headers: other } = await login(app, "jxp23@b.example");
+  const csv = await app.handle({ method: "GET", url: "/api/orders.csv", headers: other });
+  assert.equal(csv.body, "id,customer,total,state\r\nb1,Lin,99,ready\r\n");
+  assert.ok(!csv.body.includes("Ada"));
+});
+
+test("the orders CSV neutralizes formulas and filters by date", async () => {
+  const hostile = { state: orders.state, orders: [
+    { id: "a1", tenantId: "tenant-a", customer: "=1+1", total: 1, state: "ready", placedOn: "2026-09-01" },
+    { id: "a2", tenantId: "tenant-a", customer: "Grace", total: 2, state: "ready", placedOn: "2026-09-02" },
+  ] };
+  const app = createOrdersApplication({ seed, orders: hostile });
+  const { headers } = await login(app, "kzr41@a.example");
+  const all = await app.handle({ method: "GET", url: "/api/orders.csv", headers });
+  assert.ok(all.body.includes("a1,'=1+1,"));
+  const day = await app.handle({ method: "GET", url: "/api/orders.csv?from=2026-09-02&to=2026-09-02", headers });
+  assert.equal(day.body, "id,customer,total,state\r\na2,Grace,2,ready\r\n");
+  assert.equal((await app.handle({ method: "GET", url: "/api/orders.csv?from=yesterday", headers })).status, 400);
+});
+
+test("orders endpoints require a session", async () => {
+  const response = await application().handle({ method: "GET", url: "/api/tenants/tenant-a/orders", headers: {} });
+  assert.equal(response.status, 401);
+});
+
+test("the page is rendered for the signed-in account: identity, export button and its tenant's rows", async () => {
+  const app = application();
+  const visitor = await app.handle({ method: "GET", url: "/", headers: {} });
+  assert.match(visitor.body, /data-testid="login-submit"/);
+  assert.doesNotMatch(visitor.body, /data-testid="(identity|export-csv|orders-table)"/);
+  const { headers } = await login(app, "mvd58@a.example");
+  const page = (await app.handle({ method: "GET", url: "/", headers })).body;
+  assert.match(page, /<p data-testid="identity">Viewer A \(viewer\)<\/p>/);
+  assert.match(page, /data-testid="export-csv"/);
+  assert.match(page, /data-testid="order-row-a1"/);
+  assert.doesNotMatch(page, /order-row-b1|mvd58|inventory/i);
+});
