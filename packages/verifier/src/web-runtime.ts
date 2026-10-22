@@ -54,9 +54,26 @@ export async function finishWebCaseCapture(input: { capture: E2EWebCapturePorts 
   } catch { /* a page that cannot be photographed leaves no screenshot */ }
 }
 
+/**
+ * How an agent step ended, as the executor's ledger recorded it: `concluded` when `agent.act` resolved, `failed` when it threw an `AgentError` (the stop code says which). Both are facts
+ * about the executor's own run; whether the case passes is the deterministic assertions' (and Task 4.4's).
+ */
+export type E2EWebAgentStepOutcome = Readonly<{ verdict: "concluded" | "failed"; stopCode: string | null; receiptIds: readonly string[] }>;
+/** The governed agent step driver, supplied only by the executor host and only for a group whose plan carries a model channel. */
+export type E2EWebAgentPorts = Readonly<{
+  /**
+   * Runs one agent step: opens it on the model channel, writes its ledger, runs `act` (the pinned runner's `agent.act`, with Rovara's executor behind it) and closes the step. An
+   * `AgentError` from `act` is an outcome (`failed`), never a throw; anything else that goes wrong (the channel refusing a marker, the ledger not writable) throws.
+   */
+  runStep(input: { caseId: string; stepIndex: number; goal: string; maxActions: number; timeoutMs: number; signal: AbortSignal;
+    act(goal: string, options: { maxSteps: number; maxModelCalls: number; timeout: number }): Promise<unknown> }): Promise<E2EWebAgentStepOutcome>;
+}>;
+
 export type E2EWebRuntimePorts = Readonly<{
   /** Screenshots of failed cases; absent when the admission approves none. */
   capture?: E2EWebCapturePorts;
+  /** Present only when the executor was given a model channel (a group with an agent step). */
+  agent?: E2EWebAgentPorts;
   casePlans: E2EApplicationCliCasePlanReader;
   caseObservations: E2EApplicationProtectedCaseObservationReader;
   evidence: E2EApplicationCliEvidenceWriter;
@@ -181,11 +198,42 @@ function decodeSelectedFile(raw: unknown): { name: string; mimeType: string; byt
   return { name: row.name, mimeType: row.mimeType, bytes: new Uint8Array(bytes) };
 }
 
+
+/** What came of the download an agent step was expected to trigger (it is the last step that can). `captured` is the one download of the step; the others are why there is none to use. */
+export type WebAgentDownloadStatus = "captured" | "agent-no-download" | "ambiguous-download";
+/** How long an agent step that concluded is given for a download it caused to start, after its last action returned. */
+const AGENT_DOWNLOAD_GRACE_MS = 2_000;
+const AGENT_STEP_MAX_MS = 90_000;
+class NoAgentDownload extends Error { constructor() { super("the agent step caused no download"); this.name = "NoAgentDownload"; } }
+
+/** Counts the downloads the owned page, and any page it opens, starts while it is watched. */
+function watchDownloads(page: Page) {
+  let count = 0;
+  const waiting: Array<() => void> = [];
+  const onDownload = () => { count += 1; for (const wake of waiting.splice(0)) wake(); };
+  const tracked = new Set<Page>();
+  const track = (target: Page) => { if (!tracked.has(target)) { tracked.add(target); target.on("download", onDownload); } };
+  const onPage = (opened: Page) => track(opened);
+  track(page);
+  page.context().on("page", onPage);
+  return {
+    count: () => count,
+    /** Resolves when a download has started, or after `ms`. */
+    async first(ms: number): Promise<void> {
+      if (count > 0) return;
+      await new Promise<void>((resolve) => { const timer = setTimeout(resolve, ms); waiting.push(() => { clearTimeout(timer); resolve(); }); });
+    },
+    stop(): void { page.context().off("page", onPage); for (const target of tracked) target.off("download", onDownload); },
+  };
+}
+
 export async function executeWebSteps(input: { caseId: string; scenario: E2EScenario; fixtures: WebFixtures; ports: E2EWebRuntimePorts;
   page: Page; signal: AbortSignal; deadlineAt?: number; origin?: string }) {
   const csvAssertions = input.scenario.assertions.filter((item) => item.kind === "csv");
   let download: { suggestedFilename: string; bytes: Uint8Array; contentRef: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>> } | null = null;
   const steps: E2EApplicationCaseCapture["steps"] = [];
+  /** Set only when an agent step was the last step that can trigger the CSV download: what came of it. */
+  let agentDownloadStatus: WebAgentDownloadStatus | null = null;
   let pendingChooser: { chooser: FileChooser; page: Page; triggerIndex: number; triggerActionDigest: string; triggerActionId: string } | null = null;
   for (let stepIndex = 0; stepIndex < input.scenario.steps.length; stepIndex += 1) {
     const step = input.scenario.steps[stepIndex]!;
@@ -194,7 +242,7 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
     const actionTimeout = Math.max(1, Math.min(30_000, (input.deadlineAt ?? Date.now() + 30_000) - Date.now()));
     if (actionTimeout <= 1 && (input.deadlineAt ?? Date.now() + 30_000) <= Date.now()) throw new Error("web action is outside the original case deadline");
     const finalDownloadTrigger = csvAssertions.length === 1
-      ? input.scenario.steps.findLastIndex((candidate) => candidate.kind === "click" || candidate.kind === "tap")
+      ? input.scenario.steps.findLastIndex((candidate) => candidate.kind === "click" || candidate.kind === "tap" || candidate.kind === "agent")
       : -1;
     const action = { caseId: input.caseId, actionIndex: stepIndex, actionDigest: sha(canonicalJson(step)) };
     const window = await input.ports.actionWindows.begin(action, signal);
@@ -248,6 +296,57 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
       pendingChooser = null;
       continue;
     }
+    if (step.kind === "agent") {
+      const agent = input.ports.agent;
+      if (!agent) throw new Error("governed web agent execution is unavailable until the installed model-operation channel is present");
+      if (pendingChooser !== null) throw new Error("an agent step cannot start while a file chooser is unresolved on this page");
+      const timeoutMs = Math.max(1, Math.min(AGENT_STEP_MAX_MS, (input.deadlineAt ?? Date.now() + AGENT_STEP_MAX_MS) - Date.now()));
+      const act = (goal: string, options: { maxSteps: number; maxModelCalls: number; timeout: number }) => input.fixtures.agent.act(goal, options);
+      const runAgent = () => agent.runStep({ caseId: input.caseId, stepIndex, goal: step.goal, maxActions: step.maxActions, timeoutMs, signal, act });
+      let outcome: E2EWebAgentStepOutcome | undefined;
+      let captured: { suggestedFilename: string; bytes: Uint8Array; contentRef: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>> } | null = null;
+      let status: WebAgentDownloadStatus | null = null;
+      if (csvAssertions.length > 0 && stepIndex === finalDownloadTrigger) {
+        if (download !== null) throw new Error("CSV download trigger association is ambiguous");
+        // The download is the one the step caused. The pinned browser fixture arms its waiter before the step runs and keeps it for the whole step, then saves the first download it saw;
+        // a second one is counted here, and makes the association ambiguous. A step that concluded without a download, or failed, ends the wait at once instead of running it out.
+        const watching = watchDownloads(input.page);
+        let saved: { path: string; suggestedFilename: string } | undefined;
+        try {
+          saved = await input.fixtures.browser.waitForDownload(async () => {
+            outcome = await runAgent();
+            if (outcome.verdict !== "concluded") throw new NoAgentDownload();
+            await watching.first(AGENT_DOWNLOAD_GRACE_MS);
+            if (watching.count() === 0) throw new NoAgentDownload();
+          }, { timeout: timeoutMs + 10_000 });
+        } catch (error) { if (!(error instanceof NoAgentDownload)) throw error; }
+        finally { watching.stop(); }
+        if (outcome === undefined) throw new Error("the agent step did not report how it ended");
+        if (outcome.verdict === "failed") status = null;
+        else if (saved === undefined) status = "agent-no-download";
+        else if (watching.count() > 1) status = "ambiguous-download";
+        else {
+          const bytes = Uint8Array.from(await input.ports.readOwnedDownload(saved, signal));
+          const contentRef = await recordE2EApplicationCliEvidence({ writer: input.ports.evidence, caseId: input.caseId, kind: "download", bytes, mediaType: "text/csv", signal });
+          captured = { suggestedFilename: saved.suggestedFilename, bytes, contentRef };
+          status = "captured";
+        }
+      } else {
+        outcome = await runAgent();
+      }
+      // A step that did not conclude stops the case here: its facts are in the ledger and the report, and no assertion is observed on a page it left half-way.
+      if (outcome.verdict === "failed") throw new Error(`the web agent step did not conclude (${outcome.stopCode ?? "unknown"})`);
+      if (captured) download = captured;
+      if (status !== null) agentDownloadStatus = status;
+      const observationId = randomUUID();
+      const stepRef = await recordJson(input.ports, input.caseId, "step-observation", { schemaVersion: "e2e-application-step-observation/v1",
+        caseId: input.caseId, index: stepIndex, declaredStepIndex: stepIndex, kind: step.kind, observationId, at: utc(), outcome: "completed",
+        agent: { verdict: outcome.verdict, stopCode: outcome.stopCode, download: status ?? "not-applicable" },
+        ...(captured ? { downloadName: captured.suggestedFilename, byteLength: captured.bytes.byteLength, sha256: sha(captured.bytes), contentRef: captured.contentRef } : {}) }, signal);
+      steps.push({ index: stepIndex, declaredStepIndex: stepIndex, kind: step.kind, actionDigest: sha(canonicalJson(step)), observationId, at: utc(), outcome: "completed",
+        evidenceRefs: captured ? [stepRef, captured.contentRef] : [stepRef], agentOperationRefs: [] });
+      continue;
+    }
     if (csvAssertions.length > 0 && (step.kind === "click" || step.kind === "tap") && stepIndex === finalDownloadTrigger) {
       if (opensFileChooser) throw new Error("one click cannot be the ambiguous trigger for both file selection and download");
       if (download !== null) throw new Error("CSV download trigger association is ambiguous");
@@ -297,7 +396,6 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
       case "click": await input.fixtures.screen.getByTestId(step.testId).click({ timeout: actionTimeout }); break;
       case "tap": await input.fixtures.screen.getByTestId(step.testId).tap({ timeout: actionTimeout }); break;
       case "swipe": await input.fixtures.screen.swipe({ direction: step.direction }); break;
-      case "agent": throw new Error("governed web agent execution is unavailable until the installed model-operation channel is present");
       default: throw new Error(`web step ${step.kind} has no installed fixed web driver`);
     }
     const observationId = randomUUID();
@@ -318,14 +416,16 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
     if (actionError !== undefined) throw new Error("web action failed with a non-error rejection", { cause: actionError });
   }
   if (pendingChooser !== null) throw new Error("owned file chooser was opened without its exact following approved fixture selection");
-  if (csvAssertions.length > 0 && !download) throw new Error("CSV assertion has no exact preceding admitted download trigger");
-  return { download, steps };
+  if (csvAssertions.length > 0 && !download && agentDownloadStatus === null) throw new Error("CSV assertion has no exact preceding admitted download trigger");
+  return { download, steps, agentDownloadStatus };
 }
 
 async function observeWebAssertions(input: { caseId: string; scenario: E2EScenario; fixtures: WebFixtures; engine: EngineHandle;
   ports: E2EWebRuntimePorts; plan: Parameters<typeof createE2EApplicationAssertionObservationHeader>[0]["plan"];
   binding: E2EApplicationObservationBinding;
   download: { suggestedFilename: string; bytes: Uint8Array; contentRef: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>> } | null;
+  /** Why an agent step that was to cause the download left none to use; absent for any other step. */
+  agentDownloadStatus?: WebAgentDownloadStatus | null;
   signal: AbortSignal }): Promise<{ assertions: E2EApplicationCaseCapture["assertions"]; refs: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>>[] }> {
   const surface = surfaceOf(input.engine);
   if (!surface) throw new Error("installed web engine did not expose its own live Playwright surface");
@@ -361,7 +461,8 @@ async function observeWebAssertions(input: { caseId: string; scenario: E2EScenar
     } else if (assertion.kind === "csv") {
       if (!input.download) {
         assertions.push({ index, digest: input.plan.expected.assertionDigests[index]!, observedAt, observationId: null,
-          value: null, evidenceRef: null, outcome: "unavailable", reason: "download-not-observed", producer: header.producer });
+          value: null, evidenceRef: null, outcome: "unavailable", reason: input.agentDownloadStatus === "agent-no-download" || input.agentDownloadStatus === "ambiguous-download" ? input.agentDownloadStatus : "download-not-observed",
+          producer: header.producer });
         stoppedReason = "prior-assertion-observation-unavailable";
         continue;
       }
@@ -448,7 +549,7 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
         }
         const stepResult = await executeWebSteps({ caseId, scenario, fixtures, ports, page, signal: operationSignal, deadlineAt: caseDeadline, origin });
         const assertionResult = await observeWebAssertions({ caseId, scenario, fixtures, engine: liveEngine, ports, plan,
-          binding: protectedObservation.binding, download: stepResult.download, signal: operationSignal });
+          binding: protectedObservation.binding, download: stepResult.download, agentDownloadStatus: stepResult.agentDownloadStatus, signal: operationSignal });
         const failedIndex = assertionResult.assertions.findIndex((item) => item.outcome === "failed");
         const unavailableIndex = assertionResult.assertions.findIndex((item) => item.outcome === "unavailable");
         const at = utc();

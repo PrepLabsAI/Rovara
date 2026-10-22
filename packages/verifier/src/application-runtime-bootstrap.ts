@@ -5,13 +5,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { E2EApplicationCliHostDescriptorSchema, E2EApplicationCliLaunchContextSchema, E2EApplicationLaunchTargetSchema, E2EExpectedCaseSchema, APPLICATION_E2E_TEST_PATH, canonicalJson, copyBoundedE2EJsonData } from "@agentx/contracts";
 import type { E2EApplicationCliLaunchContext as SharedE2EApplicationCliLaunchContext } from "@agentx/contracts";
-import type { E2EConfig, ModelInstance, Reporter } from "e2e";
+import type { E2EConfig, ModelInstance, Reporter, StepExecutor } from "e2e";
 import { isEngineHandle, type EngineHandle } from "e2e/engine";
 import { z } from "zod";
 import { E2EApplicationSelectionPacketSchema } from "./application-identity.js";
 import type { E2EApplicationCompiledShard } from "./application-scenarios.js";
-import { E2E_APPLICATION_DECLARATION_PATH, E2E_APPLICATION_GENERATED_CONFIG_PATH, E2E_APPLICATION_SELECTION_PACKET_PATH,
-  expectedE2EApplicationConfigDigest, renderE2EApplicationConfigWrapper } from "./application-templates.js";
+import { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, E2E_AGENT_EXECUTOR_NAME, E2E_AGENT_EXECUTOR_VERSION, E2E_APPLICATION_DECLARATION_PATH, E2E_APPLICATION_GENERATED_CONFIG_PATH,
+  E2E_APPLICATION_SELECTION_PACKET_PATH, expectedE2EApplicationConfigDigest, renderE2EApplicationConfigWrapper } from "./application-templates.js";
 import { expectedE2EApplicationReporterDigest } from "./application-runtime-assets.js";
 import { E2EApplicationSupervisorReadbackSchema, e2eApplicationPrivateTransferMaxBytes, e2eApplicationSupervisorEvidenceEntryMax } from "./application-result-adapter.js";
 import type { E2EApplicationSupervisorReadback } from "./application-result-adapter.js";
@@ -22,11 +22,19 @@ const HOSTS_REGISTRY = "assets/application-runtime-v1/cli-hosts.json";
 const MAX_FILE = 1_048_576;
 
 export type E2EApplicationCliLaunchContext = SharedE2EApplicationCliLaunchContext;
+/**
+ * What a host that runs agent steps adds (Task 4.3b): the model over the worker's channel, Rovara's own step executor, and the capture-only replay store. The three go together: a
+ * declaration that pins a model route gets all of them or the config load fails, and a declaration with none gets none, whatever the host offers.
+ */
+export type E2EApplicationAgentHost = Readonly<{ modelFactory: () => ModelInstance; agentExecutor: StepExecutor;
+  agentCacheStore: { readonly writable: boolean; read(keyHash: string): Promise<unknown>; write(keyHash: string, trace: never): Promise<unknown> } }>;
 export type E2EApplicationCliHost = Readonly<{ profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string };
   launchContext: E2EApplicationCliLaunchContext; installedModule: string; engine?: EngineHandle; modelFactory?: () => ModelInstance;
+  agentExecutor?: StepExecutor; agentCacheStore?: E2EApplicationAgentHost["agentCacheStore"];
   runCase(caseId: string, fixtures: unknown): Promise<void> }>;
 type E2EApplicationCliHostFactoryResult = Readonly<{ profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string };
-  engine?: EngineHandle; modelFactory?: () => ModelInstance; runCase(caseId: string, fixtures: unknown): Promise<void> }>;
+  engine?: EngineHandle; modelFactory?: () => ModelInstance; agentExecutor?: StepExecutor; agentCacheStore?: E2EApplicationAgentHost["agentCacheStore"];
+  runCase(caseId: string, fixtures: unknown): Promise<void> }>;
 
 const launchSchema = E2EApplicationCliLaunchContextSchema;
 
@@ -286,6 +294,12 @@ export async function prepareE2EApplicationCliConfig(input: { configUrl: string 
   const reporter = reporterModule.reporter;
   if (!reporter || reporter.name !== "agentx-application-first-party-reporter/v1" || typeof reporter.onEvent !== "function") throw new Error("fixed application reporter asset has no valid reporter export");
   if (declaration.modelRoute && typeof host.modelFactory !== "function") throw new Error("governed model adapter is unavailable for the declared route");
+  // The step executor and the capture store come with the model or not at all: a group with no model route runs with the cache off and no agent.
+  if (declaration.modelRoute && (host.agentExecutor === undefined || host.agentExecutor.name !== E2E_AGENT_EXECUTOR_NAME || host.agentExecutor.version !== E2E_AGENT_EXECUTOR_VERSION
+    || host.agentExecutor.cache !== undefined || host.agentExecutor.model !== undefined || host.agentExecutor.judge !== undefined)) throw new Error("installed host agent executor is not Rovara's governed step executor");
+  if (declaration.modelRoute && (host.agentCacheStore === undefined || host.agentCacheStore.writable !== true || typeof host.agentCacheStore.read !== "function" || typeof host.agentCacheStore.write !== "function")) {
+    throw new Error("installed host has no capture store for the declared route");
+  }
   let model: ModelInstance | undefined;
   if (declaration.modelRoute) {
     const route = declaration.modelRoute;
@@ -300,10 +314,14 @@ export async function prepareE2EApplicationCliConfig(input: { configUrl: string 
       }
       return resolved;
     };
-    model = Object.freeze({ provider: "agentx-e2e", modelId: route.routeId, specificationVersion: "v4",
+    // `supportedUrls` is read by the AI SDK's model wrapper; with no file parts ever sent, no URL is supported.
+    model = Object.freeze({ provider: "agentx-e2e", modelId: route.routeId, specificationVersion: "v4", supportedUrls: {},
       doGenerate: (...args: never[]) => getModel().doGenerate(...args) });
   }
+  // A group with an agent step records what its steps did into the capture-only store (the runner writes only after a later deterministic check passed, and a candidate round never
+  // replays); every other group runs with the cache off. The executor's identity, the input ceiling and the cache are what the shard's config digest names for such a group.
   const config: E2EConfig = { projectId: declaration.projectId, tests: [declaration.testPath], targets: [target], timeout: declaration.timeoutMs,
-    workers: 1, retries: 0, cache: "off", reporters: [reporter], ...(model ? { agents: { default: { model } } } : {}) };
+    workers: 1, retries: 0, cache: model ? { mode: "read-write", store: host.agentCacheStore as never } : "off", reporters: [reporter],
+    ...(model ? { agents: { default: { model, executor: host.agentExecutor!, maxInputTokens: E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } } } : {}) };
   return config;
 }

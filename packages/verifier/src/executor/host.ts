@@ -1,17 +1,25 @@
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join, sep } from "node:path";
 import { z } from "zod";
-import { E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, canonicalJson } from "@agentx/contracts";
+import { E2E_AGENT_STOP_CODES, E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, canonicalJson } from "@agentx/contracts";
+import { isAgentError } from "e2e/agent";
 import type { BrowserContext } from "playwright-core";
 import { createAPIApplicationCliHost, type E2EApiRuntimePorts } from "../api-runtime.js";
-import { createWebApplicationCliHost, type E2EWebRuntimePorts } from "../web-runtime.js";
+import { createWebApplicationCliHost, type E2EWebAgentPorts, type E2EWebRuntimePorts } from "../web-runtime.js";
 import type { E2EApplicationCliHost, E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
 import { readE2EApplicationInstalledFileFixture } from "../application-runtime-assets.js";
 import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStateProbeAsset } from "../application-state-probes.js";
 import { isPinnedRovaraHttpEngine } from "../rovara-http-engine-descriptor.js";
 import { createExecutorSessionStore } from "./accounts.js";
+import { createRovaraE2EAgentExecutor } from "./agent-executor.js";
+import { createE2EAgentCaptureStore } from "./agent-capture-store.js";
+import { E2E_AGENT_EVIDENCE_DIR, createE2EAgentLedgerWriter, type E2EAgentLedgerWriter } from "./agent-ledger.js";
+import { createE2EAgentModelAdapter } from "./agent-model-adapter.js";
+import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
+import { createE2EModelChannelClient } from "./model-channel.js";
+import { createCredentialRedactor } from "./redact.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
 import { createPlaywrightFormLoginDriver, isSessionCookieSecret, isSessionStorageSecret, parseSetCookie } from "./form-login.js";
 import { casePlanFor, resolveE2EExecutorSuite } from "./suite.js";
@@ -37,6 +45,8 @@ export const ExecutorHostContextSchema = z.object({
   projectDir: z.string().min(1).max(4096),
   cdpEndpoint: z.string().min(1).max(1024).nullable(),
   browserPid: z.number().int().nonnegative().nullable(),
+  /** Test seam, set only from `E2EExecutorRunInput.modelSocketPath` and never from a plan: where the model socket really is when it is not at the plan's fixed path (a developer's machine). */
+  modelSocketPath: z.string().min(1).max(4096).optional(),
 }).strict();
 export type ExecutorHostContext = z.infer<typeof ExecutorHostContextSchema>;
 
@@ -153,8 +163,13 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       void socket.close({ code: 1008, reason: "blocked" });
     });
   };
+  // The credentials an agent step's trace is held to: the run's accounts, and every session value this process learned (the same ones the model channel's scan is told at a step's start).
+  const agentRedactor = createCredentialRedactor(plan.accounts);
+  const sessionSecrets: string[] = [];
   // A session value is told to the ledger (so evidence and captures that carry it are caught) and left for the parent (so the text it writes is scrubbed of it).
   const registerSecret = (value: string): void => {
+    agentRedactor.addSessionSecret(value);
+    if (typeof value === "string" && value.length >= 8 && !sessionSecrets.includes(value)) sessionSecrets.push(value);
     ledger?.registerSessionSecret(value);
     appendFileSync(join(context.projectDir, E2E_EXECUTOR_SESSION_SECRETS_FILE), `${JSON.stringify(value)}\n`, { mode: 0o600 });
   };
@@ -164,6 +179,70 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const fileLedger = createFileCaseLedger(context.outDir, plan, { observations: { sessionFacts: store.sessionFacts,
     upstreamRunId: (launch) => readUpstreamRunId(context.projectDir, launch.launchId) } });
   ledger = fileLedger;
+
+
+  // The agent step driver (Task 4.3b): only for a plan that carries a model channel. The model is the worker's channel and nothing else; the executor, the ledger and the capture store are
+  // this process's, and the begin and end markers tell the worker which step each model call belongs to.
+  const channelPlan = plan.modelChannel;
+  // This process loads the AI SDK (the CLI process, not the executor's parent that `entry.ts` guards): a model given as a string must still never reach its default gateway.
+  if (channelPlan !== undefined) installRefusingE2EDefaultProvider();
+  const agent = channelPlan === undefined ? null : (() => {
+    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId });
+    const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
+    const ledgers = new Map<string, E2EAgentLedgerWriter>();
+    const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position });
+    const stopCodes: ReadonlySet<string> = new Set(E2E_AGENT_STOP_CODES);
+    const origin = declaration.originByApplicationId.find((item) => item.applicationId === launchContext.selectedTarget.applicationId)?.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN;
+    const store = createE2EAgentCaptureStore({
+      scan: (bytes) => agentRedactor.contains(bytes),
+      persist: (keyHash, bytes) => {
+        // The recording is named by a digest of its key, which is derived from the step's instruction, never from a value.
+        const directory = join(context.outDir, E2E_AGENT_EVIDENCE_DIR, "traces");
+        mkdirSync(directory, { recursive: true, mode: 0o755 });
+        writeFileSync(join(directory, `trace-${sha(keyHash).slice(0, 16)}.json`), bytes, { mode: 0o644 });
+      },
+    });
+    const executor = createRovaraE2EAgentExecutor({ position: () => current.position, ledger: () => current.ledger, origin: () => origin });
+    const runStep: E2EWebAgentPorts["runStep"] = async (request) => {
+      const position = { caseId: request.caseId, stepIndex: request.stepIndex };
+      let caseLedger = ledgers.get(request.caseId);
+      if (caseLedger === undefined) {
+        caseLedger = createE2EAgentLedgerWriter({ outDir: context.outDir, runId: plan.runId, caseId: request.caseId, valueKey: channelPlan.valueKey });
+        ledgers.set(request.caseId, caseLedger);
+      }
+      // The session values the browser holds are told to the worker's scan at the start of the step, so a page that shows one is refused before a model sees it.
+      const cookieValues = sessionSecrets.slice(-32);
+      await client.beginStep({ ...position, ...(cookieValues.length === 0 ? {} : { cookieValues }) }, request.signal);
+      let verdict: "concluded" | "failed" = "concluded";
+      let stopCode: string | null = null;
+      let thrown: unknown;
+      let receiptIds: string[] = [];
+      let begun = false;
+      try {
+        caseLedger.beginStep(position.stepIndex, request.goal);
+        begun = true;
+        current.position = position; current.ledger = caseLedger;
+        try { await request.act(request.goal, { maxSteps: request.maxActions, maxModelCalls: request.maxActions + 4, timeout: request.timeoutMs }); }
+        catch (error) {
+          verdict = "failed";
+          if (isAgentError(error)) stopCode = stopCodes.has(error.code) ? error.code : "ACTION_FAILED";
+          else { stopCode = "ACTION_FAILED"; thrown = error; }
+        }
+      } finally {
+        current.position = null; current.ledger = null;
+        receiptIds = adapter.takeReceiptIds(position);
+        // The step is over for the worker whatever happened to it, and the ledger says how it ended.
+        let endFailure: unknown;
+        try { if (begun) caseLedger.endStep(position.stepIndex, { verdict, stopCode: stopCode as never, receiptIds }); } catch (error) { endFailure = error; }
+        try { await client.endStep(position, AbortSignal.timeout(10_000)); } catch (error) { endFailure ??= error; }
+        if (endFailure !== undefined) thrown ??= endFailure;
+      }
+      if (thrown !== undefined) throw thrown;
+      return { verdict, stopCode, receiptIds };
+    };
+    return { adapter, store, executor, runStep };
+  })();
+  const agentParts = agent === null ? {} : { modelFactory: () => agent.adapter as never, agentExecutor: agent.executor, agentCacheStore: agent.store };
 
   const casePlans: E2EWebRuntimePorts["casePlans"] = { readCasePlan: async (request, signal) => {
     const result = await fileLedger.casePlans.readCasePlan(request, signal);
@@ -207,6 +286,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     // Screenshots and traces of failed cases follow the admitted capture policy and nothing else; with both off the case adapter is given no capture port at all.
     const screenshots = fileLedger.capture.enabled("screenshot");
     const ports: E2EWebRuntimePorts = Object.freeze({ ...shared,
+      ...(agent === null ? {} : { agent: { runStep: agent.runStep } }),
       ...(screenshots ? { capture: { screenshots, record: (item: { caseId: string; kind: "screenshot"; bytes: Uint8Array }) => fileLedger.capture.record(item) } } : {}),
       resolveOwnedCdpEndpoint: async () => {
         if (!context.cdpEndpoint) throw new Error("the executor launched no browser for this shard");
@@ -272,7 +352,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     const inner = createWebApplicationCliHost({ launchContext, declaration, ports,
       engineAdmission: { artifactCapabilities: launchTarget.artifactCapabilities, stateCapability: launchTarget.stateCapability } });
     // The case adapter opens its own first page and its assertion steps; nothing may run before them.
-    return inner;
+    return { ...inner, ...agentParts };
   }
 
   if (launchContext.selectedTarget.kind === "api") {
@@ -291,7 +371,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         return { proof: { ref, bytes: Uint8Array.from(bytes) }, assetBinding };
       },
     });
-    return createAPIApplicationCliHost({ launchContext, declaration: { ...declaration, target: { targetId: declaration.target.targetId, app: null } }, ports });
+    return { ...createAPIApplicationCliHost({ launchContext, declaration: { ...declaration, target: { targetId: declaration.target.targetId, app: null } }, ports }), ...agentParts };
   }
   throw new Error("the executor host supports only its installed web-Chromium and API-HTTP profiles");
 }

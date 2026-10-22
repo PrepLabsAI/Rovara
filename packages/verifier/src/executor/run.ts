@@ -33,6 +33,8 @@ export type E2EExecutorRunInput = Readonly<{
   localAppUpstream?: string;
   /** Test seam for a Chromium binary other than the pinned Playwright one. */
   chromiumExecutable?: string;
+  /** Test seam, never part of a plan: where the worker's model socket really is on a machine that cannot have `/run/rovara/model.sock` (a developer's laptop). */
+  modelSocketPath?: string;
   /** Test seam for what is read about Chromium's renderer processes; the default reads `/proc`, so a host without it (macOS) cannot run a browser case. */
   inspectChromiumSandbox?: (input: InspectChromiumSandboxInput) => ReturnType<typeof inspectChromiumSandbox>;
   /** How long the sandbox check keeps looking while renderers are still starting. Default 5000; a test that expects a refusal passes 0. */
@@ -145,7 +147,9 @@ type ShardOutcome = { shardId: string; launchId: string; targetKind: string; lis
  * registered executor host, which drives the case adapters against the live application.
  */
 async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApplicationCliLaunchContext; workDir: string; planPath: string; outDir: string;
-  browser: LocalChromium | null; redactor: CredentialRedactor; signal: AbortSignal; log: (line: string) => Promise<void> }): Promise<ShardOutcome> {
+  browser: LocalChromium | null; redactor: CredentialRedactor; signal: AbortSignal; log: (line: string) => Promise<void>;
+  /** A plan with a model channel: the run keeps the replay cache the config sets (the capture-only store) instead of switching it off. */
+  agentCapture?: boolean; modelSocketPath?: string }): Promise<ShardOutcome> {
   const { resolved, launch } = input;
   const shard = resolved.suite.shards.find((candidate) => candidate.shardId === launch.shardId)!;
   const shardKey = sha(launch.shardId).slice(0, 16);
@@ -163,7 +167,7 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
   const home = join(project, ".home"); const tmp = join(project, ".tmp");
   await mkdir(home, { mode: 0o700 }); await mkdir(tmp, { mode: 0o700 });
   const context: ExecutorHostContext = { schemaVersion: "e2e-executor-host-context/v1", planPath: input.planPath, outDir: input.outDir, projectDir: project,
-    cdpEndpoint: input.browser?.cdpEndpoint ?? null, browserPid: input.browser?.pid ?? null };
+    cdpEndpoint: input.browser?.cdpEndpoint ?? null, browserPid: input.browser?.pid ?? null, ...(input.modelSocketPath === undefined ? {} : { modelSocketPath: input.modelSocketPath }) };
   const contextPath = join(input.workDir, `host-context-${shardKey}.json`);
   await writeExclusive(contextPath, `${JSON.stringify(context)}\n`);
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp, CI: "1",
@@ -195,8 +199,10 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
   }
 
   await input.log(`shard ${shard.shardId}: running ${shard.selection.tuples.length} case(s)`);
+  // `--no-cache` wins over the config, so a group with an agent step must not pass it: its config names the capture-only store (a candidate round never replays, and the store only
+  // keeps what the runner writes after a later check passed). Every other group's config says `cache: "off"` and the flag stays, as it always was.
   const run = await runProcess(process.execPath, [cliPath, "run", "--config", configPath, "--reporter", "json", "--output", E2E_EXECUTOR_OUTPUT_DIR,
-    "--no-cache", "--workers", "1", "--retries", "0"], { cwd: project, env, deadlineAt: resolved.deadlineAtMs, signal: input.signal });
+    ...(input.agentCapture === true ? [] : ["--no-cache"]), "--workers", "1", "--retries", "0"], { cwd: project, env, deadlineAt: resolved.deadlineAtMs, signal: input.signal });
   // What the sessions of this shard's cases hold (cookie values) is scrubbed from every text this parent writes from here on, the raw report included.
   for (const secret of await readJsonStrings(join(project, E2E_EXECUTOR_SESSION_SECRETS_FILE))) input.redactor.addSessionSecret(secret);
   const failedLogins = [...new Set(await readJsonStrings(join(project, E2E_EXECUTOR_LOGIN_FAILED_FILE)))].sort();
@@ -382,7 +388,8 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     workDir = await mkdtemp(join(await realpath(tmpdir()), "rovara-executor-"));
     for (const launch of launches) {
       if (state.forwarderFailure) break;
-      shards.push(await runShard({ resolved, launch, workDir, planPath: input.planPath, outDir, browser, redactor, signal: runSignal, log }));
+      shards.push(await runShard({ resolved, launch, workDir, planPath: input.planPath, outDir, browser, redactor, signal: runSignal, log,
+        ...(plan.modelChannel === undefined ? {} : { agentCapture: true }), ...(input.modelSocketPath === undefined ? {} : { modelSocketPath: input.modelSocketPath }) }));
     }
     if (state.forwarderFailure) { reason = "forwarder-failed"; await log(`unavailable: forwarder-failed: ${state.forwarderFailure.message}`); return; }
     if (shards.length === 0) { reason = "no-shards"; await log("unavailable: no-shards"); return; }
