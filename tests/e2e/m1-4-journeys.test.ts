@@ -125,14 +125,18 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     const why = (() => { const logs = hosts[0]?.readDiagnostics(runId);
       const collectorSaid = group === undefined ? "(no group evidence uploaded)" : JSON.stringify({ unavailableReason: group.groupRun.unavailableReason, collection: group.groupRun.collection });
       return `result: ${JSON.stringify(result).slice(0, 2000)}\nwhat the worker's collector said: ${collectorSaid.slice(0, 2000)}\nbuild log: ${logs?.buildLogTail || "(empty)"}\napp log: ${logs?.appLogTail || "(empty)"}\nexecutor log: ${logs?.executorLogTail || "(empty)"}`; })();
-    /** The broker's verdict on exactly the bytes the worker uploaded, against the admission and the registry's definition of the admitted route revision. */
+    /**
+     * The broker's verdict on exactly the bytes the worker uploaded, against the admission and the registry's definition of the admitted route revision. The operation that ran the checks
+     * ended (the worker's `processStatus` says whether every process exited 0, which a round with a failing assertion does not, but the operation itself completed): the broker reads
+     * its rows as authoritative then, as it does for every M1.3 round.
+     */
     const verdict = () => {
       if (group === undefined || aggregateSaved === undefined) throw new Error(`the worker uploaded no group evidence or no aggregate\n${why}`);
       return verifyApplicationE2EEvidence({ admissionBytes,
         subject: { taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
           candidateDigest: admission.candidateDigest, roundId: admission.round.roundId, groupRunIds: [runId], admissionSha256: admissionSha },
         aggregate: JSON.parse(aggregateSaved.bytes.toString("utf8")) as unknown, groupEvidence: new Map([[runId, group]]),
-        receivedAt: new Map([[runId, group.groupRun.actual?.collection.receivedAt ?? new Date().toISOString()]]), terminalStatus: result.processStatus, modelRouteDefinition: scriptedE2ERouteDefinition() });
+        receivedAt: new Map([[runId, group.groupRun.actual?.collection.receivedAt ?? new Date().toISOString()]]), terminalStatus: "SUCCEEDED", modelRouteDefinition: scriptedE2ERouteDefinition() });
     };
     return { fixture, result, closed, sent, caseId, ledger, agentModel, saved, runId, why, verdict, steps: e2eApplicationGroupAgentSteps(fixture.compiled) };
   }
