@@ -117,7 +117,25 @@ describe("worker HTTP contract", () => {
     // Spec 053: what this build parses, so the dispatcher sends the thinking level only to it; spec 051 adds readiness,
     // and publish's reportChecks (P-2), so only this build is asked to publish despite a failing check.
     await expect((await handleWorkerRequest(new Request("http://worker/ping"), state)).json())
-      .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource"] });
+      .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1"] });
+  });
+
+  it("withholds the agent step feature (Task 4.3a) from /ping with its reason exactly as it withholds another feature, and lists it once nothing withholds it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-withheld-agent-"));
+    let withheld: Record<string, unknown> = { "task.workflowE2EAgentSteps.v1": { status: "unavailable", reason: "agent-driver-not-installed" } };
+    const state = createWorkerServerState(new OperationJournal(root), { execute: () => Promise.resolve(), withheldInvocationFeatures: () => withheld });
+    const ping = async () => (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as Promise<{ invocationFeatures: string[]; invocationFeatureDiagnostics?: Record<string, unknown> }>;
+    const held = await ping();
+    expect(held.invocationFeatures).not.toContain("task.workflowE2EAgentSteps.v1");
+    expect(held.invocationFeatures).toContain("task.workflowE2EApplicationChecks");
+    expect(held.invocationFeatureDiagnostics).toMatchObject({ "task.workflowE2EAgentSteps.v1": { status: "unavailable", reason: "agent-driver-not-installed" } });
+    withheld = {};
+    expect((await ping()).invocationFeatures).toContain("task.workflowE2EAgentSteps.v1");
+    // A withholding check that throws fails closed for the agent feature too, when it is one the executor may withhold.
+    const failing = createWorkerServerState(new OperationJournal(root), { execute: () => Promise.resolve(), withholdableInvocationFeatures: ["task.workflowE2EAgentSteps.v1"], withheldInvocationFeatures: () => { throw new Error("boom"); } });
+    const failed = await (await handleWorkerRequest(new Request("http://worker/ping"), failing)).json() as { invocationFeatures: string[]; invocationFeatureDiagnostics?: Record<string, unknown> };
+    expect(failed.invocationFeatures).not.toContain("task.workflowE2EAgentSteps.v1");
+    expect(failed.invocationFeatureDiagnostics).toMatchObject({ "task.workflowE2EAgentSteps.v1": { reason: "availability-check-failed" } });
   });
 
   it("withholds a feature the executor reports as unavailable from /ping, with the reason, and lists it again once it is available", async () => {

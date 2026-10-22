@@ -80,6 +80,8 @@ export const DEFAULT_DEADLINE_GRACE_MS = 15_000;
 /** The pinned Node base image that builds a web/API candidate and runs it. */
 export const WEB_API_BUILD_IMAGE = "public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5";
 const ADMIN_TIMEOUT_MS = 30_000;
+/** The longest model socket path the host accepts: the smaller of the two platforms' unix socket limits, so a test on a Mac binds what a Linux worker does. */
+const MODEL_SOCKET_PATH_MAX_BYTES = 103;
 const MAX_TAIL_BYTES = 64 * 1024;
 const APP_PORT = 4317;
 const BUILD_COPY_TIMEOUT_MS = 120_000;
@@ -296,6 +298,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     mock: join(workspace, "mock"), mockOut: join(workspace, "mock-out"), resolv: join(workspace, "resolv.conf"), model: join(workspace, "model") };
   /** Where the worker's proxy listens for this run; only the executor container gets it, at `E2E_MODEL_CHANNEL_SOCKET_PATH`. */
   const modelSocket = join(dirs.model, "model.sock");
+  // A unix socket path is limited to 107 bytes on Linux and 103 on macOS. The worker's run root leaves this one 97, so a deeper root is a configuration error to say at once, not an
+  // address the proxy fails to bind in the middle of a run.
+  if (usesModel && Buffer.byteLength(modelSocket) > MODEL_SOCKET_PATH_MAX_BYTES) throw new Error("docker application host run root is too deep for the model socket path");
   const mockContainers = [{ origin: SINKHOLE_ORIGIN, componentId: null as string | null, fixture: null as (typeof originPlan.mocked)[number]["fixture"] | null },
     ...originPlan.mocked.map((item) => ({ origin: item.originRef, componentId: item.componentId, fixture: item.fixture }))]
     .map((item) => ({ ...item, name: `rovara-mock-${runId}-${item.origin}`, alias: `mock-${item.origin}` }));

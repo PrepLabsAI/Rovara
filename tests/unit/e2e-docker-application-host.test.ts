@@ -1323,6 +1323,8 @@ describe("docker application host: the model channel", () => {
     assertions: [{ kind: "csv" as const, downloadName: "orders.csv", columns: ["id", "total"], rows: [["1", "10"]] }] });
   const agentFixture = () => createOrdersExecutorPlan({ probe: "web-csv-positive-v1", modelRoute: ROUTE, accountScenarios: [{ accountProfileId: "orders-owner", scenario: agentScenario }] });
   const MODEL_SOCKET = (runRoot: string, runId: string) => join(runRoot, runId, "model", "model.sock");
+  /** A unix socket path is short (about 100 bytes): a run with a model channel runs in a short root. */
+  const shortRoot = async () => { const dir = realpathSync(await mkdtemp(join("/tmp", "rr-"))); roots.push(dir); return dir; };
 
   /** A model channel that records when it was opened relative to the executor, and what it was given. */
   function channel(events: string[], fake: FakeDockerCli, behaviour: { open?: () => void | Promise<void>; close?: () => void | Promise<void> } = {}) {
@@ -1339,7 +1341,7 @@ describe("docker application host: the model channel", () => {
   it("mounts exactly one model socket into the executor container, and into no other, and the executor's arguments carry no cloud or credential names", async () => {
     const fake = new FakeDockerCli(); const events: string[] = []; const used = channel(events, fake);
     const fixture = agentFixture();
-    const s = await setup({ fake, fixture, modelChannel: used.port }); fake.onExecutor = okOutput(s);
+    const s = await setup({ fake, fixture, runRoot: await shortRoot(), modelChannel: used.port }); fake.onExecutor = okOutput(s);
     const result = await runWith(s);
     expect(result.unavailableReason).toBeNull();
     const mounts = fake.mountsFor("executor");
@@ -1355,7 +1357,7 @@ describe("docker application host: the model channel", () => {
 
   it("opens the channel before the executor container exists, with the run's own socket path, account credentials and deadline, and closes it when the executor is done", async () => {
     const fake = new FakeDockerCli(); const events: string[] = []; const used = channel(events, fake);
-    const s = await setup({ fake, fixture: agentFixture(), modelChannel: used.port }); fake.onExecutor = okOutput(s);
+    const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: used.port }); fake.onExecutor = okOutput(s);
     await runWith(s);
     expect(events).toEqual(["open:executor-started=false", "close"]);
     expect(used.opened).toHaveLength(1);
@@ -1370,7 +1372,7 @@ describe("docker application host: the model channel", () => {
   it("writes the plan's modelChannel from the admission's own route, and the executor schema accepts it", async () => {
     const fake = new FakeDockerCli(); const fixture = agentFixture();
     let planText = "";
-    const s = await setup({ fake, fixture, modelChannel: channel([], fake).port });
+    const s = await setup({ fake, fixture, runRoot: await shortRoot(), modelChannel: channel([], fake).port });
     fake.onExecutor = (outDir) => { planText = readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8"); okOutput(s)(outDir); };
     await runWith(s);
     const plan = E2EExecutorPlanSchema.parse(JSON.parse(planText));
@@ -1381,7 +1383,7 @@ describe("docker application host: the model channel", () => {
   it("closes the channel on every exit: an executor that fails, a deadline, a cancellation, and a close of the lease; and closes it once", async () => {
     for (const how of ["exit-2", "cancelled", "close-only"] as const) {
       const fake = new FakeDockerCli(); const events: string[] = []; const used = channel(events, fake);
-      const s = await setup({ fake, fixture: agentFixture(), modelChannel: used.port });
+      const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: used.port });
       if (how === "exit-2") { fake.exitCodeOfExecutor(2); fake.onExecutor = (outDir) => writeExecutorOutput(outDir, { exitCode: 2, reason: "x", runId: s.runId, groupId: s.groupId }); await runWith(s); }
       else if (how === "cancelled") {
         const abort = new AbortController(); fake.onExecutor = () => abort.abort(new Error("stop")); await runWith(s, abort.signal);
@@ -1398,7 +1400,7 @@ describe("docker application host: the model channel", () => {
   it("is unavailable, and starts no executor, when the channel cannot be opened; what it says is a fixed sentence, not the error's words", async () => {
     const fake = new FakeDockerCli(); const events: string[] = [];
     const used = channel(events, fake, { open: () => { throw new Error("this worker's environment can redirect model calls (AWS_ACCESS_KEY_ID=AKIASECRET)"); } });
-    const s = await setup({ fake, fixture: agentFixture(), modelChannel: used.port });
+    const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: used.port });
     const result = await runWith(s);
     expect(result.unavailableReason).toBe("model-channel-unavailable");
     expect(fake.calls.some((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-executor-"))).toBe(false);
@@ -1420,12 +1422,20 @@ describe("docker application host: the model channel", () => {
     await expect(setup({ fake: new FakeDockerCli(), modelChannel: channel([], fake).port })).rejects.toThrow(/no AI navigation step and must not get the model channel/);
   });
 
+  it("refuses a run root so deep that the model socket path could not be bound, at construction", async () => {
+    const deep = join(await temp("deep-"), "x".repeat(60));
+    await expect(setup({ fake: new FakeDockerCli(), fixture: agentFixture(), runRoot: deep, modelChannel: channel([], new FakeDockerCli()).port })).rejects.toThrow(/too deep for the model socket/);
+    // The worker's own run root leaves the path room to spare.
+    const production = "/mnt/agentx-runtime/candidates/web-api-runs";
+    expect(Buffer.byteLength(join(production, "11111111-1111-4111-8111-111111111111", "model", "model.sock"))).toBeLessThanOrEqual(103);
+  });
+
   it("refuses to be built for an agent group without a channel", async () => {
     await expect(setup({ fake: new FakeDockerCli(), fixture: agentFixture() })).rejects.toThrow(/needs the model channel/);
   });
 
   it("removes /d/model with the rest of the workspace through the labeled root container", async () => {
-    const fake = new FakeDockerCli(); const s = await setup({ fake, fixture: agentFixture(), modelChannel: channel([], fake).port });
+    const fake = new FakeDockerCli(); const s = await setup({ fake, fixture: agentFixture(), runRoot: await shortRoot(), modelChannel: channel([], fake).port });
     const locked = join(s.runRoot, s.runId, "out", "locked");
     fake.onExecutor = (outDir) => { writeExecutorOutput(outDir, { exitCode: 0, reason: null, runId: s.runId, groupId: s.groupId });
       mkdirSync(join(outDir, "locked")); writeFileSync(join(outDir, "locked", "file"), "x"); chmodSync(join(outDir, "locked"), 0o555); };
