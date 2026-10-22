@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { parseVerifiedE2EAgentActionLedger, e2eAgentValueKeyId } from "@agentx/contracts";
 import { agentRunnable, downloadsOf, executorLog, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { AGENT_GOAL, sha256Hex } from "../support/orders-m14-agent.js";
-import { allOutputText, observations, readReport } from "../support/e2e-executor-output.js";
+import { allOutputText, caseStatuses, observations, readReport } from "../support/e2e-executor-output.js";
 
 // Task 4.3b, test cases 5 to 10 on this machine: the real executor, the pinned CLI, a real Chromium, the m14 orders app and the worker's real model proxy answering from the scripted
 // double. The Linux tests run the same cases through the production Docker host (tests/linux/e2e-agent.test.ts).
@@ -88,6 +88,14 @@ describe.runIf(agentRunnable)("the agent step end to end, on this machine", () =
     const failedStep = JSON.stringify(report).includes("MODEL_PROVIDER_FAILED");
     expect(failedStep).toBe(true);
     expect(downloadsOf(r.out)).toEqual([]);
+  }, 300_000);
+
+  it("a step that failed never lets the case go on to pass: with an assertion the page would satisfy anyway (no csv), the case still fails and records no capture frame", async () => {
+    const r = await run({ script: [{ kind: "fail", message: "provider down" }], plan: { assertions: [{ kind: "visible", testId: "identity", equals: true }] } });
+    expect(r.result.exitCode, executorLog(r.out)).toBe(1);
+    expect(caseStatuses(r.out, r.fixture)).toEqual({ "agent-export": "failed" });
+    expect(observations(r.out).filter((item) => item.kind === "case-capture")).toEqual([]);
+    expect(r.readLedger()!.steps[0]).toMatchObject({ verdict: "failed", stopCode: "MODEL_PROVIDER_FAILED" });
   }, 300_000);
 
   it("a second download in the step records ambiguous-download and gives the csv assertion nothing to read", async () => {

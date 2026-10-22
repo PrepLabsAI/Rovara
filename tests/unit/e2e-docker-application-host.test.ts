@@ -1376,7 +1376,8 @@ describe("docker application host: the model channel", () => {
     fake.onExecutor = (outDir) => { planText = readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8"); okOutput(s)(outDir); };
     await runWith(s);
     const plan = E2EExecutorPlanSchema.parse(JSON.parse(planText));
-    expect(plan.modelChannel).toEqual({ protocol: "rovara-e2e-model-channel/v1", socketPath: "/run/rovara/model.sock", ...ROUTE, valueKey: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(plan.modelChannel!.valueKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(plan.modelChannel).toEqual({ protocol: "rovara-e2e-model-channel/v1", socketPath: "/run/rovara/model.sock", ...ROUTE, valueKey: plan.modelChannel!.valueKey });
     expect(plan.modelChannel).toMatchObject(plan.admission.modelRoute!);
   });
 

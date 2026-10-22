@@ -95,7 +95,7 @@ function elide(message: ModelMessage): ModelMessage {
       if (part.type !== "text") return part;
       const at = part.text.indexOf(`\n\n${SCREEN_HEADER}\n`);
       return at < 0 ? part : { ...part, text: `${part.text.slice(0, at)}\n\n${SCREEN_HEADER}\n${OMITTED_SCREEN}` };
-    }) } as ModelMessage;
+    }) };
   }
   if (message.role === "tool") {
     return { ...message, content: message.content.map((part) => {
@@ -142,7 +142,8 @@ export function createRovaraE2EAgentExecutor(options: E2EAgentExecutorOptions): 
       const observation = await ctx.observe();
       return `Goal: ${ctx.step.instruction}\n\n${SCREEN_HEADER}\n${boundScreen(observation.text)}`;
     },
-    tools(ctx, { guard }) {
+    tools(ctx, helpers) {
+      const guard = <Value>(body: () => Promise<Value>, label?: string) => helpers.guard(body, label);
       // The screen the model last saw: node ids are valid only for it. It is read once per action, after the action, and is what the ledger describes.
       let screen: { text: string; sha: string; nodes: Map<string, ScreenLine> } | null = null;
       const look = async () => {
@@ -168,7 +169,7 @@ export function createRovaraE2EAgentExecutor(options: E2EAgentExecutorOptions): 
         try { await spec.run(resolved === null ? null : resolved.id); }
         catch (error) { failure = error; outcome = isAgentError(error) && error.code === "POLICY_DENIED" ? "policy-denied" : "action-failed"; }
         ledger.recordAction({ tool: spec.tool, node: resolved === null ? null : resolved.node, value: spec.value, url: spec.url ?? null, snapshotSha256: seen.sha, outcome });
-        if (failure !== undefined) throw failure;
+        if (failure !== undefined) throw failure instanceof Error ? failure : new Error("the action failed");
         return `Done.\n\n${AFTER_HEADER}\n${await look()}`;
       };
 

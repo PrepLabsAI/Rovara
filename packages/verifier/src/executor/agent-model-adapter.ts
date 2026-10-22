@@ -69,7 +69,7 @@ function channelPrompt(prompt: readonly V4Message[]): E2EModelChannelRequest["ca
         ? { type: "tool-result" as const, toolCallId: part.toolCallId, toolName: part.toolName, output: part.output } as never : refuse())) };
     }
     return refuse();
-  }) as E2EModelChannelRequest["call"]["prompt"];
+  });
 }
 
 export interface E2EAgentModelAdapterOptions {

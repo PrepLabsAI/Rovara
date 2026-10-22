@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
-import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -35,7 +35,7 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
 
   /** One round with one group whose case has an agent step, run through the worker's checks on a real Docker host. */
   async function journey(script: readonly ScriptedTurn[]) {
-    const fixture = createOrdersM14AgentPlan({ mock: true });
+    const fixture = createOrdersM14AgentPlan({ mock: true, taskId: TASK_ID });
     const admission = fixture.plan.admission;
     const admissionBytes = Buffer.from(encodeE2EApplicationExecutionAdmission(admission), "utf8");
     const admissionSha = sha(admissionBytes);
@@ -58,13 +58,19 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     await mkdir(evidenceRoot, { mode: 0o700 });
     const repositoryRoot = join(base, "repo");
     await mkdir(repositoryRoot);
-    // The candidate commit's files: the m14 app, copied where the worker stages the candidate (the git archive is the one thing not exercised here).
+    // The worker stages exactly the build source the admission approves (the plan's snapshot holds the app's package.json and its mock files, as a plan builder writes them); the
+    // git archive is the one thing not exercised here. The host is given the whole app instead of that staged copy (below), because the plan's snapshot is not a whole repository.
     const git: CandidateGit = { treeOf: async () => admission.candidateTreeSha,
-      materializeInto: async (_root, _commit, destination) => { for (const file of ORDERS_M14_APP_FILES) await cp(join(ORDERS_M14_ROOT, file), join(destination, file), { recursive: true }); return []; } };
+      materializeInto: async (_root, _commit, destination) => {
+        for (const source of admission.sourceSnapshot.sources) { const path = join(destination, source.path); await mkdir(dirname(path), { recursive: true }); await writeFile(path, Buffer.from(source.bytesBase64, "base64")); }
+        return [];
+      } };
+    const appCopy = join(base, "app");
+    for (const file of ORDERS_M14_APP_FILES) await cp(join(ORDERS_M14_ROOT, file), join(appCopy, file), { recursive: true });
     const outputs: Array<{ actual: Record<string, unknown> | null }> = [];
     const config = { executorImage: EXECUTOR_IMAGE, buildImage: ciImage("node-build", WEB_API_BUILD_IMAGE), runRoot } satisfies WorkflowE2EApplicationRuntimeConfig;
     const application: WorkflowE2EApplicationRuntime = { runRoot, git,
-      createHost: (input) => createDockerApplicationHost({ ...workflowE2EApplicationHostDeps(config, createProcessDockerCli(), () => Date.now(), input) }),
+      createHost: (input) => createDockerApplicationHost({ ...workflowE2EApplicationHostDeps(config, createProcessDockerCli(), () => Date.now(), { ...input, candidateSourceDir: appCopy }) }),
       // The collector's verdict is Task 4.4's; what the host handed it is what these journeys read.
       collect: ((input: { actual: Record<string, unknown> | null }) => { outputs.push({ actual: input.actual });
         return { collection: { marker: "journey" }, oracle: {}, unavailableReason: null, qualification: { status: "PASS", reason: "all cases passed", runId: null, rawReportSha256: null, result: null } }; }) as never };
@@ -125,4 +131,3 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
   }, 500_000);
 });
 
-void randomUUID; void dirname; void TASK_ID;

@@ -69,11 +69,8 @@ export async function runAgentProbe(options: { script: readonly ScriptedTurn[]; 
     } } });
   const run = await runIsolatedE2EApplication({ input: webApiProbeRunInput(fixture) as never, compiled: fixture.compiled, ports: host, signal: AbortSignal.timeout(280_000) });
   const caseId = fixture.compiled.expectedCases[0]!.caseId;
-  return { fixture, run, exitCode: run.lifecycle.process.exitCode, outDir, host, caseId, receipts: evidence.receipts(), valueKey, requestBytes, get closes() { return closes; }, credentialsLeaked,
-    readLedger() {
-      if (outDir === null) return null;
-      return readLedgerFrom(outDir, caseId);
-    } } as AgentProbeRun;
+  return { fixture, run, exitCode: run.lifecycle.process.exitCode, outDir, host, caseId, receipts: evidence.receipts(), valueKey, requestBytes, closes, credentialsLeaked,
+    readLedger: () => (outDir === null ? null : readLedgerFrom(outDir, caseId)) };
 }
 
 import { existsSync, readFileSync } from "node:fs";

@@ -49,7 +49,7 @@ export function createE2EAgentStepDriver(options: E2EAgentStepDriverOptions): E2
     let verdict: "concluded" | "failed" = "concluded";
     let stopCode: string | null = null;
     let thrown: unknown;
-    let receiptIds: string[] = [];
+    let receiptIds: string[] | undefined;
     let begun = false;
     try {
       ledger.beginStep(position.stepIndex, request.goal);
@@ -72,7 +72,7 @@ export function createE2EAgentStepDriver(options: E2EAgentStepDriverOptions): E2
       try { await options.client.endStep(position, AbortSignal.timeout(END_MARKER_TIMEOUT_MS)); } catch (error) { endFailure ??= error; }
       if (endFailure !== undefined) thrown ??= endFailure;
     }
-    if (thrown !== undefined) throw thrown;
-    return { verdict, stopCode, receiptIds };
+    if (thrown !== undefined) throw thrown instanceof Error ? thrown : new Error("the agent step failed");
+    return { verdict, stopCode, receiptIds: receiptIds ?? [] };
   };
 }

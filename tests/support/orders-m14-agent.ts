@@ -37,12 +37,14 @@ export type AgentPlanOptions = {
   deadlineMs?: number;
   /** Approve the app's inventory mock for the plan (what a Docker host serves; the local runs have no mock). */
   mock?: boolean;
+  /** The task the admission names (a UUID); a journey that signs an invocation for it needs one. */
+  taskId?: string;
 };
 
 /** A plan with one web case: open the page, an agent step with `goal`, and (by default) the CSV assertion on the owner's orders export. */
 export function createOrdersM14AgentPlan(options: AgentPlanOptions = {}): WebApiProbePlan {
   const goal = options.goal ?? AGENT_GOAL;
-  return createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot: ORDERS_M14_ROOT, modelRoute: SCRIPTED_ROUTE, healthTimeoutMs: 20_000, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }), ...(options.mock === true ? { mock: true } : {}),
+  return createWebApiProbePlan({ probe: "web-csv-positive-v1", appRoot: ORDERS_M14_ROOT, modelRoute: SCRIPTED_ROUTE, healthTimeoutMs: 20_000, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }), ...(options.mock === true ? { mock: true } : {}), ...(options.taskId === undefined ? {} : { taskId: options.taskId }),
     accountScenarios: [{ accountProfileId: "orders-owner", scenario: (targetId: string): E2EScenario => ({ scenarioId: "agent-export", requirementId: "orders-export", requestedTargetIds: [targetId], required: true,
       accountProfileId: "orders-owner", minimumEvidence: "runtime", requiredRealComponentIds: [],
       steps: [...(options.before ?? [{ kind: "navigate" as const, path: "/" }]), { kind: "agent" as const, goal, maxActions: options.maxActions ?? 4 }, ...(options.after ?? [])],

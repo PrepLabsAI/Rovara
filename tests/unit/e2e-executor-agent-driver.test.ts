@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentError } from "e2e/agent";
 import { E2EAgentActionLedgerSchema, generateE2EAgentValueKey, type E2EModelChannelClient } from "@agentx/contracts";
-import { createE2EAgentLedgerWriter, E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "../../packages/verifier/src/executor/agent-ledger.js";
+import { E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "../../packages/verifier/src/executor/agent-ledger.js";
+import type { createE2EAgentLedgerWriter } from "../../packages/verifier/src/executor/agent-ledger.js";
 import { createE2EAgentStepDriver } from "../../packages/verifier/src/executor/agent-step-driver.js";
 
 // Task 4.3b: the lifecycle around one agent.act call (executor/agent-step-driver.ts): the markers the worker is told, the ledger, the current step, and what a failure does.
