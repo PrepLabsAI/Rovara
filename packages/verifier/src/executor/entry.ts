@@ -1,3 +1,7 @@
+// The AI SDK resolves a string model id through a global default provider; the executor has none and must not fall back to a gateway. This runs before anything else loads.
+import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
+installRefusingE2EDefaultProvider();
+
 // The host mounts the plan read-only and an empty writable out directory; both paths are fixed by the container contract
 // and can be overridden by arguments (`entry.js <plan> <out>`) or ROVARA_EXECUTOR_PLAN / ROVARA_EXECUTOR_OUT.
 const planPath = process.argv[2] ?? process.env.ROVARA_EXECUTOR_PLAN ?? "/run/rovara/plan.json";
