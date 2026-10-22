@@ -74,6 +74,10 @@ export function reviewAgentTraceFile(input: { bytes: Uint8Array; cases: readonly
   if (input.expect !== undefined && (input.expect.caseDirectory !== caseDirectory || input.expect.stepIndex !== mapped.stepIndex || input.expect.keyHash !== file.data.keyHash)) return { keep: false, reason: "trace-step-mismatch" };
   const owner = input.cases.find((item) => item.caseId === mapped.caseId);
   if (owner?.ledger == null) return { keep: false, reason: "ledger-not-verified" };
+  // Owner decision Q4: an anchor's input value is text of the step's own goal or a keyed digest, never text the model chose.
+  const goal = owner.steps.find((step) => step.stepIndex === mapped.stepIndex)?.goal;
+  const anchorValues = [...(file.data.trace.endAnchors ?? []), ...(file.data.trace.goneAnchors ?? [])].flatMap((anchor) => (anchor.value === undefined ? [] : [anchor.value]));
+  if (goal === undefined || anchorValues.some((value) => !/^hmac-sha256:[a-f0-9]{64}$/.test(value) && !(value.length <= 256 && goal.includes(value)))) return { keep: false, reason: "trace-review-failed" };
   const review = reviewCapturedE2EAgentTrace({ stepIndex: mapped.stepIndex, trace: file.data.trace, ledger: owner.ledger, valueKey: input.valueKey, credentialScanHit: false });
   if (!review.keep) return { keep: false, reason: "trace-review-failed" };
   return { keep: true, caseId: mapped.caseId, caseDirectory, stepIndex: mapped.stepIndex, keyHash: file.data.keyHash, binding: review.binding };

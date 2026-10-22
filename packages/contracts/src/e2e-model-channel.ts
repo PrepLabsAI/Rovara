@@ -684,9 +684,55 @@ export const E2E_AGENT_TRACE_FILE_MAX_BYTES = 131_072;
 export const E2E_AGENT_TRACES_PER_GROUP_MAX = caps.maxAgentStepsPerGroup;
 export const E2E_AGENT_TRACE_ANCHORS_MAX = 16;
 export const E2E_AGENT_TRACE_ANCHOR_TEXT_MAX = 300;
+/** A node name as the ledger holds it. */
+export const E2E_LEDGER_NAME_MAX = 120;
 /** The only prose a kept trace carries: the recorded run's own summary is model text, so it is replaced before anything is digested. */
 export const E2E_AGENT_TRACE_SUMMARY = "The recorded AI navigation concluded.";
-export const E2EAgentTraceFileSchema = z.object({ schemaVersion: z.literal(E2E_AGENT_TRACE_FILE_SCHEMA_VERSION), keyHash: digest, trace: z.record(z.string(), z.unknown()) }).strict();
+/** The keys a recording may keep as they are: a closed set of named keys. Any other key is text the model chose, so it is kept as a digest like a typed value (unless it is text of the goal). */
+export const E2E_AGENT_NAMED_KEYS = ["Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "Space"] as const;
+export const E2E_AGENT_SCROLL_DIRECTIONS = ["up", "down", "left", "right"] as const;
+const namedKeys: ReadonlySet<string> = new Set(E2E_AGENT_NAMED_KEYS);
+const scrollDirections: ReadonlySet<string> = new Set(E2E_AGENT_SCROLL_DIRECTIONS);
+
+const cleanText = (max: number) => z.string().min(1).max(max);
+/** A target as the ledger holds a node: a normalised role, a name of at most 120 characters, a test id of at most 120. */
+const cleanTarget = z.object({ role: z.string().regex(/^[a-z]{1,32}$/), name: cleanText(E2E_LEDGER_NAME_MAX).optional(), testId: cleanText(E2E_LEDGER_NAME_MAX).optional() }).strict();
+/** An app path, or the application's origin and a path: no query, fragment or credentials. */
+const cleanUrl = z.string().max(600).regex(/^(?:https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?)?\/(?!\/)[^\s\\?#@]*$/);
+const cleanPath = z.string().max(600).regex(/^\/(?!\/)[^\s\\?#]*$/);
+const anchorText = cleanText(E2E_AGENT_TRACE_ANCHOR_TEXT_MAX);
+const cleanAnchor = z.object({ role: anchorText.optional(), name: anchorText.optional(), text: anchorText.optional(), testId: anchorText.optional(), placeholder: anchorText.optional(),
+  states: z.array(z.enum(["checked", "expanded", "pressed", "selected"])).min(1).max(4).optional(), value: anchorText.optional() }).strict()
+  .refine((anchor) => Object.keys(anchor).length > 0, "an anchor holds something");
+const actionSummary = (name: string) => z.literal(`The ${name} action.`);
+const cleanAction = z.discriminatedUnion("name", [
+  z.object({ name: z.literal("tap"), summary: actionSummary("tap"), target: cleanTarget }).strict(),
+  z.object({ name: z.literal("type"), summary: actionSummary("type"), target: cleanTarget, value: z.string().max(4096) }).strict(),
+  z.object({ name: z.literal("select"), summary: actionSummary("select"), target: cleanTarget, value: z.string().max(4096) }).strict(),
+  z.object({ name: z.literal("press"), summary: actionSummary("press"), target: cleanTarget, key: z.string().min(1).max(80) }).strict(),
+  z.object({ name: z.literal("scroll"), summary: actionSummary("scroll"), direction: z.enum(E2E_AGENT_SCROLL_DIRECTIONS), target: cleanTarget.optional(), times: z.number().int().min(1).max(50).optional() }).strict(),
+  z.object({ name: z.literal("navigate"), summary: actionSummary("navigate"), url: cleanUrl }).strict(),
+]);
+const identifier = z.string().min(1).max(600);
+/**
+ * The recording exactly as the capture store keeps it (see `agent-trace-clean.ts`): strict, so a field the cleaner does not produce, a target with more than role, name and test id,
+ * a prose summary, a path with a query or fragment, more than eight actions or sixteen anchors, or text past its bound is not a recording of this contract. The host checks its files
+ * with it before uploading and the broker checks every upload with it again.
+ */
+export const E2EAgentCleanTraceSchema = z.object({
+  actions: z.array(cleanAction).max(caps.maxActionsPerStep),
+  summary: z.literal(E2E_AGENT_TRACE_SUMMARY),
+  executor: z.object({ name: cleanText(120), version: cleanText(60).optional() }).strict(),
+  recordedFor: z.object({ testId: identifier, targetId: identifier, instructionDigest: digest, paramsDigest: digest.optional(), callIndex: z.number().int().min(0).max(1000).optional(), agent: identifier.optional() }).strict().optional(),
+  startPath: cleanPath.optional(), endPath: cleanPath.optional(),
+  endAnchors: z.array(cleanAnchor).max(E2E_AGENT_TRACE_ANCHORS_MAX / 2).optional(), goneAnchors: z.array(cleanAnchor).max(E2E_AGENT_TRACE_ANCHORS_MAX / 2).optional(),
+  endWaitMs: z.number().int().min(0).max(120_000).optional(),
+  keyedBy: z.object({ cacheSchema: identifier, policyVersion: identifier, project: identifier, platform: identifier, engineName: identifier, engineSpiVersion: z.number().int().min(0).max(1000),
+    appIdentity: identifier, agentContextDigest: identifier }).strict().optional(),
+}).strict().superRefine((trace, context) => {
+  if ((trace.endAnchors?.length ?? 0) + (trace.goneAnchors?.length ?? 0) > E2E_AGENT_TRACE_ANCHORS_MAX) context.addIssue({ code: "custom", path: ["endAnchors"], message: "more anchors than the owner's bound" });
+});
+export const E2EAgentTraceFileSchema = z.object({ schemaVersion: z.literal(E2E_AGENT_TRACE_FILE_SCHEMA_VERSION), keyHash: digest, trace: E2EAgentCleanTraceSchema }).strict();
 export type E2EAgentTraceFile = z.infer<typeof E2EAgentTraceFileSchema>;
 
 export type CapturedTraceReview =
@@ -709,16 +755,22 @@ function pathOf(url: unknown): string | undefined {
 }
 
 function actionMatches(traced: Rec, action: VerifiedE2EAgentActionLedger["steps"][number]["actions"][number], key: string): boolean {
-  // A typed value the capture store kept as its keyed digest (`hmac-sha256:<digest>`, because it was not text of the goal) matches the ledger's digest as it is.
-  const keyed = (value: unknown, expected: string | null) => typeof value === "string" && expected !== null
-    && (e2eAgentValueDigest(key, value) === expected || value === `hmac-sha256:${expected}`);
+  // Owner decision Q4: a value the model chose is never kept. What a recording may hold for an action's value is the step's own goal text (the ledger's verified `valueLiteral`), the
+  // marker `hmac-sha256:<the ledger's digest>`, or (for a key or a direction only) a name from the closed vocabulary whose keyed digest is the ledger's. A plain value that merely
+  // matches the digest is refused.
+  const keyed = (value: unknown, expected: string | null, vocabulary: ReadonlySet<string> | null) => {
+    if (typeof value !== "string" || expected === null) return false;
+    if (value === `hmac-sha256:${expected}`) return true;
+    if (action.valueLiteral !== null && value === action.valueLiteral) return true;
+    return vocabulary !== null && vocabulary.has(value) && e2eAgentValueDigest(key, value) === expected;
+  };
   if (traced["name"] !== action.tool) return false;
   switch (action.tool) {
     case "tap": return targetMatches(traced["target"], action.node);
-    case "type": return targetMatches(traced["target"], action.node) && keyed(traced["value"], action.valueDigest);
-    case "select": return targetMatches(traced["target"], action.node) && keyed(traced["value"], action.valueDigest);
-    case "press": return targetMatches(traced["target"], action.node) && keyed(traced["key"], action.valueDigest);
-    case "scroll": return targetMatches(traced["target"], action.node) && keyed(traced["direction"], action.valueDigest);
+    case "type": return targetMatches(traced["target"], action.node) && keyed(traced["value"], action.valueDigest, null);
+    case "select": return targetMatches(traced["target"], action.node) && keyed(traced["value"], action.valueDigest, null);
+    case "press": return targetMatches(traced["target"], action.node) && keyed(traced["key"], action.valueDigest, namedKeys);
+    case "scroll": return targetMatches(traced["target"], action.node) && keyed(traced["direction"], action.valueDigest, scrollDirections);
     case "navigate": return pathOf(traced["url"]) === action.url;
   }
 }

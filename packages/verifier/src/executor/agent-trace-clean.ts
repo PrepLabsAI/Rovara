@@ -1,4 +1,5 @@
-import { E2E_AGENT_TRACE_ANCHORS_MAX, E2E_AGENT_TRACE_ANCHOR_TEXT_MAX, E2E_AGENT_TRACE_SUMMARY, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, e2eAgentValueDigest } from "@agentx/contracts";
+import { E2E_AGENT_NAMED_KEYS, E2E_AGENT_TRACE_ANCHORS_MAX, E2E_AGENT_TRACE_ANCHOR_TEXT_MAX, E2E_AGENT_TRACE_SUMMARY, E2E_LEDGER_NAME_MAX, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, e2eAgentValueDigest } from "@agentx/contracts";
+import { ledgerName, ledgerRole } from "./agent-ledger.js";
 
 /**
  * What a recording of an AI navigation step may keep (Task 4.6a, CAPTURE46): e2e's own `ActionTrace` reduced, field by field, to what the action ledger's rules allow, before it is
@@ -18,7 +19,7 @@ const isRec = (value: unknown): value is Rec => typeof value === "object" && val
 
 /** The ledger's own rule for an app path (`appRelativePath` in the contracts): one leading slash, no scheme or host, no query, no fragment. */
 const APP_PATH = /^\/(?!\/)[^\s\\?#]*$/;
-const KEY = /^[A-Za-z0-9+_ -]{1,32}$/;
+const NAMED_KEYS: ReadonlySet<string> = new Set(E2E_AGENT_NAMED_KEYS);
 const DIRECTIONS: ReadonlySet<string> = new Set(["up", "down", "left", "right"]);
 const ANCHOR_STATES: ReadonlySet<string> = new Set(["checked", "expanded", "pressed", "selected"]);
 const KEY_CONTEXT_STRINGS = ["cacheSchema", "policyVersion", "project", "platform", "engineName", "appIdentity", "agentContextDigest"] as const;
@@ -32,7 +33,7 @@ const ANCHORS_PER_SIDE = E2E_AGENT_TRACE_ANCHORS_MAX / 2;
 export type TraceCleanOptions = {
   /** The application's origin: an absolute `navigate` URL is kept only when it is exactly this origin plus an app path. A relative path needs none. */
   origin?: string;
-  /** The goals of the agent steps this process has run: an anchor's input value that is text of one is kept, any other becomes its keyed digest. */
+  /** The step's own goal (the goals whose instruction digest is the one the recording carries): an anchor's input value, a typed value or a key that is text of one is kept, any other becomes its keyed digest. */
   goals: readonly string[];
   /** The run's value key. Without one, a trace with an anchor value that is not goal text is dropped. */
   valueKey?: string;
@@ -40,18 +41,19 @@ export type TraceCleanOptions = {
 
 const bounded = (value: unknown, max: number): string | undefined => (typeof value === "string" && value.length <= max ? value : undefined);
 
-/** A target as `{ role, name, testId }`, or undefined when it holds none of them or one is out of bound. */
+/** A target as the ledger holds a node (`{ role, name, testId }`: a normalised role, a name and a test id of at most 120), or undefined when the descriptor holds none of the three. */
 function cleanTarget(raw: unknown): Rec | undefined {
   if (!isRec(raw)) return undefined;
-  const target: Rec = {};
-  for (const field of ["role", "name", "testId"] as const) {
-    const value = raw[field];
-    if (value === undefined) continue;
-    const text = bounded(value, E2E_AGENT_TRACE_ANCHOR_TEXT_MAX);
-    if (text === undefined) return undefined;
-    if (text !== "") target[field] = text;
-  }
-  return Object.keys(target).length === 0 ? undefined : target;
+  const role = typeof raw["role"] === "string" ? raw["role"] : undefined;
+  const name = typeof raw["name"] === "string" ? raw["name"] : undefined;
+  const testId = typeof raw["testId"] === "string" ? raw["testId"] : undefined;
+  if ((role === undefined || role === "") && (name === undefined || name === "") && (testId === undefined || testId === "")) return undefined;
+  if ([raw["role"], raw["name"], raw["testId"]].some((value) => value !== undefined && typeof value !== "string")) return undefined;
+  const target: Rec = { role: ledgerRole(role) };
+  const kept = ledgerName(name);
+  if (kept !== "") target["name"] = kept;
+  if (testId !== undefined && testId !== "") target["testId"] = testId.slice(0, E2E_LEDGER_NAME_MAX);
+  return target;
 }
 
 /** The anchor's own fields; its input value follows the goal-literal-or-keyed-digest rule at once. Undefined when it is out of bound or empty. */
@@ -124,8 +126,12 @@ function cleanAction(raw: unknown, options: TraceCleanOptions): Rec | undefined 
     }
     case "press": {
       const target = cleanTarget(raw["target"]);
-      const key = bounded(raw["key"], 32);
-      return target === undefined || key === undefined || !KEY.test(key) ? undefined : { name, summary, target, key };
+      const key = bounded(raw["key"], 64);
+      if (target === undefined || key === undefined || key === "") return undefined;
+      // Owner decision Q4: a key is text the model chose unless it is a named key or text of the goal; any other is kept as a digest only.
+      const plain = NAMED_KEYS.has(key) || (key.length <= LITERAL_MAX && options.goals.some((goal) => goal.includes(key)));
+      if (!plain && options.valueKey === undefined) return undefined;
+      return { name, summary, target, key: plain ? key : `hmac-sha256:${e2eAgentValueDigest(options.valueKey!, key)}` };
     }
     case "scroll": {
       const direction = bounded(raw["direction"], 8);

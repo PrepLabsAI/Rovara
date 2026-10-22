@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_AGENT_TRACE_SUMMARY, reviewCapturedE2EAgentTrace } from "@agentx/contracts";
+import { createHash } from "node:crypto";
+import { E2E_AGENT_TRACE_FILE_MAX_BYTES, canonicalJson, E2E_AGENT_TRACE_SUMMARY, reviewCapturedE2EAgentTrace } from "@agentx/contracts";
 import { agentRunnable, runAgentCase, type AgentRun } from "../support/agent-executor-run.js";
 import { AGENT_GOAL } from "../support/orders-m14-agent.js";
 import { asLinuxRun, assembleAgentRun, brokerRoundFor, collectAssembled, firstCase } from "../support/agent-collection.js";
@@ -25,7 +26,7 @@ const twinBefore = [{ kind: "navigate" as const, path: "/" }, { kind: "agent" as
 
 type Json = Record<string, unknown>;
 type TraceAction = Record<string, unknown> & { target: Record<string, unknown> };
-type TraceBody = { actions: TraceAction[] };
+type TraceBody = { actions: TraceAction[]; endAnchors?: Json[]; endPath?: string } & Json;
 /** The group's model evidence inside an uploaded group run, for the tests that edit it after the fact. */
 const modelEvidenceOf = (groupRun: Json): Json => ((groupRun["actual"] as { collectionInputs: { agentModel: Json } }).collectionInputs).agentModel;
 const uploadsOf = (groupRun: Json): Json[] => modelEvidenceOf(groupRun)["traces"] as Json[];
@@ -147,6 +148,14 @@ describe.runIf(agentRunnable)("the recording of a passed AI navigation step (Tas
       ["another kind", (trace) => { trace.actions[0]!["name"] = "type"; trace.actions[0]!["value"] = "orders"; }],
       ["another target name", (trace) => { trace.actions[0]!.target["name"] = "Download invoices"; }],
       ["another test id", (trace) => { trace.actions[0]!.target["testId"] = "download-invoices"; }],
+      // Task 4.6a fix round 1 (Q4 and the strict shape): a trace that is not the cleaned shape is not uploaded, however well it matches the ledger.
+      ["a selector on a target", (trace) => { trace.actions[0]!.target["selector"] = "main > button"; }],
+      ["a prose summary", (trace) => { trace["summary"] = "The model said the export worked."; }],
+      ["a query in the end path", (trace) => { trace.endPath = "/orders?token=abc"; }],
+      ["a target name past 120 characters", (trace) => { trace.actions[0]!.target["name"] = "n".repeat(121); }],
+      ["a field the cleaner does not produce", (trace) => { trace["modelNotes"] = "x"; }],
+      ["an anchor input value that is text the model chose", (trace) => { trace.endAnchors![0]!["value"] = "typed by the model"; }],
+      ["seventeen anchors", (trace) => { trace.endAnchors = Array.from({ length: 9 }, () => ({ text: "x" })); trace["goneAnchors"] = Array.from({ length: 8 }, () => ({ text: "y" })); }],
     ];
     const group = agentTraceGroupOf(a.resolved.suite, a.resolved.binding.runId);
     for (const [name, edit] of edits) {
@@ -218,6 +227,13 @@ describe.runIf(agentRunnable)("the recording of a passed AI navigation step (Tas
       change(file);
       traces[0]!["traceBase64"] = Buffer.from(JSON.stringify(file)).toString("base64");
     };
+    // An edit that also re-binds: the binding claims the edited trace's own digest, so only the broker's review of the file itself can refuse it.
+    const rebound = (traces: Json[], change: (file: { trace: TraceBody }) => void) => {
+      reencode(traces, (file) => {
+        change(file);
+        traces[0]!["binding"] = { ...(traces[0]!["binding"] as Json), traceSha256: createHash("sha256").update(canonicalJson(file.trace), "utf8").digest("hex") };
+      });
+    };
     const edits: Array<[string, (traces: Json[]) => void]> = [
       ["a target edited after upload", (traces) => reencode(traces, (file) => { file.trace.actions[0]!.target["name"] = "Download invoices"; })],
       ["an action added", (traces) => reencode(traces, (file) => { file.trace.actions.push({ ...file.trace.actions[0]! }); })],
@@ -229,6 +245,12 @@ describe.runIf(agentRunnable)("the recording of a passed AI navigation step (Tas
       ["bytes that are not canonical base64", (traces) => { traces[0]!["traceBase64"] = `${traces[0]!["traceBase64"] as string}\n`; }],
       ["bytes over the ceiling", (traces) => { traces[0]!["traceBase64"] = Buffer.alloc(E2E_AGENT_TRACE_FILE_MAX_BYTES + 1, 0x20).toString("base64"); }],
       ["a duplicate", (traces) => { traces.push({ ...traces[0]! }); }],
+      // The broker holds the file to the cleaned shape and to Q4 itself, whatever the host's review made of it.
+      ["a selector on a target", (traces) => rebound(traces, (file) => { file.trace.actions[0]!.target["selector"] = "main > button"; })],
+      ["a prose summary", (traces) => rebound(traces, (file) => { file.trace["summary"] = "The model said the export worked."; })],
+      ["a query in the end path", (traces) => rebound(traces, (file) => { file.trace.endPath = "/orders?token=abc"; })],
+      ["an anchor input value that is text the model chose", (traces) => rebound(traces, (file) => { file.trace.endAnchors![0]!["value"] = "typed by the model"; })],
+      ["a field the cleaner does not produce", (traces) => rebound(traces, (file) => { file.trace["modelNotes"] = "x"; })],
     ];
     for (const [name, change] of edits) {
       const verdict = edit(change);

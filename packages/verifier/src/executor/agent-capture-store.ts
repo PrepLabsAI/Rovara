@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_AGENT_TRACE_FILE_SCHEMA_VERSION, e2eAgentValueDigest } from "@agentx/contracts";
+import { E2EAgentCleanTraceSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_AGENT_TRACE_FILE_SCHEMA_VERSION, e2eAgentValueDigest } from "@agentx/contracts";
+import { agentInstructionDigest } from "../application-agent-traces.js";
 import { cleanE2EAgentTrace } from "./agent-trace-clean.js";
 import { E2E_AGENT_EVIDENCE_DIR } from "./evidence-paths.js";
 
@@ -9,8 +10,8 @@ import { E2E_AGENT_EVIDENCE_DIR } from "./evidence-paths.js";
  * The capture-only replay cache store of a round with an agent step (Ruling M4-A, Task 4.3b).
  *
  * e2e keeps a recording of what an `act` step did (its `ActionTrace`) so a later run can replay it without a model. A candidate round never replays: `read` always misses, so the
- * model always navigates. `write` keeps the trace the runner hands over, and the runner only does that after a later deterministic verification step of the attempt passed, which is
- * the "verified round" this feature wants. Nothing here reads a file or the network; the traces stay in this process until the host takes them, scans them for credentials, and
+ * model always navigates. `write` keeps the trace the runner hands over, and the runner only does that after a later deterministic verification step of the attempt passed. Rovara's approved assertions all open before the agent step, so the web case
+ * records one more passed step after it (the seal, `confirm()`, only for a case that passed whole): that is what makes a verified round leave a recording. Nothing here reads a file or the network; the traces stay in this process until the host takes them, scans them for credentials, and
  * writes the clean ones to the out directory as operator evidence. `delete` does nothing: an eviction can never remove what a verified round produced.
  *
  * Task 4.6a (CAPTURE46): the recording is first reduced to what the ledger's rules allow (`cleanE2EAgentTrace`: a fixed summary, targets as `{ role, name, testId }`, same-origin app
@@ -72,9 +73,8 @@ function replaceValueFields(node: unknown, markers: ReadonlyMap<string, string>)
 }
 
 /** The trace with the ledger's rule applied to its typed values, or undefined when it cannot be kept. */
-function hideTypedValues(trace: unknown, options: E2EAgentCaptureStoreOptions): unknown {
+function hideTypedValues(trace: unknown, options: E2EAgentCaptureStoreOptions, goals: readonly string[]): unknown {
   if (!isRec(trace) || !Array.isArray(trace["actions"])) return undefined;
-  const goals = options.goals?.() ?? [];
   const markers = new Map<string, string>();
   for (const action of trace["actions"] as unknown[]) {
     if (!isRec(action) || typeof action["name"] !== "string" || !TYPED_ACTIONS.has(action["name"]) || typeof action["value"] !== "string") continue;
@@ -84,14 +84,12 @@ function hideTypedValues(trace: unknown, options: E2EAgentCaptureStoreOptions): 
     markers.set(value, `hmac-sha256:${e2eAgentValueDigest(options.valueKey, value)}`);
   }
   if (markers.size === 0) return trace;
-  const replaced = replaceValueFields(trace, markers) as Rec;
-  // The typed action's own summary is prose that may quote the value; it becomes a fixed one.
-  const actions = (replaced["actions"] as unknown[]).map((action) => (isRec(action) && typeof action["value"] === "string" && action["value"].startsWith("hmac-sha256:") && [...markers.values()].includes(action["value"])
-    ? { ...action, summary: `${String(action["name"])} (the value is kept as its keyed digest)` } : action));
-  const result = { ...replaced, actions };
+  const result = replaceValueFields(trace, markers) as Rec;
   const serialized = JSON.stringify(result);
   for (const value of markers.keys()) {
-    const forms = [value, JSON.stringify(value).slice(1, -1), encodeURIComponent(value), Buffer.from(value, "utf8").toString("base64")];
+    const bytes = Buffer.from(value, "utf8");
+    // Hex and base64url forms of a very short value would match any digest, so they are looked for from four characters up (the other forms always were).
+    const forms = [value, JSON.stringify(value).slice(1, -1), encodeURIComponent(value), bytes.toString("base64"), ...(value.length >= 4 ? [bytes.toString("base64url"), bytes.toString("hex")] : [])];
     if (forms.some((form) => serialized.includes(form))) return undefined;
   }
   return result;
@@ -107,9 +105,14 @@ export function createE2EAgentCaptureStore(options: E2EAgentCaptureStoreOptions 
       let serialized: string | undefined;
       let trace: unknown;
       try {
-        const cleaned = cleanE2EAgentTrace(JSON.parse(JSON.stringify(received)) as unknown, { goals: options.goals?.() ?? [], ...(options.origin === undefined ? {} : { origin: options.origin }),
-          ...(options.valueKey === undefined ? {} : { valueKey: options.valueKey }) });
-        trace = cleaned === undefined ? undefined : hideTypedValues(cleaned, options);
+        const copy = JSON.parse(JSON.stringify(received)) as unknown;
+        // Owner decision Q4: only text of the step's own goal may stay a literal. The step is the one whose instruction digest the recording carries; with none, no goal applies.
+        const digest = isRec(copy) && isRec(copy["recordedFor"]) ? copy["recordedFor"]["instructionDigest"] : undefined;
+        const goals = (options.goals?.() ?? []).filter((goal) => agentInstructionDigest(goal) === digest);
+        const cleaned = cleanE2EAgentTrace(copy, { goals, ...(options.origin === undefined ? {} : { origin: options.origin }), ...(options.valueKey === undefined ? {} : { valueKey: options.valueKey }) });
+        trace = cleaned === undefined ? undefined : hideTypedValues(cleaned, options, goals);
+        // The shape the host and the broker accept; anything else is not kept.
+        if (trace !== undefined && !E2EAgentCleanTraceSchema.safeParse(trace).success) trace = undefined;
         serialized = trace === undefined ? undefined : JSON.stringify({ schemaVersion: E2E_AGENT_TRACE_FILE_SCHEMA_VERSION, keyHash, trace });
       } catch { return undefined; }
       if (serialized === undefined || !/^[a-f0-9]{64}$/.test(keyHash)) return undefined;

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentError } from "e2e/agent";
-import { E2EAgentActionLedgerSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_AGENT_TRACE_SUMMARY, e2eAgentValueDigest, e2eAgentValueKeyId, generateE2EAgentValueKey, parseVerifiedE2EAgentActionLedger, reviewCapturedE2EAgentTrace,
+import { E2EAgentActionLedgerSchema, E2EAgentCleanTraceSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_AGENT_TRACE_SUMMARY, e2eAgentValueDigest, e2eAgentValueKeyId, generateE2EAgentValueKey, parseVerifiedE2EAgentActionLedger, reviewCapturedE2EAgentTrace,
   type E2EModelChannelClient, type E2EModelChannelRequest, type E2EModelChannelResponse } from "@agentx/contracts";
 import { createRovaraE2EAgentExecutor, appRelativePath, elideSupersededScreens, parseScreen, parseScreenLine, E2E_AGENT_MESSAGES_SOFT_BUDGET_BYTES } from "../../packages/verifier/src/executor/agent-executor.js";
 import { createE2EAgentLedgerWriter, E2E_AGENT_EVIDENCE_DIR, E2E_AGENT_LEDGER_FILE, agentCaseDirectoryName } from "../../packages/verifier/src/executor/agent-ledger.js";
@@ -29,7 +29,8 @@ const SCREEN = [
 ].join("\n");
 
 /** A recording as e2e hands it to the store (Task 4.6a): the actions and the provenance a real trace carries. */
-const rec = (actions: unknown[], extra: Record<string, unknown> = {}) => ({ actions, executor: { name: "rovara-e2e-agent", version: "1" }, summary: "Done.", ...extra });
+const rec = (actions: unknown[], extra: Record<string, unknown> = {}) => ({ actions, executor: { name: "rovara-e2e-agent", version: "1" }, summary: "Done.",
+  recordedFor: { testId: ".agentx/e2e/generated-application.test.ts::case-orders-export", targetId: "account-target-1", instructionDigest: sha(GOAL), callIndex: 0 }, ...extra });
 const TAP_ORDERS = { name: "tap", summary: 'tap button "Download orders"', target: { role: "button", name: "Download orders", testId: "download-orders" } };
 
 const dirs: string[] = [];
@@ -330,7 +331,8 @@ describe("the capture-only store with the host's credential scan and file hook (
     expect(path).not.toContain("1111");
     // The file is the wrapper (Task 4.6a): its key, and the trace cleaned to what the ledger's rules allow.
     expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ schemaVersion: "rovara-agent-trace-file/v1", keyHash,
-      trace: { actions: [{ name: "tap", summary: "The tap action.", target: { role: "button", name: "Download orders", testId: "download-orders" } }], summary: E2E_AGENT_TRACE_SUMMARY, executor: { name: "rovara-e2e-agent", version: "1" } } });
+      trace: { actions: [{ name: "tap", summary: "The tap action.", target: { role: "button", name: "Download orders", testId: "download-orders" } }], summary: E2E_AGENT_TRACE_SUMMARY, executor: { name: "rovara-e2e-agent", version: "1" },
+        recordedFor: { testId: ".agentx/e2e/generated-application.test.ts::case-orders-export", targetId: "account-target-1", instructionDigest: sha(GOAL), callIndex: 0 } } });
   });
 
   it("drops a trace that carries an account password (also as base64) or a session value learned later: no file, no held trace, the verdict inputs untouched", async () => {
@@ -353,12 +355,13 @@ describe("the capture-only store with the host's credential scan and file hook (
   });
 });
 
+type Kept = Record<string, unknown> & { actions: Array<Record<string, unknown> & { target: Record<string, unknown> }> };
 describe("trace hygiene: what the capture store keeps (Task 4.6a, test case 4)", () => {
   const PASSWORD = "pw-Zk39-very-secret-value";
   const account = { profileId: "orders-owner", email: "rovara-owner-a1b2c3@example.test", password: PASSWORD };
   const redactor = createCredentialRedactor([account]);
   const make = (extra: Parameters<typeof createE2EAgentCaptureStore>[0] = {}) => createE2EAgentCaptureStore({ scan: (bytes) => redactor.contains(bytes), origin: ORIGIN, goals: () => [GOAL], valueKey: generateE2EAgentValueKey(), ...extra });
-  const keptOf = async (store: ReturnType<typeof make>, trace: unknown) => { const written = await store.write("a".repeat(64), trace); return written === undefined ? undefined : store.taken()[0]!.trace as Record<string, unknown>; };
+  const keptOf = async (store: ReturnType<typeof make>, trace: unknown) => { const written = await store.write("a".repeat(64), trace); return written === undefined ? undefined : store.taken()[0]!.trace as Kept; };
   const dirtyTarget = { role: "button", name: "Download orders", testId: "download-orders", text: "Download the orders", placeholder: "ph", selector: "main > button:nth-child(2)", inputPurpose: "email",
     within: "row-7", position: { index: 1, of: 2 } };
 
@@ -392,7 +395,7 @@ describe("trace hygiene: what the capture store keeps (Task 4.6a, test case 4)",
   it("drops a trace with an action the ledger has no verb for, a truncated one, one with more than eight actions, a key or direction out of vocabulary, or a target with nothing in it", async () => {
     const store = make();
     for (const action of [{ name: "upload", summary: "u", target: dirtyTarget, paths: ["/etc/passwd"] }, { name: "typeSecret", summary: "s", target: dirtyTarget, secret: "login" }, { name: "tapAt", summary: "t", point: { x: 1, y: 2 }, viewport: { width: 1, height: 1 } },
-      { name: "typeText", summary: "t", value: "x", replace: false }, { name: "press", summary: "p", key: "a long key name that is not a key at all", target: dirtyTarget }, { name: "scroll", summary: "s", direction: "sideways" },
+      { name: "typeText", summary: "t", value: "x", replace: false }, { name: "press", summary: "p", key: "k".repeat(65), target: dirtyTarget }, { name: "scroll", summary: "s", direction: "sideways" },
       { name: "tap", summary: "t", target: { selector: "button" } }, { name: "tap", summary: "t" }]) {
       expect(await store.write("e".repeat(64), rec([action])), JSON.stringify(action)).toBeUndefined();
     }
@@ -442,6 +445,60 @@ describe("trace hygiene: what the capture store keeps (Task 4.6a, test case 4)",
     for (let index = 1; index <= spots.length; index += 1) expect(existsSync(agentTraceFilePath(outDir, String(index).repeat(64)))).toBe(false);
     // Positive control: the same store keeps a clean trace, so the drops above are the scan's.
     expect(await store.write("a".repeat(64), rec([TAP_ORDERS], { endAnchors: [{ text: "Orders exported" }] }))).toBeDefined();
+  });
+
+  it("Q4: a typed value, option or key that is text of ANOTHER goal (not the step's own) is a digest, like any value the model chose; the step is found by the recording's instruction digest", async () => {
+    const valueKey = generateE2EAgentValueKey();
+    const other = "Open the archive and rename the quarterly report";
+    const store = make({ valueKey, goals: () => [GOAL, other] });
+    const field = { role: "textbox", name: "File name" };
+    const trace = await keptOf(store, rec([{ name: "type", value: "orders", summary: "t", target: field }, { name: "type", value: "quarterly report", summary: "t", target: field },
+      { name: "press", key: "quarterly", summary: "p", target: field }]));
+    expect(trace!["actions"].map((action: Record<string, unknown>) => action["value"] ?? action["key"])).toEqual(["orders", `hmac-sha256:${e2eAgentValueDigest(valueKey, "quarterly report")}`,
+      `hmac-sha256:${e2eAgentValueDigest(valueKey, "quarterly")}`]);
+    expect(JSON.stringify(trace)).not.toContain("quarterly report");
+    // A recording that names no step of this process has no goal at all: every value is a digest, and without a key it is dropped.
+    const unnamed = await keptOf(make({ valueKey, goals: () => [GOAL] }), rec([{ name: "type", value: "orders", summary: "t", target: field }], { recordedFor: undefined }));
+    expect(unnamed!["actions"][0]!["value"]).toBe(`hmac-sha256:${e2eAgentValueDigest(valueKey, "orders")}`);
+    expect(await make({ valueKey: undefined as never, goals: () => [GOAL] }).write("b".repeat(64), rec([{ name: "type", value: "orders", summary: "t", target: field }], { recordedFor: { testId: "t::c", targetId: "x", instructionDigest: "0".repeat(64) } }))).toBeUndefined();
+  });
+
+  it("keeps a key only when it is a named key or text of the goal; any other key is a keyed digest, and a key past the closed set is not spelled out", async () => {
+    const valueKey = generateE2EAgentValueKey();
+    const store = make({ valueKey });
+    const field = { role: "textbox", name: "File name" };
+    const keys = ["Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "Space"];
+    const trace = await keptOf(store, rec(keys.slice(0, 8).map((key) => ({ name: "press", key, summary: "p", target: field }))));
+    expect(trace!["actions"].map((action: Record<string, unknown>) => action["key"])).toEqual(keys.slice(0, 8));
+    const spelled = await keptOf(make({ valueKey }), rec(["q", "x", "Control+a", "z", "1", "7", "k", "m"].map((key) => ({ name: "press", key, summary: "p", target: field }))));
+    expect(spelled!["actions"].map((action: Record<string, unknown>) => action["key"])).toEqual(["q", "x", "Control+a", "z", "1", "7", "k", "m"].map((key) => (GOAL.includes(key) ? key : `hmac-sha256:${e2eAgentValueDigest(valueKey, key)}`)));
+    expect(JSON.stringify(spelled)).not.toContain("Control+a");
+    expect(await make({ valueKey: undefined as never }).write("c".repeat(64), rec([{ name: "press", key: "Control+a", summary: "p", target: field }]))).toBeUndefined();
+  });
+
+  it("holds a target to the ledger's node: a lower-case role of letters, a name and a test id of at most 120 characters", async () => {
+    const trace = await keptOf(make(), rec([{ name: "tap", summary: "t", target: { role: "Menu-Item", name: "n".repeat(300), testId: "t".repeat(200) } }, { name: "tap", summary: "t", target: { name: "No role" } }]));
+    expect(trace!["actions"].map((action) => action.target)).toEqual([{ role: "menuitem", name: "n".repeat(120), testId: "t".repeat(120) }, { role: "generic", name: "No role" }]);
+  });
+
+  it("the file schema is strict on the cleaned shape: a hand-made trace with a selector, a prose summary, a query, a ninth action, a long name or an extra field is refused, and every trace the store keeps passes it", async () => {
+    const ok = (await keptOf(make(), rec([TAP_ORDERS], { endAnchors: [{ text: "Orders exported" }], startPath: "/", endPath: "/" })))!;
+    expect(E2EAgentCleanTraceSchema.safeParse(ok).success).toBe(true);
+    const bad: Array<[string, Record<string, unknown>]> = [
+      ["a selector on a target", { ...ok, actions: [{ ...(ok["actions"] as Record<string, unknown>[])[0], target: { role: "button", selector: "#b" } }] }],
+      ["prose in the summary", { ...ok, summary: "the model liked it" }],
+      ["prose in an action summary", { ...ok, actions: [{ ...(ok["actions"] as Record<string, unknown>[])[0], summary: "tapped the secret" }] }],
+      ["a query in the end path", { ...ok, endPath: "/x?token=1" }],
+      ["a long name", { ...ok, actions: [{ ...(ok["actions"] as Record<string, unknown>[])[0], target: { role: "button", name: "n".repeat(121) } }] }],
+      ["a ninth action", { ...ok, actions: Array.from({ length: 9 }, () => (ok["actions"] as unknown[])[0]) }],
+      ["an extra field", { ...ok, model: "x" }],
+      ["a selector on an anchor", { ...ok, endAnchors: [{ text: "x", selector: "#s" }] }],
+      ["nine anchors a side", { ...ok, endAnchors: Array.from({ length: 9 }, () => ({ text: "x" })) }],
+      ["an anchor text past 300", { ...ok, endAnchors: [{ text: "x".repeat(301) }] }],
+      ["sixteen and one anchors", { ...ok, endAnchors: Array.from({ length: 8 }, () => ({ text: "x" })), goneAnchors: Array.from({ length: 9 }, () => ({ text: "x" })) }],
+      ["an upload action", { ...ok, actions: [{ name: "upload", summary: "The upload action.", target: { role: "button" }, paths: ["/etc/passwd"] }] }],
+    ];
+    for (const [label, trace] of bad) expect(E2EAgentCleanTraceSchema.safeParse(trace).success, label).toBe(false);
   });
 
   it("keeps provenance only as identifiers and digests, and drops what e2e adds that this module does not know", async () => {

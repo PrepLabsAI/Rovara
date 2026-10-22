@@ -777,7 +777,7 @@ describe("captured ActionTrace review (M4-A trace bound to the verified ledger)"
     { name: "type", target: { role: "textbox", name: "File name", testId: "file-name", selector: "#f" }, value: "orders.csv", summary: "type" },
     { name: "press", target: { role: "textbox", name: "File name", testId: "file-name" }, key: "Enter", summary: "press" },
     { name: "scroll", direction: "down", summary: "scroll" },
-    { name: "select", target: { role: "combobox", name: "Format" }, value: "CSV", summary: "select" },
+    { name: "select", target: { role: "combobox", name: "Format" }, value: `hmac-sha256:${hmac("CSV")}`, summary: "select" },
     { name: "tap", target: { role: "button", name: "Download orders" }, summary: "tap" },
   ];
   const trace = (overrides: Record<string, unknown> = {}) => ({ actions: traceActions(), executor: { name: "rovara" }, summary: "s", ...overrides });
@@ -820,6 +820,24 @@ describe("captured ActionTrace review (M4-A trace bound to the verified ledger)"
       expect(result, label).toMatchObject({ keep: false, reason: "trace-ledger-mismatch" });
       expect(JSON.stringify(result), label).not.toContain("hunter2-secret");
     }
+  });
+
+  it("Q4: refuses a plain value the model chose even when it matches the ledger's keyed digest; only the step's goal text, the marker or a named key or direction is accepted", () => {
+    const mutate = (index: number, change: Record<string, unknown>) => { const list = traceActions() as Record<string, unknown>[]; list[index] = { ...list[index], ...change }; return trace({ actions: list }); };
+    // The select value "CSV" is not text of the goal and not a literal in the ledger: its plain spelling has the ledger's digest, and is refused all the same.
+    expect(review({ trace: mutate(4, { value: "CSV" }) })).toMatchObject({ keep: false, reason: "trace-ledger-mismatch" });
+    expect(review({ trace: mutate(4, { value: `hmac-sha256:${hmac("CSV")}` }) }).keep).toBe(true);
+    // The typed value that IS the ledger's literal (goal text) is accepted as it is, or as its marker.
+    expect(review({ trace: mutate(1, { value: "orders.csv" }) }).keep).toBe(true);
+    expect(review({ trace: mutate(1, { value: `hmac-sha256:${hmac("orders.csv")}` }) }).keep).toBe(true);
+    // A key outside the named set, plain, is refused even with the right digest; a named key is accepted as it is, and any key as a marker.
+    const keyLedger = verified(ledger({ steps: [ledgerStep({ actions: [ledgerAction({ tool: "press", node: { role: "textbox", name: "File name", testId: "file-name" }, valueDigest: hmac("q") })], receiptIds: [] })] }));
+    const pressTrace = (key: string) => trace({ actions: [{ name: "press", target: { role: "textbox", name: "File name", testId: "file-name" }, key, summary: "press" }] });
+    expect(review({ ledger: keyLedger, trace: pressTrace("q") })).toMatchObject({ keep: false, reason: "trace-ledger-mismatch" });
+    expect(review({ ledger: keyLedger, trace: pressTrace(`hmac-sha256:${hmac("q")}`) }).keep).toBe(true);
+    // A direction outside the vocabulary is refused too.
+    const dirLedger = verified(ledger({ steps: [ledgerStep({ actions: [ledgerAction({ tool: "scroll", node: null, valueDigest: hmac("sideways") })], receiptIds: [] })] }));
+    expect(review({ ledger: dirLedger, trace: trace({ actions: [{ name: "scroll", direction: "sideways", summary: "scroll" }] }) })).toMatchObject({ keep: false });
   });
 
   it("skips ledger actions that did not commit, because e2e records only committed actions", () => {
