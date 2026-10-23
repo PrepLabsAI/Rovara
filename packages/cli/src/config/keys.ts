@@ -21,6 +21,8 @@ export interface ConfigKey {
   target: ConfigTarget;
   /** The template's default, shown when the stack reports no value. */
   defaultValue?: string;
+  /** The AI navigation model choice (Task 4.10): held to the models Rovara can use with the environment's provider and region before anything changes. It has no coding-model test call. */
+  e2eAgentModel?: true;
   /** Model keys pass a one-token test call before anything changes (FR-049). */
   model?: ModelRole;
   /** The value to store, or CONFIG_INVALID saying what is allowed. */
@@ -44,6 +46,12 @@ const oneOf = (key: string, values: readonly string[]) => (value: string): strin
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
 const modelId = (key: string) => (value: string): string => (MODEL_ID.test(value.trim()) ? value.trim() : refuse(key, "a model id"));
 
+/** `default` (Rovara's recommendation) or a model id; the environment's provider and region decide which ids are usable, which only the command knows. */
+const e2eAgentModel = (key: string) => (value: string): string => {
+  const trimmed = value.trim();
+  return trimmed === "default" || MODEL_ID.test(trimmed) ? trimmed : refuse(key, "default or a model id");
+};
+
 const email = (key: string) => (value: string): string => (AlertEmailSchema.safeParse(value.trim()).success ? value.trim() : refuse(key, "an email address"));
 
 const parameter = (part: DeployPart, name: string): ConfigTarget => ({ kind: "stack-parameter", part, parameter: name });
@@ -52,6 +60,10 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   { key: "models.orchestrator", description: "the model the Slack orchestrator uses", target: parameter("slack", "ModelId"), model: "orchestrator", parse: modelId("models.orchestrator") },
   { key: "models.classifier", description: "the model the gate classifier uses", target: parameter("slack", "GateClassifierModelId"), model: "classifier", parse: modelId("models.classifier") },
   { key: "models.worker", description: "the model the coding worker uses", target: parameter("runtime", "ModelId"), model: "worker", parse: modelId("models.worker") },
+  {
+    key: "models.e2eAgent", description: "the AI model that navigates your app in browser checks: default (Rovara's recommendation) or a model id Rovara can use with your provider",
+    target: parameter("runtime", "E2eAgentModelId"), defaultValue: "default", e2eAgentModel: true, parse: e2eAgentModel("models.e2eAgent"),
+  },
   {
     key: "models.chatgpt.enabled", description: "true: people may connect their own ChatGPT plan and their tasks run on it; false: every task uses the worker model",
     target: { kind: "chatgpt-setting", field: "enabled" }, defaultValue: "false", parse: oneOf("models.chatgpt.enabled", ["true", "false"]),

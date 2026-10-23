@@ -18,6 +18,7 @@ import { secretFromSource, type Prompter, type SecretSource } from "../init/prom
 import { alertsTopicArn, ensureSubscribed, type AlertsApi } from "../setup/alerts.js";
 import { CLI_VERSION } from "../version.js";
 import { CONFIG_KEYS, configKey, whereText, type ConfigKey, type ModelRole } from "./keys.js";
+import { KEYED_MODEL_PROVIDERS, eligibleE2EAgentModel, isKeyedModelProvider, type ModelProvider } from "@agentx/contracts";
 
 export interface ConfigServices {
   store: ParameterStore;
@@ -96,6 +97,18 @@ export async function runConfigGet(services: ConfigServices, env: string, key: s
   const entry = configKey(key);
   const settings = await installed(services, env);
   return { key: entry.key, value: await currentValue(services, env, settings, entry), where: whereText(entry.target, env), description: entry.description };
+}
+
+/**
+ * models.e2eAgent: `default` is always fine; a model id must be one the table of eligible AI navigation models lists for the environment's worker provider and region. There is no test
+ * call here: the driving test on the qualified runner is the gate (Task 4.10C), and the broker shows the choice at setup approval.
+ */
+function checkE2eAgentChoice(env: string, settings: EnvironmentSettings, value: string): void {
+  if (value === "default") return;
+  const provider: ModelProvider = settings.models.providers?.worker ?? "amazon-bedrock";
+  if (eligibleE2EAgentModel(provider, value, settings.region) !== null) return;
+  const label = isKeyedModelProvider(provider) ? KEYED_MODEL_PROVIDERS[provider].label : "Amazon Bedrock";
+  throw agentXError("CONFIG_INVALID", `models.e2eAgent must be default or a model Rovara can use with ${label} in ${settings.region}; agentx --env ${env} config set models.e2eAgent default puts the recommendation back; nothing changed`);
 }
 
 /** FR-049: a model key passes the same one-token test call init makes, with the environment's provider. */
@@ -273,6 +286,7 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
   const value = entry.parse(input.value);
   const settings = await installed(services, env);
   const role = entry.model;
+  if (entry.e2eAgentModel === true) checkE2eAgentChoice(env, settings, value);
   if ((await currentValue(services, env, settings, entry)) === value) {
     if (role === undefined || await modelRecorded(services, env, settings, role, value)) {
       services.write(`${entry.key} is already ${value}; nothing to change`);
