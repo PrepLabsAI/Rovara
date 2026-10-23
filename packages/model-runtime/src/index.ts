@@ -85,7 +85,7 @@ export function modelFallbackModel(value: string | undefined): { provider: "amaz
   return catalogModel({ provider: "amazon-bedrock", modelId: id }) === undefined ? undefined : { provider: "amazon-bedrock", modelId: id };
 }
 
-const FALLBACK_COMMAND = "`agentx config set models.fallback <bedrock model id>`";
+const FALLBACK_COMMAND = "`agentx --env <env> config set models.fallback <bedrock model id>`";
 
 /**
  * Resolve a missing provider secret before creating a session, so its model and usage agree. There is no default fallback (MODEL3): with no chosen fallback the call fails by name, and with
@@ -102,8 +102,8 @@ export async function createModelRuntimeWithFallback<T extends ModelIdentifier>(
     if (model === undefined) {
       const named = MODEL_FALLBACK_PATTERN.test(chosen) && chosen !== MODEL_FALLBACK_NONE;
       throw agentXError("CONFIG_INVALID", named
-        ? `The ${label} key secret is missing, and the fallback model ${chosen} is not a Bedrock model in this Rovara's model catalog. Restore the key, or choose another fallback with ${FALLBACK_COMMAND}`
-        : `The ${label} key secret is missing, and no fallback model was chosen. Restore the key, or choose a fallback with ${FALLBACK_COMMAND}`);
+        ? `The ${label} key secret is missing, and the fallback model ${chosen} is not a Bedrock model in this Rovara's model catalog. Add or restore the key, or choose another fallback with ${FALLBACK_COMMAND}`
+        : `The ${label} key secret is missing, and no fallback model was chosen. Add or restore the key, or choose a fallback with ${FALLBACK_COMMAND}`);
     }
     const reason = `${error.provider}_secret_missing`;
     const notice: ModelFallbackNotice = {

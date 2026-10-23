@@ -139,8 +139,8 @@ exposure. See [OpenRouter model access](openrouter.md#workspace-credential-expos
 
 When the ARN is empty, the secret does not exist, or its value is empty, the role does not run on a model
 nobody chose. Without a chosen fallback (the default, `none`) the call fails with a named error: "The OpenAI
-key secret is missing, and no fallback model was chosen. Restore the key, or choose a fallback with
-`agentx config set models.fallback <bedrock model id>`". `agentx init` refuses a role whose key is missing for
+key secret is missing, and no fallback model was chosen. Add or restore the key, or choose a fallback with
+`agentx --env <env> config set models.fallback <bedrock model id>`". `agentx init` refuses a role whose key is missing for
 the same reason, and `agentx doctor` reports it as an error naming the role.
 
 To run on Amazon Bedrock instead while the key is missing, choose the model:

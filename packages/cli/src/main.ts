@@ -64,7 +64,9 @@ import { runEnvAdopt, runEnvList, runEnvUse } from "./environments/commands.js";
 import { ssmParameterStore, type ParameterStore } from "./environments/parameter-store.js";
 import { settingsParameterName, type EnvironmentSettings } from "./environments/settings.js";
 import { formatError, formatSuccess } from "./output.js";
-import { realSetupContext, type SetupCommandContext } from "./setup/command-context.js";
+import { projectModelChecker, realSetupContext, type SetupCommandContext } from "./setup/command-context.js";
+import { checkModelsForRegistration } from "./setup/register-model-check.js";
+import type { ProjectModelChecker } from "./setup/project-model-check.js";
 import { registerSetupCommands } from "./setup/cli.js";
 import { registerConfigCommands } from "./config/cli.js";
 import type { ConfigServices } from "./config/commands.js";
@@ -89,6 +91,7 @@ interface GlobalOptions {
   deploymentFile?: string;
   env: string;
   allowLoopback: boolean;
+  acceptUncheckedModel?: string;
   json: boolean;
 }
 
@@ -97,6 +100,8 @@ interface TextWriter {
 }
 
 export interface CliDependencies {
+  /** `admin project register --file`: the single-call model check, for tests; the real one is built from the environment's settings. */
+  registerModelCheck?: ProjectModelChecker;
   /**
    * Owner decision 2026-10-02 (#218, #235 follow-up): how this CLI process was launched, for tests;
    * `currentCliInvocation()` otherwise. Shared by the admin sign-in notices, the Ctrl-C stop line,
@@ -281,6 +286,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--deployment-file <path>", "AgentX deployment settings; defaults to this environment's local cache, or, for production, ~/.agentx/deployment.yaml")
     .option("--env <name>", "AgentX environment", DEFAULT_ENVIRONMENT)
     .option("--allow-loopback", "allow loopback HTTP endpoints for local testing only", false)
+    .option("--accept-unchecked-model <reason>", "register a project whose default model failed its check anyway (project add, setup-approve, connector add, admin project register); the reason is recorded with the revision")
     .option("--json", "emit stable machine-readable output", false);
 
   // Refuse an invalid --env before any command runs, so a malformed name never reaches AWS.
@@ -490,7 +496,9 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--volume-type <type>", "workspace volume type (ec2-ebs)", "gp3")
     .option("--take-ownership", "register a revision of an existing project you do not administer, becoming its administrator; needs --ownership-reason and is recorded")
     .option("--ownership-reason <why>", "why you are taking the project over (with --take-ownership); recorded with your identity and the time")
+    .option("--region <region>", "AWS region of the environment, to read its settings for the project models' check; defaults to your AWS configuration")
     .action(async (options: {
+      region?: string;
       file: string;
       deploymentMode: string;
       launchTemplateId?: string;
@@ -509,7 +517,14 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       }
       const deploymentMode = WorkspaceDeploymentModeSchema.parse(options.deploymentMode);
       const runtimeBinding = cliRuntimeBinding(deploymentMode, options);
-      const definition = await projectFromFile(options.file, globals.allowLoopback);
+      const parsedDefinition = await projectFromFile(options.file, globals.allowLoopback);
+      // MODEL1: the project's models are checked here too; a failing default refuses, anything else warns.
+      const modelChecked = await checkModelsForRegistration({
+        definition: parsedDefinition, env: globals.env, store: parameterStore(options.region),
+        checker: (environment) => dependencies.registerModelCheck ?? projectModelChecker(environment, { parameterStore, fetch: services.fetchImplementation, stderr: services.stderr }),
+        acceptUncheckedModel: globals.acceptUncheckedModel,
+      });
+      const definition = modelChecked.definition;
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       const result = await registerProject({
         controlPlaneUrl: settings.controlPlaneUrl,
@@ -531,7 +546,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         services.stderr.write(`Warning: native project registration succeeded, but local Rovara enrollment could not be saved (${(error as Error).message}); publication will remain on hold.\n`);
       }
       services.stdout.write(formatSuccess(result, globals.json));
-      for (const warning of registrationWarnings(result, definition)) services.stderr.write(`Warning: ${warning}\n`);
+      for (const warning of [...modelChecked.warnings, ...registrationWarnings(result, definition)]) services.stderr.write(`Warning: ${warning}\n`);
     });
 
   const runtimeInstallation = admin.command("runtime-installation").description("qualify and register the standard portable runtime");

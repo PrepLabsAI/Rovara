@@ -18,7 +18,7 @@ describe("no silent fallback (test 41)", () => {
     for (const environment of [{}, { AGENTX_MODEL_FALLBACK: "none" }, { AGENTX_MODEL_FALLBACK: "" }]) {
       create.mockClear();
       await expect(createModelRuntimeWithFallback(selected, role, { environment })).rejects.toThrow(
-        "The OpenAI key secret is missing, and no fallback model was chosen. Restore the key, or choose a fallback with `agentx config set models.fallback <bedrock model id>`",
+        "The OpenAI key secret is missing, and no fallback model was chosen. Add or restore the key, or choose a fallback with `agentx --env <env> config set models.fallback <bedrock model id>`",
       );
       // The OpenAI runtime is made before its key is read; a Bedrock one would be a second call.
       expect(create).toHaveBeenCalledTimes(1);

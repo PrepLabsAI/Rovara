@@ -209,6 +209,8 @@ models:
     - { provider: amazon-bedrock, modelId: us.anthropic.claude-sonnet-4-6, label: Sonnet, thinkingLevel: medium }
 ```
 
+When a revision with `models` is registered (`agentx project add`, `project setup-approve`, `connector add`, or `agentx --env <env> admin project register --file`), Rovara checks the default and each approved model with one small call, using your environment's own keys. A default model that is not found, is not in Rovara's catalog, has a refused key, or has a Bedrock quota of 0 refuses the registration; register it anyway with `--accept-unchecked-model "<reason>"` (the reason is recorded with the revision). A throttle, an outage or a check this computer cannot make only warns, and the model is recorded as unchecked: its first use checks it again. The result is stored with each model, and `@agentx use` warns when the stored check failed. `agentx doctor` checks the projects registered from this computer; listing projects registered elsewhere is a follow-up.
+
 `approved` lists 1 to 16 models with unique provider and model ID pairs and optional, unique labels.
 The default must be one of them. In the bound channel, `@agentx models` lists the choices and
 `@agentx use <label>` selects one for every workspace in the project from its next coding turn. The model IDs shown here are examples;

@@ -51,7 +51,7 @@ function noTerminalPrompter(): Prompter {
 }
 
 /** The model check of one environment: its AWS checks are built once, on the first pair. */
-function projectModelChecker(settings: EnvironmentSettings, input: { parameterStore: (region?: string) => ParameterStore; fetch: typeof fetch; stderr: TextWriter }): ProjectModelChecker {
+export function projectModelChecker(settings: EnvironmentSettings, input: { parameterStore: (region?: string) => ParameterStore; fetch: typeof fetch; stderr: TextWriter }): ProjectModelChecker {
   let checks: ReturnType<typeof awsPrerequisiteChecks> | undefined;
   return (pair) => {
     checks ??= awsPrerequisiteChecks({ region: settings.region, account: settings.account, store: input.parameterStore(settings.region), runner: realCommandRunner(input.stderr), fetch: input.fetch });
@@ -67,7 +67,7 @@ export function realSetupContext(input: {
   stdout: TextWriter; stderr: TextWriter; home?: string;
 }): SetupCommandContext {
   const openAws = async (command: Command): Promise<Omit<SetupRun, "session">> => {
-    const globals = command.optsWithGlobals<{ env: string; json: boolean; configDir: string; region?: string }>();
+    const globals = command.optsWithGlobals<{ env: string; json: boolean; configDir: string; region?: string; acceptUncheckedModel?: string }>();
     const settings = await readEnvironmentSettings(input.parameterStore(globals.region), globals.env);
     if (settings === undefined) {
       throw agentXError("CONFIG_INVALID", `environment ${globals.env} has no settings in ${globals.region ?? "your AWS configuration's region"}; pass --region, or run agentx env list`);
@@ -79,6 +79,7 @@ export function realSetupContext(input: {
         ...realSetupServices({ region: settings.region, fetch: input.fetch, configDir: globals.configDir, tokenStore: input.tokenStore }), ...(input.home === undefined ? {} : { loopHome: input.home }),
         // MODEL1: a project's models are checked with the environment's own keys and region, through the same checks init and doctor make.
         modelCheck: projectModelChecker(settings, input),
+        ...(globals.acceptUncheckedModel === undefined ? {} : { acceptUncheckedModel: globals.acceptUncheckedModel }),
       },
       prompter: process.stdin.isTTY === true ? processPrompter(input.stderr) : noTerminalPrompter(),
       write: (line) => { input.stderr.write(`${line}\n`); },
