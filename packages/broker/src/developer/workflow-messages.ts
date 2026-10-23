@@ -478,7 +478,7 @@ function verifyBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof
         buttons: [...exits.sendBack(), ...exits.retryChecks(), exits.close] };
     }
     return { text: "The required E2E evidence is incomplete or unavailable. Some required runtime checks may not have run. Nothing was sent to GitHub.",
-      buttons: [...exits.retryChecks(), exits.close] };
+      buttons: [...exits.sendBack(), ...exits.retryChecks(), exits.close] };
   }
   // Review only: no check runs, so the way on is coding again, or a check the owner chooses when the project has one.
   if (workflowIsReviewOnly(workflow.checkPolicy)) {

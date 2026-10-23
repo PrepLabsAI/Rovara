@@ -120,6 +120,11 @@ describe("RUN-2: reading the codes out of the block reason", () => {
   it("reads one code per group, and refuses (undefined) anything that is not exactly 'group: code' for every group", () => {
     expect(workflowApplicationEvidenceCodes(incomplete("group-1: build-failed"))).toEqual(["build-failed"]);
     expect(workflowApplicationEvidenceCodes(incomplete("group-1: build-failed", "group-2: evidence too large"))).toEqual(["build-failed", "evidence too large"]);
+    // A reason the broker cut on whole entries ends with "; …": the entries before it are read, the marker is not a code (and only a last entry may be one).
+    expect(workflowApplicationEvidenceCodes(incomplete("group-1: build-failed", "group-2: executor-failed", "…"))).toEqual(["build-failed", "executor-failed"]);
+    for (const reason of [incomplete("…"), incomplete("…", "group-1: build-failed"), incomplete("group-1: build-failed", "…", "group-2: build-failed"), incomplete("group-1: build-failed", "x…")]) {
+      expect(workflowApplicationEvidenceCodes(reason), reason).toBeUndefined();
+    }
     // A code-shaped word is read as written; whether it is the candidate's is decided by the closed list, not by the shape.
     expect(workflowApplicationEvidenceCodes(incomplete("group-1: build-fail"))).toEqual(["build-fail"]);
     for (const reason of [undefined, "", "one or more admitted E2E groups failed", "admitted E2E evidence is incomplete or unknown", "admitted E2E evidence is incomplete or unknown (accepted-group-evidence-integrity)",
@@ -156,8 +161,8 @@ describe("RUN-2 item 2: Send back for the codes the candidate causes", () => {
       expect(workflowSendBackOffered(workflow), code).toBe(false);
       expect(sendBackProblems(workflow, sentenceOf), code).toEqual([]);
     }
-    for (const reason of [incomplete("group-1: build-failed", "group-2: executor-failed"), incomplete("group-1: build-failed", "group-2: the group's lifecycle does not confirm a clean run"),
-      incomplete("group-1: build-failed", "group-2: build-fail"), "admitted E2E evidence is incomplete or unknown", "one or more admitted E2E groups failed: build-failed"]) {
+    for (const reason of [incomplete("group-1: build-failed", "group-2: the group's lifecycle does not confirm a clean run"),
+      "admitted E2E evidence is incomplete or unknown", "one or more admitted E2E groups failed: build-failed"]) {
       expect(workflowSendBackOffered(blockedOn(reason)), reason).toBe(false);
     }
     const notRequired = blockedOn(incomplete("group-1: build-failed"), { e2e: { contractDigest: "1".repeat(64), policyDigest: "2".repeat(64), bundleDigest: "3".repeat(64), executionPlanDigest: "4".repeat(64),
@@ -201,13 +206,13 @@ describe("RUN-2: the Slack message says why, and offers Send back only where the
     }
   });
 
-  it("names each distinct sentence once for several groups, and offers Send back only when every group's code is the candidate's", () => {
+  it("names each distinct sentence once for several groups, and offers Send back when any group's code is the candidate's", () => {
     const same = messageOf(incomplete("group-1: build-failed", "group-2: build-failed"));
     expect(same.text.split(sentenceOf("build-failed"))).toHaveLength(2);
     const mixed = messageOf(incomplete("group-1: build-failed", "group-2: executor-failed"));
     expect(mixed.text).toContain(sentenceOf("build-failed"));
     expect(mixed.text).toContain(sentenceOf("executor-failed"));
-    expect(buttonsOf(mixed.blocks)).not.toContain("agentx_workflow_send_back");
+    expect(buttonsOf(mixed.blocks)).toContain("agentx_workflow_send_back");
   });
 
   it("keeps the one fixed text, and no Send back, for a reason that carries no code it can read", () => {
@@ -230,7 +235,7 @@ describe("review round 1: minors", () => {
     expect(messageOf(incomplete("g1: build-failed", "g2: app-exited", "g3: app-unhealthy")).text).not.toContain("more.");
   });
 
-  it("M-1: a reason cut for the block is cut on whole entries and ends with a marker the parser refuses, so a cut never offers Send back", () => {
+  it("M-1: a reason cut for the block is cut on whole entries and ends with a marker that is not read as a code", () => {
     const entries = Array.from({ length: 12 }, (_, index) => `group-${"x".repeat(14)}${index}: build-failed`);
     const full = incomplete(...entries);
     expect(full.length).toBeGreaterThan(240);
@@ -239,10 +244,56 @@ describe("review round 1: minors", () => {
     expect(cut.length).toBeLessThanOrEqual(240);
     expect(cut.endsWith("; …")).toBe(true);
     expect(cut.slice(0, -3).split("; ").every((entry) => entries.includes(entry))).toBe(true);
-    expect(workflowApplicationEvidenceCodes(`admitted E2E evidence is incomplete or unknown (${cut})`)).toBeUndefined();
-    expect(workflowSendBackOffered(blockedOn(`admitted E2E evidence is incomplete or unknown (${cut})`))).toBe(false);
+    // The marker is not a code: the entries before it are read, and every one is the candidate's, so Send back is offered (round 2).
+    expect(workflowApplicationEvidenceCodes(`admitted E2E evidence is incomplete or unknown (${cut})`)).toEqual(cut.slice(0, -3).split("; ").map(() => "build-failed"));
     // Short reasons, and a reason whose first entry alone is over the limit, are cut as they always were.
     expect(cutEvidenceReason("g: build-failed", 240)).toBe("g: build-failed");
     expect(cutEvidenceReason("y".repeat(300), 240)).toBe("y".repeat(240));
+  });
+});
+
+describe("review round 2: Send back in a mixed round, and from a long reason", () => {
+  it("is offered when at least one group ended with a candidate-caused code, whatever the other groups ended with, and the coder gets only the candidate's codes", () => {
+    for (const other of ["executor-failed", "deadline-exceeded", "evidence too large", "runtime-expired", "something-new", "login-failed"]) {
+      const workflow = blockedOn(incomplete("group-1: executor-failed", "group-2: build-failed", `group-3: ${other}`, "group-4: seed-failed"));
+      expect(workflowSendBackOffered(workflow), other).toBe(true);
+      const problems = sendBackProblems(workflow, sentenceOf);
+      expect(problems.map((problem) => problem.text.match(/\((.*?)\)/)?.[1])).toEqual(["build-failed", "seed-failed"]);
+      for (const text of problems.map((problem) => problem.text)) for (const infra of ["executor-failed", "deadline-exceeded", "evidence too large", "login-failed", "something-new"]) expect(text).not.toContain(infra);
+    }
+  });
+
+  it("is still not offered when no group ended with a candidate-caused code", () => {
+    for (const reason of [incomplete("group-1: executor-failed", "group-2: deadline-exceeded"), incomplete("group-1: build-fail"), incomplete("group-1: login-failed")]) {
+      expect(workflowSendBackOffered(blockedOn(reason)), reason).toBe(false);
+      expect(sendBackProblems(blockedOn(reason), sentenceOf), reason).toEqual([]);
+    }
+  });
+
+  it("puts Send back beside Retry checks and Close on the card of a mixed round, with every sentence still shown", () => {
+    const mixed = messageOf(incomplete("group-1: build-failed", "group-2: executor-failed"));
+    expect(buttonsOf(mixed.blocks)).toEqual(["agentx_workflow_send_back", "agentx_workflow_retry_checks", "agentx_workflow_close"]);
+    expect(mixed.text).toContain(sentenceOf("build-failed"));
+    expect(mixed.text).toContain(sentenceOf("executor-failed"));
+    // An unknown code has no sentence (the one fixed text), but the candidate's code beside it still earns Send back.
+    const unknown = messageOf(incomplete("group-1: build-failed", "group-2: something-new"));
+    expect(unknown.text).toBe(GENERIC);
+    expect(buttonsOf(unknown.blocks)).toEqual(["agentx_workflow_send_back", "agentx_workflow_retry_checks", "agentx_workflow_close"]);
+  });
+
+  it("depends on the parsed codes, not on the cut text: a reason over 240 characters where every group is build-failed still offers Send back", () => {
+    const entries = Array.from({ length: 14 }, (_, index) => `group-${"x".repeat(14)}${index}: build-failed`);
+    const inner = entries.join("; ");
+    expect(inner.length).toBeGreaterThan(240);
+    const cut = cutEvidenceReason(inner, 240);
+    expect(cut.endsWith("; …")).toBe(true);
+    const workflow = blockedOn(`admitted E2E evidence is incomplete or unknown (${cut})`);
+    expect(workflowApplicationEvidenceCodes(workflow.blockReason)!.length).toBeGreaterThan(1);
+    expect(workflowSendBackOffered(workflow)).toBe(true);
+    expect(sendBackProblems(workflow, sentenceOf)).toEqual([{ source: "check", text: `the browser and API checks could not run on this change (build-failed): ${sentenceOf("build-failed")}` }]);
+    expect(buttonsOf(workflowMessage({ taskId, workflow })!.blocks)).toEqual(["agentx_workflow_send_back", "agentx_workflow_retry_checks", "agentx_workflow_close"]);
+    // A cut that leaves only infrastructure codes visible offers nothing.
+    const infra = cutEvidenceReason(Array.from({ length: 14 }, (_, index) => `group-${"x".repeat(14)}${index}: executor-failed`).join("; "), 240);
+    expect(workflowSendBackOffered(blockedOn(`admitted E2E evidence is incomplete or unknown (${infra})`))).toBe(false);
   });
 });

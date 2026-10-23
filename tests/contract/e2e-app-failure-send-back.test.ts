@@ -139,6 +139,44 @@ describe("no Send back for the rest", () => {
     });
   }
 
+  it("a mixed round (the app did not build in one group, the runner failed in another) offers Send back with the candidate's code only, and nothing is skipped on the way", async () => {
+    const round = await startApplicationRound({ applications: 4 });
+    const groups: ApplicationGroupEvidence[] = [];
+    for (const groupId of round.groupIds) groups.push(await round.collectGroup(groupId, PASS));
+    expect(groups.length).toBeGreaterThan(1);
+    round.markRunning();
+    const runs: Record<string, unknown>[] = [];
+    for (const [index, group] of groups.entries()) {
+      const groupRun = clone(group.groupRun);
+      const code = index === 0 ? "build-failed" : "executor-failed";
+      groupRun.collection = { status: "UNKNOWN", reason: code };
+      groupRun.unavailableReason = code; groupRun.actual = null;
+      groupRun.diagnostics = { notice: "logs for the operator", appLogTail: APP_LOG, buildLogTail: BUILD_LOG, executorLogTail: "" };
+      runs.push(groupRun);
+      expect((await round.upload(round.groupEnvelope(groupRun), { groupRunId: group.runId })).response.status).toBe(200);
+    }
+    const aggregate = await round.upload(round.aggregateEnvelope(runs));
+    await round.finishChecks(aggregate.response.body as { key: string; sha256: string });
+    withChecks(round);
+    expect([...workflowApplicationEvidenceCodes(round.workflowNow().blockReason)!].sort()).toEqual(["build-failed", "executor-failed"]);
+    expect(workflowSendBackOffered(workflowOf(round))).toBe(true);
+    expect(buttons(round)).toEqual(["agentx_workflow_send_back", "agentx_workflow_retry_checks", "agentx_workflow_close"]);
+    const before = round.workflowNow();
+    expect((await sendBack(round, OMAR)).status).toBe(404);
+    expect((await sendBack(round, MAYA, { expectedRevision: before.revision - 1 })).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const requestId = randomUUID();
+    expect((await sendBack(round, MAYA, { requestId })).status).toBe(200);
+    expect((await sendBack(round, MAYA, { requestId, expectedRevision: before.revision })).status).toBe(200);
+    expect(round.operationRows((row) => row.workflowMode === "IMPLEMENT" && row.requestId === requestId)).toHaveLength(1);
+    // Back at coding: no qualified round and no failed round survive, so the next round re-runs every group and every check, review and approval.
+    expect(round.workflowNow()).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", revision: before.revision + 2 });
+    expect((round.workflowNow().e2e as { qualifiedRound?: unknown }).qualifiedRound).toBeUndefined();
+    const prompt = promptOf(round, requestId);
+    expect(prompt).toContain(`(build-failed): ${E2E_OWNER_SENTENCES.groupCode["build-failed"]!}`);
+    expect(prompt.match(/<\/problem>/g)).toHaveLength(1);
+    for (const left of ["executor-failed", E2E_OWNER_SENTENCES.groupCode["executor-failed"]!, "hunter2", "/home/runner"]) expect(prompt, left).not.toContain(left);
+  });
+
   it("a code with worker text after it is not a code: the one fixed message, and no Send back beyond what a task with a project check already allows (none)", async () => {
     const round = await blockedWithCode(`build-failed: ${BUILD_LOG}`);
     withChecks(round);
