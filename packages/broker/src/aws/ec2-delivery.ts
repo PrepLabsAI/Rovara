@@ -268,6 +268,18 @@ async function forWorker(
   needsModelFreeLimits = false,
   modelChoice?: () => Promise<boolean | undefined>,
 ): Promise<WorkerInvocation> {
+  // The CLI's stored model check results (`lastCheck`) are not for workers, and a worker built before them refuses the whole invocation for an unknown key: they never go out.
+  return forWorkerFeatures(withoutLastCheck(invocation), pingUrl, workerFeatures, admissionSchemaVersion, needsModelFreeLimits, modelChoice);
+}
+
+async function forWorkerFeatures(
+  invocation: WorkerInvocation,
+  pingUrl: string,
+  workerFeatures: Ec2DeliveryDependencies["workerFeatures"],
+  admissionSchemaVersion?: string,
+  needsModelFreeLimits = false,
+  modelChoice?: () => Promise<boolean | undefined>,
+): Promise<WorkerInvocation> {
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
   const carriesReviewChecks = invocation.kind === "task" && (invocation.payload.workflowReviewChecks !== undefined || invocation.payload.workflowReviewPlan !== undefined
@@ -648,6 +660,18 @@ function withoutUnparsedFields(invocation: WorkerInvocation, features: readonly 
   if (models === undefined) return invocation;
   const project = { ...invocation.payload.project, models: { default: withoutLevel(models.default), approved: models.approved.map(withoutLevel) } };
   // Identical branches so each keeps its own payload type within the discriminated union.
+  if (invocation.kind === "prepare") return { ...invocation, payload: { ...invocation.payload, project } };
+  if (invocation.kind === "publish") return { ...invocation, payload: { ...invocation.payload, project } };
+  return { ...invocation, payload: { ...invocation.payload, project } };
+}
+
+/** The same invocation with every project model's stored check result dropped (and the very object back when it carries none). */
+function withoutLastCheck(invocation: WorkerInvocation): WorkerInvocation {
+  if (!carriesProject(invocation)) return invocation;
+  const models = invocation.payload.project.models;
+  if (models === undefined || ![models.default, ...models.approved].some((model) => model.lastCheck !== undefined)) return invocation;
+  const strip = <Model extends { lastCheck?: unknown }>(model: Model): Omit<Model, "lastCheck"> => { const rest: Model = { ...model }; delete rest.lastCheck; return rest; };
+  const project = { ...invocation.payload.project, models: { default: strip(models.default), approved: models.approved.map(strip) } };
   if (invocation.kind === "prepare") return { ...invocation, payload: { ...invocation.payload, project } };
   if (invocation.kind === "publish") return { ...invocation, payload: { ...invocation.payload, project } };
   return { ...invocation, payload: { ...invocation.payload, project } };

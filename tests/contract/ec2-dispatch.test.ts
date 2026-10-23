@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, agentXError, taskGraphDigest, workflowPublicationContext, workflowPublicationContextDigest, workspaceSessionKey, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
@@ -1250,6 +1251,34 @@ describe("ec2-ebs delivery", () => {
             event: "dispatch.thinking_level_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
           }));
           log.mockRestore();
+        });
+
+        // Task 4.10D review I-1: `lastCheck` is written by the CLI at registration and no worker reads it; an older worker's strict parse would refuse the whole invocation.
+        it(`${kind}: never sends lastCheck, so a worker built before it accepts the definition (whatever its features, and without asking it)`, async () => {
+          const checked = {
+            default: { provider: "amazon-bedrock", modelId: "fast", label: "Fast", lastCheck: { status: "ok", checkedAt: "2026-10-23T12:00:00.000Z" } },
+            approved: [
+              { provider: "amazon-bedrock", modelId: "fast", label: "Fast", lastCheck: { status: "ok", checkedAt: "2026-10-23T12:00:00.000Z" } },
+              { provider: "openrouter", modelId: "z-ai/glm-5.3", lastCheck: { status: "failed", class: "model-not-found", checkedAt: "2026-10-23T12:00:00.000Z" } },
+            ],
+          };
+          const beforeLastCheck = z.object({ provider: z.string(), modelId: z.string(), thinkingLevel: z.string().optional(), label: z.string().optional() }).strict();
+          for (const features of [[], ["model.thinkingLevel"]]) {
+            const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => features);
+            const { deliver, post } = delivery({ workerFeatures });
+            const record = projectRecord(kind, checked);
+            expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+            const sent = postedModels(post) as { default: unknown; approved: unknown[] };
+            expect(() => { beforeLastCheck.parse(sent.default); for (const model of sent.approved) beforeLastCheck.parse(model); }).not.toThrow();
+            expect(JSON.stringify(sent)).not.toContain("lastCheck");
+            expect(sent.approved).toHaveLength(2);
+          }
+          // Without a model-level field there is nothing to ask the worker about: no probe.
+          const probe = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => []);
+          const quiet = delivery({ workerFeatures: probe });
+          const record = projectRecord(kind, checked);
+          await quiet.deliver(record, record.invocation);
+          expect(probe).not.toHaveBeenCalled();
         });
 
         it(`${kind}: fails the attempt, posting nothing, when the worker's /ping does not answer`, async () => {
