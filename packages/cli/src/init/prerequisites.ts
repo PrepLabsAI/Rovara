@@ -9,7 +9,7 @@ import { ProviderCheckHttpError, bedrockThrottleSentence, checkModel, type Model
 import type { QuotaClient } from "@agentx/model-runtime/model-discovery";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import { agentXError, AgentXError, KEYED_MODEL_PROVIDERS } from "@agentx/contracts";
+import { agentXError, AgentXError, KEYED_MODEL_PROVIDERS, type ModelProvider } from "@agentx/contracts";
 import { assertCdkBootstrapped, type CommandRunner } from "../deploy/cdk-engine.js";
 import { releaseRegionProblem, type ReleaseCoverage } from "../deploy/release.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -349,18 +349,12 @@ export async function checkPrerequisites(input: {
     ["worker", answers.models.worker],
   ];
   const seen = new Set<string>();
-  // A keyed provider without a configured or stored key runs on the role's Bedrock default (specs
-  // 032 and 054), so that is the model checked.
-  const checkFallback = async (role: ModelRole, identifier: string, label: string) => {
-    const fallback = defaultBedrockModel(role);
-    try {
-      const fallbackKey = `${fallback.provider}/${fallback.modelId}`;
-      if (!seen.has(fallbackKey)) await checks.converse(fallback.modelId);
-      seen.add(fallbackKey);
-      passed(`Model ${identifier}`, `ok ${identifier}: ${label} secret missing; using default ${fallback.provider}/${fallback.modelId}`);
-    } catch (fallbackError) {
-      failed(`Model ${fallback.modelId}`, modelCheckProblem({ modelId: fallback.modelId, role, region, error: fallbackError, ...(audience === "page" ? { wording: pageWording() } : {}) }));
-    }
+  // A keyed provider without a configured or stored key has no fallback (MODEL3): the work would fail by name at its first call, so init refuses it now and says what to give.
+  const checkFallback = async (provider: Exclude<ModelProvider, "amazon-bedrock">, identifier: string) => {
+    const { label, flag } = KEYED_MODEL_PROVIDERS[provider];
+    failed(`Model ${identifier}`, audience === "page"
+      ? `${identifier}: there is no ${label} key, and no other model would be used in its place. Add the ${label} key, or choose an Amazon Bedrock model for this role.`
+      : `${identifier}: there is no ${label} key, and no other model would be used in its place; pass --${flag}-key-file or --${flag}-key-env (or --${flag}-secret-arn), or choose an Amazon Bedrock model for this role`);
   };
   for (const [role, modelId] of roles) {
     const provider = answers.models.providers?.[role] ?? "amazon-bedrock";
@@ -379,7 +373,7 @@ export async function checkPrerequisites(input: {
         seen.add(identifier);
         passed(`Model ${identifier}`, `ok ${identifier} supports tools and answers`);
       } catch (error) {
-        if (error instanceof MissingProviderSecret) await checkFallback(role, identifier, "OpenRouter");
+        if (error instanceof MissingProviderSecret) await checkFallback("openrouter", identifier);
         else failed(`Model ${identifier}`, `${identifier}: OpenRouter preflight failed; check the model's tool support, secret read permission, key credits and routing allowlist`);
       }
       continue;
@@ -398,7 +392,7 @@ export async function checkPrerequisites(input: {
         seen.add(identifier);
         passed(`Model ${identifier}`, `ok ${identifier} supports tools and answers`);
       } catch (error) {
-        if (error instanceof MissingProviderSecret) await checkFallback(role, identifier, label);
+        if (error instanceof MissingProviderSecret) await checkFallback(provider, identifier);
         else failed(`Model ${identifier}`, `${identifier}: ${label} preflight failed: ${errorMessage(error).replace(/^[A-Z_]+: /, "")}`);
       }
       continue;

@@ -33,23 +33,22 @@ async function run(answers: InitAnswers, checks = passingChecks(), prompter = sc
 }
 
 describe("init prerequisites", () => {
-  it("checks each distinct fallback when the same missing-credential OpenRouter model is selected", async () => {
+  it("refuses a missing-credential OpenRouter model once per role and never checks a Bedrock model nobody chose (MODEL3)", async () => {
     const checks = passingChecks();
     const model = "qwen/qwen3-coder";
-    await run(sampleAnswers({ models: { orchestrator: model, classifier: model, worker: model,
+    await expect(run(sampleAnswers({ models: { orchestrator: model, classifier: model, worker: model,
       providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" },
-    } }), checks);
-    expect(checks.models).toEqual([...new Set([DEFAULT_BEDROCK_MODELS.orchestrator, DEFAULT_BEDROCK_MODELS.classifier, DEFAULT_BEDROCK_MODELS.worker])]);
+    } }), checks)).rejects.toThrow("openrouter/qwen/qwen3-coder: there is no OpenRouter key, and no other model would be used in its place; pass --openrouter-key-file or --openrouter-key-env (or --openrouter-secret-arn), or choose an Amazon Bedrock model for this role");
+    expect(checks.models).toEqual([]);
   });
-  it("checks and reports the default Bedrock model when the OpenRouter secret is absent", async () => {
+  it("refuses, naming the key to give, when the OpenRouter secret is absent, and checks no Bedrock default", async () => {
     for (const openRouter of [undefined, { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:missing-AbCdEf" }]) {
       const checks = passingChecks({ openRouter: async () => { throw new MissingOpenRouterSecret(); } });
       const answers = sampleAnswers({ models: { orchestrator: "a", classifier: "b", worker: "qwen/qwen3-coder",
         providers: { worker: "openrouter" }, ...(openRouter ? { openRouter } : {}),
       } });
-      const lines = await run(answers, checks);
-      expect(checks.models).toContain(DEFAULT_BEDROCK_MODELS.worker);
-      expect(lines.join("\n")).toContain("OpenRouter secret missing; using default amazon-bedrock/");
+      await expect(run(answers, checks)).rejects.toThrow("there is no OpenRouter key, and no other model would be used in its place");
+      expect(checks.models).not.toContain(DEFAULT_BEDROCK_MODELS.worker);
     }
   });
   it("checks OpenRouter independently and never invokes Bedrock for OpenRouter roles", async () => {
