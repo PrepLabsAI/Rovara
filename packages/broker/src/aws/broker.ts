@@ -256,7 +256,7 @@ import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKe
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
-import { GithubMergeRateLimitError, isWebhookSecretMissing } from "../github-app.js";
+import { GithubMergeRateLimitError, isWebhookSecretMissing, pullRequestBodyWithDraftNote } from "../github-app.js";
 import { createGitHubAppCredentials } from "./github-credentials.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
@@ -453,6 +453,8 @@ interface PullRequestRecord {
   expectedHeadCommit: string;
   title: string;
   body: string;
+  /** Set when GitHub refused to open this pull request as a draft and it was opened as a normal one (INTG1). */
+  draftRefused?: true;
   createdByOperationId: string;
   replacedBy?: number;
   replacementFor?: number;
@@ -9193,6 +9195,7 @@ async function reconcilePullRequest(
     ...(body === undefined ? {} : { body }),
     ...(draft === undefined ? {} : { draft }),
   });
+  if (pullRequest.draftRefused === true) console.log(JSON.stringify({ component: "broker", event: "pull_request.draft_refused", operationId: operation.id, number: pullRequest.number }));
   // The branch could move between the check and the open (a force-push): the opened pull request's own head must still
   // be the checked commit, or it is closed again and nothing is recorded.
   if (expectedTree !== undefined) {
@@ -9235,7 +9238,9 @@ async function reconcilePullRequest(
     baseBranch: expected.baseBranch,
     expectedHeadCommit: input.commit,
     title: expected.title,
-    body: body ?? "",
+    // What was opened: with the note first when GitHub refused the draft (INTG1), so a later update of the description keeps it.
+    body: pullRequest.draftRefused === true ? pullRequestBodyWithDraftNote(body) : body ?? "",
+    ...(pullRequest.draftRefused === true ? { draftRefused: true as const } : {}),
     createdByOperationId: operation.id,
     ...(expected.mode === "replace" && expected.targetPullRequestNumber !== undefined
       ? { replacementFor: expected.targetPullRequestNumber }
@@ -9270,8 +9275,8 @@ async function reconcilePullRequest(
       Item: record,
     }));
   }
-  // Ruling Z: the worker's result says whether the pull request is a draft, so the reply can say so.
-  return { ...pullRequest, draft: draft === true };
+  // Ruling Z: the worker's result says whether the pull request is a draft, so the reply can say so. INTG1: one that GitHub refused as a draft was opened as a normal one, so it is not.
+  return { ...pullRequest, draft: draft === true && pullRequest.draftRefused !== true };
 }
 
 /** Spec 051 (D-7): the checks the worker ran at publish, judged against their befores; none from an older worker. */

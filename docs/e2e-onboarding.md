@@ -12,7 +12,7 @@ Before saving E2E setup, AgentX shows the proposed setup and readiness commands,
 
 ## Approve or decline
 
-Choose whether to use the proposed setup. AgentX records that choice against the immutable proposal reference and digest. Approving stores the proposal's E2E policy with the project revision. Declining records the decision and omits that E2E policy; you can revisit project configuration later.
+Choose whether to use the proposed setup. AgentX records that choice against the immutable proposal reference and digest. Approving stores the proposal's E2E policy with the project revision. Declining records the decision and omits that E2E policy, so browser and API checks are off; the project keeps its own setup and test commands (the proposed ones and any you passed as flags), and you can run `agentx project setup-approve` later to turn the checks on.
 
 A mock can support a local check of an isolated behavior. Approving that substitution keeps it in the saved proposal; it does not produce a runtime PASS or prove the corresponding live source, browser workflow, or customer path. Required evidence that remains missing or `UNKNOWN` must remain visible and cannot be treated as a pass.
 

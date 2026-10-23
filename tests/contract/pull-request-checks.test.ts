@@ -10,6 +10,7 @@ import {
   type CheckReport,
 } from "@agentx/contracts";
 import { beforeAll, describe, expect, it, type vi } from "vitest";
+import { DRAFT_REFUSED_PULL_REQUEST_NOTE } from "../../packages/broker/src/github-app.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import {
   call,
@@ -198,6 +199,26 @@ describe("the pull request's checks (spec 051 FR-008)", () => {
     expect(await publishAnswer(drafted, [regression])).toMatchObject({ number: 7, draft: true });
     const normal = await harness();
     expect(await publishAnswer(normal, [entry()])).toMatchObject({ number: 7, draft: false });
+  });
+
+  // Evaluation fix INTG1: GitHub refuses drafts on a private repository without draft support (GitHub Free); the GitHub client then opens a normal pull request, says so in its
+  // result, and the broker tells the worker it is not a draft and records that drafts were refused.
+  it("says the pull request is not a draft, and records why, when GitHub refused the draft and a normal pull request opened (INTG1)", async () => {
+    const h = await harness();
+    h.reconcilePullRequest.mockResolvedValue({ number: 7, url: "https://github.com/example/demo/pull/7", reconciled: false, draftRefused: true });
+    expect(await publishAnswer(h, [regression])).toMatchObject({ number: 7, draft: false });
+    expect(sentToGitHub(h).draft).toBe(true);
+    const [record] = h.db.find((item) => item.entityType === "PULL_REQUEST");
+    expect(record).toMatchObject({ number: 7, draftRefused: true });
+    expect(String(record!.body)).toContain(DRAFT_REFUSED_PULL_REQUEST_NOTE);
+  });
+
+  it("records no draft refusal for a pull request that opened as asked", async () => {
+    const h = await harness();
+    expect(await publishAnswer(h, [regression])).toMatchObject({ number: 7, draft: true });
+    const [record] = h.db.find((item) => item.entityType === "PULL_REQUEST");
+    expect(record).not.toHaveProperty("draftRefused");
+    expect(String(record!.body)).not.toContain(DRAFT_REFUSED_PULL_REQUEST_NOTE);
   });
 
   it("forces a draft over an explicit draft: false when a check regressed", async () => {

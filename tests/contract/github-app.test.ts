@@ -1,10 +1,12 @@
 import { generateKeyPairSync, verify } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
+  DRAFT_REFUSED_PULL_REQUEST_NOTE,
   GitHubAppCredentialProvider,
   GithubMergeRateLimitError,
   appIdFromSecret,
   createGitHubAppJwt,
+  pullRequestBodyWithDraftNote,
   privateKeyFromSecret,
   webhookSecretFromSecret,
 } from "../../packages/broker/src/github-app.js";
@@ -868,6 +870,100 @@ describe("GitHub App repository credentials", () => {
       { title: "Draft change", head: input.headBranch, base: "main", draft: true },
       { title: "Draft change", head: input.headBranch, base: "main" },
     ]);
+  });
+
+  // Evaluation fix INTG1: GitHub answers 422 to a draft pull request on a private repository whose plan has no drafts (GitHub Free). That one answer, and only that, is retried once
+  // as a normal pull request; every other 422 fails with a readable reason that is one of AgentX's own sentences, never GitHub's text.
+  describe("a draft pull request that GitHub refuses (INTG1)", () => {
+    const DRAFT_REFUSAL = { message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "Draft pull requests are not supported in this repository." }],
+      documentation_url: "https://docs.github.com/rest/pulls/pulls#create-a-pull-request" };
+    const input = { repositoryUrl: "https://github.com/ps06756/personal-website-test.git", headBranch: "agentx/00000000-0000-4000-8000-000000000003", baseBranch: "main", title: "Draft change", body: "The change." };
+
+    /** A provider whose create calls are answered, in order, by `answers` (a response, or a function of the request body); the requests and the lookups are kept. */
+    function creating(answers: Array<Response | ((body: Record<string, unknown>) => Response)>) {
+      const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+      const created: Array<Record<string, unknown>> = [];
+      let lookups = 0;
+      const provider = appProvider({
+        credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+        fetchImplementation: async (url, init) => {
+          const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+          if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "pr-token" }), { status: 201 });
+          if (init?.method === "POST") {
+            if (typeof init.body !== "string") throw new Error("expected JSON request body");
+            const body = JSON.parse(init.body) as Record<string, unknown>;
+            created.push(body);
+            const answer = answers[created.length - 1];
+            if (answer === undefined) throw new Error("an unexpected extra create request");
+            return typeof answer === "function" ? answer(body) : answer;
+          }
+          lookups += 1;
+          return new Response("[]", { status: 200 });
+        },
+      });
+      return { provider, created, lookups: () => lookups };
+    }
+    const opened = () => new Response(JSON.stringify({ number: 43, html_url: "https://github.com/ps06756/personal-website-test/pull/43" }), { status: 201 });
+    const refused = (body: unknown) => new Response(typeof body === "string" ? body : JSON.stringify(body), { status: 422 });
+
+    it("opens a normal pull request once, with the do-not-merge note, and says that it did", async () => {
+      const { provider, created } = creating([refused(DRAFT_REFUSAL), opened()]);
+      const result = await provider.reconcilePullRequest({ ...input, draft: true });
+      expect(result).toEqual({ number: 43, url: "https://github.com/ps06756/personal-website-test/pull/43", reconciled: false, draftRefused: true });
+      expect(created).toEqual([
+        { title: "Draft change", head: input.headBranch, base: "main", body: "The change.", draft: true },
+        { title: "Draft change", head: input.headBranch, base: "main", body: `${DRAFT_REFUSED_PULL_REQUEST_NOTE}\n\nThe change.` },
+      ]);
+      expect(created[1]).not.toHaveProperty("draft");
+    });
+
+    it("keeps the whole body inside GitHub's limit when the note is added", () => {
+      const longBody = "x".repeat(65_536);
+      const withNote = pullRequestBodyWithDraftNote(longBody);
+      expect(withNote.length).toBeLessThanOrEqual(65_536);
+      expect(withNote.startsWith(DRAFT_REFUSED_PULL_REQUEST_NOTE)).toBe(true);
+      expect(pullRequestBodyWithDraftNote(undefined)).toBe(DRAFT_REFUSED_PULL_REQUEST_NOTE);
+    });
+
+    it("retries only once: a second refusal fails, and a draft that opened was never retried", async () => {
+      const twice = creating([refused(DRAFT_REFUSAL), refused(DRAFT_REFUSAL)]);
+      await expect(twice.provider.reconcilePullRequest({ ...input, draft: true })).rejects.toThrow(/HTTP 422/);
+      expect(twice.created).toHaveLength(2);
+      const fine = creating([opened()]);
+      await expect(fine.provider.reconcilePullRequest({ ...input, draft: true })).resolves.toEqual({ number: 43, url: "https://github.com/ps06756/personal-website-test/pull/43", reconciled: false });
+      expect(fine.created).toHaveLength(1);
+    });
+
+    it("never retries a pull request that was not asked to be a draft", async () => {
+      const { provider, created } = creating([refused(DRAFT_REFUSAL)]);
+      await expect(provider.reconcilePullRequest(input)).rejects.toThrow(/HTTP 422: this repository does not allow draft pull requests/);
+      expect(created).toHaveLength(1);
+    });
+
+    it.each([
+      ["no commits between the branches", { message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "No commits between main and agentx/x" }] }, /HTTP 422: the head branch has no commits that the base branch lacks/],
+      ["a head branch GitHub cannot find", { message: "Validation Failed", errors: [{ resource: "PullRequest", field: "head", code: "invalid" }] }, /HTTP 422: GitHub cannot find the head branch/],
+      ["a base branch GitHub cannot find", { message: "Validation Failed", errors: [{ resource: "PullRequest", field: "base", code: "invalid" }] }, /HTTP 422: GitHub cannot find the base branch/],
+      ["a reason AgentX does not know", { message: "sensitive-github-error", errors: [{ message: "sensitive-github-error" }] }, /HTTP 422: GitHub rejected the pull request and gave a reason AgentX does not recognise/],
+      ["an answer that is not JSON", "sensitive-github-error", /HTTP 422: GitHub rejected the pull request and gave a reason AgentX does not recognise/],
+    ])("keeps failing, with a readable reason and no retry, for %s", async (_name, body, reason) => {
+      const { provider, created } = creating([refused(body)]);
+      const failure = await provider.reconcilePullRequest({ ...input, draft: true }).then(() => undefined, (error: unknown) => error as Error);
+      expect(failure?.message).toMatch(reason);
+      expect(failure?.message).not.toContain("sensitive-github-error");
+      expect(created).toHaveLength(1);
+    });
+
+    it("tells the reason of the retry's own refusal, and does not read a 403 or a 500 as a draft refusal", async () => {
+      const retried = creating([refused(DRAFT_REFUSAL), refused({ message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "No commits between main and x" }] })]);
+      await expect(retried.provider.reconcilePullRequest({ ...input, draft: true })).rejects.toThrow(/HTTP 422: the head branch has no commits/);
+      for (const status of [403, 500]) {
+        const other = creating([new Response(JSON.stringify(DRAFT_REFUSAL), { status })]);
+        await expect(other.provider.reconcilePullRequest({ ...input, draft: true })).rejects.toThrow(new RegExp(`GitHub pull request creation failed with HTTP ${status}$`));
+        expect(other.created).toHaveLength(1);
+      }
+    });
   });
 });
 
