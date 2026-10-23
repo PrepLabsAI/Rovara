@@ -87,6 +87,11 @@ describe("the generated table (test 4)", () => {
     expect(E2E_AGENT_ELIGIBLE_MODELS.length).toBe(rows.length);
   });
 
+  it("holds only ids the E2eAgentModelId stack parameter and the config key accept, so no eligible model is unusable", () => {
+    const pattern = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
+    expect(E2E_AGENT_ELIGIBLE_MODELS.filter((row) => !pattern.test(row.modelId)).map((row) => row.modelId)).toEqual([]);
+  });
+
   it("is sorted and has no duplicate (provider, modelId)", () => {
     const keys = E2E_AGENT_ELIGIBLE_MODELS.map((row) => `${row.provider}\u0000${row.modelId}`);
     expect(new Set(keys).size).toBe(keys.length);
