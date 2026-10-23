@@ -31,7 +31,7 @@ import {
   type WorkflowReviewBase,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
-import { modelCallView } from "./model-call-view.js";
+import { isHeartbeat, modelCallView } from "./model-call-view.js";
 import type { ShareDecision } from "./share.js";
 
 /** Whether a block reason is one of the two that send a task back to plan review for a corrected E2E plan: a source reference that does not match the candidate, or an application plan that can no longer run as written. */
@@ -335,11 +335,16 @@ export function taskEvent(event: StoredEvent): DeveloperTaskEvent | undefined {
   }
 }
 
-/** The newest `count` readable events, returned oldest first. */
+/** The newest `count` readable events, returned oldest first. A heartbeat (one a minute) is kept only when it is the newest, so a long wait never pushes a failure or a retry out of the list. */
 export function recentTaskEvents(newestFirst: readonly StoredEvent[], count: number): DeveloperTaskEvent[] {
   const picked: DeveloperTaskEvent[] = [];
+  let heartbeatKept = false;
   for (const event of newestFirst) {
     if (picked.length >= count) break;
+    if (event.type === "progress" && isHeartbeat(event.payload)) {
+      if (heartbeatKept) continue;
+      heartbeatKept = true;
+    }
     const readable = taskEvent(event);
     if (readable !== undefined) picked.push(readable);
   }
