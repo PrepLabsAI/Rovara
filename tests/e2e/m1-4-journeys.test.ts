@@ -124,7 +124,9 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
       readAdmission: async (offset: number) => ({ totalBytes: admissionBytes.byteLength, chunkBase64: admissionBytes.subarray(offset, offset + 64 * 1024).toString("base64"), sha256: admissionSha }),
       saveEvidence: async (bytes: Uint8Array, digest: string, _max: number, groupRunId?: string) => { saved.push({ bytes: Buffer.from(bytes), groupRunId });
         return { key: `workflow-e2e-${groupRunId === undefined ? "evidence" : "group-evidence"}/sha256/${digest}.json`, sha256: digest }; },
-      modelBudget: post, modelChannel: { environment: { ROVARA_E2E_SCRIPTED_MODEL: "1" }, policyScope: "standard", onClosed: (summary: (typeof closed)[number]) => closed.push(summary),
+      modelBudget: post,
+      // These journeys drive the scripted double, which only a qualification round admits (Task FU2, AGENTSCOPE): the worker collects them, and the broker verifies them, as one.
+      modelChannel: { environment: { ROVARA_E2E_SCRIPTED_MODEL: "1" }, policyScope: "qualification", onClosed: (summary: (typeof closed)[number]) => closed.push(summary),
         invoke: createScriptedE2EInvoke({ scripts: { [sha256Hex(AGENT_GOAL)]: script } }) },
     } as never);
     const caseId = fixture.compiled.expectedCases[0]!.caseId;
@@ -152,7 +154,7 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
         subject: { taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
           candidateDigest: admission.candidateDigest, roundId: admission.round.roundId, groupRunIds: [runId], admissionSha256: admissionSha },
         aggregate: JSON.parse(aggregateSaved.bytes.toString("utf8")) as unknown, groupEvidence: new Map([[runId, group]]),
-        receivedAt: new Map([[runId, group.groupRun.actual?.collection.receivedAt ?? new Date().toISOString()]]), terminalStatus: "SUCCEEDED", modelRouteDefinition: scriptedE2ERouteDefinition() });
+        receivedAt: new Map([[runId, group.groupRun.actual?.collection.receivedAt ?? new Date().toISOString()]]), terminalStatus: "SUCCEEDED", modelRouteDefinition: scriptedE2ERouteDefinition(), roundScope: "qualification" });
     };
     /** The broker's verification of an audit replay's evidence and the result it would record, against the source cases the replay admission signs. */
     const replayResult = () => {
