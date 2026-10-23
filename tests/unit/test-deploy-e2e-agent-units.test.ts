@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_DEPLOY_UNITS, DEPLOY_UNITS, E2E_AGENT_SETTINGS_UNIT, assertOnlyExpectedChanges, formatPlan, liftDeclaredSettings, parseTestDeployArgs, planTestDeploy,
+  DEFAULT_DEPLOY_UNITS, DEPLOY_UNITS, E2E_AGENT_SETTINGS_UNIT, assertOnlyExpectedChanges, formatPlan, liftDeclaredSettings, observedChanges, parseTestDeployArgs, planTestDeploy,
   type BuiltArtifacts, type CfnTemplate, type DeployStep, type StackParameters,
 } from "../../scripts/test-deploy.js";
+import type { Change } from "@aws-sdk/client-cloudformation";
+import { readFileSync } from "node:fs";
 
 // M1.4 Task 4.10A, test 12: the test-deploy units that put the AI navigation model setting on TEST.
 
@@ -120,6 +122,7 @@ describe("the e2e-agent-settings unit", () => {
     expect(changeSet.expect).toEqual({
       action: "Modify", logicalIds: ["BrokerE1355FD6", ...E2E_AGENT_SETTINGS_UNIT.policies],
       allowedAttributes: [], allowedAttributesByLogicalId: { BrokerE1355FD6: ["Properties.Environment"], ...Object.fromEntries(E2E_AGENT_SETTINGS_UNIT.policies.map((id) => [id, ["Properties.PolicyDocument"]])) },
+      allowArnReevaluations: true, arnSources: ["BrokerE1355FD6"],
     });
     // Every parameter keeps its value.
     expect(changeSet.parameters.every((parameter) => "usePreviousValue" in parameter)).toBe(true);
@@ -130,8 +133,9 @@ describe("the e2e-agent-settings unit", () => {
 
   it("accepts the change set only when the broker changes its Environment and each policy its PolicyDocument, and nothing else", () => {
     const expected = changeSetOf(plan(["e2e-agent-settings"])).expect;
-    const broker = { action: "Modify", logicalId: "BrokerE1355FD6", type: "AWS::Lambda::Function", replacement: "False", attributes: ["Properties.Environment"] };
-    const policies = E2E_AGENT_SETTINGS_UNIT.policies.map((logicalId) => ({ action: "Modify", logicalId, type: "AWS::IAM::Policy", replacement: "False", attributes: ["Properties.PolicyDocument"] }));
+    const own = [{ evaluation: "Static", changeSource: "DirectModification" }];
+    const broker = { action: "Modify", logicalId: "BrokerE1355FD6", type: "AWS::Lambda::Function", replacement: "False", attributes: ["Properties.Environment"], details: own };
+    const policies = E2E_AGENT_SETTINGS_UNIT.policies.map((logicalId) => ({ action: "Modify", logicalId, type: "AWS::IAM::Policy", replacement: "False", attributes: ["Properties.PolicyDocument"], details: own }));
     expect(() => assertOnlyExpectedChanges([broker, ...policies], expected)).not.toThrow();
     // A policy may change its document and not its roles, and the broker its environment and not its code or role.
     expect(() => assertOnlyExpectedChanges([{ ...broker, attributes: ["Properties.Environment", "Properties.Code"] }, ...policies], expected)).toThrow(/Properties\.Code/);
@@ -139,9 +143,69 @@ describe("the e2e-agent-settings unit", () => {
     expect(() => assertOnlyExpectedChanges([broker, { ...policies[0]!, attributes: ["Properties.PolicyDocument", "Properties.Roles"] }, ...policies.slice(1)], expected)).toThrow(/Properties\.Roles/);
     expect(() => assertOnlyExpectedChanges([broker, { ...policies[0]!, attributes: ["Properties.Environment"] }, ...policies.slice(1)], expected)).toThrow(/Properties\.Environment/);
     expect(() => assertOnlyExpectedChanges([{ ...broker, replacement: "True" }, ...policies], expected)).toThrow(/replac/);
-    expect(() => assertOnlyExpectedChanges([broker, ...policies, { action: "Modify", logicalId: "SessionsSteps3B98DD2B", type: "AWS::Lambda::Function", attributes: ["Properties.Code"] }], expected)).toThrow(/SessionsSteps3B98DD2B/);
+    expect(() => assertOnlyExpectedChanges([broker, ...policies, { action: "Modify", logicalId: "SessionsSteps3B98DD2B", type: "AWS::Lambda::Function", attributes: ["Properties.Code"], details: own }], expected)).toThrow(/SessionsSteps3B98DD2B/);
     expect(() => assertOnlyExpectedChanges([broker, ...policies, { action: "Add", logicalId: "E2eModelDiscovery", type: "AWS::IAM::Policy" }], expected)).toThrow(/Add E2eModelDiscovery/);
     expect(() => assertOnlyExpectedChanges([broker, ...policies.slice(1)], expected)).toThrow(/missing the expected Modify/);
+  });
+
+  // DEPLOYFIX round 2: the change set CloudFormation made for this unit on TEST at b6cfedb4 (saved from the refused live run): the three declared Modifies and eight Modifies that only
+  // re-evaluate the Broker's Arn (an API integration, an invoke permission whose Replacement is Conditional, three schedules, four role policies).
+  describe("against the change set CloudFormation made for it on TEST", () => {
+    const live = JSON.parse(readFileSync(new URL("../fixtures/test-deploy/control-plane-e2e-settings-change-set.json", import.meta.url), "utf8")) as { Changes: Change[] };
+    const fresh = (): Change[] => JSON.parse(JSON.stringify(live.Changes)) as Change[];
+    const expected = changeSetOf(plan(["e2e-agent-settings"])).expect;
+    const check = (changes: Change[]) => assertOnlyExpectedChanges(observedChanges(changes), expected);
+    const named = (changes: Change[], id: string) => changes.find((change) => change.ResourceChange?.LogicalResourceId === id)!.ResourceChange!;
+
+    it("has the three declared Modifies and eight Arn re-evaluations, and passes", () => {
+      const changes = fresh();
+      expect(changes).toHaveLength(11);
+      const result = check(changes);
+      expect(result.noOpReevaluations.sort()).toEqual([
+        "BrokerApiInvokeC6C766F0", "BrokerIntegration", "GithubWebhookRecoveryRoleDefaultPolicyDC13C89E", "GithubWebhookRecoverySchedule", "SlackIngressServiceRoleDefaultPolicy6F2F26FC",
+        "WorkflowDispatchRecoveryRoleDefaultPolicy083213B6", "WorkflowDispatchRecoverySchedule", "WorkflowMergeRecoverySchedule",
+      ]);
+    });
+
+    it("still refuses a Static detail on one of the extra resources", () => {
+      const changes = fresh();
+      Object.assign(named(changes, "BrokerIntegration").Details![0]!, { Evaluation: "Static", ChangeSource: "DirectModification", CausingEntity: undefined });
+      expect(() => check(changes)).toThrow(/Modify BrokerIntegration/);
+    });
+
+    it("still refuses a re-evaluation caused by anything but a modified resource's Arn", () => {
+      for (const causingEntity of ["SessionsSteps3B98DD2B.Arn", "BrokerE1355FD6", "BrokerE1355FD6.Role", "BrokerServiceRoleDefaultPolicyDDFD9E7E.Arn", "WorkerImageUri"]) {
+        const changes = fresh();
+        named(changes, "GithubWebhookRecoverySchedule").Details![0]!.CausingEntity = causingEntity;
+        expect(() => check(changes), causingEntity).toThrow(/Modify GithubWebhookRecoverySchedule/);
+      }
+    });
+
+    it("still refuses a Dynamic detail that is not a ResourceAttribute re-evaluation", () => {
+      for (const changeSource of ["ParameterReference", "DirectModification", "Automatic"]) {
+        const changes = fresh();
+        named(changes, "WorkflowMergeRecoverySchedule").Details![0]!.ChangeSource = changeSource as never;
+        expect(() => check(changes), changeSource).toThrow(/Modify WorkflowMergeRecoverySchedule/);
+      }
+    });
+
+    it("still refuses a replacement of an extra resource, an Add and a Remove", () => {
+      const replaced = fresh();
+      named(replaced, "BrokerIntegration").Replacement = "True";
+      expect(() => check(replaced)).toThrow(/Modify BrokerIntegration/);
+      const added = fresh();
+      added.push({ Type: "Resource", ResourceChange: { Action: "Add", LogicalResourceId: "NewQueue", ResourceType: "AWS::SQS::Queue" } });
+      expect(() => check(added)).toThrow(/Add NewQueue/);
+      const removed = fresh();
+      removed.push({ Type: "Resource", ResourceChange: { Action: "Remove", LogicalResourceId: "OldQueue", ResourceType: "AWS::SQS::Queue" } });
+      expect(() => check(removed)).toThrow(/Remove OldQueue/);
+    });
+
+    it("still refuses when the Broker itself changes more than its Environment, which would make its Arn re-evaluations real", () => {
+      const changes = fresh();
+      named(changes, "BrokerE1355FD6").Details!.push({ Target: { Attribute: "Properties", Name: "Code", RequiresRecreation: "Never" }, Evaluation: "Static", ChangeSource: "DirectModification" });
+      expect(() => check(changes)).toThrow(/Properties\.Code/);
+    });
   });
 });
 

@@ -137,6 +137,8 @@ export interface ChangeExpectation {
    * function's Arn, so these are CloudFormation's conservative no-ops; anything else is still refused.
    */
   allowArnReevaluations?: boolean;
+  /** With allowArnReevaluations: the only resources among `logicalIds` whose Arn may cause a re-evaluation (default: all of them). A role policy has no Arn to re-evaluate. */
+  arnSources?: readonly string[];
 }
 export interface ObservedDetail {
   evaluation?: string;
@@ -514,6 +516,9 @@ export function planTestDeploy(
         expect: {
           action: "Modify", logicalIds: [broker, ...policies], allowedAttributes: [],
           allowedAttributesByLogicalId: { [broker]: ["Properties.Environment"], ...Object.fromEntries(policies.map((logicalId) => [logicalId, ["Properties.PolicyDocument"]])) },
+          // CloudFormation lists every resource that reads the Broker's Arn as a Dynamic re-evaluation (API integration, invoke permission, schedules, role policies) when the Broker changes at
+          // all; the same no-op re-evaluations control-plane-code accepts, on the same terms (never a Static detail, another cause, or a replacement).
+          allowArnReevaluations: true, arnSources: [broker],
         },
       },
       { id: "execute-e2e-agent-settings", kind: "execute-change-set", stack: stacks["control-plane"], createdBy: "change-set-e2e-agent-settings" },
@@ -590,6 +595,7 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
   const problems: string[] = [];
   // The code units whose own change is exactly the expected one: only their Arn re-evaluations may be accepted.
   const exactUnits = new Set<string>();
+  const arnSources = expected.arnSources ?? expected.logicalIds ?? [];
   const reevaluations: ObservedChange[] = [];
   const unitChanges: ObservedChange[] = [];
   for (const change of changes) {
@@ -615,10 +621,11 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
       if (details.length === 0) problems.push(`${label}: its change details are not reported, so they cannot be checked`);
       else if (details.some((detail) => !isOwn(detail) && !isCross(detail))) problems.push(`${label}: has a change that is not a Static DirectModification`);
       else if (!details.some(isOwn)) problems.push(`${label}: has no Static DirectModification of its own, only re-evaluations`);
-      else if (expected.allowedAttributes !== undefined) {
+      else if (expected.allowedAttributes !== undefined || expected.allowedAttributesByLogicalId !== undefined) {
         // Only the unit's own (Static) details name what it changes; attributes and details are reported in the same order.
         const own = attributes.length === details.length ? attributes.filter((_, index) => isOwn(details[index]!)) : attributes;
-        const extra = own.filter((attribute) => !(expected.allowedAttributes ?? []).includes(attribute));
+        const allowed = expected.allowedAttributesByLogicalId?.[change.logicalId] ?? expected.allowedAttributes ?? [];
+        const extra = own.filter((attribute) => !allowed.includes(attribute));
         if (own.length === 0) problems.push(`${label}: changed attributes are not reported, so they cannot be checked`);
         else if (extra.length > 0) problems.push(`${label}: also changes ${extra.join(", ")}`);
       }
@@ -637,7 +644,7 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
     if (!baseClean.has(change.logicalId)) continue;
     const label = labelOf(change);
     const bad = (crossDetails.get(change.logicalId) ?? []).filter((detail) =>
-      !(detail.causingEntity !== undefined && [...baseClean].some((unit) => unit !== change.logicalId && detail.causingEntity === arnOf(unit))));
+      !(detail.causingEntity !== undefined && [...baseClean].some((unit) => unit !== change.logicalId && arnSources.includes(unit) && detail.causingEntity === arnOf(unit))));
     if (bad.length > 0) problems.push(`${label}: re-evaluates on ${bad.map((detail) => detail.causingEntity ?? "no entity").join(", ")}, which is not the Arn of another code unit changed only in Code`);
     else exactUnits.add(change.logicalId);
   }
@@ -647,7 +654,7 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
     const details = change.details ?? [];
     const causedByExactUnit = (detail: ObservedDetail) =>
       detail.evaluation === "Dynamic" && detail.changeSource === "ResourceAttribute"
-      && (expected.logicalIds ?? []).some((unit) => exactUnits.has(unit) && detail.causingEntity === arnOf(unit));
+      && arnSources.some((unit) => exactUnits.has(unit) && detail.causingEntity === arnOf(unit));
     let unsafe: string | undefined;
     if (details.length === 0) unsafe = "its change details are not reported, so they cannot be checked";
     else if (change.replacement === "True") unsafe = `would replace the resource (Replacement ${change.replacement})`;
@@ -659,7 +666,7 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
     if (!changes.some((change) => change.logicalId === logicalId && change.action === expected.action)) problems.push(`missing the expected ${expected.action} ${logicalId}`);
   }
   if (problems.length > 0) {
-    const accepted = noOpReevaluations.length === 0 ? "" : `; accepted separately as no-op re-evaluations caused by ${(expected.logicalIds ?? []).map(arnOf).join(", ")}: ${noOpReevaluations.join(", ")}`;
+    const accepted = noOpReevaluations.length === 0 ? "" : `; accepted separately as no-op re-evaluations caused by ${arnSources.map(arnOf).join(", ")}: ${noOpReevaluations.join(", ")}`;
     throw new Error(`the change set holds unexpected changes: ${problems.join("; ")}${accepted}`);
   }
   return { noOpReevaluations };
@@ -1011,7 +1018,7 @@ export function formatPlan(steps: readonly DeployStep[]): string {
           : `deployed template plus ${step.template.logicalIdPrefix}*${(step.template.parameterNames ?? []).length === 0 ? "" : ` and parameter ${(step.template.parameterNames ?? []).join(", ")}`} from a CDK synth of ${step.template.construct} (${[`identity=${step.template.identityMode}`, ...Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`)].join(", ")})`;
         const allowed = [...(step.expect.logicalIds ?? []), ...(step.expect.logicalIdPrefixes ?? []).map((prefix) => `${prefix}*`)].join(", ");
         const reevaluations = step.expect.allowArnReevaluations === true
-          ? `, plus Modify entries accepted only as no-op re-evaluations caused by ${(step.expect.logicalIds ?? []).map(arnOf).join(", ")} (every detail Dynamic ResourceAttribute, never a replacement; a code unit may carry such a detail only when another listed code unit's Arn causes it)`
+          ? `, plus Modify entries accepted only as no-op re-evaluations caused by ${(step.expect.arnSources ?? step.expect.logicalIds ?? []).map(arnOf).join(", ")} (every detail Dynamic ResourceAttribute, never a replacement; a code unit may carry such a detail only when another listed code unit's Arn causes it)`
           : "";
         return `${head} create change set on ${step.stack}: ${template}; ${step.parameters.length} parameters, ${changed.length === 0 ? "all UsePreviousValue" : `changing only ${changed.join(", ")}`}; abort unless the only changes are ${step.expect.action} ${allowed}${reevaluations}`;
       }
@@ -1224,7 +1231,7 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
   console.log(`change set ${changeSetName}:\n${observed.map((change) => `  ${change.action} ${change.logicalId} ${change.type ?? ""} ${(change.attributes ?? []).join(",")}`).join("\n")}`);
   try {
     const { noOpReevaluations } = assertOnlyExpectedChanges(observed, step.expect);
-    if (noOpReevaluations.length > 0) console.log(`accepted as no-op re-evaluations caused by ${(step.expect.logicalIds ?? []).map(arnOf).join(", ")}: ${noOpReevaluations.join(", ")}`);
+    if (noOpReevaluations.length > 0) console.log(`accepted as no-op re-evaluations caused by ${(step.expect.arnSources ?? step.expect.logicalIds ?? []).map(arnOf).join(", ")}: ${noOpReevaluations.join(", ")}`);
   } catch (error) {
     await dropChangeSet();
     throw new Error(`${error instanceof Error ? error.message : String(error)}. The change set was deleted and nothing was applied.`, { cause: error });
