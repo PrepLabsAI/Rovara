@@ -286,7 +286,7 @@ import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
-import { applicationRuntimeRowFences, readE2ERuntimeStatus, readExpiredE2ERuntimes, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
+import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, readE2ERuntimeStatus, readExpiredE2ERuntimes, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
 import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntries } from "./e2e-account-registry.js";
 import { E2EAccountRegistryError, unreadableAccountMessage, type E2EAccountRegistryEntry } from "../e2e/application-account-registry.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
@@ -305,7 +305,7 @@ import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
-import { untestedRouteSentence } from "../e2e/model-checks.js";
+import { ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, untestedRouteSentence, type ModelCheckDependencies } from "../e2e/model-checks.js";
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, readE2EModelRouteShape, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
 import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification, type VerifiedAgentTrace } from "../e2e/application-evidence.js";
@@ -1382,6 +1382,12 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (!dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("NOT_FOUND", "browser and API runtimes are not set up in this deployment");
         return json(await readE2ERuntimeStatus({ runtimeCatalogId: dependencies.e2eFeatureRuntimeCatalogId, profileId: WEB_API_RUNTIME_PROFILE_ID,
           read: (key) => getItem<Record<string, unknown>>(dependencies, key) }), request.requestId);
+      }
+      // M1.4 Task 4.10C: the on-account model checks (a driving test of one model, or a discovery of the models this account sees), served by the qualified runner.
+      const modelCheck = /^\/v1\/admin\/e2e\/model-checks(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
+      if (modelCheck !== null && ((request.method === "POST" && modelCheck[1] === undefined) || (request.method === "GET" && modelCheck[1] !== undefined) || (request.method === "GET" && url.pathname.endsWith("/model-checks")))) {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        return await adminModelChecks(dependencies, request.method, modelCheck[1], body, request.requestId);
       }
       // #343: Sign in with ChatGPT, for rovara doctor.
       if (request.method === "GET" && url.pathname === "/v1/admin/chatgpt") {
@@ -13218,6 +13224,40 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
     task,
     value,
   );
+}
+
+/**
+ * M1.4 Task 4.10C: `POST /v1/admin/e2e/model-checks { kind: "drive" | "discover", modelId? }` asks the qualified runner for a driving test or a discovery (202 and the check's id);
+ * `GET .../<checkId>` is pending until the runner has answered, then the validated outcome in the owner's sentence; `GET .../model-checks` (no id) is the tiers on record.
+ */
+async function adminModelChecks(dependencies: AwsBrokerDependencies, method: string, checkId: string | undefined, body: unknown, requestId: string): Promise<ReturnType<typeof json>> {
+  if (dependencies.e2eAgentInstallation === undefined || dependencies.e2eFeatureRuntimeCatalogId === undefined) throw agentXError("NOT_FOUND", "AI navigation model checks are not set up in this deployment");
+  const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
+  const checks: ModelCheckDependencies = {
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, installation: dependencies.e2eAgentInstallation,
+    readRuntimeRow: async () => (await getItem<Record<string, unknown>>(dependencies, e2eRegisteredRuntimeKey(catalogId, WEB_API_RUNTIME_PROFILE_ID, "web"))) ?? undefined,
+    putObject: async (key, text) => { await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key, Body: text, ContentType: "application/json" })); },
+    getObject: async (key) => {
+      try {
+        const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key }));
+        return object.Body === undefined ? new Uint8Array() : await object.Body.transformToByteArray();
+      } catch (error) {
+        // Without a list grant S3 answers a missing key with AccessDenied: not there yet.
+        const name = error instanceof Error ? error.name : "";
+        if (name === "NoSuchKey" || name === "AccessDenied" || name === "Forbidden") return undefined;
+        throw error;
+      }
+    },
+  };
+  try {
+    if (method === "POST") return json(await startModelCheck(checks, body, WEB_API_RUNTIME_PROFILE_ID), requestId, 202);
+    if (checkId !== undefined) return json(await readModelCheck(checks, checkId), requestId);
+    return json({ tiers: await readCurrentTiers(checks) }, requestId);
+  } catch (error) {
+    if (!(error instanceof ModelCheckError)) throw error;
+    // The code of the error is the fixed one of the check; the message never carries a model id from the request.
+    throw agentXError(error.status === 400 ? "CONFIG_INVALID" : error.status === 404 ? "NOT_FOUND" : error.code === "check-in-progress" ? "WORKSPACE_BUSY" : "RUNTIME_UNAVAILABLE", `${error.code}: ${error.message}`);
+  }
 }
 
 /**
