@@ -168,7 +168,7 @@ const LABELS: Record<ModelProvider, string> = { "amazon-bedrock": "Amazon Bedroc
  */
 export function agentRouteSummary(definition: E2EModelRouteDefinition): string {
   const provider = definition.provider as ModelProvider;
-  const who = definition.modelId === E2E_AGENT_RECOMMENDED_MODELS[provider as ModelProvider] ? "Rovara's recommendation" : "your choice";
+  const who = definition.modelId === E2E_AGENT_RECOMMENDED_MODELS[provider] ? "Rovara's recommendation" : "your choice";
   const head = `AI navigation: ${LABELS[provider] ?? provider} \`${definition.modelId}\` (${who})`;
   const bound = `at most ${definition.budgets.maxActionsPerStep} actions per step; checks decide`;
   const scope = provider === "amazon-bedrock" ? e2eAgentScopeSentence(definition.modelId) : null;

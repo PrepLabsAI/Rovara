@@ -6,8 +6,8 @@ import { WORKER_SETTING_PARAMETERS } from "../../packages/contracts/src/session.
 // M1.4 Task 4.10A, test 9: the AI navigation model is a setting the broker reads, never a worker boot variable, and the code that reads every other worker setting copes with it.
 
 const { ssmSend, kmsSend } = vi.hoisted(() => ({ ssmSend: vi.fn(), kmsSend: vi.fn() }));
-vi.mock("@aws-sdk/client-ssm", async (importOriginal) => ({ ...(await importOriginal<typeof import("@aws-sdk/client-ssm")>()), SSMClient: class { send = ssmSend; } }));
-vi.mock("@aws-sdk/client-kms", async (importOriginal) => ({ ...(await importOriginal<typeof import("@aws-sdk/client-kms")>()), KMSClient: class { send = kmsSend; } }));
+vi.mock("@aws-sdk/client-ssm", async (importOriginal) => ({ ...(await importOriginal<Record<string, unknown>>()), SSMClient: class { send = ssmSend; } }));
+vi.mock("@aws-sdk/client-kms", async (importOriginal) => ({ ...(await importOriginal<Record<string, unknown>>()), KMSClient: class { send = kmsSend; } }));
 
 const PREFIX = "/agentx/test/";
 const settings: Record<string, string> = {

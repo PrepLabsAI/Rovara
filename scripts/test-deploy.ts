@@ -1486,7 +1486,7 @@ function readWorkerSetting(readers: CheckReaders, name: string): SettingFact {
  * The Bedrock tokens-per-minute quotas of the route's model, from `service-quotas list-service-quotas` (needs servicequotas:ListServiceQuotas on the operator profile): a hint.
  * A denied or failed read is `unverifiable`, which is information in the check, never an error.
  */
-function readBedrockQuotas(readers: CheckReaders, route: E2EModelRoute, label: string | undefined): QuotaFacts {
+function readBedrockQuotas(readers: CheckReaders, route: E2EModelRoute): QuotaFacts {
   const result = readers.runner.aws([
     "service-quotas", "list-service-quotas", "--service-code", "bedrock",
     "--query", "Quotas[?contains(QuotaName, 'tokens per minute')].[QuotaCode,QuotaName,Value]", "--region", readers.region, "--output", "json",
@@ -1591,7 +1591,7 @@ export function readModelRoute(readers: CheckReaders, input: { table: string; fo
   const profileResource = [profileArn ?? `arn:${partition}:bedrock:${readers.region}:${accountId}:inference-profile/${route.modelId}`];
   const modelResources = modelArns.length > 0 ? modelArns : [`arn:${partition}:bedrock:${readers.region}::foundation-model/${route.modelId.replace(INFERENCE_PROFILE_ID, "")}`];
   return {
-    choice, tested, quota: readBedrockQuotas(readers, route, eligibleE2EAgentModel("amazon-bedrock", route.modelId, readers.region)?.label),
+    choice, tested, quota: readBedrockQuotas(readers, route),
     provider: { state: "known", route }, approval: approval(route.routeId),
     bedrock: { access, iam: { foundationTemplate, roleLogicalId, resources: [...new Set([...profileResource, ...modelResources])], scope } },
   };
