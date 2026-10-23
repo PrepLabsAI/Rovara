@@ -373,7 +373,11 @@ case "$1" in
   login) cat >/dev/null; exit 0 ;;
   pull) [[ "$FAKE_EXECUTOR" == pullable ]] && touch "${dir}/pulled"; exit 0 ;;
 esac
-[[ "$*" == *e2e-model-canary-cli.js* ]] && exit 0
+if [[ "$*" == *e2e-model-canary-cli.js* ]]; then
+  # The model check server's fixed lines go to stderr, as the real one's do.
+  [[ "$FAKE_QUALIFIER" == 0 ]] && printf '%s\n' "model-check: request not readable (AccessDenied)" >&2
+  exit 0
+fi
 out=; failure=; while (($#)); do [[ "$1" == --out ]] && out=$2; [[ "$1" == --failure-out ]] && failure=$2; shift; done
 if [[ "$FAKE_QUALIFIER" != 0 ]]; then
   if [[ -n "$failure" && -n "\${FAKE_FAILURE_FILE:-}" ]]; then
@@ -523,6 +527,19 @@ exec /bin/dd "\${a[@]}"`);
       // The canary comes after the qualification's own status, which it never changes.
       expect(JSON.parse(object("status.json") ?? "{}")).toMatchObject({ state: "SUCCEEDED", reason: "qualified" });
       expect(called.findIndex((call) => call.includes("status.json"))).toBeLessThan(called.lastIndexOf(execs[1]!));
+    });
+
+    // Task 4.10C, test 33 (CANARYLOG): the model check server's output reaches the journal instead of /dev/null.
+    it("writes the server's fixed lines to the journal, and its hook has no redirect to /dev/null", () => {
+      const { result } = runHook();
+      expect(result.status, result.stderr).toBe(0);
+      const lines = result.stderr.split("\n").filter((line) => line.includes("model-check:"));
+      expect(lines).toEqual(["agentx-e2e-qualification: model-check: request not readable (AccessDenied)"]);
+      const hook = qualificationScript.split("\n").find((line) => line.includes("e2e-model-canary-cli.js"))!;
+      expect(hook).not.toMatch(/\/dev\/null/);
+      expect(hook).toMatch(/2>&1 \| while read l; do log "\$l"; done/);
+      // It serves for the registration's seven days, with a little margin.
+      expect(hook).toMatch(/timeout --foreground --kill-after=10s 7d /);
     });
 
     it("never runs after a failed qualification", () => {

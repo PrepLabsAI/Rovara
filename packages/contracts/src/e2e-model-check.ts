@@ -85,7 +85,7 @@ export const E2EDrivingTestFindingSchema = z.object({
   caseVerdict: z.enum(["passed", "failed", "unknown", "none"]),
   /** The oracle's reason code for an unknown or failed case, or null. A fixed code, never text. */
   caseCode: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/).nullable(),
-  receipts: z.array(E2EModelReceiptSchema).max(DRIVING_TEST_BUDGET.maxCalls + 4),
+  receipts: z.array(E2EModelReceiptSchema).max(DRIVING_TEST_BUDGET.maxCalls + 6),
   /** The executor's own account of the navigation step, which the receipts must equal. */
   reported: z.object({ modelCalls: count.max(64), downloads: count.max(16), csvPassed: z.boolean() }).strict().nullable(),
 }).strict();

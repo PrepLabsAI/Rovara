@@ -66,6 +66,8 @@ export interface ExpectedModelCheck {
   checkId: string;
   kind: "drive" | "discover";
   provider: ModelProvider;
+  /** For a drive: the shape the request named (the stored one); a test that began in the minimal shape has no retry. */
+  startShape?: "standard" | "minimal";
   /** For a drive: the definitions of the model in each request shape, at revision 1, as the broker derives them. */
   definitions?: { standard: E2EModelRouteDefinition; minimal: E2EModelRouteDefinition };
 }
@@ -105,7 +107,8 @@ export function validateModelCheckResult(raw: unknown, expected: ExpectedModelCh
 
   const receipts = finding.receipts;
   const revisions = new Set([e2eModelRouteRevision(expected.definitions.standard), e2eModelRouteRevision(expected.definitions.minimal)]);
-  if (receipts.length !== finding.calls || finding.calls > DRIVING_TEST_BUDGET.maxCalls) return refuse("the receipts are not the calls the test says it made");
+  // A call is a receipt of a request the route took (a refusal for budget is the budget holding, not a call).
+  if (receipts.filter((item) => item.outcome !== "budget").length !== finding.calls || finding.calls > DRIVING_TEST_BUDGET.maxCalls) return refuse("the receipts are not the calls the test says it made");
   if (sum(receipts.map((item) => item.inputTokens)) !== finding.inputTokens || finding.inputTokens > DRIVING_TEST_BUDGET.maxInputTokensTotal) return refuse("the test passed its input token budget");
   if (sum(receipts.map((item) => item.outputTokens)) !== finding.outputTokens || receipts.some((item) => item.outputTokens > DRIVING_TEST_BUDGET.maxOutputTokensPerCall)) return refuse("the test passed its output token budget");
   for (const receipt of receipts) {
@@ -121,7 +124,8 @@ export function validateModelCheckResult(raw: unknown, expected: ExpectedModelCh
   const navigation = receipts.filter((item) => item.caseId !== DRIVING_TEST_FIRST_CALL_CASE_ID);
   const testedRevision = e2eModelRouteRevision(definition);
   // One retry at most, only after a rejected request, and only in the minimal shape.
-  if (first.length > 2) return refuse("the test retried more than once");
+  const startShape = expected.startShape ?? "standard";
+  if (first.length > (startShape === "minimal" ? 1 : 2)) return refuse("the test retried more than once");
   if (first.length === 2) {
     const [before, after] = first as [typeof first[number], typeof first[number]];
     if (finding.payloadShape !== "minimal" || before.failure?.class !== "request-rejected" || before.routeRevision !== e2eModelRouteRevision(expected.definitions.standard) || after.routeRevision !== testedRevision) {
@@ -129,7 +133,8 @@ export function validateModelCheckResult(raw: unknown, expected: ExpectedModelCh
     }
   } else if (first.length === 1 && first[0]!.routeRevision !== testedRevision) return refuse("the first call is not in the tested shape");
   if (navigation.some((item) => item.routeRevision !== testedRevision)) return refuse("the navigation was not in the tested shape");
-  if (finding.payloadShape === "minimal" && first.length !== 2) return refuse("a minimal shape is only the result of a retry");
+  if (finding.payloadShape === "minimal" && startShape === "standard" && first.length !== 2) return refuse("a minimal shape is only the result of a retry");
+  if (finding.payloadShape === "standard" && startShape === "minimal") return refuse("the test began in the minimal shape and cannot end in the standard one");
 
   const lastFailed = [...receipts].sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.callIndex - b.callIndex).filter((item) => item.outcome !== "ok").at(-1);
   if (finding.failure !== null) {
@@ -395,7 +400,7 @@ export async function readModelCheck(deps: ModelCheckDependencies, checkId: stri
   let definitions: Awaited<ReturnType<typeof definitionsFor>> | undefined;
   if (kind === "drive") {
     definitions = await definitionsFor(deps, installation, String(row["modelId"]));
-    expected = { checkId, kind, provider, definitions };
+    expected = { checkId, kind, provider, definitions, startShape: row["definitionDigest"] === e2eAgentRouteDefinitionDigest(definitions.minimal) ? "minimal" : "standard" };
   } else expected = { checkId, kind, provider };
   const validated = validateModelCheckResult(raw, expected);
   let view: ModelCheckView;

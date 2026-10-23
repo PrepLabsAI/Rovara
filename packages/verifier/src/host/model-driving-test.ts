@@ -62,15 +62,19 @@ export function lastFailureOf(receipts: readonly E2EModelReceipt[]): E2EModelFai
   return failed?.failure ?? null;
 }
 
-export async function runModelDrivingTest(deps: DrivingTestDependencies): Promise<DrivingTestOutcome> {
+/**
+ * `startShape` is the shape the test begins in: the standard one, or the minimal one when an earlier pass already found the standard shape refused (the stored shape). Only a test that
+ * began in the standard shape can retry, and only once.
+ */
+export async function runModelDrivingTest(deps: DrivingTestDependencies, startShape: DrivingShape = "standard"): Promise<DrivingTestOutcome> {
   const receipts: E2EModelReceipt[] = [];
-  let shape: DrivingShape = "standard";
+  let shape: DrivingShape = startShape;
   const stopped = (): DrivingTestOutcome => ({ payloadShape: shape, outcome: "failed", failure: lastFailureOf(receipts), caseVerdict: "none", caseCode: null, receipts, reported: null });
-  const first = await deps.firstCall("standard", 0);
+  const first = await deps.firstCall(startShape, 0);
   receipts.push(first);
   if (first.outcome !== "ok") {
-    // Only a request the provider refused as malformed is worth one more try, in the shape that sends the least. Nothing else is retried.
-    if (first.failure?.class !== "request-rejected") return stopped();
+    // Only a request the provider refused as malformed is worth one more try, in the shape that sends the least. Nothing else is retried, and a test already in that shape has none.
+    if (first.failure?.class !== "request-rejected" || startShape === "minimal") return stopped();
     shape = "minimal";
     const retry = await deps.firstCall("minimal", 1);
     receipts.push(retry);

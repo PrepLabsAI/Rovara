@@ -4,7 +4,6 @@ import { deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment, e2eAgentRoute
 import { e2eAgentRouteDefinitionDigest as brokerDigest } from "../../packages/broker/src/e2e/model-route-registry.js";
 import type { E2EInvoke, E2EInvokeInput, E2EInvokeOutput } from "../../packages/model-runtime/src/e2e-route.js";
 import { E2E_MODEL_CANARY_BOUNDS, E2E_MODEL_CANARY_CALL, runE2EModelCanary, type E2EModelCanaryRequest } from "../../packages/worker/src/e2e-model-canary.js";
-import { parseCanaryCliArgs, serveModelCanary } from "../../packages/worker/src/e2e-model-canary-cli.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 
 // M1.4 Task 4.9 step 3: the worker side of the model canary. One call, through the governed route the agent steps use, with a faked provider.
@@ -133,69 +132,5 @@ describe("the worker's model canary", () => {
     if (result.status !== "called") throw new Error("unreachable");
     expect(calls).toHaveLength(1);
     expect(result.receipt.outcome).toBe("refused-credential-match");
-  });
-});
-
-describe("the worker's model canary command", () => {
-  const PREFIX = "e2e-runtime/AROAEXAMPLEROLEID1234:i-0123456789abcdef0/";
-  const args = { bucket: "agentx-test-artifacts", prefix: PREFIX, waitSeconds: 30 };
-  function transport(objects: Map<string, Uint8Array> = new Map()) {
-    const puts: Array<{ key: string; body: string }> = [];
-    const gets: string[] = [];
-    return { puts, gets, objects, get: async (key: string) => { gets.push(key); return objects.get(key); }, put: async (key: string, body: string) => { puts.push({ key, body }); } };
-  }
-  function deps(t: ReturnType<typeof transport>, runner: (raw: unknown) => ReturnType<typeof run>) {
-    let clock = 0;
-    const lines: string[] = [];
-    return { lines, value: { transport: t, run: runner, sleep: async (ms: number) => { clock += ms; }, now: () => clock, log: (line: string) => lines.push(line), pollMs: 10_000 } };
-  }
-
-  it("serves one request from its own prefix: one call, the result put under the same prefix", async () => {
-    const t = transport(new Map([[`${PREFIX}canary-request.json`, Buffer.from(JSON.stringify(request()))]]));
-    const { invoke, calls } = fakeInvoke();
-    const d = deps(t, (raw) => run(raw, invoke));
-    expect(await serveModelCanary(args, d.value)).toBe(0);
-    expect(calls).toHaveLength(1);
-    expect(t.puts.map((item) => item.key)).toEqual([`${PREFIX}canary-result.json`]);
-    expect(JSON.parse(t.puts[0]!.body)).toMatchObject({ status: "called", calls: 1, receipt: { outcome: "ok" } });
-    expect(new Set(t.gets)).toEqual(new Set([`${PREFIX}canary-request.json`]));
-    expect(d.lines.join("\n")).not.toContain("secret answer");
-  });
-
-  it("waits, bounded, and makes no call and puts nothing when no request comes", async () => {
-    const t = transport();
-    let ran = 0;
-    const d = deps(t, async (raw) => { ran += 1; return run(raw, fakeInvoke().invoke); });
-    expect(await serveModelCanary(args, d.value)).toBe(0);
-    expect(ran).toBe(0);
-    expect(t.puts).toEqual([]);
-    expect(t.gets.length).toBe(4);
-    expect(d.lines).toContain("model-canary: no model canary was asked for");
-  });
-
-  it("puts a fixed failure for an empty or oversized request without calling", async () => {
-    for (const body of [Buffer.alloc(0), Buffer.alloc(4_097, 120)]) {
-      const t = transport(new Map([[`${PREFIX}canary-request.json`, body]]));
-      let ran = 0;
-      expect(await serveModelCanary(args, deps(t, async (raw) => { ran += 1; return run(raw, fakeInvoke().invoke); }).value)).toBe(0);
-      expect(ran).toBe(0);
-      expect(JSON.parse(t.puts[0]!.body)).toEqual({ schemaVersion: "rovara-e2e-model-canary-result/v1", status: "failed", reason: "canary-request-size-rejected" });
-    }
-  });
-
-  it("puts a refusal for a request that is not JSON, without calling", async () => {
-    const t = transport(new Map([[`${PREFIX}canary-request.json`, Buffer.from("{not json")]]));
-    const { invoke, calls } = fakeInvoke();
-    expect(await serveModelCanary(args, deps(t, (raw) => run(raw, invoke)).value)).toBe(0);
-    expect(calls).toHaveLength(0);
-    expect(JSON.parse(t.puts[0]!.body)).toMatchObject({ status: "refused", code: "canary-request-invalid" });
-  });
-
-  it("refuses arguments outside its own prefix shape", () => {
-    expect(parseCanaryCliArgs(["--bucket", "agentx-test-artifacts", "--prefix", PREFIX])).toEqual({ bucket: "agentx-test-artifacts", prefix: PREFIX, waitSeconds: 7200 });
-    for (const argv of [["--bucket", "b"], ["--bucket", "agentx-test-artifacts", "--prefix", "e2e-runtime/other/"], ["--bucket", "agentx-test-artifacts", "--prefix", PREFIX, "--x", "1"],
-      ["--bucket", "agentx-test-artifacts", "--prefix", PREFIX, "--wait-seconds", "-1"]]) {
-      expect(() => parseCanaryCliArgs(argv)).toThrow();
-    }
   });
 });

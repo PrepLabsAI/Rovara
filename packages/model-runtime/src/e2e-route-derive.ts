@@ -206,6 +206,25 @@ export function searchE2EAgentRoute(installation: E2EAgentInstallation, provider
 }
 
 /**
+ * The definition (at revision 1, in either request shape) of an eligible model of the provider whose digest is `definitionDigest`, or undefined: how a model check finds the route it
+ * was asked to test without taking a definition from the request. Bounded like `searchE2EAgentRoute`.
+ */
+export function searchE2EAgentRouteByDigest(installation: E2EAgentInstallation, provider: ModelProvider, definitionDigest: string): E2EModelRouteDefinition | undefined {
+  const recommended = E2E_AGENT_RECOMMENDED_MODELS[provider];
+  const ids = [recommended, ...e2eAgentModelsFor(provider, installation.region ?? null).map((row) => row.modelId).filter((modelId) => modelId !== recommended)];
+  let tried = 0;
+  for (const modelId of ids) {
+    for (const shape of ["standard", "minimal"] as const) {
+      if (tried >= E2E_AGENT_ROUTE_SEARCH_LIMIT) return undefined;
+      tried += 1;
+      const derived = deriveE2EAgentRouteForModel(installation, modelId, shape, 1);
+      if (derived.status === "available" && e2eAgentRouteDefinitionDigest(derived.definition) === definitionDigest) return derived.definition;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Re-derives, from the worker's own settings, the route an admission names, and holds it to the admission's revision. The worker never takes a definition from the admission or
  * the executor: it makes its own, and serves it only when its digest is the revision the broker approved and the project's policy pinned.
  *
