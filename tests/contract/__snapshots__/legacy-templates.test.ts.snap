@@ -2055,46 +2055,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     ],
                   ],
                 },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":ssm:",
-                      {
-                        "Ref": "AWS::Region",
-                      },
-                      ":",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":parameter/agentx/production/worker-e2e-agent-model",
-                    ],
-                  ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":ssm:",
-                      {
-                        "Ref": "AWS::Region",
-                      },
-                      ":",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":parameter/agentx/production/worker-model-fallback",
-                    ],
-                  ],
-                },
               ],
               "Sid": "ReadEvalSettings",
             },

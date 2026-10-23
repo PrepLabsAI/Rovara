@@ -286,7 +286,7 @@ import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
-import { applicationRuntimeRowFences, readE2ERuntimeStatus, readExpiredE2ERuntimes, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
+import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, readE2ERuntimeStatus, readExpiredE2ERuntimes, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
 import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntries } from "./e2e-account-registry.js";
 import { E2EAccountRegistryError, unreadableAccountMessage, type E2EAccountRegistryEntry } from "../e2e/application-account-registry.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
@@ -305,6 +305,7 @@ import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
+import { ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, untestedRouteSentence, type ModelCheckDependencies } from "../e2e/model-checks.js";
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, readE2EModelRouteShape, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
 import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification, type VerifiedAgentTrace } from "../e2e/application-evidence.js";
@@ -403,6 +404,20 @@ async function plannedAgentRoute(dependencies: Pick<AwsBrokerDependencies, "docu
     const planned = await planE2EAgentRoute({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, await dependencies.e2eAgentInstallation());
     return planned.status === "available" ? planned : undefined;
   } catch { return undefined; }
+}
+
+/**
+ * What a setup proposal says when the installation's route is well-formed but has no passed driving test (Task 4.10C): the provider, the model and the sentence "AI navigation steps
+ * will not run: the driving test with <provider> `<model>` has not passed (<why>)". Null when the route is available, or cannot be made at all (the CLI's own sentence says that).
+ */
+async function untestedAgentRouteNote(dependencies: Pick<AwsBrokerDependencies, "documentClient" | "tableName" | "e2eAgentInstallation">): Promise<{ provider: string; modelId: string; sentence: string } | null> {
+  if (dependencies.e2eAgentInstallation === undefined) return null;
+  try {
+    const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
+    const planned = await planE2EAgentRoute(store, await dependencies.e2eAgentInstallation());
+    if (planned.status !== "unavailable" || planned.untested === undefined) return null;
+    return { provider: planned.untested.provider, modelId: planned.untested.modelId, sentence: await untestedRouteSentence(store, { ...planned.untested, routeId: E2E_DEFAULT_MODEL_ROUTE_ID }) };
+  } catch { return null; }
 }
 
 export interface RegisteredProjectRecord {
@@ -1221,7 +1236,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate, readyProfiles });
         const agentRoute = await plannedAgentRoute(dependencies);
         const policy = projectSetupPolicy(proposal, agentRoute);
-        const aiNavigation = agentRoute === undefined ? null : agentRouteSummary(agentRoute.definition);
+        const aiNavigation = agentRoute === undefined ? null : agentRouteSummary(agentRoute.definition, { drivingTest: agentRoute.drivingTest });
+        const aiNavigationUntested = agentRoute === undefined ? await untestedAgentRouteNote(dependencies) : null;
         const repositoryName = urlParts[2].replace(/\.git$/i, "");
         const cleanedRepositoryName = repositoryName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
         const registeredRepositoryId = /^[a-z]/.test(cleanedRepositoryName) ? cleanedRepositoryName : `repo-${cleanedRepositoryName}`.slice(0, 63);
@@ -1257,7 +1273,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           const retained = await readStoredText(dependencies.s3, dependencies.artifactBucketName, proposalRef, MAX_SETUP_PROPOSAL_BYTES);
           if (retained !== artifactBytes) throw agentXError("RUNTIME_UNAVAILABLE", "content-addressed setup proposal object conflicts with its expected bytes");
         }
-        return json({ proposalRef, proposalSha256: artifactDigest, candidateDigest: candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, proposal, policy, aiNavigation }, request.requestId);
+        return json({ proposalRef, proposalSha256: artifactDigest, candidateDigest: candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, proposal, policy, aiNavigation, aiNavigationUntested }, request.requestId);
       }
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-approvals") {
@@ -1303,7 +1319,11 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           // The only difference is the AI navigation route: the installation's provider, model, secret or OpenRouter policy changed (or another approval moved the registry) since the proposal.
           if (sameJsonContent({ ...(artifact.policy as Record<string, unknown>), modelRouteRevision: null, limits: null }, { ...policy, modelRouteRevision: null, limits: null })) {
             // With no route now, the settings were not read or no longer give a usable route; they have not been shown to have changed.
-            if (agentRoute === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: The AI navigation settings of this installation could not be read, or no longer give a usable route; propose the setup again once they can be`);
+            if (agentRoute === undefined) {
+              const untested = await untestedAgentRouteNote(dependencies);
+              throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: ${untested !== null ? `${untested.sentence}; run the driving test, then propose the setup again`
+                : "The AI navigation settings of this installation could not be read, or no longer give a usable route; propose the setup again once they can be"}`);
+            }
             throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_MODEL_ROUTE_CHANGED_REAPPROVE}: The AI navigation settings changed; propose the setup again, then approve the new proposal`);
           }
           throw agentXError("RUNTIME_UNAVAILABLE", "this setup proposal was made under an earlier default policy and can no longer be approved: propose the setup again (re-propose the setup), then approve the new proposal");
@@ -1362,6 +1382,12 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (!dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("NOT_FOUND", "browser and API runtimes are not set up in this deployment");
         return json(await readE2ERuntimeStatus({ runtimeCatalogId: dependencies.e2eFeatureRuntimeCatalogId, profileId: WEB_API_RUNTIME_PROFILE_ID,
           read: (key) => getItem<Record<string, unknown>>(dependencies, key) }), request.requestId);
+      }
+      // M1.4 Task 4.10C: the on-account model checks (a driving test of one model, or a discovery of the models this account sees), served by the qualified runner.
+      const modelCheck = /^\/v1\/admin\/e2e\/model-checks(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
+      if (modelCheck !== null && ((request.method === "POST" && modelCheck[1] === undefined) || (request.method === "GET" && modelCheck[1] !== undefined) || (request.method === "GET" && url.pathname.endsWith("/model-checks")))) {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        return await adminModelChecks(dependencies, request.method, modelCheck[1], body, request.requestId);
       }
       // #343: Sign in with ChatGPT, for rovara doctor.
       if (request.method === "GET" && url.pathname === "/v1/admin/chatgpt") {
@@ -13198,6 +13224,40 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
     task,
     value,
   );
+}
+
+/**
+ * M1.4 Task 4.10C: `POST /v1/admin/e2e/model-checks { kind: "drive" | "discover", modelId? }` asks the qualified runner for a driving test or a discovery (202 and the check's id);
+ * `GET .../<checkId>` is pending until the runner has answered, then the validated outcome in the owner's sentence; `GET .../model-checks` (no id) is the tiers on record.
+ */
+async function adminModelChecks(dependencies: AwsBrokerDependencies, method: string, checkId: string | undefined, body: unknown, requestId: string): Promise<ReturnType<typeof json>> {
+  if (dependencies.e2eAgentInstallation === undefined || dependencies.e2eFeatureRuntimeCatalogId === undefined) throw agentXError("NOT_FOUND", "AI navigation model checks are not set up in this deployment");
+  const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
+  const checks: ModelCheckDependencies = {
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, installation: dependencies.e2eAgentInstallation,
+    readRuntimeRow: async () => (await getItem<Record<string, unknown>>(dependencies, e2eRegisteredRuntimeKey(catalogId, WEB_API_RUNTIME_PROFILE_ID, "web"))) ?? undefined,
+    putObject: async (key, text) => { await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key, Body: text, ContentType: "application/json" })); },
+    getObject: async (key) => {
+      try {
+        const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key }));
+        return object.Body === undefined ? new Uint8Array() : await object.Body.transformToByteArray();
+      } catch (error) {
+        // Without a list grant S3 answers a missing key with AccessDenied: not there yet.
+        const name = error instanceof Error ? error.name : "";
+        if (name === "NoSuchKey" || name === "AccessDenied" || name === "Forbidden") return undefined;
+        throw error;
+      }
+    },
+  };
+  try {
+    if (method === "POST") return json(await startModelCheck(checks, body, WEB_API_RUNTIME_PROFILE_ID), requestId, 202);
+    if (checkId !== undefined) return json(await readModelCheck(checks, checkId), requestId);
+    return json({ tiers: await readCurrentTiers(checks) }, requestId);
+  } catch (error) {
+    if (!(error instanceof ModelCheckError)) throw error;
+    // The code of the error is the fixed one of the check; the message never carries a model id from the request.
+    throw agentXError(error.status === 400 ? "CONFIG_INVALID" : error.status === 404 ? "NOT_FOUND" : error.code === "check-in-progress" ? "WORKSPACE_BUSY" : "RUNTIME_UNAVAILABLE", `${error.code}: ${error.message}`);
+  }
 }
 
 /**

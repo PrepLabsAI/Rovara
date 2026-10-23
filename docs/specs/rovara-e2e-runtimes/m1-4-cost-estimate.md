@@ -86,3 +86,20 @@ TODO: measure one round's runner time in the demo and replace the 15-to-30-minut
 | Model: canary + 2 candidate rounds + replay | about $0.005 | $0.08 (hard bound on every call) |
 | Runner: requalification + overlap + 4 rounds | about $0.35 | $0.35, plus $1.90 for each day the runner is left up |
 | **Total, runner retired the same day** | **about $0.36** | **about $2.33** |
+
+
+---
+
+## Task 4.10: the driving test and discovery (Task 4.10C)
+
+Prices are from the pinned pi catalog (per MTok, input/output; the AWS Price List API was not read for this change, so re-read `AmazonBedrockFoundationModels` (us-east-1) before quoting them to a customer). The test makes at most 6 model calls, 36,000 input tokens in all and 512 output tokens per call (3,072 in all); it is not charged to any project's day budget.
+
+| Case (Bedrock Haiku 4.5 `us.`, $1.10 / $5.50) | Calls | Input | Output | Total |
+|---|---|---|---|---|
+| Driving test, expected | 3 | about 4,700 | about 400 | **$0.0074** |
+| Driving test, worst (budget) | 6 | 36,000 | 3,072 | **$0.0565** |
+| Discovery | 0 | none | none | $0 |
+
+Worst case of one driving test with each provider's recommended default: Bedrock Haiku 5.5 US-only $0.0057, Bedrock Haiku 5.5 Global $0.0051, Anthropic $0.0051, OpenAI `gpt-5.4-mini` $0.0408, OpenRouter $0.0051 plus its credit fee. `agentx project model-check test` prints the worst case of the model about to be tested and asks first; `discover` lists each model that can be tested with its worst case.
+
+Remaining Task 4.9 work (at most 2 driving tests, 2 candidate rounds, the replay): model about $0.05 expected, $0.85 worst (2 x $0.0565 + 2 x $0.3675); runner $0.35; **about $3.10 worst with the runner retired the same day**, within the approved $3.11. A third driving test needs the owner's word.

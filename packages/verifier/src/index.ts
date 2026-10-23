@@ -40,7 +40,7 @@ export type { E2EApplicationProducer, E2EApplicationProofBytes, E2EApplicationSu
   E2EApplicationQualification, E2EApplicationCaseFacts, E2EApplicationUnmockedCall } from "./application-result-adapter.js";
 export { collectE2EApplicationRun } from "./application-collection.js";
 export { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, E2E_REPLAY_EXECUTOR_NAME, E2E_REPLAY_EXECUTOR_VERSION } from "./application-templates.js";
-export { E2E_AGENT_TRACE_BASE64_MAX, evaluateE2EAgentCase, E2EAgentModelEvidenceSchema, E2E_AGENT_UNKNOWN_CODES, E2E_AGENT_LEDGER_MAX_BYTES, E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION } from "./application-agent-result.js";
+export { E2E_AGENT_TRACE_BASE64_MAX, evaluateE2EAgentCase, E2EAgentModelEvidenceSchema, E2E_AGENT_UNKNOWN_CODES, E2E_FAILURE_CLASS_AGENT_CODE, E2E_AGENT_LEDGER_MAX_BYTES, E2E_AGENT_MODEL_EVIDENCE_SCHEMA_VERSION } from "./application-agent-result.js";
 export { agentInstructionDigest, mapAgentTraceToStep, reviewAgentTraceFile, selectAgentTraceUploads, verifiedAgentCaseLedger } from "./application-agent-traces.js";
 export type { E2EAgentTraceCase, E2EAgentTraceReview, E2EAgentTraceUpload } from "./application-agent-traces.js";
 export type { E2EAgentModelEvidence, E2EAgentUnknownCode, E2EAgentCaseVerdict, E2EAgentCaseInput, E2EAgentCaseResult, E2EAgentTranscriptDigest } from "./application-agent-result.js";
@@ -74,4 +74,7 @@ export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, Docke
 export { executorContainerArgs } from "./host/executor-container.js";
 export { installedExecutorSeccompProfilePath, verifyExecutorSeccompProfile } from "./host/executor-seccomp.js";
 export { deriveWebApiProbeObservation, verifyWebApiProbeRecord, type WebApiProbeDerivation } from "./web-api-probe-evidence.js";
+export { DRIVING_TEST_LIMITS, DRIVING_TEST_SCENARIO_ID, webApiDrivingTestPlan } from "./host/web-api-probe-plan.js";
+export { createDrivingNavigator, lastFailureOf, reasonCodeOf, runModelDrivingTest } from "./host/model-driving-test.js";
+export type { DrivingChannelRequest, DrivingNavigatorDependencies, DrivingShape, DrivingTestDependencies, DrivingTestOutcome, NavigationOutcome } from "./host/model-driving-test.js";
 export type { WebApiProbeModelChannelFactory, WebApiProbeModelChannelRequest } from "./host/web-api-probe-runner.js";

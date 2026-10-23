@@ -81,6 +81,7 @@ describe("planTestQualification", () => {
       "poll-status",
       "download-proposal",
       "register",
+      "record-model-check-runner",
       "delete-challenge",
       "print-registered-rows",
     ]);
@@ -317,6 +318,7 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
     },
     async deleteObject(key) { calls.push(`deleteObject ${key}`); maybeFail(key === PREFLIGHT_KEY ? "deletePreflight" : "deleteObject"); },
     saveProposal(bytes) { calls.push(`saveProposal ${bytes.toString()}`); return "/tmp/proposal.json"; },
+    async recordModelCheckRunner(runner) { calls.push(`recordModelCheckRunner ${runner.roleId} ${runner.instanceId} ${runner.transportCorrelationId}`); maybeFail("recordModelCheckRunner"); },
     async register(file) { calls.push(`register ${file}`); maybeFail("register"); return JSON.stringify({ profileId: "linux-arm64-web-api-v1", featureCatalogId: "catalog-1", featureRevisions: { web: 1, api: 1 } }); },
     now: () => clock,
     async sleep(ms) { clock += ms; },
@@ -334,8 +336,11 @@ describe("runTestQualification", () => {
     const names = calls.map((call) => call.split(" ")[0]);
     expect(names).toEqual([
       "checkAdminSession", "resolveFacts", "putBytes", "getObjectStrict", "deleteObject", "createVolume", "runInstance", "attachVolume", "privateIpOf", "getObject", "issueChallenge", "putObject",
-      "getObject", "getObject", "getObject", "getObject", "saveProposal", "register", "deleteObject",
+      "getObject", "getObject", "getObject", "getObject", "saveProposal", "register", "recordModelCheckRunner", "deleteObject",
     ]);
+    // Task 4.10C: the runner that serves model checks is recorded after the registration, bound to its transport correlation, and never before a successful one.
+    expect(calls).toContain(`recordModelCheckRunner ${facts.workerRoleId} ${INSTANCE_ID} ${WORKSPACE_ID}`);
+    expect(calls.findIndex((call) => call.startsWith("recordModelCheckRunner"))).toBeGreaterThan(calls.findIndex((call) => call.startsWith("register ")));
     // The ready marker is read before the challenge is issued, never after.
     expect(calls.indexOf(`getObject ${PREFIX}ready.json`)).toBeLessThan(calls.findIndex((call) => call.startsWith("issueChallenge")));
     // The preflight object is put, read back and deleted before anything is launched.

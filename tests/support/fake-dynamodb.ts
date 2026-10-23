@@ -71,6 +71,13 @@ function testSeed(): number {
   return name === undefined ? DEFAULT_MAP_ORDER_SEED : keyRank(name, DEFAULT_MAP_ORDER_SEED);
 }
 
+let assumedDrivingTests = false;
+/**
+ * For a test file about something other than the driving-test gate (setup approval, dispatch, the budget): every route digest is read as having passed its driving test
+ * (Task 4.10C), so those tests keep their own subject. A test of the gate itself must not call this. Module state, so it holds for the whole test file only.
+ */
+export function assumeDrivingTestsPassed(on = true): void { assumedDrivingTests = on; }
+
 export class FakeDynamoDb {
   readonly items = new Map<string, Item>();
   /**
@@ -192,6 +199,10 @@ export class FakeDynamoDb {
         if (this.eventual && input.ConsistentRead !== true && this.staleOnce.has(stored)) {
           item = this.staleOnce.get(stored);
           this.staleOnce.delete(stored);
+        }
+        if (item === undefined && assumedDrivingTests && key.pk === "E2E_MODEL_ROUTES" && key.sk.startsWith("E2E_MODEL_ROUTE_CANARY#")) {
+          const [, routeId, definitionDigest] = key.sk.split("#");
+          item = { ...key, entityType: "E2E_MODEL_ROUTE_CANARY", test: "driving/v1", routeId, definitionDigest, recordedAt: "2026-10-23T10:00:00.000Z" };
         }
         return { Item: item === undefined ? undefined : this.readClone(item) };
       }

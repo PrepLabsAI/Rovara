@@ -61,9 +61,9 @@ function networkCodeOf(error: unknown): string | undefined {
 /** The class of a failed check, from the error's status, name and network code. Message text is read only to tell the model-not-in-catalog refusal apart, never kept. */
 export function failureFromError(provider: ModelProvider, error: unknown): E2EModelFailure {
   // By name too: the error may come from another copy of this package (the CLI loads the built one).
-  if (error instanceof MissingProviderSecret || (isRecord(error) && (error.name === "MissingProviderSecret" || error.name === "MissingOpenRouterSecret"))) return { class: "key-rejected", signal: "secret-unreadable" };
+  if (error instanceof MissingProviderSecret || (isRecord(error) && (error.name === "MissingProviderSecret" || error.name === "MissingOpenRouterSecret"))) return { class: "secret-unreadable", signal: "secret-unreadable" };
   if (isRecord(error) && error.code === "CONFIG_INVALID") {
-    return typeof error.message === "string" && /not in the installed Pi catalog/.test(error.message) ? { class: "model-not-found", signal: "not-in-catalog" } : { class: "request-rejected", signal: null };
+    return typeof error.message === "string" && /not in the installed Pi catalog/.test(error.message) ? { class: "not-in-catalog", signal: "not-in-catalog" } : { class: "request-rejected", signal: null };
   }
   const name = isRecord(error) && typeof error.name === "string" && !GENERIC_ERROR_NAMES.has(error.name) && signalPattern(provider).test(error.name) ? error.name : undefined;
   const network = networkCodeOf(error);

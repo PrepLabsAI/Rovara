@@ -7,7 +7,10 @@ import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { startApplicationRound } from "../support/e2e-application-round-harness.js";
 import { call } from "../support/slack-broker.js";
-import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
+
+// The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
+assumeDrivingTestsPassed();
 
 // Task 4.3a, test case 7 (Ruling DB-8): the worker's callback for the project's day budget.
 

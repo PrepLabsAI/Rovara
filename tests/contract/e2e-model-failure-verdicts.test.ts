@@ -73,7 +73,7 @@ const failed = (failureClass: E2EModelFailure["class"] | null, over: Partial<E2E
   receipt({ outcome: "provider-error", ...(failureClass === null ? {} : { failure: { class: failureClass, signal: null } }), ...over });
 const CLASS_CODE: Record<Exclude<E2EModelFailure["class"], "unknown">, E2EAgentUnknownCode> = {
   "limit-or-rate-limited": "model-limit-reached", "key-rejected": "model-key-rejected", "model-not-found": "model-not-found", unreachable: "model-unreachable",
-  "request-rejected": "model-request-rejected", "provider-outage": "model-provider-outage",
+  "request-rejected": "model-request-rejected", "provider-outage": "model-provider-outage", "secret-unreadable": "model-secret-unreadable", "not-in-catalog": "model-not-in-catalog",
 };
 
 describe("21. the class of the last failed model call decides the code", () => {
@@ -180,7 +180,7 @@ describe("23. nothing a provider said reaches a receipt, a verdict or a row", ()
       const verdict = evaluateE2EAgentCase(stopped("MODEL_PROVIDER_FAILED", [intoCase(outcome.receipt)]));
       expect(verdict.verdict).toEqual({ kind: "unknown", code: "model-limit-reached" });
       const shown = displayed(definition, "model-limit-reached");
-      expect(shown.reason).toBe(`Amazon Bedrock refused the AI navigation call to \`us.anthropic.claude-haiku-5-5\`: this account's limit for that model is used up or set to zero. Raise the limit or choose another model, then retry the checks`);
+      expect(shown.reason).toBe(`Amazon Bedrock refused the AI navigation call to \`us.anthropic.claude-haiku-5-5\`: this account's limit for that model is used up or set to zero. Raise the limit, or choose another model and run its driving test (agentx project model-check test --model <id>), then retry the checks`);
       const everything = JSON.stringify({ outcome, verdict, shown });
       for (const text of HOSTILE) expect(everything, text).not.toContain(text);
     } finally { await loopback.close(); }
@@ -204,7 +204,7 @@ describe("23. nothing a provider said reaches a receipt, a verdict or a row", ()
         ],
         [
           "model-limit-reached",
-          "Amazon Bedrock refused the AI navigation call to \`us.anthropic.claude-haiku-4-5-20251001-v1:0\`: this account's limit for that model is used up or set to zero. Raise the limit or choose another model, then retry the checks",
+          "Amazon Bedrock refused the AI navigation call to \`us.anthropic.claude-haiku-4-5-20251001-v1:0\`: this account's limit for that model is used up or set to zero. Raise the limit, or choose another model and run its driving test (agentx project model-check test --model <id>), then retry the checks",
         ],
         [
           "model-key-rejected",
@@ -212,7 +212,7 @@ describe("23. nothing a provider said reaches a receipt, a verdict or a row", ()
         ],
         [
           "model-not-found",
-          "Amazon Bedrock says \`us.anthropic.claude-haiku-4-5-20251001-v1:0\` does not exist or is not available to this account. Choose another model and approve setup again",
+          "Amazon Bedrock says \`us.anthropic.claude-haiku-4-5-20251001-v1:0\` does not exist or is not available to this account. Choose another model, run its driving test (agentx project model-check test --model <id>), and approve setup again",
         ],
         [
           "model-unreachable",
@@ -225,6 +225,14 @@ describe("23. nothing a provider said reaches a receipt, a verdict or a row", ()
         [
           "model-provider-outage",
           "Amazon Bedrock had a problem answering for \`us.anthropic.claude-haiku-4-5-20251001-v1:0\`. Retry the checks later",
+        ],
+        [
+          "model-secret-unreadable",
+          "Rovara could not read its stored access for Amazon Bedrock. Check that the key's secret exists and Rovara's worker can read it, then retry the checks",
+        ],
+        [
+          "model-not-in-catalog",
+          "Rovara doesn't know how to call \`us.anthropic.claude-haiku-4-5-20251001-v1:0\` on Amazon Bedrock. Choose a model from the list Rovara offers",
         ],
         [
           "model-unavailable",

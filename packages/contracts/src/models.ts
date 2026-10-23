@@ -93,6 +93,8 @@ export function modelCheckClassSentence(input: { provider: string; modelId: stri
     case "unreachable": return `${label} could not be reached for ${modelId}; check the network, then check again.`;
     case "request-rejected": return `${label} refused the check request for ${modelId}; check the model id and its settings.`;
     case "provider-outage": return `${label} did not answer the check of ${modelId} in time or reported a problem; try again later.`;
+    case "secret-unreadable": return `${label}'s key for ${modelId} could not be read; check that the key's secret exists and Rovara can read it, then check again.`;
+    case "not-in-catalog": return `Rovara does not know how to call ${modelId} on ${label}; choose a model from Rovara's model catalog.`;
     case "unknown": return `The check of ${modelId} on ${label} failed for a reason Rovara could not tell; check the model, then check again.`;
   }
 }

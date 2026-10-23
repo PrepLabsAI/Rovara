@@ -53,7 +53,7 @@ export type E2EAgentTranscriptDigest = E2EAgentModelEvidence["transcriptDigests"
 
 export const E2E_AGENT_UNKNOWN_CODES = ["model-receipts-mismatch", "model-prompt-credential-match", "model-route-budget-exhausted",
   // Task 4.10B: why the model could not be used, by the failure class of its last failed call. At most one applies to a case; `model-unavailable` stays for a failure that is unclassified.
-  "model-limit-reached", "model-key-rejected", "model-not-found", "model-unreachable", "model-request-rejected", "model-provider-outage", "model-unavailable",
+  "model-limit-reached", "model-key-rejected", "model-not-found", "model-unreachable", "model-request-rejected", "model-provider-outage", "model-secret-unreadable", "model-not-in-catalog", "model-unavailable",
   "agent-timeout", "agent-budget-exhausted", "agent-navigation-incomplete", "agent-no-download", "ambiguous-download"] as const;
 export type E2EAgentUnknownCode = (typeof E2E_AGENT_UNKNOWN_CODES)[number];
 export type E2EAgentCaseVerdict = { kind: "deterministic" } | { kind: "unknown"; code: E2EAgentUnknownCode };
@@ -84,9 +84,9 @@ export type E2EAgentCaseResult = Readonly<{
 
 const PRECEDENCE: readonly E2EAgentUnknownCode[] = E2E_AGENT_UNKNOWN_CODES;
 /** The code of each failure class (`unknown` has none: it stays `model-unavailable`). */
-const FAILURE_CLASS_CODE: Readonly<Record<Exclude<E2EModelFailureClass, "unknown">, E2EAgentUnknownCode>> = Object.freeze({
+export const E2E_FAILURE_CLASS_AGENT_CODE: Readonly<Record<Exclude<E2EModelFailureClass, "unknown">, E2EAgentUnknownCode>> = Object.freeze({
   "limit-or-rate-limited": "model-limit-reached", "key-rejected": "model-key-rejected", "model-not-found": "model-not-found", unreachable: "model-unreachable",
-  "request-rejected": "model-request-rejected", "provider-outage": "model-provider-outage",
+  "request-rejected": "model-request-rejected", "provider-outage": "model-provider-outage", "secret-unreadable": "model-secret-unreadable", "not-in-catalog": "model-not-in-catalog",
 });
 const MODEL_UNAVAILABLE_STOPS: ReadonlySet<string> = new Set(["MODEL_UNAVAILABLE", "MODEL_PROVIDER_FAILED"]);
 
@@ -171,7 +171,7 @@ function evaluate(input: E2EAgentCaseInput): E2EAgentCaseResult {
   // The last failed model call (by step, then call) says why; a failure with no class (an older worker's receipt, or class `unknown`), or a stop with no failed call, is `model-unavailable`.
   const lastFailed = parsedReceipts.filter((receipt) => receipt.outcome === "provider-error" || receipt.outcome === "timeout")
     .sort((left, right) => left.stepIndex - right.stepIndex || left.callIndex - right.callIndex).at(-1);
-  if (lastFailed !== undefined) codes.add(lastFailed.failure === undefined || lastFailed.failure.class === "unknown" ? "model-unavailable" : FAILURE_CLASS_CODE[lastFailed.failure.class]);
+  if (lastFailed !== undefined) codes.add(lastFailed.failure === undefined || lastFailed.failure.class === "unknown" ? "model-unavailable" : E2E_FAILURE_CLASS_AGENT_CODE[lastFailed.failure.class]);
   else if (stops.some((stop) => stop !== null && MODEL_UNAVAILABLE_STOPS.has(stop))) codes.add("model-unavailable");
   if (stops.includes("STEP_TIMEOUT")) codes.add("agent-timeout");
   if (stops.includes("STEP_BUDGET_EXHAUSTED")) codes.add("agent-budget-exhausted");

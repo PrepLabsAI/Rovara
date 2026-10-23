@@ -131,7 +131,7 @@ Facts this runbook uses: TEST installation `agentxlivetest123`, account `9449373
 
 | Gate | Where | What the owner approves |
 |---|---|---|
-| **G1: first real model call** | Step 3 (the canary) | The first call to Bedrock from Rovara (decision D1). Show the owner the cost table in `m1-4-cost-estimate.md` (and Ruling M4-Q's cost ceiling) before the call. D7 pre-approves model spend within the D2 caps, but not this first call. |
+| **G1: first real model call** | Step 3 (the driving test) | The first call to Bedrock from Rovara (decision D1). Show the owner the cost table in `m1-4-cost-estimate.md` (and Ruling M4-Q's cost ceiling) before the call. D7 pre-approves model spend within the D2 caps, but not this first call. |
 | G2: runner spend | Step 2 | Covered by D7 (up to 3 qualification runner launches pre-approved, 2026-10-21). Tell the owner when a launch starts; a fourth launch needs a new OK. |
 | G3: fixture push | Step 4 | Covered by D6 (push the m14 baseline to `main` of the fixture repo, close the M1.3 demo PR unmerged). The dry run's file list is shown to the owner first. |
 | G4: Tier 3 | Steps 1 and 3 | Any `iam-missing-grant` the head does not declare, missing Bedrock model access, or a network gap from the runner to `bedrock-runtime`: stop and send the owner one Tier 3 packet. |
@@ -197,23 +197,45 @@ Run `--check` again. It must exit with no findings other than the `model-route-n
 
 Record: run UUID, new instance ID and private IP, volume ID, role unique ID and the `e2e-runtime/<role unique ID>:<instance ID>/` prefix, challenge ID, `proposalSha256`, both row revisions and their expiry (7 days), the retired runner's IDs and when it was ended. Never paste `challenge.json`.
 
-### 3. Model canary: one real Bedrock call (Task 4.9 step 5) — gate G1
+### 3. Model check: the driving test of the demo model (Task 4.10) — gate G1
+
+The single-call canary of Task 4.9 is replaced by the **driving test**: one call, then a small real navigation of the built-in fixture app, run on the qualified runner under the model the installation chose. No route of any provider is approvable until its driving test has passed for that exact route (`E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest>` with `test: "driving/v1"`).
+
+Before anything is spent, look at what the account can use (no model call):
 
 ```sh
-npx tsx scripts/test-model-canary.ts --env agentxlivetest123 --profile agentx-test --instance <runner instance ID from step 2>            # plan only; no AWS call
-npx tsx scripts/test-model-canary.ts --env agentxlivetest123 --profile agentx-test --instance <runner instance ID from step 2> --apply    # gate G1
+agentx --env agentxlivetest123 project model-check discover
+```
+
+It prints the tiers (Recommended, Works on your account, Not usable with the reason, Can be tested with the worst-case cost of one driving test) and the exact `config set models.e2eAgent <id>` and `model-check test --model <id>` lines. On TEST, with quota `L-47520EB7` at 0, Haiku 5.5 is Not usable (limit 0; US-only `L-47520EB7` 0, Global `L-F26CA8D1` 0) and `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the recommendation. If discovery is denied, it says so and the driving test confirms the model instead; discovery never blocks.
+
+Choose the model, then run the test (gate G1: the owner's explicit OK first; the command shows the worst-case cost and asks):
+
+```sh
+npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only e2e-agent-model --e2e-model us.anthropic.claude-haiku-4-5-20251001-v1:0 --apply
+agentx --env agentxlivetest123 project model-check test --model us.anthropic.claude-haiku-4-5-20251001-v1:0
+```
+
+The same checks can be asked with the operator's AWS profile where the CLI has no admin sign-in (plan only without `--apply`):
+
+```sh
+npx tsx scripts/test-model-canary.ts --env agentxlivetest123 --profile agentx-test --instance <runner instance ID from step 2> --model <id>            # plan only; no AWS call
+npx tsx scripts/test-model-canary.ts --env agentxlivetest123 --profile agentx-test --instance <runner instance ID from step 2> --model <id> --apply    # gate G1
+npx tsx scripts/test-model-canary.ts --env agentxlivetest123 --profile agentx-test --instance <runner instance ID from step 2> --discover --apply      # lists the models; no model call
 # optional: --timeout-minutes <1-30> (default 10), --region <region> (default us-east-1)
 ```
 
-How it works: the script puts `e2e-runtime/<role unique ID>:<instance ID>/canary-request.json` (route id, definition digest, and the bounds: 1 call, input at most 32,000 tokens, output at most 1,024 tokens). The runner's boot hook, after a successful qualification, waits up to 2 hours for that request and runs `e2e-model-canary-cli.js` in the worker container: one call through the governed route (environment guard, credential scan, pinned model, thinking off, effort low, a one-call budget), result in `canary-result.json` (receipt, digests, counts; no text). The script writes `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest>` only for an `ok` receipt within the bounds. A runner serves one canary: a second run against the same runner is refused (`canary-result.json` exists); a failed canary needs a new runner (D7 launch count). Exit codes: 0 recorded, 1 not ok or no result, 2 refused arguments. The call does not go through the project's day budget (no project is involved); it is one call, under one cent.
+How it works: the control plane (`POST /v1/admin/e2e/model-checks`) or the script puts `e2e-runtime/<role unique ID>:<instance ID>/canary-request.json`: a v2 request that names the check (a new id), its kind and, for a driving test, the route's id and definition digest. The runner's boot hook starts a bounded server in the worker container (`e2e-model-canary-cli.js`): it polls every 20 seconds for two hours and every 120 seconds after, serves each check id once, at most 12 checks per runner and at least 60 seconds apart, and stops when the registration expires (7 days) or it is stopped. Its fixed `model-check:` lines go to the runner's journal (`agentx-e2e-qualification: model-check: ...`). The test makes one call of a fixed prompt (with ONE retry in the minimal request shape if the provider rejects the request as malformed; no other failure is retried), then runs the fixture's CSV-export goal through the real executor and the governed model channel, with at most 3 actions. The whole test is held to one budget by the worker: at most 6 model calls, 36,000 input tokens in all and 512 output tokens per call. It passes only when the deterministic oracle says so: one download, the CSV check passes, and the worker's receipts equal the executor's report; a model never judges it. The broker validates the result (route, tested definition, receipts, budget, verdict, report) and writes the rows only for a validated pass: the gating row, the request shape that worked and the model's test row. A failed test writes its test row only and tells the failure in the owner's sentence; a failed test needs no new runner. Exit codes of the script: 0 recorded and passed, 1 not passed, not trusted or no result, 2 refused arguments. The test does not go through any project's day budget (no project is involved); its worst case for Haiku 4.5 on Bedrock is $0.0565 (expected about $0.0074).
 
-Before the call: show the owner the canary row and the "worst-case day" row of `m1-4-cost-estimate.md`, and get an explicit OK. The call is one model call with output at most 1024 tokens and input at most 32,000 tokens. Its cost is under one cent.
+The runner that serves checks is recorded by `scripts/test-qualify-runtime.ts` after the registration (`E2E_MODEL_ROUTES / E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1`, bound to the registration's transport correlation), so a check is only sent to the runner that was qualified. A runtime registered before this change needs `test-qualify-runtime --apply` again.
 
-Expected result: one receipt with outcome `ok`, `provider: "amazon-bedrock"`, `modelId: "us.anthropic.claude-haiku-5-5"`, `servedModelId: null` (Bedrock reports none), and non-zero `inputTokens` and `outputTokens`. The payload is accepted with thinking disabled and effort `low`. If Bedrock refuses `output_config`, drop the effort, keep thinking disabled (Ruling M4-Q), and record that.
+Before the test: show the owner the driving-test rows of `m1-4-cost-estimate.md` (section 9 of the 4.10 plan) and get an explicit OK.
+
+Expected result: `The driving test passed with ...: it clicked through the built-in fixture, downloaded one file and the checks agreed.`, with the request shape (standard, or minimal if the first call was rejected and the one retry decided) and the counts. A failure prints the approved sentence of its class (limit, key, not found, unreachable, request rejected, provider outage, unreadable secret, unknown model, unknown). Setup approval then shows `driving test passed <date>` and approves the exact route that was tested.
 
 If model access is refused (AccessDenied, or the agreement is not available) or the runner's subnet cannot reach `bedrock-runtime`: stop. That is gate G4.
 
-Record: the receipt (all fields), `providerPayloadSha256`, the served model (`null` for Bedrock), the latency, and the token counts. This gives the first measured input-token figure for the cost estimate.
+Record: the check ID, the receipts (all fields), the shape, the token counts and the latency. This gives the first measured input-token figure for the cost estimate.
 
 ### 4. Publish the fixture baseline and approve setup again (Task 4.9 step 6)
 

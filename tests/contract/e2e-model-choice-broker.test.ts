@@ -7,8 +7,11 @@ import {
   e2eModelRouteRevisionKey, e2eModelRouteShapeKey, planE2EAgentRoute, readE2EModelRouteShape, type E2EAgentInstallation,
 } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { createWorkflowE2EAdmissionModelChoiceReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
-import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
+
+// The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
+assumeDrivingTestsPassed();
 
 // M1.4 Task 4.10A, tests 8 and 14: what the broker reads of the installation's choice, what it shows the administrator, and the reader the dispatcher uses.
 

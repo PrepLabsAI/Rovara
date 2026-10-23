@@ -19,7 +19,7 @@ export const signalPattern = (provider: ModelProvider): RegExp => (provider === 
 const NETWORK_CODES: ReadonlySet<string> = new Set(["ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET"]);
 export const isNetworkCode = (code: string): boolean => NETWORK_CODES.has(code) || /^CERT_[A-Z0-9_]{1,56}$/.test(code);
 
-const named = (entries: Record<Cls, readonly string[]>): ReadonlyMap<string, Cls> =>
+const named = (entries: Partial<Record<Cls, readonly string[]>>): ReadonlyMap<string, Cls> =>
   new Map((Object.entries(entries) as Array<[Cls, readonly string[]]>).flatMap(([cls, names]) => names.map((name) => [name, cls] as const)));
 
 const none = [] as const;

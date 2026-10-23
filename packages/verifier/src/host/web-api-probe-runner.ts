@@ -145,7 +145,7 @@ export async function readBlockedRequests(outDir: string): Promise<Uint8Array | 
  * copy, the run's workspace, and any container or network labeled for it. The host refuses to allocate over an existing workspace, so without this a
  * qualification killed part-way could not be retried within its challenge.
  */
-async function clearEarlierAttempt(deps: WebApiProbeRunnerDeps, runId: string, staged: string): Promise<void> {
+export async function clearEarlierAttempt(deps: WebApiProbeRunnerDeps, runId: string, staged: string): Promise<void> {
   const signal = new AbortController().signal;
   const admin = (args: string[]) => deps.docker.run(args, { signal, timeoutMs: CLEANUP_TIMEOUT_MS });
   const listed = await admin(["ps", "-a", "--filter", `label=rovara.run=${runId}`, "--format", "{{.Names}}"]);

@@ -89,8 +89,8 @@ describe("the class a failed check carries (test 40)", () => {
   it("reads a network code (also under a cause) as unreachable, a deadline as an outage, a missing secret as key-rejected, and a model outside the catalog as model-not-found", () => {
     expect(failureFromError("openai", Object.assign(new Error("fetch failed"), { cause: { code: "ENOTFOUND" } }))).toEqual({ class: "unreachable", signal: "ENOTFOUND" });
     expect(failureFromError("amazon-bedrock", Object.assign(new Error("did not answer"), { name: "TimeoutError" }))).toEqual({ class: "provider-outage", signal: "timeout" });
-    expect(failureFromError("openai", new MissingProviderSecret("openai"))).toEqual({ class: "key-rejected", signal: "secret-unreadable" });
-    expect(failureFromError("anthropic", Object.assign(new Error("Anthropic model is not in the installed Pi catalog; choose a supported model"), { code: "CONFIG_INVALID" }))).toEqual({ class: "model-not-found", signal: "not-in-catalog" });
+    expect(failureFromError("openai", new MissingProviderSecret("openai"))).toEqual({ class: "secret-unreadable", signal: "secret-unreadable" });
+    expect(failureFromError("anthropic", Object.assign(new Error("Anthropic model is not in the installed Pi catalog; choose a supported model"), { code: "CONFIG_INVALID" }))).toEqual({ class: "not-in-catalog", signal: "not-in-catalog" });
     expect(failureFromError("openai", new Error("something else"))).toEqual({ class: "unknown", signal: null });
   });
 
@@ -104,7 +104,7 @@ describe("the class a failed check carries (test 40)", () => {
   });
 
   it("has one fixed sentence per class, each naming the provider and the model", () => {
-    for (const cls of ["limit-or-rate-limited", "key-rejected", "model-not-found", "unreachable", "request-rejected", "provider-outage", "unknown"] as const) {
+    for (const cls of ["limit-or-rate-limited", "key-rejected", "model-not-found", "unreachable", "request-rejected", "provider-outage", "unknown", "secret-unreadable", "not-in-catalog"] as const) {
       const sentence = classSentence({ provider: "openai", modelId: "gpt-5.4", class: cls });
       expect(sentence).toContain("OpenAI");
       expect(sentence).toContain("gpt-5.4");

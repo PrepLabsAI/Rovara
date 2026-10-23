@@ -80,3 +80,12 @@ export function tapAnswer(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
 }
+
+/**
+ * The gating row of a route that passed its driving test (`E2E_MODEL_ROUTE_CANARY#<routeId>#<digest>`, `test: "driving/v1"`), as the broker writes it on a validated pass.
+ * `digest` is `e2eAgentRouteDefinitionDigest(definition)`.
+ */
+export function drivingTestRow(definition: { routeId: string; provider: string; modelId: string }, digest: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { pk: "E2E_MODEL_ROUTES", sk: `E2E_MODEL_ROUTE_CANARY#${definition.routeId}#${digest}`, entityType: "E2E_MODEL_ROUTE_CANARY", test: "driving/v1",
+    routeId: definition.routeId, definitionDigest: digest, provider: definition.provider, modelId: definition.modelId, recordedAt: "2026-10-23T10:00:00.000Z", ...extra };
+}

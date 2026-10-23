@@ -30,10 +30,11 @@ export type ModelSentenceContext = Readonly<{ providerLabel: string; modelId: st
 
 /** A model id or provider name as a sentence quotes it: the page-element quoting, and a backtick (which closes the code quote) replaced too, cut so a sentence fits a row's 300. */
 const MODEL_NAME_MAX = 80;
-const quotedName = (name: string): string => {
+const ROW_MAX = 300;
+const quotedName = (name: string, max: number = MODEL_NAME_MAX): string => {
   const clean = sentenceName(name).replaceAll("`", "\u2019");
   const characters = Array.from(clean);
-  return characters.length <= MODEL_NAME_MAX ? clean : `${characters.slice(0, MODEL_NAME_MAX - 1).join("")}\u2026`;
+  return characters.length <= max ? clean : `${characters.slice(0, max - 1).join("")}\u2026`;
 };
 
 /**
@@ -46,13 +47,24 @@ export function modelSentenceContext(definition: Readonly<{ provider: string; mo
   return providerLabel === undefined ? undefined : { providerLabel, modelId: definition.modelId };
 }
 
+/** The command that runs a model's driving test (Task 4.10C), as the owner-approved sentences name it. */
+const DRIVING_TEST_COMMAND = "agentx project model-check test --model <id>";
+
 /** How a sentence names the provider (at the start of a sentence, and inside one) and the model, with a plain fallback when no definition is known. */
 type Who = Readonly<{ start: string; mid: string; model: string; named: boolean }>;
-const whoOf = (ctx: ModelSentenceContext | undefined): Who => {
+const whoOf = (ctx: ModelSentenceContext | undefined, max: number = MODEL_NAME_MAX): Who => {
   if (ctx === undefined) return { start: "The AI provider", mid: "the AI provider", model: "the chosen model", named: false };
-  const provider = quotedName(ctx.providerLabel);
-  return { start: provider, mid: provider, model: `\`${quotedName(ctx.modelId)}\``, named: true };
+  const provider = quotedName(ctx.providerLabel, max);
+  return { start: provider, mid: provider, model: `\`${quotedName(ctx.modelId, max)}\``, named: true };
 };
+
+/** A sentence that fits a display row: the names are cut to 80 characters, and cut further, as little as it takes, where the approved wording around them is long. */
+function fitted(code: E2EAgentUnknownCode, ctx: ModelSentenceContext | undefined): string {
+  for (let max = MODEL_NAME_MAX; ; max = Math.max(12, max - 8)) {
+    const sentence = AGENT_SENTENCES[code](whoOf(ctx, max));
+    if (Array.from(sentence).length <= ROW_MAX || ctx === undefined || max <= 12) return sentence;
+  }
+}
 
 /**
  * One sentence per AI navigation code. The model codes (Task 4.10B) name the provider and the model, so the owner knows what to fix; `model-unavailable` is the unclassified failure and,
@@ -62,9 +74,11 @@ const AGENT_SENTENCES = Object.freeze({
   "model-receipts-mismatch": () => "The AI navigation record didn't match what was run, so this check can't be trusted; retry the checks",
   "model-prompt-credential-match": () => "The AI navigator stopped because the page showed a test password, which the AI is never allowed to see; this check could not be decided",
   "model-route-budget-exhausted": () => "The AI navigation budget for these checks ran out before they finished; retry the checks",
-  "model-limit-reached": (who: Who) => `${who.start} refused the AI navigation call to ${who.model}: this account's limit for that model is used up or set to zero. Raise the limit or choose another model, then retry the checks`,
+  "model-limit-reached": (who: Who) => `${who.start} refused the AI navigation call to ${who.model}: this account's limit for that model is used up or set to zero. Raise the limit, or choose another model and run its driving test (${DRIVING_TEST_COMMAND}), then retry the checks`,
   "model-key-rejected": (who: Who) => `${who.start} did not accept Rovara's access for ${who.model} (the API key, or on Amazon Bedrock the worker role's model access). Fix the access, then retry the checks`,
-  "model-not-found": (who: Who) => `${who.start} says ${who.model} does not exist or is not available to this account. Choose another model and approve setup again`,
+  "model-not-found": (who: Who) => `${who.start} says ${who.model} does not exist or is not available to this account. Choose another model, run its driving test (${DRIVING_TEST_COMMAND}), and approve setup again`,
+  "model-secret-unreadable": (who: Who) => `Rovara could not read its stored access for ${who.mid}. Check that the key's secret exists and Rovara's worker can read it, then retry the checks`,
+  "model-not-in-catalog": (who: Who) => `Rovara doesn't know how to call ${who.model} on ${who.mid}. Choose a model from the list Rovara offers`,
   "model-unreachable": (who: Who) => `Rovara could not reach ${who.mid} to call ${who.model}. Check the network path from the runner, then retry the checks`,
   "model-request-rejected": (who: Who) => `${who.start} rejected the AI navigation request to ${who.model}, so this check could not run. Tell Rovara support (code model-request-rejected)`,
   "model-provider-outage": (who: Who) => `${who.start} had a problem answering for ${who.model}. Retry the checks later`,
@@ -82,7 +96,7 @@ export const E2E_OWNER_SENTENCES = Object.freeze({
    * Why a scenario could not be decided, for the codes the collector gives a case whose AI navigation was not clean (`E2E_AGENT_UNKNOWN_CODES`). `ctx` is the provider and model of the
    * route definition the broker stored for the admitted revision, or undefined when there is none.
    */
-  agentCode: (code: E2EAgentUnknownCode, ctx: ModelSentenceContext | undefined): string => AGENT_SENTENCES[code](whoOf(ctx)),
+  agentCode: (code: E2EAgentUnknownCode, ctx: ModelSentenceContext | undefined): string => fitted(code, ctx),
   /** Whether a text is one of the codes `agentCode` words (matched exactly). */
   isAgentCode: (code: string): code is E2EAgentUnknownCode => Object.hasOwn(AGENT_SENTENCES, code),
 

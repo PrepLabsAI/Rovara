@@ -105,7 +105,7 @@ describe("the e2e-agent-settings unit", () => {
     expect(() => plan(["e2e-agent-settings", "broker"])).toThrow(/e2e-agent-settings.*on its own/);
   });
 
-  it("plans one change set on the control-plane stack that only modifies the broker's environment and the three role policies, then reads the variable back", () => {
+  it("plans one change set on the control-plane stack that only modifies the broker's environment and the two role policies, then reads the variable back", () => {
     const steps = plan(["e2e-agent-settings"]);
     expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set", "verify-lambda-environment"]);
     const changeSet = changeSetOf(steps);
@@ -115,7 +115,7 @@ describe("the e2e-agent-settings unit", () => {
       environment: [{ logicalId: "BrokerE1355FD6", variable: "AGENTX_E2E_AGENT_SETTINGS_PREFIX" }],
       grants: E2E_AGENT_SETTINGS_UNIT.policies.map((logicalId) => ({ logicalId, parameterName: `/agentx/${ENV}/worker-e2e-agent-model` })),
     });
-    expect(E2E_AGENT_SETTINGS_UNIT.policies).toEqual(["BrokerServiceRoleDefaultPolicyDDFD9E7E", "SessionsStepsServiceRoleDefaultPolicy9F4B87C9", "EvalBatchTickServiceRoleDefaultPolicyC35492F8"]);
+    expect(E2E_AGENT_SETTINGS_UNIT.policies).toEqual(["BrokerServiceRoleDefaultPolicyDDFD9E7E", "SessionsStepsServiceRoleDefaultPolicy9F4B87C9"]);
     expect(changeSet.expect).toEqual({
       action: "Modify", logicalIds: ["BrokerE1355FD6", ...E2E_AGENT_SETTINGS_UNIT.policies],
       allowedAttributes: [], allowedAttributesByLogicalId: { BrokerE1355FD6: ["Properties.Environment"], ...Object.fromEntries(E2E_AGENT_SETTINGS_UNIT.policies.map((id) => [id, ["Properties.PolicyDocument"]])) },

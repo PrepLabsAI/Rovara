@@ -1,6 +1,6 @@
 import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
-  E2EModelRouteDefinitionSchema, E2E_AGENT_RECOMMENDED_MODELS, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE,
+  E2EModelRouteDefinitionSchema, E2E_AGENT_RECOMMENDED_MODELS, E2E_MODEL_DRIVING_TEST_MARKER, E2E_MODEL_ROUTE_NOT_TESTED, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE,
   INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, e2eAgentScopeSentence, indexExpiresAt, e2eModelRouteRevision, e2eModelRouteRevisionNumber,
   isKeyedModelProvider, type E2EModelRouteDefinition, type ModelProvider,
 } from "@agentx/contracts";
@@ -20,7 +20,12 @@ export { deriveE2EAgentRoute, type E2EAgentInstallation, type DerivedE2EAgentRou
  * Rows (a fixed partition, so approval state is read by key and a deploy check needs no project and no Scan):
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE#<routeId>#REV#<n>`: the definition of revision n, written once and never changed;
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_LATEST#<routeId>`: `{ revisionNumber, revision, definitionDigest }`, moved only from the previous revision;
- * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest>`: written by the live canary (Task 4.9) for a provisional route;
+ * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest>`: the gating row. Since Task 4.10C only the on-account driving test writes it (`test: "driving/v1"`, validated by
+ *   the broker), and no route of any provider is approvable or dispatchable without it for its exact definition. A single-call row of Task 4.9 (no `test`) does not gate;
+ * - `E2E_MODEL_ROUTES / E2E_MODEL_TEST#<routeId>#<modelId>`: the last driving test of a model, passed or failed, with its failure class (feeds the tiers);
+ * - `E2E_MODEL_ROUTES / E2E_MODEL_DISCOVERY#<provider>`: the last discovery report;
+ * - `E2E_MODEL_ROUTES / E2E_MODEL_CHECK#<checkId>`: one requested model check (TTL one day);
+ * - `E2E_MODEL_ROUTES / E2E_MODEL_CHECK_RUNNER#<profileId>`: the runner that serves model checks;
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_SHAPE#<routeId>#<modelId>`: `{ payloadShape: "standard" | "minimal", testedAt }`, the request shape the driving test found to work for that model
  *   (Task 4.10; written by the broker when it validates a passing test, read here so setup approval derives exactly the tested definition);
  * - `PROJECT#<project> / E2E_MODEL_BUDGET#<yyyy-mm-dd>`: `{ inputTokens, calls }` of the project's UTC day, moved only by conditional increments;
@@ -55,6 +60,11 @@ export function isTransientAwsFault(error: unknown): boolean {
 export const e2eModelRouteRevisionKey = (routeId: string, revisionNumber: number) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE#${routeId}#REV#${revisionNumber}` });
 export const e2eModelRouteLatestKey = (routeId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_LATEST#${routeId}` });
 export const e2eModelRouteCanaryKey = (routeId: string, definitionDigest: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_CANARY#${routeId}#${definitionDigest}` });
+export const e2eModelRouteTestKey = (routeId: string, modelId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_TEST#${routeId}#${modelId}` });
+export const e2eModelDiscoveryKey = (provider: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_DISCOVERY#${provider}` });
+export const e2eModelCheckKey = (checkId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_CHECK#${checkId}` });
+export const e2eModelCheckLatestKey = () => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: "E2E_MODEL_CHECK_LATEST" });
+export const e2eModelCheckRunnerKey = (profileId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_CHECK_RUNNER#${profileId}` });
 export const e2eModelRouteShapeKey = (routeId: string, modelId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_SHAPE#${routeId}#${modelId}` });
 export const e2eModelBudgetKey = (projectName: string, day: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET#${day}` });
 /** One reservation of a call's tokens against the project's day (`model-budget-endpoint.ts`): written with the day's increment, settled or released once. */
@@ -135,9 +145,6 @@ export async function e2eAgentInstallationFromParameters(
   };
 }
 
-/** A provider whose small-model id has not been shown live: its route stays unapproved until a canary on an installation of that provider records one (owner decision O5). */
-const PROVISIONAL_PROVIDERS: ReadonlySet<string> = new Set(["openrouter"]);
-
 const unavailable = (detail: string): Extract<DerivedE2EAgentRoute, { status: "unavailable" }> => ({ status: "unavailable", reason: E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved, detail });
 
 /**
@@ -166,13 +173,19 @@ const LABELS: Record<ModelProvider, string> = { "amazon-bedrock": "Amazon Bedroc
  * The sentence the setup proposal shows the administrator: the model, whether it is Rovara's recommendation or the installation's own choice, the routing scope of a Bedrock
  * profile in the owner-approved words (US data centers, or Global), and the action bound. The request shape is not shown: it is an engineering detail of what the driving test found.
  */
-export function agentRouteSummary(definition: E2EModelRouteDefinition): string {
+export function agentRouteSummary(definition: E2EModelRouteDefinition, context: { drivingTest?: { passedAt: string | null } | null } = {}): string {
   const provider = definition.provider as ModelProvider;
   const who = definition.modelId === E2E_AGENT_RECOMMENDED_MODELS[provider] ? "Rovara's recommendation" : "your choice";
   const head = `AI navigation: ${LABELS[provider] ?? provider} \`${definition.modelId}\` (${who})`;
+  // The date the driving test passed on this installation, and the minimal request shape when that is what passed.
+  const day = context.drivingTest?.passedAt?.slice(0, 10);
+  const tested = context.drivingTest === undefined || context.drivingTest === null ? null
+    : `driving test passed${day !== undefined && /^\d{4}-\d{2}-\d{2}$/.test(day) ? ` ${day}` : ""}${definition.payloadShape === "minimal" ? ", with the minimal request shape" : ""}`;
   const bound = `at most ${definition.budgets.maxActionsPerStep} actions per step; checks decide`;
   const scope = provider === "amazon-bedrock" ? e2eAgentScopeSentence(definition.modelId) : null;
-  return scope === null ? `${head}; ${bound}` : `${head}. ${scope} ${bound.charAt(0).toUpperCase()}${bound.slice(1)}`;
+  const cap = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+  if (scope === null) return `${head}; ${tested === null ? "" : `${tested}; `}${bound}`;
+  return `${head}. ${scope} ${tested === null ? "" : `${cap(tested)}. `}${cap(bound)}`;
 }
 
 export class E2EModelRouteError extends Error {
@@ -200,34 +213,47 @@ export async function readE2EModelRouteLatest(store: E2EModelRouteStore, routeId
   return { routeId, revisionNumber: item.revisionNumber as number, revision: item.revision, definitionDigest: item.definitionDigest };
 }
 
-async function hasCanary(store: E2EModelRouteStore, routeId: string, definitionDigest: string): Promise<boolean> {
+/**
+ * Whether the driving test passed for this exact definition (the gating row, written only by the broker's validation of a passing result). A row without the marker (the
+ * single-call canary of Task 4.9) is not one, and neither is a row whose own fields are not those of this route and digest.
+ */
+async function drivingTestOf(store: E2EModelRouteStore, routeId: string, definitionDigest: string): Promise<{ passedAt: string | null } | null> {
   const response = await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: e2eModelRouteCanaryKey(routeId, definitionDigest), ConsistentRead: true }));
-  return response.Item !== undefined;
+  const item = response.Item as Record<string, unknown> | undefined;
+  if (item === undefined || item["test"] !== E2E_MODEL_DRIVING_TEST_MARKER || item["routeId"] !== routeId || item["definitionDigest"] !== definitionDigest) return null;
+  return { passedAt: typeof item["recordedAt"] === "string" ? item["recordedAt"] : null };
 }
+const hasDrivingTest = async (store: E2EModelRouteStore, routeId: string, definitionDigest: string): Promise<boolean> => (await drivingTestOf(store, routeId, definitionDigest)) !== null;
 
 export type PlannedE2EAgentRoute =
-  | { status: "available"; definition: E2EModelRouteDefinition; definitionDigest: string; revision: string; revisionNumber: number; unchanged: boolean }
-  | { status: "unavailable"; reason: typeof E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved; detail: string };
+  | { status: "available"; definition: E2EModelRouteDefinition; definitionDigest: string; revision: string; revisionNumber: number; unchanged: boolean;
+    /** The driving test that gates the route: when it passed (the gating row's time, or null for a row that has none). */
+    drivingTest: { passedAt: string | null } }
+  | { status: "unavailable"; reason: typeof E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved; detail: string;
+    /** Set when the route is well-formed but its driving test has not passed: the provider and the model, so the proposal can say which one to test. */
+    untested?: { provider: ModelProvider; modelId: string } };
 
 /**
  * The route the installation would have approved now, and the revision it would be: the latest revision when the definition is unchanged, else the next. Reads only, by key.
- * A provisional provider's route is unavailable until its canary row exists for this exact definition.
+ * A route of any provider is unavailable until its driving test has passed for this exact definition (the gating row): "no untested route is approvable".
  */
 export async function planE2EAgentRoute(store: E2EModelRouteStore, installation: E2EAgentInstallation): Promise<PlannedE2EAgentRoute> {
   const derived = deriveE2EAgentRoute(installation, 1);
   if (derived.status === "unavailable") return { status: "unavailable", reason: derived.reason, detail: derived.detail };
   const definitionDigest = e2eAgentRouteDefinitionDigest(derived.definition);
-  if (PROVISIONAL_PROVIDERS.has(derived.definition.provider) && !(await hasCanary(store, derived.definition.routeId, definitionDigest))) {
-    return unavailable(`the ${LABELS[derived.definition.provider as ModelProvider]} AI navigation model is provisional until a canary call on this installation has been recorded`);
+  const drivingTest = await drivingTestOf(store, derived.definition.routeId, definitionDigest);
+  if (drivingTest === null) {
+    const provider = derived.definition.provider as ModelProvider;
+    return { ...unavailable(`the driving test with ${LABELS[provider]} \`${derived.definition.modelId}\` has not passed yet`), untested: { provider, modelId: derived.definition.modelId } };
   }
   const latest = await readE2EModelRouteLatest(store, derived.definition.routeId);
   if (latest !== null && latest.definitionDigest === definitionDigest) {
     const definition = E2EModelRouteDefinitionSchema.parse({ ...derived.definition, revision: latest.revisionNumber });
-    return { status: "available", definition, definitionDigest, revision: e2eModelRouteRevision(definition), revisionNumber: latest.revisionNumber, unchanged: true };
+    return { status: "available", definition, definitionDigest, revision: e2eModelRouteRevision(definition), revisionNumber: latest.revisionNumber, unchanged: true, drivingTest };
   }
   const revisionNumber = (latest?.revisionNumber ?? 0) + 1;
   const definition = E2EModelRouteDefinitionSchema.parse({ ...derived.definition, revision: revisionNumber });
-  return { status: "available", definition, definitionDigest, revision: e2eModelRouteRevision(definition), revisionNumber, unchanged: false };
+  return { status: "available", definition, definitionDigest, revision: e2eModelRouteRevision(definition), revisionNumber, unchanged: false, drivingTest };
 }
 
 const isConditionalFailure = (error: unknown): boolean => {
@@ -277,12 +303,12 @@ export async function approveE2EAgentRoute(store: E2EModelRouteStore, installati
 
 export type E2EAgentRouteCheck =
   | { ok: true; routeId: string; routeRevision: string }
-  | { ok: false; code: typeof E2E_MODEL_ROUTE_CHANGED_REAPPROVE | typeof E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved; detail: string };
+  | { ok: false; code: typeof E2E_MODEL_ROUTE_CHANGED_REAPPROVE | typeof E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved | typeof E2E_MODEL_ROUTE_NOT_TESTED; detail: string };
 
 /**
  * Dispatch's check (and planning's): derives the route from the installation again and compares it with what the registry holds and what the project's policy pinned.
  * Any change of provider, model, secret ARN or OpenRouter policy gives `model-route-changed-reapprove`; a route the installation can no longer make, or none ever approved,
- * is `agent-route-not-approved`. Reads by key only.
+ * is `agent-route-not-approved`; a route whose driving test has not passed for its digest is `model-route-not-tested`. Reads by key only.
  */
 export async function checkE2EAgentRouteCurrent(store: E2EModelRouteStore, installation: E2EAgentInstallation, policyRevision: string | null): Promise<E2EAgentRouteCheck> {
   const latest = await readE2EModelRouteLatest(store);
@@ -292,6 +318,9 @@ export async function checkE2EAgentRouteCurrent(store: E2EModelRouteStore, insta
   if (derived.status === "unavailable") return { ok: false, code: "agent-route-not-approved", detail: derived.detail };
   if (e2eAgentRouteDefinitionDigest(derived.definition) !== latest.definitionDigest) {
     return { ok: false, code: E2E_MODEL_ROUTE_CHANGED_REAPPROVE, detail: "The AI navigation settings changed; approve the checks again" };
+  }
+  if (!(await hasDrivingTest(store, latest.routeId, latest.definitionDigest))) {
+    return { ok: false, code: E2E_MODEL_ROUTE_NOT_TESTED, detail: "The driving test has not passed for the AI navigation route this project's setup approved; run the driving test, then approve the checks again" };
   }
   if (policyRevision !== latest.revision) return { ok: false, code: E2E_MODEL_ROUTE_CHANGED_REAPPROVE, detail: "The AI navigation settings changed since this project's setup was approved; approve the checks again" };
   return { ok: true, routeId: latest.routeId, routeRevision: latest.revision };

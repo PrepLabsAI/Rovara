@@ -18,7 +18,7 @@ export async function modelChecks(context: DoctorContext): Promise<DoctorCheck[]
     if (result === undefined) {
       const wording = { changeModel: `agentx --env ${env} config set models.${role} <model id>`, rerun: "run agentx doctor again", region: "check this computer's network access to AWS (an environment cannot move regions), then run agentx doctor again" };
       const outcome = await runModelCheck({ provider, modelId, region: settings.region, checks: services.checks, config: settings.models, sleep: services.sleep });
-      if (!outcome.ok && outcome.signal === "secret-unreadable" && isKeyedModelProvider(provider)) {
+      if (!outcome.ok && outcome.class === "secret-unreadable" && isKeyedModelProvider(provider)) {
         // MODEL3: a missing key is its own error, naming the role and what happens to its work.
         const label = KEYED_MODEL_PROVIDERS[provider].label;
         const fallback = (await services.stacks.describe(settings.stacks.runtime ?? environmentStackName(env, "runtime")))?.parameters.ModelFallback;

@@ -135,28 +135,28 @@ describe("Anthropic, OpenAI and OpenRouter discovery (tests 26 and 27)", () => {
 
   it("Anthropic: 401 is unverified/key-rejected; the key is sent once per page and never reported", async () => {
     const fetchFake = vi.fn(async () => json(401, { error: { message: "invalid x-api-key sk-ant-SECRETVALUE" } }));
-    const report = await discoverModels({ provider: "anthropic", candidates: ["claude-haiku-5-5"] }, deps({ fetch: fetchFake as never, apiKey: async () => "sk-ant-SECRETVALUE" }));
+    const report = await discoverModels({ provider: "anthropic", candidates: ["claude-haiku-5-5"] }, deps({ fetch: fetchFake, apiKey: async () => "sk-ant-SECRETVALUE" }));
     expect(report).toMatchObject({ status: "unverified", unverifiedReason: "key-rejected" });
     expect(JSON.stringify(report)).not.toContain("SECRETVALUE");
   });
 
   it("Anthropic: the pin counts as listed when only its dated snapshot is listed, and a different id does not", async () => {
-    const fetchFake = vi.fn(async () => json(200, { data: [{ id: "claude-haiku-5-5-20260601" }, { id: "claude-haiku-5-50-extra" }], has_more: false }));
-    const report = await discoverModels({ provider: "anthropic", candidates: ["claude-haiku-5-5", "claude-haiku-9"] }, deps({ fetch: fetchFake as never, apiKey: async () => "k" }));
+    const fetchFake = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>(async () => json(200, { data: [{ id: "claude-haiku-5-5-20260601" }, { id: "claude-haiku-5-50-extra" }], has_more: false }));
+    const report = await discoverModels({ provider: "anthropic", candidates: ["claude-haiku-5-5", "claude-haiku-9"] }, deps({ fetch: fetchFake, apiKey: async () => "k" }));
     expect(report.models).toMatchObject([{ modelId: "claude-haiku-5-5", visible: true, state: "available" }, { modelId: "claude-haiku-9", visible: false, state: "not-in-region" }]);
     expect(fetchFake.mock.calls[0]![1]).toMatchObject({ headers: { "x-api-key": "k", "anthropic-version": "2023-06-01" } });
   });
 
   it("Anthropic: pages are capped at 3", async () => {
     const fetchFake = vi.fn(async () => json(200, { data: [{ id: "x" }], has_more: true, last_id: "x" }));
-    await discoverModels({ provider: "anthropic", candidates: ["claude-haiku-5-5"] }, deps({ fetch: fetchFake as never, apiKey: async () => "k" }));
+    await discoverModels({ provider: "anthropic", candidates: ["claude-haiku-5-5"] }, deps({ fetch: fetchFake, apiKey: async () => "k" }));
     expect(fetchFake).toHaveBeenCalledTimes(3);
   });
 
   it("OpenAI: listed is available, and a 404 listing (a gateway) is unverified/not-supported", async () => {
-    const ok = await discoverModels({ provider: "openai", candidates: ["gpt-5.4-mini", "gpt-9"] }, deps({ fetch: (async () => json(200, { data: [{ id: "gpt-5.4-mini" }] })) as never, apiKey: async () => "k" }));
+    const ok = await discoverModels({ provider: "openai", candidates: ["gpt-5.4-mini", "gpt-9"] }, deps({ fetch: (async () => json(200, { data: [{ id: "gpt-5.4-mini" }] })), apiKey: async () => "k" }));
     expect(ok.models.map((row) => [row.modelId, row.state])).toEqual([["gpt-5.4-mini", "available"], ["gpt-9", "not-in-region"]]);
-    const gateway = await discoverModels({ provider: "openai", candidates: ["gpt-5.4-mini"] }, deps({ fetch: (async () => json(404, {})) as never, apiKey: async () => "k" }));
+    const gateway = await discoverModels({ provider: "openai", candidates: ["gpt-5.4-mini"] }, deps({ fetch: (async () => json(404, {})), apiKey: async () => "k" }));
     expect(gateway).toMatchObject({ status: "unverified", unverifiedReason: "not-supported" });
   });
 

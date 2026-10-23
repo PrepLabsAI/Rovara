@@ -5,7 +5,7 @@ import { E2E_DEFAULT_MODEL_ROUTE_ID, e2eModelRouteRevision } from "@agentx/contr
 import { GetCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { approveE2EAgentRoute, planE2EAgentRoute } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { modelRouteForAdmission as modelRouteForAdmissionWith } from "../../packages/broker/src/e2e/application-evidence.js";
-import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 import { createOrdersM14AgentPlan } from "../support/orders-m14-agent.js";
 import { deriveE2EAgentRoute } from "../../packages/model-runtime/src/e2e-route-derive.js";
@@ -14,6 +14,9 @@ import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../
 import { SCRIPTED_REGISTRY_ROUTE, asLinuxRun, assembleAgentRun, brokerRoundFor } from "../support/agent-collection.js";
 import { renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
 import { scrubScenarioResults } from "../../packages/broker/src/e2e/application-display.js";
+
+// The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
+assumeDrivingTestsPassed();
 
 // Task 4.4a at the broker: the same real agent runs as the group evidence a worker uploads, re-collected and requalified by `verifyApplicationE2EEvidence` against the admission and the
 // model route registry's own definition of the admitted revision. The verdicts of the three journeys (agent-renamed-export, agent-wrong-action, agent-model-outage) at verdict level.

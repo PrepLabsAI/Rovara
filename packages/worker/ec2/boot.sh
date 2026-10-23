@@ -428,8 +428,7 @@ WantedBy=multi-user.target
 EOF
 }
 
-# Opt-in TEST web/API qualification (AGENTX_E2E_QUALIFICATION_*): its own unit after the worker starts, so it cannot fail
-# the boot; reports via status.json under e2e-runtime/<role ID>:<instance ID>/.
+# Opt-in TEST web/API qualification (AGENTX_E2E_QUALIFICATION_*): its own unit, so it cannot fail the boot; reports under e2e-runtime/.
 write_e2e_qualification_script() {
   install -d -o root -g root -m 0755 /usr/local/libexec
   cat >/usr/local/libexec/agentx-e2e-qualification <<'QUALIFICATION'
@@ -515,7 +514,7 @@ size=$(wc -c <"$proposal" | tr -d '[:space:]')
 upload proposal.json "$proposal" || fail_with proposal-upload-failed
 publish_status SUCCEEDED qualified || { log "could not upload the success status"; exit 1; }
 log "qualified; the proposal and status are under the prefix"
-timeout --foreground --kill-after=10s 7500s docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/worker/dist/e2e-model-canary-cli.js --bucket "$BUCKET" --prefix "$PREFIX" >/dev/null 2>&1
+timeout --foreground --kill-after=10s 7d docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/worker/dist/e2e-model-canary-cli.js --bucket "$BUCKET" --prefix "$PREFIX" 2>&1 | while read l; do log "$l"; done
 QUALIFICATION
 }
 

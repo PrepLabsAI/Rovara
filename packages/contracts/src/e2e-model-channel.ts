@@ -218,6 +218,10 @@ export const E2E_AGENT_APPROVAL_REFUSALS = Object.freeze({
 } as const);
 /** The code the owner sees when the installation's AI navigation settings changed after the route was approved. */
 export const E2E_MODEL_ROUTE_CHANGED_REAPPROVE = "model-route-changed-reapprove" as const;
+/** The code the owner sees when the installation's AI navigation route has no passed driving test for its exact definition (Task 4.10C, Q8). */
+export const E2E_MODEL_ROUTE_NOT_TESTED = "model-route-not-tested" as const;
+/** The `test` marker of the gating row `E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest>`: only the on-account driving test writes it. The single-call canary of Task 4.9 does not gate. */
+export const E2E_MODEL_DRIVING_TEST_MARKER = "driving/v1" as const;
 
 /**
  * The revision number inside a route revision id (`r<n>-<12 hex>`), or null for anything else. The worker uses it to derive the route of the revision an admission names.
@@ -355,10 +359,11 @@ export type E2EModelChannelResponse = z.infer<typeof E2EModelChannelResponseSche
 
 /**
  * M1.4 Task 4.10B: why a provider call failed, in words that do not depend on the provider. `limit-or-rate-limited` is a quota or a rate limit, `key-rejected` an API key, role or
- * model access the provider did not accept (or a key secret the worker could not read), `model-not-found` a model the provider does not have for this account, `unreachable` no answer at
- * all (DNS, connection, TLS), `request-rejected` a request the provider refused as malformed or too large, `provider-outage` the provider's own fault or a timeout, `unknown` anything else.
+ * model access the provider did not accept, `model-not-found` a model the provider does not have for this account, `unreachable` no answer at
+ * all (DNS, connection, TLS), `request-rejected` a request the provider refused as malformed or too large, `provider-outage` the provider's own fault or a timeout, `unknown` anything else. Two classes come from before any request is sent (Task 4.10C): `secret-unreadable` (the key's secret could
+ * not be read) and `not-in-catalog` (Rovara's catalog does not know how to call the model).
  */
-export const E2E_MODEL_FAILURE_CLASSES = ["limit-or-rate-limited", "key-rejected", "model-not-found", "unreachable", "request-rejected", "provider-outage", "unknown"] as const;
+export const E2E_MODEL_FAILURE_CLASSES = ["limit-or-rate-limited", "key-rejected", "model-not-found", "unreachable", "request-rejected", "provider-outage", "unknown", "secret-unreadable", "not-in-catalog"] as const;
 export type E2EModelFailureClass = (typeof E2E_MODEL_FAILURE_CLASSES)[number];
 
 /**
