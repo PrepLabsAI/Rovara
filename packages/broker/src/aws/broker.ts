@@ -12610,6 +12610,7 @@ async function recordTerminalResult(
   let evidenceJobs: PlanEvidenceEvent[] = [];
   const inlineEvidence: InlineEvidence[] = [];
   const plannerReplies: PlannerReplies[] = [];
+  let cancelStepDropped = false;
   try {
     // A queuing transaction that met another one in flight (TransactionConflict, not a failed
     // condition) is decided again once from fresh reads before it counts as a stale callback.
@@ -12619,7 +12620,7 @@ async function recordTerminalResult(
     // the read and the commit, or the step finished first); the cancel is then decided again without it.
     let cancelStepAllowed = true;
     let cancelStepAttached = false;
-    let cancelStepConflictRetried = false;
+    let cancelStepRedecided = false;
     const decideAndSend = async () => {
       cancelStepAttached = false;
       const pointer = TASK_POINTER_KINDS.has(operation.kind)
@@ -12660,9 +12661,11 @@ async function recordTerminalResult(
         break;
       } catch (refused) {
         if (!cancelStepAttached || !isConditional(refused)) throw refused;
-        // A transaction that met another one in flight is decided again once from fresh reads, step included.
-        if (isTransactionConflict(refused) && !cancelStepConflictRetried) { cancelStepConflictRetried = true; continue; }
+        // A refusal (another transaction in flight, or the task row moved) is decided again once from fresh reads, step included:
+        // the step is recomputed against the row as it is now. Only a second refusal drops it.
+        if (!cancelStepRedecided) { cancelStepRedecided = true; continue; }
         cancelStepAllowed = false;
+        cancelStepDropped = true;
         console.log(JSON.stringify({ component: "broker", event: "workflow.cancel_step_dropped", operationId: operation.id, targetOperationId: operation.targetOperationId }));
       }
     }
@@ -12695,6 +12698,11 @@ async function recordTerminalResult(
       }
     }
     throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
+  }
+  // PLANINC-2: a cancel that had to drop its workflow item committed without it; the step is blocked now, best effort and
+  // conditional (a step that already moved, or a workspace a newer run holds, is left alone), so Retry is offered.
+  if (cancelStepDropped && recordedStatus === terminalStatus && cancelTargetOperation !== undefined) {
+    await blockStoppedWorkflowRun(dependencies.documentClient, dependencies.tableName, cancelTargetOperation, "CANCELLED");
   }
   if (closeCanFinish && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id, operation.createdAt, operation.discardUnpublished === true && closePreflight?.safeToClose !== true);
   // M1.3 Task 3.7b: a baseline round settles its own record now that its result is committed, before the step it was holding back is started.
