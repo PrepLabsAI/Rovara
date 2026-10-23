@@ -14,7 +14,6 @@ import { STAGING_SETTINGS } from "../support/setup-fakes.js";
 // M1.4 Task 4.10D fix round 1 (review I-2): `agentx admin project register --file`, the documented way to set a project's models, runs the same model check as project add.
 
 const deployment = { controlPlaneUrl: "http://127.0.0.1:8787", auth: { issuer: "https://identity.example.test", clientId: "agentx-client", audience: "agentx-api" } };
-const NOW = "2026-10-23T12:00:00.000Z";
 const SONNET = { provider: "anthropic", modelId: "claude-sonnet-4-6", label: "Sonnet" };
 const OPUS = { provider: "anthropic", modelId: "claude-opus-5", label: "Opus" };
 const models = { default: SONNET, approved: [SONNET, OPUS] };

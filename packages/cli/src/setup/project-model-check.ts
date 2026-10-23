@@ -87,7 +87,8 @@ export async function checkProjectModels(input: {
       : `The default model ${describePair(model)} failed its check, and is registered anyway because you accepted it (${accepted.reason}): ${sentence}`);
   }
   const withRecord = (model: ModelRef): ModelRef => {
-    const { lastCheck: _stale, ...rest } = model;
+    const rest: ModelRef = { ...model };
+    delete rest.lastCheck;
     const record = records.get(modelKey(model));
     return record === undefined ? rest : { ...rest, lastCheck: record };
   };
