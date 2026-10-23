@@ -77,7 +77,7 @@ describe("the e2e-agent-model unit", () => {
 
   it("refuses --e2e-model for any other unit, and refuses to combine the unit with another", () => {
     expect(() => plan(["broker"], { e2eModel: "default" })).toThrow("--e2e-model goes only with the e2e-agent-model unit");
-    for (const other of ["broker", "dispatcher", "control-plane-code", "worker-image", "executor-image", "qualification-transport", "e2e-agent-settings"] as const) {
+    for (const other of ["broker", "dispatcher", "control-plane-code", "worker-image", "executor-image", "qualification-transport", "e2e-agent-settings", "model-fallback-settings"] as const) {
       expect(() => plan(["e2e-agent-model", other], { e2eModel: "default" }), other).toThrow(/changes a stack template or setting; run it on its own/);
     }
   });
@@ -105,7 +105,7 @@ describe("the e2e-agent-settings unit", () => {
     expect(() => plan(["e2e-agent-settings", "broker"])).toThrow(/e2e-agent-settings.*on its own/);
   });
 
-  it("plans one change set on the control-plane stack that only modifies the broker's environment and the two role policies, then reads the variable back", () => {
+  it("plans one change set on the control-plane stack that only modifies the broker's environment and the two role policies (two setting ARNs each), then reads the variable back", () => {
     const steps = plan(["e2e-agent-settings"]);
     expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set", "verify-lambda-environment"]);
     const changeSet = changeSetOf(steps);
@@ -113,7 +113,8 @@ describe("the e2e-agent-settings unit", () => {
     expect(changeSet.template).toEqual({
       source: "lift-declared", construct: "AgentXControlPlane", cdkContext: { "agentx:e2eQualificationTransport": "enabled" }, identityMode: "cognito",
       environment: [{ logicalId: "BrokerE1355FD6", variable: "AGENTX_E2E_AGENT_SETTINGS_PREFIX" }],
-      grants: E2E_AGENT_SETTINGS_UNIT.policies.map((logicalId) => ({ logicalId, parameterName: `/agentx/${ENV}/worker-e2e-agent-model` })),
+      // Both settings' ARNs in both policies: 4.10A's worker-e2e-agent-model and 4.10D's worker-model-fallback.
+      grants: E2E_AGENT_SETTINGS_UNIT.policies.flatMap((logicalId) => [`/agentx/${ENV}/worker-e2e-agent-model`, `/agentx/${ENV}/worker-model-fallback`].map((parameterName) => ({ logicalId, parameterName }))),
     });
     expect(E2E_AGENT_SETTINGS_UNIT.policies).toEqual(["BrokerServiceRoleDefaultPolicyDDFD9E7E", "SessionsStepsServiceRoleDefaultPolicy9F4B87C9"]);
     expect(changeSet.expect).toEqual({
@@ -144,22 +145,76 @@ describe("the e2e-agent-settings unit", () => {
   });
 });
 
+describe("the model-fallback-settings unit", () => {
+  const RUNTIME_WITH_FALLBACK: StackParameters = { ...previous, runtime: { ...previous.runtime, ModelFallback: "none" } };
+
+  it("is a unit of its own, never a default one", () => {
+    expect(DEPLOY_UNITS).toContain("model-fallback-settings");
+    expect(DEFAULT_DEPLOY_UNITS).not.toContain("model-fallback-settings");
+    for (const other of ["broker", "dispatcher", "control-plane-code", "worker-image", "executor-image", "qualification-transport", "e2e-agent-settings", "e2e-agent-model"] as const) {
+      expect(() => plan(["model-fallback-settings", other]), other).toThrow(/changes a stack template or setting; run it on its own/);
+    }
+  });
+
+  it("adds the parameter and its SSM setting, defaulting to none: exactly two additions lifted from a synth of the runtime stack, then reads the parameter back", () => {
+    const steps = plan(["model-fallback-settings"]);
+    expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set", "verify-stack-parameter"]);
+    const changeSet = changeSetOf(steps);
+    expect(changeSet.stack).toBe(RUNTIME);
+    expect(changeSet.template).toEqual({
+      source: "lift-resources", logicalIdPrefix: "WorkerModelFallbackParameter", parameterNames: ["ModelFallback"], construct: "AgentXProductionRuntime", cdkContext: {}, identityMode: "cognito",
+    });
+    expect(changeSet.expect).toEqual({ action: "Add", logicalIdPrefixes: ["WorkerModelFallbackParameter"] });
+    const template = changeSet.template as Extract<ChangeSetStep["template"], { source: "lift-resources" }>;
+    expect((template.parameterNames ?? []).length + (changeSet.expect.logicalIdPrefixes ?? []).length).toBe(2);
+    expect(changeSet.parameters).toEqual([
+      { key: "ModelFallback", literal: "none" },
+      { key: "ModelId", usePreviousValue: true }, { key: "ModelProvider", usePreviousValue: true }, { key: "WorkerImageUri", usePreviousValue: true },
+    ]);
+    expect(steps[2]).toMatchObject({ stack: RUNTIME, key: "ModelFallback", expected: { literal: "none" } });
+  });
+
+  it("refuses to plan once the runtime stack has the parameter, and points at the command that changes it", () => {
+    expect(() => plan(["model-fallback-settings"], { previous: RUNTIME_WITH_FALLBACK })).toThrow(/already has ModelFallback.*models\.fallback/);
+  });
+
+  it("accepts the change set only when it adds the parameter's SSM setting and nothing else", () => {
+    const expected = changeSetOf(plan(["model-fallback-settings"])).expect;
+    const added = { action: "Add", logicalId: "WorkerModelFallbackParameter0A1B2C3D", type: "AWS::SSM::Parameter" };
+    expect(() => assertOnlyExpectedChanges([added], expected)).not.toThrow();
+    expect(() => assertOnlyExpectedChanges([added, { action: "Add", logicalId: "WorkerOtherParameter", type: "AWS::SSM::Parameter" }], expected)).toThrow(/Add WorkerOtherParameter/);
+    expect(() => assertOnlyExpectedChanges([added, { action: "Modify", logicalId: "WorkerImageParameter", type: "AWS::SSM::Parameter", attributes: ["Properties.Value"] }], expected)).toThrow(/Modify WorkerImageParameter/);
+    expect(() => assertOnlyExpectedChanges([{ ...added, action: "Modify" }], expected)).toThrow(/Modify WorkerModelFallbackParameter0A1B2C3D/);
+  });
+
+  it("prints what it will do, and takes no --e2e-model", () => {
+    const text = formatPlan(plan(["model-fallback-settings"]));
+    expect(text).toContain("ModelFallback=none");
+    expect(text).toContain("WorkerModelFallbackParameter*");
+    expect(text).not.toContain("image");
+    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "model-fallback-settings"])).toMatchObject({ only: ["model-fallback-settings"] });
+    expect(() => parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "model-fallback-settings", "--e2e-model", "default"])).toThrow("--e2e-model goes only with --only e2e-agent-model");
+  });
+});
+
 describe("liftDeclaredSettings", () => {
   const PARAMETER = `/agentx/${ENV}/worker-e2e-agent-model`;
+  const FALLBACK = `/agentx/${ENV}/worker-model-fallback`;
   const arn = (name: string) => ({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ssm:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, `:parameter/agentx/${ENV}/${name}`]] });
   const policy = (resources: unknown[], extra: unknown[] = []) => ({
     Type: "AWS::IAM::Policy", Properties: { PolicyName: "P", Roles: [{ Ref: "R" }], PolicyDocument: { Version: "2012-10-17", Statement: [{ Effect: "Allow", Action: "ssm:GetParameters", Resource: resources }, ...extra] } },
   });
   const OTHER = { Effect: "Allow", Action: "s3:GetObject", Resource: "arn:aws:s3:::bucket/*" };
-  const template = (withNew: boolean): CfnTemplate => ({
+  // `added` names the settings whose ARN the policies carry: both in head, none in the deployed template of TEST, or one of them in a half-applied one.
+  const template = (withNew: boolean, added: readonly string[] = withNew ? ["worker-e2e-agent-model", "worker-model-fallback"] : []): CfnTemplate => ({
     Resources: {
       BrokerE1355FD6: { Type: "AWS::Lambda::Function", Properties: { Code: { S3Key: "k" }, Environment: { Variables: { STATE_TABLE_NAME: "t", ...(withNew ? { AGENTX_E2E_AGENT_SETTINGS_PREFIX: `/agentx/${ENV}/` } : {}) } } } },
-      P1: policy([arn("worker-image"), ...(withNew ? [arn("worker-e2e-agent-model")] : [])], [OTHER]),
-      P2: policy([arn("worker-image"), ...(withNew ? [arn("worker-e2e-agent-model")] : [])]),
+      P1: policy([arn("worker-image"), ...added.map(arn)], [OTHER]),
+      P2: policy([arn("worker-image"), ...added.map(arn)]),
       Unrelated: { Type: "AWS::SQS::Queue", Properties: {} },
     },
   });
-  const declared = { environment: [{ logicalId: "BrokerE1355FD6", variable: "AGENTX_E2E_AGENT_SETTINGS_PREFIX" }], grants: ["P1", "P2"].map((logicalId) => ({ logicalId, parameterName: PARAMETER })) };
+  const declared = { environment: [{ logicalId: "BrokerE1355FD6", variable: "AGENTX_E2E_AGENT_SETTINGS_PREFIX" }], grants: ["P1", "P2"].flatMap((logicalId) => [PARAMETER, FALLBACK].map((parameterName) => ({ logicalId, parameterName }))) };
 
   it("takes exactly the declared additions from head and leaves every other byte of the deployed template", () => {
     const deployed = template(false);
@@ -190,6 +245,47 @@ describe("liftDeclaredSettings", () => {
       ["changed roles of a policy", head((t) => { (t.Resources!["P1"]!.Properties as { Roles: unknown[] }).Roles = [{ Ref: "Other" }]; })],
     ];
     for (const [what, headTemplate] of refusals) expect(() => liftDeclaredSettings(template(false), headTemplate, declared), what).toThrow(/more than the declared|differs from head/);
+  });
+
+  it("takes both settings' ARNs into one policy: the second grant is judged against what the deployed policy lacks, not against the first one's result", () => {
+    const lifted = liftDeclaredSettings(template(false), template(true), declared);
+    for (const id of ["P1", "P2"]) {
+      const resources = (lifted.Resources![id]!.Properties as { PolicyDocument: { Statement: Array<{ Resource: unknown[] }> } }).PolicyDocument.Statement[0]!.Resource;
+      expect(resources, id).toEqual([arn("worker-image"), arn("worker-e2e-agent-model"), arn("worker-model-fallback")]);
+    }
+  });
+
+  it("finishes a half-applied policy (one of the two ARNs already there)", () => {
+    for (const present of [["worker-e2e-agent-model"], ["worker-model-fallback"]]) {
+      expect(liftDeclaredSettings(template(false, present), template(true), declared).Resources, present.join()).toEqual(template(true).Resources);
+    }
+  });
+
+  it("ignores the order of statements and of the lists inside them: IAM reads both as sets", () => {
+    const deployed = template(false);
+    for (const id of ["P1", "P2"]) {
+      const document = (deployed.Resources![id]!.Properties as { PolicyDocument: { Statement: Array<{ Resource: unknown }> } }).PolicyDocument;
+      document.Statement.reverse();
+      for (const statement of document.Statement) if (Array.isArray(statement.Resource)) statement.Resource.reverse();
+    }
+    expect(liftDeclaredSettings(deployed, template(true), declared).Resources).toEqual(template(true).Resources);
+  });
+
+  it("refuses a second difference even when both declared ARNs are missing: an undeclared ARN, an extra statement in head, or a statement the deployed policy lacks", () => {
+    const extraArn = template(true);
+    ((extraArn.Resources!["P1"]!.Properties as { PolicyDocument: { Statement: Array<{ Resource: unknown[] }> } }).PolicyDocument.Statement[0]!.Resource).push(arn("worker-undeclared"));
+    const extraStatement = template(true);
+    (extraStatement.Resources!["P2"]!.Properties as { PolicyDocument: { Statement: unknown[] } }).PolicyDocument.Statement.push({ Effect: "Allow", Action: "kms:Decrypt", Resource: "*" });
+    const deployedLacksStatement = template(false);
+    (deployedLacksStatement.Resources!["P1"]!.Properties as { PolicyDocument: { Statement: unknown[] } }).PolicyDocument.Statement.pop();
+    expect(() => liftDeclaredSettings(template(false), extraArn, declared), "an undeclared ARN").toThrow(/more than the declared grant/);
+    expect(() => liftDeclaredSettings(template(false), extraStatement, declared), "an extra statement").toThrow(/more than the declared grant/);
+    expect(() => liftDeclaredSettings(deployedLacksStatement, template(true), declared), "a statement the deployed policy lacks").toThrow(/more than the declared grant/);
+  });
+
+  it("refuses an ARN that is not declared: head carries the fallback's ARN and only the other setting is declared (what the unit did at df5a5a1e)", () => {
+    const onlyFirst = { environment: declared.environment, grants: ["P1", "P2"].map((logicalId) => ({ logicalId, parameterName: PARAMETER })) };
+    expect(() => liftDeclaredSettings(template(false), template(true), onlyFirst)).toThrow(/more than the declared grant for \/agentx\/agentxlivetest123\/worker-e2e-agent-model/);
   });
 
   it("refuses a policy that does not carry the parameter in head, a resource of another type, and a resource missing from either template", () => {

@@ -2,6 +2,7 @@
 //
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test [--apply]
 //     [--only control-plane-code,broker,dispatcher,worker-image,executor-image,qualification-transport]
+//   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only model-fallback-settings [--apply]
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only e2e-agent-settings [--apply]
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only e2e-agent-model --e2e-model <model id or default> [--apply]
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --check
@@ -97,8 +98,8 @@ import {
  * `control-plane-code` rebuilds every packaged control-plane Lambda (CONTROL_PLANE_LAMBDAS) in one change set; `broker` and
  * `dispatcher` rebuild just those two, and are contained in `control-plane-code`.
  */
-export type DeployUnit = "control-plane-code" | "broker" | "dispatcher" | "worker-image" | "executor-image" | "qualification-transport" | "e2e-agent-settings" | "e2e-agent-model";
-export const DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "broker", "dispatcher", "worker-image", "executor-image", "qualification-transport", "e2e-agent-settings", "e2e-agent-model"];
+export type DeployUnit = "control-plane-code" | "broker" | "dispatcher" | "worker-image" | "executor-image" | "qualification-transport" | "e2e-agent-settings" | "e2e-agent-model" | "model-fallback-settings";
+export const DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "broker", "dispatcher", "worker-image", "executor-image", "qualification-transport", "e2e-agent-settings", "e2e-agent-model", "model-fallback-settings"];
 /** What a normal TEST deploy changes: all control-plane code, so no function is left on old code, and the worker image. */
 export const DEFAULT_DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "worker-image"];
 const DEFAULT_REGION = "us-east-1";
@@ -263,16 +264,21 @@ const EXECUTOR_SETTING = { logicalIdPrefix: "WorkerExecutorImageParameter", cons
 /** The AI navigation model setting (Task 4.10): a runtime stack parameter and the SSM parameter it fills. */
 const E2E_AGENT_MODEL_PARAMETER = "E2eAgentModelId";
 const E2E_AGENT_MODEL_SETTING = { logicalIdPrefix: "WorkerE2eAgentModelParameter", construct: CDK_CONSTRUCT_IDS.runtime } as const;
+/** The model fallback setting (Task 4.10D, MODEL3): a runtime stack parameter (default `none`) and the SSM parameter it fills. */
+const MODEL_FALLBACK_PARAMETER = "ModelFallback";
+const MODEL_FALLBACK_SETTING = { logicalIdPrefix: "WorkerModelFallbackParameter", construct: CDK_CONSTRUCT_IDS.runtime } as const;
 /**
- * What the `e2e-agent-settings` unit changes in the deployed control-plane stack, and nothing else: the broker's `AGENTX_E2E_AGENT_SETTINGS_PREFIX` variable (PREFIXGAP) and the ARN of the
- * `worker-e2e-agent-model` parameter in the `ssm:GetParameters` statement of the two role policies that read it (the broker's and the session steps'; the eval batch tick never reads
- * it, 4.10A review M-2). All are declared IAM and environment changes of the head templates.
+ * What the `e2e-agent-settings` unit changes in the deployed control-plane stack, and nothing else: the broker's `AGENTX_E2E_AGENT_SETTINGS_PREFIX` variable (PREFIXGAP) and the ARNs of the
+ * `worker-e2e-agent-model` (4.10A) and `worker-model-fallback` (4.10D) parameters in the `ssm:GetParameters` statement of the two role policies that read every worker setting (the broker's
+ * and the session steps'; the eval batch tick reads neither, 4.10A review M-2 and 4.10D, so TEST's deployed policy of it already is head's). All are declared IAM and environment changes of
+ * the head templates. A setting's ARN may be granted before its SSM parameter exists (`model-fallback-settings` adds that one on the runtime stack).
  */
 export const E2E_AGENT_SETTINGS_UNIT = {
   broker: CONTROL_PLANE_LAMBDAS.broker.logicalId,
   variable: "AGENTX_E2E_AGENT_SETTINGS_PREFIX",
   policies: ["BrokerServiceRoleDefaultPolicyDDFD9E7E", "SessionsStepsServiceRoleDefaultPolicy9F4B87C9"],
-} as const;
+  settings: ["e2eAgentModel", "modelFallback"],
+} as const satisfies { broker: string; variable: string; policies: readonly string[]; settings: ReadonlyArray<keyof typeof WORKER_SETTING_PARAMETERS> };
 
 /**
  * The executor image's repository: the worker's, with its own name changed (`.../worker` to `.../executor`, `.../agentx-worker` to
@@ -361,7 +367,7 @@ export function planTestDeploy(
     throw new Error("qualification-transport changes the control-plane template; run it on its own, apart from control-plane-code, broker and dispatcher");
   }
   // These two change a stack's template or settings by themselves: each runs on its own, so the exact-change guard of one never has to judge another's changes.
-  for (const unit of ["e2e-agent-settings", "e2e-agent-model"] as const) {
+  for (const unit of ["e2e-agent-settings", "e2e-agent-model", "model-fallback-settings"] as const) {
     if (units.includes(unit) && units.length > 1) throw new Error(`${unit} changes a stack template or setting; run it on its own, apart from the other units`);
   }
   if (input.e2eModel !== undefined && !units.includes("e2e-agent-model")) throw new Error("--e2e-model goes only with the e2e-agent-model unit");
@@ -430,6 +436,32 @@ export function planTestDeploy(
     );
   }
 
+  if (units.includes("model-fallback-settings")) {
+    // A runtime stack deployed before 4.10D has neither the parameter nor its SSM setting: the change set adds both, lifted from a synth of the runtime stack, and changes nothing else. The
+    // value stays none (no fallback, the worker fails by name when a keyed provider's secret is missing); `agentx config set models.fallback` is how an owner chooses one afterwards.
+    if (input.previous.runtime[MODEL_FALLBACK_PARAMETER] !== undefined) {
+      throw new Error(`the runtime stack already has ${MODEL_FALLBACK_PARAMETER}; model-fallback-settings only adds it. Change its value with agentx config set models.fallback`);
+    }
+    const previousKeys = Object.keys(input.previous.runtime);
+    steps.push(
+      {
+        id: "change-set-model-fallback",
+        kind: "create-change-set",
+        stack: stacks.runtime,
+        stackKind: "runtime",
+        changeSetPrefix: `test-deploy-model-fallback-${revision.slice(0, 12)}`,
+        template: { source: "lift-resources", logicalIdPrefix: MODEL_FALLBACK_SETTING.logicalIdPrefix, parameterNames: [MODEL_FALLBACK_PARAMETER], construct: MODEL_FALLBACK_SETTING.construct, cdkContext: {}, identityMode },
+        parameters: [
+          { key: MODEL_FALLBACK_PARAMETER, literal: "none" },
+          ...previousKeys.sort().map((key): ParameterSpec => ({ key, usePreviousValue: true })),
+        ],
+        expect: { action: "Add", logicalIdPrefixes: [MODEL_FALLBACK_SETTING.logicalIdPrefix] },
+      },
+      { id: "execute-model-fallback", kind: "execute-change-set", stack: stacks.runtime, createdBy: "change-set-model-fallback" },
+      { id: "verify-model-fallback", kind: "verify-stack-parameter", stack: stacks.runtime, key: MODEL_FALLBACK_PARAMETER, expected: { literal: "none" } },
+    );
+  }
+
   if (units.includes("e2e-agent-model")) {
     if (input.e2eModel === undefined) throw new Error("e2e-agent-model needs --e2e-model <model id or default>");
     const provider = input.previous.runtime["ModelProvider"] ?? "amazon-bedrock";
@@ -465,7 +497,7 @@ export function planTestDeploy(
   }
 
   if (units.includes("e2e-agent-settings")) {
-    const parameterName = `${environmentSettingsPrefix(input.env)}${WORKER_SETTING_PARAMETERS.e2eAgentModel}`;
+    const parameterNames = E2E_AGENT_SETTINGS_UNIT.settings.map((setting) => `${environmentSettingsPrefix(input.env)}${WORKER_SETTING_PARAMETERS[setting]}`);
     const { broker, variable, policies } = E2E_AGENT_SETTINGS_UNIT;
     steps.push(
       {
@@ -476,7 +508,7 @@ export function planTestDeploy(
         changeSetPrefix: `test-deploy-e2e-settings-${revision.slice(0, 12)}`,
         template: {
           source: "lift-declared", construct: QUALIFICATION.construct, cdkContext: QUALIFICATION.context, identityMode,
-          environment: [{ logicalId: broker, variable }], grants: policies.map((logicalId) => ({ logicalId, parameterName })),
+          environment: [{ logicalId: broker, variable }], grants: policies.flatMap((logicalId) => parameterNames.map((parameterName) => ({ logicalId, parameterName }))),
         },
         parameters: usePrevious("control-plane"),
         expect: {
@@ -687,8 +719,8 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined => (value
 /**
  * The deployed template with exactly the declared additions taken from head's (`lift-declared`), and every other byte of it as it is:
  * - each `environment` entry: the Lambda's environment variable, which head sets and the deployed function lacks; the other variables of head and the deployed function must be equal;
- * - each `grants` entry: the ARN of an SSM parameter in the `ssm:GetParameters` statement of a role policy; the rest of head's policy (its other statements, resources and roles) must
- *   be equal to the deployed policy's.
+ * - each `grants` entry: the ARN of an SSM parameter in the `ssm:GetParameters` statement of a role policy (several entries may name the same policy, and are judged together); the rest of
+ *   head's policy (its other statements, resources and roles) must be equal to the deployed policy's, whatever the order of its statements and of their Action and Resource lists.
  * A resource that is already as head has it is left alone (a re-run). Anything head and the deployed template differ by beyond that refuses, naming the resource: this change set is
  * allow-listed to the declared additions and must never carry another IAM or environment change along with them.
  */
@@ -719,34 +751,50 @@ export function liftDeclaredSettings(
     if (deployedValue !== undefined && canonical(deployedValue) !== canonical(headValue)) throw new Error(`the deployed ${logicalId} already sets ${variable} to another value than head's; stop for review`);
     resources[logicalId] = { ...deployedResource, Properties: { ...(deployedResource.Properties ?? {}), Environment: { ...(asRecord(deployedResource.Properties?.Environment) ?? {}), Variables: { ...deployedVariables, [variable]: headValue } } } };
   }
-  for (const { logicalId, parameterName } of declared.grants) {
+  // One policy can take several declared ARNs: they are judged together, against the deployed policy, so each is not compared with a deployed policy that still lacks the others.
+  const grantsByPolicy = new Map<string, string[]>();
+  for (const { logicalId, parameterName } of declared.grants) grantsByPolicy.set(logicalId, [...(grantsByPolicy.get(logicalId) ?? []), parameterName]);
+  for (const [logicalId, parameterNames] of grantsByPolicy) {
     const deployedResource = need(logicalId, deployed, "the deployed template");
     const headResource = need(logicalId, head, "head's template");
     for (const [where, resource] of [["the deployed template", deployedResource], ["head's template", headResource]] as const) {
       if (resource.Type !== "AWS::IAM::Policy") throw new Error(`${logicalId} is not an AWS::IAM::Policy in ${where}; stop for review`);
     }
-    const marker = `:parameter${parameterName}`;
+    const markers = parameterNames.map((parameterName) => `:parameter${parameterName}`);
+    const named = parameterNames.join(", ");
     const statementsOf = (properties: Record<string, unknown> | undefined): Array<Record<string, unknown>> => ((asRecord(properties?.PolicyDocument)?.Statement ?? []) as Array<Record<string, unknown>>);
-    const holds = (statement: Record<string, unknown>): boolean => (Array.isArray(statement.Resource) ? statement.Resource : []).some((entry) => canonical(entry).includes(marker));
-    const holders = statementsOf(headResource.Properties).flatMap((statement, index) => (holds(statement) ? [index] : []));
-    if (holders.length !== 1) throw new Error(`head's ${logicalId} has no grant for ${parameterName} in exactly one statement; stop for review`);
-    const index = holders[0]!;
-    if (statementsOf(deployedResource.Properties).some(holds)) {
+    const holdsMarker = (statement: Record<string, unknown>, marker: string): boolean => (Array.isArray(statement.Resource) ? statement.Resource : []).some((entry) => canonical(entry).includes(marker));
+    // Every declared ARN is in head's policy, all of them in the one same statement.
+    const holders = new Set(markers.map((marker, position) => {
+      const where = statementsOf(headResource.Properties).flatMap((statement, index) => (holdsMarker(statement, marker) ? [index] : []));
+      if (where.length !== 1) throw new Error(`head's ${logicalId} has no grant for ${parameterNames[position]} in exactly one statement; stop for review`);
+      return where[0]!;
+    }));
+    if (holders.size !== 1) throw new Error(`head's ${logicalId} does not hold ${named} in one statement; stop for review`);
+    if (markers.every((marker) => statementsOf(deployedResource.Properties).some((statement) => holdsMarker(statement, marker)))) {
       // Already granted in the deployed policy (a re-run): it must be head's policy exactly, or something else changed and this unit is not the way to apply it.
-      if (canonical(headResource.Properties) !== canonical(deployedResource.Properties)) throw new Error(`head's ${logicalId} differs from the deployed policy by more than the declared grant for ${parameterName}: the deployed policy already has it, and another statement, resource or role differs; stop for review (Tier 3)`);
+      if (canonical(headResource.Properties) !== canonical(deployedResource.Properties)) throw new Error(`head's ${logicalId} differs from the deployed policy by more than the declared grant for ${named}: the deployed policy already has it, and another statement, resource or role differs; stop for review (Tier 3)`);
       continue;
     }
-    // Head's policy with the parameter's ARN taken out of its one statement must be the deployed policy: nothing else of it differs (the resource list is compared as a set).
-    const normalised = (properties: Record<string, unknown> | undefined, drop: boolean): string => {
+    // Head's policy with the declared ARNs taken out must be the deployed policy with the same ARNs taken out (a half-applied policy has some of them): nothing else of it differs. IAM reads the
+    // statements, and the Action and Resource lists inside them, as sets, and a synth orders them by how the code granted them (TEST's deployed Broker policy holds head's statements in another
+    // order), so the comparison ignores the order of the statements and of those lists. Every other property (name, roles, conditions, effects) is compared exactly.
+    const normalised = (properties: Record<string, unknown> | undefined): string => {
       const copy = JSON.parse(JSON.stringify(properties ?? {})) as Record<string, unknown>;
-      const statement = statementsOf(copy)[index];
-      if (statement !== undefined && Array.isArray(statement.Resource)) {
-        statement.Resource = (statement.Resource as unknown[]).filter((entry) => !(drop && canonical(entry).includes(marker))).map((entry) => canonical(entry)).sort();
+      const document = asRecord(copy.PolicyDocument);
+      if (document !== undefined && Array.isArray(document.Statement)) {
+        const statements = (document.Statement as Array<Record<string, unknown>>).map((statement) => {
+          const listed = { ...statement };
+          if (Array.isArray(listed.Resource)) listed.Resource = (listed.Resource as unknown[]).filter((entry) => !markers.some((marker) => canonical(entry).includes(marker)));
+          for (const key of ["Action", "Resource"]) if (Array.isArray(listed[key])) listed[key] = (listed[key] as unknown[]).map((entry) => canonical(entry)).sort();
+          return canonical(listed);
+        });
+        document.Statement = statements.sort();
       }
       return canonical(copy);
     };
-    if (normalised(headResource.Properties, true) !== normalised(deployedResource.Properties, false)) {
-      throw new Error(`head's ${logicalId} differs from the deployed policy by more than the declared grant for ${parameterName}: another statement, resource or role differs; stop for review (Tier 3)`);
+    if (normalised(headResource.Properties) !== normalised(deployedResource.Properties)) {
+      throw new Error(`head's ${logicalId} differs from the deployed policy by more than the declared grant for ${named}: another statement, resource or role differs; stop for review (Tier 3)`);
     }
     resources[logicalId] = { ...deployedResource, Properties: { ...(deployedResource.Properties ?? {}), PolicyDocument: headResource.Properties?.PolicyDocument } };
   }
@@ -1764,7 +1812,7 @@ export async function main(argv: readonly string[]): Promise<void> {
   const outputDir = join(tmpdir(), `test-deploy-${revision.slice(0, 12)}`);
   if (args.check) return runCheck(args, runner, options, { revision, identityMode, outputDir });
   const stacks = resolveTestStacks(args.env);
-  const needsRuntime = args.only.includes("worker-image") || args.only.includes("executor-image") || args.only.includes("e2e-agent-model");
+  const needsRuntime = args.only.includes("worker-image") || args.only.includes("executor-image") || args.only.includes("e2e-agent-model") || args.only.includes("model-fallback-settings");
   const previous: StackParameters = {
     "control-plane": currentParameters(runner, args.region, stacks["control-plane"]),
     runtime: needsRuntime ? currentParameters(runner, args.region, stacks.runtime) : {},
