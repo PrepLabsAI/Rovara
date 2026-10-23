@@ -177,6 +177,22 @@ describe("no Send back for the rest", () => {
     for (const left of ["executor-failed", E2E_OWNER_SENTENCES.groupCode["executor-failed"]!, "hunter2", "/home/runner"]) expect(prompt, left).not.toContain(left);
   });
 
+  it("a review-only task whose block reason says the evidence is incomplete but holds no readable code gets no Send back, on the card or through the API", async () => {
+    for (const reason of ["admitted E2E evidence is incomplete or unknown", "admitted E2E evidence is incomplete or unknown (accepted-group-evidence-integrity)",
+      "admitted E2E evidence is incomplete or unknown (group-1: the group's lifecycle does not confirm a clean run)", "admitted E2E evidence is incomplete or unknown (group-1: build-failed: npm ERR! hunter2)"]) {
+      const round = await blockedWithCode("executor-failed");
+      const task = round.taskNow() as { workflow: Record<string, unknown> };
+      round.harness.db.set({ ...task, workflow: { ...task.workflow, blockReason: reason } });
+      expect(workflowSendBackOffered(workflowOf(round)), reason).toBe(false);
+      expect(buttons(round), reason).toEqual(["agentx_workflow_retry_checks", "agentx_workflow_close"]);
+      const before = round.workflowNow();
+      const refused = await sendBack(round, MAYA);
+      expect(refused.status, reason).toBe(400);
+      expect(refused.body.error, reason).toMatchObject({ code: "CONFIG_INVALID" });
+      expect(round.workflowNow(), reason).toMatchObject({ stage: "VERIFY", state: "BLOCKED", revision: before.revision });
+    }
+  });
+
   it("a code with worker text after it is not a code: the one fixed message, and no Send back beyond what a task with a project check already allows (none)", async () => {
     const round = await blockedWithCode(`build-failed: ${BUILD_LOG}`);
     withChecks(round);

@@ -1847,7 +1847,8 @@ export function workflowSendBackOffered(workflow: {
     // A required round whose groups ended with codes: new code fixes it when at least one group ended with a code the candidate causes (it did not build, stopped at start, never
     // answered, or its seed failed), whatever the other groups ended with. When none did, the codes are Rovara's or the environment's, and a task with no checks of its own (review
     // only) must not be sent back for them by the rule below.
-    if (workflow.e2e?.required === true && workflowApplicationEvidenceCodes(workflow.blockReason) !== undefined) return evidenceCandidateCodes(workflow.blockReason).length > 0;
+    // An incomplete-evidence block whose reason holds no readable code says nothing about who is at fault, and gives the coder nothing to fix: no Send back, not even by the rule below.
+    if (workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX) === true) return evidenceCandidateCodes(workflow.blockReason).length > 0;
     // Review only: there is no check to retry, so coding again is the way on, except from rewritten history.
     if (workflowIsReviewOnly(workflow.checkPolicy)) return workflow.blockReason !== WORKFLOW_HISTORY_REWRITTEN_MESSAGE;
     const failedOrdinaryCheck = current !== undefined && workflow.verification?.candidateDigest === current
