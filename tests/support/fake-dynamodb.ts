@@ -202,7 +202,7 @@ export class FakeDynamoDb {
         }
         if (item === undefined && assumedDrivingTests && key.pk === "E2E_MODEL_ROUTES" && key.sk.startsWith("E2E_MODEL_ROUTE_CANARY#")) {
           const [, routeId, definitionDigest] = key.sk.split("#");
-          item = { ...key, entityType: "E2E_MODEL_ROUTE_CANARY", test: "driving/v1", routeId, definitionDigest };
+          item = { ...key, entityType: "E2E_MODEL_ROUTE_CANARY", test: "driving/v1", routeId, definitionDigest, recordedAt: "2026-10-23T10:00:00.000Z" };
         }
         return { Item: item === undefined ? undefined : this.readClone(item) };
       }

@@ -47,7 +47,7 @@ describe("the driving test's budget on the worker (test 30)", () => {
     for (let index = 0; index < 9; index += 1) {
       const result = await route.generate({ schemaVersion: "rovara-e2e-model-channel/v1", runId: CHECK, caseId: "case", stepIndex: 0, callIndex: index, call: { prompt: [{ role: "user", content: [{ type: "text", text: "Reply with OK." }] }], maxOutputTokens: 64 } } as never, {});
       outcomes.push(result.receipt.outcome);
-      if (result.receipt.outcome === "budget") expect(result.result).toMatchObject({ code: "budget", message: expect.stringContaining("model-route-budget-exhausted") });
+      if (result.receipt.outcome === "budget") expect(result.result).toMatchObject({ code: "budget", message: expect.stringContaining("model-route-budget-exhausted") as string });
     }
     expect(outcomes).toEqual(["ok", "ok", "ok", "ok", "ok", "ok", "budget", "budget", "budget"]);
     expect(ledger.snapshot().calls).toBe(6);
@@ -64,10 +64,10 @@ describe("the driving test's budget on the worker (test 30)", () => {
   it("gives back a call that was never sent, and trues a settled one up to what was charged", async () => {
     const ledger = createDrivingTestLedger();
     const first = (await ledger.reserve(5_000, { maxInputTokens: 0, maxCalls: 0 }))!;
-    first.release();
+    await first.release();
     expect(ledger.snapshot()).toEqual({ calls: 0, inputTokens: 0 });
     const second = (await ledger.reserve(5_000, { maxInputTokens: 0, maxCalls: 0 }))!;
-    second.settle(1_200);
+    await second.settle(1_200);
     expect(ledger.snapshot()).toEqual({ calls: 1, inputTokens: 1_200 });
   });
 
@@ -199,7 +199,7 @@ describe("the check the runner makes", () => {
   it("finds the driving test's host from the worker's own configuration, and fails closed without it", () => {
     expect(() => drivingTestHostConfig({}, "linux", "arm64")).toThrow(/EXECUTOR_IMAGE/);
     expect(() => drivingTestHostConfig({ EXECUTOR_IMAGE: "-bad" }, "linux", "arm64")).toThrow();
-    expect(drivingTestHostConfig({ EXECUTOR_IMAGE: "111122223333.dkr.ecr.us-east-1.amazonaws.com/executor@sha256:" + "e".repeat(64) }, "linux", "arm64")).toMatchObject({ runRoot: expect.stringContaining("web-api-probes") });
+    expect(drivingTestHostConfig({ EXECUTOR_IMAGE: "111122223333.dkr.ecr.us-east-1.amazonaws.com/executor@sha256:" + "e".repeat(64) }, "linux", "arm64")).toMatchObject({ runRoot: expect.stringContaining("web-api-probes") as string });
   });
 });
 

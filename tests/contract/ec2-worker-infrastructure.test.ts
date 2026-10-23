@@ -314,7 +314,7 @@ describe("standing E2E qualification transport (agentx:e2eQualificationTransport
       [["s3:GetObject"], ["/e2e-runtime/*/canary-result.json"]],
     ]);
     expect(JSON.stringify(statements.map((s) => s.Resource))).toMatch(/Artifacts/);
-    expect(policy![1].Properties.Roles).toEqual([{ Ref: expect.stringMatching(/^Broker/) }]);
+    expect(policy![1].Properties.Roles).toEqual([{ Ref: expect.stringMatching(/^Broker/) as string }]);
   });
 
   it("leaves the protected foundation template and its instance role unchanged", () => {

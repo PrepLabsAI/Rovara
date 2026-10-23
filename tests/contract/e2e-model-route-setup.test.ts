@@ -60,7 +60,7 @@ describe("a setup proposal and its approval carry the AI navigation route", () =
     expect(proposal.status, JSON.stringify(proposal.body)).toBe(200);
     const policy = E2EPolicySchema.parse(proposal.body.policy);
     expect(policy.modelRouteRevision).toMatch(/^r1-[a-f0-9]{12}$/);
-    expect(proposal.body.aiNavigation).toBe(`AI navigation: Anthropic \`${DEFAULT_E2E_AGENT_MODELS.anthropic}\` (Rovara's recommendation); at most 8 actions per step; checks decide`);
+    expect(proposal.body.aiNavigation).toBe(`AI navigation: Anthropic \`${DEFAULT_E2E_AGENT_MODELS.anthropic}\` (Rovara's recommendation); driving test passed 2026-10-23; at most 8 actions per step; checks decide`);
     // A proposal writes nothing: only the approval records the route.
     expect(routeRows(harness.db)).toEqual([]);
     const stored = JSON.parse(harness.s3.objects.get(String(proposal.body.proposalRef))!) as { aiNavigation?: string; policy: { modelRouteRevision: string } };
@@ -158,6 +158,28 @@ describe("a setup proposal and its approval carry the AI navigation route", () =
     expect(proposal.body.aiNavigation).toBeNull();
     expect((await approve(harness, proposal)).status).toBe(200);
     expect(routeRows(harness.db)).toEqual([]);
+  });
+
+  // Task 4.10C, test 38: the setup text. A tested route says so with the date, and the scope sentence stays; an untested one says it will not run and which command to run.
+  it("shows the scope sentence and the date the driving test passed for a tested us. route", async () => {
+    const { harness } = await harnessFor(async () => ({ provider: "amazon-bedrock", region: "us-east-1" }));
+    const proposal = await propose(harness);
+    expect(proposal.body.aiNavigation).toBe("AI navigation: Amazon Bedrock `us.anthropic.claude-haiku-5-5` (Rovara's recommendation). Your app's pages are processed by the AI in US data centers. Driving test passed 2026-10-23. At most 8 actions per step; checks decide");
+  });
+
+  it("an approval of a proposal written before Task 4.10 (the older sentence, no driving test in it) still verifies", async () => {
+    const { harness } = await harnessFor(async () => ({ provider: "amazon-bedrock", region: "us-east-1" }));
+    const proposal = await propose(harness);
+    const ref = String(proposal.body.proposalRef);
+    const stored = JSON.parse(harness.s3.objects.get(ref)!) as Record<string, unknown>;
+    expect(stored["aiNavigation"]).toContain("Driving test passed");
+    // The artifact as 4.9 stored it: the same policy and proposal, the sentence without a driving test, filed under its own digest.
+    const older = canonicalJson({ ...stored, aiNavigation: "AI navigation: Amazon Bedrock `us.anthropic.claude-haiku-5-5` (Rovara's recommendation). Your app's pages are processed by the AI in US data centers. At most 8 actions per step; checks decide" });
+    const sha = createHash("sha256").update(older, "utf8").digest("hex");
+    const olderRef = `project-setup-proposals/${ref.split("/")[1]}/${sha}.json`;
+    harness.s3.objects.set(olderRef, older);
+    const approved = await approve(harness, { body: { proposalRef: olderRef, proposalSha256: sha } });
+    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
   });
 
   // Task 4.10C, review item I-1 of 4.10A: no untested route is approvable, for any of the four providers, the default route (the one the PREFIXGAP fix makes reachable) included.

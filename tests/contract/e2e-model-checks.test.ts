@@ -32,7 +32,7 @@ function receipt(over: Partial<E2EModelReceipt> & { shape?: "standard" | "minima
     receiptId: `rcpt-${counter}`, runId: CHECK, caseId: DRIVING_TEST_FIRST_CALL_CASE_ID, stepIndex: 0, callIndex: 0, routeId: definitions.standard.routeId, routeRevision: REV[shape],
     provider: "amazon-bedrock", modelId: MODEL, startedAt: new Date(Date.parse("2026-10-23T10:00:00Z") + counter * 1000).toISOString(), inputTokens: 1000, outputTokens: 40, latencyMs: 300,
     servedModelId: null, servedUpstream: null, promptSha256: "a".repeat(64), responseSha256: "b".repeat(64), outcome: "ok", ...rest,
-  } as E2EModelReceipt;
+  };
 }
 const nav = (callIndex: number, over: Partial<E2EModelReceipt> & { shape?: "standard" | "minimal" } = {}) => receipt({ caseId: "case-drive", stepIndex: 1, callIndex, ...over });
 
@@ -187,14 +187,14 @@ describe("POST: starting a check", () => {
     await startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1");
     await expect(startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1")).rejects.toMatchObject({ status: 409, code: "check-in-progress" });
     h.advance(11 * 60_000);
-    await expect(startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1")).resolves.toMatchObject({ checkId: expect.any(String) });
+    await expect(startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1")).resolves.toMatchObject({ checkId: expect.any(String) as string });
   });
 
   it("uses the stored shape for the route it asks about", async () => {
     const h = harness();
     h.db.set({ ...e2eModelRouteShapeKey(route.routeId, MODEL), entityType: "E2E_MODEL_ROUTE_SHAPE", payloadShape: "minimal", testedAt: "2026-10-22T10:00:00.000Z" });
     await startModelCheck(h.deps, { kind: "drive", modelId: MODEL }, "linux-arm64-web-api-v1");
-    expect(JSON.parse([...h.objects.values()][0]!).definitionDigest).toBe(e2eAgentRouteDefinitionDigest(definitions.minimal));
+    expect((JSON.parse([...h.objects.values()][0]!) as { definitionDigest: string }).definitionDigest).toBe(e2eAgentRouteDefinitionDigest(definitions.minimal));
   });
 });
 
@@ -264,7 +264,7 @@ describe("GET: reading a check", () => {
     const view = await readModelCheck(h.deps, checkId);
     expect(view.status).toBe("discovered");
     expect(view.tiers?.recommended?.modelId).toBe(MODEL);
-    expect(view.tiers?.notUsable[0]).toMatchObject({ modelId: "us.anthropic.claude-haiku-5-5", reason: expect.stringContaining("L-47520EB7") });
+    expect(view.tiers?.notUsable[0]).toMatchObject({ modelId: "us.anthropic.claude-haiku-5-5", reason: expect.stringContaining("L-47520EB7") as string });
     expect(view.tiers?.notUsable[0]?.reason).toContain("L-F26CA8D1");
     // The report on record feeds the tiers a later read shows.
     const tiers = await readCurrentTiers(h.deps);

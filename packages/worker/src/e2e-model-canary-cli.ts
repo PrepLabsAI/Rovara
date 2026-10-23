@@ -106,7 +106,7 @@ export async function serveModelChecks(args: CanaryCliArgs, dependencies: ModelC
     if (bytes !== undefined) {
       let raw: unknown;
       let id: string | undefined;
-      let oversize = bytes.byteLength === 0 || bytes.byteLength > REQUEST_MAX_BYTES;
+      const oversize = bytes.byteLength === 0 || bytes.byteLength > REQUEST_MAX_BYTES;
       if (!oversize) { try { raw = JSON.parse(Buffer.from(bytes).toString("utf8")); id = requestIdOf(raw); } catch { raw = undefined; } }
       const key = id ?? `x-${requestFingerprint(bytes)}`;
       if (!served.has(key)) {

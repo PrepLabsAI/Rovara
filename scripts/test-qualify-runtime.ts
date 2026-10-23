@@ -27,8 +27,11 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CloudFormationClient, DescribeStackResourcesCommand, DescribeStacksCommand } from "@aws-sdk/client-cloudformation";
 import { AttachVolumeCommand, CreateVolumeCommand, DescribeInstancesCommand, DescribeLaunchTemplateVersionsCommand, DescribeVolumesCommand, EC2Client, RunInstancesCommand, type RunInstancesCommandInput } from "@aws-sdk/client-ec2";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { e2eModelCheckRunnerKey } from "../packages/broker/src/e2e/model-route-registry.js";
 import { ec2Binding } from "../packages/cli/src/setup/project-add.js";
 import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
 import {
@@ -40,6 +43,7 @@ import {
   ec2WorkerUserData,
   type Ec2RuntimeBinding,
 } from "../packages/contracts/src/session.js";
+import { WEB_API_RUNTIME_PROFILE_ID } from "../packages/contracts/src/e2e-web-api-qualification.js";
 import { Runner, type ReleaseOptions } from "./release-common.js";
 import { loadAllowlist, parseOptions } from "./test-deploy.js";
 
@@ -114,6 +118,7 @@ export type QualificationStep =
   | { id: string; kind: "poll-status"; object: string; timeoutMs: number; intervalMs: number }
   | { id: string; kind: "download-proposal"; object: string }
   | { id: string; kind: "register" }
+  | { id: string; kind: "record-model-check-runner"; transportCorrelationId: string }
   | { id: string; kind: "delete-challenge"; object: string }
   | { id: string; kind: "print-registered-rows" };
 
@@ -146,6 +151,8 @@ export function planTestQualification(input: QualificationInput, allowlist: read
     { id: "poll-status", kind: "poll-status", object: "status.json", timeoutMs: QUALIFICATION_POLL_TIMEOUT_MS, intervalMs: POLL_INTERVAL_MS },
     { id: "download-proposal", kind: "download-proposal", object: "proposal.json" },
     { id: "register", kind: "register" },
+    // Task 4.10C: where the control plane puts model checks: this runner, bound to the registration just made.
+    { id: "record-model-check-runner", kind: "record-model-check-runner", transportCorrelationId: input.workspaceId },
     { id: "delete-challenge", kind: "delete-challenge", object: "challenge.json" },
     { id: "print-registered-rows", kind: "print-registered-rows" },
   ];
@@ -182,6 +189,7 @@ export function formatQualificationPlan(steps: readonly QualificationStep[], inp
       case "poll-status": return `poll ${PLAN_PREFIX}${step.object} every ${step.intervalMs / 1000}s for up to ${step.timeoutMs / 60_000} minutes (the challenge's lifetime)`;
       case "download-proposal": return `only if the status is SUCCEEDED: download ${PLAN_PREFIX}${step.object}`;
       case "register": return "register the proposal (agentx admin runtime-installation register --proposal-file)";
+      case "record-model-check-runner": return `record this runner for model checks (E2E_MODEL_ROUTES / E2E_MODEL_CHECK_RUNNER#${WEB_API_RUNTIME_PROFILE_ID}: its role ID, instance ID and transport correlation ${step.transportCorrelationId})`;
       case "delete-challenge": return `after a successful registration, delete the one-use ${PLAN_PREFIX}${step.object} from the bucket (a failure only warns and prints the command)`;
       case "print-registered-rows": return "print the registered catalog rows";
     }
@@ -274,6 +282,8 @@ export interface QualificationEffects {
   deleteObject(key: string): Promise<void>;
   saveProposal(bytes: Buffer): string;
   register(proposalFile: string): Promise<string>;
+  /** Records the runner that serves model checks (`E2E_MODEL_CHECK_RUNNER#<profile>`), with the registration's transport correlation, so a check is only ever sent to the runner that was qualified. */
+  recordModelCheckRunner(runner: { roleId: string; instanceId: string; transportCorrelationId: string }): Promise<void>;
   now(): number;
   sleep(ms: number): Promise<void>;
   print(line: string): void;
@@ -415,6 +425,9 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
           break;
         }
         case "register": state.registered = await effects.register(need(state.proposalFile, "the proposal file")); break;
+        case "record-model-check-runner":
+          await effects.recordModelCheckRunner({ roleId: need(state.facts, "the stack facts").workerRoleId, instanceId: need(state.instanceId, "the instance"), transportCorrelationId: step.transportCorrelationId });
+          break;
         case "delete-challenge": {
           const key = `${need(state.prefix, "the instance's key prefix")}${step.object}`;
           try {
@@ -557,6 +570,7 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
   const ec2 = new EC2Client(config);
   const ssm = new SSMClient(config);
   const kms = new KMSClient(config);
+  const documents = DynamoDBDocumentClient.from(new DynamoDBClient(config));
   const scratch = mkdtempSync(join(tmpdir(), "test-qualify-runtime-"));
   let bucket = "";
   const cli = (commandArgs: string[]): { status: number; stdout: string; stderr: string } => {
@@ -750,6 +764,12 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
       const result = cli(["admin", "runtime-installation", "register", "--proposal-file", proposalFile]);
       if (result.status !== 0) throw new Error(`registration failed: ${result.stderr.trim().slice(0, 500)}`);
       return result.stdout;
+    },
+
+    async recordModelCheckRunner(runner) {
+      const table = requireOutput(outputsOf(await stack(environmentStackName(args.env, "control-plane"))), "StateTableName", environmentStackName(args.env, "control-plane"));
+      await documents.send(new PutCommand({ TableName: table, Item: { ...e2eModelCheckRunnerKey(WEB_API_RUNTIME_PROFILE_ID), entityType: "E2E_MODEL_CHECK_RUNNER", roleId: runner.roleId, instanceId: runner.instanceId,
+        transportCorrelationId: runner.transportCorrelationId, recordedAt: new Date().toISOString() } }));
     },
 
     now: () => Date.now(),

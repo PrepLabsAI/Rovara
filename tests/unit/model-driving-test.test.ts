@@ -17,7 +17,7 @@ function receipt(over: Partial<E2EModelReceipt> = {}): E2EModelReceipt {
   counter += 1;
   return { receiptId: `r-${counter}`, runId: RUN, caseId: "model-check", stepIndex: 0, callIndex: 0, routeId: "rovara-e2e-default", routeRevision: "r1-aaaaaaaaaaaa", provider: "amazon-bedrock", modelId: MODEL,
     startedAt: new Date(Date.parse("2026-10-23T10:00:00Z") + counter * 1000).toISOString(), inputTokens: 1000, outputTokens: 40, latencyMs: 200, servedModelId: null, servedUpstream: null,
-    promptSha256: "a".repeat(64), responseSha256: "b".repeat(64), outcome: "ok", ...over } as E2EModelReceipt;
+    promptSha256: "a".repeat(64), responseSha256: "b".repeat(64), outcome: "ok", ...over };
 }
 const rejected = (callIndex = 0) => receipt({ callIndex, outcome: "provider-error", responseSha256: null, inputTokens: 0, outputTokens: 0, failure: { class: "request-rejected", signal: "ValidationException" } });
 const limited = () => receipt({ outcome: "provider-error", responseSha256: null, inputTokens: 0, outputTokens: 0, failure: { class: "limit-or-rate-limited", signal: "ThrottlingException" } });
@@ -25,8 +25,8 @@ const passedNavigation = (): NavigationOutcome => ({ caseVerdict: "passed", case
 
 function fakes(firstCalls: E2EModelReceipt[], navigation: NavigationOutcome | Error = passedNavigation()) {
   const queue = [...firstCalls];
-  const firstCall = vi.fn(async (_shape: "standard" | "minimal", _callIndex: number) => { const next = queue.shift(); if (next === undefined) throw new Error("a call the test did not expect"); return next; });
-  const navigate = vi.fn(async (_shape: "standard" | "minimal") => { if (navigation instanceof Error) throw navigation; return navigation; });
+  const firstCall = vi.fn<(shape: "standard" | "minimal", callIndex: number) => Promise<E2EModelReceipt>>(async () => { const next = queue.shift(); if (next === undefined) throw new Error("a call the test did not expect"); return next; });
+  const navigate = vi.fn<(shape: "standard" | "minimal") => Promise<NavigationOutcome>>(async () => { if (navigation instanceof Error) throw navigation; return navigation; });
   return { firstCall, navigate };
 }
 

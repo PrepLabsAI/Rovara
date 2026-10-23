@@ -157,7 +157,7 @@ export async function quotaHint(input: QuotaHintInput, deps: Pick<DiscoveryDepen
   const empty = hintFrom([], input);
   if (deps.quotas === undefined) return empty;
   try {
-    const rows = await readAllQuotas(deps.quotas, createBounded(deps as DiscoveryDependencies));
+    const rows = await readAllQuotas(deps.quotas, createBounded(deps));
     return hintFrom(rows, input);
   } catch { return empty; }
 }
@@ -394,7 +394,7 @@ export function rankModels(input: { report: ModelDiscoveryReport | null; eligibl
   const defaultRow = byId.get(input.recommended);
   const defaultUnusable = notUsable.some((row) => row.modelId === input.recommended);
   let recommended: Tiered | null = null;
-  let why: RankedModels["why"] = "none";
+  let why: RankedModels["why"];
   if (defaultRow !== undefined && !defaultUnusable) {
     recommended = works.find((row) => row.modelId === input.recommended) ?? canBeTested.find((row) => row.modelId === input.recommended) ?? defaultRow;
     why = verified ? "default" : "discovery-unverified";

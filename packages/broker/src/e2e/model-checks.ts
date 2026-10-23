@@ -250,6 +250,8 @@ export interface ModelTiers {
   discovery: { status: "listed" | "unverified" | "none"; unverifiedReason?: string; checkedAt?: string };
   why: RankedModels["why"];
   recommended: TierRow | null;
+  /** The model a driving test with no modelId drives: the installation's setting, or Rovara's recommendation. */
+  current: TierRow | null;
   worksOnAccount: TierRow[];
   notUsable: TierRow[];
   canBeTested: TierRow[];
@@ -258,7 +260,7 @@ export interface ModelTiers {
 }
 const MAX_CAN_BE_TESTED = 12;
 
-function describeTiers(ranked: RankedModels, report: ModelDiscoveryReport | null, provider: ModelProvider, quotaText: (modelId: string) => string): ModelTiers {
+function describeTiers(ranked: RankedModels, report: ModelDiscoveryReport | null, provider: ModelProvider, quotaText: (modelId: string) => string, currentRow: Tiered | undefined): ModelTiers {
   const row = (item: Tiered): TierRow => ({ modelId: item.modelId, label: item.label, scope: item.scope, inputUsdPerMTok: item.inputUsdPerMTok, outputUsdPerMTok: item.outputUsdPerMTok,
     ...(item.testedAt === undefined ? {} : { testedAt: item.testedAt }), ...(item.payloadShape === undefined ? {} : { payloadShape: item.payloadShape }), worstCaseUsd: drivingTestWorstCaseUsd(item) });
   const reasonOf = (item: Tiered & { reason: NotUsableReason }): string => (item.reason.code === "test-failed" ? failureClassSentence(item.reason.failureClass, { provider, modelId: item.modelId })
@@ -267,6 +269,7 @@ function describeTiers(ranked: RankedModels, report: ModelDiscoveryReport | null
     discovery: report === null ? { status: "none" } : { status: report.status, ...(report.unverifiedReason === undefined ? {} : { unverifiedReason: report.unverifiedReason }), checkedAt: report.checkedAt },
     why: ranked.why,
     recommended: ranked.recommended === null ? null : row(ranked.recommended),
+    current: currentRow === undefined ? null : row({ ...currentRow }),
     worksOnAccount: ranked.worksOnAccount.map(row),
     notUsable: ranked.notUsable.map((item) => ({ ...row(item), reason: reasonOf(item) })),
     canBeTested: ranked.canBeTested.slice(0, MAX_CAN_BE_TESTED).map(row),
@@ -296,7 +299,7 @@ export async function readModelTiers(deps: ModelCheckDependencies, installation:
   const recommendedRow = E2E_AGENT_ELIGIBLE_MODELS.find((item) => item.provider === provider && item.modelId === recommended);
   const rows = recommendedRow === undefined || eligible.some((item) => item.modelId === recommended) ? eligible : [...eligible, recommendedRow];
   const ranked = rankModels({ report, eligible: rows, recommended, tests, current });
-  return describeTiers(ranked, report, provider, quotaSentence(report));
+  return describeTiers(ranked, report, provider, quotaSentence(report), rows.find((item) => item.modelId === (current ?? recommended)));
 }
 
 export async function readDiscoveryReport(deps: Pick<ModelCheckDependencies, "documentClient" | "tableName">, provider: string): Promise<ModelDiscoveryReport | null> {

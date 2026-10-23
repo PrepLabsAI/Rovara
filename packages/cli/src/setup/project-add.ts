@@ -304,7 +304,7 @@ async function setupRequest(session: AdminSession, fetchImplementation: typeof f
   return result as Record<string, unknown>;
 }
 
-function validateSetupProposalResponse(value: Record<string, unknown>): { proposal: E2ESetupProposal; policy: E2EPolicy; proposalRef: string; proposalSha256: string; aiNavigation: string | null } {
+function validateSetupProposalResponse(value: Record<string, unknown>): { proposal: E2ESetupProposal; policy: E2EPolicy; proposalRef: string; proposalSha256: string; aiNavigation: string | null; aiNavigationUntested: { sentence: string; modelId: string } | null } {
   const proposal = E2ESetupProposalSchema.parse(value.proposal);
   const policy = E2EPolicySchema.parse(value.policy);
   if (typeof value.proposalRef !== "string" || !/^project-setup-proposals\/[a-f0-9]{64}\/[a-f0-9]{64}\.json$/.test(value.proposalRef)
@@ -318,7 +318,12 @@ function validateSetupProposalResponse(value: Record<string, unknown>): { propos
   // pins one without the sentence is not shown for approval at all (it is treated as malformed), and a sentence is shown only for a policy that pins a route.
   const sentence = typeof value.aiNavigation === "string" ? value.aiNavigation.replace(/[\p{Cc}\p{Cf}]+/gu, " ").trim().slice(0, 400) : "";
   if (policy.modelRouteRevision !== null && sentence === "") throw agentXError("RUNTIME_UNAVAILABLE", "control plane pinned an AI navigation route without saying which");
-  return { proposal, policy, proposalRef: value.proposalRef, proposalSha256: value.proposalSha256, aiNavigation: policy.modelRouteRevision === null || sentence === "" ? null : sentence };
+  // Task 4.10C: a route that exists but has no passed driving test is not pinned; the control plane says which model must be tested. Only a well-formed note is shown, as plain text.
+  const untested = typeof value.aiNavigationUntested === "object" && value.aiNavigationUntested !== null ? value.aiNavigationUntested as { modelId?: unknown; sentence?: unknown } : undefined;
+  const untestedNote = untested !== undefined && typeof untested.modelId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(untested.modelId) && typeof untested.sentence === "string"
+    ? { modelId: untested.modelId, sentence: untested.sentence.replace(/[\p{Cc}\p{Cf}]+/gu, " ").trim().slice(0, 600) } : null;
+  return { proposal, policy, proposalRef: value.proposalRef, proposalSha256: value.proposalSha256, aiNavigation: policy.modelRouteRevision === null || sentence === "" ? null : sentence,
+    aiNavigationUntested: policy.modelRouteRevision === null ? untestedNote : null };
 }
 
 /** What this rerun asks for that the existing project does not have. Only the answers given are
@@ -334,13 +339,16 @@ function differences(existing: ProjectDefinition, wanted: { repositoryUrl?: stri
 }
 
 /** What the administrator is shown and asked about a source-backed setup plan: one confirmation that names the targets, the commands and the AI navigation route (D5). */
-async function confirmSetupPlan(input: { prompter: Prompter; write: (line: string) => void; proposal: E2ESetupProposal; aiNavigation: string | null; setup: ProjectDefinition["setup"]; readiness: ProjectDefinition["readiness"] }): Promise<boolean> {
+async function confirmSetupPlan(input: { prompter: Prompter; write: (line: string) => void; proposal: E2ESetupProposal; aiNavigation: string | null; env?: string; aiNavigationUntested?: { sentence: string; modelId: string } | null; setup: ProjectDefinition["setup"]; readiness: ProjectDefinition["readiness"] }): Promise<boolean> {
   const { proposal } = input;
   const targetSummary = proposal.targets.map((target) => target.kind + ":" + target.targetId).join(", ") || "no targets detected";
   const mockSummary = proposal.missingInputs.filter((item) => item.disposition === "mock-substitutable").map((item) => item.kind).join(", ") || "none detected";
   const blockerSummary = proposal.missingInputs.filter((item) => item.disposition === "blocking").map((item) => item.reason).join("; ") || "none";
   input.write(proposal.missingInputs.length === 0 ? "Detected source-backed E2E setup." : "Detected source-backed E2E setup with unresolved inputs: " + blockerSummary);
-  const aiNavigationSummary = input.aiNavigation ?? "AI navigation steps will not run: this installation has no usable model route for them (it needs a configured model provider with its key), so only deterministic checks run";
+  // An untested route says which model to test and the exact command (Task 4.10C); with no route at all the older sentence stands.
+  const untestedSummary = input.aiNavigationUntested === undefined || input.aiNavigationUntested === null ? undefined
+    : `${input.aiNavigationUntested.sentence}. Run \`agentx${input.env === undefined ? "" : ` --env ${input.env}`} project model-check test --model ${input.aiNavigationUntested.modelId}\``;
+  const aiNavigationSummary = input.aiNavigation ?? untestedSummary ?? "AI navigation steps will not run: this installation has no usable model route for them (it needs a configured model provider with its key), so only deterministic checks run";
   input.write(aiNavigationSummary);
   const commandSummary = "setup: " + input.setup.map(commandLine).join("; ") + "; readiness: " + input.readiness.map(commandLine).join("; ");
   return input.prompter.confirm("Use this project setup plan? (" + commandSummary + "; targets: " + targetSummary + "; mock substitutions: " + mockSummary + "; unresolved inputs: " + blockerSummary + "; " + aiNavigationSummary + ")", { defaultValue: true });
@@ -392,7 +400,7 @@ export async function reapproveProjectSetup(input: {
   const trusted = validateSetupProposalResponse(await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-proposals", {
     repositoryUrl: repository.url, ref: repository.defaultBranch,
   }, 65_000));
-  const accepted = await confirmSetupPlan({ prompter: input.prompter, write: input.write, proposal: trusted.proposal, aiNavigation: trusted.aiNavigation, setup: existing.setup, readiness: existing.readiness });
+  const accepted = await confirmSetupPlan({ prompter: input.prompter, write: input.write, proposal: trusted.proposal, aiNavigation: trusted.aiNavigation, env: input.env, aiNavigationUntested: trusted.aiNavigationUntested, setup: existing.setup, readiness: existing.readiness });
   const setupApproval = await recordSetupDecision({ session: input.session, fetch: input.services.fetch, projectName: name, trusted, decision: accepted ? "approve" : "decline" });
   if (!accepted) {
     input.write(`Declined the setup of ${name}; the decision is recorded and revision ${existing.revision} stays as it is.`);
@@ -517,7 +525,7 @@ export async function addProject(input: {
   if (flags.setupCommand !== undefined) setup = typed(flags.setupCommand, SETUP_TIMEOUT);
   if (flags.testCommand !== undefined) readiness = typed(flags.testCommand, TEST_TIMEOUT);
   if (setupProposal !== undefined && e2ePolicy !== undefined && trustedSetup !== undefined) {
-    e2eAccepted = await confirmSetupPlan({ prompter, write: input.write, proposal: setupProposal, aiNavigation: trustedSetup.aiNavigation, setup, readiness });
+    e2eAccepted = await confirmSetupPlan({ prompter, write: input.write, proposal: setupProposal, aiNavigation: trustedSetup.aiNavigation, env: input.env, aiNavigationUntested: trustedSetup.aiNavigationUntested, setup, readiness });
     setupApproval = await recordSetupDecision({ session: input.session, fetch: input.services.fetch, projectName: name, trusted: trustedSetup, decision: e2eAccepted ? "approve" : "decline" });
     // RUN-5: declining the plan turns off only the browser and API checks (no `e2e` policy is registered). The project's own setup and test commands, the proposed ones and the ones given
     // as flags, stay; they used to be erased, and every later task then ran with no setup and no test check.

@@ -12,6 +12,7 @@ import { addJira } from "./connectors/jira.js";
 import { addLinear } from "./connectors/linear.js";
 import { addMcp, type McpAddFlags } from "./connectors/mcp.js";
 import type { ConnectorAddInput } from "./connectors/revision.js";
+import { discoverModelCheck, testModelCheck } from "./model-check.js";
 import { addProject, reapproveProjectSetup } from "./project-add.js";
 import { installationToken } from "./project-files.js";
 import { waitForThreadedReply } from "./reply-watch.js";
@@ -59,6 +60,31 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
         ? `Approved the setup of ${result.name}; revision ${result.revision}${result.modelRouteRevision === null ? ", no AI navigation route" : `, AI navigation route ${result.modelRouteRevision}`}; file ${result.file}\n`
         : `Declined the setup of ${result.name}; revision ${result.revision} unchanged\n`);
     });
+
+  // M1.4 Task 4.10C: the on-account checks of the AI navigation model.
+  const modelCheck = project.command("model-check").description("check which AI navigation models this account can use, and prove one with a driving test");
+  withRegion(modelCheck.command("discover").description("list the models this account can see, in tiers (no model call; shows the exact commands to choose and test one)"))
+    .action(async (_options: unknown, command: Command) => {
+      const run = await context.open(command);
+      const result = await discoverModelCheck({ env: run.env, session: run.session, fetch: run.services.fetch, write: run.write, sleep: run.sleep, now: run.now });
+      run.print(result, "");
+    });
+  const testAction = async (options: { model?: string; yes?: boolean }, command: Command) => {
+    const run = await context.open(command);
+    const view = await testModelCheck({ env: run.env, session: run.session, fetch: run.services.fetch, write: run.write, sleep: run.sleep, now: run.now, prompter: run.prompter,
+      ...(options.model === undefined ? {} : { model: options.model }), ...(options.yes === true ? { assumeYes: true } : {}) });
+    run.print(view, "");
+    if (view.status !== "passed") process.exitCode = 1;
+  };
+  withRegion(modelCheck.command("test").description("run the driving test of a model on the runner (a small real navigation of a built-in app; shows the worst-case cost and asks first)"))
+    .option("--model <id>", "the model to test (default: the installation's chosen model, or Rovara's recommendation)")
+    .option("--yes", "do not ask for confirmation")
+    .action(testAction);
+  // The same command under the plan's first name.
+  withRegion(modelCheck.command("drive").description("the same as test"))
+    .option("--model <id>", "the model to test")
+    .option("--yes", "do not ask for confirmation")
+    .action(testAction);
 
   const channel = program.command("channel").description("Slack channels bound to AgentX projects");
   withRegion(channel

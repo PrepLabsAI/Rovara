@@ -1236,7 +1236,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate, readyProfiles });
         const agentRoute = await plannedAgentRoute(dependencies);
         const policy = projectSetupPolicy(proposal, agentRoute);
-        const aiNavigation = agentRoute === undefined ? null : agentRouteSummary(agentRoute.definition);
+        const aiNavigation = agentRoute === undefined ? null : agentRouteSummary(agentRoute.definition, { drivingTest: agentRoute.drivingTest });
         const aiNavigationUntested = agentRoute === undefined ? await untestedAgentRouteNote(dependencies) : null;
         const repositoryName = urlParts[2].replace(/\.git$/i, "");
         const cleanedRepositoryName = repositoryName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);

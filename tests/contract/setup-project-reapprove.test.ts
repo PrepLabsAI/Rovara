@@ -18,7 +18,7 @@ let configDir: string;
 beforeEach(async () => { configDir = await mkdtemp(join(tmpdir(), "agentx-reapprove-")); });
 afterEach(async () => { await rm(configDir, { recursive: true, force: true }); });
 
-function setup(options: { pin?: boolean } = {}) {
+function setup(options: { pin?: boolean; untested?: boolean } = {}) {
   const plane = fakeControlPlane();
   const repositories = fakeRepositories({ "acme/payments-api": { files: { "package.json": JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } }), "package-lock.json": "{}" } } });
   bindSetupSourceProvider(plane, repositories);
@@ -32,7 +32,9 @@ function setup(options: { pin?: boolean } = {}) {
     const stored = plane.setupProposals.get(String(body.proposalSha256))!;
     const policy = E2EPolicySchema.parse({ ...(body.policy as E2EPolicy), modelRouteRevision: options.pin === false ? null : PINNED });
     plane.setupProposals.set(String(body.proposalSha256), { ...stored, policy });
-    return new Response(JSON.stringify({ ...body, policy, ...(options.pin === false ? {} : { aiNavigation: SENTENCE }) }), { status: 200, headers: { "content-type": "application/json" } });
+    // Task 4.10C: a route with no passed driving test is not pinned; the control plane says which model must be tested.
+    const untested = options.untested === true ? { aiNavigationUntested: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-5-5", sentence: "AI navigation steps will not run: the driving test with Amazon Bedrock `us.anthropic.claude-haiku-5-5` has not passed (not run)" } } : {};
+    return new Response(JSON.stringify({ ...body, policy, ...(options.pin === false ? {} : { aiNavigation: SENTENCE }), ...untested }), { status: 200, headers: { "content-type": "application/json" } });
   }) as typeof globalThis.fetch;
   const services = { fetch: wrappedFetch, repositories, configDir, stackOutputs: async (name: string) => (name === "agentx-staging-foundation" ? FOUNDATION : undefined) };
   return { plane, services, pinNow: () => { pin = true; } };
@@ -98,6 +100,19 @@ describe("agentx project setup-approve (re-approval of an already registered pro
     const result = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: context.services, projectName: "payments-api" });
     expect(result.modelRouteRevision).toBeNull();
     expect(lines.join("\n")).toMatch(/AI navigation steps will not run/);
+  });
+
+  it("says which model to test, and the exact command, when its route has no passed driving test (Task 4.10C)", async () => {
+    const context = setup({ pin: false, untested: true });
+    await registered(context);
+    context.pinNow();
+    const lines: string[] = [];
+    const prompter = scriptedPrompter([true]);
+    const result = await reapproveProjectSetup({ env: "staging", session, prompter, write: (line) => lines.push(line), services: context.services, projectName: "payments-api" });
+    expect(result.modelRouteRevision).toBeNull();
+    const expected = "AI navigation steps will not run: the driving test with Amazon Bedrock `us.anthropic.claude-haiku-5-5` has not passed (not run). Run `agentx --env staging project model-check test --model us.anthropic.claude-haiku-5-5`";
+    expect(lines.join("\n")).toContain(expected);
+    expect(prompter.asked.find((question) => question.startsWith("Use this project setup plan?"))).toContain(expected);
   });
 
   it("refuses a project that is not registered here, before asking the control plane anything", async () => {
