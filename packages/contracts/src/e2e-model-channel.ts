@@ -884,18 +884,29 @@ export type E2EModelDayBudgetResponse = z.infer<typeof E2EModelDayBudgetResponse
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
- * The limits of a round that runs no model call: the small limits a setup that pins no route keeps. A project that pinned a route has policy limits sized for agent steps
- * (`e2eAgentRoutePolicyLimits`); a round or a group that has no agent step runs under these instead.
+ * The limits of a round that runs no model call: the normal time and action limits (`E2E_DEFAULT_LIMITS` in e2e.ts: run 600 s, startup 60 s, preparation 180 s, case 90 s, 30
+ * actions per case), with model budgets of the least a limit may be (1 request, 1 input token, 1 output token), because such a round makes no model call. A setup that pins no
+ * route keeps these as its policy limits; a project that pinned a route has policy limits sized for agent steps (`e2eAgentRoutePolicyLimits`), and a round or a group that has
+ * no agent step runs under no more than these instead. (The values are written out here because e2e.ts imports this module; a test pins them to `E2E_DEFAULT_LIMITS`.)
+ *
+ * Before the evaluation fix RUN-1 these were 60 s for the whole run (including the image pull, `npm ci`, the build and the app start) and 10 s per case, which no ordinary
+ * app builds in: see `E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1`.
  */
 export const E2E_MODEL_FREE_LIMITS: E2ELimits = Object.freeze({
+  runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 180_000, caseTimeoutMs: 90_000,
+  maxActionsPerCase: 30, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null,
+});
+
+/**
+ * The model-free limits as they were before the evaluation fix RUN-1. Admissions written by that control plane carry round limits and shard timeouts derived from them, and a
+ * worker's validator still accepts those (`e2eEffectiveRoundLimitsBeforeRun1`). Nothing new is written with them.
+ */
+export const E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1: E2ELimits = Object.freeze({
   runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
   maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null,
 });
 
-/** The limits a round or group runs under: the policy's when it uses the model, else no larger than the model-free limits (each limit the smaller of the two). */
-export function e2eEffectiveRoundLimits(policy: E2ELimits, usesModel: boolean): E2ELimits {
-  if (usesModel) return policy;
-  const free = E2E_MODEL_FREE_LIMITS;
+function capLimits(policy: E2ELimits, free: E2ELimits): E2ELimits {
   return {
     runTimeoutMs: Math.min(policy.runTimeoutMs, free.runTimeoutMs), startupTimeoutMs: Math.min(policy.startupTimeoutMs, free.startupTimeoutMs),
     preparationTimeoutMs: Math.min(policy.preparationTimeoutMs, free.preparationTimeoutMs), caseTimeoutMs: Math.min(policy.caseTimeoutMs, free.caseTimeoutMs),
@@ -903,6 +914,16 @@ export function e2eEffectiveRoundLimits(policy: E2ELimits, usesModel: boolean): 
     maxInputTokens: Math.min(policy.maxInputTokens, free.maxInputTokens), maxOutputTokens: Math.min(policy.maxOutputTokens, free.maxOutputTokens),
     maxSpendUsd: policy.maxSpendUsd === null || free.maxSpendUsd === null ? (policy.maxSpendUsd ?? free.maxSpendUsd) : Math.min(policy.maxSpendUsd, free.maxSpendUsd),
   };
+}
+
+/** The limits a round or group runs under: the policy's when it uses the model, else no larger than the model-free limits (each limit the smaller of the two). */
+export function e2eEffectiveRoundLimits(policy: E2ELimits, usesModel: boolean): E2ELimits {
+  return usesModel ? policy : capLimits(policy, E2E_MODEL_FREE_LIMITS);
+}
+
+/** `e2eEffectiveRoundLimits` as it was before RUN-1, for validating an admission an earlier control plane wrote (and for the built-in qualification probes, whose plans are pinned). */
+export function e2eEffectiveRoundLimitsBeforeRun1(policy: E2ELimits, usesModel: boolean): E2ELimits {
+  return usesModel ? policy : capLimits(policy, E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1);
 }
 
 /** The shortest local part of an account email that is scanned for and redacted on its own. A shorter one would match too much ordinary text. */

@@ -6,7 +6,7 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationBuildSourceManifestS
   E2EApplicationPreparedGroupFactsSchema, E2EAppArtifactRefSchema, E2EAppBuildManifestSchema,
   E2EApplicationPlanIntentSchema, E2EExecutionPlanSchema, E2ERuntimeCapabilityDescriptorSchema, E2EScenarioBundleSchema,
   E2ERegisteredRuntimeSchema, canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes,
-  e2eAppBuildManifestDigest, e2eEffectiveRoundLimits, e2ePolicyDigest, e2eRuntimeBindingKey, e2eRuntimeBindingOf, e2eScenarioBundleDigest, selectE2EApplicationExecutionPlan,
+  e2eAppBuildManifestDigest, e2eEffectiveRoundLimits, e2eEffectiveRoundLimitsBeforeRun1, e2ePolicyDigest, e2eRuntimeBindingKey, e2eRuntimeBindingOf, e2eScenarioBundleDigest, selectE2EApplicationExecutionPlan,
   projectE2EApplicationPortableSelection, validateE2EAppBuildBinding, verifyE2ESourceSnapshot, E2EApplicationPortableProjectionSchema,
   E2EApplicationExecutionAdmissionSchema, E2EApplicationGroupAdmissionSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAgentTraceFileSchema, E2E_AGENT_TRACE_FILE_MAX_BYTES,
   type CandidateManifest, type E2EApplicationApprovalBinding, type E2EApplicationBuildSourceManifest,
@@ -166,7 +166,7 @@ function snapshotDigest(snapshot: E2ESourceSnapshot): string {
   return hash.digest("hex");
 }
 function selectedContextCopy(input: unknown): E2EApplicationCompilationContext {
-  const context = ordinaryRecord(input, ["selectionInput", "executionPlan", "bundle", "applicationBindings", "runtimeBindings", "launchTargets", "modelRoute", "cliHostsByProfile", "preparedEnvironmentsByGroup", "policyLimitsForModelFreeShards", "replay"], "application compilation context");
+  const context = ordinaryRecord(input, ["selectionInput", "executionPlan", "bundle", "applicationBindings", "runtimeBindings", "launchTargets", "modelRoute", "cliHostsByProfile", "preparedEnvironmentsByGroup", "policyLimitsForModelFreeShards", "modelFreeShardRule", "replay"], "application compilation context");
   const selectionRaw = ordinaryRecord(context.selectionInput, ["candidateDigest", "expectedCandidate", "sourceSnapshot", "planDigest", "policy", "scenarios", "selectedTargetIds", "sandboxAvailability", "runtimeAvailability", "portableApprovalBinding", "approvedSemanticApproval", "mockableComponents", "intent", "intentDigest", "setupProposal", "setupApproval", "applicationApprovalBinding", "registeredRuntimes", "runtimeAccountRefs", "now"], "application selection input");
   const selectionInput = { ...selectionRaw, expectedCandidate: bounded(selectionRaw.expectedCandidate, 262_144), sourceSnapshot: snapshotCopy(selectionRaw.sourceSnapshot),
     policy: bounded(selectionRaw.policy), scenarios: bounded(selectionRaw.scenarios), selectedTargetIds: bounded(selectionRaw.selectedTargetIds),
@@ -193,6 +193,7 @@ function selectedContextCopy(input: unknown): E2EApplicationCompilationContext {
   return { selectionInput, executionPlan: E2EExecutionPlanSchema.parse(bounded(context.executionPlan)), bundle: E2EScenarioBundleSchema.parse(bounded(context.bundle)),
     applicationBindings, runtimeBindings, launchTargets, modelRoute, cliHostsByProfile, preparedEnvironmentsByGroup,
     ...(context.policyLimitsForModelFreeShards === true ? { policyLimitsForModelFreeShards: true as const } : {}),
+    ...(context.modelFreeShardRule === "before-run-1" ? { modelFreeShardRule: "before-run-1" as const } : {}),
     ...(context.replay === undefined ? {} : { replay: replayContextCopy(context.replay) }) };
 }
 
@@ -402,7 +403,8 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
     const groupUsesModel = caseScenarios.some((scenario) => scenario.steps.some((step) => step.kind === "agent"));
     // A project that pinned an AI navigation route has policy limits sized for agent steps; a shard with no agent step runs under the model-free limits instead (Task 4.3a).
     // A policy that pinned no route keeps the limits it was approved with, and so does an admission written before this rule (the validator says so in the context).
-    const limits = context.selectionInput.policy.modelRouteRevision === null || context.policyLimitsForModelFreeShards === true ? context.selectionInput.policy.limits : e2eEffectiveRoundLimits(context.selectionInput.policy.limits, groupUsesModel);
+    const effectiveLimits = context.modelFreeShardRule === "before-run-1" ? e2eEffectiveRoundLimitsBeforeRun1 : e2eEffectiveRoundLimits;
+    const limits = context.selectionInput.policy.modelRouteRevision === null || context.policyLimitsForModelFreeShards === true ? context.selectionInput.policy.limits : effectiveLimits(context.selectionInput.policy.limits, groupUsesModel);
     const timeoutMs = Math.min(...expectedCases.map(() => limits.caseTimeoutMs), limits.runTimeoutMs);
     // Task 4.6b: an audit replay runs the agent steps with no model route at all (its admission names none) and a read-only store of the bound recordings. A shard of it with no agent step
     // is an ordinary shard. Nothing about a group that is not a replay changes.
@@ -460,7 +462,7 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
   const contextDigest = sha256(canonicalJson({ selectionInput: { ...context.selectionInput, sourceSnapshot: undefined }, executionPlan: context.executionPlan,
     bundle: context.bundle, applicationBindings: [...context.applicationBindings], runtimeBindings: [...context.runtimeBindings], launchTargets: context.launchTargets,
     modelRoute: context.modelRoute, cliHostsByProfile: [...context.cliHostsByProfile], preparedEnvironmentsByGroup: [...context.preparedEnvironmentsByGroup],
-    policyLimitsForModelFreeShards: context.policyLimitsForModelFreeShards, replay: context.replay }));
+    policyLimitsForModelFreeShards: context.policyLimitsForModelFreeShards, modelFreeShardRule: context.modelFreeShardRule, replay: context.replay }));
   const snapshot = context.selectionInput.sourceSnapshot;
   const runtimeAdmission = Object.freeze({ schemaVersion: "e2e-application-compiled-admission/v1" as const,
     expectedCandidate: context.selectionInput.expectedCandidate, sourceSnapshot: snapshot, sourceSnapshotDigest: snapshotDigest(snapshot), contextDigest,
@@ -729,25 +731,34 @@ export function validateE2EApplicationExecutionAdmission(admissionInput: unknown
     throw new Error("application admission does not exactly cover runnable application groups");
   }
   const applicationSuites = runnableApplicationGroups.map((group) => {
-    const compiled = compileE2EApplicationScenarios({ context, groupId: group.groupId });
-    const admitted = appAdmissions.find((item) => item.outerBinding.groupId === group.groupId)!;
-    const outerBinding = admission.round.groupBindings.find((item) => item.groupId === group.groupId);
-    const cliHost = admission.cliHosts.find((item) => item.profileId === compiled.cliHost.profileId);
-    if (!outerBinding || canonicalJson(admitted.outerBinding) !== canonicalJson(outerBinding)
-      || outerBinding.executionPlanDigest !== executionPlan.digest || outerBinding.executionMode !== group.mode
-      || outerBinding.mockManifestDigest !== group.mockManifestDigest || canonicalJson(outerBinding.expectedCases) !== canonicalJson(group.expectedCases)
-      || outerBinding.appBuildDigest !== sha256(canonicalJson(compiled.inventory))
-      || outerBinding.environmentDigest !== compiled.preparedEnvironmentDigest
-      || outerBinding.runtimeManifestDigest !== e2eCompiledRuntime(compiled)?.manifestDigest
-      || canonicalJson(admitted.cliHost) !== canonicalJson({ profileId: compiled.cliHost.profileId, descriptor: cliHost?.descriptor })
-      || admitted.preparedEnvironmentDigest !== compiled.preparedEnvironmentDigest
-      || canonicalJson(admitted.originByApplicationId) !== canonicalJson(compiled.originByApplicationId)
-      || admitted.compiledInventoryDigest !== compiled.inventory.digest
-      || canonicalJson(admitted.shards) !== canonicalJson(compiled.inventory.shards.map((shard) => ({ shardId: shard.shardId, targetId: shard.targetId,
-        inventoryDigest: shard.inventoryDigest, configDigest: shard.expectedConfigDigest, expectedCaseIds: [...shard.expectedCaseIds] })))) {
-      throw new Error("application admission group differs from fresh shard compilation, host descriptor, or prepared facts");
+    // The current rule first. A route-pinned policy's admission written before the evaluation fix RUN-1 has shards with no agent step compiled under the 60 s / 10 s model-free
+    // limits, and its round carries the policy's own limits when it had an agent step, so it cannot say which rule it was written under: it is accepted when it matches the earlier
+    // rule exactly (the same fresh compilation, only with the earlier limits). Anything that matches neither is refused with the current rule's reason.
+    const validateGroup = (groupContext: E2EApplicationCompilationContext) => {
+      const compiled = compileE2EApplicationScenarios({ context: groupContext, groupId: group.groupId });
+      const admitted = appAdmissions.find((item) => item.outerBinding.groupId === group.groupId)!;
+      const outerBinding = admission.round.groupBindings.find((item) => item.groupId === group.groupId);
+      const cliHost = admission.cliHosts.find((item) => item.profileId === compiled.cliHost.profileId);
+      if (!outerBinding || canonicalJson(admitted.outerBinding) !== canonicalJson(outerBinding)
+        || outerBinding.executionPlanDigest !== executionPlan.digest || outerBinding.executionMode !== group.mode
+        || outerBinding.mockManifestDigest !== group.mockManifestDigest || canonicalJson(outerBinding.expectedCases) !== canonicalJson(group.expectedCases)
+        || outerBinding.appBuildDigest !== sha256(canonicalJson(compiled.inventory))
+        || outerBinding.environmentDigest !== compiled.preparedEnvironmentDigest
+        || outerBinding.runtimeManifestDigest !== e2eCompiledRuntime(compiled)?.manifestDigest
+        || canonicalJson(admitted.cliHost) !== canonicalJson({ profileId: compiled.cliHost.profileId, descriptor: cliHost?.descriptor })
+        || admitted.preparedEnvironmentDigest !== compiled.preparedEnvironmentDigest
+        || canonicalJson(admitted.originByApplicationId) !== canonicalJson(compiled.originByApplicationId)
+        || admitted.compiledInventoryDigest !== compiled.inventory.digest
+        || canonicalJson(admitted.shards) !== canonicalJson(compiled.inventory.shards.map((shard) => ({ shardId: shard.shardId, targetId: shard.targetId,
+          inventoryDigest: shard.inventoryDigest, configDigest: shard.expectedConfigDigest, expectedCaseIds: [...shard.expectedCaseIds] })))) {
+        throw new Error("application admission group differs from fresh shard compilation, host descriptor, or prepared facts");
+      }
+      return compiled;
+      };
+    try { return validateGroup(context); } catch (error) {
+      if (admission.policy.modelRouteRevision === null || context.policyLimitsForModelFreeShards === true) throw error;
+      try { return validateGroup({ ...context, modelFreeShardRule: "before-run-1" as const }); } catch { throw error; }
     }
-    return compiled;
   });
   if (admission.replay !== undefined) assertReplayAdmission(admission.replay, applicationSuites);
   const portableProjection = projectE2EApplicationPortableSelection(selectionInput);

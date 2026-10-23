@@ -385,7 +385,7 @@ function projectSetupPolicy(proposal: E2ESetupProposal, agentRoute?: { revision:
     schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: proposal.targets,
     defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision: agentRoute?.revision ?? null,
     capture: PROJECT_SETUP_CAPTURE_POLICY,
-    // A setup that pins a route runs under limits derived from the route's budgets (D2); one that pins none keeps the small model-free limits.
+    // A setup that pins a route runs under limits derived from the route's budgets (D2); one that pins none gets the normal limits (a build and an app start need minutes), with model budgets of one (RUN-1).
     limits: agentRoute === undefined
       ? { ...E2E_MODEL_FREE_LIMITS }
       : e2eAgentRoutePolicyLimits(agentRoute.definition.budgets),

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, WEB_API_AGENT_GUARD_MARKER_TESTID, WEB_API_AGENT_GUARD_PAGE_PATH, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_MAX_ACTIONS, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
   E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
-  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimits, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
+  e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimitsBeforeRun1, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
   selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EReplaySourceCase, type E2EReplayTrace, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { compileE2EApplicationScenarios, e2eApplicationGroupUsesModel, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../application-build-source.js";
@@ -322,13 +322,15 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
   const replayBindings = options.replay === undefined ? undefined : options.replay.traces.map((trace) => ({ caseId: trace.caseId, stepIndex: trace.stepIndex, keyHash: trace.keyHash,
     traceSha256: trace.binding.traceSha256, actionCount: trace.binding.actionCount }));
+  // The built-in probes keep the model-free limits they were pinned and qualified with (before the evaluation fix RUN-1): they are small fixtures, not a customer's build.
   const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets, modelRoute: options.replay === undefined ? options.modelRoute ?? null : null, cliHostsByProfile,
+    modelFreeShardRule: "before-run-1" as const,
     preparedEnvironmentsByGroup: new Map([[group.groupId, { preparedEnvironmentDigest, originByApplicationId: [{ applicationId: application.applicationId, origin: WEB_API_PROBE_APP_ORIGIN }] }]]),
     ...(replayBindings === undefined ? {} : { replay: { bindings: replayBindings } }) };
   const compiled = compileE2EApplicationScenarios({ context, groupId: group.groupId });
   const roundId = randomUUID();
   // As the control plane admits a round: a route-pinned policy's round with no agent step runs under the model-free limits, and its deadline fits them (Task 4.3a).
-  const roundLimits = options.modelRoute === undefined ? policy.limits : e2eEffectiveRoundLimits(policy.limits, e2eApplicationGroupUsesModel(compiled));
+  const roundLimits = options.modelRoute === undefined ? policy.limits : e2eEffectiveRoundLimitsBeforeRun1(policy.limits, e2eApplicationGroupUsesModel(compiled));
   const deadlineSpanMs = options.deadlineMs ?? Math.min(300_000, roundLimits.runTimeoutMs);
   const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId: options.runId ?? randomUUID(), roundId, taskId: options.taskId ?? "task-orders", operationId: randomUUID(), operationFence: 1,
     workflowRevision: 1, groupId: group.groupId, executionPlanDigest: executionPlan.digest, executionMode: group.mode, mockManifestDigest: group.mockManifestDigest,

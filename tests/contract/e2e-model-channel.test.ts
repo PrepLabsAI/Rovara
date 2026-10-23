@@ -2,15 +2,18 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import * as barrel from "../../packages/contracts/src/index.js";
+import { E2E_DEFAULT_LIMITS } from "../../packages/contracts/src/e2e.js";
 import {
   E2E_AGENT_TOOL_NAMES,
   E2E_MODEL_CHANNEL_SOCKET_PATH,
   E2E_MODEL_CHANNEL_STEP_PATH,
   E2E_MODEL_FREE_LIMITS,
+  E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1,
   E2EModelChannelStepMarkerSchema,
   E2EModelDayBudgetRequestSchema,
   E2EModelDayBudgetResponseSchema,
   e2eEffectiveRoundLimits,
+  e2eEffectiveRoundLimitsBeforeRun1,
   e2eModelRouteRevisionNumber,
   e2eScannableEmailLocalPart,
   E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES,
@@ -922,11 +925,30 @@ describe("the step marker, the budget callback and the effective round limits (T
   it("e2eEffectiveRoundLimits: model-free is the model-free limits, a model group keeps the policy", () => {
     const routeLimits = { runTimeoutMs: 1_200_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 300_000, maxActionsPerCase: 54,
       maxModelRequests: 40, maxInputTokens: 400_000, maxOutputTokens: 40_960, maxSpendUsd: null };
-    expect(e2eEffectiveRoundLimits(routeLimits, false)).toEqual(E2E_MODEL_FREE_LIMITS);
-    expect(E2E_MODEL_FREE_LIMITS).toMatchObject({ caseTimeoutMs: 10_000, runTimeoutMs: 60_000, maxActionsPerCase: 10 });
+    // RUN-1: a route-pinned policy's round with no agent step runs under the normal time (run 600 s, case 90 s), not 60 s and 10 s. Startup and preparation stay what the policy said
+    // (10 s; nothing reads them), because a round never gets more than its policy allows.
+    expect(e2eEffectiveRoundLimits(routeLimits, false)).toEqual({ ...E2E_MODEL_FREE_LIMITS, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000 });
+    expect(e2eEffectiveRoundLimits(routeLimits, false)).toMatchObject({ runTimeoutMs: 600_000, caseTimeoutMs: 90_000, maxActionsPerCase: 30, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1 });
     expect(e2eEffectiveRoundLimits(routeLimits, true)).toEqual(routeLimits);
     // It never raises a limit a policy already lowered.
-    expect(e2eEffectiveRoundLimits({ ...routeLimits, caseTimeoutMs: 5_000, maxSpendUsd: 2 }, false)).toMatchObject({ caseTimeoutMs: 5_000, runTimeoutMs: 60_000, maxSpendUsd: 2 });
+    expect(e2eEffectiveRoundLimits({ ...routeLimits, caseTimeoutMs: 5_000, maxSpendUsd: 2 }, false)).toMatchObject({ caseTimeoutMs: 5_000, runTimeoutMs: 600_000, maxSpendUsd: 2 });
+  });
+
+  it("the model-free limits are the normal limits with model budgets of the least a limit may be (RUN-1)", () => {
+    expect(E2E_MODEL_FREE_LIMITS).toEqual({ ...E2E_DEFAULT_LIMITS, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1 });
+    expect(E2E_MODEL_FREE_LIMITS).toMatchObject({ runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 180_000, caseTimeoutMs: 90_000 });
+    expect(Object.isFrozen(E2E_MODEL_FREE_LIMITS)).toBe(true);
+    // The normal run time still leaves the host's teardown inside the stale-run sweep (one hour).
+    expect(E2E_MODEL_FREE_LIMITS.runTimeoutMs).toBeLessThan(3_600_000 / 2);
+  });
+
+  it("the limits before RUN-1 stay available, pinned, for admissions an earlier control plane wrote", () => {
+    expect(E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1).toEqual({ runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10,
+      maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null });
+    const routeLimits = { runTimeoutMs: 1_200_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 300_000, maxActionsPerCase: 54,
+      maxModelRequests: 40, maxInputTokens: 400_000, maxOutputTokens: 40_960, maxSpendUsd: null };
+    expect(e2eEffectiveRoundLimitsBeforeRun1(routeLimits, false)).toEqual(E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1);
+    expect(e2eEffectiveRoundLimitsBeforeRun1(routeLimits, true)).toEqual(routeLimits);
   });
 
   it("e2eScannableEmailLocalPart: short and word-like local parts are not scanned, the host-generated form is", () => {

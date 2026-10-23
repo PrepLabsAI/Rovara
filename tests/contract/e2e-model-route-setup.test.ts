@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { E2EPolicySchema, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, type E2EApplicationPlanIntent } from "@agentx/contracts";
+import { E2EPolicySchema, E2E_DEFAULT_LIMITS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, canonicalJson, e2ePolicyDigest, type E2EApplicationPlanIntent } from "@agentx/contracts";
 import { STALE_RUN_SWEEP_AGE_MS } from "../../packages/verifier/src/host/docker-application-host.js";
 import { e2eApplicationModelUseWithinRound } from "../../packages/verifier/src/application-result-adapter.js";
 import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/config.js";
@@ -90,10 +91,41 @@ describe("a setup proposal and its approval carry the AI navigation route", () =
     expect(within(caps.maxModelCallsPerGroup + 1, 1_000, 1_000)).toBe(false);
   });
 
-  it("keeps the earlier small limits for a setup that pins no route", async () => {
+  // Evaluation fix RUN-1: a setup that pins no route used to get a 60 s run and 10 s cases, which no ordinary app builds in. It now gets the normal limits (E2E_DEFAULT_LIMITS: run 600 s,
+  // startup 60 s, preparation 180 s, case 90 s, 30 actions per case); its model budgets stay at the least a limit may be, because such a round makes no model call.
+  it("gives a setup that pins no route the normal limits, with zero-use model budgets (RUN-1)", async () => {
     const { harness } = await harnessFor(undefined);
-    const { limits } = E2EPolicySchema.parse((await propose(harness)).body.policy);
-    expect(limits).toMatchObject({ runTimeoutMs: 60_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1 });
+    const policy = E2EPolicySchema.parse((await propose(harness)).body.policy);
+    expect(policy.limits).toEqual({ ...E2E_DEFAULT_LIMITS, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1 });
+    expect(policy.limits).toMatchObject({ runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 180_000, caseTimeoutMs: 90_000 });
+  });
+
+  // The setup policy digest this moves, for the setup of the contract fixture repository (tests/support/e2e-application-plan-fixtures.ts): the no-route policy's limits are in its digest, so
+  // it moves, and a proposal made before this change is no longer approvable ("propose the setup again"). The route-pinned policy's limits come from the route's budgets (the test above),
+  // so it does not move; a round with no agent step is capped when it is admitted, not in the policy.
+  const NO_ROUTE_POLICY_DIGEST_BEFORE_RUN_1 = "7e658bf43c3dd070c054b438e16e1ec4d9bd1527599dc1053d491b6e7b20a767";
+  const NO_ROUTE_POLICY_DIGEST = "a14f64fc2e291bb6018f8e90881ba2e549ce5f9b60679cc1179a53cc8d9d0ab7";
+  it("moves the no-route setup policy's digest (RUN-1)", async () => {
+    const { harness } = await harnessFor(undefined);
+    const digest = e2ePolicyDigest(E2EPolicySchema.parse((await propose(harness)).body.policy));
+    expect(digest).not.toBe(NO_ROUTE_POLICY_DIGEST_BEFORE_RUN_1);
+    expect(digest).toBe(NO_ROUTE_POLICY_DIGEST);
+  });
+
+  it("refuses to approve a no-route proposal made before RUN-1 and says to propose the setup again, and records nothing", async () => {
+    const { harness } = await harnessFor(undefined);
+    const proposal = await propose(harness);
+    // The proposal exactly as the control plane before RUN-1 stored it: the same policy, with the earlier model-free limits.
+    const stored = JSON.parse(harness.s3.objects.get(String(proposal.body.proposalRef))!) as { policy: { limits: unknown } };
+    stored.policy.limits = { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null };
+    const bytes = canonicalJson(stored);
+    const sha = createHash("sha256").update(bytes, "utf8").digest("hex");
+    const ref = `project-setup-proposals/${String(proposal.body.proposalRef).split("/")[1]}/${sha}.json`;
+    harness.s3.objects.set(ref, bytes);
+    const refused = await approve(harness, { body: { proposalRef: ref, proposalSha256: sha } });
+    expect(refused.status).toBeGreaterThanOrEqual(400);
+    expect(JSON.stringify(refused.body)).toMatch(/propose the setup again/);
+    expect(JSON.stringify(refused.body)).not.toMatch(/ProjectSetupApproval|undefined/);
   });
 
   it("records revision 1 and the latest pointer when the setup is approved, and the approval holds the same policy", async () => {

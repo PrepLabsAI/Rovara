@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { type E2EScenario, E2EApplicationPlanIntentSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V1, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, E2E_MODEL_FREE_LIMITS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
+import { type E2EScenario, E2EApplicationPlanIntentSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V1, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, E2E_MODEL_FREE_LIMITS, E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
   deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, e2eRuntimeBindingKey, E2ESetupProposalSchema, createCandidateManifest, inspectE2ERepository, proposeE2ESetup, verifyE2ESetupProposal } from "@agentx/contracts";
 import { registryFor } from "../support/e2e-account-registry-fixtures.js";
@@ -436,6 +436,9 @@ describe("setup proposals stored before Task 3.3", () => {
 describe("a baseline round's admission on a project whose policy pins a model route", () => {
   const ROUTE = "r1-0123456789ab";
   const ROUTE_LIMITS = e2eAgentRoutePolicyLimits(E2E_MODEL_ROUTE_DEFAULT_BUDGETS);
+  // RUN-1: what a round with no agent step runs under on a route-pinned policy: the normal limits, except that the policy's own startup and preparation limits (10 s, which nothing reads)
+  // stay, because a round never gets more than its policy allows. It used to be the 60 s run and 10 s case limits.
+  const ROUTE_NO_AGENT_LIMITS = { ...E2E_MODEL_FREE_LIMITS, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000 };
   const agentScenario: E2EScenario = { ...csvScenario, scenarioId: "agent-orders", steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }],
     assertions: [{ kind: "visible", testId: "orders", equals: true }] };
   const agentRow = () => webApiRow("web", {}, (value) => ({ ...value, supportedSteps: [...value.supportedSteps, "agent" as const] }));
@@ -520,8 +523,49 @@ describe("a baseline round's admission on a project whose policy pins a model ro
 
     it("is not what the current control plane writes: a candidate round of the same plan carries the model-free limits and validates too (the positive control)", async () => {
       const built = (await routed({ baseline: false, plan: "plain" }))();
-      expect(built.admission.round.limits).toEqual(E2E_MODEL_FREE_LIMITS);
+      expect(built.admission.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
       expect(() => validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(built.bytes))).not.toThrow();
+    });
+  });
+
+  // Evaluation fix RUN-1 (checklist 3): the control plane before it admitted a route-pinned round with no agent step under the 60 s run and 10 s case limits, and compiled each shard with no
+  // agent step under the same cap. The fixtures are admissions written by the real builder at 38b55645 (before RUN-1): a plain plan, and a web plan with an AI navigation scenario plus an
+  // API plan (the round keeps the policy's agent-sized limits, while the API shard, which has no agent step, was compiled under the 10 s case limit).
+  describe("an admission written before the evaluation fix RUN-1", () => {
+    const stored = (name: string) => readFileSync(new URL(`../fixtures/${name}`, import.meta.url));
+    const rules = (validated: ReturnType<typeof validateE2EApplicationExecutionAdmission>) => Object.fromEntries(validated.applicationSuites
+      .map((suite) => [suite.runtimeKind, suite.runtimeAdmissionContext.modelFreeShardRule ?? "current"]));
+
+    it("a route-pinned round with no agent step, written under the 60 s / 10 s limits, still validates, on the earlier rule", () => {
+      const decoded = decodeE2EApplicationExecutionAdmission(stored("admission-before-run-1-route-pinned-plain.json"));
+      expect(decoded.policy.modelRouteRevision).toBe(ROUTE);
+      expect(decoded.round.limits).toEqual(E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1);
+      expect(decoded.round.limits).not.toEqual(ROUTE_NO_AGENT_LIMITS);
+      expect(agentScenarioIds(decoded)).toEqual([]);
+      expect(rules(validateE2EApplicationExecutionAdmission(decoded))).toEqual({ web: "before-run-1" });
+    });
+
+    it("a web plan with an AI navigation scenario and an API plan validates: the web shard on the current rule, the API shard (no agent step) on the earlier one", () => {
+      const decoded = decodeE2EApplicationExecutionAdmission(stored("admission-before-run-1-web-agent-and-api.json"));
+      expect(decoded.round.limits).toEqual(ROUTE_LIMITS);
+      expect(agentScenarioIds(decoded)).toEqual(["owner-agent-page"]);
+      expect(rules(validateE2EApplicationExecutionAdmission(decoded))).toEqual({ web: "current", api: "before-run-1" });
+    });
+
+    it("is not accepted on any other terms: a shard digest that matches neither rule is refused with the current rule's reason", () => {
+      const { admissionDigest: _digest, ...body } = JSON.parse(stored("admission-before-run-1-route-pinned-plain.json").toString("utf8")) as { groups: Array<{ shards: Array<{ configDigest: string }> }>; admissionDigest: string };
+      void _digest;
+      const original = body.groups[0]!.shards[0]!.configDigest;
+      body.groups[0]!.shards[0]!.configDigest = `${original[0] === "a" ? "b" : "a"}${original.slice(1)}`;
+      const resealed = { ...body, admissionDigest: createHash("sha256").update(canonicalJson(body)).digest("hex") };
+      expect(() => validateE2EApplicationExecutionAdmission(resealed)).toThrow(/differs from fresh shard compilation/);
+    });
+
+    it("is not what the current control plane writes: a candidate round of the same plan gets the normal limits and a 600 s deadline, and validates on the current rule (the positive control)", async () => {
+      const built = (await routed({ baseline: false, plan: "plain" }))();
+      expect(built.admission.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
+      expect(Date.parse(built.admission.round.deadlineAt) - Date.parse(built.admission.round.admittedAt)).toBe(600_000);
+      expect(rules(validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(built.bytes)))).toEqual({ web: "current" });
     });
   });
 
@@ -535,8 +579,8 @@ describe("a baseline round's admission on a project whose policy pins a model ro
       expect(decoded.round.groupBindings.length).toBeGreaterThan(0);
       expect(decoded.round.groupBindings.every((item) => item.modelRouteRevision === null)).toBe(true);
       expect(agentScenarioIds(decoded), plan).toEqual([]);
-      expect(decoded.round.limits).toEqual(E2E_MODEL_FREE_LIMITS);
-      expect(decoded.policy.limits).toEqual(E2E_MODEL_FREE_LIMITS);
+      expect(decoded.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
+      expect(decoded.policy.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
       expect(() => validateE2EApplicationExecutionAdmission(decoded)).not.toThrow();
       await expect(agentStepsOf(built)).resolves.toBe(false);
     }
@@ -577,7 +621,7 @@ describe("a baseline round's admission on a project whose policy pins a model ro
 
   it("a candidate round of a route-pinned project with no AI navigation step runs under the model-free limits, and with one keeps the agent-sized limits", async () => {
     const plain = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "plain" }))().bytes);
-    expect(plain.round.limits).toEqual(E2E_MODEL_FREE_LIMITS);
+    expect(plain.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
     expect(plain.policy.limits).toEqual(ROUTE_LIMITS);
     const mixed = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "mixed" }))().bytes);
     expect(mixed.round.limits).toEqual(ROUTE_LIMITS);
@@ -623,12 +667,14 @@ describe("a baseline round's admission on a project whose policy pins a model ro
     expect(roundOf.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: ROUTE });
     expect(roundOf.round.limits).toEqual(ROUTE_LIMITS);
     expect(usesModelByKind(roundOf)).toEqual({ web: true, api: false });
+    // Written now, no group needs the earlier model-free rule (RUN-1).
+    expect(validateE2EApplicationExecutionAdmission(roundOf).applicationSuites.every((suite) => suite.runtimeAdmissionContext.modelFreeShardRule === undefined)).toBe(true);
 
     const baselineOf = build(true);
     expect(baselineOf.modelRoute).toBeNull();
     expect(baselineOf.round.groupBindings).toHaveLength(2);
     expect(baselineOf.round.groupBindings.every((item) => item.modelRouteRevision === null)).toBe(true);
-    expect(baselineOf.round.limits).toEqual(E2E_MODEL_FREE_LIMITS);
+    expect(baselineOf.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
     expect(agentScenarioIds(baselineOf)).toEqual([]);
     expect(baselineOf.bundle.scenarios.map((scenario) => scenario.scenarioId).sort()).toEqual([fx.apiScenario.scenarioId, fx.webScenario.scenarioId].sort());
     expect(usesModelByKind(baselineOf)).toEqual({ web: false, api: false });

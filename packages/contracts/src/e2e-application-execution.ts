@@ -312,6 +312,11 @@ export type E2EApplicationCompilationContext = Readonly<{
    */
   policyLimitsForModelFreeShards?: true;
   /**
+   * Set only by the worker's validator (and by the built-in qualification probes, whose plans are pinned): the shards with no agent step are compiled under the model-free limits as they
+   * were before the evaluation fix RUN-1 (60 s run, 10 s case) instead of the normal ones. An admission written by an earlier control plane says so by only matching that way.
+   */
+  modelFreeShardRule?: "before-run-1";
+  /**
    * Set only for an audit replay (Task 4.6b): the group runs with no model route and a read-only store of the bound recordings, whatever agent steps its scenarios have. It carries the
    * binding of each recording (what the verified round showed for the step), never the recording itself, so the compiled files do not depend on the recordings' bytes.
    */
