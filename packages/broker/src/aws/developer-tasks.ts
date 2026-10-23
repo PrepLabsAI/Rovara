@@ -188,6 +188,7 @@ import {
   type TurnParty,
   type WorkspaceCharge,
 } from "../developer/task-records.js";
+import { recoverStrandedPlanning, stoppedStepReason, strandedPlanningRun } from "./workflow-cancel-reconcile.js";
 import { GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, WORKFLOW_DISPATCH_PK, hashJson, isConditional, planDocumentKindName, previousPlanDocumentBlock, workflowDispatchItem, type WorkflowDispatchRecord } from "./broker-shared.js";
 import { planEvidencePointerKey, type PlanEvidencePointer } from "../developer/plan-evidence-jobs.js";
 import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown, type LoadedDocument } from "../developer/plan-artifacts.js";
@@ -1279,6 +1280,12 @@ export async function taskView(
     void _internalOperationId;
     workflow = { ...publicWorkflow, decisions: task.workflow.decisions.map(({ answerOverrides, commentsIncluded, via, ...decision }) => { void answerOverrides; void commentsIncluded; void via; return decision; }) };
   }
+  // PLANINC-2: planning that shows RUNNING although its run ended and the workspace is free (a stop recorded before the cancel fix)
+  // reads as blocked, so the owner is offered Retry; the stored row is blocked by that retry, never by a read.
+  if (workflow !== undefined && task.workflow !== undefined) {
+    const stopped = strandedPlanningRun(task, workspace, operations);
+    if (stopped !== undefined) workflow = { ...workflow, state: "BLOCKED", blockReason: stoppedStepReason("PLAN", stopped.status) };
+  }
   if (options.details && workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
     const activeArtifactType = workflow.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
       : workflow.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
@@ -2173,7 +2180,8 @@ function keptProposedIds(policy: WorkflowCheckPolicy | undefined): string[] {
   return policy?.selectedProposedIds === undefined ? proposed : proposed.filter((id) => policy.selectedProposedIds!.includes(id));
 }
 
-async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
+/** `afterRecovery`: this call is the one retryTaskWorkflow makes itself once it has blocked a stranded planning step; it never recovers twice. */
+async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown, afterRecovery = false): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-retry");
   const access = await authorizeTaskAction(deps, caller, taskId, "retry");
   const { task } = access;
@@ -2385,6 +2393,25 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
     : (await deps.actions.operations(task.workspaceId)).find((operation) => operation.requestId === request.requestId
       && (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "PLAN"));
   if (replayed !== undefined) return { task: await taskView(deps, task, { events: 0, details: false }) };
+  // PLANINC-2: planning still RUNNING although its run ended and nothing holds the workspace (a stop recorded before the cancel
+  // fix, or a release that never reached the workflow) is blocked first, in one transaction conditional on the same row,
+  // workspace and run, so the ordinary Retry planning below applies to it. Nothing else changes: no approval, no dispatch.
+  if (!afterRecovery && task.workflow !== undefined && task.workflow.stage === "PLAN" && task.workflow.state === "RUNNING") {
+    const [workspace, runs] = await Promise.all([deps.actions.workspace(task.workspaceId), deps.actions.operations(task.workspaceId)]);
+    const stopped = strandedPlanningRun(task, workspace, runs);
+    if (stopped !== undefined) {
+      if (request.expectedRevision !== undefined && request.expectedRevision !== task.workflow.revision) {
+        throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
+      }
+      await recoverStrandedPlanning(deps.documentClient, deps.tableName, { taskId, workflow: task.workflow }, workspace, stopped, iso(deps));
+      const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
+      if (fresh.workflow?.stage !== "PLAN" || fresh.workflow.state !== "BLOCKED") {
+        throw agentXError("IDEMPOTENCY_CONFLICT", "this task changed while the retry was starting; refresh the task and try again");
+      }
+      // The owner saw the revision the stranded step had; the block moved it on by one.
+      return retryTaskWorkflow(deps, caller, taskId, request.expectedRevision === undefined ? value : { ...(value as Record<string, unknown>), expectedRevision: fresh.workflow.revision }, true);
+    }
+  }
   if (task.workflow?.stage === "IMPLEMENT" && task.workflow.state === "BLOCKED") return retryWorkflowImplementation(deps, caller, access, request);
   if (task.workflow === undefined || task.workflow.state !== "BLOCKED" || task.workflow.stage !== "PLAN") {
     throw agentXError("CONFIG_INVALID", "this action can retry blocked planning or coding, or run selected checks for blocked verification or a change ready to publish");
