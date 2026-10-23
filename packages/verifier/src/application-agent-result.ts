@@ -2,7 +2,7 @@ import { z } from "zod";
 import {
   E2EAgentTraceBindingSchema, E2EModelReceiptSchema, E2EModelRouteDefinitionSchema, E2E_AGENT_TRACES_PER_GROUP_MAX, E2E_AGENT_TRACE_FILE_MAX_BYTES, checkE2EGroupModelBudget, checkE2EStepModelAccounting, crossCheckE2EAgentLedgerReceipts, e2eModelRouteRevision,
   parseVerifiedE2EAgentActionLedger,
-  type E2EModelReceipt, type E2EModelRouteDefinition, type E2ERoundScope, type VerifiedE2EAgentActionLedger,
+  type E2EModelFailureClass, type E2EModelReceipt, type E2EModelRouteDefinition, type E2ERoundScope, type VerifiedE2EAgentActionLedger,
 } from "@agentx/contracts";
 
 /**
@@ -51,8 +51,10 @@ export type E2EAgentModelEvidence = z.infer<typeof E2EAgentModelEvidenceSchema>;
 export type E2EAgentChannelFacts = E2EAgentModelEvidence["channel"];
 export type E2EAgentTranscriptDigest = E2EAgentModelEvidence["transcriptDigests"][number];
 
-export const E2E_AGENT_UNKNOWN_CODES = ["model-receipts-mismatch", "model-prompt-credential-match", "model-route-budget-exhausted", "model-unavailable", "agent-timeout",
-  "agent-budget-exhausted", "agent-navigation-incomplete", "agent-no-download", "ambiguous-download"] as const;
+export const E2E_AGENT_UNKNOWN_CODES = ["model-receipts-mismatch", "model-prompt-credential-match", "model-route-budget-exhausted",
+  // Task 4.10B: why the model could not be used, by the failure class of its last failed call. At most one applies to a case; `model-unavailable` stays for a failure that is unclassified.
+  "model-limit-reached", "model-key-rejected", "model-not-found", "model-unreachable", "model-request-rejected", "model-provider-outage", "model-unavailable",
+  "agent-timeout", "agent-budget-exhausted", "agent-navigation-incomplete", "agent-no-download", "ambiguous-download"] as const;
 export type E2EAgentUnknownCode = (typeof E2E_AGENT_UNKNOWN_CODES)[number];
 export type E2EAgentCaseVerdict = { kind: "deterministic" } | { kind: "unknown"; code: E2EAgentUnknownCode };
 
@@ -81,6 +83,11 @@ export type E2EAgentCaseResult = Readonly<{
 }>;
 
 const PRECEDENCE: readonly E2EAgentUnknownCode[] = E2E_AGENT_UNKNOWN_CODES;
+/** The code of each failure class (`unknown` has none: it stays `model-unavailable`). */
+const FAILURE_CLASS_CODE: Readonly<Record<Exclude<E2EModelFailureClass, "unknown">, E2EAgentUnknownCode>> = Object.freeze({
+  "limit-or-rate-limited": "model-limit-reached", "key-rejected": "model-key-rejected", "model-not-found": "model-not-found", unreachable: "model-unreachable",
+  "request-rejected": "model-request-rejected", "provider-outage": "model-provider-outage",
+});
 const MODEL_UNAVAILABLE_STOPS: ReadonlySet<string> = new Set(["MODEL_UNAVAILABLE", "MODEL_PROVIDER_FAILED"]);
 
 const MISMATCH: E2EAgentCaseResult = Object.freeze({ verdict: Object.freeze({ kind: "unknown" as const, code: "model-receipts-mismatch" as const }), ledger: null, verifiedReceiptIds: [],
@@ -161,7 +168,11 @@ function evaluate(input: E2EAgentCaseInput): E2EAgentCaseResult {
   if (parsedReceipts.some((receipt) => receipt.outcome === "refused-credential-match")) codes.add("model-prompt-credential-match");
   if (stepBudgetRefused || !group.ok) codes.add("model-route-budget-exhausted");
   const stops = ledger.steps.map((step) => step.stopCode);
-  if (parsedReceipts.some((receipt) => receipt.outcome === "provider-error" || receipt.outcome === "timeout") || stops.some((stop) => stop !== null && MODEL_UNAVAILABLE_STOPS.has(stop))) codes.add("model-unavailable");
+  // The last failed model call (by step, then call) says why; a failure with no class (an older worker's receipt, or class `unknown`), or a stop with no failed call, is `model-unavailable`.
+  const lastFailed = parsedReceipts.filter((receipt) => receipt.outcome === "provider-error" || receipt.outcome === "timeout")
+    .sort((left, right) => left.stepIndex - right.stepIndex || left.callIndex - right.callIndex).at(-1);
+  if (lastFailed !== undefined) codes.add(lastFailed.failure === undefined || lastFailed.failure.class === "unknown" ? "model-unavailable" : FAILURE_CLASS_CODE[lastFailed.failure.class]);
+  else if (stops.some((stop) => stop !== null && MODEL_UNAVAILABLE_STOPS.has(stop))) codes.add("model-unavailable");
   if (stops.includes("STEP_TIMEOUT")) codes.add("agent-timeout");
   if (stops.includes("STEP_BUDGET_EXHAUSTED")) codes.add("agent-budget-exhausted");
   const otherStop = stops.some((stop) => stop !== null && !MODEL_UNAVAILABLE_STOPS.has(stop) && stop !== "STEP_TIMEOUT" && stop !== "STEP_BUDGET_EXHAUSTED");
