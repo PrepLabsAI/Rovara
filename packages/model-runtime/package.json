@@ -8,6 +8,7 @@
     "./catalog": "./dist/catalog.js",
     "./config": "./dist/config.js",
     "./e2e-route-derive": "./dist/e2e-route-derive.js",
+    "./model-discovery": "./dist/model-discovery.js",
     "./thinking-levels": "./dist/thinking-levels.js"
   },
   "types": "./dist/index.d.ts",
