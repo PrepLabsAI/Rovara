@@ -288,6 +288,47 @@ describe("liftDeclaredSettings", () => {
     expect(() => liftDeclaredSettings(template(false), template(true), onlyFirst)).toThrow(/more than the declared grant for \/agentx\/agentxlivetest123\/worker-e2e-agent-model/);
   });
 
+  describe("matches a declared ARN only as the exact entry CDK synthesizes (DEPLOYFIX review I-1, M-1)", () => {
+    type Statement = { Sid?: string; Effect: string; Action: unknown; Resource: unknown[] };
+    const statementsOf = (t: CfnTemplate, id: string) => (t.Resources![id]!.Properties as { PolicyDocument: { Statement: Statement[] } }).PolicyDocument.Statement;
+    const refused = (deployed: CfnTemplate, head: CfnTemplate) => expect(() => liftDeclaredSettings(deployed, head, declared)).toThrow(/more than the declared grant/);
+
+    it("refuses a wildcard ARN that contains a declared name", () => {
+      const head = template(true);
+      statementsOf(head, "P1")[0]!.Resource.push(arn("worker-model-fallback*"));
+      refused(template(false), head);
+    });
+
+    it("refuses another parameter whose name starts with a declared one", () => {
+      const head = template(true);
+      statementsOf(head, "P1")[0]!.Resource.push(arn("worker-e2e-agent-model-secret-arn"));
+      refused(template(false), head);
+    });
+
+    it("refuses an ARN of any region and any account for a declared name", () => {
+      const head = template(true);
+      statementsOf(head, "P1")[0]!.Resource.push(`arn:aws:ssm:*:*:parameter${FALLBACK}`);
+      refused(template(false), head);
+      const otherAccount = template(true);
+      statementsOf(otherAccount, "P2")[0]!.Resource.push({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ssm:", { Ref: "AWS::Region" }, ":123456789012", `:parameter${PARAMETER}`]] });
+      refused(template(false), otherAccount);
+    });
+
+    it("refuses a declared ARN listed twice in the holder statement", () => {
+      const head = template(true);
+      statementsOf(head, "P1")[0]!.Resource.push(arn("worker-model-fallback"));
+      expect(() => liftDeclaredSettings(template(false), head, declared)).toThrow(/in exactly one statement/);
+    });
+
+    it("does not take the declared ARN out of a statement of another Action: a deployed ssm:PutParameter grant that head empties is a removal, not the declared change", () => {
+      const deployed = template(false);
+      statementsOf(deployed, "P1").push({ Effect: "Allow", Action: "ssm:PutParameter", Resource: [arn("worker-model-fallback")] });
+      const head = template(true);
+      statementsOf(head, "P1").push({ Effect: "Allow", Action: "ssm:PutParameter", Resource: [] });
+      refused(deployed, head);
+    });
+  });
+
   it("refuses a policy that does not carry the parameter in head, a resource of another type, and a resource missing from either template", () => {
     expect(() => liftDeclaredSettings(template(false), template(false), { environment: [], grants: declared.grants })).toThrow(/head's P1 has no grant/);
     expect(() => liftDeclaredSettings(template(false), template(false), declared)).toThrow(/head's BrokerE1355FD6 does not set AGENTX_E2E_AGENT_SETTINGS_PREFIX/);

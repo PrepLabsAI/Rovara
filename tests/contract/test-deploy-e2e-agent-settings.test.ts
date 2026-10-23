@@ -114,6 +114,20 @@ describe("the e2e-agent-settings unit against head's control-plane template", ()
     expect(() => liftDeclaredSettings(deployed, headTemplate, { environment: declared.environment, grants: onlyFirst })).toThrow(/more than the declared grant for \/agentx\/agentxlivetest123\/worker-e2e-agent-model/);
   });
 
+  it("refuses a head policy whose holder statement also carries a wildcard or prefix-named ARN of a declared setting (the real synthesized shape)", () => {
+    const deployed = beforeTheUnit(headTemplate);
+    for (const extra of [
+      { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ssm:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, `:parameter${FALLBACK}*`]] },
+      { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ssm:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, `:parameter${PARAMETER}-other`]] },
+      `arn:aws:ssm:*:*:parameter${PARAMETER}`,
+    ]) {
+      const head = JSON.parse(JSON.stringify(headTemplate)) as CfnTemplate;
+      const holder = (head.Resources![E2E_AGENT_SETTINGS_UNIT.policies[0]] as unknown as Policy).Properties.PolicyDocument.Statement.find((statement) => Array.isArray(statement.Resource) && statement.Resource.some(holdsParameter))!;
+      (holder.Resource as unknown[]).push(extra);
+      expect(() => liftDeclaredSettings(deployed, head, { environment: declared.environment, grants: declared.grants }), JSON.stringify(extra)).toThrow(/more than the declared grant/);
+    }
+  });
+
   it("refuses when TEST's deployed policy differs from head by something besides the declared ARNs, in either policy", () => {
     for (const id of E2E_AGENT_SETTINGS_UNIT.policies) {
       const deployed = beforeTheUnit(headTemplate);

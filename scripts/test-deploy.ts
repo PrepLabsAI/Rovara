@@ -760,18 +760,25 @@ export function liftDeclaredSettings(
     for (const [where, resource] of [["the deployed template", deployedResource], ["head's template", headResource]] as const) {
       if (resource.Type !== "AWS::IAM::Policy") throw new Error(`${logicalId} is not an AWS::IAM::Policy in ${where}; stop for review`);
     }
-    const markers = parameterNames.map((parameterName) => `:parameter${parameterName}`);
+    // A declared ARN is matched only as the exact entry CDK synthesizes (partition, region and account refs, then exactly `:parameter<name>`): a wildcard, a longer name that starts with the
+    // declared one, or an ARN of another region or account is a different grant, stays in the comparison, and so refuses.
+    const exactArns = parameterNames.map((parameterName) => canonical({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ssm:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, `:parameter${parameterName}`]] }));
     const named = parameterNames.join(", ");
     const statementsOf = (properties: Record<string, unknown> | undefined): Array<Record<string, unknown>> => ((asRecord(properties?.PolicyDocument)?.Statement ?? []) as Array<Record<string, unknown>>);
-    const holdsMarker = (statement: Record<string, unknown>, marker: string): boolean => (Array.isArray(statement.Resource) ? statement.Resource : []).some((entry) => canonical(entry).includes(marker));
-    // Every declared ARN is in head's policy, all of them in the one same statement.
-    const holders = new Set(markers.map((marker, position) => {
-      const where = statementsOf(headResource.Properties).flatMap((statement, index) => (holdsMarker(statement, marker) ? [index] : []));
-      if (where.length !== 1) throw new Error(`head's ${logicalId} has no grant for ${parameterNames[position]} in exactly one statement; stop for review`);
+    const entriesOf = (statement: Record<string, unknown>): unknown[] => (Array.isArray(statement.Resource) ? statement.Resource : []);
+    const occurrences = (statement: Record<string, unknown>, exact: string): number => entriesOf(statement).filter((entry) => canonical(entry) === exact).length;
+    const actionKey = (statement: Record<string, unknown>): string => canonical(Array.isArray(statement.Action) ? (statement.Action as unknown[]).map((entry) => canonical(entry)).sort() : statement.Action);
+    // Every declared ARN is in head's policy exactly once, all of them in the one same statement.
+    const holders = new Set(exactArns.map((exact, position) => {
+      const where = statementsOf(headResource.Properties).flatMap((statement, index) => (occurrences(statement, exact) > 0 ? [index] : []));
+      const statement = statementsOf(headResource.Properties)[where[0] ?? 0];
+      if (where.length !== 1 || statement === undefined || occurrences(statement, exact) !== 1) throw new Error(`head's ${logicalId} has no grant for ${parameterNames[position]} in exactly one statement; stop for review`);
       return where[0]!;
     }));
     if (holders.size !== 1) throw new Error(`head's ${logicalId} does not hold ${named} in one statement; stop for review`);
-    if (markers.every((marker) => statementsOf(deployedResource.Properties).some((statement) => holdsMarker(statement, marker)))) {
+    // Only statements of the holder's Action (ssm:GetParameters) may have the declared ARNs taken out: the same ARN in a statement of another Action is not the declared grant.
+    const holderAction = actionKey(statementsOf(headResource.Properties)[[...holders][0]!]!);
+    if (exactArns.every((exact) => statementsOf(deployedResource.Properties).some((statement) => occurrences(statement, exact) > 0))) {
       // Already granted in the deployed policy (a re-run): it must be head's policy exactly, or something else changed and this unit is not the way to apply it.
       if (canonical(headResource.Properties) !== canonical(deployedResource.Properties)) throw new Error(`head's ${logicalId} differs from the deployed policy by more than the declared grant for ${named}: the deployed policy already has it, and another statement, resource or role differs; stop for review (Tier 3)`);
       continue;
@@ -785,7 +792,7 @@ export function liftDeclaredSettings(
       if (document !== undefined && Array.isArray(document.Statement)) {
         const statements = (document.Statement as Array<Record<string, unknown>>).map((statement) => {
           const listed = { ...statement };
-          if (Array.isArray(listed.Resource)) listed.Resource = (listed.Resource as unknown[]).filter((entry) => !markers.some((marker) => canonical(entry).includes(marker)));
+          if (Array.isArray(listed.Resource) && actionKey(statement) === holderAction) listed.Resource = (listed.Resource as unknown[]).filter((entry) => !exactArns.includes(canonical(entry)));
           for (const key of ["Action", "Resource"]) if (Array.isArray(listed[key])) listed[key] = (listed[key] as unknown[]).map((entry) => canonical(entry)).sort();
           return canonical(listed);
         });
