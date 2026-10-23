@@ -2,6 +2,7 @@
 // free Elastic IPs init checks, item 5); and spec 025 FR-046's sign-in checks, unchanged.
 import { environmentStackName } from "@agentx/contracts";
 import { EC2_WORKER_VCPU_REQUIREMENT, modelCheckProblem, NAT_ELASTIC_IPS, type ModelRole } from "../init/prerequisites.js";
+import { runModelCheck } from "../init/run-model-check.js";
 import { plainMessage } from "../output.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 
@@ -15,21 +16,10 @@ export async function modelChecks(context: DoctorContext): Promise<DoctorCheck[]
     const key = `${provider}/${modelId}`;
     let result = results.get(key);
     if (result === undefined) {
-      try {
-        if (provider === "openrouter") {
-          if (services.checks.openRouter === undefined) throw new Error("this agentx cannot check OpenRouter models");
-          await services.checks.openRouter(modelId, settings.models.openRouter ?? {});
-        } else if (provider === "anthropic" || provider === "openai") {
-          if (services.checks.directProvider === undefined) throw new Error(`this agentx cannot check ${provider} models`);
-          await services.checks.directProvider(provider, modelId, settings.models[provider] ?? {});
-        } else {
-          await services.checks.converse(modelId);
-        }
-        result = { ok: true, detail: `${modelId} answers a one-token test call` };
-      } catch (error) {
-        const wording = { changeModel: `agentx --env ${env} config set models.${role} <model id>`, rerun: "run agentx doctor again", region: "check this computer's network access to AWS (an environment cannot move regions), then run agentx doctor again" };
-        result = { ok: false, detail: modelCheckProblem({ modelId, role, region: settings.region, error, wording }) };
-      }
+      const wording = { changeModel: `agentx --env ${env} config set models.${role} <model id>`, rerun: "run agentx doctor again", region: "check this computer's network access to AWS (an environment cannot move regions), then run agentx doctor again" };
+      const outcome = await runModelCheck({ provider, modelId, region: settings.region, checks: services.checks, config: settings.models, sleep: services.sleep });
+      result = outcome.ok ? { ok: true, detail: `${modelId} answers a one-token test call` }
+        : { ok: false, detail: modelCheckProblem({ modelId, role, region: settings.region, error: outcome.error, ...(outcome.quota === undefined ? {} : { quota: outcome.quota }), wording }) };
       results.set(key, result);
     }
     checks.push(result.ok ? check("models", role, "ok", result.detail) : check("models", role, "fail", result.detail, `choose another model with agentx --env ${env} config set models.${role} <model id>`));

@@ -14,6 +14,7 @@ import { checkAlertWebhook, storeAlertWebhook, webhookDisplay } from "../init/an
 import type { InitSecrets } from "../init/context.js";
 import { readInstallAnswers, writeInstallAnswers } from "../init/install-state.js";
 import { modelCheckProblem, type PrerequisiteChecks } from "../init/prerequisites.js";
+import { runModelCheck } from "../init/run-model-check.js";
 import { secretFromSource, type Prompter, type SecretSource } from "../init/prompts.js";
 import { alertsTopicArn, ensureSubscribed, type AlertsApi } from "../setup/alerts.js";
 import { CLI_VERSION } from "../version.js";
@@ -27,7 +28,7 @@ export interface ConfigServices {
   stacks: StackReader;
   identity: CallerIdentity;
   /** Built for the environment's own region, once its settings are read (the model test call runs there). */
-  checks: (region: string) => Pick<PrerequisiteChecks, "converse" | "openRouter" | "directProvider">;
+  checks: (region: string) => Pick<PrerequisiteChecks, "converse" | "openRouter" | "directProvider" | "quotas">;
   alerts: AlertsApi;
   prompter: Prompter;
   processEnv: NodeJS.ProcessEnv;
@@ -114,26 +115,16 @@ function checkE2eAgentChoice(env: string, settings: EnvironmentSettings, value: 
 /** FR-049: a model key passes the same one-token test call init makes, with the environment's provider. */
 async function checkModel(services: ConfigServices, env: string, settings: EnvironmentSettings, role: ModelRole, modelId: string): Promise<void> {
   const checks = services.checks(settings.region);
-  try {
-    const provider = settings.models.providers?.[role];
-    if (provider === "openrouter") {
-      if (checks.openRouter === undefined) throw new Error("this agentx cannot check OpenRouter models");
-      await checks.openRouter(modelId, settings.models.openRouter ?? {});
-    } else if (provider === "anthropic" || provider === "openai") {
-      if (checks.directProvider === undefined) throw new Error(`this agentx cannot check ${provider} models`);
-      await checks.directProvider(provider, modelId, settings.models[provider] ?? {});
-    } else {
-      await checks.converse(modelId);
-    }
-  } catch (error) {
-    // Live check L3: init's wording names its --<role>-model flag, which config set does not take.
-    const wording = {
-      changeModel: `agentx --env ${env} config set models.${role} <another model id>`,
-      rerun: `run agentx --env ${env} config set models.${role} again`,
-      region: "check this computer's network access to AWS (an environment cannot move regions), then try again",
-    };
-    throw agentXError("CONFIG_INVALID", `${modelCheckProblem({ modelId, role, region: settings.region, error, wording })}; nothing changed`);
-  }
+  const provider = settings.models.providers?.[role] ?? "amazon-bedrock";
+  const outcome = await runModelCheck({ provider, modelId, region: settings.region, checks, config: settings.models, sleep: services.sleep });
+  if (outcome.ok) return;
+  // Live check L3: init's wording names its --<role>-model flag, which config set does not take.
+  const wording = {
+    changeModel: `agentx --env ${env} config set models.${role} <another model id>`,
+    rerun: `run agentx --env ${env} config set models.${role} again`,
+    region: "check this computer's network access to AWS (an environment cannot move regions), then try again",
+  };
+  throw agentXError("CONFIG_INVALID", `${modelCheckProblem({ modelId, role, region: settings.region, error: outcome.error, ...(outcome.quota === undefined ? {} : { quota: outcome.quota }), wording })}; nothing changed`);
 }
 
 /** Records a model in the settings, then the install answers. `agentx upgrade` reads the models from
