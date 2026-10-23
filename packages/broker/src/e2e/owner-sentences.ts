@@ -106,7 +106,7 @@ const GROUP_SENTENCES = Object.freeze({
   // The candidate's own faults (Send back to coding is offered for these four).
   "build-failed": "The app didn't install or build with this change. The coding agent needs to fix it.",
   "app-exited": "The app stopped right after it started. The coding agent needs to fix it.",
-  "app-unhealthy": "The app didn't answer its health check in time. If it needs another port, path or a longer start, set `health` and `listenPort` in the project contract; otherwise the coding agent needs to fix it.",
+  "app-unhealthy": "The app didn't answer its health check in time. If it listens on another port, answers on another path, or needs longer to start, change that in the project's browser and API check settings; otherwise the coding agent needs to fix it.",
   "seed-failed": "The app couldn't load its test data. The coding agent needs to fix it.",
   // The test account's sign-in (RUN-7): only an app's own email-and-password form with the accounts Rovara creates is supported.
   "login-failed": "The test account couldn't sign in. Signed-in checks work only with a plain email-and-password form and the test accounts Rovara creates; sign-in through Auth0, Clerk, Google or similar is not supported yet.",

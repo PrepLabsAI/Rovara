@@ -135,6 +135,7 @@ import {
   returnWorkflowToImplementation,
   sendBackProblems,
   workflowSendBackOffered,
+  workflowReadmitsApplicationRound,
   WORKFLOW_REGRESSION_INSTRUCTION,
   type WorkflowSendBackProblem,
   type WorkflowDependencyInvocation,
@@ -2248,7 +2249,7 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
     }
     const selected = workflowSelectedChecks({ ...policy, selectedOptionalIds, selectedProposedIds });
     // An application round's retry re-admits the approved browser and API checks; it runs no project check, so a task that has none can still retry it.
-    const readmitsApplicationRound = workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined;
+    const readmitsApplicationRound = workflowReadmitsApplicationRound(workflow);
     if (selected.length === 0 && !readmitsApplicationRound) throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.retryNeedsOneCheck);
     await actionableWorkspace(deps, task);
     const receivedAt = iso(deps);

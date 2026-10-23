@@ -230,6 +230,7 @@ import {
   WorkerInvocationSchema,
   workflowPublicationContext,
   workflowPublicationContextDigest,
+  cutEvidenceReason,
 } from "@agentx/contracts";
 import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { renderE2EMcpProjection, renderE2EPageHtml, renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
@@ -8055,7 +8056,7 @@ async function verifyApplicationWorkflowE2EEvidence(input: {
   }
   if (!authorityValid) return unavailable(diagnostic?.reason ?? "current-owner-policy-source-or-runtime-authority");
   if (verified.verdict !== "PASS" && diagnostic !== undefined) {
-    diagnostic.reason = verified.reason.replace(/\p{Cc}+/gu, " ").replace(/\s+/gu, " ").trim().slice(0, APPLICATION_VERDICT_REASON_MAX_CHARS);
+    diagnostic.reason = cutEvidenceReason(verified.reason.replace(/\p{Cc}+/gu, " ").replace(/\s+/gu, " ").trim(), APPLICATION_VERDICT_REASON_MAX_CHARS);
   }
   return verified.verdict;
 }

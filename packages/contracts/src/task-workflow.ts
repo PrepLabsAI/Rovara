@@ -80,6 +80,30 @@ export function workflowApplicationEvidenceCodes(blockReason: string | undefined
   }
   return codes;
 }
+/**
+ * Cuts the reason a block keeps (the groups' `id: code` entries joined with "; ") to at most `max` characters on whole entries, ending with "; …", a marker no entry matches, so a cut
+ * reason is never read as a full list of codes. A reason that fits is unchanged; one whose first entry alone is over the limit is cut as plain text, as it always was.
+ */
+export function cutEvidenceReason(reason: string, max: number): string {
+  if (reason.length <= max) return reason;
+  const marker = "; …";
+  const kept: string[] = [];
+  let length = 0;
+  for (const entry of reason.split("; ")) {
+    const next = length + (kept.length === 0 ? 0 : 2) + entry.length;
+    if (next + marker.length > max) break;
+    kept.push(entry);
+    length = next;
+  }
+  return kept.length === 0 ? reason.slice(0, max) : `${kept.join("; ")}${marker}`;
+}
+/**
+ * Whether a retry re-admits an approved browser and API round (a required round with an approved selection): it runs no project check of its own, so a task with none can retry it
+ * with no check chosen. The retry route and the Slack form both read this.
+ */
+export function workflowReadmitsApplicationRound(workflow: { e2e?: { required?: boolean | undefined; applicationSelection?: unknown } | undefined }): boolean {
+  return workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined;
+}
 /** Whether every group of an incomplete round ended with a code the candidate causes (see `E2E_APPLICATION_SEND_BACK_CODES`). */
 function evidenceFailureIsTheCandidates(blockReason: string | undefined): boolean {
   const codes = workflowApplicationEvidenceCodes(blockReason);

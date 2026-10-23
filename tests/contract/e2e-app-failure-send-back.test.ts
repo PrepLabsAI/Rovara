@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { workflowApplicationEvidenceCodes, workflowSendBackOffered, type WorkflowSnapshot } from "@agentx/contracts";
+import { workflowSlackHandlers, type SlackBlockAction } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
@@ -47,6 +48,7 @@ const withChecks = (round: ApplicationRound) => {
   const task = round.taskNow() as { workflow: Record<string, unknown> };
   round.harness.db.set({ ...task, workflow: { ...task.workflow, checkPolicy: CHECK_POLICY } });
 };
+const storedEvidence = (round: ApplicationRound): string[] => [...round.harness.s3.objects.entries()].filter(([key]) => key.startsWith("workflow-e2e-group-evidence/")).map(([, value]) => String(value));
 const workflowOf = (round: ApplicationRound) => round.workflowNow() as unknown as WorkflowSnapshot;
 const sendBack = (round: ApplicationRound, who: typeof MAYA, body: Record<string, unknown> = {}) => round.harness.dev(who, "POST", `/v1/dev/tasks/${round.taskId}/workflow/send-back`,
   { requestId: randomUUID(), expectedRevision: round.workflowNow().revision, instructions: "Fix the problems listed above, then report what changed.", ...body });
@@ -66,7 +68,7 @@ describe("the block reason the broker really writes names each group's code, so 
     expect(workflowApplicationEvidenceCodes(reason)).toEqual(round.groupIds.map(() => "build-failed"));
     for (const printed of ["hunter2", "tenant-a", "/home/runner", "ECONNREFUSED"]) expect(reason).not.toContain(printed);
     // Positive control: the logs really are in the evidence the broker stored, so their absence above is the broker's doing.
-    const stored = [...round.harness.s3.objects.entries()].filter(([key]) => key.startsWith("workflow-e2e-group-evidence/")).map(([, value]) => String(value));
+    const stored = storedEvidence(round);
     expect(stored.length).toBeGreaterThan(0);
     expect(stored.every((text) => text.includes("hunter2-build-log"))).toBe(true);
   });
@@ -77,8 +79,11 @@ describe("Send back for a code the candidate causes", () => {
     it(`${code} (${checks ? "a task with a project check" : "a review-only task"}): is offered in the message, returns the change to coding with the fixed code and sentence only, and records a SEND_BACK decision`, async () => {
       const round = await blockedWithCode(code);
       if (checks) withChecks(round);
+      // Self-proving: the planted logs are in the stored evidence of this very round, so their absence from the prompt below is the broker's doing.
+      expect(storedEvidence(round).every((text) => text.includes("hunter2-build-log"))).toBe(true);
       expect(workflowSendBackOffered(workflowOf(round))).toBe(true);
-      expect(buttons(round)).toEqual(["agentx_workflow_send_back", ...(checks ? ["agentx_workflow_retry_checks"] : []), "agentx_workflow_close"]);
+      // Retry checks is offered too, with or without a project check: a required browser and API round can always be re-admitted.
+      expect(buttons(round)).toEqual(["agentx_workflow_send_back", "agentx_workflow_retry_checks", "agentx_workflow_close"]);
       const before = round.workflowNow();
       const requestId = randomUUID();
       const sent = await sendBack(round, MAYA, { requestId });
@@ -119,12 +124,12 @@ describe("Send back for a code the candidate causes", () => {
 
 describe("no Send back for the rest", () => {
   for (const checks of [false, true]) for (const code of ["executor-failed", "mock-unavailable", "deadline-exceeded", "executor-result-mismatch", "model-channel-unavailable", "login-failed", "evidence too large", "cancelled"]) {
-    it(`${code} (${checks ? "a task with a project check" : "a review-only task"}): the message gives its sentence with ${checks ? "Retry checks and " : ""}Close only, and a Send back is refused with the task unchanged`, async () => {
+    it(`${code} (${checks ? "a task with a project check" : "a review-only task"}): the message gives its sentence with Retry checks and Close only (the sentence and the buttons agree), and a Send back is refused with the task unchanged`, async () => {
       const round = await blockedWithCode(code);
       if (checks) withChecks(round);
       expect(round.workflowNow().blockReason).toContain(`: ${code}`);
       expect(workflowSendBackOffered(workflowOf(round))).toBe(false);
-      expect(buttons(round)).toEqual([...(checks ? ["agentx_workflow_retry_checks"] : []), "agentx_workflow_close"]);
+      expect(buttons(round)).toEqual(["agentx_workflow_retry_checks", "agentx_workflow_close"]);
       expect(workflowMessage({ taskId: round.taskId, workflow: workflowOf(round) })!.text).toContain(E2E_OWNER_SENTENCES.groupCode[code]!);
       const before = round.workflowNow();
       const refused = await sendBack(round, MAYA);
@@ -141,5 +146,58 @@ describe("no Send back for the rest", () => {
     expect(buttons(round)).toEqual(["agentx_workflow_retry_checks", "agentx_workflow_close"]);
     expect(workflowMessage({ taskId: round.taskId, workflow: workflowOf(round) })!.text).toContain("The required E2E evidence is incomplete or unavailable.");
     expect((await sendBack(round, MAYA)).status).toBe(400);
+  });
+});
+
+describe("the Retry the sentences promise is real for a task with no project check (review round 1, I-1)", () => {
+  it("is accepted by the retry route for a review-only task: same owner rule, stale revision refused, the round is admitted again", async () => {
+    const round = await blockedWithCode("executor-failed");
+    const revision = round.workflowNow().revision;
+    const retry = (who: typeof MAYA, body: Record<string, unknown> = {}) => round.harness.dev(who, "POST", `/v1/dev/tasks/${round.taskId}/workflow/retry`,
+      { requestId: randomUUID(), expectedRevision: round.workflowNow().revision, instructions: "Retry the checks", ...body });
+    expect((await retry(OMAR)).status).toBe(404);
+    expect((await retry(MAYA, { expectedRevision: revision - 1 })).body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED", revision });
+    const taken = await retry(MAYA);
+    expect(taken.status, JSON.stringify(taken.body)).toBe(200);
+    expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "WAITING", revision: revision + 1 });
+  });
+
+  const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };
+  const press = (actionId: string, value: Record<string, unknown>, userId = "U0OWNER0001"): SlackBlockAction => ({ actionId, value: JSON.stringify(value), userId, userTeamId: thread.teamId,
+    workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: Date.now(), thread, messageTs: "1695500001.000002", messageText: "blocked",
+    responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3", actionTs: "1695500001.000009" });
+
+  it("opens the retry form on Slack for a review-only task, and its submission (no check chosen, none needed) retries at the exact revision, for the owner only", async () => {
+    const round = await blockedWithCode("executor-failed");
+    const workflow = round.workflowNow();
+    let opened: Record<string, unknown> | undefined;
+    const retries: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => ({ taskId: round.taskId, slackUserId: "U0OWNER0001", share: thread, workflow }), openView: async (_trigger, view) => { opened = view; },
+      submit: async () => undefined, retryChecks: async (input) => { retries.push(input); } });
+    const submission = (state: Record<string, unknown> = {}) => handlers.handleSubmission({ user: { id: "U0OWNER0001", team_id: thread.teamId }, team: { id: thread.teamId },
+      view: { callback_id: "agentx_workflow_checks_retry_submission", private_metadata: opened?.private_metadata, state: { values: state } } });
+    await handlers.handleAction(press("agentx_workflow_retry_checks", { taskId: round.taskId, revision: workflow.revision }));
+    expect(opened).toMatchObject({ callback_id: "agentx_workflow_checks_retry_submission" });
+    expect((opened!.blocks as unknown[]).length).toBeGreaterThan(0);
+    await expect(handlers.handleAction(press("agentx_workflow_retry_checks", { taskId: round.taskId, revision: workflow.revision }, "U0OTHER0002"))).rejects.toThrow(/Only/);
+    await expect(handlers.handleAction(press("agentx_workflow_retry_checks", { taskId: round.taskId, revision: workflow.revision - 1 }))).rejects.toThrow(/out of date/);
+    await submission();
+    expect(retries).toEqual([expect.objectContaining({ taskId: round.taskId, expectedRevision: workflow.revision, selectedOptionalCheckIds: [] })]);
+  });
+
+  it("still asks for a check on a review-only task whose block is not a browser and API round (no application round to re-admit)", async () => {
+    const round = await blockedWithCode("executor-failed");
+    const { applicationSelection: _selection, ...e2e } = round.workflowNow().e2e!;
+    void _selection;
+    const workflow = { ...round.workflowNow(), e2e };
+    let opened: Record<string, unknown> | undefined;
+    const retries: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => ({ taskId: round.taskId, slackUserId: "U0OWNER0001", share: thread, workflow }), openView: async (_trigger, view) => { opened = view; },
+      submit: async () => undefined, retryChecks: async (input) => { retries.push(input); } });
+    await handlers.handleAction(press("agentx_workflow_retry_checks", { taskId: round.taskId, revision: workflow.revision }));
+    await expect(handlers.handleSubmission({ user: { id: "U0OWNER0001", team_id: thread.teamId }, team: { id: thread.teamId },
+      view: { callback_id: "agentx_workflow_checks_retry_submission", private_metadata: opened?.private_metadata, state: { values: {} } } })).rejects.toThrow(/at least one check/i);
+    expect(retries).toEqual([]);
   });
 });

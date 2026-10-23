@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  E2EDisplayScenarioSchema, E2E_APPLICATION_SEND_BACK_CODES, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, sendBackInstructions, sendBackProblems,
+  E2EDisplayScenarioSchema, E2E_APPLICATION_SEND_BACK_CODES, cutEvidenceReason, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, sendBackInstructions, sendBackProblems,
   workflowApplicationEvidenceCodes, workflowSendBackOffered, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { DockerApplicationUnavailableReason } from "@agentx/verifier";
@@ -74,7 +74,7 @@ describe("RUN-2 item 1: a fixed owner sentence for every reason a group can end 
     expect(Object.fromEntries([...HOST_CODES, ...OTHER_CODES].map((code) => [code, sentenceOf(code)]))).toMatchInlineSnapshot(`
       {
         "app-exited": "The app stopped right after it started. The coding agent needs to fix it.",
-        "app-unhealthy": "The app didn't answer its health check in time. If it needs another port, path or a longer start, set \`health\` and \`listenPort\` in the project contract; otherwise the coding agent needs to fix it.",
+        "app-unhealthy": "The app didn't answer its health check in time. If it listens on another port, answers on another path, or needs longer to start, change that in the project's browser and API check settings; otherwise the coding agent needs to fix it.",
         "build-failed": "The app didn't install or build with this change. The coding agent needs to fix it.",
         "cancelled": "The checks were stopped before they finished. Retry the checks.",
         "deadline-exceeded": "The checks ran out of time before they finished. Retry the checks; if it happens again, tell Rovara support (code deadline-exceeded).",
@@ -217,5 +217,32 @@ describe("RUN-2: the Slack message says why, and offers Send back only where the
       expect(message.text, reason).toBe(GENERIC);
       expect(buttonsOf(message.blocks), reason).toEqual(["agentx_workflow_retry_checks", "agentx_workflow_close"]);
     }
+  });
+});
+
+describe("review round 1: minors", () => {
+  it("M-2: says how many more reasons there are instead of dropping a fourth distinct sentence silently", () => {
+    const four = messageOf(incomplete("g1: build-failed", "g2: app-exited", "g3: app-unhealthy", "g4: seed-failed"));
+    for (const code of ["build-failed", "app-exited", "app-unhealthy"]) expect(four.text).toContain(sentenceOf(code));
+    expect(four.text).not.toContain(sentenceOf("seed-failed"));
+    expect(four.text).toContain("And 1 more.");
+    expect(() => new StrictSlackWeb({ briefLimit: 1_200 }).post({ channel: "C0123456789", threadTs: "1695500000.000001", ...four })).not.toThrow();
+    expect(messageOf(incomplete("g1: build-failed", "g2: app-exited", "g3: app-unhealthy")).text).not.toContain("more.");
+  });
+
+  it("M-1: a reason cut for the block is cut on whole entries and ends with a marker the parser refuses, so a cut never offers Send back", () => {
+    const entries = Array.from({ length: 12 }, (_, index) => `group-${"x".repeat(14)}${index}: build-failed`);
+    const full = incomplete(...entries);
+    expect(full.length).toBeGreaterThan(240);
+    const inner = entries.join("; ");
+    const cut = cutEvidenceReason(inner, 240);
+    expect(cut.length).toBeLessThanOrEqual(240);
+    expect(cut.endsWith("; …")).toBe(true);
+    expect(cut.slice(0, -3).split("; ").every((entry) => entries.includes(entry))).toBe(true);
+    expect(workflowApplicationEvidenceCodes(`admitted E2E evidence is incomplete or unknown (${cut})`)).toBeUndefined();
+    expect(workflowSendBackOffered(blockedOn(`admitted E2E evidence is incomplete or unknown (${cut})`))).toBe(false);
+    // Short reasons, and a reason whose first entry alone is over the limit, are cut as they always were.
+    expect(cutEvidenceReason("g: build-failed", 240)).toBe("g: build-failed");
+    expect(cutEvidenceReason("y".repeat(300), 240)).toBe("y".repeat(240));
   });
 });
