@@ -329,6 +329,7 @@ import { publicWorkspace } from "../workspaces.js";
 import { SessionManager } from "./sessions.js";
 import { STUCK_SETUP_MESSAGE } from "./stuck-setup.js";
 import { workflowRunEndedReason } from "./outbox-failure.js";
+import { WORKFLOW_STEP_STAGE, blockStoppedWorkflowRun, stopBlocksWorkflowStep } from "./workflow-cancel-reconcile.js";
 import {
   adaptHttpApiEvent,
   identityFromJwtClaims,
@@ -12446,6 +12447,34 @@ async function cancelledE2EWorkflowItems(
   return completedWorkflowItems(dependencies, target, pointer, "CANCELLED", now, undefined, undefined, undefined, undefined, undefined, target);
 }
 
+/**
+ * PLANINC-2: a stopped run's own workflow step (planning, plain coding, checks without a native E2E round, review,
+ * feedback review) is blocked in the cancel's transaction, the way the same step is when its run ends FAILED, so the task
+ * offers Retry instead of showing the step running with nothing running. The graph IMPLEMENT and native E2E CHECKS runs
+ * have their own items above and are not repeated here. The item is the ordinary terminal transition, conditional on the
+ * workflow row's revision, stage and RUNNING state; the transaction's workspace condition (this target holds the
+ * workspace at this fence) means a target that finished first commits nothing here. It only blocks: no approval is
+ * added or skipped and no dispatch row is queued, so anything else the transition would write is refused.
+ */
+async function cancelledWorkflowStepItems(
+  dependencies: AwsBrokerDependencies,
+  pointer: DeveloperTaskPointerRecord | undefined,
+  target: OperationRecord | undefined,
+  now: string,
+): Promise<TransactItems> {
+  if (target === undefined || pointer === undefined || target.kind !== "task" || target.workflowMode === undefined) return [];
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  if (task === undefined || !stopBlocksWorkflowStep(task, target)) return [];
+  const items = await completedWorkflowItems(dependencies, target, pointer, "CANCELLED", now, undefined, "operation was cancelled");
+  // Only the one conditional update of the step the target ran, exactly; anything else is left to the owner's Retry.
+  const update = items.length === 1 ? items[0]?.Update : undefined;
+  const values = update?.ExpressionAttributeValues;
+  const key = taskKey(task.taskId);
+  if (update === undefined || update.Key?.pk !== key.pk || update.Key?.sk !== key.sk
+    || values?.[":stage"] !== WORKFLOW_STEP_STAGE[target.workflowMode] || values?.[":running"] !== "RUNNING") return [];
+  return items;
+}
+
 async function recordTerminalResult(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -12592,7 +12621,14 @@ async function recordTerminalResult(
     // A queuing transaction that met another one in flight (TransactionConflict, not a failed
     // condition) is decided again once from fresh reads before it counts as a stale callback.
     // Each decision reads the task pointer once (P39); a Slack workspace has none.
+    // PLANINC-2: the stopped step's workflow item rides in the cancel's transaction, but it must never fail the cancel.
+    // `cancelStepAllowed` goes false when the transaction was refused with that item attached (the task row moved between
+    // the read and the commit, or the step finished first); the cancel is then decided again without it.
+    let cancelStepAllowed = true;
+    let cancelStepAttached = false;
+    let cancelStepConflictRetried = false;
     const decideAndSend = async () => {
+      cancelStepAttached = false;
       const pointer = TASK_POINTER_KINDS.has(operation.kind)
         ? await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id))
         : undefined;
@@ -12605,20 +12641,37 @@ async function recordTerminalResult(
         : await cancelledE2EWorkflowItems(dependencies, pointer, e2eCancelBoundTarget, now);
       const cancelledGraph = graphCancellation === undefined ? []
         : await cancelledGraphWorkflowItems(dependencies, pointer, graphCancellation.target, now);
+      const cancelledStep = !cancelStepAllowed || graphCancelBoundTarget !== undefined || e2eCancelBoundTarget !== undefined ? []
+        : await cancelledWorkflowStepItems(dependencies, pointer, cancelTargetOperation, now);
+      cancelStepAttached = cancelledStep.length > 0;
       recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now,
-        [...transactItems, ...completed, ...workflow, ...cancelledGraph, ...cancelledE2E], workspaceUpdate, send);
+        [...transactItems, ...completed, ...workflow, ...cancelledGraph, ...cancelledE2E, ...cancelledStep], workspaceUpdate, send);
       evidenceJobs = [...workflow, ...cancelledGraph, ...cancelledE2E].flatMap((item) => {
         const row = item.Put?.Item as Partial<PlanEvidenceJob> | undefined;
         return row?.pk === PLAN_EVIDENCE_PK && row.taskId !== undefined && row.artifactId !== undefined ? [planEvidenceEvent(row.taskId, row.artifactId)] : [];
       });
     };
-    try {
-      await decideAndSend();
-    } catch (firstError) {
-      if (!(firstError instanceof QueuingConflict)) throw firstError;
-      await decideAndSend().catch((secondError: unknown) => {
-        throw secondError instanceof QueuingConflict ? secondError.cause : secondError;
-      });
+    const decideAndSendOnce = async () => {
+      try {
+        await decideAndSend();
+      } catch (firstError) {
+        if (!(firstError instanceof QueuingConflict)) throw firstError;
+        await decideAndSend().catch((secondError: unknown) => {
+          throw secondError instanceof QueuingConflict ? secondError.cause : secondError;
+        });
+      }
+    };
+    for (;;) {
+      try {
+        await decideAndSendOnce();
+        break;
+      } catch (refused) {
+        if (!cancelStepAttached || !isConditional(refused)) throw refused;
+        // A transaction that met another one in flight is decided again once from fresh reads, step included.
+        if (isTransactionConflict(refused) && !cancelStepConflictRetried) { cancelStepConflictRetried = true; continue; }
+        cancelStepAllowed = false;
+        console.log(JSON.stringify({ component: "broker", event: "workflow.cancel_step_dropped", operationId: operation.id, targetOperationId: operation.targetOperationId }));
+      }
     }
   } catch (transactionError) {
     if (!isConditional(transactionError)) throw transactionError;
@@ -12766,6 +12819,8 @@ async function releaseOnOwnResult(dependencies: AwsBrokerDependencies, operation
     if (stored.workspaceReleaseReason !== "own-result") {
       console.log(JSON.stringify({ component: "broker", event: "stuck_cancel.late_result_after_release", workspaceId: operation.workspaceId, operationId: operation.id, reason: stored.workspaceReleaseReason }));
     }
+    // PLANINC-2: a release by the reconciler never reached the workflow; the run's own result proves it ended, so its step stops (idempotent).
+    await blockStoppedWorkflowRun(dependencies.documentClient, dependencies.tableName, operation);
     return operation;
   }
   const workspace = await getItem<{ activeOperationId?: unknown; fence?: unknown }>(dependencies, workspaceKey(operation.workspaceId));
@@ -12777,6 +12832,8 @@ async function releaseOnOwnResult(dependencies: AwsBrokerDependencies, operation
     return typeof again.workspaceReleasedAt === "string" ? again : undefined;
   }
   console.log(JSON.stringify({ component: "broker", event: "stuck_cancel.released", workspaceId: operation.workspaceId, operationId: operation.id, reason: "own-result" }));
+  // PLANINC-2: the freed workspace and the workflow step it held agree again: the step is blocked, so Retry is offered.
+  await blockStoppedWorkflowRun(dependencies.documentClient, dependencies.tableName, operation);
   return await requireOperation(dependencies, operation.workspaceId, operation.id);
 }
 
