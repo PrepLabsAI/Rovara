@@ -1093,7 +1093,9 @@ describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", ()
       steps: [bash("pytest", "c1"), fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" })],
       runners: fake.runners, shell,
     });
-    expect(String(run.failure)).toContain("model down");
+    // PLANINC-3b: the error is fixed text; the provider's message ("model down") is not copied.
+    expect(String(run.failure)).toContain("the model call failed: unknown attempt 1; retry the step");
+    expect(String(run.failure)).not.toContain("model down");
     expect(run.report).toMatchObject({ status: "not_verified", notVerifiedReason: "error", checks: [], extraTry: "not_needed" });
     expect(fake.agentCalls).toEqual([]);
     expect(fake.projectCalls).toEqual([]);

@@ -54,19 +54,20 @@ async function run(adapter: PiSessionAdapter, cancellationController?: WorkerCan
 }
 
 describe("a task whose model call fails", () => {
-  it("fails with the model's error instead of succeeding, and records FAILED usage", async () => {
+  it("fails with a fixed-text error instead of succeeding, and records FAILED usage", async () => {
     const adapter = await realPi([fauxAssistantMessage([], {
       stopReason: "error", errorMessage: "OpenRouter request failed; check the key's credit balance and spending limit",
     })]);
     const { outcome, usageOutcome, events } = await run(adapter);
     expect(outcome).toBeInstanceOf(Error);
-    expect((outcome as Error).message).toBe("RUNTIME_UNAVAILABLE: the model call failed: OpenRouter request failed; check the key's credit balance and spending limit");
+    // PLANINC-3b: the provider's message is never copied into the error; the failure class, call number and next action are.
+    expect((outcome as Error).message).toBe("RUNTIME_UNAVAILABLE: the model call failed: unknown attempt 1; retry the step");
     expect(usageOutcome).toBe("FAILED");
     expect(events.filter((event) => event.type === "result")).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({ type: "error", payload: { message: (outcome as Error).message } }));
   });
 
-  it("redacts credentials that a provider's error message carries", async () => {
+  it("never copies a provider's error message into the error, so the credentials it carries cannot reach it", async () => {
     const adapter = await realPi([fauxAssistantMessage([], {
       // Not a transient error, so pi does not retry it.
       stopReason: "error", errorMessage: "400 invalid request to https://user:hunter2@proxy.example.test/v1?token=abc123",
@@ -74,7 +75,8 @@ describe("a task whose model call fails", () => {
     const { outcome } = await run(adapter);
     expect((outcome as Error).message).not.toContain("hunter2");
     expect((outcome as Error).message).not.toContain("abc123");
-    expect((outcome as Error).message).toContain("[REDACTED]");
+    expect((outcome as Error).message).not.toContain("proxy.example.test");
+    expect((outcome as Error).message).toBe("RUNTIME_UNAVAILABLE: the model call failed: unknown attempt 1; retry the step");
   });
 
   it("judges the turn by its last model call: a transient failure pi retries successfully is a success", async () => {
