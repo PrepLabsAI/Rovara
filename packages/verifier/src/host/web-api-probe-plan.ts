@@ -322,7 +322,8 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
   const replayBindings = options.replay === undefined ? undefined : options.replay.traces.map((trace) => ({ caseId: trace.caseId, stepIndex: trace.stepIndex, keyHash: trace.keyHash,
     traceSha256: trace.binding.traceSha256, actionCount: trace.binding.actionCount }));
-  // The built-in probes keep the model-free limits they were pinned and qualified with (before the evaluation fix RUN-1): they are small fixtures, not a customer's build.
+  // The built-in probes keep the model-free limits they were pinned and qualified with (before the evaluation fix RUN-1): they are small fixtures, not a customer's build. This makes the earlier rule
+  // (`e2eEffectiveRoundLimitsBeforeRun1` and the validator's fallback) a permanent dependency of the qualification probes: retire it only after re-pinning them.
   const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets, modelRoute: options.replay === undefined ? options.modelRoute ?? null : null, cliHostsByProfile,
     modelFreeShardRule: "before-run-1" as const,
     preparedEnvironmentsByGroup: new Map([[group.groupId, { preparedEnvironmentDigest, originByApplicationId: [{ applicationId: application.applicationId, origin: WEB_API_PROBE_APP_ORIGIN }] }]]),

@@ -10,7 +10,7 @@ import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } f
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
 import { createEc2Delivery } from "./ec2-delivery.js";
-import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionModelChoiceReader, createWorkflowE2EAdmissionSchemaReader } from "./workflow-e2e-admission-schema.js";
+import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionModelChoiceReader, createWorkflowE2EAdmissionNeedsModelFreeLimitsReader, createWorkflowE2EAdmissionSchemaReader } from "./workflow-e2e-admission-schema.js";
 import { appendOperationEvent } from "./operation-events.js";
 import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./sessions.js";
 import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
@@ -596,6 +596,7 @@ const deliverEc2 = createEc2Delivery({
       s3: new S3Client(awsClientConfiguration), bucket: process.env.ARTIFACT_BUCKET_NAME,
       readRow: async (key) => (await documentClient.send(new GetCommand({ TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"), Key: key, ConsistentRead: true }))).Item as Record<string, unknown> | undefined,
     }),
+    workflowE2EAdmissionNeedsModelFreeLimits: createWorkflowE2EAdmissionNeedsModelFreeLimitsReader({ s3: new S3Client(awsClientConfiguration), bucket: process.env.ARTIFACT_BUCKET_NAME }),
   }),
   guardTaskDispatch: taskDispatchGuard,
   applicationPlanNotNegotiated: createApplicationPlanNegotiationRecorder({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),

@@ -213,6 +213,14 @@ describe("the pull request's checks (spec 051 FR-008)", () => {
     expect(String(record!.body)).toContain(DRAFT_REFUSED_PULL_REQUEST_NOTE);
   });
 
+  it("tells the truth too when the pull request was found again as a normal one (a lost response or a broker retry), not only when it was just created (I2)", async () => {
+    const h = await harness();
+    h.reconcilePullRequest.mockResolvedValue({ number: 7, url: "https://github.com/example/demo/pull/7", reconciled: true, draftRefused: true });
+    expect(await publishAnswer(h, [regression])).toMatchObject({ number: 7, draft: false });
+    const [record] = h.db.find((item) => item.entityType === "PULL_REQUEST");
+    expect(record).toMatchObject({ number: 7, draftRefused: true });
+  });
+
   it("records no draft refusal for a pull request that opened as asked", async () => {
     const h = await harness();
     expect(await publishAnswer(h, [regression])).toMatchObject({ number: 7, draft: true });

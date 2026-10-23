@@ -897,6 +897,13 @@ export type E2EModelDayBudgetResponse = z.infer<typeof E2EModelDayBudgetResponse
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
+ * The feature a worker lists when it compiles the groups of a route-pinned round that have no agent step under `E2E_MODEL_FREE_LIMITS` (the normal time limits; evaluation fix RUN-1,
+ * Ruling DV). An older worker compiles them under the 60 s / 10 s limits and refuses such an admission after compute was spent, so the dispatcher hands one only to a worker that lists this.
+ * It is in `WORKER_INVOCATION_FEATURES`, so every worker of this image advertises it and `test-deploy --check` reports it missing on a runner qualified before it.
+ */
+export const E2E_MODEL_FREE_LIMITS_FEATURE = "task.workflowE2EModelFreeLimits.v1" as const;
+
+/**
  * The limits of a round that runs no model call: the normal time and action limits (`E2E_DEFAULT_LIMITS` in e2e.ts: run 600 s, startup 60 s, preparation 180 s, case 90 s, 30
  * actions per case), with model budgets of the least a limit may be (1 request, 1 input token, 1 output token), because such a round makes no model call. A setup that pins no
  * route keeps these as its policy limits; a project that pinned a route has policy limits sized for agent steps (`e2eAgentRoutePolicyLimits`), and a round or a group that has

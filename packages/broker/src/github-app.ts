@@ -43,7 +43,10 @@ export const DRAFT_REFUSED_PULL_REQUEST_NOTE = "Draft pull requests are not avai
 export function pullRequestBodyWithDraftNote(body: string | undefined): string {
   if (body === undefined || body === "") return DRAFT_REFUSED_PULL_REQUEST_NOTE;
   const separator = "\n\n";
-  return `${DRAFT_REFUSED_PULL_REQUEST_NOTE}${separator}${body.slice(0, Math.max(0, PULL_REQUEST_BODY_MAX_CHARS - DRAFT_REFUSED_PULL_REQUEST_NOTE.length - separator.length))}`;
+  let room = Math.max(0, PULL_REQUEST_BODY_MAX_CHARS - DRAFT_REFUSED_PULL_REQUEST_NOTE.length - separator.length);
+  // Cut between characters: a surrogate pair is never split at the end.
+  if (room < body.length && room > 0 && /[\uD800-\uDBFF]/u.test(body.charAt(room - 1))) room -= 1;
+  return `${DRAFT_REFUSED_PULL_REQUEST_NOTE}${separator}${body.slice(0, room)}`;
 }
 
 /**
@@ -61,9 +64,31 @@ const PULL_REQUEST_REFUSAL_SENTENCES: Record<PullRequestRefusal, string> = {
 };
 const MAX_REFUSAL_BODY_CHARS = 16_384;
 
+/** The body's first 16 KiB, read through the stream so that a larger body is never read in full; a body that goes on past that is not read as JSON (it cannot be one of the short answers listed). */
+async function boundedRefusalText(response: Response): Promise<string | undefined> {
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const next = await reader.read() as { done: boolean; value?: Uint8Array };
+      if (next.done || next.value === undefined) break;
+      chunks.push(next.value);
+      total += next.value.byteLength;
+      if (total > MAX_REFUSAL_BODY_CHARS) { await reader.cancel().catch(() => undefined); return undefined; }
+    }
+  } catch { return undefined; }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 async function pullRequestRefusalOf(response: Response): Promise<PullRequestRefusal> {
   let parsed: unknown;
-  try { parsed = JSON.parse((await response.text()).slice(0, MAX_REFUSAL_BODY_CHARS)); } catch { return "unknown"; }
+  try {
+    const text = await boundedRefusalText(response);
+    if (text === undefined) return "unknown";
+    parsed = JSON.parse(text);
+  } catch { return "unknown"; }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "unknown";
   const errors = (parsed as { errors?: unknown }).errors;
   if (!Array.isArray(errors)) return "unknown";
@@ -236,8 +261,14 @@ export class GitHubAppCredentialProvider {
       contents: "read",
       pull_requests: "write",
     });
+    // The draft state is GitHub's, read from the pull request object on every path (created, or found again after a lost response or a broker retry), so the record and the
+    // owner's message are always truthful (I2): a draft was refused when one was asked for and the pull request is not a draft.
+    const finish = (found: FoundPullRequest, reconciled: boolean, refusedForSure = false): GitHubPullRequestResult => {
+      const { isDraft, ...result } = found;
+      return { ...result, reconciled, ...(refusedForSure || (input.draft === true && isDraft === false) ? { draftRefused: true as const } : {}) };
+    };
     const existing = await this.findOpenPullRequest(repository, input, token);
-    if (existing) return { ...existing, reconciled: true };
+    if (existing) return finish(existing, true);
 
     try {
       const create = (draft: boolean | undefined, body: string | undefined) => this.fetchImplementation(
@@ -255,22 +286,22 @@ export class GitHubAppCredentialProvider {
         },
       );
       let response = await create(input.draft, input.body);
-      if (response.ok) return { ...parsePullRequest(await response.json(), repository), reconciled: false };
+      if (response.ok) return finish(parsePullRequestWithDraft(await response.json(), repository), false);
       // INTG1: GitHub answers 422 to a draft on a private repository whose plan has no drafts. That answer, and only that, is retried once as a normal pull request with the
       // do-not-merge note; the result says so. Any other answer, and a second refusal, fails below.
       let refusal = response.status === 422 ? await pullRequestRefusalOf(response) : undefined;
       if (refusal === "draft-unsupported" && input.draft === true) {
         response = await create(undefined, pullRequestBodyWithDraftNote(input.body));
-        if (response.ok) return { ...parsePullRequest(await response.json(), repository), reconciled: false, draftRefused: true };
+        if (response.ok) return finish(parsePullRequestWithDraft(await response.json(), repository), false, true);
         refusal = response.status === 422 ? await pullRequestRefusalOf(response) : undefined;
       }
       const afterFailure = await this.findOpenPullRequest(repository, input, token);
-      if (afterFailure) return { ...afterFailure, reconciled: true };
+      if (afterFailure) return finish(afterFailure, true);
       throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request creation failed with HTTP ${response.status}${refusal === undefined ? "" : `: ${PULL_REQUEST_REFUSAL_SENTENCES[refusal]}`}`);
     } catch (error) {
       if (isAgentXError(error)) throw error;
       const afterFailure = await this.findOpenPullRequest(repository, input, token);
-      if (afterFailure) return { ...afterFailure, reconciled: true };
+      if (afterFailure) return finish(afterFailure, true);
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub pull request creation outcome is unknown");
     }
   }
@@ -885,7 +916,7 @@ export class GitHubAppCredentialProvider {
     repository: InstalledRepository,
     input: GitHubPullRequestInput,
     token: string,
-  ): Promise<Omit<GitHubPullRequestResult, "reconciled"> | undefined> {
+  ): Promise<FoundPullRequest | undefined> {
     const query = new URLSearchParams({
       state: "open",
       head: `${repository.owner}:${input.headBranch}`,
@@ -904,7 +935,7 @@ export class GitHubAppCredentialProvider {
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
     }
     if (value.length === 0) return undefined;
-    return parsePullRequest(value[0], repository);
+    return parsePullRequestWithDraft(value[0], repository);
   }
 }
 
@@ -1036,6 +1067,14 @@ function parsePullRequest(
     throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned a non-canonical pull request URL");
   }
   return { number: candidate.number as number, url: candidate.html_url };
+}
+
+/** A pull request as the reconcile paths read it: the result without `reconciled`, and GitHub's own `draft` flag when it gives one. */
+type FoundPullRequest = Omit<GitHubPullRequestResult, "reconciled" | "draftRefused"> & { isDraft?: boolean };
+function parsePullRequestWithDraft(value: unknown, repository: InstalledRepository): FoundPullRequest {
+  const basic = parsePullRequest(value, repository);
+  const draft = (value as Record<string, unknown>).draft;
+  return typeof draft === "boolean" ? { ...basic, isDraft: draft } : basic;
 }
 
 function parsePullRequestDetails(

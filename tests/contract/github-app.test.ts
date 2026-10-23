@@ -926,6 +926,21 @@ describe("GitHub App repository credentials", () => {
       expect(pullRequestBodyWithDraftNote(undefined)).toBe(DRAFT_REFUSED_PULL_REQUEST_NOTE);
     });
 
+    it("never cuts a surrogate pair in two when the note makes the description too long", () => {
+      const room = 65_536 - DRAFT_REFUSED_PULL_REQUEST_NOTE.length - 2;
+      const body = `${"x".repeat(room - 1)}\u{1F600}${"y".repeat(10)}`;
+      const withNote = pullRequestBodyWithDraftNote(body);
+      expect(withNote.length).toBeLessThanOrEqual(65_536);
+      expect(/[\uD800-\uDBFF]$/u.test(withNote)).toBe(false);
+    });
+
+    it("reads at most the start of a refusal body, and reads a larger one as an unrecognised reason", async () => {
+      const big = JSON.stringify({ message: "Validation Failed", errors: [{ message: "Draft pull requests are not supported in this repository.", pad: "z".repeat(40_000) }] });
+      const { provider, created } = creating([refused(big)]);
+      await expect(provider.reconcilePullRequest({ ...input, draft: true })).rejects.toThrow(/HTTP 422: GitHub rejected the pull request and gave a reason AgentX does not recognise/);
+      expect(created).toHaveLength(1);
+    });
+
     it("retries only once: a second refusal fails, and a draft that opened was never retried", async () => {
       const twice = creating([refused(DRAFT_REFUSAL), refused(DRAFT_REFUSAL)]);
       await expect(twice.provider.reconcilePullRequest({ ...input, draft: true })).rejects.toThrow(/HTTP 422/);
@@ -953,6 +968,60 @@ describe("GitHub App repository credentials", () => {
       expect(failure?.message).toMatch(reason);
       expect(failure?.message).not.toContain("sensitive-github-error");
       expect(created).toHaveLength(1);
+    });
+
+    // Fix round 1 (I2): the draft state is GitHub's, read from the pull request object on every path, so a pull request found again after a lost response, or on a broker retry, is told
+    // truthfully. A found pull request that is not a draft, for a draft request, is one whose draft was refused (or was made ready): it is never reported as a draft.
+    describe("the draft state of a pull request found again (I2)", () => {
+      const found = (draft: boolean | undefined) => [{ number: 43, html_url: "https://github.com/ps06756/personal-website-test/pull/43", ...(draft === undefined ? {} : { draft }) }];
+      /** The create calls are answered in order; each lookup answers the next of `lookups`. */
+      function providerWith(creates: Array<Response | "network-error">, lookups: unknown[][]) {
+        const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+        const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+        let created = 0;
+        let looked = 0;
+        const provider = appProvider({
+          credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+          fetchImplementation: async (url, init) => {
+            const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+            if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "pr-token" }), { status: 201 });
+            if (init?.method === "POST") {
+              const answer = creates[created++];
+              if (answer === undefined) throw new Error("an unexpected extra create request");
+              if (answer === "network-error") throw new TypeError("socket closed after request body was sent");
+              return answer;
+            }
+            return new Response(JSON.stringify(lookups[Math.min(looked++, lookups.length - 1)]), { status: 200 });
+          },
+        });
+        return { provider, creates: () => created };
+      }
+
+      it("says the draft was refused when the retry's response was lost and the pull request is found again as a normal one", async () => {
+        const { provider, creates } = providerWith([refused(DRAFT_REFUSAL), "network-error"], [[], found(false)]);
+        const result = await provider.reconcilePullRequest({ ...input, draft: true });
+        expect(result).toEqual({ number: 43, url: "https://github.com/ps06756/personal-website-test/pull/43", reconciled: true, draftRefused: true });
+        expect(creates()).toBe(2);
+      });
+
+      it("says it on a broker retry that finds the normal pull request an earlier attempt opened, without creating another", async () => {
+        const { provider, creates } = providerWith([], [found(false)]);
+        expect(await provider.reconcilePullRequest({ ...input, draft: true })).toEqual({ number: 43, url: "https://github.com/ps06756/personal-website-test/pull/43", reconciled: true, draftRefused: true });
+        expect(creates()).toBe(0);
+      });
+
+      it("says nothing of a refusal for a found pull request that is still a draft, one whose state GitHub does not give, or a request that did not ask for a draft", async () => {
+        for (const [lookup, draft] of [[found(true), true], [found(undefined), true], [found(false), undefined]] as const) {
+          const { provider } = providerWith([], [lookup]);
+          const result = await provider.reconcilePullRequest({ ...input, ...(draft === undefined ? {} : { draft }) });
+          expect(result).toEqual({ number: 43, url: "https://github.com/ps06756/personal-website-test/pull/43", reconciled: true });
+        }
+      });
+
+      it("says it when a create that was lost is found as a normal pull request after a draft request that GitHub never refused", async () => {
+        const { provider } = providerWith(["network-error"], [[], found(false)]);
+        expect(await provider.reconcilePullRequest({ ...input, draft: true })).toMatchObject({ reconciled: true, draftRefused: true });
+      });
     });
 
     it("tells the reason of the retry's own refusal, and does not read a 403 or a 500 as a draft refusal", async () => {
