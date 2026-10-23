@@ -56,6 +56,13 @@ describe("the session steps' read of the worker settings", () => {
     expect(userData).not.toMatch(/E2E_AGENT_MODEL|E2E_MODEL/);
   });
 
+  it("gives the boot script no variable for it: user data has almost no headroom, and the worker never reads the model from its boot environment", () => {
+    const boot = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
+    expect(boot).not.toMatch(/E2E_AGENT_MODEL|E2E_MODEL|e2eAgentModel|worker-e2e-agent-model/);
+    const derive = readFileSync(new URL("../../packages/model-runtime/src/e2e-route-derive.ts", import.meta.url), "utf8");
+    expect(derive).not.toMatch(/AGENTX_E2E_/);
+  });
+
   it("keeps the number of worker settings within one GetParameters call: an eleventh must be read in chunks", () => {
     expect(Object.keys(WORKER_SETTING_PARAMETERS).length).toBeLessThanOrEqual(10);
   });
