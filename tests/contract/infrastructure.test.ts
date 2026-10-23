@@ -364,6 +364,7 @@ describe("production foundation and worker settings", () => {
     // would try to create a second parameter with the same name and fail the release (#117).
     expect(Object.entries(resources).filter(([, resource]) => resource.Type !== "AWS::CDK::Metadata").map(([id, resource]) => [id, resource.Type]).sort()).toEqual([
       [expect.stringMatching(/^WorkerAnthropicSecretParameter/), "AWS::SSM::Parameter"],
+      [expect.stringMatching(/^WorkerE2eAgentModelParameter/), "AWS::SSM::Parameter"],
       [expect.stringMatching(/^WorkerExecutorImageParameter/), "AWS::SSM::Parameter"],
       ["WorkerImageParameter7CA9ADBB", "AWS::SSM::Parameter"],
       ["WorkerModelIdParameter02DE997A", "AWS::SSM::Parameter"],

@@ -41,6 +41,14 @@ export class WorkerSettingsStack extends Stack {
       type: "String",
       description: "pi model identifier available in the deployment region",
     });
+    // Task 4.10: the AI navigation model the installation chose, a setting beside the coding model (not a boot variable: the worker searches the eligible models for the revision
+    // an admission names). `agentx config set models.e2eAgent` changes it; the broker reads it from SSM, the worker never does.
+    const e2eAgentModelId = new CfnParameter(this, "E2eAgentModelId", {
+      type: "String",
+      default: "default",
+      allowedPattern: "^(default|[A-Za-z0-9][A-Za-z0-9._:/-]{0,199})$",
+      description: "AI navigation model for browser checks: default (Rovara's recommendation) or an eligible model id",
+    });
     const promptCacheRetention = new CfnParameter(this, "PromptCacheRetention", {
       type: "String",
       default: "long",
@@ -68,6 +76,7 @@ export class WorkerSettingsStack extends Stack {
       ["WorkerModelProviderParameter", "modelProvider", modelProvider.valueAsString],
       ["WorkerModelIdParameter", "modelId", modelId.valueAsString],
       ["WorkerPromptCacheRetentionParameter", "promptCacheRetention", promptCacheRetention.valueAsString],
+      ["WorkerE2eAgentModelParameter", "e2eAgentModel", e2eAgentModelId.valueAsString],
     ];
     for (const [id, setting, value] of workerSettings) {
       new ssm.StringParameter(this, id, {

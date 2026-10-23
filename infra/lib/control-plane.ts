@@ -202,6 +202,9 @@ export class ControlPlaneStack extends Stack {
     // and the worker model per request, and starts the eval state machine by its fixed name; both
     // exist only once the eval stack is deployed, and until then a run is refused as not installed.
     broker.addEnvironment("SWEBENCH_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
+    // M1.4 Task 4.10 (PREFIXGAP): the broker derives the AI navigation route from the installation's worker settings only when it knows where they are. Nothing ever set this, so setup
+    // approval said "AI navigation steps will not run" and dispatch offered none. Named environments only: the legacy production template stays as it is. The read grant below covers it.
+    if (naming.env !== undefined) broker.addEnvironment("AGENTX_E2E_AGENT_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
     const swebenchParameterArns = [
       swebenchNames(naming).settingsParameterName,
       swebenchNames(naming).runnerImageParameterName,

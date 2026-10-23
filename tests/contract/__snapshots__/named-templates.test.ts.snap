@@ -2283,6 +2283,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Ref": "AdminValues",
             },
             "AGENTX_ALARM_PREFIX": "agentx-staging-",
+            "AGENTX_E2E_AGENT_SETTINGS_PREFIX": "/agentx/staging/",
             "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID": "agentx-staging-e2e-mock-runtime-v1",
             "AGENTX_ENV": "staging",
             "AGENTX_METRICS_NAMESPACE": "AgentX/staging",
@@ -3013,6 +3014,26 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                         "Ref": "AWS::AccountId",
                       },
                       ":parameter/agentx/staging/worker-openai-secret-arn",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-e2e-agent-model",
                     ],
                   ],
                 },
@@ -5589,6 +5610,26 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                         "Ref": "AWS::AccountId",
                       },
                       ":parameter/agentx/staging/worker-openai-secret-arn",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-e2e-agent-model",
                     ],
                   ],
                 },
@@ -9640,6 +9681,26 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     ],
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-e2e-agent-model",
+                    ],
+                  ],
+                },
               ],
             },
             {
@@ -13096,6 +13157,12 @@ exports[`named environment templates > agentx-staging-runtime is unchanged 1`] =
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
       "Type": "AWS::SSM::Parameter::Value<String>",
     },
+    "E2eAgentModelId": {
+      "AllowedPattern": "^(default|[A-Za-z0-9][A-Za-z0-9._:/-]{0,199})$",
+      "Default": "default",
+      "Description": "AI navigation model for browser checks: default (Rovara's recommendation) or an eligible model id",
+      "Type": "String",
+    },
     "ExecutorImageUri": {
       "AllowedPattern": "^(none|.+@sha256:[a-f0-9]{64})$",
       "Default": "none",
@@ -13167,6 +13234,20 @@ exports[`named environment templates > agentx-staging-runtime is unchanged 1`] =
             },
             "none",
           ],
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "WorkerE2eAgentModelParameter3B6AA65C": {
+      "Properties": {
+        "Description": "AgentX worker e2eAgentModel for EC2 workers",
+        "Name": "/agentx/staging/worker-e2e-agent-model",
+        "Tags": {
+          "agentx:env": "staging",
+        },
+        "Type": "String",
+        "Value": {
+          "Ref": "E2eAgentModelId",
         },
       },
       "Type": "AWS::SSM::Parameter",
