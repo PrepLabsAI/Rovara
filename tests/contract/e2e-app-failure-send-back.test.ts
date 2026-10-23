@@ -65,6 +65,10 @@ describe("the block reason the broker really writes names each group's code, so 
     expect(reason).toMatch(/^admitted E2E evidence is incomplete or unknown \(.+: build-failed(; .+: build-failed)*\)$/);
     expect(workflowApplicationEvidenceCodes(reason)).toEqual(round.groupIds.map(() => "build-failed"));
     for (const printed of ["hunter2", "tenant-a", "/home/runner", "ECONNREFUSED"]) expect(reason).not.toContain(printed);
+    // Positive control: the logs really are in the evidence the broker stored, so their absence above is the broker's doing.
+    const stored = [...round.harness.s3.objects.entries()].filter(([key]) => key.startsWith("workflow-e2e-group-evidence/")).map(([, value]) => String(value));
+    expect(stored.length).toBeGreaterThan(0);
+    expect(stored.every((text) => text.includes("hunter2-build-log"))).toBe(true);
   });
 });
 
