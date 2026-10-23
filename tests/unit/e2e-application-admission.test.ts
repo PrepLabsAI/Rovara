@@ -16,7 +16,7 @@ import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationR
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { builtWebAndApiAdmission } from "../support/e2e-web-and-api-admission.js";
 import { PROFILE, anonymousScenario, anonymousTargetOf, binding, csvScenario, inferredSnapshot, oneAppWebAndApiFixture, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
-import { createWorkflowE2EAdmissionAgentStepsReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
+import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionNeedsModelFreeLimitsReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
 
 afterEach(disposeRealCandidates);
 const candidateOf = createRealCandidate;
@@ -525,6 +525,40 @@ describe("a baseline round's admission on a project whose policy pins a model ro
       const built = (await routed({ baseline: false, plan: "plain" }))();
       expect(built.admission.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
       expect(() => validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(built.bytes))).not.toThrow();
+    });
+  });
+
+  // Fix round 1 (Ruling DV): the dispatcher reads the admission to decide whether the worker must list task.workflowE2EModelFreeLimits.v1: only a route-pinned policy's round with a scenario that
+  // has no agent step relies on the normal limits for it.
+  describe("whether an admission relies on the normal no-model limits (the dispatcher's read)", () => {
+    const reliesOn = (built: ReturnType<typeof buildApplicationExecutionAdmission>) => createWorkflowE2EAdmissionNeedsModelFreeLimitsReader({
+      s3: { send: async () => ({ Body: { transformToString: async () => built.bytes.toString("utf8") } }) }, bucket: "b" })({ schemaVersion: 1, kind: "application",
+      taskId: "11111111-1111-4111-8111-111111111111", workflowRevision: 7, candidateDigest: built.admission.candidateDigest, roundId: built.roundId, groupRunIds: built.groupRunIds,
+      admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } });
+
+    it("is true for a route-pinned round with a scenario that has no agent step, and false when every scenario has one", async () => {
+      await expect(reliesOn((await routed({ baseline: false, plan: "plain" }))())).resolves.toBe(true);
+      await expect(reliesOn((await routed({ baseline: false, plan: "mixed" }))())).resolves.toBe(true);
+      await expect(reliesOn((await routed({ baseline: false, plan: "agent-only" }))())).resolves.toBe(false);
+    });
+
+    it("is false for a baseline round (its policy pins no route) and for a policy that pins none", async () => {
+      await expect(reliesOn((await routed({ baseline: true, plan: "plain" }))())).resolves.toBe(false);
+      const fx = planFixture({});
+      const candidate = await candidateOf(ordersTree);
+      const rows = [webApiRow("web")];
+      const built = buildApplicationExecutionAdmission({ taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+        runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+        setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource,
+        planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection(fx, rows) });
+      await expect(reliesOn(built)).resolves.toBe(false);
+    });
+
+    it("answers undefined when the object is not the admission the reference names", async () => {
+      const built = (await routed({ baseline: false, plan: "plain" }))();
+      const reader = createWorkflowE2EAdmissionNeedsModelFreeLimitsReader({ s3: { send: async () => ({ Body: { transformToString: async () => "{}" } }) }, bucket: "b" });
+      await expect(reader({ schemaVersion: 1, kind: "application", taskId: "11111111-1111-4111-8111-111111111111", workflowRevision: 7, candidateDigest: built.admission.candidateDigest,
+        roundId: built.roundId, groupRunIds: built.groupRunIds, admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } })).resolves.toBeUndefined();
     });
   });
 

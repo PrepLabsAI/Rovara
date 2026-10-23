@@ -545,6 +545,50 @@ describe("ec2-ebs delivery", () => {
         });
       });
 
+      // Evaluation fix RUN-1, fix round 1 (Ruling DV): a round whose no-agent groups rely on the normal time limits (a route-pinned policy's round with a group that has no agent step) goes only to a
+      // worker that lists task.workflowE2EModelFreeLimits.v1. An older worker would compile those groups under 60 s and 10 s and refuse the admission after compute was spent.
+      describe("a round that relies on the normal no-model limits (RUN-1, Ruling DV)", () => {
+        const APPLICATION = "workflow-e2e-application-admission/v1";
+        const FEATURE = "task.workflowE2EModelFreeLimits.v1";
+        const base = [...checksFeatures, "task.workflowE2EApplicationChecks"];
+        const dependenciesFor = (relies: boolean | undefined | Error, features: string[]) => ({
+          workerFeatures: async () => features, workflowE2EAdmissionSchemaVersion: async () => APPLICATION,
+          workflowE2EAdmissionNeedsModelFreeLimits: vi.fn(async () => { if (relies instanceof Error) throw relies; return relies; }),
+        });
+
+        it("never sends it to a worker that does not list the feature, and says why, before anything runs", async () => {
+          const record = checks(admission({ kind: "application" }));
+          const older = delivery(dependenciesFor(true, base));
+          const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+          expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+          expect(refusal?.message).toContain(FEATURE);
+          expect(older.post).not.toHaveBeenCalled();
+        });
+
+        it("hands it, unchanged, to a worker that lists the feature", async () => {
+          const ref = admission({ kind: "application" });
+          const record = checks(ref);
+          const capable = delivery(dependenciesFor(true, [...base, FEATURE]));
+          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
+        });
+
+        it("does not ask for the feature of a round that does not rely on the limits, so an older worker still runs it", async () => {
+          const record = checks(admission({ kind: "application" }));
+          const older = delivery(dependenciesFor(false, base));
+          expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+        });
+
+        it("fails closed, retryably, when the admission cannot be read for the limits it relies on", async () => {
+          const record = checks(admission({ kind: "application" }));
+          for (const unreadable of [undefined, new Error("s3 down")]) {
+            const attempt = delivery(dependenciesFor(unreadable, [...base, FEATURE]));
+            await expect(attempt.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+            expect(attempt.post).not.toHaveBeenCalled();
+          }
+        });
+      });
+
       it("does not ask for the agent-steps feature when no group has an agent step", async () => {
         const record = checks(admission({ kind: "application" }));
         const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"], workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });

@@ -257,6 +257,14 @@ describe("evaluateTestDeployCheck", () => {
       expect(lacking.findings[0]!.message).toContain(`renew it with: ${RENEW}`);
     });
 
+    it("reports the no-model-limits feature as missing on a runner whose worker predates it, which keeps failing the check (RUN-1, Ruling DV)", () => {
+      const lacking = READY_FEATURES.filter((feature) => feature !== "task.workflowE2EModelFreeLimits.v1");
+      expect(lacking).toHaveLength(READY_FEATURES.length - 1);
+      const result = evaluateTestDeployCheck(withRenew({ runnerFacts: { ...GOOD_RUNNER, invocationFeatures: lacking } }));
+      expect(result.ok).toBe(false);
+      expect(result.findings[0]).toMatchObject({ kind: "worker-feature-missing", severity: "error", missing: ["task.workflowE2EModelFreeLimits.v1"] });
+    });
+
     it("an input with no renew command still reports every finding, with the generic command", () => {
       const result = evaluateTestDeployCheck(input({ catalogRows: rows([{ expiresAt: hoursFromNow(30) }, {}]) }));
       expect(result.findings[0]!.message).toContain("renew it with: npx tsx scripts/test-qualify-runtime.ts --env <env> --profile <aws-profile> --apply");

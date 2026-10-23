@@ -1,5 +1,6 @@
 import {
   E2E_AGENT_STEPS_FEATURE,
+  E2E_MODEL_FREE_LIMITS_FEATURE,
   E2E_REPLAY_CHECKS_FEATURE,
   E2E_APPLICATION_ADMISSION_SCHEMA_V2,
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
@@ -66,6 +67,11 @@ export interface Ec2DeliveryDependencies {
    * flag decides whether the worker must list the agent-steps feature, so a reference that understated it would skip that gate. Undefined when it cannot be read.
    */
   workflowE2EAdmissionUsesAgentSteps?: (reference: E2EWorkflowAdmissionRef) => Promise<boolean | undefined>;
+  /**
+   * Whether an application admission relies on the normal no-model limits for a group (RUN-1, Ruling DV), read from the admission itself. With it, the dispatcher hands such a round only to a
+   * worker that lists `task.workflowE2EModelFreeLimits.v1`. Undefined when it cannot be read, which refuses the attempt; absent in a deployment that cannot read admissions.
+   */
+  workflowE2EAdmissionNeedsModelFreeLimits?: (reference: E2EWorkflowAdmissionRef) => Promise<boolean | undefined>;
   /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
   guardTaskDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
   /** Loads and validates the durable internal readiness marker before any session provisioning. */
@@ -106,6 +112,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     if (invocation.kind === "project-setup-smoke" && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const admissionSchemaVersion = await checkAdmissionKind(invocation, dependencies.workflowE2EAdmissionSchemaVersion);
     await checkAdmissionAgentSteps(invocation, dependencies.workflowE2EAdmissionUsesAgentSteps);
+    const needsModelFreeLimits = await admissionNeedsModelFreeLimits(invocation, dependencies.workflowE2EAdmissionNeedsModelFreeLimits);
     let binding: Ec2RuntimeBinding | undefined;
     let session: { ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string };
     if (invocation.kind === "project-setup-smoke") {
@@ -139,7 +146,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
       return { readinessGeneration: session.generation };
     }
     if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
-    const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures, admissionSchemaVersion);
+    const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures, admissionSchemaVersion, needsModelFreeLimits);
     if (invocation.kind === "task" && invocation.payload.workflowE2EPlanVersion !== undefined
       && !(sent.kind === "task" && sent.payload.workflowE2EPlanVersion !== undefined)) {
       // Without the recorder the operation record would keep saying version 2 was offered while the worker was sent a portable-only run, so the broker would
@@ -214,6 +221,14 @@ async function checkAdmissionAgentSteps(invocation: WorkerInvocation, read: Ec2D
   }
 }
 
+async function admissionNeedsModelFreeLimits(invocation: WorkerInvocation, read: Ec2DeliveryDependencies["workflowE2EAdmissionNeedsModelFreeLimits"]): Promise<boolean> {
+  if (read === undefined || invocation.kind !== "task" || invocation.payload.workflowE2EAdmission?.kind !== "application") return false;
+  let relies: boolean | undefined;
+  try { relies = await read(invocation.payload.workflowE2EAdmission); } catch { relies = undefined; }
+  if (relies === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "could not read the E2E admission to check the time limits it relies on; no round was sent");
+  return relies;
+}
+
 /**
  * Spec 053: the invocation as the worker can parse it. Worker payloads are strict and a running
  * worker keeps its image after a release (or after a worker-image rollback), so a thinking level goes
@@ -239,6 +254,7 @@ async function forWorker(
   pingUrl: string,
   workerFeatures: Ec2DeliveryDependencies["workerFeatures"],
   admissionSchemaVersion?: string,
+  needsModelFreeLimits = false,
 ): Promise<WorkerInvocation> {
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
@@ -313,6 +329,11 @@ async function forWorker(
   // that runs application rounds only would run it as a candidate's; it is never handed one, and nothing is spent on a worker that cannot run it.
   if (carriesApplicationAdmission && invocation.kind === "task" && invocation.payload.workflowE2EAdmission?.purpose === "replay" && !features.includes(E2E_REPLAY_CHECKS_FEATURE)) {
     throw agentXError("RUNTIME_UNAVAILABLE", "the audit replay needs a worker that runs replay rounds (it must list task.workflowE2EReplayChecks.v1); this worker predates it or has no executor image on its host, so no replay was sent to it");
+  }
+  // Evaluation fix RUN-1 (Ruling DV): a route-pinned round whose groups with no agent step rely on the normal time limits goes only to a worker that compiles them that way; an older one would
+  // refuse the admission after compute was spent, so it is refused here, before anything runs.
+  if (carriesApplicationAdmission && needsModelFreeLimits && !features.includes(E2E_MODEL_FREE_LIMITS_FEATURE)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "this round's browser and API checks need a worker that runs them under the normal time limits (it must list task.workflowE2EModelFreeLimits.v1); this worker predates it, so no round was sent to it; update the worker, then retry the checks");
   }
   if (carriesProjectSetupSmoke && !features.includes("project.setupSmoke")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "project setup smoke requires a worker that implements project.setupSmoke");
