@@ -281,8 +281,13 @@ describe("workflow Slack messages", () => {
 
   it("turns the broker's own block reasons into plain sentences", () => {
     expect(plainBlockReason("implementation operation ended failed")).toBe("The run stopped unexpectedly.");
-    expect(plainBlockReason("planning operation ended interrupted")).toBe("The run stopped unexpectedly.");
-    expect(plainBlockReason("independent review operation ended cancelled")).toBe("The run stopped unexpectedly.");
+    // PLANINC-2: a stop the owner asked for is not "unexpected", and says what to do next.
+    expect(plainBlockReason("planning operation ended interrupted")).toBe("Planning was stopped before it finished. Choose Retry to run it again.");
+    expect(plainBlockReason("planning operation ended cancelled")).toBe("Planning was stopped before it finished. Choose Retry to run it again.");
+    expect(plainBlockReason("implementation operation ended cancelled")).toBe("Coding was stopped before it finished. Choose Retry to run it again.");
+    expect(plainBlockReason("verification retry operation ended cancelled")).toBe("Checking was stopped before it finished. Choose Retry to run it again.");
+    expect(plainBlockReason("independent review operation ended cancelled")).toBe("Reviewing was stopped before it finished. Choose Retry to run it again.");
+    expect(plainBlockReason("planning operation ended failed")).toBe("The run stopped unexpectedly.");
     expect(plainBlockReason("independent candidate review was invalid, incomplete, or stale")).toBe("The result couldn't be trusted, so nothing moved forward.");
     // Only exact, known plain reasons pass: a prefix that looks plain is not enough.
     expect(plainBlockReason("AgentX could not verify the selected checks for the final code candidate.")).toBe("Something went wrong on AgentX's side.");
