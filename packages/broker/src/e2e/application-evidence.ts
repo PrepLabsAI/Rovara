@@ -96,6 +96,8 @@ export type ApplicationEvidenceVerification = Readonly<{
   groups: readonly ApplicationGroupVerification[];
   /** The broker's own projection of every group it re-collected, for display; never read as a verdict. */
   results: readonly E2EQualifiedResult[];
+  /** What the round was signed as and so how its rows are labelled: a replay's are `replay`, never `candidate`. Present once the admission verified and the rows were derived. */
+  purpose?: "candidate" | "baseline" | "replay";
   /**
    * The per-scenario rows and the screenshots behind them, derived from the verification above and from nothing the worker says about itself (see application-display.ts).
    * Present once the admission verified. Display only: it is never read as a verdict.
@@ -199,7 +201,8 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     const shown = authoritative ? results : results.map((result): E2EQualifiedResult => ({ ...result, status: "unavailable", reason: "application-round-not-complete" }));
     const reasonOf = (verdict: E2EVerdict) => groups.filter((group) => group.verdict === verdict).map((group) => `${group.groupId}: ${group.reason}`).join("; ");
     // The rows are held to the same rule as the verdict: shown only for a round the broker accepted whole, and never able to change what the verdict decided.
-    const display = displayOf({ plan, authoritative, purpose: input.purpose === "baseline" ? "baseline" : "candidate", groups: displayGroups, shown });
+    // The label is the purpose the admission was signed with (checked against the caller's above), so a replay's rows are never labelled as the candidate's (Task FU2, REPLAYLABEL).
+    const display = displayOf({ plan, authoritative, purpose: signedPurpose, groups: displayGroups, shown });
     if (aggregateRuns === undefined) {
       return { verdict: "UNKNOWN", reason: "the round's aggregate evidence has not been accepted, so no group result is authoritative", plan, round, groups, results: shown, ...display };
     }
@@ -217,14 +220,15 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
 }
 
 /** The display of a verified round, or nothing: a failure to build rows never changes the verdict they sit beside. */
-function displayOf(input: { plan: E2EExecutionPlan; authoritative: boolean; purpose: "candidate" | "baseline"; shown: readonly E2EQualifiedResult[];
-  groups: ReadonlyArray<{ runId: string; group: Omit<DisplayGroupInput, "result"> }> }): { display: NonNullable<ApplicationEvidenceVerification["display"]> } | Record<string, never> {
+function displayOf(input: { plan: E2EExecutionPlan; authoritative: boolean; purpose: "candidate" | "baseline" | "replay"; shown: readonly E2EQualifiedResult[];
+  groups: ReadonlyArray<{ runId: string; group: Omit<DisplayGroupInput, "result"> }> }): { purpose: "candidate" | "baseline" | "replay"; display?: NonNullable<ApplicationEvidenceVerification["display"]> } {
+  const { purpose } = input;
   try {
     const targetKinds = new Map(input.plan.effectiveTargets.flatMap((target) => (target.kind === "web" || target.kind === "api" ? [[target.targetId, target.kind] as const] : [])));
     const built = buildScenarioRows({ authoritative: input.authoritative, attach: input.purpose === "baseline" ? "all" : "failed-or-incomplete", targetKinds,
       groups: input.groups.map(({ runId, group }) => ({ ...group, result: input.shown.find((result) => result.binding.runId === runId) })) });
-    return { display: built };
-  } catch { return {}; }
+    return { purpose, display: built };
+  } catch { return { purpose }; }
 }
 
 function readAggregate(aggregate: unknown, admission: ReturnType<typeof decodeE2EApplicationExecutionAdmission>, subject: ApplicationEvidenceSubject): Map<string, Json> | undefined {

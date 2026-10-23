@@ -128,6 +128,21 @@ describe.runIf(agentRunnable)("the broker verifies an audit replay (Task 4.6b)",
     expect(candidateRound.verify().verdict).toBe("PASS");
   });
 
+  it("REPLAYLABEL: a replay's rows are labelled as a replay's, a candidate's as the candidate's, and the rows themselves do not change with the label", async () => {
+    const replayRound = await roundOf(replays.whole);
+    const asReplay = verifyApplicationE2EEvidence({ ...replayRound.input, purpose: "replay" });
+    expect(asReplay.purpose).toBe("replay");
+    expect(asReplay.display?.scenarios).toHaveLength(1);
+    const candidateRound = brokerRoundFor(asLinuxRun(await assembleAgentRun(source)));
+    const asCandidate = candidateRound.verify();
+    expect(asCandidate.purpose).toBe("candidate");
+    // The rows are the candidate's derivation for both (screenshots only for a failed or incomplete row; a passed row has none): the label changes nothing shown.
+    expect(asReplay.display!.scenarios[0]).toMatchObject({ status: "PASSED" });
+    expect(asReplay.display!.scenarios[0]).not.toHaveProperty("screenshot");
+    expect(asCandidate.display!.scenarios[0]).not.toHaveProperty("screenshot");
+    expect(asReplay.display!.artifacts).toEqual(asCandidate.display!.artifacts);
+  });
+
   it("records the verified result only for the round that was started, conditionally: a record that moved on is left as it is, and the result is the verification's own", async () => {
     const { round, verified } = await replayOf(replays.whole);
     expect(verified).toBeDefined();
