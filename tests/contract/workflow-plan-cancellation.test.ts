@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "@agentx/contracts";
 import { startTaskWorkflowFeedbackReviewFromWebhook } from "../../packages/broker/src/aws/developer-tasks.js";
 import { releaseFailedCancelWorkspace } from "../../packages/broker/src/aws/failed-cancel-release.js";
-import { stopBlocksWorkflowStep, strandedPlanningRun } from "../../packages/broker/src/aws/workflow-cancel-reconcile.js";
+import { stopBlocksWorkflowStep, strandedPlanningRun, type StoppedRunOperation, type StoppedRunTask } from "../../packages/broker/src/aws/workflow-cancel-reconcile.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown } from "../support/plan-documents.js";
 
@@ -17,7 +17,7 @@ const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSh
 const REQUIRED_CHECK = { id: "required-1", label: "npm test", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 } };
 const operations = (harness: Harness, workspaceId: string) => harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION");
 const operationOf = (harness: Harness, workspaceId: string, mode: string) => operations(harness, workspaceId).find((item) => item.workflowMode === mode)!;
-const taskRow = (harness: Harness, taskId: string) => harness.db.get(`DEVTASK#${taskId}`, "META") as Row & { workflow: WorkflowSnapshot; workspaceId: string };
+const taskRow = (harness: Harness, taskId: string) => harness.db.get(`DEVTASK#${taskId}`, "META") as Row & { workflow: WorkflowSnapshot; workspaceId: string; ownerKey: string };
 const taskWorkflow = (harness: Harness, taskId: string) => taskRow(harness, taskId).workflow;
 const workspaceRow = (harness: Harness, workspaceId: string) => harness.db.get(`WORKSPACE#${workspaceId}`, "META") as Row;
 const dispatchRows = (harness: Harness) => harness.db.find((item) => item.pk === "WORKFLOW_DISPATCH");
@@ -192,6 +192,25 @@ describe("PLANINC-2: a planning step stranded RUNNING by an earlier release", ()
     expect(operations(harness, workspaceId).filter((item) => item.workflowMode === "PLAN")).toHaveLength(2);
   });
 
+  it("refuses, changing nothing, when the workspace is taken between the check and the block", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { taskId, workspaceId, stranded } = await strandedPlanning(harness);
+    let taken = 0;
+    harness.db.injectFault({ command: "TransactWriteCommand", error: { name: "UNUSED" }, match: (input) => {
+      const items = (input.TransactItems ?? []) as Array<{ ConditionCheck?: unknown }>;
+      if (items.some((item) => item.ConditionCheck !== undefined) && taken === 0) {
+        taken += 1;
+        harness.db.set({ ...workspaceRow(harness, workspaceId), status: "BUSY", activeOperationId: randomUUID() });
+      }
+      return false;
+    } });
+    const retry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/retry`, { requestId: randomUUID(), instructions: "Try again", expectedRevision: stranded.revision });
+    expect(taken).toBe(1);
+    expect(retry.status).toBe(409);
+    expect(taskWorkflow(harness, taskId)).toEqual(stranded);
+    expect(operations(harness, workspaceId).filter((item) => item.workflowMode === "PLAN")).toHaveLength(1);
+  });
+
   it("never touches planning that is really running: the view says running and Retry is refused as before", async () => {
     const harness = await createDeveloperTaskBroker();
     const { taskId, workspaceId } = await planningTask(harness);
@@ -246,6 +265,19 @@ describe("PLANINC-2: the stuck-cancel release", () => {
     await harness.finish(workspaceId, String(plan.id), "FAILED", { error: "the worker ended the task" });
     expect(taskWorkflow(harness, taskId).revision).toBe(before.revision + 1);
     expect(dispatchRows(harness)).toEqual([]);
+  });
+
+  it("blocks the step when the task's own late result arrives after the reconciler already freed the workspace", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { taskId, workspaceId, plan } = await planningTask(harness);
+    const before = taskWorkflow(harness, taskId);
+    const cancel = await requestStop(harness, taskId, workspaceId, String(plan.id));
+    await finishStop(harness, workspaceId, cancel, "FAILED");
+    const interrupted = operations(harness, workspaceId).find((item) => item.id === plan.id)!;
+    expect(await releaseFailedCancelWorkspace(harness.db, "state", { workspaceId, operationId: String(plan.id) }, interrupted, "compute-gone", new Date())).toBe(true);
+    expect(taskWorkflow(harness, taskId)).toEqual(before);
+    await harness.finish(workspaceId, String(plan.id), "FAILED", { error: "late" });
+    expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "PLAN", state: "BLOCKED", blockReason: "planning operation ended interrupted", revision: before.revision + 1 });
   });
 
   it("does not block a step a newer run holds the workspace for", async () => {
@@ -325,7 +357,7 @@ describe("PLANINC-2: every other workflow step", () => {
     const workspaceId = taskRow(harness, taskId).workspaceId;
     await harness.finish(workspaceId, String(operations(harness, workspaceId).find((item) => item.kind === "prepare")!.id), "SUCCEEDED", PREPARED);
     await harness.finish(workspaceId, String(operationOf(harness, workspaceId, "PLAN").id), "FAILED", { error: "test setup advances the workspace to READY" });
-    const task = taskRow(harness, taskId) as Row & { ownerKey: string };
+    const task = taskRow(harness, taskId);
     const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
     const now = new Date().toISOString();
     const planSha = createHash("sha256").update("Approved plan").digest("hex");
@@ -368,8 +400,8 @@ describe("PLANINC-2: every other workflow step", () => {
 
 describe("PLANINC-2: which stopped runs block their step", () => {
   const workflow = (stage: string, state = "RUNNING") => ({ stage, state } as unknown as WorkflowSnapshot);
-  const task = (extra: Row = {}) => ({ workspaceId: "w1", workflow: workflow("PLAN"), ...extra }) as never;
-  const run = (extra: Row = {}) => ({ id: "o1", workspaceId: "w1", kind: "task", status: "CANCEL_REQUESTED", fence: 1, createdAt: "2026-10-23T00:00:00.000Z", workflowMode: "PLAN", ...extra }) as never;
+  const task = (extra: Row = {}) => ({ workspaceId: "w1", workflow: workflow("PLAN"), ...extra }) as unknown as StoppedRunTask;
+  const run = (extra: Row = {}) => ({ id: "o1", workspaceId: "w1", kind: "task", status: "CANCEL_REQUESTED", fence: 1, createdAt: "2026-10-23T00:00:00.000Z", workflowMode: "PLAN", ...extra }) as unknown as StoppedRunOperation;
 
   it("blocks the step the run ran, and nothing else", () => {
     expect(stopBlocksWorkflowStep(task(), run())).toBe(true);
