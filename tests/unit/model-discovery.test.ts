@@ -141,7 +141,7 @@ describe("Anthropic, OpenAI and OpenRouter discovery (tests 26 and 27)", () => {
   });
 
   it("Anthropic: the pin counts as listed when only its dated snapshot is listed, and a different id does not", async () => {
-    const fetchFake = vi.fn(async () => json(200, { data: [{ id: "claude-haiku-5-5-20260601" }, { id: "claude-haiku-5-50-extra" }], has_more: false }));
+    const fetchFake = vi.fn<(url: string | URL | Request, init?: RequestInit) => Promise<Response>>(async () => json(200, { data: [{ id: "claude-haiku-5-5-20260601" }, { id: "claude-haiku-5-50-extra" }], has_more: false }));
     const report = await discoverModels({ provider: "anthropic", candidates: ["claude-haiku-5-5", "claude-haiku-9"] }, deps({ fetch: fetchFake, apiKey: async () => "k" }));
     expect(report.models).toMatchObject([{ modelId: "claude-haiku-5-5", visible: true, state: "available" }, { modelId: "claude-haiku-9", visible: false, state: "not-in-region" }]);
     expect(fetchFake.mock.calls[0]![1]).toMatchObject({ headers: { "x-api-key": "k", "anthropic-version": "2023-06-01" } });

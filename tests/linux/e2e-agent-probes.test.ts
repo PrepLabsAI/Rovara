@@ -1,13 +1,19 @@
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { WEB_API_AGENT_PROBE_IDS, evaluateWebApiProbeObservation, type WebApiProbeObservation } from "../../packages/contracts/src/index.js";
-import { e2eRunNetworks } from "../../packages/verifier/src/host/docker-application-host.js";
-import { webApiAgentIsolationGuardArgs } from "../../packages/verifier/src/host/web-api-probe-plan.js";
+import { WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_IDS, evaluateWebApiProbeObservation, type WebApiProbeObservation } from "../../packages/contracts/src/index.js";
+import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
+import { createDrivingNavigator } from "../../packages/verifier/src/host/model-driving-test.js";
+import { createDrivingTestLedger } from "../../packages/worker/src/e2e-model-check.js";
+import { createE2EModelEvidenceCollector, openE2EModelChannelSession } from "../../packages/worker/src/e2e-model-channel-session.js";
+import { createScriptedE2EInvoke } from "../../packages/worker/src/e2e-model-scripted.js";
+import { createProcessDockerCli, e2eRunNetworks } from "../../packages/verifier/src/host/docker-application-host.js";
+import { webApiAgentIsolationGuardArgs, webApiAgentProbeScript } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 import { verifyWebApiProbeRecord } from "../../packages/verifier/src/web-api-probe-evidence.js";
 import { substituteGuard } from "../support/agent-probe-guard.js";
-import { createLinuxProbeRunner, linuxProbeScratch, removeWebApiProbeScratch } from "../support/linux-web-api-probes.js";
+import { collectOnThisHost, createLinuxProbeRunner, linuxProbeScratch, removeWebApiProbeScratch } from "../support/linux-web-api-probes.js";
 import { APP_NODE_IMAGE, removeProbeDirs } from "../support/linux-runtime.js";
 import { assertFirewallInstalled, docker, listenOnAllAddresses } from "../support/linux-network-walls.js";
 import { webApiChallenge } from "../support/web-api-qualification.js";
@@ -143,4 +149,45 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       } finally { server.server.close(); }
     }, 300_000);
   });
+});
+
+// M1.4 Task 4.10C: the on-account driving test's navigation on a real Docker host, with the scripted double standing in for the provider. It is the real navigator (the plan function
+// `webApiDrivingTestPlan`, the Docker host, the real executor image, the real collector and the oracle), the worker's real model channel under the driving test's own ledger and the
+// worker's own evidence collector. What a real provider changes is the invoke and the route; the pass is the oracle's: one download, the CSV check, and the receipts equal the report.
+describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1")("the driving test's navigation on a real Docker host (scripted double)", () => {
+  afterAll(async () => { await removeProbeDirs(); await removeWebApiProbeScratch(); }, 120_000);
+
+  async function navigateWith(script: ReadonlyArray<{ kind: string; name?: string }>) {
+    const { runRoot } = await linuxProbeScratch();
+    const definition = scriptedE2ERouteDefinition();
+    const collector = createE2EModelEvidenceCollector();
+    const ledger = createDrivingTestLedger();
+    const turns = script.map((turn) => (turn.kind === "tap" ? { kind: "tap" as const, name: new RegExp(turn.name ?? "") } : { kind: "done" as const }));
+    const invoke = createScriptedE2EInvoke({ scripts: { [createHash("sha256").update(WEB_API_AGENT_PROBE_GOAL, "utf8").digest("hex")]: turns } });
+    const navigate = createDrivingNavigator({ docker: createProcessDockerCli(), executorImage: process.env.ROVARA_EXECUTOR_IMAGE ?? "rovara-e2e-executor:ci", buildImage: APP_NODE_IMAGE, runRoot,
+      roundScope: "qualification", collect: collectOnThisHost, receiptsOf: () => collector.receipts(),
+      modelChannelFor: (request) => ({ async open(open) {
+        const session = await openE2EModelChannelSession({ runId: request.runId, modelRoute: request.modelRoute, policyScope: "qualification", socketPath: open.socketPath, allowedSteps: request.allowedSteps,
+          credentialSet: { ...open.credentialSet, cookieValues: [] }, deadlineAt: open.deadlineAt, dayBudget: ledger, evidence: collector, signal: open.signal, invoke });
+        // A CI runner's own user owns the socket and the executor image runs as uid 1000 (see createLinuxProbeRunner).
+        chmodSync(session.socketPath, 0o666);
+        return { async close() { const summary = await session.close(); return { ...summary, transcripts: collector.transcripts(), valueKey: open.valueKey, definition: session.definition }; } };
+      } }) });
+    const outcome = await navigate({ definition, runId: randomUUID(), signal: AbortSignal.timeout(280_000) });
+    return { outcome, ledger };
+  }
+
+  it("passes with one download and receipts equal to the report: the oracle's PASS, never a model's", async () => {
+    const { outcome, ledger } = await navigateWith(webApiAgentProbeScript("web-agent-scripted-v1"));
+    expect(outcome, JSON.stringify(outcome)).toMatchObject({ caseVerdict: "passed", caseCode: null, reported: { modelCalls: 2, downloads: 1, csvPassed: true } });
+    expect(outcome.receipts.map((receipt) => receipt.outcome)).toEqual(["ok", "ok"]);
+    expect(ledger.snapshot().calls).toBe(2);
+  }, 600_000);
+
+  it("a model that does nothing is an UNKNOWN case (agent-no-download), so there is no pass", async () => {
+    const { outcome } = await navigateWith(webApiAgentProbeScript("web-agent-wrong-action-v1"));
+    expect(outcome.caseVerdict, JSON.stringify(outcome)).toBe("unknown");
+    expect(outcome.caseCode).toBe("agent-no-download");
+    expect(outcome.reported?.downloads ?? 0).toBe(0);
+  }, 600_000);
 });
