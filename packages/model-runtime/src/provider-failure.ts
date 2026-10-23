@@ -68,15 +68,17 @@ export interface ProviderFailureFacts {
 }
 
 export function classifyProviderFailure(facts: ProviderFailureFacts): E2EModelFailure {
+  const status = typeof facts.status === "number" && Number.isInteger(facts.status) ? facts.status : undefined;
+  // A call that got no response and named an allow-listed network code is unreachable, even when the SDK rewrote it as "Request timed out." (a connect timeout is the most common
+  // unreachable there is). Only a timeout with a response, or with no network code, is the provider's outage.
+  if (status === undefined && facts.networkCode !== undefined && isNetworkCode(facts.networkCode)) return { class: "unreachable", signal: facts.networkCode };
   if (facts.timedOut === true) return { class: "provider-outage", signal: "timeout" };
   const signal = typeof facts.signal === "string" && signalPattern(facts.provider).test(facts.signal) && E2E_MODEL_FAILURE_SIGNAL_PATTERN.test(facts.signal) ? facts.signal : null;
-  const status = typeof facts.status === "number" && Number.isInteger(facts.status) ? facts.status : undefined;
   const bySignal = signal === null ? undefined : SIGNALS[facts.provider].get(signal);
   if (bySignal !== undefined) return { class: bySignal, signal };
   if (status !== undefined) {
     const byStatus = STATUSES[facts.provider].find(([, matches]) => matches(status))?.[0];
     return { class: byStatus ?? "unknown", signal };
   }
-  if (facts.networkCode !== undefined && isNetworkCode(facts.networkCode)) return { class: "unreachable", signal: facts.networkCode };
   return { class: "unknown", signal };
 }

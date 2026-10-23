@@ -93,6 +93,7 @@ export const E2E_OWNER_SENTENCES = Object.freeze({
   groupCode: Object.freeze({
     "model-route-changed-reapprove": "The AI navigation settings changed after setup was approved. Approve setup again to run these checks.",
     "agent-route-not-approved": "AI navigation isn't approved for this project yet. Approve setup to run the AI-navigated checks.",
+    "runtime-expired": "The browser and API runtime's qualification expired. An administrator must qualify it again, then retry the checks.",
     "model-route-not-tested": "AI navigation has not passed its driving test yet. Run the driving test, then approve setup again.",
     "model-environment-unsafe": "This check could not be verified.",
   } as Readonly<Record<string, string>>),

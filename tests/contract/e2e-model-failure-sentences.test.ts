@@ -78,6 +78,10 @@ describe("22. the sentence of each model code, from the approved wording", () =>
     expect(E2E_OWNER_SENTENCES.groupCode["model-route-not-tested"]).toBe("AI navigation has not passed its driving test yet. Run the driving test, then approve setup again.");
   });
 
+  it("carries RUN-3's runtime-expired group sentence, so a group refused for it does not read 'could not be verified'", () => {
+    expect(E2E_OWNER_SENTENCES.groupCode["runtime-expired"]).toBe("The browser and API runtime's qualification expired. An administrator must qualify it again, then retry the checks.");
+  });
+
   it("the context comes from a stored route definition: the provider's name and the pinned model, and nothing for a scripted route", () => {
     expect(modelSentenceContext({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-5-5" })).toEqual({ providerLabel: "Amazon Bedrock", modelId: "us.anthropic.claude-haiku-5-5" });
     expect(modelSentenceContext({ provider: "anthropic", modelId: "claude-haiku-5-5" })?.providerLabel).toBe("Anthropic");

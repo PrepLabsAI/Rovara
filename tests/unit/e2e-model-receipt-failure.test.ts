@@ -48,7 +48,7 @@ describe("20. the receipt's failure", () => {
 
   it("an unknown class, extra keys and a signal outside the allow-list are refused", () => {
     for (const failure of [{ class: "weird", signal: null }, { class: "unknown", signal: null, extra: 1 }, { class: "unknown" }, { class: "unknown", signal: "has space" },
-      { class: "unknown", signal: "x".repeat(65) }, { class: "unknown", signal: "sk-ant-SECRET:value" }, { class: "unknown", signal: "" }]) {
+      { class: "unknown", signal: "x".repeat(65) }, { class: "unknown", signal: "sk-ant-SECRET:value" }, { class: "unknown", signal: "sk-ant-SECRETVALUE" }, { class: "unknown", signal: "Mixed-Case-Token" }, { class: "unknown", signal: "" }]) {
       expect(E2EModelReceiptSchema.safeParse({ ...base, failure }).success, JSON.stringify(failure)).toBe(false);
     }
   });

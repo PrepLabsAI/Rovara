@@ -480,8 +480,10 @@ async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition, depen
       if (input.signal.aborted && status === undefined) throw providerError("the model call was stopped", { mayHaveBeenBilled: billed });
       // Why it failed, as one fixed class (Task 4.10B). The adapter's error text is read for nothing but a timeout and an allow-listed network code; Bedrock's own diagnostic names a
       // stream error that came after a 200.
-      const text = final.errorMessage;
-      const failure = classifyProviderFailure({ provider, status, signal: observed.signal ?? bedrockDiagnosticSignal(final), networkCode: observed.networkCode ?? networkCodeInText(text),
+      // The adapter's text is read only when no 2xx response was seen: after one, it can hold what the model or the provider's stream said, which must not steer the class.
+      const text = observed.accepted === true ? undefined : final.errorMessage;
+      const networkCode = observed.networkCode ?? networkCodeInText(text);
+      const failure = classifyProviderFailure({ provider, status, signal: observed.signal ?? bedrockDiagnosticSignal(final), networkCode,
         timedOut: status === undefined && (final.stopReason === "aborted" || (text !== undefined && /\btimed? ?out\b/i.test(text))) });
       throw providerError("the provider call failed", { ...(status === undefined ? {} : { status }), mayHaveBeenBilled: billed, failure });
     }

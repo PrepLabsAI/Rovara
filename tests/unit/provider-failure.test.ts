@@ -118,7 +118,7 @@ describe("16. classifyProviderFailure: every cell of the plan's table", () => {
 
   it("a timeout is an outage with the signal timeout, whatever else was seen", () => {
     expect(classifyProviderFailure({ provider: "openrouter", timedOut: true })).toEqual({ class: "provider-outage", signal: "timeout" });
-    expect(classifyProviderFailure({ provider: "amazon-bedrock", timedOut: true, networkCode: "ETIMEDOUT" })).toEqual({ class: "provider-outage", signal: "timeout" });
+    expect(classifyProviderFailure({ provider: "amazon-bedrock", timedOut: true, status: 504 })).toEqual({ class: "provider-outage", signal: "timeout" });
   });
 });
 
@@ -135,5 +135,18 @@ describe("19. a signal outside the allow-list pattern is dropped, and the status
   });
   it("a hostile signal with no status is unknown with no signal", () => {
     expect(classifyProviderFailure({ provider: "openai", signal: "sk-ant-SECRETVALUE" })).toEqual({ class: "unknown", signal: null });
+  });
+});
+
+describe("review I-1: a captured network code with no response decides unreachable before the timeout rule", () => {
+  it("timed out with an allow-listed network code and no response is unreachable", () => {
+    for (const networkCode of ["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "ECONNRESET", "ENOTFOUND", "CERT_HAS_EXPIRED"]) {
+      expect(classifyProviderFailure({ provider: "anthropic", timedOut: true, networkCode })).toEqual({ class: "unreachable", signal: networkCode });
+    }
+    expect(classifyProviderFailure({ provider: "amazon-bedrock", timedOut: true, networkCode: "ETIMEDOUT" })).toEqual({ class: "unreachable", signal: "ETIMEDOUT" });
+  });
+  it("a timeout with a code outside the allow-list, or with a response, is still an outage with the signal timeout", () => {
+    expect(classifyProviderFailure({ provider: "openai", timedOut: true, networkCode: "EWHATEVER" })).toEqual({ class: "provider-outage", signal: "timeout" });
+    expect(classifyProviderFailure({ provider: "openai", timedOut: true, networkCode: "ETIMEDOUT", status: 504 })).toEqual({ class: "provider-outage", signal: "timeout" });
   });
 });

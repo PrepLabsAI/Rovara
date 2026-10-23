@@ -349,11 +349,11 @@ export const E2E_MODEL_FAILURE_CLASSES = ["limit-or-rate-limited", "key-rejected
 export type E2EModelFailureClass = (typeof E2E_MODEL_FAILURE_CLASSES)[number];
 
 /**
- * The most a failure's `signal` can be: the error's own name or code, never its message. It is one allow-listed token (a Bedrock error type such as `ThrottlingException`, a provider's
- * error code such as `rate_limit_error`, a network code such as `ECONNRESET`, or a fixed Rovara word such as `secret-unreadable` or `timeout`), up to 64 characters, so no sentence, key
- * or prompt text can be carried in it. It is for the operator and never reaches Slack or the task page.
+ * The most a failure's `signal` can be: the error's own name or code, never its message. It is one token of the shapes the producers emit (a Bedrock error type such as
+ * `ThrottlingException`: letters; a provider's error code such as `rate_limit_error`: lower case, digits and underscores; a network code such as `ECONNRESET` or `CERT_*`; or the fixed
+ * words `secret-unreadable` and `not-in-catalog`), up to 64 characters, so no sentence, key or prompt text can be carried in it. It is for the operator and never reaches Slack or the task page.
  */
-export const E2E_MODEL_FAILURE_SIGNAL_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+export const E2E_MODEL_FAILURE_SIGNAL_PATTERN = /^(?:[A-Za-z]{1,64}|[a-z0-9_]{1,64}|E[A-Z_]{2,30}|UND_ERR_[A-Z_]{1,40}|CERT_[A-Z0-9_]{1,56}|secret-unreadable|not-in-catalog)$/;
 export const E2EModelFailureSchema = z.object({
   class: z.enum(E2E_MODEL_FAILURE_CLASSES),
   signal: z.string().regex(E2E_MODEL_FAILURE_SIGNAL_PATTERN).nullable(),
