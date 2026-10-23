@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import type { E2EWorkflowAdmissionRef } from "@agentx/contracts";
+import { e2eAgentRouteNeedsModelChoice, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
 import { readObjectText } from "../developer/plan-artifacts.js";
+import { readAdmittedE2EModelRoute } from "../e2e/model-route-registry.js";
 
 /**
  * How the dispatcher learns what kind of admission a CHECKS reference names: it reads the stored object, holds it to the reference's size and sha256, and answers its
@@ -39,6 +40,35 @@ export function createWorkflowE2EAdmissionSchemaReader(input: { s3: { send(comma
     try {
       const schemaVersion = (JSON.parse(text) as { schemaVersion?: unknown } | null)?.schemaVersion;
       return typeof schemaVersion === "string" ? schemaVersion : undefined;
+    } catch { return undefined; }
+  };
+}
+
+/**
+ * Whether the route an application admission pins needs a worker that lists the model-choice feature (Task 4.10): the admission is read as the others are (held to the reference's
+ * size and sha256), its `modelRoute` names a revision, and the registry's definition of that revision says whether the model is not the recommended one or the request shape is
+ * `minimal`. An admission that pins no route (a round with no AI navigation, or a replay) needs nothing. Anything it cannot establish (the object, the registry row, a fault
+ * reading it) answers undefined, which the dispatcher treats as a refusal: it never guesses that a route is the default.
+ */
+export function createWorkflowE2EAdmissionModelChoiceReader(input: {
+  s3: { send(command: never): Promise<unknown> };
+  bucket: string;
+  readRow: (key: { pk: string; sk: string }) => Promise<Record<string, unknown> | undefined>;
+}) {
+  return async (reference: E2EWorkflowAdmissionRef): Promise<boolean | undefined> => {
+    const { key, sha256, byteLength } = reference.admissionRef;
+    const text = await readObjectText(input.s3, input.bucket, key, byteLength);
+    if (text === undefined) return undefined;
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.byteLength !== byteLength || createHash("sha256").update(bytes).digest("hex") !== sha256) return undefined;
+    let route: unknown;
+    try { route = (JSON.parse(text) as { modelRoute?: unknown } | null)?.modelRoute; } catch { return undefined; }
+    if (route === null) return false;
+    const named = route as { routeId?: unknown; routeRevision?: unknown } | undefined;
+    if (typeof named?.routeId !== "string" || typeof named.routeRevision !== "string") return undefined;
+    try {
+      const definition = await readAdmittedE2EModelRoute(input.readRow, { routeId: named.routeId, routeRevision: named.routeRevision });
+      return definition === null ? undefined : e2eAgentRouteNeedsModelChoice(definition);
     } catch { return undefined; }
   };
 }

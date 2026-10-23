@@ -240,6 +240,11 @@ export const WORKER_SETTING_PARAMETERS = {
   openRouterProviders: "worker-openrouter-providers",
   anthropicSecretArn: "worker-anthropic-secret-arn",
   openaiSecretArn: "worker-openai-secret-arn",
+  /**
+   * The AI navigation model the installation chose (Task 4.10): `default` (Rovara's recommendation) or an eligible model id. Read by the broker and the deploy check, never put in the
+   * worker's boot environment: the worker searches the eligible models for the revision an admission names.
+   */
+  e2eAgentModel: "worker-e2e-agent-model",
 } as const;
 
 /**

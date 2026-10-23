@@ -1,5 +1,7 @@
 import {
+  E2E_AGENT_MODEL_CHOICE_FEATURE,
   E2E_AGENT_STEPS_FEATURE,
+  E2E_AGENT_UNAVAILABLE_REASONS,
   E2E_REPLAY_CHECKS_FEATURE,
   E2E_APPLICATION_ADMISSION_SCHEMA_V2,
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
@@ -66,6 +68,12 @@ export interface Ec2DeliveryDependencies {
    * flag decides whether the worker must list the agent-steps feature, so a reference that understated it would skip that gate. Undefined when it cannot be read.
    */
   workflowE2EAdmissionUsesAgentSteps?: (reference: E2EWorkflowAdmissionRef) => Promise<boolean | undefined>;
+  /**
+   * Whether the route an application admission pins is one a worker built before the model choice (Task 4.10) cannot serve: a model other than the recommended one, or the minimal
+   * request shape. Undefined when it cannot be read. With it, a round with AI navigation steps is never sent to a worker that does not list `task.workflowE2EAgentModelChoice.v1`
+   * when the route needs it, and a route that cannot be read is refused rather than assumed to be the default.
+   */
+  workflowE2EAdmissionNeedsModelChoice?: (reference: E2EWorkflowAdmissionRef) => Promise<boolean | undefined>;
   /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
   guardTaskDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
   /** Loads and validates the durable internal readiness marker before any session provisioning. */
@@ -139,7 +147,10 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
       return { readinessGeneration: session.generation };
     }
     if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
-    const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures, admissionSchemaVersion);
+    const applicationAdmission = invocation.kind === "task" && invocation.payload.workflowE2EAdmission?.kind === "application" ? invocation.payload.workflowE2EAdmission : undefined;
+    const modelChoice = applicationAdmission === undefined || dependencies.workflowE2EAdmissionNeedsModelChoice === undefined ? undefined
+      : () => dependencies.workflowE2EAdmissionNeedsModelChoice!(applicationAdmission);
+    const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures, admissionSchemaVersion, modelChoice);
     if (invocation.kind === "task" && invocation.payload.workflowE2EPlanVersion !== undefined
       && !(sent.kind === "task" && sent.payload.workflowE2EPlanVersion !== undefined)) {
       // Without the recorder the operation record would keep saying version 2 was offered while the worker was sent a portable-only run, so the broker would
@@ -239,6 +250,7 @@ async function forWorker(
   pingUrl: string,
   workerFeatures: Ec2DeliveryDependencies["workerFeatures"],
   admissionSchemaVersion?: string,
+  modelChoice?: () => Promise<boolean | undefined>,
 ): Promise<WorkerInvocation> {
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
@@ -298,6 +310,13 @@ async function forWorker(
   // A round with AI navigation steps needs the model channel only a worker that lists the feature has, and the steps are never trimmed away: the attempt fails with this reason instead.
   if (carriesAgentSteps && !features.includes(E2E_AGENT_STEPS_FEATURE)) {
     throw agentXError("RUNTIME_UNAVAILABLE", "This worker can't run AI navigation steps yet; retry once it restarts");
+  }
+  // Task 4.10: a route whose model the installation chose, or whose request shape is minimal, is derived only by a worker that lists the model-choice feature. An older worker would refuse it
+  // after compute was spent, so it is refused here, with a fixed sentence. A route that cannot be read is refused too: it is never assumed to be the default.
+  if (carriesAgentSteps && modelChoice !== undefined && !features.includes(E2E_AGENT_MODEL_CHOICE_FEATURE)) {
+    let needs: boolean | undefined;
+    try { needs = await modelChoice(); } catch { needs = undefined; }
+    if (needs !== false) throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: this worker is too old for the chosen AI navigation model`);
   }
   // M1.3 Task 3.4: a version 2 admission keys its runtime rows by profile and kind, which a worker built before it cannot read. It is refused here, before compute is spent, with a sentence the
   // owner can act on (the worker lists the feature again once it restarts on the new image).

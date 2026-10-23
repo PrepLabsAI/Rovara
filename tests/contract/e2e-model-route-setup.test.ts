@@ -57,7 +57,7 @@ describe("a setup proposal and its approval carry the AI navigation route", () =
     expect(proposal.status, JSON.stringify(proposal.body)).toBe(200);
     const policy = E2EPolicySchema.parse(proposal.body.policy);
     expect(policy.modelRouteRevision).toMatch(/^r1-[a-f0-9]{12}$/);
-    expect(proposal.body.aiNavigation).toBe(`AI navigation: Anthropic \`${DEFAULT_E2E_AGENT_MODELS.anthropic}\`; at most 8 actions per step; checks decide`);
+    expect(proposal.body.aiNavigation).toBe(`AI navigation: Anthropic \`${DEFAULT_E2E_AGENT_MODELS.anthropic}\` (Rovara's recommendation); at most 8 actions per step; checks decide`);
     // A proposal writes nothing: only the approval records the route.
     expect(routeRows(harness.db)).toEqual([]);
     const stored = JSON.parse(harness.s3.objects.get(String(proposal.body.proposalRef))!) as { aiNavigation?: string; policy: { modelRouteRevision: string } };

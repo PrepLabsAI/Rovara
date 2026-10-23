@@ -99,3 +99,14 @@ export function e2eAgentScopeSentence(modelId: string): string | null {
   if (modelId.startsWith("global.")) return SCOPE_SENTENCES.global;
   return null;
 }
+
+/**
+ * Whether a route needs a worker that lists `E2E_AGENT_MODEL_CHOICE_FEATURE`: its model is not the recommended one for its provider, or its request shape is `minimal`. A worker
+ * built before Task 4.10 derives only the recommended model in the standard shape, so it would refuse such a route; the broker never dispatches one to it.
+ */
+export function e2eAgentRouteNeedsModelChoice(definition: { provider: string; modelId: string; payloadShape?: "minimal" | undefined }): boolean {
+  const recommended = (E2E_AGENT_RECOMMENDED_MODELS as Record<string, string | undefined>)[definition.provider];
+  // The scripted provider is not an installation's provider: a qualification route, which has no recommended model.
+  if (recommended === undefined) return false;
+  return definition.payloadShape === "minimal" || definition.modelId !== recommended;
+}

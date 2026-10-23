@@ -506,6 +506,63 @@ describe("ec2-ebs delivery", () => {
         expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
       });
 
+      describe("a chosen AI navigation model or the minimal request shape (M1.4 Task 4.10A, test 15)", () => {
+        const APPLICATION = "workflow-e2e-application-admission/v1";
+        const MESSAGE = "agent-route-not-approved: this worker is too old for the chosen AI navigation model";
+        const withAgents = [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"];
+        const withChoice = [...withAgents, "task.workflowE2EAgentModelChoice.v1"];
+        const dependenciesFor = (needs: boolean | undefined | Error, features: string[]) => ({
+          workerFeatures: async () => features, workflowE2EAdmissionSchemaVersion: async () => APPLICATION, workflowE2EAdmissionUsesAgentSteps: async () => true,
+          workflowE2EAdmissionNeedsModelChoice: vi.fn(async () => { if (needs instanceof Error) throw needs; return needs; }),
+        });
+        const round = () => { const ref = admission({ kind: "application", agentSteps: true }); return { ref, record: checks(ref) }; };
+
+        it("refuses a non-recommended or minimal route to a worker that does not list task.workflowE2EAgentModelChoice.v1, with the fixed detail and nothing sent", async () => {
+          const { record } = round();
+          const dependencies = dependenciesFor(true, withAgents);
+          const older = delivery(dependencies);
+          const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+          expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+          expect(refusal?.message).toContain(MESSAGE);
+          expect(older.post).not.toHaveBeenCalled();
+          expect(dependencies.workflowE2EAdmissionNeedsModelChoice).toHaveBeenCalledTimes(1);
+        });
+
+        it("delivers the same route, unchanged, to a worker that lists the feature (positive control)", async () => {
+          const { ref, record } = round();
+          const capable = delivery(dependenciesFor(true, withChoice));
+          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
+        });
+
+        it("still delivers Rovara's recommended route in the standard shape to a worker without the feature, so the older fleet keeps working", async () => {
+          const { ref, record } = round();
+          const older = delivery(dependenciesFor(false, withAgents));
+          expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(older.post).workflowE2EAdmission).toEqual(ref);
+        });
+
+        it("fails closed when the route cannot be read: an unreadable route is never assumed to be the default", async () => {
+          for (const needs of [undefined, new Error("ddb down")]) {
+            const { record } = round();
+            const unreadable = delivery(dependenciesFor(needs, withAgents));
+            await expect(unreadable.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining(MESSAGE) as unknown });
+            expect(unreadable.post).not.toHaveBeenCalled();
+          }
+        });
+
+        it("does not look at the route when the worker lists the feature or the round has no AI navigation step", async () => {
+          const { record } = round();
+          const dependencies = dependenciesFor(true, withChoice);
+          await delivery(dependencies).deliver(record, record.invocation);
+          expect(dependencies.workflowE2EAdmissionNeedsModelChoice).not.toHaveBeenCalled();
+          const plain = checks(admission({ kind: "application" }));
+          const noAgents = { ...dependenciesFor(true, [...checksFeatures, "task.workflowE2EApplicationChecks"]), workflowE2EAdmissionUsesAgentSteps: async () => false };
+          expect(await delivery(noAgents).deliver(plain, plain.invocation)).toBe("DELIVERED");
+          expect(noAgents.workflowE2EAdmissionNeedsModelChoice).not.toHaveBeenCalled();
+        });
+      });
+
       describe("the reference's agentSteps flag against the admission it names (checked before delivery)", () => {
         const withAgents = [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"];
         const APPLICATION = "workflow-e2e-application-admission/v1";

@@ -1,8 +1,8 @@
 import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
-  E2EModelRouteDefinitionSchema, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE,
-  INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, indexExpiresAt, e2eModelRouteRevision, e2eModelRouteRevisionNumber, isKeyedModelProvider,
-  type E2EModelRouteDefinition, type ModelProvider,
+  E2EModelRouteDefinitionSchema, E2E_AGENT_RECOMMENDED_MODELS, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE,
+  INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, e2eAgentScopeSentence, indexExpiresAt, e2eModelRouteRevision, e2eModelRouteRevisionNumber,
+  isKeyedModelProvider, type E2EModelRouteDefinition, type ModelProvider,
 } from "@agentx/contracts";
 import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest, type E2EAgentInstallation, type DerivedE2EAgentRoute } from "@agentx/model-runtime/e2e-route-derive";
 import type { E2EDayBudget, E2EDayLimits, E2EDayReservation } from "@agentx/model-runtime";
@@ -21,6 +21,8 @@ export { deriveE2EAgentRoute, type E2EAgentInstallation, type DerivedE2EAgentRou
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE#<routeId>#REV#<n>`: the definition of revision n, written once and never changed;
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_LATEST#<routeId>`: `{ revisionNumber, revision, definitionDigest }`, moved only from the previous revision;
  * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_CANARY#<routeId>#<definitionDigest>`: written by the live canary (Task 4.9) for a provisional route;
+ * - `E2E_MODEL_ROUTES / E2E_MODEL_ROUTE_SHAPE#<routeId>#<modelId>`: `{ payloadShape: "standard" | "minimal", testedAt }`, the request shape the driving test found to work for that model
+ *   (Task 4.10; written by the broker when it validates a passing test, read here so setup approval derives exactly the tested definition);
  * - `PROJECT#<project> / E2E_MODEL_BUDGET#<yyyy-mm-dd>`: `{ inputTokens, calls }` of the project's UTC day, moved only by conditional increments;
  * - `PROJECT#<project> / E2E_MODEL_BUDGET_RESERVATION#<reservationId>`: one call's reservation against that day (`open`, then `settled` or `released` once), kept by the worker's
  *   budget callback (`model-budget-endpoint.ts`, Task 4.3a), which is the budget the worker path uses.
@@ -53,6 +55,7 @@ export function isTransientAwsFault(error: unknown): boolean {
 export const e2eModelRouteRevisionKey = (routeId: string, revisionNumber: number) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE#${routeId}#REV#${revisionNumber}` });
 export const e2eModelRouteLatestKey = (routeId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_LATEST#${routeId}` });
 export const e2eModelRouteCanaryKey = (routeId: string, definitionDigest: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_CANARY#${routeId}#${definitionDigest}` });
+export const e2eModelRouteShapeKey = (routeId: string, modelId: string) => ({ pk: E2E_MODEL_ROUTE_PARTITION, sk: `E2E_MODEL_ROUTE_SHAPE#${routeId}#${modelId}` });
 export const e2eModelBudgetKey = (projectName: string, day: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET#${day}` });
 /** One reservation of a call's tokens against the project's day (`model-budget-endpoint.ts`): written with the day's increment, settled or released once. */
 export const e2eModelBudgetReservationKey = (projectName: string, reservationId: string) => ({ pk: `PROJECT#${projectName}`, sk: `E2E_MODEL_BUDGET_RESERVATION#${reservationId}` });
@@ -85,27 +88,50 @@ export interface E2EModelRouteStore {
 }
 
 /**
- * Reads the installation's worker model settings from the SSM parameters under its settings prefix (`/agentx/<env>/`): the provider, a keyed provider's secret ARN and the
- * OpenRouter allowlist. They hold an id and an ARN, never a secret. A value that is absent or `none` is not configured. `read` returns the values found by parameter name.
+ * The request shape recorded for one model (the `E2E_MODEL_ROUTE_SHAPE` row): `minimal` when the driving test found the standard shape refused, else undefined. A row that is
+ * there but is not one of the two shapes cannot be trusted to say which definition was tested, so it is an error rather than "standard".
+ */
+export async function readE2EModelRouteShape(store: E2EModelRouteStore, routeId: string, modelId: string): Promise<"minimal" | undefined> {
+  const response = await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: e2eModelRouteShapeKey(routeId, modelId), ConsistentRead: true }));
+  const item = response.Item as Record<string, unknown> | undefined;
+  if (item === undefined) return undefined;
+  if (item["payloadShape"] === "minimal") return "minimal";
+  if (item["payloadShape"] === "standard") return undefined;
+  throw new E2EModelRouteError("agent-route-not-approved", "the stored request shape of the AI navigation model cannot be read");
+}
+
+/**
+ * Reads the installation's worker model settings from the SSM parameters under its settings prefix (`/agentx/<env>/`): the provider, a keyed provider's secret ARN, the
+ * OpenRouter allowlist and the AI navigation model the installation chose (`worker-e2e-agent-model`; `default`, `none` or absent is Rovara's recommendation). They hold an id and an
+ * ARN, never a secret. A value that is absent or `none` is not configured. `read` returns the values found by parameter name. `options.readShape` answers the request shape the
+ * driving test recorded for a model; with it, the installation carries `payloadShape: "minimal"` when that is the tested shape, so setup approval derives exactly what was tested.
  */
 export async function e2eAgentInstallationFromParameters(
   prefix: string,
   read: (names: readonly string[]) => Promise<ReadonlyMap<string, string>>,
   region: string | undefined,
+  options: { readShape?: (modelId: string) => Promise<"minimal" | undefined> } = {},
 ): Promise<E2EAgentInstallation> {
   const names = {
     provider: `${prefix}${WORKER_SETTING_PARAMETERS.modelProvider}`,
     openRouterProviders: `${prefix}${WORKER_SETTING_PARAMETERS.openRouterProviders}`,
+    e2eModel: `${prefix}${WORKER_SETTING_PARAMETERS.e2eAgentModel}`,
     ...Object.fromEntries(Object.entries(KEYED_MODEL_PROVIDERS).map(([provider, row]) => [provider, `${prefix}${WORKER_SETTING_PARAMETERS[row.workerSetting]}`])),
   } as Record<string, string>;
   const values = await read(Object.values(names));
   const setting = (name: string): string | undefined => { const value = values.get(name)?.trim(); return value === undefined || value === "" || value === "none" ? undefined : value; };
   const provider = setting(names.provider!);
+  const chosen = setting(names.e2eModel!);
+  const e2eModel = chosen === undefined || chosen === "default" ? undefined : chosen;
+  const shapeModel = e2eModel ?? (provider !== undefined && (MODEL_PROVIDERS as readonly string[]).includes(provider) ? E2E_AGENT_RECOMMENDED_MODELS[provider as ModelProvider] : undefined);
+  const payloadShape = options.readShape === undefined || shapeModel === undefined ? undefined : await options.readShape(shapeModel);
   return {
     ...(provider === undefined ? {} : { provider }),
     ...(provider !== undefined && isKeyedModelProvider(provider) && setting(names[provider]!) !== undefined ? { secretArn: setting(names[provider]!)! } : {}),
     ...(setting(names.openRouterProviders!) === undefined ? {} : { openRouterProviders: setting(names.openRouterProviders!)! }),
     ...(region === undefined || region === "" ? {} : { region }),
+    ...(e2eModel === undefined ? {} : { e2eModel }),
+    ...(payloadShape === undefined ? {} : { payloadShape }),
   };
 }
 
@@ -136,10 +162,17 @@ export { e2eAgentRouteDefinitionDigest };
 
 const LABELS: Record<ModelProvider, string> = { "amazon-bedrock": "Amazon Bedrock", openrouter: "OpenRouter", anthropic: "Anthropic", openai: "OpenAI" };
 
-/** The sentence the setup proposal shows the administrator. */
+/**
+ * The sentence the setup proposal shows the administrator: the model, whether it is Rovara's recommendation or the installation's own choice, the routing scope of a Bedrock
+ * profile in the owner-approved words (US data centers, or Global), and the action bound. The request shape is not shown: it is an engineering detail of what the driving test found.
+ */
 export function agentRouteSummary(definition: E2EModelRouteDefinition): string {
   const provider = definition.provider as ModelProvider;
-  return `AI navigation: ${LABELS[provider] ?? provider} \`${definition.modelId}\`; at most ${definition.budgets.maxActionsPerStep} actions per step; checks decide`;
+  const who = definition.modelId === E2E_AGENT_RECOMMENDED_MODELS[provider as ModelProvider] ? "Rovara's recommendation" : "your choice";
+  const head = `AI navigation: ${LABELS[provider] ?? provider} \`${definition.modelId}\` (${who})`;
+  const bound = `at most ${definition.budgets.maxActionsPerStep} actions per step; checks decide`;
+  const scope = provider === "amazon-bedrock" ? e2eAgentScopeSentence(definition.modelId) : null;
+  return scope === null ? `${head}; ${bound}` : `${head}. ${scope} ${bound.charAt(0).toUpperCase()}${bound.slice(1)}`;
 }
 
 export class E2EModelRouteError extends Error {

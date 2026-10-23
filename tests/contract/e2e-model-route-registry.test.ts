@@ -67,8 +67,8 @@ describe("the route is derived from the installation's worker provider", () => {
   });
 
   it("reads the proposal sentence the administrator approves", () => {
-    expect(agentRouteSummary(available(anthropic))).toBe(`AI navigation: Anthropic \`${DEFAULT_E2E_AGENT_MODELS.anthropic}\`; at most 8 actions per step; checks decide`);
-    expect(agentRouteSummary(available(bedrock))).toMatch(/^AI navigation: Amazon Bedrock `us\.anthropic\.claude-haiku-5-5`; at most 8 actions per step; checks decide$/);
+    expect(agentRouteSummary(available(anthropic))).toBe(`AI navigation: Anthropic \`${DEFAULT_E2E_AGENT_MODELS.anthropic}\` (Rovara's recommendation); at most 8 actions per step; checks decide`);
+    expect(agentRouteSummary(available(bedrock))).toMatch(/^AI navigation: Amazon Bedrock `us\.anthropic\.claude-haiku-5-5` \(Rovara's recommendation\)\. Your app's pages are processed by the AI in US data centers\. At most 8 actions per step; checks decide$/);
   });
 });
 
