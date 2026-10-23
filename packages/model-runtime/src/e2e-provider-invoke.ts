@@ -190,16 +190,25 @@ function shapePayload(rawPayload: unknown, input: E2EInvokeInput, definition: E2
   let payload = withoutSampling(rawPayload as Payload);
   const expectedModel = input.target.identifier;
   const claude = provider === "anthropic" || (provider === "amazon-bedrock" && /anthropic\.claude/.test(expectedModel)) || (provider === "openrouter" && definition.modelId.startsWith("anthropic/"));
+  // The minimal shape (Task 4.10, D-3) sends no thinking, effort or reasoning field on any provider: only the model, messages, tools, tool choice and max tokens.
+  const minimal = definition.payloadShape === "minimal";
 
   if (provider === "amazon-bedrock") {
     const inference = withoutSampling((payload["inferenceConfig"] ?? {}) as Payload);
     payload = { ...payload, inferenceConfig: inference };
     delete payload["additionalModelRequestFields"];
-    if (claude) payload["additionalModelRequestFields"] = { thinking: { type: "disabled" }, ...(input.effort === null ? {} : { output_config: { effort: input.effort } }) };
+    if (claude && !minimal) payload["additionalModelRequestFields"] = { thinking: { type: "disabled" }, ...(input.effort === null ? {} : { output_config: { effort: input.effort } }) };
     if (payload["modelId"] !== expectedModel) throw providerError("the provider payload names another model than the route pins");
+  } else if (provider === "anthropic" && minimal) {
+    delete payload["thinking"];
+    delete payload["output_config"];
+    if (payload["model"] !== expectedModel) throw providerError("the provider payload names another model than the route pins");
   } else if (provider === "anthropic") {
     payload["thinking"] = { type: "disabled" };
     if (input.effort !== null) payload["output_config"] = { ...((payload["output_config"] ?? {}) as Payload), effort: input.effort };
+    if (payload["model"] !== expectedModel) throw providerError("the provider payload names another model than the route pins");
+  } else if (provider === "openai" && minimal) {
+    delete payload["reasoning"];
     if (payload["model"] !== expectedModel) throw providerError("the provider payload names another model than the route pins");
   } else if (provider === "openai") {
     if (input.effort !== null || (payload["reasoning"] !== undefined)) payload["reasoning"] = { ...((payload["reasoning"] ?? {}) as Payload), effort: "low" };
@@ -211,7 +220,8 @@ function shapePayload(rawPayload: unknown, input: E2EInvokeInput, definition: E2
     payload["provider"] = { allow_fallbacks: policy.allowFallbacks, require_parameters: policy.requireParameters, data_collection: policy.dataCollection, ...(policy.only.length > 0 ? { only: policy.only, order: policy.only } : {}) };
     delete payload["models"];
     delete payload["route"];
-    if (definition.modelId.startsWith("anthropic/")) payload["reasoning"] = { effort: "none" };
+    if (minimal) { delete payload["reasoning"]; delete payload["reasoning_effort"]; }
+    else if (definition.modelId.startsWith("anthropic/")) payload["reasoning"] = { effort: "none" };
     if (payload["model"] !== expectedModel) throw providerError("the provider payload names another model than the route pins");
   }
   if (JSON.stringify(payloadToolNames(provider, payload)) !== JSON.stringify(offeredNames(input.call))) {

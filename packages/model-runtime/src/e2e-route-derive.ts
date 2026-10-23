@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import {
-  E2EModelRouteDefinitionSchema, E2E_AGENT_UNAVAILABLE_REASONS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
-  E2E_MODEL_SCRIPTED_ROUTE_PREFIX, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, SECRET_ARN_PATTERN, canonicalJson, e2eModelRouteRevision, e2eModelRouteRevisionNumber, isKeyedModelProvider,
-  type E2EModelRouteDefinition, type ModelProvider,
+  E2EModelRouteDefinitionSchema, E2E_AGENT_ELIGIBLE_MODELS, E2E_AGENT_RECOMMENDED_MODELS, E2E_AGENT_UNAVAILABLE_REASONS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE,
+  E2E_MODEL_ROUTE_DEFAULT_BUDGETS, E2E_MODEL_SCRIPTED_ROUTE_PREFIX, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, SECRET_ARN_PATTERN, canonicalJson, e2eAgentModelsFor, e2eModelRouteRevision,
+  e2eModelRouteRevisionNumber, eligibleE2EAgentModel, isKeyedModelProvider,
+  type E2EModelRouteDefinition, type EligibleE2EAgentModel, type ModelProvider,
 } from "@agentx/contracts";
 
 /**
@@ -12,18 +13,13 @@ import {
  */
 
 /**
- * The small model the AI browser-test agent uses on each provider, pinned in its route at setup approval (amendment A1).
- * It is a separate choice from every coding role and is not a `ModelRole`: a role's default can fall back to Bedrock,
- * and the e2e route never falls back. The OpenRouter id is provisional until a canary on an OpenRouter installation
- * records the model OpenRouter reports serving it (owner item O5). A test fails if the pinned pi catalog lacks any of them.
+ * The small model the AI browser-test agent uses on each provider unless the installation chooses another, pinned in its route at setup approval (amendment A1). It lives in
+ * contracts (`E2E_AGENT_RECOMMENDED_MODELS`, with the table of every model the route may be pinned to), so the broker and the CLI read it without pi-ai.
+ * It is a separate choice from every coding role and is not a `ModelRole`: a role's default can fall back to Bedrock, and the e2e route never falls back. A test fails if the
+ * pinned pi catalog lacks any of them.
  */
 // A default model must show agreement AVAILABLE in `test-deploy --check` (ruling M4-U): a model with no agreement reports NOT_AVAILABLE and fails it.
-export const DEFAULT_E2E_AGENT_MODELS = {
-  "amazon-bedrock": "us.anthropic.claude-haiku-5-5",
-  anthropic: "claude-haiku-5-5",
-  openrouter: "anthropic/claude-haiku-5.5",
-  openai: "gpt-5.4-mini",
-} as const satisfies Record<ModelProvider, string>;
+export const DEFAULT_E2E_AGENT_MODELS = E2E_AGENT_RECOMMENDED_MODELS;
 
 /** What the installation says about its worker's model, read from its worker settings (SSM `worker-model-provider`, `worker-<provider>-secret-arn`, `worker-openrouter-providers`). */
 export interface E2EAgentInstallation {
@@ -34,6 +30,13 @@ export interface E2EAgentInstallation {
   openRouterProviders?: string | undefined;
   /** The AWS region the Bedrock call goes to (the worker's region). */
   region?: string | undefined;
+  /**
+   * `worker-e2e-agent-model`: the model the installation chose for AI navigation. `default`, `none`, empty or absent mean Rovara's recommendation. Never taken from the worker's
+   * boot environment: the worker searches the eligible models for the revision an admission names instead (`resolveE2EAgentRouteForAdmission`).
+   */
+  e2eModel?: string | undefined;
+  /** The request shape the driving test found to work for the chosen model (the broker's `E2E_MODEL_ROUTE_SHAPE` row). Absent means the standard shape. */
+  payloadShape?: "minimal" | undefined;
 }
 
 export type DerivedE2EAgentRoute =
@@ -42,8 +45,15 @@ export type DerivedE2EAgentRoute =
 
 const unavailable = (detail: string): Extract<DerivedE2EAgentRoute, { status: "unavailable" }> => ({ status: "unavailable", reason: E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved, detail });
 
-/** The route the installation's settings give, as revision `revision`. A provider without what it needs (a secret, a region) has no route, and agent steps stay unavailable. */
-export function deriveE2EAgentRoute(installation: E2EAgentInstallation, revision = 1): DerivedE2EAgentRoute {
+/** What a provider's settings give a route of any model: the provider, its secret or region, and OpenRouter's routing policy. */
+interface RouteBase {
+  provider: ModelProvider;
+  secretArn: string | null;
+  region: string | null;
+  openRouter: E2EModelRouteDefinition["openRouter"];
+}
+
+function routeBase(installation: E2EAgentInstallation): { status: "ok"; base: RouteBase } | Extract<DerivedE2EAgentRoute, { status: "unavailable" }> {
   const provider = installation.provider;
   if (provider === undefined || provider === "") return unavailable("the installation has no model provider setting");
   if (!(MODEL_PROVIDERS as readonly string[]).includes(provider)) return unavailable(`${provider} is not a provider an installation can configure`);
@@ -65,11 +75,56 @@ export function deriveE2EAgentRoute(installation: E2EAgentInstallation, revision
     if (installation.region === undefined || installation.region === "") return unavailable("the Bedrock region of the installation is unknown");
     region = installation.region;
   }
-  const parsed = E2EModelRouteDefinitionSchema.safeParse({
-    routeId: E2E_DEFAULT_MODEL_ROUTE_ID, revision, scope: "standard", provider: modelProvider, region, modelId: DEFAULT_E2E_AGENT_MODELS[modelProvider], inferenceProfileArn: null, secretArn, openRouter,
-    budgets: { ...E2E_MODEL_ROUTE_DEFAULT_BUDGETS }, promptProtocol: "e2e-0.20.0-act/v1", sampling: "provider-default", thinking: "off", effort: modelProvider === "openai" ? null : "low", vision: false,
-  });
+  return { status: "ok", base: { provider: modelProvider, secretArn, region, openRouter } };
+}
+
+/** The unparsed definition of `row` in `shape`: the minimal shape sends no effort. */
+function definitionInput(base: RouteBase, row: EligibleE2EAgentModel, shape: "standard" | "minimal", revision: number) {
+  return {
+    routeId: E2E_DEFAULT_MODEL_ROUTE_ID, revision, scope: "standard", provider: base.provider, region: base.region, modelId: row.modelId, inferenceProfileArn: null, secretArn: base.secretArn,
+    openRouter: base.openRouter, budgets: { ...E2E_MODEL_ROUTE_DEFAULT_BUDGETS }, promptProtocol: "e2e-0.20.0-act/v1", sampling: "provider-default", thinking: "off",
+    effort: shape === "minimal" ? null : row.effort, vision: false, ...(shape === "minimal" ? { payloadShape: "minimal" } : {}),
+  };
+}
+
+function parsedDefinition(base: RouteBase, row: EligibleE2EAgentModel, shape: "standard" | "minimal", revision: number): DerivedE2EAgentRoute {
+  const parsed = E2EModelRouteDefinitionSchema.safeParse(definitionInput(base, row, shape, revision));
   return parsed.success ? { status: "available", definition: parsed.data } : unavailable(`the installation's settings do not make a valid route: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+}
+
+/** The recommended model's table row. It is not held to the region rule of a chosen model: a default install keeps the route it has always had, and a Bedrock profile of another geography fails closed at the call. */
+function recommendedRow(provider: ModelProvider): EligibleE2EAgentModel | undefined {
+  const modelId = E2E_AGENT_RECOMMENDED_MODELS[provider];
+  return E2E_AGENT_ELIGIBLE_MODELS.find((row) => row.provider === provider && row.modelId === modelId);
+}
+
+const isBuiltInChoice = (setting: string | undefined): boolean => setting === undefined || ["", "default", "none"].includes(setting.trim());
+
+/**
+ * The route the installation's settings give, as revision `revision`: the installation's chosen model (`e2eModel`), or Rovara's recommendation when it chose none. A provider
+ * without what it needs (a secret, a region) has no route, and agent steps stay unavailable. A chosen model the table does not list for this provider and region has no route
+ * either, and the sentence never carries the setting's value.
+ */
+export function deriveE2EAgentRoute(installation: E2EAgentInstallation, revision = 1): DerivedE2EAgentRoute {
+  const base = routeBase(installation);
+  if (base.status === "unavailable") return base;
+  const label = base.base.provider === "amazon-bedrock" ? "Amazon Bedrock" : KEYED_MODEL_PROVIDERS[base.base.provider].label;
+  const chosen = isBuiltInChoice(installation.e2eModel) ? undefined : installation.e2eModel?.trim();
+  const row = chosen === undefined || chosen === E2E_AGENT_RECOMMENDED_MODELS[base.base.provider] ? recommendedRow(base.base.provider) : eligibleE2EAgentModel(base.base.provider, chosen, base.base.region);
+  if (row === undefined || row === null) return unavailable(`the chosen AI navigation model is not one Rovara can use with ${label} in this region`);
+  return parsedDefinition(base.base, row, installation.payloadShape === "minimal" ? "minimal" : "standard", revision);
+}
+
+/**
+ * The route of one named model in one request shape, whatever the installation's setting says: what the worker's search tries (D-2) and what a model check drives (Task 4.10C). An
+ * id the table does not list for this provider and region has no route.
+ */
+export function deriveE2EAgentRouteForModel(installation: E2EAgentInstallation, modelId: string, shape: "standard" | "minimal", revision: number): DerivedE2EAgentRoute {
+  const base = routeBase(installation);
+  if (base.status === "unavailable") return base;
+  const row = modelId === E2E_AGENT_RECOMMENDED_MODELS[base.base.provider] ? recommendedRow(base.base.provider) : eligibleE2EAgentModel(base.base.provider, modelId, base.base.region);
+  if (row === undefined || row === null) return unavailable("that model is not one Rovara can use with this provider in this region");
+  return parsedDefinition(base.base, row, shape, revision);
 }
 
 /**
@@ -128,6 +183,28 @@ export type ResolvedE2EAgentRoute =
   | { ok: true; definition: E2EModelRouteDefinition }
   | { ok: false; code: typeof E2E_MODEL_ROUTE_CHANGED_REAPPROVE | typeof E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved; detail: string };
 
+/** The most routes the worker's search builds for one admission. Today's table holds fewer than 300 eligible models on any provider, in two shapes each. */
+export const E2E_AGENT_ROUTE_SEARCH_LIMIT = 1_000;
+
+/**
+ * The definition, among the models eligible for the provider and region (the recommended model first) in both request shapes at the admission's revision number, whose revision is
+ * the one the admission names; undefined when none is. Bounded at `E2E_AGENT_ROUTE_SEARCH_LIMIT` candidates. Never takes a definition from the admission: it makes each one itself.
+ */
+export function searchE2EAgentRoute(installation: E2EAgentInstallation, provider: ModelProvider, revisionNumber: number, routeRevision: string): E2EModelRouteDefinition | undefined {
+  const recommended = E2E_AGENT_RECOMMENDED_MODELS[provider];
+  const ids = [recommended, ...e2eAgentModelsFor(provider, installation.region ?? null).map((row) => row.modelId).filter((modelId) => modelId !== recommended)];
+  let tried = 0;
+  for (const modelId of ids) {
+    for (const shape of ["standard", "minimal"] as const) {
+      if (tried >= E2E_AGENT_ROUTE_SEARCH_LIMIT) return undefined;
+      tried += 1;
+      const derived = deriveE2EAgentRouteForModel(installation, modelId, shape, revisionNumber);
+      if (derived.status === "available" && e2eModelRouteRevision(derived.definition) === routeRevision) return derived.definition;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Re-derives, from the worker's own settings, the route an admission names, and holds it to the admission's revision. The worker never takes a definition from the admission or
  * the executor: it makes its own, and serves it only when its digest is the revision the broker approved and the project's policy pinned.
@@ -156,9 +233,13 @@ export function resolveE2EAgentRouteForAdmission(
     definition = scriptedE2ERouteDefinition({ revision: revisionNumber });
   } else {
     if (modelRoute.routeId !== E2E_DEFAULT_MODEL_ROUTE_ID) return refuse(E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved, "this worker does not serve that route");
-    const derived = deriveE2EAgentRoute(e2eAgentInstallationFromEnvironment(environment), revisionNumber);
+    // The worker's boot environment names the provider, secret and region, not the model: it searches the eligible models for the revision the admission names (D-2).
+    const installation = e2eAgentInstallationFromEnvironment(environment);
+    const derived = deriveE2EAgentRoute(installation, revisionNumber);
     if (derived.status === "unavailable") return refuse(E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved, derived.detail);
-    definition = derived.definition;
+    const found = searchE2EAgentRoute(installation, derived.definition.provider as ModelProvider, revisionNumber, modelRoute.routeRevision);
+    if (found === undefined) return refuse(E2E_MODEL_ROUTE_CHANGED_REAPPROVE, "the AI navigation settings of this worker are not the ones this route was approved with");
+    definition = found;
   }
   if (e2eModelRouteRevision(definition) !== modelRoute.routeRevision) {
     return refuse(E2E_MODEL_ROUTE_CHANGED_REAPPROVE, "the AI navigation settings of this worker are not the ones this route was approved with");

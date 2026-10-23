@@ -142,6 +142,12 @@ export const E2EModelRouteDefinitionSchema = z.object({
   thinking: z.literal("off"),
   /** The Claude effort level sent beside disabled thinking. Null where the provider has no such field. */
   effort: z.literal("low").nullable(),
+  /**
+   * `minimal` sends only the model, messages, tools, tool choice and max tokens: no thinking, effort, `output_config` or `reasoning` field (Task 4.10, D-3). Absent means the standard
+   * shape, so every definition written before it parses and hashes as it did. It is set only when the driving test found the standard shape refused, and is part of the digest, so
+   * what was tested is what is approved.
+   */
+  payloadShape: z.literal("minimal").optional(),
   vision: z.literal(false),
 }).strict().superRefine((route, context) => {
   const issue = (path: string, message: string) => context.addIssue({ code: "custom", path: [path], message });
@@ -154,9 +160,11 @@ export const E2EModelRouteDefinitionSchema = z.object({
     if (route.secretArn !== null) issue("secretArn", "the scripted provider has no secret");
     if (route.openRouter !== null) issue("openRouter", "the scripted provider has no OpenRouter policy");
     if (route.effort !== null) issue("effort", "the scripted provider has no effort");
+    if (route.payloadShape !== undefined) issue("payloadShape", "the scripted provider has no request shape");
     return;
   }
   if (scriptedId) issue("routeId", "the scripted route id prefix is reserved for the scripted provider");
+  if (route.payloadShape === "minimal" && route.effort !== null) issue("payloadShape", "the minimal request shape sends no effort");
   if (route.provider === "amazon-bedrock") {
     if (route.region === null) issue("region", "a Bedrock route pins its region");
     if (route.secretArn !== null) issue("secretArn", "a Bedrock route reads no secret: it uses the worker role");
@@ -192,6 +200,11 @@ export function e2eModelRouteInvokedIdentifier(definition: E2EModelRouteDefiniti
 export const E2E_DEFAULT_MODEL_ROUTE_ID = "rovara-e2e-default" as const;
 /** The worker feature string a worker lists on /ping once it can run `agent` steps (Task 4.3 enables it). */
 export const E2E_AGENT_STEPS_FEATURE = "task.workflowE2EAgentSteps.v1" as const;
+/**
+ * The worker feature string of a worker that serves a route whose model was chosen by the installation (not Rovara's recommendation) or whose request shape is `minimal` (Task 4.10).
+ * The broker never dispatches such a route to a worker that does not list it.
+ */
+export const E2E_AGENT_MODEL_CHOICE_FEATURE = "task.workflowE2EAgentModelChoice.v1" as const;
 /** Why an `agent` step has no executable case: the three readiness reasons, in the order they are judged. */
 export const E2E_AGENT_UNAVAILABLE_REASONS = Object.freeze({
   runtimeNotQualified: "agent-runtime-not-qualified",

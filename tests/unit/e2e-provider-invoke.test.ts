@@ -219,6 +219,64 @@ describe("final payload shape per provider (Haiku 5.5 rejects temperature 0 and 
   });
 });
 
+describe("the minimal request shape (Task 4.10A, test 6)", () => {
+  const body = async (definition: E2EModelRouteDefinition, response: () => Response) => {
+    const fake = fakeFetch(response);
+    const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret, fetch: fake.fetch });
+    await invoke(input(definition));
+    return fake.requests[0]!.body;
+  };
+  const minimal = { effort: null, payloadShape: "minimal" };
+
+  it("Anthropic: no thinking and no output_config, where the standard shape sends both", async () => {
+    const standard = await body(keyedRoute("anthropic"), () => anthropicSse({ model: "claude-haiku-5-5", tool: TAP }));
+    expect(standard["thinking"]).toEqual({ type: "disabled" });
+    const sent = await body(keyedRoute("anthropic", minimal), () => anthropicSse({ model: "claude-haiku-5-5", tool: TAP }));
+    expect(sent).not.toHaveProperty("thinking");
+    expect(sent).not.toHaveProperty("output_config");
+    expect(sent["model"]).toBe("claude-haiku-5-5");
+    expect(hasNoSampling(sent)).toBe(true);
+  });
+
+  it("OpenAI: no reasoning field, where the standard shape sends effort low", async () => {
+    const standard = await body(keyedRoute("openai", { effort: "low" }), () => openaiResponsesSse({ model: "gpt-5.4-mini", tool: TAP }));
+    expect(standard["reasoning"]).toMatchObject({ effort: "low" });
+    const sent = await body(keyedRoute("openai", minimal), () => openaiResponsesSse({ model: "gpt-5.4-mini", tool: TAP }));
+    expect(sent).not.toHaveProperty("reasoning");
+    expect(hasNoSampling(sent)).toBe(true);
+  });
+
+  it("OpenRouter: no reasoning field, and its routing policy is still the route's", async () => {
+    const policy = { allowFallbacks: false, requireParameters: true, dataCollection: "deny", only: ["anthropic"] };
+    const sent = await body(keyedRoute("openrouter", { ...minimal, openRouter: policy }), () => openrouterSse({ model: "anthropic/claude-haiku-5.5", tool: TAP, upstream: "Anthropic" }));
+    expect(sent).not.toHaveProperty("reasoning");
+    expect(sent).not.toHaveProperty("reasoning_effort");
+    expect(sent["provider"]).toEqual({ allow_fallbacks: false, require_parameters: true, data_collection: "deny", only: ["anthropic"], order: ["anthropic"] });
+    expect(sent["model"]).toBe("anthropic/claude-haiku-5.5");
+  });
+
+  describe("Bedrock", () => {
+    let loopback: BedrockLoopback | undefined;
+    afterEach(async () => { await loopback?.close(); loopback = undefined; });
+    const sentBody = async (definition: E2EModelRouteDefinition) => {
+      loopback = await bedrockLoopback(() => ({ status: 200, body: bedrockStreamBody({ tool: TAP }) }));
+      const invoke = await createE2EProviderInvokeForTesting(definition, { environment: installationEnvironment(definition) }, { bedrockEndpoint: loopback.endpoint, providerEnv: { AWS_BEDROCK_SKIP_AUTH: "1" } });
+      await invoke(input(definition));
+      return loopback.requests[0]!.body;
+    };
+
+    it("sends no additionalModelRequestFields, where the standard shape sends thinking disabled", async () => {
+      expect((await sentBody(bedrockRoute()))["additionalModelRequestFields"]).toEqual({ thinking: { type: "disabled" }, output_config: { effort: "low" } });
+      await loopback?.close();
+      const sent = await sentBody(bedrockRoute(minimal));
+      expect(sent).not.toHaveProperty("additionalModelRequestFields");
+      expect(sent["inferenceConfig"]).toEqual({ maxTokens: 1024 });
+      expect(toolConfigOf(sent).toolChoice).toEqual({ any: {} });
+      expect(hasNoSampling(sent)).toBe(true);
+    });
+  });
+});
+
 describe("Bedrock through pi-ai on a loopback endpoint (Step 0)", () => {
   let loopback: BedrockLoopback | undefined;
   afterEach(async () => { await loopback?.close(); loopback = undefined; });
