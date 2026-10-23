@@ -1,12 +1,13 @@
 import type { E2EAgentUnknownCode } from "@agentx/verifier";
-import type { E2E_DISPLAY_ASSERTION_KINDS } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, isKeyedModelProvider, type E2E_DISPLAY_ASSERTION_KINDS } from "@agentx/contracts";
 
 /**
  * M1.4 Tasks 4.4b and 4.4c: every sentence the owner reads about AI navigation, in one place. Change the wording here and nowhere else. The display, the Slack summary and the task page
  * all take their words from this map; none of them builds an owner-facing sentence of its own for AI navigation.
  *
  * Nothing here is ever built from what a worker or the model said. A sentence is chosen by a fixed code, and the only things put into one are a count, a page element's role and
- * name from the verified ledger (already redacted by the caller) and the title of an approved scenario.
+ * name from the verified ledger (already redacted by the caller), the title of an approved scenario and (Task 4.10B) the provider's name and the model id of the route definition the
+ * broker stored for the admitted revision (`modelSentenceContext`: never a worker's account of its route).
  */
 
 type AssertionKind = (typeof E2E_DISPLAY_ASSERTION_KINDS)[number];
@@ -24,22 +25,66 @@ const ACTION_VERB = Object.freeze({ tap: "clicked", select: "chose", press: "pre
  */
 const sentenceName = (name: string): string => name.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ").replace(/\s+/gu, " ").trim().replaceAll("'", "\u2019").replaceAll('"', "\u201d").replaceAll(";", ",");
 
+/** The provider and the model a sentence names: from the stored route definition only. */
+export type ModelSentenceContext = Readonly<{ providerLabel: string; modelId: string }>;
+
+/** A model id or provider name as a sentence quotes it: the page-element quoting, and a backtick (which closes the code quote) replaced too, cut so a sentence fits a row's 300. */
+const MODEL_NAME_MAX = 80;
+const quotedName = (name: string): string => {
+  const clean = sentenceName(name).replaceAll("`", "\u2019");
+  const characters = Array.from(clean);
+  return characters.length <= MODEL_NAME_MAX ? clean : `${characters.slice(0, MODEL_NAME_MAX - 1).join("")}\u2026`;
+};
+
+/**
+ * The context of a route definition the broker stored (`readAdmittedE2EModelRoute`): its provider's name and its pinned model id. Undefined when there is none (no definition was read, or
+ * the route is the scripted double, which has no provider to name), and the sentences then name neither.
+ */
+export function modelSentenceContext(definition: Readonly<{ provider: string; modelId: string }> | null | undefined): ModelSentenceContext | undefined {
+  if (definition === null || definition === undefined) return undefined;
+  const providerLabel = definition.provider === "amazon-bedrock" ? "Amazon Bedrock" : isKeyedModelProvider(definition.provider) ? KEYED_MODEL_PROVIDERS[definition.provider].label : undefined;
+  return providerLabel === undefined ? undefined : { providerLabel, modelId: definition.modelId };
+}
+
+/** How a sentence names the provider (at the start of a sentence, and inside one) and the model, with a plain fallback when no definition is known. */
+type Who = Readonly<{ start: string; mid: string; model: string; named: boolean }>;
+const whoOf = (ctx: ModelSentenceContext | undefined): Who => {
+  if (ctx === undefined) return { start: "The AI provider", mid: "the AI provider", model: "the chosen model", named: false };
+  const provider = quotedName(ctx.providerLabel);
+  return { start: provider, mid: provider, model: `\`${quotedName(ctx.modelId)}\``, named: true };
+};
+
+/**
+ * One sentence per AI navigation code. The model codes (Task 4.10B) name the provider and the model, so the owner knows what to fix; `model-unavailable` is the unclassified failure and,
+ * with no definition to name, reads exactly as it did before. Every code has a sentence; the type makes a new code a compile error until it is worded here.
+ */
+const AGENT_SENTENCES = Object.freeze({
+  "model-receipts-mismatch": () => "The AI navigation record didn't match what was run, so this check can't be trusted; retry the checks",
+  "model-prompt-credential-match": () => "The AI navigator stopped because the page showed a test password, which the AI is never allowed to see; this check could not be decided",
+  "model-route-budget-exhausted": () => "The AI navigation budget for these checks ran out before they finished; retry the checks",
+  "model-limit-reached": (who: Who) => `${who.start} refused the AI navigation call to ${who.model}: this account's limit for that model is used up or set to zero. Raise the limit or choose another model, then retry the checks`,
+  "model-key-rejected": (who: Who) => `${who.start} did not accept Rovara's access for ${who.model} (the API key, or on Amazon Bedrock the worker role's model access). Fix the access, then retry the checks`,
+  "model-not-found": (who: Who) => `${who.start} says ${who.model} does not exist or is not available to this account. Choose another model and approve setup again`,
+  "model-unreachable": (who: Who) => `Rovara could not reach ${who.mid} to call ${who.model}. Check the network path from the runner, then retry the checks`,
+  "model-request-rejected": (who: Who) => `${who.start} rejected the AI navigation request to ${who.model}, so this check could not run. Tell Rovara support (code model-request-rejected)`,
+  "model-provider-outage": (who: Who) => `${who.start} had a problem answering for ${who.model}. Retry the checks later`,
+  "model-unavailable": (who: Who) => (who.named ? `The AI model (${who.start} ${who.model}) couldn't be reached, so this AI-navigated check could not run; retry the checks`
+    : "The AI model couldn't be reached, so this AI-navigated check could not run; retry the checks"),
+  "agent-timeout": () => "The AI navigator ran out of time before it finished; retry the checks",
+  "agent-budget-exhausted": () => "The AI navigator used all the actions it was allowed without finishing; retry, or check the page has a clear way to the goal",
+  "agent-navigation-incomplete": () => "The AI navigator didn't reach the end of its task; retry, or check the page matches what the check describes",
+  "agent-no-download": () => "The AI navigator didn't find a way to download the CSV; retry, or check the button exists",
+  "ambiguous-download": () => "The AI navigator started more than one download, so the CSV check can't tell which file to read; retry, or make the export button clear",
+} satisfies Record<E2EAgentUnknownCode, (who: Who) => string>);
+
 export const E2E_OWNER_SENTENCES = Object.freeze({
   /**
-   * Why a scenario could not be decided, for the codes the collector gives a case whose AI navigation was not clean (`E2E_AGENT_UNKNOWN_CODES`). Every code has a sentence; the type
-   * makes a new code a compile error until it is worded here.
+   * Why a scenario could not be decided, for the codes the collector gives a case whose AI navigation was not clean (`E2E_AGENT_UNKNOWN_CODES`). `ctx` is the provider and model of the
+   * route definition the broker stored for the admitted revision, or undefined when there is none.
    */
-  agentCode: Object.freeze({
-    "model-receipts-mismatch": "The AI navigation record didn't match what was run, so this check can't be trusted; retry the checks",
-    "model-prompt-credential-match": "The AI navigator stopped because the page showed a test password, which the AI is never allowed to see; this check could not be decided",
-    "model-route-budget-exhausted": "The AI navigation budget for these checks ran out before they finished; retry the checks",
-    "model-unavailable": "The AI model couldn't be reached, so this AI-navigated check could not run; retry the checks",
-    "agent-timeout": "The AI navigator ran out of time before it finished; retry the checks",
-    "agent-budget-exhausted": "The AI navigator used all the actions it was allowed without finishing; retry, or check the page has a clear way to the goal",
-    "agent-navigation-incomplete": "The AI navigator didn't reach the end of its task; retry, or check the page matches what the check describes",
-    "agent-no-download": "The AI navigator didn't find a way to download the CSV; retry, or check the button exists",
-    "ambiguous-download": "The AI navigator started more than one download, so the CSV check can't tell which file to read; retry, or make the export button clear",
-  } satisfies Record<E2EAgentUnknownCode, string>),
+  agentCode: (code: E2EAgentUnknownCode, ctx: ModelSentenceContext | undefined): string => AGENT_SENTENCES[code](whoOf(ctx)),
+  /** Whether a text is one of the codes `agentCode` words (matched exactly). */
+  isAgentCode: (code: string): code is E2EAgentUnknownCode => Object.hasOwn(AGENT_SENTENCES, code),
 
   /**
    * Why a whole group could not run, for the group reasons that are put into words (matched exactly on the code before the first colon; the rest of the group's text is never shown).
@@ -48,6 +93,7 @@ export const E2E_OWNER_SENTENCES = Object.freeze({
   groupCode: Object.freeze({
     "model-route-changed-reapprove": "The AI navigation settings changed after setup was approved. Approve setup again to run these checks.",
     "agent-route-not-approved": "AI navigation isn't approved for this project yet. Approve setup to run the AI-navigated checks.",
+    "model-route-not-tested": "AI navigation has not passed its driving test yet. Run the driving test, then approve setup again.",
     "model-environment-unsafe": "This check could not be verified.",
   } as Readonly<Record<string, string>>),
 

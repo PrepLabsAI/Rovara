@@ -89,7 +89,7 @@ describe("test 24: a group that could not run says why for the closed set of rou
     for (const reason of ["agent-route-not-approved", "agent-route-not-approved: the group has AI navigation steps and the admission pins no model route"]) {
       expect(rowsOf([group({ reason })])[0]!.reason).toBe("AI navigation isn't approved for this project yet. Approve setup to run the AI-navigated checks.");
     }
-    expect(rowsOf([group({ reason: "model-route-budget-exhausted: 41 calls" })])[0]!.reason).toBe(E2E_OWNER_SENTENCES.agentCode["model-route-budget-exhausted"]);
+    expect(rowsOf([group({ reason: "model-route-budget-exhausted: 41 calls" })])[0]!.reason).toBe(E2E_OWNER_SENTENCES.agentCode("model-route-budget-exhausted", undefined));
   });
 
   it("does not repeat an unknown group code, or any text after a known one, or a code that only starts like a known one", () => {
@@ -129,7 +129,7 @@ describe("test 27: a sentence for every agent code, each a fixed string", () => 
     for (const code of E2E_AGENT_UNKNOWN_CODES) {
       const [row] = rowsOf([group({ verdict: "UNKNOWN", reason: "irrelevant", result: unavailableCase(code) })]);
       expect(row!.status).toBe("UNKNOWN");
-      expect(row!.reason, code).toBe(E2E_OWNER_SENTENCES.agentCode[code]);
+      expect(row!.reason, code).toBe(E2E_OWNER_SENTENCES.agentCode(code, undefined));
       expect(row!.reason).not.toBe("this check could not be verified");
       seen.add(row!.reason!);
     }
@@ -148,7 +148,7 @@ describe("test 27: a sentence for every agent code, each a fixed string", () => 
 
   it("puts a group's own agent code into words too (a refusal of the whole group)", () => {
     const [row] = rowsOf([group({ reason: "model-receipts-mismatch: no model receipts or action ledgers came with the group's AI navigation steps" })]);
-    expect(row!.reason).toBe(E2E_OWNER_SENTENCES.agentCode["model-receipts-mismatch"]);
+    expect(row!.reason).toBe(E2E_OWNER_SENTENCES.agentCode("model-receipts-mismatch", undefined));
   });
 
   it("never turns a code into words for a round the broker did not accept whole", () => {
