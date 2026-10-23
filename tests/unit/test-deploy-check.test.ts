@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { MODEL_PROVIDERS } from "../../packages/contracts/src/model-providers.js";
 import { WORKER_INVOCATION_FEATURES } from "../../packages/contracts/src/protocol.js";
 import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/config.js";
+import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import {
   E2E_MODEL_ROUTE,
   E2E_MODEL_ROUTE_ID,
@@ -12,6 +13,7 @@ import {
   findingLabel,
   formatFindings,
   lambdaRoleIds,
+  matchBedrockQuotas,
   parseDeployedCodeKey,
   parseRunnerStatus,
   sourcePathsFor,
@@ -1109,7 +1111,7 @@ describe("the read-only reader (F6)", () => {
     expect([...CHECK_READ_VERBS].sort()).toEqual([
       "bedrock get-foundation-model-availability", "bedrock get-inference-profile",
       "cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources",
-      "dynamodb query", "dynamodb scan", "ec2 describe-instances", "iam get-role", "lambda get-function", "s3api get-object", "ssm get-parameter",
+      "dynamodb query", "dynamodb scan", "ec2 describe-instances", "iam get-role", "lambda get-function", "s3api get-object", "service-quotas list-service-quotas", "ssm get-parameter",
     ]);
   });
 
@@ -1291,7 +1293,8 @@ describe("gatherCheckFacts", () => {
       },
     };
   };
-  function fakeAws(overrides: { instances?: string[]; statusBody?: string | null; catalogItems?: unknown[]; brokerSha?: string; brokerKey?: string; bedrock?: BedrockMode; routeRows?: number; scan?: "denied"; agreement?: string; ssm?: Record<string, string>; secretPolicy?: keyof typeof SECRET_PREFIX } = {}) {
+  function fakeAws(overrides: { instances?: string[]; statusBody?: string | null; catalogItems?: unknown[]; brokerSha?: string; brokerKey?: string; bedrock?: BedrockMode; routeRows?: number; scan?: "denied"; agreement?: string; ssm?: Record<string, string>; secretPolicy?: keyof typeof SECRET_PREFIX;
+    quotas?: "denied" | "garbage" | Array<[string, string, number]>; shapeRow?: "minimal" | "standard" | "unreadable"; testRow?: "driving/v1" | "single-call" | "unreadable" } = {}) {
     const calls: string[][] = [];
     const runner = {
       aws(args: readonly string[]): CommandResult {
@@ -1343,6 +1346,25 @@ describe("gatherCheckFacts", () => {
           const name = args[args.indexOf("--function-name") + 1];
           return ok(`"${name === "fn-broker" && overrides.brokerSha !== undefined ? overrides.brokerSha : `sha-of-${name}`}"`);
         }
+        if (args[0] === "service-quotas" && args[1] === "list-service-quotas") {
+          if (overrides.quotas === "denied") return failed("An error occurred (AccessDeniedException) when calling the ListServiceQuotas operation: User is not authorized to perform: servicequotas:ListServiceQuotas");
+          if (overrides.quotas === "garbage") return ok("not a list");
+          return ok(overrides.quotas ?? []);
+        }
+        // The registry's own rows, read by key: the recorded request shape and the driving test's row.
+        const registryKey = args[1] === "query" ? JSON.parse(args[args.indexOf("--expression-attribute-values") + 1] ?? "{}") as { ":pk"?: { S?: string }; ":sk"?: { S?: string } } : {};
+        if (args[0] === "dynamodb" && args[1] === "query" && registryKey[":pk"]?.S === "E2E_MODEL_ROUTES") {
+          const sk = registryKey[":sk"]?.S ?? "";
+          if (sk.startsWith("E2E_MODEL_ROUTE_SHAPE#")) {
+            if (overrides.shapeRow === "unreadable") return failed("AccessDeniedException: not authorized to perform: dynamodb:Query");
+            return ok({ Items: overrides.shapeRow === undefined ? [] : [{ payloadShape: { S: overrides.shapeRow } }] });
+          }
+          if (sk.startsWith("E2E_MODEL_ROUTE_CANARY#")) {
+            if (overrides.testRow === "unreadable") return failed("AccessDeniedException: not authorized to perform: dynamodb:Query");
+            return ok({ Items: overrides.testRow === undefined ? [] : overrides.testRow === "driving/v1" ? [{ test: { S: "driving/v1" } }] : [{}] });
+          }
+          throw new Error(`unexpected registry query: ${sk}`);
+        }
         if (args[0] === "dynamodb" && args[1] === "query") {
           return ok({ Items: overrides.catalogItems ?? [
             { sk: { S: "PROFILE#linux-arm64-web-api-v1#api" }, state: { S: "READY" }, expiresAt: { S: "2027-01-01T00:00:00.000Z" }, endpoint: { S: "http://10.0.1.5:8080" } },
@@ -1379,7 +1401,7 @@ describe("gatherCheckFacts", () => {
     expect(facts.builtZipShas).toEqual({ BrokerE1355FD6: "b" });
     expect(facts.catalogRows.map((row) => row.sk).sort()).toEqual(["PROFILE#linux-arm64-web-api-v1#api", "PROFILE#linux-arm64-web-api-v1#web"]);
     expect(facts.runnerFacts).toEqual({ deployedExecutorImage: ACCOUNT_IMAGE, executorImage: ACCOUNT_IMAGE, invocationFeatures: ["task.readiness"] });
-    const readOnly = ["cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources", "lambda get-function", "dynamodb query", "ec2 describe-instances", "iam get-role", "s3api get-object", "bedrock get-inference-profile", "bedrock get-foundation-model-availability", "dynamodb scan", "ssm get-parameter"];
+    const readOnly = ["cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources", "lambda get-function", "dynamodb query", "ec2 describe-instances", "iam get-role", "s3api get-object", "bedrock get-inference-profile", "bedrock get-foundation-model-availability", "dynamodb scan", "ssm get-parameter", "service-quotas list-service-quotas"];
     for (const call of fake.calls) expect(readOnly, call.join(" ")).toContain(`${call[0]} ${call[1]}`);
   });
 
@@ -1413,8 +1435,9 @@ describe("gatherCheckFacts", () => {
       const fake = fakeAws();
       await gather(fake);
       const ssm = fake.calls.filter((call) => call[0] === "ssm");
-      expect(ssm.map((call) => call[1])).toEqual(["get-parameter"]);
-      expect(ssm[0]?.[ssm[0].indexOf("--name") + 1]).toBe(`/agentx/${ENV}/worker-model-provider`);
+      expect(ssm.map((call) => call[1])).toEqual(["get-parameter", "get-parameter"]);
+      // The provider, then the AI navigation model the installation chose (Task 4.10).
+      expect(ssm.map((call) => call[call.indexOf("--name") + 1])).toEqual([`/agentx/${ENV}/worker-model-provider`, `/agentx/${ENV}/worker-e2e-agent-model`]);
     });
 
     it("derives the route from the setting and DEFAULT_E2E_AGENT_MODELS, and checks the pinned route's model, approval row and the worker role's grants", async () => {
@@ -1485,6 +1508,163 @@ describe("gatherCheckFacts", () => {
       expect(JSON.stringify(denied.facts.modelRoute?.provider)).toContain("ssm:GetParameter");
       const bogus = await gather(fakeAws({ ssm: { "worker-model-provider": "bogus-provider" } }));
       expect(JSON.stringify(bogus.facts.modelRoute?.provider)).toContain("bogus-provider");
+    });
+
+    describe("the AI navigation model the installation chose (Task 4.10A, test 13)", () => {
+      const HAIKU_45_GLOBAL = "global.anthropic.claude-haiku-4-5-20251001-v1:0";
+      const HAIKU_55_US = "Cross-region model inference tokens per minute for Anthropic Claude Haiku 5.5";
+      const HAIKU_55_GLOBAL = "Global cross-region model inference tokens per minute for Anthropic Claude Haiku 5.5";
+      const TEST_QUOTAS: Array<[string, string, number]> = [["L-47520EB7", HAIKU_55_US, 0], ["L-F26CA8D1", HAIKU_55_GLOBAL, 10_000_000]];
+      const chosen = (modelId: string) => ({ "worker-model-provider": "amazon-bedrock", "worker-e2e-agent-model": modelId });
+      /** The errors about the model route (the fake installation has unrelated findings, such as stale code, which are not what these tests are about). */
+      const routeErrors = (result: ReturnType<typeof evaluateTestDeployCheck>) => result.findings.filter((finding) => finding.severity === "error" && finding.kind.startsWith("model-"));
+
+      it("derives the route from the setting: the chosen model is the one Bedrock is asked about, and the digest and the registry rows follow it", async () => {
+        const fake = fakeAws({ ssm: chosen(HAIKU_45_GLOBAL), shapeRow: "minimal", testRow: "driving/v1" });
+        const { facts } = await gather(fake);
+        expect(facts.modelRoute?.choice).toEqual({ state: "chosen", modelId: HAIKU_45_GLOBAL });
+        expect(facts.modelRoute?.provider).toEqual({ state: "known", route: { routeId: "rovara-e2e-default", provider: "amazon-bedrock", modelId: HAIKU_45_GLOBAL } });
+        expect(fake.calls.find((call) => call[1] === "get-inference-profile")?.join(" ")).toContain(`--inference-profile-identifier ${HAIKU_45_GLOBAL}`);
+        const derived = deriveE2EAgentRoute({ provider: "amazon-bedrock", region: "us-east-1", e2eModel: HAIKU_45_GLOBAL, payloadShape: "minimal" });
+        if (derived.status !== "available") throw new Error("not available");
+        const registryReads = fake.calls.filter((call) => call[1] === "query" && call.join(" ").includes("E2E_MODEL_ROUTES")).map((call) => (JSON.parse(call[call.indexOf("--expression-attribute-values") + 1]!) as { ":sk": { S: string } })[":sk"].S);
+        expect(registryReads).toEqual([`E2E_MODEL_ROUTE_SHAPE#rovara-e2e-default#${HAIKU_45_GLOBAL}`, `E2E_MODEL_ROUTE_CANARY#rovara-e2e-default#${e2eAgentRouteDefinitionDigest(derived.definition)}`]);
+        expect(facts.modelRoute?.tested).toEqual({ tested: true });
+      });
+
+      it("treats absent, none and default as Rovara's recommendation, and says nothing about an eligible choice", async () => {
+        for (const value of [undefined, "none", "default", "us.anthropic.claude-haiku-5-5"]) {
+          const ssm: Record<string, string> = { "worker-model-provider": "amazon-bedrock", ...(value === undefined ? {} : { "worker-e2e-agent-model": value }) };
+          const { facts } = await gather(fakeAws({ ssm }));
+          expect(facts.modelRoute?.choice, String(value)).toEqual({ state: "recommended" });
+          expect(facts.modelRoute?.provider, String(value)).toEqual({ state: "known", route: E2E_MODEL_ROUTE });
+        }
+        const eligible = evaluateTestDeployCheck({ ...(await gather(fakeAws({ ssm: chosen(HAIKU_45_GLOBAL), testRow: "driving/v1" }))).facts, now: NOW });
+        expect(eligible.findings.filter((finding) => finding.subject === E2E_MODEL_ROUTE_ID).map((finding) => finding.kind).sort()).toEqual(["model-quota-unverified", "model-route-not-approved"]);
+      });
+
+      it("is an error, model-route-choice-unsupported, when the setting names a model the table does not list for the provider and region, and reads no Bedrock for it", async () => {
+        for (const value of ["anthropic.claude-haiku-4-5-20251001-v1:0", "eu.anthropic.claude-haiku-5-5", "claude-haiku-5-5", "us.made-up-v1"]) {
+          const fake = fakeAws({ ssm: chosen(value) });
+          const { facts } = await gather(fake);
+          expect(facts.modelRoute?.choice, value).toEqual({ state: "unsupported", setting: value });
+          expect(fake.calls.filter((call) => call[0]?.startsWith("bedrock")), value).toEqual([]);
+          const result = evaluateTestDeployCheck({ ...facts, now: NOW });
+          expect(result.ok, value).toBe(false);
+          const found = result.findings.find((finding) => finding.kind === "model-route-choice-unsupported");
+          expect(found, value).toMatchObject({ severity: "error" });
+          expect(found?.message).toContain("Amazon Bedrock");
+        }
+        // The same ids are judged against the keyed provider's own models.
+        const keyed = evaluateTestDeployCheck({ ...(await gather(fakeAws({ ssm: { ...PROVIDERS.anthropic, "worker-e2e-agent-model": "us.anthropic.claude-haiku-5-5" } }))).facts, now: NOW });
+        expect(keyed.findings.find((finding) => finding.kind === "model-route-choice-unsupported")?.message).toContain("Anthropic");
+        const ok = await gather(fakeAws({ ssm: { ...PROVIDERS.anthropic, "worker-e2e-agent-model": "claude-haiku-4-5" } }));
+        expect(ok.facts.modelRoute?.choice).toEqual({ state: "chosen", modelId: "claude-haiku-4-5" });
+        expect(evaluateTestDeployCheck({ ...ok.facts, now: NOW }).findings.map((finding) => finding.kind)).not.toContain("model-route-choice-unsupported");
+      });
+
+      it("reads a setting it cannot read as unverifiable, which is not a pass", async () => {
+        const { facts } = await gather(fakeAws({ ssm: { "worker-model-provider": "amazon-bedrock", "worker-e2e-agent-model": "DENIED" } }));
+        expect(facts.modelRoute?.choice?.state).toBe("unverifiable");
+        const result = evaluateTestDeployCheck({ ...facts, now: NOW });
+        expect(result.ok).toBe(false);
+        expect(result.findings.find((finding) => finding.kind === "model-access-unverified")?.message).toMatch(/AI navigation model setting is unverifiable, which is not a pass/);
+      });
+
+      it("warns model-quota-zero when the route's own scope has a limit of 0, naming both codes and both values (the TEST incident)", async () => {
+        const fake = fakeAws({ quotas: TEST_QUOTAS });
+        const { facts } = await gather(fake);
+        expect(facts.modelRoute?.quota).toEqual({ state: "read", geographic: { code: "L-47520EB7", tokensPerMinute: 0 }, global: { code: "L-F26CA8D1", tokensPerMinute: 10_000_000 } });
+        const quotaCall = fake.calls.find((call) => call[0] === "service-quotas")!;
+        expect(quotaCall.slice(0, 4)).toEqual(["service-quotas", "list-service-quotas", "--service-code", "bedrock"]);
+        const result = evaluateTestDeployCheck({ ...facts, now: NOW });
+        const warning = result.findings.find((finding) => finding.kind === "model-quota-zero");
+        expect(warning).toMatchObject({ severity: "warning" });
+        expect(warning?.message).toContain("L-47520EB7");
+        expect(warning?.message).toContain("L-F26CA8D1");
+        expect(warning?.message).toContain("is 0 tokens per minute");
+        expect(warning?.message).toContain("10,000,000");
+        // Never an error: the check's verdict is unchanged by it.
+        expect(result.findings.filter((finding) => finding.kind === "model-quota-zero" || finding.kind === "model-quota-unverified").every((finding) => finding.severity !== "error")).toBe(true);
+        expect(routeErrors(result)).toEqual([]);
+      });
+
+      it("judges the quota of the route's own scope: a Global profile with a Global limit is fine when only the US-only one is 0", async () => {
+        const rows: Array<[string, string, number]> = [["L-47520EB7", HAIKU_55_US, 0], ["L-F26CA8D1", HAIKU_55_GLOBAL, 10_000_000]];
+        const global = evaluateTestDeployCheck({ ...(await gather(fakeAws({ ssm: chosen("global.anthropic.claude-haiku-5-5"), quotas: rows }))).facts, now: NOW });
+        expect(global.findings.map((finding) => finding.kind)).not.toContain("model-quota-zero");
+        const globalZero = evaluateTestDeployCheck({ ...(await gather(fakeAws({ ssm: chosen("global.anthropic.claude-haiku-5-5"), quotas: [["L-47520EB7", HAIKU_55_US, 5_000_000], ["L-F26CA8D1", HAIKU_55_GLOBAL, 0]] }))).facts, now: NOW });
+        expect(globalZero.findings.find((finding) => finding.kind === "model-quota-zero")?.message).toContain("Global scope");
+      });
+
+      it("matches an unpinned model's quotas by name, from the catalog label without its scope", () => {
+        const rows: Array<[string, string, number]> = [
+          ["L-AAAA1111", "Cross-region model inference tokens per minute for Anthropic Claude Haiku 4.5", 5_000_000],
+          ["L-BBBB2222", "Global cross-region model inference tokens per minute for Anthropic Claude Haiku 4.5", 0],
+          ["L-CCCC3333", "Cross-region model inference tokens per minute for Anthropic Claude Sonnet 4.6", 1],
+        ];
+        const route = { routeId: "rovara-e2e-default", provider: "amazon-bedrock" as const, modelId: HAIKU_45_GLOBAL };
+        expect(matchBedrockQuotas(rows, route, "Claude Haiku 4.5 (Global)")).toEqual({ geographic: { code: "L-AAAA1111", tokensPerMinute: 5_000_000 }, global: { code: "L-BBBB2222", tokensPerMinute: 0 } });
+        expect(matchBedrockQuotas(rows, route, undefined)).toEqual({ geographic: null, global: null });
+        expect(matchBedrockQuotas([], route, "Claude Haiku 4.5 (US)")).toEqual({ geographic: null, global: null });
+      });
+
+      it("reports a denied or unreadable lookup as information, and a lookup that found nothing as information, never an error", async () => {
+        for (const quotas of ["denied", "garbage"] as const) {
+          const { facts } = await gather(fakeAws({ quotas }));
+          expect(facts.modelRoute?.quota?.state).toBe("unverifiable");
+          const result = evaluateTestDeployCheck({ ...facts, now: NOW });
+          expect(result.findings.find((finding) => finding.kind === "model-quota-unverified")).toMatchObject({ severity: "info" });
+          expect(result.findings.map((finding) => finding.kind)).not.toContain("model-quota-zero");
+          expect(routeErrors(result), quotas).toEqual([]);
+        }
+        const none = evaluateTestDeployCheck({ ...(await gather(fakeAws({ quotas: [] }))).facts, now: NOW });
+        expect(none.findings.find((finding) => finding.kind === "model-quota-unverified")).toMatchObject({ severity: "info" });
+        expect(JSON.stringify((await gather(fakeAws({ quotas: "denied" }))).facts.modelRoute?.quota)).toContain("servicequotas:ListServiceQuotas");
+      });
+
+      it("asks for no quota of a keyed provider", async () => {
+        const fake = fakeAws({ ssm: PROVIDERS.anthropic });
+        const { facts } = await gather(fake);
+        expect(facts.modelRoute?.quota).toBeUndefined();
+        expect(fake.calls.filter((call) => call[0] === "service-quotas")).toEqual([]);
+      });
+
+      it("warns model-route-not-tested when no driving/v1 row exists for the derived digest: no row, a single-call row, and an unreadable row", async () => {
+        const warn = async (testRow: "driving/v1" | "single-call" | "unreadable" | undefined) =>
+          evaluateTestDeployCheck({ ...(await gather(fakeAws({ ...(testRow === undefined ? {} : { testRow }) }))).facts, now: NOW }).findings.filter((finding) => finding.kind === "model-route-not-tested");
+        expect(await warn(undefined)).toEqual([expect.objectContaining({ severity: "warning" })]);
+        expect((await warn(undefined))[0]?.message).toContain("has no passing driving test");
+        expect(await warn("single-call")).toEqual([expect.objectContaining({ severity: "warning" })]);
+        expect(await warn("driving/v1")).toEqual([]);
+        const unreadable = await warn("unreadable");
+        expect(unreadable).toEqual([expect.objectContaining({ severity: "warning" })]);
+        expect(unreadable[0]?.message).toContain("could not be read");
+        // It is only ever a warning: the check still passes with it.
+        expect(routeErrors(evaluateTestDeployCheck({ ...(await gather(fakeAws({}))).facts, now: NOW }))).toEqual([]);
+      });
+
+      it("keys the driving-test row by the digest of the definition with the recorded request shape, so a minimal test does not stand for a standard route", async () => {
+        const minimalRows = fakeAws({ shapeRow: "minimal", testRow: "driving/v1" });
+        const { facts } = await gather(minimalRows);
+        expect(facts.modelRoute?.tested).toEqual({ tested: true });
+        const read = (fake: ReturnType<typeof fakeAws>) => fake.calls.filter((call) => call[1] === "query" && call.join(" ").includes("E2E_MODEL_ROUTE_CANARY#")).map((call) => call[call.indexOf("--expression-attribute-values") + 1]);
+        const standardRows = fakeAws({ shapeRow: "standard", testRow: "driving/v1" });
+        await gather(standardRows);
+        expect(read(minimalRows)).toHaveLength(1);
+        expect(read(minimalRows)[0]).not.toBe(read(standardRows)[0]);
+      });
+
+      it("reads only: the registry rows go through dynamodb query, and the shape and test rows are projections of one attribute", async () => {
+        const fake = fakeAws({});
+        await gather(fake);
+        const reads = fake.calls.filter((call) => call[1] === "query" && call.join(" ").includes("E2E_MODEL_ROUTES"));
+        expect(reads).toHaveLength(2);
+        for (const call of reads) {
+          expect(call).toContain("--consistent-read");
+          expect(call.join(" ")).toMatch(/--projection-expression (payloadShape|#t)/);
+        }
+      });
     });
 
     describe.each(["anthropic", "openai", "openrouter"] as const)("keyed provider %s", (provider) => {

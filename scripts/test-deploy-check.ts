@@ -7,6 +7,7 @@
 // M1.4 adds the e2e agent's model route, which follows the installation's provider (amendment A1): Bedrock through the worker's
 // instance role, or Anthropic, OpenAI or OpenRouter through the provider key's Secrets Manager ARN. Nothing here calls a model, and
 // nothing reads a secret: a key's validity and a customer-managed KMS key are reported as unverifiable (owner decision O6).
+import { E2E_AGENT_BEDROCK_QUOTA_CODES, E2E_AGENT_RECOMMENDED_MODELS, eligibleE2EAgentModel } from "../packages/contracts/src/e2e-agent-models.js";
 import { E2E_RUNTIME_GENERIC_RENEW_COMMAND, e2eRuntimeExpiryNotice } from "../packages/contracts/src/e2e-runtime-expiry.js";
 import { KEYED_MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN, isKeyedModelProvider, type KeyedModelProvider, type ModelProvider } from "../packages/contracts/src/model-providers.js";
 import { WORKER_INVOCATION_FEATURES } from "../packages/contracts/src/protocol.js";
@@ -36,7 +37,11 @@ export type FindingKind =
   | "model-route-secret-missing"
   | "model-route-openrouter-allowlist"
   | "model-route-alias-refused"
-  | "model-route-third-party-processor";
+  | "model-route-third-party-processor"
+  | "model-route-choice-unsupported"
+  | "model-route-not-tested"
+  | "model-quota-zero"
+  | "model-quota-unverified";
 
 /** The worker feature string for `agent` steps (M1.4). A running worker must list it on /ping before an agent step can be dispatched to it. */
 export const AGENT_STEPS_FEATURE = "task.workflowE2EAgentSteps.v1";
@@ -48,9 +53,23 @@ export interface E2EModelRoute {
   modelId: string;
 }
 export const E2E_MODEL_ROUTE_ID = "rovara-e2e-default";
-/** The route for an installation on `provider`: the model is `DEFAULT_E2E_AGENT_MODELS[provider]`, which the worker pins at setup approval. */
-export function deriveE2EModelRoute(provider: ModelProvider): E2EModelRoute {
-  return { routeId: E2E_MODEL_ROUTE_ID, provider, modelId: DEFAULT_E2E_AGENT_MODELS[provider] };
+/**
+ * The route for an installation on `provider`: the model is the installation's choice (`worker-e2e-agent-model`, Task 4.10) when it made one, else
+ * `DEFAULT_E2E_AGENT_MODELS[provider]`, which the worker pins at setup approval. Whether a choice is a model Rovara can use is judged apart (`e2eModelChoice`).
+ */
+export function deriveE2EModelRoute(provider: ModelProvider, chosenModel?: string): E2EModelRoute {
+  return { routeId: E2E_MODEL_ROUTE_ID, provider, modelId: chosenModel ?? DEFAULT_E2E_AGENT_MODELS[provider] };
+}
+
+/**
+ * What the installation's `worker-e2e-agent-model` setting says: no choice (absent, `none`, `default`), a model the table of eligible AI navigation models lists for the
+ * provider and region, or one it does not (an error: the broker would derive no route from it).
+ */
+export function e2eModelChoice(provider: ModelProvider, setting: string | undefined, region: string): ModelChoiceFacts {
+  const value = setting?.trim();
+  if (value === undefined || value === "" || value === "none" || value === "default") return { state: "recommended" };
+  if (value === E2E_AGENT_RECOMMENDED_MODELS[provider]) return { state: "recommended" };
+  return eligibleE2EAgentModel(provider, value, region) === null ? { state: "unsupported", setting: value } : { state: "chosen", modelId: value };
 }
 /** TEST's route: TEST runs Bedrock. The gatherer derives the real one from the installation's `worker-model-provider` setting. */
 export const E2E_MODEL_ROUTE: E2EModelRoute = deriveE2EModelRoute("amazon-bedrock");
@@ -191,7 +210,31 @@ export interface KeyedRouteFacts {
   };
 }
 
+/** The installation's choice of AI navigation model (Task 4.10): see `e2eModelChoice`; `unverifiable` when the setting could not be read. */
+export type ModelChoiceFacts =
+  | { state: "recommended" }
+  | { state: "chosen"; modelId: string }
+  | { state: "unsupported"; setting: string }
+  | { state: "unverifiable"; reason: string };
+
+/** One Bedrock tokens-per-minute quota: its code and value. */
+export interface QuotaValue {
+  code: string;
+  tokensPerMinute: number;
+}
+
+/** The Bedrock tokens-per-minute quotas for the route's model: the cross-region (geographic) one and the global one; null where none matched. A lookup is a hint, never a state. */
+export type QuotaFacts =
+  | { state: "unverifiable"; reason: string }
+  | { state: "read"; geographic: QuotaValue | null; global: QuotaValue | null };
+
 export interface ModelRouteCheck {
+  /** The installation's AI navigation model choice. Undefined (a check built before Task 4.10) is no choice. */
+  choice?: ModelChoiceFacts | undefined;
+  /** amazon-bedrock: the tokens-per-minute quotas of the route's model, read with servicequotas:ListServiceQuotas. Undefined skips the hint. */
+  quota?: QuotaFacts | undefined;
+  /** Whether a passing driving test (`E2E_MODEL_ROUTE_CANARY` row with `test: "driving/v1"`) exists for the exact definition the installation would approve. Undefined skips the check. */
+  tested?: { tested: boolean } | { unreadable: string } | undefined;
   provider: RouteProviderFacts;
   /** Whether the broker's registry holds an approved revision of the route; `unreadable` when it could not be asked. */
   approval: { approved: boolean } | { unreadable: string };
@@ -667,6 +710,22 @@ function routeFindings(check: ModelRouteCheck): Finding[] {
     return findings;
   }
   const { route } = check.provider;
+  if (check.choice?.state === "unverifiable") {
+    findings.push(finding("model-access-unverified", "error", `the installation's AI navigation model setting is unverifiable, which is not a pass: ${check.choice.reason}`));
+    return findings;
+  }
+  if (check.choice?.state === "unsupported") {
+    findings.push(finding("model-route-choice-unsupported", "error",
+      `worker-e2e-agent-model is ${JSON.stringify(check.choice.setting)}, which is not a model Rovara can use with ${providerLabel(route.provider)} in this region, so the broker derives no AI navigation route from it; set a listed model, or default, with agentx config set models.e2eAgent`));
+    return findings;
+  }
+  if (check.tested !== undefined) {
+    const untested = "unreadable" in check.tested ? `could not be read (${check.tested.unreadable})` : check.tested.tested ? undefined : "has no passing driving test on this installation";
+    if (untested !== undefined) {
+      findings.push(finding("model-route-not-tested", "warning", `${routeText} ${untested}; AI navigation steps will not run until the driving test passes (agentx project model-check drive)`));
+    }
+  }
+  if (check.quota !== undefined) findings.push(...quotaFindings(route, check.quota, finding));
   // An OpenRouter alias is refused on its own finding; asking the catalog about it would only repeat that.
   const alias = route.provider === "openrouter" && isOpenRouterAlias(route.modelId);
   const catalog = alias ? undefined : catalogProblem(route);
@@ -680,6 +739,47 @@ function routeFindings(check: ModelRouteCheck): Finding[] {
     findings.push(...keyedFindings(route, route.provider, check.keyed, finding));
   }
   return findings;
+}
+
+const providerLabel = (provider: ModelProvider): string => (isKeyedModelProvider(provider) ? KEYED_MODEL_PROVIDERS[provider].label : "Amazon Bedrock");
+
+const quotaText = (name: string, quota: QuotaValue | null): string => (quota === null ? `${name} no matching quota` : `${name} ${quota.tokensPerMinute.toLocaleString("en-US")} (${quota.code})`);
+
+/**
+ * The Bedrock tokens-per-minute limits of the route's model, as a hint and never an error: a 0 for the route's own scope is a warning that names both scopes and their codes
+ * (a Bedrock quota of 0 refuses every call at once, which TEST showed for Haiku 5.5), and a lookup that was denied or found nothing is information.
+ */
+function quotaFindings(route: E2EModelRoute, quota: QuotaFacts, finding: Maker): Finding[] {
+  if (route.provider !== "amazon-bedrock") return [];
+  if (quota.state === "unverifiable") return [finding("model-quota-unverified", "info", `the Bedrock tokens-per-minute limit for ${route.modelId} could not be read (${quota.reason}); a limit of 0 would show at the driving test instead`)];
+  const own = route.modelId.startsWith("global.") ? "global" : "geographic";
+  if (quota.geographic === null && quota.global === null) {
+    return [finding("model-quota-unverified", "info", `no Bedrock tokens-per-minute quota was found for ${route.modelId} by code or by name; a limit of 0 would show at the driving test instead`)];
+  }
+  const owned = quota[own];
+  if (owned === null || owned.tokensPerMinute !== 0) return [];
+  return [finding("model-quota-zero", "warning",
+    `the Bedrock limit for ${route.modelId} in ${own === "global" ? "the Global scope" : "this geography"} is 0 tokens per minute (${owned.code}), so Bedrock refuses every call; ${quotaText("US-only/geographic limit", quota.geographic)}; ${quotaText("Global limit", quota.global)}; raise the limit, or choose another model with agentx config set models.e2eAgent`)];
+}
+
+/**
+ * Matches the quota rows a `service-quotas list-service-quotas --service-code bedrock` read returned (`[code, name, value]`) to a route's model: by the pinned codes of
+ * `E2E_AGENT_BEDROCK_QUOTA_CODES` when the model is listed there, else by name ("Cross-region model inference tokens per minute for <model name>" and the "Global ..." one,
+ * <model name> being the catalog's label without its scope). A quota that matches nothing is null: never a state.
+ */
+export function matchBedrockQuotas(rows: ReadonlyArray<readonly [string, string, number]>, route: E2EModelRoute, label: string | undefined): { geographic: QuotaValue | null; global: QuotaValue | null } {
+  const foundation = route.modelId.replace(/^(us-gov|us|eu|apac|global|jp|au|in|ca)\./, "");
+  const pinned = E2E_AGENT_BEDROCK_QUOTA_CODES[foundation];
+  const model = (label ?? "").replace(/\s*\((?:US|Global|EU|APAC|JP|AU|IN|CA)[^)]*\)\s*$/i, "").trim().toLowerCase();
+  const find = (code: string | null | undefined, prefix: string): QuotaValue | null => {
+    const byCode = code === null || code === undefined ? undefined : rows.find((row) => row[0] === code);
+    const byName = byCode !== undefined || model === "" ? byCode : rows.find((row) => { const name = row[1].toLowerCase(); return name.startsWith(prefix) && name.slice(prefix.length).includes(model); });
+    return byName === undefined ? null : { code: byName[0], tokensPerMinute: byName[2] };
+  };
+  return {
+    geographic: find(pinned?.geographic, "cross-region model inference tokens per minute for "),
+    global: find(pinned?.global, "global cross-region model inference tokens per minute for "),
+  };
 }
 
 /** A router alias, not a model: `~` aliases (`~anthropic/claude-haiku-latest`) and `openrouter/` routers (`openrouter/auto`). Pi's catalog refuses both. */

@@ -42,7 +42,9 @@ import { GetFunctionConfigurationCommand, LambdaClient } from "@aws-sdk/client-l
 import { build as bundle } from "esbuild";
 import { CDK_CONSTRUCT_IDS, cdkAppArguments } from "../packages/cli/src/deploy/cdk-engine.js";
 import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
+import { E2E_AGENT_RECOMMENDED_MODELS, eligibleE2EAgentModel } from "../packages/contracts/src/e2e-agent-models.js";
 import { KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, isKeyedModelProvider, type ModelProvider } from "../packages/contracts/src/model-providers.js";
+import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest } from "../packages/model-runtime/src/e2e-route-derive.js";
 import { WORKER_SETTING_PARAMETERS } from "../packages/contracts/src/session.js";
 import { WEB_API_RUNTIME_PROFILE_ID } from "../packages/contracts/src/e2e-web-api-qualification.js";
 import { e2eRuntimeRenewCommand } from "../packages/contracts/src/e2e-runtime-expiry.js";
@@ -64,12 +66,14 @@ import { deterministicZip } from "./release/zip.js";
 import {
   E2E_MODEL_ROUTE_ID,
   deriveE2EModelRoute,
+  e2eModelChoice,
   evaluateEnvironmentDrift,
   evaluateIamDrift,
   evaluateTestDeployCheck,
   formatFindings,
   iamEvaluationNotes,
   lambdaRoleIds,
+  matchBedrockQuotas,
   parseDeployedCodeKey,
   parseRunnerStatus,
   sourcePathsFor,
@@ -80,7 +84,9 @@ import {
   type Finding,
   type ModelAccessFacts,
   type ModelAvailabilityFact,
+  type ModelChoiceFacts,
   type ModelRouteCheck,
+  type QuotaFacts,
   type RunnerFacts,
   type SettingFact,
 } from "./test-deploy-check.js";
@@ -1092,7 +1098,7 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
 // --check: the read-only gatherer. Every AWS call below is one of CHECK_READ_VERBS, and the reader refuses any other before it reaches
 // the CLI: cloudformation describe-stacks, get-template and list-stack-resources; lambda get-function; dynamodb query and scan (COUNT);
 // ec2 describe-instances; iam get-role; s3api get-object; bedrock get-inference-profile and get-foundation-model-availability; and
-// ssm get-parameter (no decryption). The head synth and build are injected so the unit tests run without either.
+// ssm get-parameter (no decryption), and service-quotas list-service-quotas for the Bedrock tokens-per-minute hint. The head synth and build are injected so the unit tests run without either.
 // ---------------------------------------------------------------------------------------------
 
 /** The catalog rows' key: the profile the web/API runtime registers its web and API rows under. */
@@ -1109,6 +1115,7 @@ export const CHECK_READ_VERBS: ReadonlySet<string> = new Set([
   "s3api get-object",
   "bedrock get-inference-profile", "bedrock get-foundation-model-availability",
   "ssm get-parameter",
+  "service-quotas list-service-quotas",
 ]);
 
 /** The reader the check gathers through: it refuses any verb outside CHECK_READ_VERBS, so a later edit cannot add a write or a secret read by accident. */
@@ -1280,8 +1287,61 @@ function readWorkerSetting(readers: CheckReaders, name: string): SettingFact {
   return /ParameterNotFound/.test(text) && !/AccessDenied/.test(text) ? { state: "read", value: undefined } : { state: "unverifiable", reason: text };
 }
 
-/** The route's checks, for the installation's provider: approval, and either Bedrock (reads only) or the keyed provider's secret ARN, with the worker instance role's grants. */
-function readModelRoute(readers: CheckReaders, input: { table: string; foundationStack: string; roleArn: string; controlPlaneTemplate: CfnTemplate; controlPlaneParameters: Record<string, string> }): ModelRouteCheck {
+/**
+ * The Bedrock tokens-per-minute quotas of the route's model, from `service-quotas list-service-quotas` (needs servicequotas:ListServiceQuotas on the operator profile): a hint.
+ * A denied or failed read is `unverifiable`, which is information in the check, never an error.
+ */
+function readBedrockQuotas(readers: CheckReaders, route: E2EModelRoute, label: string | undefined): QuotaFacts {
+  const result = readers.runner.aws([
+    "service-quotas", "list-service-quotas", "--service-code", "bedrock",
+    "--query", "Quotas[?contains(QuotaName, 'tokens per minute')].[QuotaCode,QuotaName,Value]", "--region", readers.region, "--output", "json",
+  ], true);
+  if (result.status !== 0) return { state: "unverifiable", reason: failureText(result.stderr) };
+  let parsed: unknown;
+  try { parsed = JSON.parse(result.stdout); } catch { return { state: "unverifiable", reason: "the answer was not JSON" }; }
+  if (!Array.isArray(parsed)) return { state: "unverifiable", reason: "the answer was not a list of quotas" };
+  const rows = parsed.flatMap((row): Array<[string, string, number]> => Array.isArray(row) && typeof row[0] === "string" && typeof row[1] === "string" && typeof row[2] === "number" ? [[row[0], row[1], row[2]]] : []);
+  return { state: "read", ...matchBedrockQuotas(rows, route, eligibleE2EAgentModel("amazon-bedrock", route.modelId, readers.region)?.label) };
+}
+
+/** One row of the broker's registry partition by key (`dynamodb query`, consistent, read-only): its item as DynamoDB JSON, undefined when absent, or why it could not be read. */
+function readRegistryRow(readers: CheckReaders, table: string, sk: string, projection: string, names: Record<string, string>): { item: Record<string, { S?: string }> | undefined } | { unreadable: string } {
+  const result = readers.runner.aws([
+    "dynamodb", "query", "--table-name", table, "--consistent-read", "--key-condition-expression", "pk = :pk AND sk = :sk",
+    "--expression-attribute-values", JSON.stringify({ ":pk": { S: "E2E_MODEL_ROUTES" }, ":sk": { S: sk } }),
+    ...(Object.keys(names).length === 0 ? [] : ["--expression-attribute-names", JSON.stringify(names)]), "--projection-expression", projection, "--region", readers.region, "--output", "json",
+  ], true);
+  if (result.status !== 0) return { unreadable: failureText(result.stderr) };
+  return { item: (JSON.parse(result.stdout) as { Items?: Array<Record<string, { S?: string }>> }).Items?.[0] };
+}
+
+/**
+ * Whether a passing driving test exists for the exact definition the installation would approve (Task 4.10): the broker's `E2E_MODEL_ROUTE_CANARY#<routeId>#<digest>` row with
+ * `test: "driving/v1"`, where the digest is the one the broker derives from this installation's settings and the recorded request shape. A route that cannot be derived is judged
+ * by the other findings, not here.
+ */
+function readRouteTested(readers: CheckReaders, input: { table: string; installation: Parameters<typeof deriveE2EAgentRoute>[0] }): ModelRouteCheck["tested"] {
+  const modelId = input.installation.e2eModel ?? DEFAULT_E2E_AGENT_MODELS_FOR(input.installation.provider);
+  if (modelId === undefined) return undefined;
+  const shape = readRegistryRow(readers, input.table, `E2E_MODEL_ROUTE_SHAPE#${E2E_MODEL_ROUTE_ID}#${modelId}`, "payloadShape", {});
+  if ("unreadable" in shape) return { unreadable: shape.unreadable };
+  const payloadShape = shape.item?.payloadShape?.S;
+  const derived = deriveE2EAgentRoute({ ...input.installation, ...(payloadShape === "minimal" ? { payloadShape: "minimal" as const } : {}) });
+  if (derived.status === "unavailable") return undefined;
+  const row = readRegistryRow(readers, input.table, `E2E_MODEL_ROUTE_CANARY#${E2E_MODEL_ROUTE_ID}#${e2eAgentRouteDefinitionDigest(derived.definition)}`, "#t", { "#t": "test" });
+  if ("unreadable" in row) return { unreadable: row.unreadable };
+  return { tested: row.item?.test?.S === "driving/v1" };
+}
+
+const DEFAULT_E2E_AGENT_MODELS_FOR = (provider: string | undefined): string | undefined =>
+  provider !== undefined && (MODEL_PROVIDERS as readonly string[]).includes(provider) ? E2E_AGENT_RECOMMENDED_MODELS[provider as ModelProvider] : undefined;
+
+/**
+ * The route's checks, for the installation's provider: approval, the installation's choice of AI navigation model (`worker-e2e-agent-model`; a model the table does not list is
+ * `model-route-choice-unsupported`), whether the route has a passing driving test, and either Bedrock (reads only, with the tokens-per-minute hint) or the keyed provider's secret
+ * ARN, with the worker instance role's grants.
+ */
+export function readModelRoute(readers: CheckReaders, input: { table: string; foundationStack: string; roleArn: string; controlPlaneTemplate: CfnTemplate; controlPlaneParameters: Record<string, string> }): ModelRouteCheck {
   const approval = (routeId: string) => readRouteApproval(readers, input.table, routeId);
   const providerSetting = readWorkerSetting(readers, WORKER_SETTING_PARAMETERS.modelProvider);
   if (providerSetting.state === "unverifiable") return { provider: { state: "unverifiable", reason: `worker-model-provider could not be read: ${providerSetting.reason}` }, approval: approval(E2E_MODEL_ROUTE_ID) };
@@ -1289,20 +1349,39 @@ function readModelRoute(readers: CheckReaders, input: { table: string; foundatio
   if (provider === undefined || !(MODEL_PROVIDERS as readonly string[]).includes(provider)) {
     return { provider: { state: "unverifiable", reason: provider === undefined ? "the worker-model-provider setting does not exist" : `worker-model-provider is ${JSON.stringify(provider)}, which is not one of ${MODEL_PROVIDERS.join(", ")}` }, approval: approval(E2E_MODEL_ROUTE_ID) };
   }
-  const route = deriveE2EModelRoute(provider as ModelProvider);
+  const modelProvider = provider as ModelProvider;
+  const choiceSetting = readWorkerSetting(readers, WORKER_SETTING_PARAMETERS.e2eAgentModel);
+  const choice: ModelChoiceFacts = choiceSetting.state === "unverifiable"
+    ? { state: "unverifiable", reason: `worker-e2e-agent-model could not be read: ${choiceSetting.reason}` }
+    : e2eModelChoice(modelProvider, choiceSetting.value, readers.region);
+  const route = deriveE2EModelRoute(modelProvider, choice.state === "chosen" ? choice.modelId : undefined);
   const foundationTemplate = deployedTemplateOf(readers.runner, readers.region, input.foundationStack);
   const output = (foundationTemplate as { Outputs?: Record<string, { Value?: { "Fn::GetAtt"?: unknown } }> }).Outputs?.Ec2WorkerInstanceRoleArn?.Value?.["Fn::GetAtt"];
   const roleLogicalId = Array.isArray(output) && typeof output[0] === "string" ? output[0] : undefined;
   if (roleLogicalId === undefined) throw new Error(`${input.foundationStack}'s Ec2WorkerInstanceRoleArn output is not a GetAtt of a role, so the worker instance role cannot be found in its template`);
+  // The installation as the broker reads it, for the digest of the definition it would approve: the secret ARN of a keyed provider and OpenRouter's allowlist are settings too.
+  const keyedSettings = isKeyedModelProvider(route.provider) ? {
+    secretArn: readWorkerSetting(readers, WORKER_SETTING_PARAMETERS[KEYED_MODEL_PROVIDERS[route.provider].workerSetting]),
+    ...(route.provider === "openrouter" ? { openRouterProviders: readWorkerSetting(readers, WORKER_SETTING_PARAMETERS.openRouterProviders) } : {}),
+  } : undefined;
+  const settingValue = (fact: SettingFact | undefined): string | undefined => (fact?.state === "read" && fact.value !== undefined && fact.value.trim() !== "" && fact.value !== "none" ? fact.value.trim() : undefined);
+  const installation = {
+    provider: modelProvider, region: readers.region,
+    ...(settingValue(keyedSettings?.secretArn) === undefined ? {} : { secretArn: settingValue(keyedSettings?.secretArn)! }),
+    ...(settingValue(keyedSettings?.openRouterProviders) === undefined ? {} : { openRouterProviders: settingValue(keyedSettings?.openRouterProviders)! }),
+    ...(choice.state === "chosen" ? { e2eModel: choice.modelId } : {}),
+  };
+  const tested = choice.state === "unsupported" || choice.state === "unverifiable" ? undefined : readRouteTested(readers, { table: input.table, installation });
   const [, partition = "aws", , , accountId = ""] = input.roleArn.split(":");
   const roleName = input.roleArn.slice(input.roleArn.lastIndexOf("/") + 1);
-  if (isKeyedModelProvider(route.provider)) {
-    const { workerSetting } = KEYED_MODEL_PROVIDERS[route.provider];
+  // An unsupported or unreadable choice has no route to look at: the finding says so, and nothing else about it is read.
+  if (choice.state === "unsupported" || choice.state === "unverifiable") return { choice, provider: { state: "known", route }, approval: approval(route.routeId) };
+  if (isKeyedModelProvider(route.provider) && keyedSettings !== undefined) {
     return {
-      provider: { state: "known", route }, approval: approval(route.routeId),
+      choice, tested, provider: { state: "known", route }, approval: approval(route.routeId),
       keyed: {
-        secretArn: readWorkerSetting(readers, WORKER_SETTING_PARAMETERS[workerSetting]),
-        ...(route.provider === "openrouter" ? { openRouterProviders: readWorkerSetting(readers, WORKER_SETTING_PARAMETERS.openRouterProviders) } : {}),
+        secretArn: keyedSettings.secretArn,
+        ...(keyedSettings.openRouterProviders === undefined ? {} : { openRouterProviders: keyedSettings.openRouterProviders }),
         iam: {
           foundationTemplate, roleLogicalId, roleName, controlPlaneTemplate: input.controlPlaneTemplate,
           scope: { partition, region: readers.region, accountId, parameters: input.controlPlaneParameters },
@@ -1317,6 +1396,7 @@ function readModelRoute(readers: CheckReaders, input: { table: string; foundatio
   const profileResource = [profileArn ?? `arn:${partition}:bedrock:${readers.region}:${accountId}:inference-profile/${route.modelId}`];
   const modelResources = modelArns.length > 0 ? modelArns : [`arn:${partition}:bedrock:${readers.region}::foundation-model/${route.modelId.replace(INFERENCE_PROFILE_ID, "")}`];
   return {
+    choice, tested, quota: readBedrockQuotas(readers, route, eligibleE2EAgentModel("amazon-bedrock", route.modelId, readers.region)?.label),
     provider: { state: "known", route }, approval: approval(route.routeId),
     bedrock: { access, iam: { foundationTemplate, roleLogicalId, resources: [...new Set([...profileResource, ...modelResources])], scope } },
   };
