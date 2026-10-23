@@ -1,5 +1,5 @@
 import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   DRIVING_TEST_BUDGET, DRIVING_TEST_FIRST_CALL_CASE_ID, E2EModelCheckResultSchema, E2EModelFailureSchema, E2E_AGENT_ELIGIBLE_MODELS, E2E_AGENT_RECOMMENDED_MODELS, E2E_MODEL_CHECK_REQUEST_SCHEMA,
   E2E_MODEL_DRIVING_TEST_MARKER, INDEX_EXPIRY_ATTRIBUTE, ModelDiscoveryReportSchema, e2eAgentModelsFor, e2eModelRouteRevision, e2eQualificationPrefix, indexExpiresAt,
@@ -225,7 +225,8 @@ export async function untestedRouteSentence(deps: Pick<ModelCheckDependencies, "
   let why = "not run";
   try {
     const last = await readModelTest(deps, untested.routeId, untested.modelId);
-    if (last?.outcome === "failed") why = failureClassSentence(last.failureClass ?? "unknown", untested).replace(/[.\s]+$/u, "");
+    // The class sentence ends with "(agentx project model-check test --model <id>)" in places: the proposal gives the real command itself, so the placeholder one is left out here.
+    if (last?.outcome === "failed") why = failureClassSentence(last.failureClass ?? "unknown", untested).replace(/ \(agentx project model-check test --model <id>\)/u, "").replace(/[.\s]+$/u, "");
   } catch { /* the sentence then says "not run" */ }
   return `AI navigation steps will not run: the driving test with ${LABELS[untested.provider]} \`${untested.modelId}\` has not passed (${why})`;
 }
@@ -281,7 +282,7 @@ function describeTiers(ranked: RankedModels, report: ModelDiscoveryReport | null
 function quotaSentence(report: ModelDiscoveryReport | null): (modelId: string) => string {
   return (modelId) => {
     const quotas = report?.models.find((item) => item.modelId === modelId)?.quotas ?? [];
-    const parts = quotas.filter((entry) => entry.code !== null).map((entry) => `${entry.scope === "geographic" ? "US-only or geographic" : "Global"} ${entry.code} ${entry.tokensPerMinute ?? "unknown"}`);
+    const parts = quotas.filter((entry) => entry.code !== null).map((entry) => `${entry.scope === "geographic" ? (modelId.startsWith("us.") ? "US-only" : "geographic") : "Global"} \`${entry.code}\` ${entry.tokensPerMinute ?? "unknown"}`);
     return parts.length === 0 ? "" : `; ${parts.join(", ")} tokens per minute`;
   };
 }
@@ -361,16 +362,33 @@ export async function startModelCheck(deps: ModelCheckDependencies, body: unknow
   }
   const prefix = await runnerPrefix(deps, profileId);
   const now = deps.now();
-  // One check at a time: the runner serves checks in order and a result key holds one answer.
-  const latest = (await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: e2eModelCheckLatestKey(), ConsistentRead: true }))).Item as Record<string, unknown> | undefined;
-  if (latest !== undefined && latest["state"] === "pending" && typeof latest["requestedAt"] === "number" && now - latest["requestedAt"] < PENDING_WINDOW_MS) {
-    throw new ModelCheckError(409, "check-in-progress", "a model check is already running; wait for it to finish");
-  }
+  // What the request asks for, apart from its id: a retried POST (a lost 202, a double click) has the same one.
+  const fingerprint = createHash("sha256").update(JSON.stringify([input.kind, record["modelId"] ?? null, record["definitionDigest"] ?? null])).digest("hex");
   const expires = indexExpiresAt(new Date(now + CHECK_TTL_MS).toISOString());
-  await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...e2eModelCheckKey(checkId), entityType: "E2E_MODEL_CHECK", checkId, ...record, prefix, requestedAt: now, state: "pending", [INDEX_EXPIRY_ATTRIBUTE]: expires } }));
-  await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...e2eModelCheckLatestKey(), entityType: "E2E_MODEL_CHECK_LATEST", checkId, requestedAt: now, state: "pending", [INDEX_EXPIRY_ATTRIBUTE]: expires } }));
-  await deps.putObject(`${prefix}${REQUEST_KEY}`, `${JSON.stringify(request)}\n`);
-  return { checkId };
+  const latestItem = (id: string) => ({ ...e2eModelCheckLatestKey(), entityType: "E2E_MODEL_CHECK_LATEST", checkId: id, requestedAt: now, state: "pending", fingerprint, [INDEX_EXPIRY_ATTRIBUTE]: expires });
+  const writeCheck = async (id: string) => {
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...e2eModelCheckKey(id), entityType: "E2E_MODEL_CHECK", checkId: id, ...record, prefix, requestedAt: now, state: "pending", [INDEX_EXPIRY_ATTRIBUTE]: expires } }));
+    await deps.putObject(`${prefix}${REQUEST_KEY}`, `${JSON.stringify({ ...request, checkId: id })}\n`);
+  };
+  // One check at a time per runner, held by ONE conditional write of the latest pointer: of two POSTs at once, one wins and the other is told which check is running. A pointer that
+  // is not pending, or has been pending longer than the window (the runner never answered), is replaced.
+  const cutoff = now - PENDING_WINDOW_MS;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: latestItem(checkId),
+        ConditionExpression: "attribute_not_exists(pk) OR #state <> :pending OR requestedAt < :cutoff", ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":pending": "pending", ":cutoff": cutoff } }));
+      await writeCheck(checkId);
+      return { checkId };
+    } catch (error) {
+      if (!(error instanceof Error) || error.name !== "ConditionalCheckFailedException") throw error;
+    }
+    const running = (await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: e2eModelCheckLatestKey(), ConsistentRead: true }))).Item as Record<string, unknown> | undefined;
+    if (running === undefined || running["state"] !== "pending" || typeof running["checkId"] !== "string") continue;
+    // The same request again: answer with the check that is already running, and put its request again (the first put may be what was lost). The runner serves an id once.
+    if (running["fingerprint"] === fingerprint) { await writeCheck(running["checkId"]); return { checkId: running["checkId"] }; }
+    throw new ModelCheckError(409, "check-in-progress", `a model check is already running (${running["checkId"]}); wait for it to finish`);
+  }
+  throw new ModelCheckError(409, "check-in-progress", "a model check is already running; wait for it to finish");
 }
 
 export interface ModelCheckView {

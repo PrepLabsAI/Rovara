@@ -57,7 +57,7 @@ export function formatTiers(tiers: Tiers, env: string): string[] {
     : tiers.discovery.status === "unverified" ? `Rovara could not list your models (${clean(tiers.discovery.unverifiedReason, 40)}); the driving test will confirm a model.` : "No discovery on record yet; run discover.");
   if (tiers.recommended !== null) {
     const note = tiers.why === "default-not-usable" ? " (Rovara's own default is not usable on this account)" : "";
-    lines.push(`Recommended: ${idOf(tiers.recommended)} (${clean(tiers.recommended.label, 80)})${tiers.recommended.testedAt === undefined ? ", not tested yet" : `, tested ${tiers.recommended.testedAt.slice(0, 10)}`}${note}`);
+    lines.push(`Recommended: ${idOf(tiers.recommended)} (${clean(tiers.recommended.label, 80)})${tiers.recommended.testedAt === undefined ? `, not tested yet${tiers.recommended.worstCaseUsd === undefined ? "" : ` (worst case of one driving test ${usd(tiers.recommended.worstCaseUsd)})`}` : `, tested ${tiers.recommended.testedAt.slice(0, 10)}`}${note}`);
   } else lines.push("Recommended: none of the models Rovara can use is available on this account.");
   if (tiers.worksOnAccount.length > 0) {
     lines.push("Works on your account:");

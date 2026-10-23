@@ -1018,7 +1018,7 @@ export class ControlPlaneStack extends Stack {
       });
       // M1.4 Task 4.10C, read-only model discovery for the runner's worker (what the model check lists: Bedrock models and profiles, availability, and the tokens-per-minute quotas).
       // No invoke grant is added: the driving test uses BedrockModelInvocation, which already covers the foundation models and this account's inference profiles (global. included).
-      // `bedrock:GetFoundationModelAvailability` is `*` until its resource-level support is confirmed in the Service Authorization Reference. Named like the transport policies so the
+      // `bedrock:GetFoundationModelAvailability` is `*` because the action has no resource type in the Service Authorization Reference. The broker needs no grant of its own for the check keys: its role already reads and writes the artifact bucket. Named like the transport policies so the
       // qualification-transport unit adds it (prefix E2eQualificationTransport); its policy name is E2eModelDiscovery.
       new iam.CfnPolicy(this, "E2eQualificationTransportDiscovery", {
         policyName: "E2eModelDiscovery",
@@ -1031,19 +1031,6 @@ export class ControlPlaneStack extends Stack {
             { Sid: "ReadBedrockInferenceProfiles", Effect: "Allow", Action: "bedrock:GetInferenceProfile", Resource: `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/*` },
             { Sid: "ListBedrockQuotas", Effect: "Allow", Action: "servicequotas:ListServiceQuotas", Resource: "*" },
             { Sid: "ReadBedrockQuota", Effect: "Allow", Action: "servicequotas:GetServiceQuota", Resource: `arn:${Aws.PARTITION}:servicequotas:${Aws.REGION}:${Aws.ACCOUNT_ID}:bedrock/*` },
-          ],
-        },
-      });
-      // The broker puts a model check's request and reads its result: exactly these two keys under any runner's prefix, no List and no Delete. A policy of its own (added by the same
-      // unit) so the broker role's default policy is not modified.
-      new iam.CfnPolicy(this, "E2eQualificationTransportBrokerChecks", {
-        policyName: "E2eModelCheckBroker",
-        roles: [broker.role!.roleName],
-        policyDocument: {
-          Version: "2012-10-17",
-          Statement: [
-            { Sid: "PutModelCheckRequest", Effect: "Allow", Action: "s3:PutObject", Resource: artifacts.arnForObjects("e2e-runtime/*/canary-request.json") },
-            { Sid: "ReadModelCheckResult", Effect: "Allow", Action: "s3:GetObject", Resource: artifacts.arnForObjects("e2e-runtime/*/canary-result.json") },
           ],
         },
       });

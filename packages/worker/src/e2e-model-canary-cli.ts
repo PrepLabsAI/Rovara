@@ -91,8 +91,13 @@ export async function serveModelChecks(args: CanaryCliArgs, dependencies: ModelC
   let unreadableLogged = false;
   log("model-check: serving model checks from this runner");
 
+  // A transient fault in putting a result must not end the server for good (nothing restarts it): it is tried three times, a few seconds apart.
   const put = async (body: string): Promise<boolean> => {
-    try { await transport.put(`${args.prefix}${CANARY_RESULT_KEY}`, body); return true; } catch { log("model-check: the result could not be uploaded"); return false; }
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try { await transport.put(`${args.prefix}${CANARY_RESULT_KEY}`, body); return true; } catch { if (attempt < 3) await dependencies.sleep(5_000 * attempt); }
+    }
+    log("model-check: the result could not be uploaded");
+    return false;
   };
 
   for (;;) {
@@ -145,15 +150,21 @@ export function runRequest(raw: unknown): Promise<unknown> {
   return version === "rovara-e2e-model-canary-request/v1" ? runE2EModelCanary(raw) : runE2EModelCheck(raw);
 }
 
-export function s3CanaryTransport(bucket: string, region: string | undefined): CanaryTransport {
-  const s3 = new S3Client({ ...(region === undefined ? {} : { region }), maxAttempts: 3 });
+/** What S3 answers for an object that is not there. The worker role has `s3:GetObject` but no `s3:ListBucket`, so S3 says AccessDenied (403), not NoSuchKey, for a missing key: a healthy runner with no request yet gets it on every poll. */
+const ABSENT_OBJECT_ERRORS: ReadonlySet<string> = new Set(["NoSuchKey", "NotFound", "AccessDenied", "Forbidden"]);
+
+export function s3CanaryTransport(bucket: string, region: string | undefined, client?: Pick<S3Client, "send">): CanaryTransport {
+  const s3 = client ?? new S3Client({ ...(region === undefined ? {} : { region }), maxAttempts: 3 });
   return {
     async get(key) {
       try {
-        const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+        const response = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key })) as { Body?: { transformToByteArray(): Promise<Uint8Array> } };
         return response.Body === undefined ? new Uint8Array() : await response.Body.transformToByteArray();
       } catch (error) {
-        if ((error as { name?: unknown }).name === "NoSuchKey") return undefined;
+        const name = (error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } }).name;
+        const status = (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode;
+        // A missing key is "not there yet", never a log line; anything else (throttling, a network fault, a 5xx) is a real error and is thrown for the server to log once.
+        if ((typeof name === "string" && ABSENT_OBJECT_ERRORS.has(name)) || status === 404 || status === 403) return undefined;
         throw error;
       }
     },

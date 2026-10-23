@@ -3,7 +3,7 @@ import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { DRIVING_TEST_FIRST_CALL_CASE_ID, E2E_MODEL_CHECK_RESULT_SCHEMA, e2eModelRouteRevision, type E2EModelReceipt } from "@agentx/contracts";
 import { deriveE2EAgentRouteForModel, e2eAgentRouteDefinitionDigest, type E2EAgentInstallation } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import {
-  ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, validateModelCheckResult, type ExpectedModelCheck, type ModelCheckDependencies,
+  ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, untestedRouteSentence, validateModelCheckResult, type ExpectedModelCheck, type ModelCheckDependencies,
 } from "../../packages/broker/src/e2e/model-checks.js";
 import {
   e2eAgentInstallationFromParameters, e2eModelCheckRunnerKey, e2eModelRouteCanaryKey, e2eModelRouteShapeKey, e2eModelRouteTestKey, planE2EAgentRoute, readE2EModelRouteShape,
@@ -182,12 +182,54 @@ describe("POST: starting a check", () => {
     await expect(startModelCheck(other.deps, { kind: "discover" }, "linux-arm64-web-api-v1")).rejects.toMatchObject({ code: "no-model-check-runner" });
   });
 
-  it("allows one check at a time", async () => {
+  // Review M-4: the one-check-at-a-time rule is one conditional write, and a retried POST finds its own check again.
+  it("allows one check at a time: a different request while one runs is a 409 that names the running check, and after the window it is allowed", async () => {
     const h = harness();
-    await startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1");
-    await expect(startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1")).rejects.toMatchObject({ status: 409, code: "check-in-progress" });
+    const { checkId } = await startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1");
+    await expect(startModelCheck(h.deps, { kind: "drive", modelId: MODEL }, "linux-arm64-web-api-v1")).rejects.toMatchObject({ status: 409, code: "check-in-progress", message: expect.stringContaining(checkId) as string });
     h.advance(11 * 60_000);
-    await expect(startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1")).resolves.toMatchObject({ checkId: expect.any(String) as string });
+    await expect(startModelCheck(h.deps, { kind: "drive", modelId: MODEL }, "linux-arm64-web-api-v1")).resolves.toMatchObject({ checkId: expect.any(String) as string });
+  });
+
+  it("two POSTs at once cannot overwrite each other: one wins, the other is refused, and the request under the key is the winner's", async () => {
+    const h = harness();
+    const settled = await Promise.allSettled([startModelCheck(h.deps, { kind: "drive", modelId: MODEL }, "linux-arm64-web-api-v1"), startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1")]);
+    expect(settled.map((item) => item.status).sort()).toEqual(["fulfilled", "rejected"]);
+    const winner = settled.find((item) => item.status === "fulfilled") as PromiseFulfilledResult<{ checkId: string }>;
+    const loser = settled.find((item) => item.status === "rejected") as PromiseRejectedResult;
+    expect(loser.reason).toMatchObject({ status: 409, code: "check-in-progress" });
+    expect((JSON.parse(h.objects.get(`${PREFIX}canary-request.json`)!) as { checkId: string }).checkId).toBe(winner.value.checkId);
+    expect(h.puts).toHaveLength(1);
+  });
+
+  it("the same request again (a lost 202, a double click) returns the running check's id instead of blocking, and puts its request again", async () => {
+    const h = harness();
+    const first = await startModelCheck(h.deps, { kind: "drive", modelId: MODEL }, "linux-arm64-web-api-v1");
+    // The 202 was lost, and so was the object (the put is what may have failed).
+    h.objects.delete(`${PREFIX}canary-request.json`);
+    const again = await startModelCheck(h.deps, { kind: "drive", modelId: MODEL }, "linux-arm64-web-api-v1");
+    expect(again).toEqual(first);
+    expect((JSON.parse(h.objects.get(`${PREFIX}canary-request.json`)!) as { checkId: string }).checkId).toBe(first.checkId);
+    // Only one check exists.
+    expect(h.db.find((item) => String(item.sk).startsWith("E2E_MODEL_CHECK#"))).toHaveLength(1);
+  });
+
+  it("a POST whose own request put failed can be retried at once", async () => {
+    const h = harness();
+    const original = h.deps.putObject;
+    let fail = true;
+    h.deps.putObject = async (key, body) => { if (fail) { fail = false; throw new Error("S3 down"); } await original(key, body); };
+    await expect(startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1")).rejects.toThrow("S3 down");
+    const retried = await startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1");
+    expect((JSON.parse(h.objects.get(`${PREFIX}canary-request.json`)!) as { checkId: string }).checkId).toBe(retried.checkId);
+  });
+
+  it("a finished check frees the runner for the next one at once", async () => {
+    const h = harness();
+    const { checkId } = await startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1");
+    h.objects.set(`${PREFIX}canary-result.json`, JSON.stringify({ schemaVersion: E2E_MODEL_CHECK_RESULT_SCHEMA, status: "discovered", checkId, discovery: { schemaVersion: "rovara-model-discovery/v1", provider: "amazon-bedrock", checkedAt: "2026-10-23T10:00:00.000Z", status: "unverified", unverifiedReason: "access-denied", models: [] } }));
+    await readModelCheck(h.deps, checkId);
+    await expect(startModelCheck(h.deps, { kind: "discover" }, "linux-arm64-web-api-v1")).resolves.toMatchObject({ checkId: expect.not.stringMatching(checkId) as string });
   });
 
   it("uses the stored shape for the route it asks about", async () => {
@@ -265,7 +307,7 @@ describe("GET: reading a check", () => {
     expect(view.status).toBe("discovered");
     expect(view.tiers?.recommended?.modelId).toBe(MODEL);
     expect(view.tiers?.notUsable[0]).toMatchObject({ modelId: "us.anthropic.claude-haiku-5-5", reason: expect.stringContaining("L-47520EB7") as string });
-    expect(view.tiers?.notUsable[0]?.reason).toContain("L-F26CA8D1");
+    expect(view.tiers?.notUsable[0]?.reason).toContain("US-only `L-47520EB7` 0, Global `L-F26CA8D1` 0 tokens per minute");
     // The report on record feeds the tiers a later read shows.
     const tiers = await readCurrentTiers(h.deps);
     expect(tiers.recommended?.modelId).toBe(MODEL);
@@ -284,6 +326,18 @@ describe("GET: reading a check", () => {
   it("does not know a check it never made", async () => {
     await expect(readModelCheck(harness().deps, "6b0e8a52-6f3e-4b8f-9f1c-0f5c1f4f2a11")).rejects.toMatchObject({ status: 404 });
     await expect(readModelCheck(harness().deps, "not-an-id")).rejects.toMatchObject({ status: 404 });
+  });
+});
+
+describe("the sentence a proposal shows for an untested route (review M-9)", () => {
+  it("embeds the last failed test's class sentence without the placeholder command, so the real command is the only one in the text", async () => {
+    const h = harness();
+    h.db.set({ ...e2eModelRouteTestKey(route.routeId, MODEL), entityType: "E2E_MODEL_TEST", outcome: "failed", failureClass: "limit-or-rate-limited", signal: "ThrottlingException", testedAt: "2026-10-23T10:00:00.000Z" });
+    const sentence = await untestedRouteSentence(h.deps, { provider: "amazon-bedrock", modelId: MODEL, routeId: route.routeId });
+    expect(sentence).toContain("AI navigation steps will not run: the driving test with Amazon Bedrock");
+    expect(sentence).toContain("choose another model and run its driving test, then retry the checks)");
+    expect(sentence).not.toContain("<id>");
+    expect(sentence).not.toContain("model-check test");
   });
 });
 
