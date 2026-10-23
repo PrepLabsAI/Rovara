@@ -45,7 +45,7 @@ describe("sanitizeModelCallEvent", () => {
       },
     };
     const output = sanitizeModelCallEvent(hostile, 1);
-    expect(output).toEqual({ modelCall: { event: "failed", class: "unknown", signal: null, attempt: 1 } });
+    expect(output).toEqual({ modelCall: { outcome: "failed", class: "unknown", signal: null, attempt: 1 } });
     expect(JSON.stringify(output)).not.toContain("SECRET");
     // a long or odd request id is dropped, a valid one is kept
     const idCase = (requestId: string) => sanitizeModelCallEvent({ type: "message_end", message: { role: "assistant", stopReason: "error", provider: "amazon-bedrock", diagnostics: [{ details: { requestId } }] } });
@@ -63,12 +63,12 @@ describe("sanitizeModelCallEvent", () => {
 
   it("classifies a keyed provider's failure by its own tokens", () => {
     const output = sanitizeModelCallEvent({ type: "message_end", message: { role: "assistant", stopReason: "error", provider: "anthropic", diagnostics: [{ details: { errorCode: "overloaded_error" } }] } }, 2);
-    expect(output).toEqual({ modelCall: { event: "failed", class: "provider-outage", signal: "overloaded_error", attempt: 2, provider: "anthropic" } });
+    expect(output).toEqual({ modelCall: { outcome: "failed", class: "provider-outage", signal: "overloaded_error", attempt: 2, provider: "anthropic" } });
   });
 
   it("never reads free text: a rate-limit sentence with no tokens stays unknown", () => {
     const output = sanitizeModelCallEvent({ type: "message_end", message: { role: "assistant", stopReason: "error", provider: "amazon-bedrock", errorMessage: "ThrottlingException: Too many requests" } });
-    expect(output).toEqual({ modelCall: { event: "failed", class: "unknown", signal: null, attempt: 1, provider: "amazon-bedrock" } });
+    expect(output).toEqual({ modelCall: { outcome: "failed", class: "unknown", signal: null, attempt: 1, provider: "amazon-bedrock" } });
   });
 
   it("writes the same fixed sentences the task error and the log will use", () => {
@@ -188,6 +188,11 @@ describe("ModelCallMonitor", () => {
     expect(expiries).toHaveLength(1);
     expect(expiries[0]).toMatchObject({ reason: "deadline", limitMs: 600_000, elapsedMs: 600_000, attempt: 2 });
     expect(Object.keys(expiryNote(expiries[0]!).modelCall).sort()).toEqual(Object.keys((fixture.payloads.deadline as { modelCall: object }).modelCall).sort());
+  });
+
+  it("names the expiry outcomes as PLANINC-1's task view reads them: deadline and stalled, with durationMs", () => {
+    expect(expiryNote({ reason: "deadline", limitMs: 1_500_000, elapsedMs: 1_500_000, sinceActivityMs: 1, attempt: 3 })).toEqual(fixture.payloads.deadline);
+    expect(expiryNote({ reason: "stall", limitMs: 240_000, elapsedMs: 300_000, sinceActivityMs: 240_000, attempt: 1 })).toEqual(fixture.payloads.stall);
   });
 
   it("counts each Pi retry as another attempt", () => {

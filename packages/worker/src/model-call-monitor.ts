@@ -15,12 +15,14 @@ import { classifyProviderFailure } from "@agentx/model-runtime";
 export const MODEL_REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 
 export type ModelCallNote =
-  | { event: "failed"; class: E2EModelFailureClass; signal: string | null; attempt: number; provider?: ModelProvider; requestId?: string; durationMs?: number }
-  | { event: "aborted"; attempt: number; provider?: ModelProvider; durationMs?: number }
+  | { outcome: "failed"; class: E2EModelFailureClass; signal: string | null; attempt: number; provider?: ModelProvider; requestId?: string; durationMs?: number }
+  | { outcome: "stopped"; attempt: number; provider?: ModelProvider; durationMs?: number }
   /** Pi scheduled retry `attempt` of `maxAttempts` (both are retries, not model calls) after `delayMs`. */
-  | { event: "retry"; attempt: number; maxAttempts: number; delayMs: number }
-  | { event: "retry-finished"; success: boolean; attempt: number }
-  | { event: "deadline"; reason: ModelCallExpiry; limitMs: number; elapsedMs: number; attempt: number };
+  | { outcome: "retrying"; attempt: number; maxAttempts: number; delayMs: number }
+  /** Not shown by PLANINC-1's view (the raw `auto_retry_end` is); kept for the worker log and 3b. */
+  | { outcome: "retry-finished"; success: boolean; attempt: number }
+  /** `durationMs` is the time since the run's clock started. `deadline` is the wall-clock limit, `stalled` the no-activity bound. */
+  | { outcome: "deadline" | "stalled"; limitMs: number; durationMs: number; attempt: number };
 
 export type ModelCallExpiry = "deadline" | "stall";
 
@@ -74,7 +76,7 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
     const provider = providerOf(message.provider);
     const durationMs = wholeNumber(message.durationMs, MAX_DURATION_MS);
     if (message.stopReason === "aborted") {
-      return { modelCall: { event: "aborted", attempt: at, ...(provider === undefined ? {} : { provider }), ...(durationMs === undefined ? {} : { durationMs }) } };
+      return { modelCall: { outcome: "stopped", attempt: at, ...(provider === undefined ? {} : { provider }), ...(durationMs === undefined ? {} : { durationMs }) } };
     }
     if (message.stopReason !== "error") return undefined;
     const facts = failureFacts(message);
@@ -83,7 +85,7 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
       : classifyProviderFailure({ provider, signal: facts.signal, ...(facts.status === undefined ? {} : { status: facts.status }) });
     return {
       modelCall: {
-        event: "failed", class: failure.class, signal: failure.signal, attempt: at,
+        outcome: "failed", class: failure.class, signal: failure.signal, attempt: at,
         ...(provider === undefined ? {} : { provider }),
         ...(facts.requestId === undefined ? {} : { requestId: facts.requestId }),
         ...(durationMs === undefined ? {} : { durationMs }),
@@ -95,12 +97,12 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
     const maxAttempts = wholeNumber(event.maxAttempts, MAX_ATTEMPT);
     const delayMs = wholeNumber(event.delayMs, MAX_DURATION_MS);
     if (attemptNumber === undefined || maxAttempts === undefined || delayMs === undefined) return undefined;
-    return { modelCall: { event: "retry", attempt: attemptNumber, maxAttempts, delayMs } };
+    return { modelCall: { outcome: "retrying", attempt: attemptNumber, maxAttempts, delayMs } };
   }
   if (event.type === "auto_retry_end") {
     const attemptNumber = wholeNumber(event.attempt, MAX_ATTEMPT);
     if (typeof event.success !== "boolean" || attemptNumber === undefined) return undefined;
-    return { modelCall: { event: "retry-finished", success: event.success, attempt: attemptNumber } };
+    return { modelCall: { outcome: "retry-finished", success: event.success, attempt: attemptNumber } };
   }
   return undefined;
 }
@@ -110,13 +112,14 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
  * Example: `the model call failed: provider-outage InternalServerException request 9e7ea41c-... attempt 4`.
  */
 export function describeModelCallNote(note: ModelCallNote): string {
-  switch (note.event) {
+  switch (note.outcome) {
     case "failed":
       return `the model call failed: ${note.class}${note.signal === null ? "" : ` ${note.signal}`}${note.requestId === undefined ? "" : ` request ${note.requestId}`} attempt ${note.attempt}`;
-    case "aborted": return `the model call was stopped: attempt ${note.attempt}`;
-    case "retry": return `the model call is retried: retry ${note.attempt} of ${note.maxAttempts}`;
+    case "stopped": return `the model call was stopped: attempt ${note.attempt}`;
+    case "retrying": return `the model call is retried: retry ${note.attempt} of ${note.maxAttempts}`;
     case "retry-finished": return note.success ? `the model call succeeded after retry ${note.attempt}` : `the model call retries ended: retry ${note.attempt}`;
-    case "deadline": return `the model did not finish: ${note.reason === "stall" ? "no activity" : "time limit"} after ${Math.round(note.elapsedMs / 1000)} s, attempt ${note.attempt}`;
+    case "deadline":
+    case "stalled": return `the model did not finish: ${note.outcome === "stalled" ? "no activity" : "time limit"} after ${Math.round(note.durationMs / 1000)} s, attempt ${note.attempt}`;
   }
 }
 
@@ -273,5 +276,5 @@ export class ModelCallMonitor {
 
 /** The note to send when `onExpire` fires. */
 export function expiryNote(info: ModelCallExpiryInfo): ModelCallNotePayload {
-  return { modelCall: { event: "deadline", reason: info.reason, limitMs: info.limitMs, elapsedMs: info.elapsedMs, attempt: info.attempt } };
+  return { modelCall: { outcome: info.reason === "stall" ? "stalled" : "deadline", limitMs: info.limitMs, durationMs: info.elapsedMs, attempt: info.attempt } };
 }
