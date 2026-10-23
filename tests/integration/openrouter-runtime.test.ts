@@ -45,23 +45,27 @@ describe("OpenRouter through the installed Pi transport", () => {
   it("refuses embedded newlines without exposing the malformed key", async () => {
     await expect(readOpenRouterKey(secretArn, async () => `${secret}\nmore`)).rejects.toThrow("credential could not be loaded");
   });
-  it.each(["worker", "orchestrator", "classifier"] as const)("uses the %s default when no secret ARN is configured", async (role) => {
+  it.each(["worker", "orchestrator", "classifier"] as const)("fails the %s's call by name when no secret ARN is configured and no fallback was chosen (MODEL3)", async (role) => {
+    await expect(createModelRuntimeWithFallback(selected, role, { environment: {} })).rejects.toThrow("The OpenRouter key secret is missing, and no fallback model was chosen");
+  });
+
+  it.each(["worker", "orchestrator", "classifier"] as const)("runs the %s on the chosen fallback and logs it when no secret ARN is configured", async (role) => {
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
-      const resolved = await createModelRuntimeWithFallback(selected, role, { environment: {} });
+      const resolved = await createModelRuntimeWithFallback(selected, role, { environment: { AGENTX_MODEL_FALLBACK: DEFAULT_BEDROCK_MODELS[role] } });
       expect(resolved.model).toEqual({ provider: "amazon-bedrock", modelId: DEFAULT_BEDROCK_MODELS[role] });
       expect(resolved.runtime.getModel(resolved.model.provider, resolved.model.modelId)).toBeDefined();
       expect(log).toHaveBeenCalledWith(expect.stringContaining('"reason":"openrouter_secret_missing"'));
     } finally { log.mockRestore(); }
   });
 
-  it("uses the configured worker default for a nonexistent or empty secret, but refuses access-denied fallback", async () => {
+  it("uses the chosen fallback for a nonexistent or empty secret, but refuses access-denied fallback", async () => {
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
-    const env = { ...environment, AGENTX_MODEL_PROVIDER: "amazon-bedrock", AGENTX_MODEL_ID: "us.anthropic.claude-haiku-4-5-20251001-v1:0" };
+    const env = { ...environment, AGENTX_MODEL_FALLBACK: "us.anthropic.claude-haiku-4-5-20251001-v1:0" };
     try {
       for (const readSecret of [async () => undefined, async () => { throw Object.assign(new Error("missing"), { name: "ResourceNotFoundException" }); }]) {
         const resolved = await createModelRuntimeWithFallback(selected, "worker", { environment: env, readSecret });
-        expect(resolved.model).toEqual({ provider: "amazon-bedrock", modelId: env.AGENTX_MODEL_ID });
+        expect(resolved.model).toEqual({ provider: "amazon-bedrock", modelId: env.AGENTX_MODEL_FALLBACK });
       }
       log.mockClear();
       await expect(createModelRuntimeWithFallback(selected, "worker", { environment: env,

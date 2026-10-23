@@ -1,4 +1,5 @@
-import { MissingProviderSecret, defaultBedrockModel, type ModelRole } from "./config.js";
+import { MissingProviderSecret, type ModelRole } from "./config.js";
+import { catalogModel } from "./catalog.js";
 import { openRouterRouting, readProviderKey, requireKeyedModel } from "./config.js";
 import { TRANSPORTS, requestCompat } from "./transport.js";
 export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
@@ -10,7 +11,7 @@ export * from "./e2e-environment-guard.js";
 export * from "./e2e-route-derive.js";
 export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
-import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type KeyedModelProvider, type ModelIdentifier } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isKeyedModelProvider, type KeyedModelProvider, type ModelIdentifier } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -32,6 +33,8 @@ export interface ModelRuntimeOptions {
    * it no longer allows). The request that found it goes there before Pi sees anything, and so does every later one.
    */
   chatgptFallback?: ChatGptFallback;
+  /** MODEL3: told when a missing provider secret sent the work to the installation's chosen fallback model. */
+  onFallback?: (notice: ModelFallbackNotice) => void;
 }
 
 /** Why a ChatGPT task stopped using its plan (#342). */
@@ -63,15 +66,53 @@ function chatGptRefusal(status: number, body: string): ChatGptFallbackReason | u
   return undefined;
 }
 
-/** Resolve missing-credential fallback before creating a session, so its model and usage agree. */
-export async function createModelRuntimeWithFallback<T extends ModelIdentifier>(selected: T, role: ModelRole, options: ModelRuntimeOptions = {}) {
+/** The environment variable that carries the installation's chosen fallback model (`none`, unset, or a Bedrock model id of the pinned catalog). */
+export const MODEL_FALLBACK_VARIABLE = "AGENTX_MODEL_FALLBACK";
+
+/** Told, once per runtime, that work ran on the chosen fallback because a provider's key secret is missing (MODEL3). `text` is the sentence for the task page and Slack. */
+export interface ModelFallbackNotice {
+  role: ModelRole;
+  reason: string;
+  requested: { provider: string; modelId: string };
+  effective: { provider: "amazon-bedrock"; modelId: string };
+  text: string;
+}
+
+/** The chosen fallback as a model, or undefined for `none`, an unset or malformed setting, and an id the pinned Bedrock catalog does not know. */
+export function modelFallbackModel(value: string | undefined): { provider: "amazon-bedrock"; modelId: string } | undefined {
+  const id = value?.trim();
+  if (id === undefined || id === "" || id === MODEL_FALLBACK_NONE || !MODEL_FALLBACK_PATTERN.test(id)) return undefined;
+  return catalogModel({ provider: "amazon-bedrock", modelId: id }) === undefined ? undefined : { provider: "amazon-bedrock", modelId: id };
+}
+
+const FALLBACK_COMMAND = "`agentx config set models.fallback <bedrock model id>`";
+
+/**
+ * Resolve a missing provider secret before creating a session, so its model and usage agree. There is no default fallback (MODEL3): with no chosen fallback the call fails by name, and with
+ * one it runs on that model and says so, in the log, in the result and through `options.onFallback`.
+ */
+export async function createModelRuntimeWithFallback<T extends ModelIdentifier>(selected: T, role: ModelRole, options: ModelRuntimeOptions = {}): Promise<{ runtime: ModelRuntime; model: T | { provider: "amazon-bedrock"; modelId: string }; fallback?: ModelFallbackNotice }> {
   try {
     return { runtime: await createConfiguredModelRuntime(selected, options), model: selected };
   } catch (error) {
     if (!(error instanceof MissingProviderSecret)) throw error;
-    const model = defaultBedrockModel(role, options.environment ?? process.env);
-    console.info(JSON.stringify({ event: "model_fallback", role, reason: `${error.provider}_secret_missing`, requested: { provider: selected.provider, modelId: selected.modelId }, effective: model }));
-    return { runtime: await createConfiguredModelRuntime(model, options), model };
+    const label = KEYED_MODEL_PROVIDERS[error.provider].label;
+    const chosen = ((options.environment ?? process.env)[MODEL_FALLBACK_VARIABLE] ?? "").trim();
+    const model = modelFallbackModel(chosen);
+    if (model === undefined) {
+      const named = MODEL_FALLBACK_PATTERN.test(chosen) && chosen !== MODEL_FALLBACK_NONE;
+      throw agentXError("CONFIG_INVALID", named
+        ? `The ${label} key secret is missing, and the fallback model ${chosen} is not a Bedrock model in this Rovara's model catalog. Restore the key, or choose another fallback with ${FALLBACK_COMMAND}`
+        : `The ${label} key secret is missing, and no fallback model was chosen. Restore the key, or choose a fallback with ${FALLBACK_COMMAND}`);
+    }
+    const reason = `${error.provider}_secret_missing`;
+    const notice: ModelFallbackNotice = {
+      role, reason, requested: { provider: selected.provider, modelId: selected.modelId }, effective: model,
+      text: `ran on Amazon Bedrock \`${model.modelId}\` because the ${label} key secret is missing`,
+    };
+    console.info(JSON.stringify({ event: "model_fallback", role, reason, requested: notice.requested, effective: model }));
+    try { options.onFallback?.(notice); } catch { /* Reporting must not fail the run it is about. */ }
+    return { runtime: await createConfiguredModelRuntime(model, options), model, fallback: notice };
   }
 }
 
