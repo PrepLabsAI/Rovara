@@ -90,7 +90,7 @@ async function run(script: Script, options: {
   const artifacts: Array<{ name: string; content: string }> = [];
   const logs: Array<{ level: string; json: Record<string, unknown> }> = [];
   const task = options.invocation ?? invocation();
-  const running = runTaskInvocation(task as never, {
+  const running = runTaskInvocation(task, {
     rootPath: await preparedRoot(), model: { provider: "fixture", modelId: "fixture" }, piAdapter: adapter,
     eventSink: async (batch) => { if (options.sink !== undefined) await options.sink(batch, sent); else sent.push(...batch); },
     artifactSink: async (artifact) => { artifacts.push(artifact); },
@@ -192,7 +192,10 @@ describe("a planning run whose model call stops answering", () => {
 
 describe("a model failure in the task's events", () => {
   it("sends one sanitized note for the failed call and its retry, and never the provider's message or the model's thinking", async () => {
-    const raw = [iseMessageEnd(), { type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 2000, errorMessage: SECRET_PROVIDER_TEXT }, planEnd(),
+    // Pi repeats the failed message in `turn_end` and `agent_end` too.
+    const failed = iseMessageEnd().message;
+    const raw = [iseMessageEnd(), { type: "turn_end", message: failed, toolResults: [] }, { type: "agent_end", messages: [{ role: "user", content: [{ type: "text", text: "Plan the change" }] }, failed], willRetry: true },
+      { type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 2000, errorMessage: SECRET_PROVIDER_TEXT }, planEnd(),
       { type: "auto_retry_end", success: true, attempt: 1 }];
     const { settled, sent, state, artifacts } = await run({ async prompt(emit) { for (const event of raw) emit(event); } });
     expect((await settled).ok).toBe(true);
@@ -208,9 +211,12 @@ describe("a model failure in the task's events", () => {
     expect(everything).not.toContain(SECRET_THINKING);
     expect(everything).not.toContain("PRIVATE-PROVIDER-DETAIL");
     expect(everything).not.toContain("unexpected error during processing");
+    // The turn and agent ends are still forwarded, without the failed message's text, and the user's own message is kept.
+    expect(sent.find((event) => (event.payload as { type?: string } | null)?.type === "turn_end")?.payload).toMatchObject({ message: { role: "assistant", stopReason: "error", content: [] } });
+    expect(JSON.stringify(sent.find((event) => (event.payload as { type?: string } | null)?.type === "agent_end")?.payload)).toContain("Plan the change");
     // No raw failure or retry event is forwarded beside the notes.
     expect(sent.filter((event) => ["auto_retry_start", "auto_retry_end"].includes((event.payload as { type?: string } | null)?.type ?? ""))).toEqual([]);
-    expect(sent.filter((event) => (event.payload as { type?: string; message?: { stopReason?: string } } | null)?.message?.stopReason === "error")).toEqual([]);
+    expect(sent.filter((event) => (event.payload as { type?: string; message?: { stopReason?: string } } | null)?.type === "message_end" && (event.payload as { message?: { stopReason?: string } }).message?.stopReason === "error")).toEqual([]);
     expect(artifacts.find((artifact) => artifact.name === "plan.md")?.content).toContain("Update the route");
   });
 

@@ -549,7 +549,7 @@ export async function runTaskInvocation(
     // A tool's streaming update (tool_execution_update) likewise repeats its arguments and its output so far; the finished
     // call (tool_execution_end) is kept.
     const streamed = (event as { type?: unknown } | undefined)?.type;
-    if (streamed !== "message_update" && streamed !== "tool_execution_update" && !isModelFailureEvent(event)) void events.append(eventType(event), event).catch(() => undefined);
+    if (streamed !== "message_update" && streamed !== "tool_execution_update" && !isModelFailureEvent(event)) void events.append(eventType(event), withoutModelFailureText(event)).catch(() => undefined);
     const outcome = assistantOutcome(event);
     if (outcome !== undefined) {
       lastAssistant = outcome;
@@ -1231,6 +1231,27 @@ function isModelFailureEvent(event: unknown): boolean {
   const { type, message } = event as { type?: unknown; message?: { role?: unknown; stopReason?: unknown } | null };
   if (type === "auto_retry_start" || type === "auto_retry_end") return true;
   return type === "message_end" && message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted");
+}
+
+/**
+ * Pi repeats a failed model call's message in other events too: `turn_end` carries it, `agent_end` lists it, and a streaming start can hold what the provider said so far. The message carries the
+ * provider's own text (`errorMessage`, `diagnostics`) and whatever the model had thought or written when the call failed. None of it is stored in the task's events: an assistant message loses
+ * `errorMessage` and `diagnostics`, and one that failed or was aborted loses its content too. The sanitized note says what happened. The event is copied, never changed: Pi still owns it.
+ */
+export function withoutModelFailureText(event: unknown): unknown {
+  if (event === null || typeof event !== "object") return event;
+  const value = event as { type?: unknown; message?: unknown; messages?: unknown };
+  if (typeof value.type !== "string") return event;
+  if (value.type === "agent_end" && Array.isArray(value.messages)) return { ...value, messages: value.messages.map(cleanAssistantMessage) };
+  if (["message_start", "message_update", "message_end", "turn_end"].includes(value.type) && value.message !== undefined) return { ...value, message: cleanAssistantMessage(value.message) };
+  return event;
+}
+
+function cleanAssistantMessage(message: unknown): unknown {
+  if (message === null || typeof message !== "object" || (message as { role?: unknown }).role !== "assistant") return message;
+  const { errorMessage: _errorMessage, diagnostics: _diagnostics, ...rest } = message as Record<string, unknown>;
+  void _errorMessage; void _diagnostics;
+  return rest.stopReason === "error" || rest.stopReason === "aborted" ? { ...rest, content: [] } : rest;
 }
 
 function eventType(event: unknown): "progress" | "tool_start" | "tool_end" {
