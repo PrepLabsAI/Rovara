@@ -18,7 +18,7 @@
         }
       },
       "output": {
-        "modelCall": { "event": "failed", "class": "provider-outage", "signal": "InternalServerException", "attempt": 1, "provider": "amazon-bedrock", "requestId": "9e7ea41c-561a-49e1-bbc3-2737b23fa76c", "durationMs": 441950 }
+        "modelCall": { "outcome": "failed", "class": "provider-outage", "signal": "InternalServerException", "attempt": 1, "provider": "amazon-bedrock", "requestId": "9e7ea41c-561a-49e1-bbc3-2737b23fa76c", "durationMs": 441950 }
       },
       "mustNotAppear": ["Internal server error", "SECRET-REASONING-TEXT", "unexpected error during processing"]
     },
@@ -29,48 +29,48 @@
         "type": "message_end",
         "message": { "role": "assistant", "stopReason": "error", "content": [], "errorMessage": "Service unavailable, try again later.", "diagnostics": [{ "type": "bedrock_response_failure", "details": { "status": 503 } }], "provider": "amazon-bedrock", "durationMs": 1200 }
       },
-      "output": { "modelCall": { "event": "failed", "class": "provider-outage", "signal": null, "attempt": 2, "provider": "amazon-bedrock", "durationMs": 1200 } },
+      "output": { "modelCall": { "outcome": "failed", "class": "provider-outage", "signal": null, "attempt": 2, "provider": "amazon-bedrock", "durationMs": 1200 } },
       "mustNotAppear": ["Service unavailable"]
     },
     {
       "name": "a failure with no diagnostics and no known provider",
       "attempt": 1,
       "input": { "type": "message_end", "message": { "role": "assistant", "stopReason": "error", "content": [], "errorMessage": "Authorization: Bearer abc123SECRET" } },
-      "output": { "modelCall": { "event": "failed", "class": "unknown", "signal": null, "attempt": 1 } },
+      "output": { "modelCall": { "outcome": "failed", "class": "unknown", "signal": null, "attempt": 1 } },
       "mustNotAppear": ["abc123SECRET", "Authorization"]
     },
     {
       "name": "an aborted model call",
       "attempt": 1,
       "input": { "type": "message_end", "message": { "role": "assistant", "stopReason": "aborted", "content": [], "provider": "amazon-bedrock", "durationMs": 53000 } },
-      "output": { "modelCall": { "event": "aborted", "attempt": 1, "provider": "amazon-bedrock", "durationMs": 53000 } },
+      "output": { "modelCall": { "outcome": "stopped", "attempt": 1, "provider": "amazon-bedrock", "durationMs": 53000 } },
       "mustNotAppear": []
     },
     {
       "name": "Pi schedules retry 1 of 3",
       "attempt": 1,
       "input": { "type": "auto_retry_start", "attempt": 1, "maxAttempts": 3, "delayMs": 2000, "errorMessage": "Internal server error: Try your request again." },
-      "output": { "modelCall": { "event": "retry", "attempt": 1, "maxAttempts": 3, "delayMs": 2000 } },
+      "output": { "modelCall": { "outcome": "retrying", "attempt": 1, "maxAttempts": 3, "delayMs": 2000 } },
       "mustNotAppear": ["Internal server error"]
     },
     {
       "name": "Pi gives up retrying",
       "attempt": 4,
       "input": { "type": "auto_retry_end", "success": false, "attempt": 3, "finalError": "Internal server error: PRIVATE-FINAL-ERROR" },
-      "output": { "modelCall": { "event": "retry-finished", "success": false, "attempt": 3 } },
+      "output": { "modelCall": { "outcome": "retry-finished", "success": false, "attempt": 3 } },
       "mustNotAppear": ["PRIVATE-FINAL-ERROR"]
     },
     {
       "name": "a retry that worked",
       "attempt": 2,
       "input": { "type": "auto_retry_end", "success": true, "attempt": 1 },
-      "output": { "modelCall": { "event": "retry-finished", "success": true, "attempt": 1 } },
+      "output": { "modelCall": { "outcome": "retry-finished", "success": true, "attempt": 1 } },
       "mustNotAppear": []
     }
   ],
   "payloads": {
     "heartbeat": { "heartbeat": { "phase": "model", "attempt": 2, "elapsedMs": 61000, "sinceActivityMs": 60000 } },
-    "deadline": { "modelCall": { "event": "deadline", "reason": "deadline", "limitMs": 1500000, "elapsedMs": 1500000, "attempt": 3 } },
-    "stall": { "modelCall": { "event": "deadline", "reason": "stall", "limitMs": 240000, "elapsedMs": 300000, "attempt": 1 } }
+    "deadline": { "modelCall": { "outcome": "deadline", "limitMs": 1500000, "durationMs": 1500000, "attempt": 3 } },
+    "stall": { "modelCall": { "outcome": "stalled", "limitMs": 240000, "durationMs": 300000, "attempt": 1 } }
   }
 }
