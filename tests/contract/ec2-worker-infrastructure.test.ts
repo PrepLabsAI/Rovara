@@ -251,9 +251,8 @@ describe("standing E2E qualification transport (agentx:e2eQualificationTransport
     const policyNamed = (name: string) => ofType(on.controlPlane, "AWS::IAM::Policy").find(([, r]) => r.Properties.PolicyName === name);
     const statementsOf = (name: string) => (policyNamed(name)![1].Properties.PolicyDocument as { Statement: Statement[] }).Statement;
     const resourcesFor = (statements: Statement[], action: string) => statements.filter((s) => [s.Action].flat().includes(action)).flatMap((s) => [s.Resource].flat().map(tail)).sort();
-    // Two for the worker's own prefix (transport, canary) and, since Task 4.10C, one for the broker's model check key (see the next test).
-    expect(withAction(on.controlPlane, "s3:GetObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"))).toHaveLength(3);
-    expect(withAction(on.controlPlane, "s3:PutObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"))).toHaveLength(3);
+    expect(withAction(on.controlPlane, "s3:GetObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"))).toHaveLength(2);
+    expect(withAction(on.controlPlane, "s3:PutObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"))).toHaveLength(2);
     // The IAM policy variable stays literal in the synthesized template (an EC2 role session's aws:userid is <role unique ID>:<instance ID>),
     // so one instance of the shared worker role reaches only its own prefix.
     const transport = statementsOf("E2eQualificationTransport");
@@ -263,9 +262,8 @@ describe("standing E2E qualification transport (agentx:e2eQualificationTransport
     const canary = statementsOf("E2eQualificationTransportCanary");
     expect(resourcesFor(canary, "s3:GetObject")).toEqual(["/e2e-runtime/${aws:userid}/canary-request.json"]);
     expect(resourcesFor(canary, "s3:PutObject")).toEqual(["/e2e-runtime/${aws:userid}/canary-result.json"]);
-    // The only wildcard under e2e-runtime/ is the broker's two exact key names, in a policy of their own.
-    const wildcards = ofType(on.controlPlane, "AWS::IAM::Policy").filter(([, r]) => JSON.stringify(r.Properties.PolicyDocument).includes("e2e-runtime/*")).map(([, r]) => r.Properties.PolicyName);
-    expect(wildcards).toEqual(["E2eModelCheckBroker"]);
+    // No wildcard under e2e-runtime/ in any policy: the broker needs no grant of its own for the model check keys (review M-1), its role already reads and writes the artifact bucket.
+    expect(JSON.stringify(on.controlPlane.toJSON())).not.toContain("e2e-runtime/*");
     for (const name of ["E2eQualificationTransport", "E2eQualificationTransportCanary"]) {
       const statements = statementsOf(name);
       // The bucket is the control plane's own artifact bucket.
@@ -302,19 +300,12 @@ describe("standing E2E qualification transport (agentx:e2eQualificationTransport
     expect(all.some((action) => /Invoke|Put|Create|Delete|Update|Request|Tag/.test(action))).toBe(false);
     expect(policy![1].Properties.Roles).toEqual([{ "Fn::Select": [3, { "Fn::Split": ["/", { Ref: "Ec2WorkerInstanceRoleArn" }] }] }]);
     // Nothing without the context flag.
-    expect(ofType(off.controlPlane, "AWS::IAM::Policy").filter(([, r]) => ["E2eModelDiscovery", "E2eModelCheckBroker"].includes(String(r.Properties.PolicyName)))).toHaveLength(0);
+    expect(ofType(off.controlPlane, "AWS::IAM::Policy").filter(([, r]) => ["E2eModelDiscovery"].includes(String(r.Properties.PolicyName)))).toHaveLength(0);
   });
 
-  it("gives the broker exactly two object keys for model checks, no List and no Delete", () => {
-    const policy = ofType(on.controlPlane, "AWS::IAM::Policy").find(([, r]) => r.Properties.PolicyName === "E2eModelCheckBroker");
-    expect(policy).toBeDefined();
-    const statements = (policy![1].Properties.PolicyDocument as { Statement: Statement[] }).Statement;
-    expect(statements.map((s) => [[s.Action].flat(), [s.Resource].flat().map(tail)])).toEqual([
-      [["s3:PutObject"], ["/e2e-runtime/*/canary-request.json"]],
-      [["s3:GetObject"], ["/e2e-runtime/*/canary-result.json"]],
-    ]);
-    expect(JSON.stringify(statements.map((s) => s.Resource))).toMatch(/Artifacts/);
-    expect(policy![1].Properties.Roles).toEqual([{ Ref: expect.stringMatching(/^Broker/) as string }]);
+  it("adds no policy of its own for the broker's model check keys: its bucket grant already covers them (review M-1)", () => {
+    expect(ofType(on.controlPlane, "AWS::IAM::Policy").filter(([, r]) => r.Properties.PolicyName === "E2eModelCheckBroker")).toHaveLength(0);
+    expect(ofType(on.controlPlane, "AWS::IAM::Policy").map(([, r]) => String(r.Properties.PolicyName)).filter((name) => name.startsWith("E2e")).sort()).toEqual(["E2eModelDiscovery", "E2eQualificationTransport", "E2eQualificationTransportCanary"]);
   });
 
   it("leaves the protected foundation template and its instance role unchanged", () => {

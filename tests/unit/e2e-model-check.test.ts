@@ -5,7 +5,7 @@ import type { E2EInvoke, E2EInvokeInput, E2EInvokeOutput } from "../../packages/
 import { deriveE2EAgentRouteForModel, e2eAgentRouteDefinitionDigest } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { validateModelCheckResult } from "../../packages/broker/src/e2e/model-checks.js";
 import { createDrivingTestLedger, drivingTestHostConfig, requestIdOf, runE2EModelCheck, withOutputCap } from "../../packages/worker/src/e2e-model-check.js";
-import { CANARY_REQUEST_KEY, CANARY_RESULT_KEY, parseCanaryCliArgs, runRequest, serveModelChecks, type CanaryTransport } from "../../packages/worker/src/e2e-model-canary-cli.js";
+import { CANARY_REQUEST_KEY, CANARY_RESULT_KEY, parseCanaryCliArgs, runRequest, s3CanaryTransport, serveModelChecks, type CanaryTransport } from "../../packages/worker/src/e2e-model-canary-cli.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 
 // M1.4 Task 4.10C, tests 30 (the budget), 32 (the server) and the worker side of 34: the check the runner makes, with a faked provider and a faked navigation.
@@ -281,12 +281,51 @@ describe("the bounded model check server (test 32)", () => {
   });
 
   it("logs one fixed line, with the error's name, for the first unreadable request, and nothing about the error's text", async () => {
-    const denied = Object.assign(new Error("Access Denied for arn:aws:s3:::secret-bucket/key"), { name: "AccessDenied" });
-    const s = server({ requests: [denied], stopAfterPolls: 5 });
+    const throttled = Object.assign(new Error("Slow down for arn:aws:s3:::secret-bucket/key"), { name: "SlowDown" });
+    const s = server({ requests: [throttled], stopAfterPolls: 5 });
     await serveModelChecks(s.args, s.value);
-    expect(s.lines.filter((line) => line.startsWith("model-check: request not readable"))).toEqual(["model-check: request not readable (AccessDenied)"]);
+    expect(s.lines.filter((line) => line.startsWith("model-check: request not readable"))).toEqual(["model-check: request not readable (SlowDown)"]);
     expect(s.lines.join("\n")).not.toContain("secret-bucket");
     expect(s.ran).toEqual([]);
+  });
+
+  // Review M-3: the worker role has no s3:ListBucket, so S3 answers a key that is not there with AccessDenied (403): that is a healthy runner with no request yet.
+  it("a healthy runner polling for a request that is not there logs nothing: S3's AccessDenied and NoSuchKey are 'not there yet'", async () => {
+    for (const absent of [Object.assign(new Error("Access Denied"), { name: "AccessDenied", $metadata: { httpStatusCode: 403 } }), Object.assign(new Error("nope"), { name: "NoSuchKey", $metadata: { httpStatusCode: 404 } }),
+      Object.assign(new Error("Forbidden"), { name: "Forbidden", $metadata: { httpStatusCode: 403 } })]) {
+      const transport = s3CanaryTransport("agentx-test-artifacts", "us-east-1", { send: async () => { throw absent; } });
+      const s = server({ stopAfterPolls: 6 });
+      s.value.transport = transport;
+      await serveModelChecks(s.args, s.value);
+      expect(s.lines.filter((line) => line.includes("not readable")), absent.name).toEqual([]);
+      expect(s.ran).toEqual([]);
+    }
+  });
+
+  it("a real S3 fault (throttling, a 5xx) is still thrown by the transport and logged once, by name", async () => {
+    const fault = Object.assign(new Error("Please reduce your request rate for secret-bucket"), { name: "SlowDown", $metadata: { httpStatusCode: 503 } });
+    const transport = s3CanaryTransport("agentx-test-artifacts", "us-east-1", { send: async () => { throw fault; } });
+    await expect(transport.get(`${PREFIX}${CANARY_REQUEST_KEY}`)).rejects.toBe(fault);
+    const s = server({ stopAfterPolls: 6 });
+    s.value.transport = transport;
+    await serveModelChecks(s.args, s.value);
+    expect(s.lines.filter((line) => line.includes("not readable"))).toEqual(["model-check: request not readable (SlowDown)"]);
+    expect(s.lines.join("\n")).not.toContain("secret-bucket");
+  });
+
+  it("returns the request's bytes when S3 has it", async () => {
+    const transport = s3CanaryTransport("agentx-test-artifacts", "us-east-1", { send: async () => ({ Body: { transformToByteArray: async () => Buffer.from("{}") } }) });
+    expect(Buffer.from((await transport.get(`${PREFIX}${CANARY_REQUEST_KEY}`))!).toString()).toBe("{}");
+  });
+
+  it("a transient fault in putting the result is retried, and does not end the server", async () => {
+    const s = server({ requests: [request(1)], stopAfterPolls: 3 });
+    let failures = 2;
+    const inner = s.value.transport;
+    s.value.transport = { get: (key) => inner.get(key), put: async (key, body) => { if (failures > 0) { failures -= 1; throw new Error("denied"); } await inner.put(key, body); } };
+    expect(await serveModelChecks(s.args, s.value)).toBe(0);
+    expect(s.puts).toHaveLength(1);
+    expect(s.lines).not.toContain("model-check: the result could not be uploaded");
   });
 
   it("answers a request that is empty, oversized or not JSON with a fixed refusal and no call, and exits 1 when the result cannot be put", async () => {

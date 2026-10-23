@@ -11,7 +11,7 @@ const tiers = {
   recommended: { modelId: MODEL, label: "Claude Haiku 4.5 (US)", scope: "geographic", worstCaseUsd: 0.0565 },
   current: { modelId: "us.anthropic.claude-haiku-5-5", label: "Claude Haiku 5.5 (US)", scope: "geographic", worstCaseUsd: 0.0057 },
   worksOnAccount: [{ modelId: "global.anthropic.claude-haiku-4-5-20251001-v1:0", label: "x", scope: "global", testedAt: "2026-10-22T09:00:00.000Z", payloadShape: "minimal" }],
-  notUsable: [{ modelId: "us.anthropic.claude-haiku-5-5", label: "x", scope: "geographic", reason: "this account's limit for the model is zero; US-only or geographic L-47520EB7 0, Global L-F26CA8D1 0 tokens per minute" }],
+  notUsable: [{ modelId: "us.anthropic.claude-haiku-5-5", label: "x", scope: "geographic", reason: "this account's limit for the model is zero; US-only `L-47520EB7` 0, Global `L-F26CA8D1` 0 tokens per minute" }],
   canBeTested: [{ modelId: "global.anthropic.claude-haiku-5-5", label: "x", scope: "global", worstCaseUsd: 0.0051 }], canBeTestedMore: 3,
 };
 
@@ -40,9 +40,9 @@ describe("discover", () => {
     expect(p.requests[0]!.body).toEqual({ kind: "discover" });
     expect(p.requests.every((request) => request.auth === "Bearer admin-token")).toBe(true);
     const text = p.lines.join("\n");
-    expect(text).toContain(`Recommended: \`${MODEL}\` (Claude Haiku 4.5 (US)), not tested yet (Rovara's own default is not usable on this account)`);
+    expect(text).toContain(`Recommended: \`${MODEL}\` (Claude Haiku 4.5 (US)), not tested yet (worst case of one driving test $0.0565) (Rovara's own default is not usable on this account)`);
     expect(text).toContain("`global.anthropic.claude-haiku-4-5-20251001-v1:0`, driving test passed 2026-10-22, with the minimal request shape");
-    expect(text).toContain("`us.anthropic.claude-haiku-5-5`: this account's limit for the model is zero; US-only or geographic L-47520EB7 0, Global L-F26CA8D1 0");
+    expect(text).toContain("`us.anthropic.claude-haiku-5-5`: this account's limit for the model is zero; US-only `L-47520EB7` 0, Global `L-F26CA8D1` 0");
     expect(text).toContain("`global.anthropic.claude-haiku-5-5`  $0.0051");
     expect(text).toContain("and 3 more");
     expect(text).toContain(`agentx --env agentxlivetest123 project model-check test --model ${MODEL}`);

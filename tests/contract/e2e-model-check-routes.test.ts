@@ -66,8 +66,14 @@ describe("the model check routes", () => {
     expect((await none.post({ kind: "discover" })).status).toBe(503);
     expect(JSON.stringify((await none.post({ kind: "discover" })).body)).toMatch(/no-model-check-runner/);
     const h = await controlPlane();
-    expect((await h.post({ kind: "discover" })).status).toBe(202);
-    expect((await h.post({ kind: "discover" })).status).toBe(409);
+    const first = await h.post({ kind: "discover" });
+    expect(first.status).toBe(202);
+    // The same request again is the same check (a lost 202); a different one is refused and names the running check.
+    const again = await h.post({ kind: "discover" });
+    expect([again.status, again.body.checkId]).toEqual([202, first.body.checkId]);
+    const other = await h.post({ kind: "drive", modelId: MODEL });
+    expect(other.status).toBe(409);
+    expect(JSON.stringify(other.body)).toContain(String(first.body.checkId));
   });
 
   it("GET is pending until the runner answers, then gives the validated outcome; an unknown check is a 404", async () => {

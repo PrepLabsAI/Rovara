@@ -375,7 +375,7 @@ case "$1" in
 esac
 if [[ "$*" == *e2e-model-canary-cli.js* ]]; then
   # The model check server's fixed lines go to stderr, as the real one's do.
-  [[ "$FAKE_QUALIFIER" == 0 ]] && printf '%s\n' "model-check: request not readable (AccessDenied)" >&2
+  [[ "$FAKE_QUALIFIER" == 0 ]] && printf '%s\n' "model-check: request not readable (SlowDown)" >&2
   exit 0
 fi
 out=; failure=; while (($#)); do [[ "$1" == --out ]] && out=$2; [[ "$1" == --failure-out ]] && failure=$2; shift; done
@@ -534,7 +534,7 @@ exec /bin/dd "\${a[@]}"`);
       const { result } = runHook();
       expect(result.status, result.stderr).toBe(0);
       const lines = result.stderr.split("\n").filter((line) => line.includes("model-check:"));
-      expect(lines).toEqual(["agentx-e2e-qualification: model-check: request not readable (AccessDenied)"]);
+      expect(lines).toEqual(["agentx-e2e-qualification: model-check: request not readable (SlowDown)"]);
       const hook = qualificationScript.split("\n").find((line) => line.includes("e2e-model-canary-cli.js"))!;
       expect(hook).not.toMatch(/\/dev\/null/);
       expect(hook).toMatch(/2>&1 \| while read l; do log "\$l"; done/);
