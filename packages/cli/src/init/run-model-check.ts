@@ -1,6 +1,6 @@
 // The one place that picks the existing single-call check for a provider and runs it through the shared model check (M1.4 Task 4.10D): init's Bedrock branch,
 // `config set`, doctor and the project-model checks all come here, so every failure carries the same class and a persistent Bedrock throttle is read against the quota.
-import type { DirectProvider, ModelsAnswers } from "../deploy/answer-schemas.js";
+import type { ModelsAnswers } from "../deploy/answer-schemas.js";
 import { checkModel, type ModelCheckResult } from "@agentx/model-runtime/model-check";
 import type { ModelProvider } from "@agentx/contracts";
 import type { PrerequisiteChecks } from "./prerequisites.js";
@@ -25,7 +25,7 @@ export async function runModelCheck(input: {
       await checks.openRouter(modelId, config.openRouter ?? {});
     } else if (provider === "anthropic" || provider === "openai") {
       if (checks.directProvider === undefined) throw new Error(`this agentx cannot check ${provider} models`);
-      await checks.directProvider(provider as DirectProvider, modelId, config[provider] ?? {});
+      await checks.directProvider(provider, modelId, config[provider] ?? {});
     } else {
       await checks.converse(modelId);
     }

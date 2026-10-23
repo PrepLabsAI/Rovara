@@ -21,7 +21,7 @@ function perStack(initial: Record<string, string>) {
     send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
       const stack = String(command.input.StackName);
       if (command.constructor.name === "CreateChangeSetCommand") changeSetStacks.push(stack);
-      return fakes.get(stack)!.send(command as never);
+      return fakes.get(stack)!.send(command);
     },
   };
 }

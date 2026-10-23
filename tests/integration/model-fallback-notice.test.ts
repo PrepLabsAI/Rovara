@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ModelFallbackNotice } from "../../packages/model-runtime/src/index.js";
-import { createOrchestratorRuntime, type OrchestrationApi } from "../../packages/orchestrator/src/orchestrator.js";
+import { createOrchestratorRuntime } from "../../packages/orchestrator/src/orchestrator.js";
+import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { workerModelRuntime } from "../../packages/worker/src/pi-session.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 
@@ -37,7 +38,7 @@ describe("the fallback notice", () => {
     const notices: ModelFallbackNotice[] = [];
     const runtime = await createOrchestratorRuntime({
       stateDirectory: await createFixtureDirectory("agentx-fallback-notice-"), projectInstructions: "Delegate coding.",
-      api: {} as unknown as OrchestrationApi, context: { workspaceId: randomUUID(), conversationId: randomUUID() },
+      api: { discoverConnectorTools: async () => undefined } as unknown as OrchestrationApi, context: { workspaceId: randomUUID(), conversationId: randomUUID() },
       model: { provider: "openai", modelId: "gpt-5.4" }, onModelFallback: (notice) => notices.push(notice),
     });
     await runtime.dispose();

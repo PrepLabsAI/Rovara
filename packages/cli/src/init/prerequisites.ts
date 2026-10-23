@@ -398,7 +398,7 @@ export async function checkPrerequisites(input: {
       continue;
     }
     seen.add(identifier);
-    const result = await checkModel({ provider: "amazon-bedrock", modelId, region }, { run: () => checks.converse(modelId), sleep: checks.sleep, ...(checks.quotas === undefined ? {} : { quotas: checks.quotas }), now: Date.now });
+    const result = await checkModel({ provider: "amazon-bedrock", modelId, region }, { run: () => checks.converse(modelId), sleep: (ms) => checks.sleep(ms), ...(checks.quotas === undefined ? {} : { quotas: checks.quotas }), now: Date.now });
     if (result.ok) passed(`Model ${modelId}`, `ok ${modelId} answers`);
     else failed(`Model ${modelId}`, modelCheckProblem({ modelId, role, region, error: result.error, ...(result.quota === undefined ? {} : { quota: result.quota }), ...(audience === "page" ? { wording: pageWording() } : {}) }));
   }
