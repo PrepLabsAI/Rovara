@@ -14,8 +14,13 @@ const id = (max = 120) => z.string().trim().min(1).max(max);
 export const E2E_REPLAY_CHECKS_FEATURE = "task.workflowE2EReplayChecks.v1" as const;
 /** More traces than a round of four groups can have (three agent steps a group). */
 export const E2E_REPLAY_TRACES_MAX = 12;
-/** More attempts than an operator needs for one verified round; the record of each lives 30 days. */
+/** The most replays of one verified round that may have started (ran, or timed out); the record of each lives 30 days. */
 export const E2E_REPLAY_ATTEMPTS_MAX = 5;
+/**
+ * The most records one verified round's replays may leave, whatever their end, and so the highest record number an admission carries. Starts that were refused before anything ran leave a
+ * record but do not count toward `E2E_REPLAY_ATTEMPTS_MAX`, so the numbering goes further than the cap (Task FU2, REPLAYCAP). Admissions signed before this bound was raised carry 1 to 5.
+ */
+export const E2E_REPLAY_RECORDS_MAX = 20;
 /** The base64 length of the largest recording file (canonical, padded). */
 export const E2E_REPLAY_TRACE_BASE64_MAX = Math.ceil(E2E_AGENT_TRACE_FILE_MAX_BYTES / 3) * 4;
 
@@ -47,7 +52,7 @@ export type E2EReplaySourceCase = z.infer<typeof E2EReplaySourceCaseSchema>;
  * round. A replay admission names no model route.
  */
 export const E2EApplicationReplaySchema = z.object({
-  purpose: z.literal("replay"), sourceRoundId: z.string().uuid(), sourceAdmissionSha256: digest, sourceEvidenceSha256: digest, attempt: z.number().int().positive().max(E2E_REPLAY_ATTEMPTS_MAX),
+  purpose: z.literal("replay"), sourceRoundId: z.string().uuid(), sourceAdmissionSha256: digest, sourceEvidenceSha256: digest, attempt: z.number().int().positive().max(E2E_REPLAY_RECORDS_MAX),
   sourceCases: z.array(E2EReplaySourceCaseSchema).max(64), traces: z.array(E2EReplayTraceSchema).max(E2E_REPLAY_TRACES_MAX),
 }).strict().superRefine((replay, context) => {
   if (new Set(replay.traces.map((trace) => `${trace.caseId}\u0000${trace.stepIndex}`)).size !== replay.traces.length) {

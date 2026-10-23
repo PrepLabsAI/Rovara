@@ -207,7 +207,7 @@ import {
   type E2ESourceSnapshot,
   type E2EReplayRefusal,
   type E2EReplaySourceCase,
-  E2E_REPLAY_ATTEMPTS_MAX,
+  E2E_REPLAY_ATTEMPTS_MAX, E2E_REPLAY_RECORDS_MAX,
   type E2EWorkflowAdmissionRef,
   E2EWorkflowAdmissionRefSchema,
   E2EWorkflowEvidenceRefSchema,
@@ -11040,7 +11040,7 @@ async function startReplayApplicationRound(
   const attempt = (latest?.attempt ?? 0) + 1;
   const neverRan = (record: ReplayRecord) => (record.state === "UNAVAILABLE" && record.reason === "start-failed") || (record === latest && record.state === "REQUESTED");
   const ran = records.filter((record) => !neverRan(record)).length;
-  if (ran >= E2E_REPLAY_ATTEMPTS_MAX || records.length >= E2E_REPLAY_RECORDS_MAX) throw refuse("replay-attempts-exhausted", `a round is replayed at most ${E2E_REPLAY_ATTEMPTS_MAX} times`);
+  if (ran >= E2E_REPLAY_ATTEMPTS_MAX || records.length >= E2E_REPLAY_RECORDS_MAX || attempt > E2E_REPLAY_RECORDS_MAX) throw refuse("replay-attempts-exhausted", `a round is replayed at most ${E2E_REPLAY_ATTEMPTS_MAX} times`);
 
   // The source round, verified again by the broker.
   const source = await reverifyQualifiedRound(dependencies, task, qualified);
@@ -11119,8 +11119,7 @@ async function startReplayApplicationRound(
 
 /** How long a replay that was asked for and never started holds the next attempt back. */
 const REPLAY_REQUEST_GRACE_MS = 10 * 60_000;
-/** The most records one round's replays may leave, whatever their end: attempts that never started are not counted against the attempt cap, so this bounds them. */
-const E2E_REPLAY_RECORDS_MAX = 20;
+
 
 /**
  * Loads the task's qualified round by the content addresses `qualifiedRound` binds (its admission and its evidence), verifies it again as the broker verified it, with the registry's own

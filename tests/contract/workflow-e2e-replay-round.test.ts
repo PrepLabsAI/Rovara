@@ -130,6 +130,13 @@ describe("the operator's request to replay a qualified round refuses before anyt
     const many = await qualified();
     for (let attempt = 1; attempt <= 20; attempt += 1) record(many, attempt, failedStart);
     expect(messageOf(await replayCall(many, "POST", { body: { roundId: roundIdOf(many) } }))).toMatch(/^replay-attempts-exhausted/);
+    // Numbering goes on past five: the next record after five refused starts is number six, and a round whose highest number is already 20 has no number left even with few records.
+    const sixth = await qualified();
+    for (const attempt of [1, 2, 3, 4, 5]) record(sixth, attempt, failedStart);
+    expect(messageOf(await replayCall(sixth, "POST", { body: { roundId: roundIdOf(sixth) } }))).toMatch(/^replay-no-recording/);
+    const topped = await qualified();
+    record(topped, 20, failedStart);
+    expect(messageOf(await replayCall(topped, "POST", { body: { roundId: roundIdOf(topped) } }))).toMatch(/^replay-attempts-exhausted/);
     const nineteen = await qualified();
     for (let attempt = 1; attempt <= 19; attempt += 1) record(nineteen, attempt, failedStart);
     expect(messageOf(await replayCall(nineteen, "POST", { body: { roundId: roundIdOf(nineteen) } }))).toMatch(/^replay-no-recording/);
