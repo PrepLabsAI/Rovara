@@ -7,6 +7,7 @@
 // M1.4 adds the e2e agent's model route, which follows the installation's provider (amendment A1): Bedrock through the worker's
 // instance role, or Anthropic, OpenAI or OpenRouter through the provider key's Secrets Manager ARN. Nothing here calls a model, and
 // nothing reads a secret: a key's validity and a customer-managed KMS key are reported as unverifiable (owner decision O6).
+import { E2E_RUNTIME_GENERIC_RENEW_COMMAND, e2eRuntimeExpiryNotice } from "../packages/contracts/src/e2e-runtime-expiry.js";
 import { KEYED_MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN, isKeyedModelProvider, type KeyedModelProvider, type ModelProvider } from "../packages/contracts/src/model-providers.js";
 import { WORKER_INVOCATION_FEATURES } from "../packages/contracts/src/protocol.js";
 import { listPricesPerMillion } from "../packages/model-runtime/src/catalog.js";
@@ -125,6 +126,8 @@ export interface CheckInput {
   inputsChanged?: Readonly<Record<string, boolean | undefined>> | undefined;
   /** The e2e model route and what the account, the registry and the worker's role say about it. Undefined skips the route checks. */
   modelRoute?: ModelRouteCheck | undefined;
+  /** The exact command that qualifies the runtime again, for the findings that need it (RUN-3). A generic one with `<env>` and `<aws-profile>` is shown when it is not given. */
+  renewCommand?: string | undefined;
 }
 
 /** What `bedrock get-foundation-model-availability` says about one foundation model. */
@@ -203,7 +206,6 @@ export interface CheckResult {
   findings: Finding[];
 }
 
-const EXPIRY_WINDOW_MS = 24 * 3_600_000;
 const CATALOG_KINDS = ["web", "api"] as const;
 
 /** A logical ID without CDK's 8-hex hash and its `Function` or `ServiceRole[DefaultPolicy]` suffix: `SessionsSteps3B98DD2B` is `SessionsSteps`. */
@@ -220,8 +222,8 @@ export function evaluateTestDeployCheck(input: CheckInput): CheckResult {
     ...staleLambdas(input),
     ...evaluateIamDrift(input.headTemplate, input.deployedTemplate),
     ...evaluateEnvironmentDrift(input.headTemplate, input.deployedTemplate),
-    ...catalogFindings(input.catalogRows, input.now),
-    ...runnerFindings(input.runnerFacts),
+    ...catalogFindings(input.catalogRows, input.now, input.renewCommand),
+    ...runnerFindings(input.runnerFacts, input.renewCommand),
     ...(input.modelRoute === undefined ? [] : routeFindings(input.modelRoute)),
   ];
   return { ok: findings.every((finding) => finding.severity !== "error"), findings };
@@ -565,7 +567,7 @@ export function lambdaRoleIds(template: CheckTemplate): Record<string, string> {
 // Catalog and runner
 // ---------------------------------------------------------------------------------------------
 
-function catalogFindings(rows: readonly CatalogRowFact[], now: Date): Finding[] {
+function catalogFindings(rows: readonly CatalogRowFact[], now: Date, renewCommand?: string): Finding[] {
   const findings: Finding[] = [];
   for (const kind of CATALOG_KINDS) {
     const kindRows = rows.filter((row) => row.sk.endsWith(`#${kind}`));
@@ -578,14 +580,11 @@ function catalogFindings(rows: readonly CatalogRowFact[], now: Date): Finding[] 
         findings.push({ kind: "catalog-not-ready", severity: "error", subject: row.sk, label: kind, message: `${row.sk} is ${row.state}, not READY` });
         continue;
       }
-      const left = Date.parse(row.expiresAt) - now.getTime();
-      if (Number.isNaN(left)) findings.push({ kind: "catalog-not-ready", severity: "error", subject: row.sk, label: kind, message: `${row.sk} has an unreadable expiry ${row.expiresAt}` });
-      else if (left < EXPIRY_WINDOW_MS) {
-        findings.push({
-          kind: "catalog-expiring", severity: "error", subject: row.sk, label: kind,
-          message: left <= 0 ? `${row.sk} expired at ${row.expiresAt}` : `${row.sk} expires at ${row.expiresAt}, in ${(left / 3_600_000).toFixed(1)} hours`,
-        });
-      }
+      // Within 24 hours (or already expired, or unreadable) it fails the check; within 48 hours it warns (RUN-3). Either names the time and the command that renews it.
+      const notice = e2eRuntimeExpiryNotice({ subject: row.sk, expiresAt: row.expiresAt, now: now.getTime(), renewCommand });
+      if (notice === undefined) continue;
+      const unreadable = Number.isNaN(Date.parse(row.expiresAt));
+      findings.push({ kind: unreadable ? "catalog-not-ready" : "catalog-expiring", severity: notice.severity, subject: row.sk, label: kind, message: notice.message });
     }
   }
   return findings;
@@ -618,10 +617,12 @@ export function parseRunnerStatus(text: string): RunnerStatus | undefined {
   };
 }
 
-function runnerFindings(facts: RunnerFacts | undefined): Finding[] {
+function runnerFindings(facts: RunnerFacts | undefined, renewCommand?: string): Finding[] {
   const findings: Finding[] = [];
+  // An image or feature mismatch means the qualification no longer stands for what is deployed: the way on is the same renewal (RUN-3).
+  const renew = `; renew it with: ${renewCommand ?? E2E_RUNTIME_GENERIC_RENEW_COMMAND}`;
   const runner = (kind: "runner-image-mismatch" | "worker-feature-missing", message: string, extra: Partial<Finding> = {}): Finding =>
-    ({ kind, severity: "error", subject: "runner", label: "runner", message, ...extra });
+    ({ kind, severity: "error", subject: "runner", label: "runner", message: `${message}${renew}`, ...extra });
   if (facts === undefined) {
     return [
       runner("runner-image-mismatch", "no qualified runner status was found, so its executor image cannot be compared with the deployed ExecutorImageUri"),

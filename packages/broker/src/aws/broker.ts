@@ -286,7 +286,7 @@ import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
-import { applicationRuntimeRowFences, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
+import { applicationRuntimeRowFences, readE2ERuntimeStatus, readExpiredE2ERuntimes, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
 import { accountRegistryFences, planSetupAccountWrites, readAccountRegistryEntries } from "./e2e-account-registry.js";
 import { E2EAccountRegistryError, unreadableAccountMessage, type E2EAccountRegistryEntry } from "../e2e/application-account-registry.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
@@ -1355,6 +1355,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return request.method === "POST"
           ? json(await dependencies.credentialRegistry.register(identity, body), request.requestId, 201)
           : json(await dependencies.credentialRegistry.list(identity), request.requestId);
+      }
+      // RUN-3: when the browser and API runtime registrations expire, for agentx doctor (an administrator reads state and times only).
+      if (request.method === "GET" && url.pathname === "/v1/admin/runtime-installation/status") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("NOT_FOUND", "browser and API runtimes are not set up in this deployment");
+        return json(await readE2ERuntimeStatus({ runtimeCatalogId: dependencies.e2eFeatureRuntimeCatalogId, profileId: WEB_API_RUNTIME_PROFILE_ID,
+          read: (key) => getItem<Record<string, unknown>>(dependencies, key) }), request.requestId);
       }
       // #343: Sign in with ChatGPT, for rovara doctor.
       if (request.method === "GET" && url.pathname === "/v1/admin/chatgpt") {
@@ -4404,6 +4411,10 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
     rows = await readProjectAdmittedE2ERuntimes({ runtimeCatalogId: catalogId, profileId: WEB_API_RUNTIME_PROFILE_ID, binding: parseRuntimeBinding(project.runtimeBinding), now,
       read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
   } catch { return unevaluable("the runtime catalog could not be read"); }
+  // A kind with no READY row but an expired one is refused as `runtime-expired`, with when it expired, not as "no runtime is READY" (RUN-3). Only read when a kind is missing; it
+  // can only change the wording of a refusal, never let a round run.
+  const expiredRuntimes = rows.length >= 2 ? [] : await readExpiredE2ERuntimes({ runtimeCatalogId: catalogId, profileId: WEB_API_RUNTIME_PROFILE_ID,
+    binding: parseRuntimeBinding(project.runtimeBinding), now, read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
   // The test accounts the plan's executable targets run as: the registry's rows for exactly those (application, account profile) pairs (Task 3.1).
   const projectId = project.definition.name;
   let accountEntries: E2EAccountRegistryEntry[];
@@ -4419,7 +4430,7 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
   }
   const evaluation = evaluateApplicationPlanApproval({ intent, taskId: task.taskId, artifact, snapshot: setup.snapshot, setupProposal: setup.setupProposal,
     setupApproval: setup.setupApproval, policy: policy.data, registeredRuntimes: rows, runtimeCatalogId: catalogId,
-    runtimeBinding: parseRuntimeBinding(project.runtimeBinding), now, accounts: { entries: accountEntries, mode: accounts.mode, pinned: accounts.pinned } });
+    runtimeBinding: parseRuntimeBinding(project.runtimeBinding), now, expiredRuntimes, accounts: { entries: accountEntries, mode: accounts.mode, pinned: accounts.pinned } });
   if (!evaluation.ok) return { ok: false, kind: "refused", reason: evaluation.reason, ...(evaluation.scope === undefined ? {} : { scope: evaluation.scope }) };
   // The rows and account pointers this derivation was made from must still be exactly those when the transaction commits.
   const conditions: TransactItems = [...applicationRuntimeRowFences({ tableName: dependencies.tableName, rows, selected: evaluation.selection.runtimeRows }),

@@ -10,6 +10,7 @@ import {
   type E2EReadyRuntimeProfile,
   type E2ERuntimeReadiness,
   type E2ERuntimeReadinessInput,
+  type E2ERuntimeStatus,
   type E2EStep,
   type Ec2RuntimeBinding,
 } from "@agentx/contracts";
@@ -117,6 +118,43 @@ async function readAdmittedWebApiRuntimes(input: { runtimeCatalogId: string; pro
     if (runtime !== undefined) admittedRows.push({ kind, runtime });
   }
   return admittedRows;
+}
+
+/**
+ * What an administrator may be told about the web and API registrations of `profileId` (RUN-3, `agentx doctor`): the state and the qualification and expiry times of each kind that
+ * has a row, and nothing else of it (endpoints, digests and evidence stay in the catalog). A row that does not read as those fields is left out, never guessed at; a failed read throws.
+ */
+export async function readE2ERuntimeStatus(input: { runtimeCatalogId: string; profileId: string; read: RuntimeRowReader }): Promise<E2ERuntimeStatus> {
+  const rows: E2ERuntimeStatus["rows"] = [];
+  for (const kind of ["web", "api"] as const) {
+    const row = await input.read(e2eRegisteredRuntimeKey(input.runtimeCatalogId, input.profileId, kind));
+    if (row === null || row === undefined || typeof row !== "object" || Array.isArray(row)) continue;
+    const { state, qualifiedAt, expiresAt } = row as { state?: unknown; qualifiedAt?: unknown; expiresAt?: unknown };
+    if (typeof state === "string" && typeof qualifiedAt === "string" && typeof expiresAt === "string") rows.push({ kind, profileId: input.profileId, state: state.slice(0, 40), qualifiedAt: qualifiedAt.slice(0, 40), expiresAt: expiresAt.slice(0, 40) });
+  }
+  return { rows };
+}
+
+/**
+ * The web/API rows of `profileId` that were READY but have expired, as `{ kind, profileId, expiresAt }`, so a refusal can say "expired at ..." where the generic one says "no
+ * runtime is READY" (RUN-3). The same row identity checks as for an admitted row apply (a row of another catalog, a malformed row or one of the other kind is not listed); a
+ * row that was never READY, or has not been qualified yet, is not listed either. A failed read is logged and leaves the generic reason: it never lets anything run.
+ */
+export async function readExpiredE2ERuntimes(input: { runtimeCatalogId: string; profileId: string; binding: Ec2RuntimeBinding; now: number;
+  read: RuntimeRowReader }): Promise<Array<{ kind: "web" | "api"; profileId: string; expiresAt: string }>> {
+  const expired: Array<{ kind: "web" | "api"; profileId: string; expiresAt: string }> = [];
+  for (const kind of ["web", "api"] as const) {
+    let row: unknown;
+    try { row = await input.read(e2eRegisteredRuntimeKey(input.runtimeCatalogId, input.profileId, kind)); } catch { continue; }
+    if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+    const capabilityDigest = (row as { capabilityDigest?: unknown }).capabilityDigest;
+    if (typeof capabilityDigest !== "string") continue;
+    const runtime = parseRegisteredRow(row, { runtimeCatalogId: input.runtimeCatalogId, profileId: input.profileId, binding: input.binding, capabilityDigest, now: input.now, kind });
+    if (runtime !== undefined && runtime.state === "READY" && Date.parse(runtime.qualifiedAt) <= input.now && Date.parse(runtime.expiresAt) <= input.now) {
+      expired.push({ kind, profileId: input.profileId, expiresAt: runtime.expiresAt });
+    }
+  }
+  return expired;
 }
 
 /**

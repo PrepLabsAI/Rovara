@@ -23,3 +23,7 @@ Standard setup and feature runtime catalogs require a separate administrator-iss
 ## Evidence status
 
 The [native P0 acceptance record](p0-native-journey-acceptance.md) summarizes the local synthetic journey, candidate-bound checks, evidence limits, and reproducible acceptance launcher. Its prior passing candidate does not qualify a later integrated commit; acceptance must be rerun against the exact candidate under review.
+
+## Runtime expiry
+
+The browser and API runtime registration is good for at most seven days, and not after the executor or worker image changes; an operator renews it with `npx tsx scripts/test-qualify-runtime.ts --env <env> --profile <aws-profile> --apply`. `agentx doctor` (with an admin sign-in) and `scripts/test-deploy.ts --check` warn when it expires within 48 hours, naming the expiry time and that command. A round refused because the registration expired says `runtime-expired`, and an administrator qualifies the runtime again, then retries the checks.

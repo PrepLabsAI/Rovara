@@ -72,5 +72,6 @@ export * from "./task-people.js";
 export * from "./e2e-openapi-fixture.js";
 export * from "./e2e-executor.js";
 export * from "./e2e-model-channel.js";
+export * from "./e2e-runtime-expiry.js";
 export * from "./e2e-replay.js";
 export * from "./workflow-publication-context.js";

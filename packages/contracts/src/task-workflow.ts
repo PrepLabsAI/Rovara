@@ -48,6 +48,11 @@ export const WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX = "The approved browser a
  * keeps its first 500 characters); send-back to coding is never offered for it.
  */
 export const WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX = "The approved browser and API checks cannot run on the runtime as it is now. An administrator must qualify the runtime again, then retry the checks to approve the plan again. Why: ";
+/**
+ * The code that opens the reason of a runtime refusal when the runtime's qualification has expired (or would before the round could end): it is `runtime-expired: ...` where the generic
+ * reasons say only that no runtime is READY, so an owner and an operator can tell "qualify it again" from "never qualified" (evaluation fix RUN-3).
+ */
+export const E2E_RUNTIME_EXPIRED_CODE = "runtime-expired" as const;
 /** The approved plan itself can no longer be approved (portable criteria, a target with no source-owned identity): the task goes back to plan review, where Request changes is the way on. */
 export const WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX = "The approved browser and API plan can no longer run as written. Request changes and submit a corrected plan before coding resumes. Why: ";
 export const WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX = "The approved browser and API checks can no longer run as approved. Retry the checks to approve the plan again against what is ready now. What changed: ";

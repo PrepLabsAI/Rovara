@@ -10,13 +10,14 @@ import { check, doctorReport, guarded, type DoctorCheck, type DoctorContext, typ
 import { chatGptChecks } from "./chatgpt.js";
 import { connectorChecks } from "./connectors.js";
 import { githubChecks, githubWebhookChecks } from "./github.js";
+import { runtimeChecks } from "./runtime.js";
 import { secretChecks } from "./secrets.js";
 import { slackChecks } from "./slack.js";
 import { stackChecks } from "./stacks.js";
 
 const GROUPS: ReadonlyArray<[DoctorGroup, (context: DoctorContext) => Promise<DoctorCheck[]>]> = [
   ["stacks", stackChecks], ["secrets", secretChecks], ["slack", slackChecks], ["github", githubChecks], ["github", githubWebhookChecks], ["connectors", connectorChecks],
-  ["models", modelChecks], ["alerts", alertChecks], ["capacity", capacityChecks], ["sign-in", signInChecks], ["chatgpt", chatGptChecks],
+  ["models", modelChecks], ["alerts", alertChecks], ["capacity", capacityChecks], ["sign-in", signInChecks], ["chatgpt", chatGptChecks], ["runtime", runtimeChecks],
 ];
 
 export async function runDoctor(input: { env: string; store: ParameterStore; services: (settings: EnvironmentSettings) => DoctorServices }): Promise<DoctorReport> {

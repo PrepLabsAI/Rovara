@@ -217,6 +217,52 @@ describe("evaluateTestDeployCheck", () => {
     expect(kinds(evaluateTestDeployCheck(input({ catalogRows: rows([{}, { expiresAt: hoursFromNow(-2) }]) })).findings)).toEqual(["catalog-expiring"]);
   });
 
+  // Evaluation fix RUN-3: a runtime that expires within 48 hours is a warning (it never fails the check); one that expires within 24 hours or has expired stays an error, as it was. Each
+  // names the expiry time and the exact command that renews it, and so does a runner whose image no longer matches (the other way a qualification stops being good).
+  describe("a runtime registration that is about to expire, or has (RUN-3)", () => {
+    const RENEW = "npx tsx scripts/test-qualify-runtime.ts --env agentxlivetest123 --profile agentx-test --apply";
+    const withRenew = (overrides: Partial<CheckInput> = {}) => input({ renewCommand: RENEW, ...overrides });
+
+    it("warns between 24 and 48 hours, naming the expiry time and the renew command, and does not fail the check", () => {
+      const expiresAt = hoursFromNow(36);
+      const result = evaluateTestDeployCheck(withRenew({ catalogRows: rows([{ expiresAt }, {}]) }));
+      expect(result.ok).toBe(true);
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0]).toMatchObject({ kind: "catalog-expiring", severity: "warning", subject: "PROFILE#linux-arm64-web-api-v1#web" });
+      expect(result.findings[0]!.message).toContain(`expires at ${expiresAt}, in 36.0 hours`);
+      expect(result.findings[0]!.message).toContain(`renew it with: ${RENEW}`);
+    });
+
+    it("says nothing at 48 hours or more", () => {
+      expect(evaluateTestDeployCheck(withRenew({ catalogRows: rows([{ expiresAt: hoursFromNow(48) }, { expiresAt: hoursFromNow(49) }]) }))).toEqual({ ok: true, findings: [] });
+    });
+
+    it("keeps within 24 hours and already expired as errors, and gives the time and the command", () => {
+      const soon = hoursFromNow(23);
+      const result = evaluateTestDeployCheck(withRenew({ catalogRows: rows([{ expiresAt: soon }, { expiresAt: hoursFromNow(-2) }]) }));
+      expect(result.ok).toBe(false);
+      expect(result.findings.map((finding) => [finding.kind, finding.severity])).toEqual([["catalog-expiring", "error"], ["catalog-expiring", "error"]]);
+      expect(result.findings[0]!.message).toContain(`expires at ${soon}, in 23.0 hours`);
+      expect(result.findings[1]!.message).toContain(`expired at ${hoursFromNow(-2)}`);
+      for (const finding of result.findings) expect(finding.message).toContain(`renew it with: ${RENEW}`);
+    });
+
+    it("gives the renew command with a runner whose image or features no longer match, which keeps failing the check", () => {
+      const other = `123.dkr.ecr.us-east-1.amazonaws.com/x/executor@sha256:${"b".repeat(64)}`;
+      const mismatch = evaluateTestDeployCheck(withRenew({ runnerFacts: { ...GOOD_RUNNER, executorImage: other } }));
+      expect(mismatch.ok).toBe(false);
+      expect(mismatch.findings[0]!.message).toContain(`renew it with: ${RENEW}`);
+      const lacking = evaluateTestDeployCheck(withRenew({ runnerFacts: { ...GOOD_RUNNER, invocationFeatures: READY_FEATURES.filter((feature) => feature !== "task.workflowE2EApplicationChecks") } }));
+      expect(lacking.ok).toBe(false);
+      expect(lacking.findings[0]!.message).toContain(`renew it with: ${RENEW}`);
+    });
+
+    it("an input with no renew command still reports every finding, with the generic command", () => {
+      const result = evaluateTestDeployCheck(input({ catalogRows: rows([{ expiresAt: hoursFromNow(30) }, {}]) }));
+      expect(result.findings[0]!.message).toContain("renew it with: npx tsx scripts/test-qualify-runtime.ts --env <env> --profile <aws-profile> --apply");
+    });
+  });
+
   it("flags a catalog row that is not READY, and a kind with no row at all", () => {
     const parked = evaluateTestDeployCheck(input({ catalogRows: rows([{}, { state: "PARKED" }]) }));
     expect(parked.findings.map((finding) => [finding.kind, finding.subject])).toEqual([["catalog-not-ready", "PROFILE#linux-arm64-web-api-v1#api"]]);

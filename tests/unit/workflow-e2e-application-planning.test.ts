@@ -192,6 +192,7 @@ const APPROVED_REF = { artifactId: APPROVED_ARTIFACT.id, digest: APPROVED_ARTIFA
 
 /** The approval evaluation of the same fixture the selection facade tests use, with the rows the broker would have admitted. */
 function evaluate(input: PlanInput & { runtimeBinding?: typeof binding; artifact?: typeof APPROVED_ARTIFACT; policyBaselineIds?: string[]; setupSnapshot?: E2ESourceSnapshot;
+  expiredRuntimes?: ReadonlyArray<{ kind: "web" | "api"; profileId: string; expiresAt: string }>;
   mutateIntent?: (intent: E2EApplicationPlanIntent, fixture: ReturnType<typeof planFixture>) => unknown; mutatePolicy?: (policy: ReturnType<typeof planFixture>["policy"]) => ReturnType<typeof planFixture>["policy"] }) {
   const fx = planFixture(input);
   const policy = { ...fx.policy, baselineScenarioIds: input.policyBaselineIds ?? fx.policy.baselineScenarioIds };
@@ -199,6 +200,7 @@ function evaluate(input: PlanInput & { runtimeBinding?: typeof binding; artifact
     snapshot: input.setupSnapshot ?? fx.snapshot, setupProposal: fx.setup.proposal, setupApproval: fx.setup.setupApproval,
     policy: input.mutatePolicy === undefined ? policy : input.mutatePolicy(policy),
     registeredRuntimes: input.registeredRuntimes ?? [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: input.runtimeBinding ?? binding, now: NOW,
+    ...(input.expiredRuntimes === undefined ? {} : { expiredRuntimes: input.expiredRuntimes }),
     accounts: { entries: fx.registry, mode: "approve", pinned: [] } });
 }
 const refusal = (result: ReturnType<typeof evaluate>) => (result.ok ? "approved" : result.reason);
@@ -237,7 +239,7 @@ describe("approving a plan that carries an application intent", () => {
       ["the runtime row is missing", { registeredRuntimes: [] }, /web runtime.*READY/i],
       ["only the other kind's row is READY", { registeredRuntimes: [webApiRow("api")] }, /web runtime.*READY/i],
       ["the row is bound to another runtime binding", { runtimeBinding: { ...binding, launchTemplateId: "lt-fedcba9876543210" } }, /another runtime binding/i],
-      ["the row has expired", { registeredRuntimes: [webApiRow("web", { qualifiedAt: new Date(NOW - 7_200_000).toISOString(), expiresAt: new Date(NOW - 1_000).toISOString() })] }, /not READY/i],
+      ["the row has expired", { registeredRuntimes: [webApiRow("web", { qualifiedAt: new Date(NOW - 7_200_000).toISOString(), expiresAt: new Date(NOW - 1_000).toISOString() })] }, /^runtime-expired: .*expired at/],
       ["the row is parked", { registeredRuntimes: [webApiRow("web", { state: "UNAVAILABLE" })] }, /not READY/i],
       ["the descriptor does not support a step the scenario uses", { registeredRuntimes: [webApiRow("web", {}, (value) => ({ ...value,
         supportedSteps: value.supportedSteps.filter((step) => step !== "click") }))] }, /not ready|unsupported|capabilit/i],
@@ -390,6 +392,31 @@ describe("approval refusals the first round left untested", () => {
   it("refuses a target approved on a profile that is not qualified even when the plan names that same profile", () => {
     expect(refusal(evaluate({ setupReady: [], planRuntimeProfileId: "web-phase-unavailable" })))
       .toMatch(/approved on runtime profile web-phase-unavailable, which cannot run application scenarios/);
+  });
+
+  // Evaluation fix RUN-3: a runtime that has expired (or whose row says it did) is refused under its own code, runtime-expired, not the generic "no runtime is READY", so the owner
+  // and the operator can tell "qualify it again" from "never qualified".
+  describe("a runtime that expired (RUN-3)", () => {
+    const EXPIRED_AT = new Date(NOW - 3_600_000).toISOString();
+    it("is refused as runtime-expired, naming the kind, the profile and when it expired, when the broker read an expired row for it", () => {
+      const result = evaluate({ registeredRuntimes: [], expiredRuntimes: [{ kind: "web", profileId: PROFILE, expiresAt: EXPIRED_AT }] });
+      expect(result.ok).toBe(false);
+      expect(refusal(result)).toMatch(new RegExp(`^runtime-expired: the web runtime of profile ${PROFILE} expired at ${EXPIRED_AT.replaceAll(".", "\\.")}`));
+      expect(!result.ok && result.scope).toBe("runtime");
+    });
+
+    it("is refused as runtime-expired too when the expired row itself is among the rows given", () => {
+      const result = evaluate({ registeredRuntimes: [webApiRow("web", { expiresAt: EXPIRED_AT, qualifiedAt: new Date(NOW - 7_200_000).toISOString() })] });
+      expect(refusal(result)).toMatch(/^runtime-expired: the web runtime of profile .* expired at /);
+      expect(!result.ok && result.scope).toBe("runtime");
+    });
+
+    it("keeps the generic reason for a kind that was never qualified, for an expired row of the other kind, and for a row that is not READY", () => {
+      expect(refusal(evaluate({ registeredRuntimes: [] }))).toMatch(/^no web runtime of profile .* is READY/);
+      expect(refusal(evaluate({ registeredRuntimes: [], expiredRuntimes: [{ kind: "api", profileId: PROFILE, expiresAt: EXPIRED_AT }] }))).toMatch(/^no web runtime of profile .* is READY/);
+      expect(refusal(evaluate({ registeredRuntimes: [webApiRow("web", { state: "PARKED" })] }))).toMatch(/is not READY now \(state PARKED/);
+      expect(refusal(evaluate({ registeredRuntimes: [webApiRow("web", { state: "PARKED", expiresAt: EXPIRED_AT, qualifiedAt: new Date(NOW - 7_200_000).toISOString() })] }))).not.toMatch(/runtime-expired/);
+    });
   });
 
   it("names the specific refusal when the descriptor lacks a step, not the row-not-READY one", () => {
@@ -1857,6 +1884,8 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
           await dispatched.runDispatch();
           expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
           expect(dispatched.taskNow().workflow.blockReason).toMatch(/expires at .* before this round could end/);
+          // RUN-3: it says so under its own code, which the generic "no runtime is READY" never carries.
+          expect(dispatched.taskNow().workflow.blockReason).toMatch(/Why: runtime-expired: the web runtime of profile linux-arm64-web-api-v1 expires at /);
           remedy(dispatched);
           expect(dispatched.checksOperations()).toEqual([]);
           // The administrator qualifies the runtime again: a new generation that lives long enough.
@@ -1869,6 +1898,22 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
           expect(dispatched.checksOperations()).toHaveLength(1);
         });
 
+        it("a runtime that has already expired: its own reason code, remedy text, no send-back, and a retry that is refused until it is qualified again (RUN-3)", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          const row = planned.harness.db.get(webKey.pk, webKey.sk)!;
+          const expired = { ...row, qualifiedAt: new Date(Date.now() - 7_200_000).toISOString(), expiresAt: new Date(Date.now() - 3_600_000).toISOString() };
+          planned.harness.db.set(expired);
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow.blockReason).toMatch(/Why: runtime-expired: the web runtime of profile linux-arm64-web-api-v1 expired at /);
+          remedy(dispatched);
+          const early = await retry(planned, dispatched);
+          expect(early.status).toBeGreaterThanOrEqual(400);
+          expect(errorOf(early).message).toMatch(/runtime-expired: the web runtime/);
+          planned.harness.db.set({ ...row, generation: 5 });
+          expect((await retry(planned, dispatched)).status).toBe(200);
+        });
+
         it("no READY row of the kind: remedy text, a retry that is refused while the runtime is still not READY, and one retry after it is restored", async () => {
           const planned = await plannedWithApplicationIntent();
           const dispatched = await atApplicationDispatch(planned);
@@ -1876,6 +1921,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
           planned.harness.db.set({ ...row, state: "REVOKED" });
           await dispatched.runDispatch();
           expect(dispatched.taskNow().workflow.blockReason).toMatch(/web runtime of profile linux-arm64-web-api-v1/);
+          expect(dispatched.taskNow().workflow.blockReason).not.toContain("runtime-expired");
           remedy(dispatched);
           const early = await retry(planned, dispatched);
           expect(early.status).toBeGreaterThanOrEqual(400);

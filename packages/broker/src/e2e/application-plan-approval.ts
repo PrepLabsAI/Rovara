@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, E2E_AGENT_UNAVAILABLE_REASONS, Ec2RuntimeBindingSchema, canonicalJson,
-  E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs, e2eRuntimeKindMatchesTarget, inspectE2EApplicationRepository, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract,
+  E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_RUNTIME_EXPIRED_CODE, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs, e2eRuntimeKindMatchesTarget, inspectE2EApplicationRepository, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract,
   withE2EAnonymousTargets, type E2EApplicationPlanIntent, type E2EApplicationProjectContract, type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type E2ERuntimeAccountRef, type E2ERuntimeAvailability,
   type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
 } from "@agentx/contracts";
@@ -34,6 +34,11 @@ export type ApplicationPlanApprovalInput = {
   policy: unknown;
   /** The runtime rows READY for the project's runtime binding, read at approval time (not cached from planning). */
   registeredRuntimes: E2ERegisteredRuntime[];
+  /**
+   * The kinds whose row is READY in the catalog but has expired, as the broker read them (a kind with a row here and none in `registeredRuntimes` is refused as `runtime-expired`,
+   * with when it expired, instead of the generic "no runtime is READY"; RUN-3). Absent when the broker did not look, which leaves the generic reason.
+   */
+  expiredRuntimes?: ReadonlyArray<{ kind: "web" | "api"; profileId: string; expiresAt: string }>;
   runtimeCatalogId: string;
   runtimeBinding: Ec2RuntimeBinding;
   now: number;
@@ -169,6 +174,11 @@ export type ApplicationPlanApproval =
     accountRefs: E2ERuntimeAccountRef[] }
   | { ok: false; reason: string; scope?: ApplicationRefusalScope };
 
+/** The reason of a refusal because a runtime's qualification expired: opens with the code `runtime-expired`, then says which runtime, when it expired and who can fix it. */
+export function runtimeExpiredReason(kind: "web" | "api", profileId: string, expiresAt: string, consequence: string): string {
+  return `${E2E_RUNTIME_EXPIRED_CODE}: the ${kind} runtime of profile ${profileId} expired at ${expiresAt},${consequence}; an administrator must qualify the runtime again`;
+}
+
 /**
  * Evaluates whether the Owner may approve a plan carrying an application intent, against the approved setup and the READY rows now.
  *
@@ -253,8 +263,13 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
       if (!accountRefs.some((item) => applicationAccountKey(item) === applicationAccountKey(pinned.ref))) accountRefs.push(pinned.ref);
       const row = input.registeredRuntimes.find((item) => item.runtimeCatalogId === input.runtimeCatalogId && item.profileId === ref.runtimeProfileId
         && e2eRuntimeKindMatchesTarget({ ...target, runtimeProfileId: ref.runtimeProfileId }, item.capabilities));
-      if (row === undefined) return refuse(`no ${target.kind} runtime of profile ${ref.runtimeProfileId} is READY for this project's runtime binding, so target ${ref.targetId} cannot run application scenarios now`, "runtime");
+      if (row === undefined) {
+        const expired = input.expiredRuntimes?.find((item) => item.kind === target.kind && item.profileId === ref.runtimeProfileId);
+        if (expired !== undefined) return refuse(runtimeExpiredReason(target.kind, ref.runtimeProfileId, expired.expiresAt, ` so target ${ref.targetId} cannot run application scenarios now`), "runtime");
+        return refuse(`no ${target.kind} runtime of profile ${ref.runtimeProfileId} is READY for this project's runtime binding, so target ${ref.targetId} cannot run application scenarios now`, "runtime");
+      }
       if (row.bindingDigest !== bindingDigest) return refuse(`the ${target.kind} runtime of profile ${ref.runtimeProfileId} is bound to another runtime binding than this project's`, "runtime");
+      if (row.state === "READY" && Date.parse(row.expiresAt) <= input.now) return refuse(runtimeExpiredReason(target.kind, ref.runtimeProfileId, row.expiresAt, ` so target ${ref.targetId} cannot run application scenarios now`), "runtime");
       if (row.state !== "READY" || Date.parse(row.qualifiedAt) > input.now || Date.parse(row.expiresAt) <= input.now) {
         return refuse(`the ${target.kind} runtime of profile ${ref.runtimeProfileId} is not READY now (state ${row.state}, expires ${row.expiresAt})`, "runtime");
       }

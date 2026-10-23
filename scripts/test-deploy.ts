@@ -45,6 +45,7 @@ import { environmentSettingsPrefix, environmentStackName } from "../packages/con
 import { KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, isKeyedModelProvider, type ModelProvider } from "../packages/contracts/src/model-providers.js";
 import { WORKER_SETTING_PARAMETERS } from "../packages/contracts/src/session.js";
 import { WEB_API_RUNTIME_PROFILE_ID } from "../packages/contracts/src/e2e-web-api-qualification.js";
+import { e2eRuntimeRenewCommand } from "../packages/contracts/src/e2e-runtime-expiry.js";
 import {
   Runner,
   assertDigestImage,
@@ -1468,7 +1469,7 @@ async function runCheck(args: TestDeployArgs, runner: Runner, options: ReleaseOp
     changedSince: gitChangedSince(runner),
   });
   for (const note of notes) say(note);
-  const result = evaluateTestDeployCheck({ ...facts, now: new Date() });
+  const result = evaluateTestDeployCheck({ ...facts, now: new Date(), renewCommand: e2eRuntimeRenewCommand({ env: args.env, profile: args.profile }) });
   say(`\n${formatFindings(result.findings)}`);
   const request = tier3Request(result.findings);
   if (request !== "") say(`\nTier 3 request, the exact statements to add (this script never applies IAM):\n${request}`);

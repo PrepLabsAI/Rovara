@@ -15,12 +15,13 @@ import type { VendorApi } from "../setup/connectors/vendors.js";
 import { plainMessage } from "../output.js";
 import type { SignInCheck } from "../signin/check.js";
 import type { ChatGptHealthRead } from "./chatgpt.js";
+import type { RuntimeStatusRead } from "./runtime.js";
 
 /** Re-exported so every doctor check reads it from here (ruling F11: one copy, in output.ts). */
 export { plainMessage };
 
 export type CheckStatus = "ok" | "warn" | "fail" | "skip";
-export type DoctorGroup = "stacks" | "secrets" | "slack" | "github" | "connectors" | "models" | "alerts" | "capacity" | "sign-in" | "chatgpt";
+export type DoctorGroup = "stacks" | "secrets" | "slack" | "github" | "connectors" | "models" | "alerts" | "capacity" | "sign-in" | "chatgpt" | "runtime";
 export interface DoctorCheck { group: DoctorGroup; name: string; status: CheckStatus; detail: string; fix?: string }
 /** One stack as doctor reads it: env adopt's StackDescription, drift included (ruling F9). */
 export type DoctorStack = StackDescription;
@@ -45,6 +46,8 @@ export interface DoctorServices {
   signIn: (settings: EnvironmentSettings) => Promise<SignInCheck[]>;
   /** #343: Sign in with ChatGPT, as the control plane reports it through this computer's admin sign-in. */
   chatgpt?: () => Promise<ChatGptHealthRead>;
+  /** RUN-3: the browser and API runtime registrations, as the control plane reports them through this computer's admin sign-in. */
+  runtime?: () => Promise<RuntimeStatusRead>;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
 }
@@ -70,6 +73,7 @@ const GUARDED_FIX: Record<DoctorGroup, string> = {
   connectors: "fix the problem named above, then run agentx doctor again",
   "sign-in": "fix the problem named above, then run agentx doctor again",
   chatgpt: "check this computer's network access to the control plane and its admin sign-in, then run agentx doctor again",
+  runtime: "check this computer's network access to the control plane and its admin sign-in, then run agentx doctor again",
 };
 
 /** A group that throws becomes one failed check, so one broken dependency never hides the others. */

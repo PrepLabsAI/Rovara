@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  E2EApplicationPlanIntentSchema, E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
+  E2EApplicationPlanIntentSchema, E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, E2E_RUNTIME_EXPIRED_CODE, canonicalJson,
   e2eRuntimeBindingKey,
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimits, e2ePolicyDigest, inspectE2EApplicationRepository, validateE2EAppBuildBinding, withE2EAnonymousTargets,
   type E2EApplicationReplay, type E2ECreatorAuthority, type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
@@ -228,7 +228,7 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   // A runtime that stops being READY mid-round would leave a finished run unverifiable, so a round does not start on one that expires before it could end.
   for (const { profileId, kind } of runtimePairs) {
     const row = runtimeFor(profileId, kind);
-    if (Date.parse(row.expiresAt) < Date.parse(deadlineAt)) throw applicationRuntimeRefusal(`the ${kind} runtime of profile ${profileId} expires at ${row.expiresAt}, before this round could end at ${deadlineAt}`);
+    if (Date.parse(row.expiresAt) < Date.parse(deadlineAt)) throw applicationRuntimeRefusal(`${E2E_RUNTIME_EXPIRED_CODE}: the ${kind} runtime of profile ${profileId} expires at ${row.expiresAt}, before this round could end at ${deadlineAt}`);
   }
   // The same goes for a test account: a round does not start on a definition that expires before it could end, or its verdict could not be verified. Registering the
   // setup again renews it. (A ref with no registered definition is an M1.2 record's, which has no expiry.)
