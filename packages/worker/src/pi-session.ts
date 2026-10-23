@@ -392,6 +392,8 @@ export async function createWorkerResources(
   // Pi 0.86+ warms prompt caches with extra paid requests during long tool runs by default ("streaming"); 0.85.1 made
   // none. The mode is a global-only setting, so it is written to AgentX's own agent directory.
   settingsManager.setCacheWarmingMode("off");
+  // After the writes above: a settings save merges the stored files again and would drop an in-memory override.
+  applyWorkerRetryBudget(settingsManager);
   const resourceLoader = new DefaultResourceLoader({
     cwd: input.cwd,
     agentDir: input.agentDirectory,
@@ -411,6 +413,19 @@ export async function createWorkerResources(
   });
   await resourceLoader.reload({ resolveProjectTrust: async () => false });
   return { resourceLoader, settingsManager };
+}
+
+/**
+ * The retry budget for a model call that fails with a transient error (PLANINC-3b). Pi retries such a call on its own: its default is 3 retries
+ * (4 calls) with 2, 4 and 8 s waits. AgentX sets its own, smaller budget so a failing model call ends in a bounded time: `maxRetries` retries after the
+ * first call (so `maxRetries + 1` calls at most), each after `baseDelayMs` doubled per retry, and never a wait longer than `maxAgentDelayMs`.
+ * Change the numbers here; the planning deadline and the stall limit (model-call-monitor.ts) bound the calls themselves.
+ */
+export const WORKER_MODEL_RETRY = { enabled: true, maxRetries: 2, baseDelayMs: 2_000, maxAgentDelayMs: 10_000 } as const;
+
+/** Applies WORKER_MODEL_RETRY on top of Pi's settings. It runs after the settings are loaded, so a settings file in the agent directory cannot widen the budget or turn retries off. */
+export function applyWorkerRetryBudget(settingsManager: SettingsManager): void {
+  settingsManager.applyOverrides({ retry: { ...WORKER_MODEL_RETRY } });
 }
 
 export function agentShellTool(cwd: string, operations?: BashOperations): ToolDefinition {
