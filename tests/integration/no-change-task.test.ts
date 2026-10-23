@@ -380,7 +380,8 @@ describe("a task that fails for another reason (#158)", () => {
     await expect(runTaskInvocation(taskInvocation(), {
       rootPath, model: { provider: "fixture", modelId: "fixture" }, piAdapter: adapter,
       eventSink: async () => undefined, artifactSink: async (artifact) => { artifacts.push(artifact); },
-    })).rejects.toThrow(/RUNTIME_UNAVAILABLE: the model call failed: upstream 500/);
+    })).rejects.toThrow(/^RUNTIME_UNAVAILABLE: the model call failed: unknown attempt 1; retry the step$/);
+    // PLANINC-3b: the provider's own text ("upstream 500") is no longer copied into the task's error.
     expect(artifacts.find(({ name }) => name === "test-and-tool-evidence.json")?.content).toContain("tests passed");
     expect(artifacts.map(({ name }) => name)).toContain("workspace.diff");
   });
