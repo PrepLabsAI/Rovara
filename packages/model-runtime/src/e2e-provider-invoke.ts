@@ -387,7 +387,7 @@ async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition, depen
     setupFailure = error;
   }
   const setupClass: E2EModelFailure | undefined = setupFailure === undefined ? undefined
-    : setupStep === "secret" ? { class: "key-rejected", signal: "secret-unreadable" } : setupStep === "catalog" ? { class: "model-not-found", signal: "not-in-catalog" } : undefined;
+    : setupStep === "secret" ? { class: "secret-unreadable", signal: "secret-unreadable" } : setupStep === "catalog" ? { class: "not-in-catalog", signal: "not-in-catalog" } : undefined;
 
   const invoke = async (input: E2EInvokeInput): Promise<E2EInvokeOutput> => {
     if (setupFailure !== undefined) {

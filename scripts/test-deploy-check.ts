@@ -722,7 +722,7 @@ function routeFindings(check: ModelRouteCheck): Finding[] {
   if (check.tested !== undefined) {
     const untested = "unreadable" in check.tested ? `could not be read (${check.tested.unreadable})` : check.tested.tested ? undefined : "has no passing driving test on this installation";
     if (untested !== undefined) {
-      findings.push(finding("model-route-not-tested", "warning", `${routeText} ${untested}; AI navigation steps will not run until the driving test passes (agentx project model-check drive)`));
+      findings.push(finding("model-route-not-tested", "warning", `${routeText} ${untested}; AI navigation steps will not run until the driving test passes (agentx project model-check test)`));
     }
   }
   if (check.quota !== undefined) findings.push(...quotaFindings(route, check.quota, finding));

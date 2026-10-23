@@ -6,11 +6,14 @@ import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/confi
 import { E2E_BUDGET_EXHAUSTED_PREFIX, createGovernedE2EModelRoute } from "../../packages/model-runtime/src/e2e-route.js";
 import {
   E2E_MODEL_ROUTE_PARTITION, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, createBrokerE2EDayBudget, deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest,
-  e2eDayBudgetRoom, e2eModelBudgetKey, isTransientAwsFault, e2eModelRouteCanaryKey, e2eModelRouteLatestKey, e2eModelRouteRevisionKey, planE2EAgentRoute, readAdmittedE2EModelRoute, readE2EModelRouteLatest, type E2EAgentInstallation,
+  e2eDayBudgetRoom, e2eModelBudgetKey, isTransientAwsFault, e2eModelRouteLatestKey, e2eModelRouteRevisionKey, planE2EAgentRoute, readAdmittedE2EModelRoute, readE2EModelRouteLatest, type E2EAgentInstallation,
 } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { E2E_MODEL_ROUTE } from "../../scripts/test-deploy-check.js";
-import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { SECRET_ARN, channelRequest, tapAnswer } from "../support/e2e-model-fixtures.js";
+import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
+import { SECRET_ARN, channelRequest, drivingTestRow, tapAnswer } from "../support/e2e-model-fixtures.js";
+
+// The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
+assumeDrivingTestsPassed();
 
 const TABLE = "state";
 const OTHER_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/other-key-ZyXwVu";
@@ -80,7 +83,8 @@ describe("the registry keeps revisions in the broker table and reads them by key
     if (planned.status !== "available") return;
     expect(planned.revision).toBe(e2eModelRouteRevision(available(anthropic, 1)));
     expect(db.items.size).toBe(0);
-    expect(db.commandNames()).toEqual(["GetCommand"]);
+    // The latest pointer, then the driving test's gating row.
+    expect(db.commandNames()).toEqual(["GetCommand", "GetCommand"]);
   });
 
   it("approval writes the revision row and the latest pointer, and keeps them under one fixed partition", async () => {
@@ -133,8 +137,8 @@ describe("the registry keeps revisions in the broker table and reads them by key
     const narrowed = { ...open, openRouterProviders: "anthropic" };
     expect(available(open).openRouter?.only).toEqual([]);
     expect(available(narrowed).openRouter?.only).toEqual(["anthropic"]);
-    // The canary a live OpenRouter installation records (Task 4.9), one per exact definition.
-    for (const installation of [open, narrowed]) db.set({ ...e2eModelRouteCanaryKey(E2E_DEFAULT_MODEL_ROUTE_ID, e2eAgentRouteDefinitionDigest(available(installation))), entityType: "E2E_MODEL_ROUTE_CANARY" });
+    // The driving test a live OpenRouter installation passes, one gating row per exact definition.
+    for (const installation of [open, narrowed]) db.set(drivingTestRow(available(installation), e2eAgentRouteDefinitionDigest(available(installation))));
     const first = await planE2EAgentRoute(store(db), open);
     if (first.status !== "available") throw new Error(`unavailable: ${first.detail}`);
     await approveE2EAgentRoute(store(db), open, first.revision);
@@ -169,21 +173,6 @@ describe("the registry keeps revisions in the broker table and reads them by key
     await expect(approveE2EAgentRoute(store(db), { provider: "anthropic", secretArn: OTHER_ARN }, planned.revision)).rejects.toThrow(/model-route-changed-reapprove/);
     await expect(approveE2EAgentRoute(store(db), { provider: "anthropic" }, planned.revision)).rejects.toThrow(/agent-route-not-approved/);
     expect(db.items.size).toBe(0);
-  });
-
-  it("refuses the OpenRouter default until a canary is recorded (owner decision O5)", async () => {
-    const db = new FakeDynamoDb();
-    const openrouter = { provider: "openrouter", secretArn: SECRET_ARN } satisfies E2EAgentInstallation;
-    const refused = await planE2EAgentRoute(store(db), openrouter);
-    expect(refused).toMatchObject({ status: "unavailable", reason: "agent-route-not-approved" });
-    expect(refused.status === "unavailable" ? refused.detail : "").toMatch(/provisional/i);
-    await expect(approveE2EAgentRoute(store(db), openrouter, "r1-000000000000")).rejects.toThrow(/agent-route-not-approved/);
-    expect(db.items.size).toBe(0);
-    expect(available(openrouter).modelId).toBe("anthropic/claude-haiku-5.5");
-    // The canary is for the exact definition, so a different OpenRouter policy is unapproved again.
-    db.set({ ...e2eModelRouteCanaryKey(E2E_DEFAULT_MODEL_ROUTE_ID, e2eAgentRouteDefinitionDigest(available(openrouter))), entityType: "E2E_MODEL_ROUTE_CANARY" });
-    expect(await planE2EAgentRoute(store(db), openrouter)).toMatchObject({ status: "available" });
-    expect(await planE2EAgentRoute(store(db), { ...openrouter, openRouterProviders: "anthropic" })).toMatchObject({ status: "unavailable" });
   });
 
   it("reads approval state with keyed GetItem or Query only, never a Scan", async () => {
@@ -224,7 +213,7 @@ describe("dispatch re-derives the route and compares it with what was approved",
   it("gives model-route-changed-reapprove when the OpenRouter policy changed", async () => {
     const db = new FakeDynamoDb();
     const open = { provider: "openrouter", secretArn: SECRET_ARN } satisfies E2EAgentInstallation;
-    db.set({ ...e2eModelRouteCanaryKey(E2E_DEFAULT_MODEL_ROUTE_ID, e2eAgentRouteDefinitionDigest(available(open))), entityType: "E2E_MODEL_ROUTE_CANARY" });
+    db.set(drivingTestRow(available(open), e2eAgentRouteDefinitionDigest(available(open))));
     const revision = await approvedRevision(db, open);
     expect(await checkE2EAgentRouteCurrent(store(db), { ...open, openRouterProviders: "anthropic" }, revision)).toMatchObject({ ok: false, code: "model-route-changed-reapprove" });
   });

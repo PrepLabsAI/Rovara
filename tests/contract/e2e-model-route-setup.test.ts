@@ -8,14 +8,17 @@ import { e2eApplicationModelUseWithinRound } from "../../packages/verifier/src/a
 import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/config.js";
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
 import {
-  E2E_MODEL_ROUTE_PARTITION, approveE2EAgentRoute, e2eAgentInstallationFromParameters, planE2EAgentRoute, type E2EAgentInstallation,
+  E2E_MODEL_ROUTE_PARTITION, approveE2EAgentRoute, checkE2EAgentRouteCurrent, e2eAgentInstallationFromParameters, planE2EAgentRoute, type E2EAgentInstallation,
 } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { describeFeatureE2EExecutableKinds } from "../../packages/broker/src/e2e/feature-plan-executable-kinds.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { call, loadSlackBroker } from "../support/slack-broker.js";
 import { contractSnapshot } from "../support/e2e-application-plan-fixtures.js";
-import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
+
+// The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
+assumeDrivingTestsPassed();
 
 // Task 4.2: setup approval derives the route from the installation's worker settings and pins it in the project's policy; dispatch re-derives it.
 type RequireAgentRoute = (dependencies: never, projectName: string, intent: E2EApplicationPlanIntent, policy: ReturnType<typeof E2EPolicySchema.parse>) => Promise<boolean>;
@@ -157,11 +160,56 @@ describe("a setup proposal and its approval carry the AI navigation route", () =
     expect(routeRows(harness.db)).toEqual([]);
   });
 
-  it("leaves the unproven OpenRouter default without AI navigation until its canary is recorded", async () => {
-    const { harness } = await harnessFor(async () => ({ provider: "openrouter", secretArn: SECRET_ARN }));
-    const proposal = await propose(harness);
-    expect(E2EPolicySchema.parse(proposal.body.policy).modelRouteRevision).toBeNull();
-    expect(routeRows(harness.db)).toEqual([]);
+  // Task 4.10C, review item I-1 of 4.10A: no untested route is approvable, for any of the four providers, the default route (the one the PREFIXGAP fix makes reachable) included.
+  const FOUR_PROVIDERS: ReadonlyArray<readonly [string, E2EAgentInstallation]> = [
+    ["amazon-bedrock", { provider: "amazon-bedrock", region: "us-east-1" }],
+    ["anthropic", { provider: "anthropic", secretArn: SECRET_ARN }],
+    ["openai", { provider: "openai", secretArn: SECRET_ARN }],
+    ["openrouter", { provider: "openrouter", secretArn: SECRET_ARN }],
+  ];
+
+  describe.each(FOUR_PROVIDERS)("%s: no untested route is approvable", (_provider, installation) => {
+    it("proposes no AI navigation for the default route until its driving test passed, and says which model to test", async () => {
+      assumeDrivingTestsPassed(false);
+      try {
+        const { harness } = await harnessFor(async () => installation);
+        const proposal = await propose(harness);
+        expect(proposal.status, JSON.stringify(proposal.body)).toBe(200);
+        expect(E2EPolicySchema.parse(proposal.body.policy).modelRouteRevision).toBeNull();
+        expect(proposal.body.aiNavigation).toBeNull();
+        expect(proposal.body.aiNavigationUntested).toMatchObject({ modelId: DEFAULT_E2E_AGENT_MODELS[installation.provider as keyof typeof DEFAULT_E2E_AGENT_MODELS] });
+        expect(String((proposal.body.aiNavigationUntested as { sentence: string }).sentence)).toMatch(/^AI navigation steps will not run: the driving test with .+ `.+` has not passed \(not run\)$/);
+        expect(routeRows(harness.db)).toEqual([]);
+      } finally { assumeDrivingTestsPassed(true); }
+    });
+
+    it("refuses an approval whose proposal pinned a model that has no passed driving test, and records nothing", async () => {
+      const { harness } = await harnessFor(async () => installation);
+      // The proposal was made while a pass was on record (or by a head without the gate); by the approval the route has none for its digest.
+      const proposal = await propose(harness);
+      expect(E2EPolicySchema.parse(proposal.body.policy).modelRouteRevision).toMatch(/^r1-/);
+      assumeDrivingTestsPassed(false);
+      try {
+        const refused = await approve(harness, proposal);
+        expect(refused.status).not.toBe(200);
+        expect(JSON.stringify(refused.body)).toMatch(/agent-route-not-approved/);
+        expect(JSON.stringify(refused.body)).toMatch(/AI navigation steps will not run: the driving test with .+ has not passed/);
+        expect(routeRows(harness.db)).toEqual([]);
+        expect(harness.db.find((item) => item.entityType === "PROJECT_SETUP_APPROVAL")).toEqual([]);
+      } finally { assumeDrivingTestsPassed(true); }
+    });
+
+    it("refuses at dispatch with model-route-not-tested a route that was approved and has no passed driving test", async () => {
+      const db = new FakeDynamoDb();
+      const planned = await planE2EAgentRoute({ documentClient: { send: db.send } as unknown as DynamoDBDocumentClient, tableName: "state" }, installation);
+      if (planned.status !== "available") throw new Error("expected the assumed driving test to make the route available");
+      const store = { documentClient: { send: db.send } as unknown as DynamoDBDocumentClient, tableName: "state" };
+      await approveE2EAgentRoute(store, installation, planned.revision);
+      assumeDrivingTestsPassed(false);
+      try {
+        expect(await checkE2EAgentRouteCurrent(store, installation, planned.revision)).toMatchObject({ ok: false, code: "model-route-not-tested" });
+      } finally { assumeDrivingTestsPassed(true); }
+    });
   });
 
   it("refuses with model-route-changed-reapprove when the installation's provider changed between the proposal and the approval, and records nothing", async () => {

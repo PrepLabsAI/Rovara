@@ -12,6 +12,10 @@ import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
 import { E2E_MODEL_ROUTE_DEFAULT_BUDGETS } from "@agentx/contracts";
 import { e2eModelBudgetKey } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
+import { assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
+
+// The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
+assumeDrivingTestsPassed();
 
 // M1.3 Task 3.7b, owner decision D2 (Review Focus 6 and the 3.7 review's findings F1, F3, F8, F9): when an application plan is approved, the approved scenarios run once on the
 // UNCHANGED code, in a round of their own, for information only. It has its own admission (purpose and base commit signed), its own callbacks and its own completion path, writes

@@ -84,9 +84,9 @@ describe("16. classifyProviderFailure: every cell of the plan's table", () => {
     });
   }
 
-  it("covers every class that has a status or signal cell (unknown and unreachable are tested below)", () => {
+  it("covers every class that has a status or signal cell (unknown and unreachable are tested below; the two pre-send classes come from the invoke, never from a response)", () => {
     const seen = new Set([...BEDROCK, ...ANTHROPIC, ...OPENAI, ...OPENROUTER].map((cell) => cell[2]));
-    expect([...seen].sort()).toEqual(E2E_MODEL_FAILURE_CLASSES.filter((item) => item !== "unknown" && item !== "unreachable").sort());
+    expect([...seen].sort()).toEqual(E2E_MODEL_FAILURE_CLASSES.filter((item) => item !== "unknown" && item !== "unreachable" && item !== "secret-unreadable" && item !== "not-in-catalog").sort());
   });
 
   it("ModelNotReadyException with a 429 is an outage, not a limit (the signal is checked before the status)", () => {

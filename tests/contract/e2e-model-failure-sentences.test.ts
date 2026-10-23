@@ -7,17 +7,19 @@ import { results, row } from "../support/e2e-scenario-results.js";
 // M1.4 Task 4.10B, tests 22 and 23: the owner's sentences for each failure class name the provider and the model, from the broker's stored definition only.
 const CTX = { providerLabel: "Amazon Bedrock", modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0" };
 const M = "`us.anthropic.claude-haiku-4-5-20251001-v1:0`";
-const MODEL_CODES = ["model-limit-reached", "model-key-rejected", "model-not-found", "model-unreachable", "model-request-rejected", "model-provider-outage", "model-unavailable"] as const;
+const MODEL_CODES = ["model-limit-reached", "model-key-rejected", "model-not-found", "model-unreachable", "model-request-rejected", "model-provider-outage", "model-secret-unreadable", "model-not-in-catalog", "model-unavailable"] as const;
 
 describe("22. the sentence of each model code, from the approved wording", () => {
   it("gives exactly the approved text for each code with the provider and the model named", () => {
     const say = (code: (typeof MODEL_CODES)[number]) => E2E_OWNER_SENTENCES.agentCode(code, CTX);
-    expect(say("model-limit-reached")).toBe(`Amazon Bedrock refused the AI navigation call to ${M}: this account's limit for that model is used up or set to zero. Raise the limit or choose another model, then retry the checks`);
+    expect(say("model-limit-reached")).toBe(`Amazon Bedrock refused the AI navigation call to ${M}: this account's limit for that model is used up or set to zero. Raise the limit, or choose another model and run its driving test (agentx project model-check test --model <id>), then retry the checks`);
     expect(say("model-key-rejected")).toBe(`Amazon Bedrock did not accept Rovara's access for ${M} (the API key, or on Amazon Bedrock the worker role's model access). Fix the access, then retry the checks`);
-    expect(say("model-not-found")).toBe(`Amazon Bedrock says ${M} does not exist or is not available to this account. Choose another model and approve setup again`);
+    expect(say("model-not-found")).toBe(`Amazon Bedrock says ${M} does not exist or is not available to this account. Choose another model, run its driving test (agentx project model-check test --model <id>), and approve setup again`);
     expect(say("model-unreachable")).toBe(`Rovara could not reach Amazon Bedrock to call ${M}. Check the network path from the runner, then retry the checks`);
     expect(say("model-request-rejected")).toBe(`Amazon Bedrock rejected the AI navigation request to ${M}, so this check could not run. Tell Rovara support (code model-request-rejected)`);
     expect(say("model-provider-outage")).toBe(`Amazon Bedrock had a problem answering for ${M}. Retry the checks later`);
+    expect(say("model-secret-unreadable")).toBe("Rovara could not read its stored access for Amazon Bedrock. Check that the key's secret exists and Rovara's worker can read it, then retry the checks");
+    expect(say("model-not-in-catalog")).toBe(`Rovara doesn't know how to call ${M} on Amazon Bedrock. Choose a model from the list Rovara offers`);
     expect(say("model-unavailable")).toBe(`The AI model (Amazon Bedrock ${M}) couldn't be reached, so this AI-navigated check could not run; retry the checks`);
   });
 
@@ -32,8 +34,8 @@ describe("22. the sentence of each model code, from the approved wording", () =>
     const hostile = "a;b'c\"d`e\u202Efg\nh\u0000i";
     for (const code of MODEL_CODES) {
       const sentence = E2E_OWNER_SENTENCES.agentCode(code, { providerLabel: "Amazon Bedrock", modelId: hostile });
-      expect(sentence, code).toContain("a,b’c”d’e fg h i");
-      expect(sentence.split("`").length - 1, code).toBe(2);
+      // The unreadable-secret sentence, as approved, names the provider only.
+      if (code !== "model-secret-unreadable") { expect(sentence, code).toContain("a,b’c”d’e fg h i"); expect(sentence.split("`").length - 1, code).toBe(2); }
       for (const character of ["\u202E", "\u0000", "\n", '"']) expect(sentence, code).not.toContain(character);
       // The only semicolon allowed is the approved one in the model-unavailable sentence's own wording.
       expect(sentence.split(";").length - 1, code).toBe(code === "model-unavailable" ? 1 : 0);
@@ -44,8 +46,10 @@ describe("22. the sentence of each model code, from the approved wording", () =>
     for (const code of MODEL_CODES) {
       const sentence = E2E_OWNER_SENTENCES.agentCode(code, { providerLabel: "Amazon Bedrock", modelId: "x".repeat(200) });
       expect(sentence.length, code).toBeLessThanOrEqual(300);
-      expect(sentence, code).toContain("…");
+      if (code !== "model-secret-unreadable") expect(sentence, code).toContain("…");
     }
+    // A long provider label is cut too, whatever the sentence.
+    for (const code of MODEL_CODES) expect(E2E_OWNER_SENTENCES.agentCode(code, { providerLabel: "P".repeat(300), modelId: "x".repeat(300) }).length, code).toBeLessThanOrEqual(300);
   });
 
   it("without a stored definition (none was read) the sentences name no provider and no model, and model-unavailable is exactly the sentence it was before", () => {

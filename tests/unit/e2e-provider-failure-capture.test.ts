@@ -157,12 +157,12 @@ describe("18. a keyed provider: only the error's type or code is kept, never its
 });
 
 describe("failures before any request goes out", () => {
-  it("an unreadable key secret is key-rejected with the fixed signal secret-unreadable, and nothing is sent", async () => {
+  it("an unreadable key secret is secret-unreadable with the fixed signal secret-unreadable, and nothing is sent", async () => {
     const definition = keyedRoute("anthropic");
     const fake = fakeFetch(() => jsonError(500));
     const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret: async () => undefined, fetch: fake.fetch });
     const { receipt } = await viaRoute(invoke, definition);
-    expect(receipt).toMatchObject({ outcome: "provider-error", inputTokens: 0, failure: { class: "key-rejected", signal: "secret-unreadable" } });
+    expect(receipt).toMatchObject({ outcome: "provider-error", inputTokens: 0, failure: { class: "secret-unreadable", signal: "secret-unreadable" } });
     expect(fake.requests).toHaveLength(0);
   });
 
@@ -170,22 +170,22 @@ describe("failures before any request goes out", () => {
     const definition = keyedRoute("openai");
     const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret: async () => { throw new Error("AccessDeniedException: not authorized for arn:aws:secretsmanager hunter2-echo"); } });
     const outcome = await viaRoute(invoke, definition);
-    expect(outcome.receipt.failure).toEqual({ class: "key-rejected", signal: "secret-unreadable" });
+    expect(outcome.receipt.failure).toEqual({ class: "secret-unreadable", signal: "secret-unreadable" });
     expect(JSON.stringify(outcome)).not.toContain("hunter2-echo");
   });
 
-  it("a keyed model the pinned catalog lacks is model-not-found with the signal not-in-catalog", async () => {
+  it("a keyed model the pinned catalog lacks is not-in-catalog with the signal not-in-catalog", async () => {
     const definition = keyedRoute("anthropic", { modelId: "claude-no-such-model-9" });
     const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition), readSecret });
     const { receipt } = await viaRoute(invoke, definition);
-    expect(receipt.failure).toEqual({ class: "model-not-found", signal: "not-in-catalog" });
+    expect(receipt.failure).toEqual({ class: "not-in-catalog", signal: "not-in-catalog" });
   });
 
-  it("a Bedrock model the pinned catalog lacks is model-not-found with the signal not-in-catalog", async () => {
+  it("a Bedrock model the pinned catalog lacks is not-in-catalog with the signal not-in-catalog", async () => {
     const definition = bedrockRoute({ modelId: "us.anthropic.claude-no-such-model-9" });
     const invoke = await createE2EProviderInvoke(definition, { environment: installationEnvironment(definition) });
     const { receipt } = await viaRoute(invoke, definition);
-    expect(receipt.failure).toEqual({ class: "model-not-found", signal: "not-in-catalog" });
+    expect(receipt.failure).toEqual({ class: "not-in-catalog", signal: "not-in-catalog" });
   });
 
   it("another refusal before sending (an environment that could redirect) carries no failure at all", async () => {

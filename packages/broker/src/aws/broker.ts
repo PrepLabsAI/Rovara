@@ -305,6 +305,7 @@ import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
+import { untestedRouteSentence } from "../e2e/model-checks.js";
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, readE2EModelRouteShape, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
   type E2EAgentInstallation, type PlannedE2EAgentRoute } from "../e2e/model-route-registry.js";
 import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification, type VerifiedAgentTrace } from "../e2e/application-evidence.js";
@@ -403,6 +404,20 @@ async function plannedAgentRoute(dependencies: Pick<AwsBrokerDependencies, "docu
     const planned = await planE2EAgentRoute({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, await dependencies.e2eAgentInstallation());
     return planned.status === "available" ? planned : undefined;
   } catch { return undefined; }
+}
+
+/**
+ * What a setup proposal says when the installation's route is well-formed but has no passed driving test (Task 4.10C): the provider, the model and the sentence "AI navigation steps
+ * will not run: the driving test with <provider> `<model>` has not passed (<why>)". Null when the route is available, or cannot be made at all (the CLI's own sentence says that).
+ */
+async function untestedAgentRouteNote(dependencies: Pick<AwsBrokerDependencies, "documentClient" | "tableName" | "e2eAgentInstallation">): Promise<{ provider: string; modelId: string; sentence: string } | null> {
+  if (dependencies.e2eAgentInstallation === undefined) return null;
+  try {
+    const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
+    const planned = await planE2EAgentRoute(store, await dependencies.e2eAgentInstallation());
+    if (planned.status !== "unavailable" || planned.untested === undefined) return null;
+    return { provider: planned.untested.provider, modelId: planned.untested.modelId, sentence: await untestedRouteSentence(store, { ...planned.untested, routeId: E2E_DEFAULT_MODEL_ROUTE_ID }) };
+  } catch { return null; }
 }
 
 export interface RegisteredProjectRecord {
@@ -1222,6 +1237,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const agentRoute = await plannedAgentRoute(dependencies);
         const policy = projectSetupPolicy(proposal, agentRoute);
         const aiNavigation = agentRoute === undefined ? null : agentRouteSummary(agentRoute.definition);
+        const aiNavigationUntested = agentRoute === undefined ? await untestedAgentRouteNote(dependencies) : null;
         const repositoryName = urlParts[2].replace(/\.git$/i, "");
         const cleanedRepositoryName = repositoryName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
         const registeredRepositoryId = /^[a-z]/.test(cleanedRepositoryName) ? cleanedRepositoryName : `repo-${cleanedRepositoryName}`.slice(0, 63);
@@ -1257,7 +1273,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           const retained = await readStoredText(dependencies.s3, dependencies.artifactBucketName, proposalRef, MAX_SETUP_PROPOSAL_BYTES);
           if (retained !== artifactBytes) throw agentXError("RUNTIME_UNAVAILABLE", "content-addressed setup proposal object conflicts with its expected bytes");
         }
-        return json({ proposalRef, proposalSha256: artifactDigest, candidateDigest: candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, proposal, policy, aiNavigation }, request.requestId);
+        return json({ proposalRef, proposalSha256: artifactDigest, candidateDigest: candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, proposal, policy, aiNavigation, aiNavigationUntested }, request.requestId);
       }
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-approvals") {
@@ -1303,7 +1319,11 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           // The only difference is the AI navigation route: the installation's provider, model, secret or OpenRouter policy changed (or another approval moved the registry) since the proposal.
           if (sameJsonContent({ ...(artifact.policy as Record<string, unknown>), modelRouteRevision: null, limits: null }, { ...policy, modelRouteRevision: null, limits: null })) {
             // With no route now, the settings were not read or no longer give a usable route; they have not been shown to have changed.
-            if (agentRoute === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: The AI navigation settings of this installation could not be read, or no longer give a usable route; propose the setup again once they can be`);
+            if (agentRoute === undefined) {
+              const untested = await untestedAgentRouteNote(dependencies);
+              throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: ${untested !== null ? `${untested.sentence}; run the driving test, then propose the setup again`
+                : "The AI navigation settings of this installation could not be read, or no longer give a usable route; propose the setup again once they can be"}`);
+            }
             throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_MODEL_ROUTE_CHANGED_REAPPROVE}: The AI navigation settings changed; propose the setup again, then approve the new proposal`);
           }
           throw agentXError("RUNTIME_UNAVAILABLE", "this setup proposal was made under an earlier default policy and can no longer be approved: propose the setup again (re-propose the setup), then approve the new proposal");
