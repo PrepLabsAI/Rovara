@@ -87,9 +87,14 @@ describe("18. a keyed provider: only the error's type or code is kept, never its
 
   it("a 401 whose body carries a key gives authentication_error, and nothing of the body is kept", async () => {
     let clones = 0;
-    class CountingResponse extends Response { clone(): Response { clones += 1; return super.clone(); } }
     const body = { type: "error", error: { type: "authentication_error", message: "invalid x-api-key sk-ant-SECRETVALUE and the prompt echoed" } };
-    const { invoke, requests } = await make(anthropic, () => new CountingResponse(JSON.stringify(body), { status: 401, headers: { "content-type": "application/json" } }));
+    const counted = () => {
+      const response = new Response(JSON.stringify(body), { status: 401, headers: { "content-type": "application/json" } });
+      const clone = response.clone.bind(response);
+      Object.defineProperty(response, "clone", { value: () => { clones += 1; return clone(); } });
+      return response;
+    };
+    const { invoke, requests } = await make(anthropic, counted);
     const outcome = await viaRoute(invoke, anthropic);
     expect(requests).toHaveLength(1);
     expect(outcome.receipt.outcome).toBe("provider-error");

@@ -29,12 +29,12 @@ describe("22. the sentence of each model code, from the approved wording", () =>
   });
 
   it("quotes a model id safely: a quote, a semicolon, a backtick, control and direction characters cannot close the quotation or read as another claim", () => {
-    const hostile = "a;b'c\"d`e‮fg\nh\u0000i";
+    const hostile = "a;b'c\"d`e\u202Efg\nh\u0000i";
     for (const code of MODEL_CODES) {
       const sentence = E2E_OWNER_SENTENCES.agentCode(code, { providerLabel: "Amazon Bedrock", modelId: hostile });
       expect(sentence, code).toContain("a,b’c”d’e fg h i");
       expect(sentence.split("`").length - 1, code).toBe(2);
-      expect(sentence, code).not.toMatch(/[‮\u0000\n"]/u);
+      for (const character of ["\u202E", "\u0000", "\n", '"']) expect(sentence, code).not.toContain(character);
       // The only semicolon allowed is the approved one in the model-unavailable sentence's own wording.
       expect(sentence.split(";").length - 1, code).toBe(code === "model-unavailable" ? 1 : 0);
     }

@@ -19,7 +19,6 @@ const KEY = "ab".repeat(32);
 const RUN = "11111111-1111-4111-8111-111111111111";
 const CASE = "agent-export";
 const GOAL = "Export the orders as a CSV file";
-const GOAL_2 = "Open the second page";
 const route: E2EModelRouteDefinition = scriptedE2ERouteDefinition();
 const REVISION = e2eModelRouteRevision(route);
 const T0 = Date.parse("2026-10-22T10:00:00.000Z");
