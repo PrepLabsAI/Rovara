@@ -20,18 +20,18 @@ readonly WORKER_GID=1000
 readonly WORKER_ENV_FILE=/etc/agentx/worker.env
 readonly WORKER_UNIT=agentx-worker.service
 readonly WORKER_CONTAINER=agentx-worker
-# Docker's data root, on the workspace volume so devcontainer images, containers and volumes survive an idle stop (#121).
+# Docker's data root, on the workspace volume: it survives an idle stop (#121).
 readonly DOCKER_DATA_ROOT=$MOUNT_PATH/.docker
 readonly DOCKER_SOCKET=/var/run/docker.sock
 # The provisioner attaches the volume after the instance is running, so it may appear late.
 readonly DEVICE_WAIT_SECONDS=${AGENTX_DEVICE_WAIT_SECONDS:-120}
 # Where /sys and /dev/disk are; tests set it.
 readonly HOST_ROOT=${AGENTX_HOST_ROOT:-}
-# Network steps try 5 times, waiting 2, 4, 8, 16 seconds (plus up to half again as jitter): at most 45 seconds per step.
+# Network steps try 5 times (2, 4, 8, 16 s waits plus jitter): at most 45 s per step.
 readonly RETRY_ATTEMPTS=5
 readonly RETRY_BASE_SECONDS=2
 readonly RETRY_MAX_SECONDS=30
-# No network try runs past this many seconds from boot start: failures report inside the 10 minute /ping window.
+# No try runs past this many seconds from boot start, so failures show within /ping's 10 minutes.
 readonly BOOT_DEADLINE=$((SECONDS + ${AGENTX_BOOT_DEADLINE_SECONDS:-480}))
 # The worker's port, which the provisioner probes; a failed boot answers there instead.
 readonly WORKER_PORT=8080
@@ -54,8 +54,8 @@ try_seconds() {
 
 tries() { if (($1 == 1)); then printf '1 try'; else printf '%s tries' "$1"; fi; }
 
-# retry DESCRIPTION COMMAND... retries with bounded exponential backoff, then fails with DESCRIPTION.
-# Commands run in an until condition, so they must return their own failures under set -e.
+# retry DESCRIPTION COMMAND... retries with bounded backoff, then fails with DESCRIPTION.
+# Commands in an until condition must return their own failures under set -e.
 retry() {
   local description=$1 attempt=1 delay wait
   shift
@@ -99,7 +99,7 @@ server.serve_forever()
 ' "$WORKER_PORT" "$FAILURE_FILE" >/dev/null 2>&1 || log "could not start the boot failure report on port $WORKER_PORT"
 }
 
-# Reports any non-zero exit: fail's reason, or the step that stopped (set -e) without one.
+# Reports any non-zero exit: fail's reason, or the step that stopped (set -e).
 BOOT_STEP="start"
 on_exit() {
   local status=$? reason
@@ -127,7 +127,7 @@ require_configuration() {
     || fail "AGENTX_EXPECT_NEW_VOLUME must be true or false"
 }
 
-# Prints the value only once it is whole, so a try that fails part-way leaves nothing behind.
+# Prints the value only once whole, so a failed try leaves nothing behind.
 imds_once() {
   local token value
   token=$(curl -fsS --connect-timeout 2 --max-time 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300') \
@@ -226,7 +226,7 @@ prepare_contained_runtime_directories() {
   CONTAINED_RUNTIME_AVAILABLE_BOOT=true
 }
 
-# A failed try may leave stale mirror metadata (#211), so it is dropped before the next try.
+# A failed try may leave stale mirror metadata (#211): dropped before the next try.
 install_docker_package() {
   timeout "$(try_seconds 120)" dnf install -y docker && return 0
   dnf clean metadata >/dev/null 2>&1 || true
@@ -242,8 +242,8 @@ ensure_docker() {
   wall_off_containers
 }
 
-# Untrusted containers (rvb*, rvi* bridges) cannot reach IMDS, the host or private ranges; only VPC resolver DNS stays open.
-# A oneshot unit re-applies the rules after Docker rebuilds its chains; CI runs this heredoc as is.
+# Untrusted containers (rvb*, rvi*) cannot reach IMDS, the host or private ranges; only VPC DNS stays open.
+# A oneshot unit re-applies the rules after Docker rebuilds its chains.
 readonly FIREWALL_UNIT=rovara-container-firewall.service
 wall_off_containers() {
   install -d -o root -g root -m 0755 /usr/local/libexec
@@ -300,7 +300,7 @@ pull_contained_image() {
   return 1
 }
 
-# Optional until the control plane sets EXECUTOR_IMAGE; without it only end-to-end checks are withheld.
+# Optional until EXECUTOR_IMAGE is set; without it only end-to-end checks are withheld.
 pull_executor_image() {
   [[ -n "${EXECUTOR_IMAGE:-}" ]] || return 0
   local attempt
@@ -312,7 +312,7 @@ pull_executor_image() {
   return 1
 }
 
-# Root-only: none of the worker's environment is secret today, but it should not become world-readable.
+# Root-only: nothing here is secret today, but it must not become world-readable.
 write_worker_environment() {
   local region=$1
   install -d -m 0700 "$(dirname "$WORKER_ENV_FILE")"
@@ -327,13 +327,14 @@ AGENTX_OPENROUTER_SECRET_ARN=${AGENTX_OPENROUTER_SECRET_ARN:-}
 AGENTX_OPENROUTER_PROVIDERS=${AGENTX_OPENROUTER_PROVIDERS:-}
 AGENTX_ANTHROPIC_SECRET_ARN=${AGENTX_ANTHROPIC_SECRET_ARN:-}
 AGENTX_OPENAI_SECRET_ARN=${AGENTX_OPENAI_SECRET_ARN:-}
+AGENTX_MODEL_FALLBACK=${AGENTX_MODEL_FALLBACK:-}
 PI_CACHE_RETENTION=$PI_CACHE_RETENTION
 AGENTX_INVOKE_PUBLIC_KEY=$AGENTX_INVOKE_PUBLIC_KEY
 AGENTX_WORKSPACE_ID=$AGENTX_WORKSPACE_ID
 AGENTX_SESSION_GENERATION=$AGENTX_SESSION_GENERATION
 EOF
   printf 'TMPDIR=/tmp\n' >>"$WORKER_ENV_FILE"
-  # The browser executor the web/API runtime runs: docker exec agentx-worker processes read it from this file too.
+  # The web/API runtime's browser executor; docker exec agentx-worker processes read it here too.
   [[ -z "${EXECUTOR_IMAGE:-}" ]] || printf 'EXECUTOR_IMAGE=%s\n' "$EXECUTOR_IMAGE" >>"$WORKER_ENV_FILE"
 }
 
@@ -458,7 +459,7 @@ refuse() { log "refused: $1"; exit 2; }
 readonly PREFIX="e2e-runtime/$ROLE_ID:$INSTANCE_ID/"
 STAGE=$(mktemp -d) || exit 1
 readonly STAGE
-# Status objects also carry the executor image and /ping's feature list (test-deploy --check).
+# Status objects also carry the executor image and /ping's features (test-deploy --check).
 EXTRA=",\"executorImage\":\"$EXECUTOR\""
 upload() { aws s3api put-object --bucket "$BUCKET" --key "$PREFIX$1" --body "$2" --server-side-encryption AES256 --region "$REGION" --no-cli-pager >/dev/null; }
 publish_status() {
@@ -481,7 +482,7 @@ until PING=$(curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/pi
   sleep "$POLL"
 done
 features=$(tr -d ' \n\r\t' <<<"$PING" | grep -oE '"invocationFeatures":\[("[A-Za-z0-9.]+"(,"[A-Za-z0-9.]+")*)?\]' | head -n1) && [[ -n "$features" ]] && EXTRA+=",$features"
-# The boot's preload is optional, the qualification needs the executor image: pull it if missing.
+# The preload is optional but the qualification needs the executor image: pull it if missing.
 if ! docker image inspect "$EXECUTOR" >/dev/null 2>&1; then
   log "the executor image is not on this host; pulling it"
   { timeout --foreground --kill-after=10s "${PULL_SECONDS}s" aws ecr get-login-password --region "$REGION" \

@@ -49,6 +49,13 @@ export class WorkerSettingsStack extends Stack {
       allowedPattern: "^(default|[A-Za-z0-9][A-Za-z0-9._:/-]{0,199})$",
       description: "AI navigation model for browser checks: default (Rovara's recommendation) or an eligible model id",
     });
+    // MODEL3: the Bedrock model the coding worker runs on when its provider's key secret is missing. `none` (the default) means no fallback: the call fails by name. `agentx config set models.fallback` changes it.
+    const modelFallback = new CfnParameter(this, "ModelFallback", {
+      type: "String",
+      default: "none",
+      allowedPattern: "^(none|[A-Za-z0-9][A-Za-z0-9._:-]{0,79})$",
+      description: "Bedrock model used when a provider key secret is missing: none, or a Bedrock model id",
+    });
     const promptCacheRetention = new CfnParameter(this, "PromptCacheRetention", {
       type: "String",
       default: "long",
@@ -77,6 +84,7 @@ export class WorkerSettingsStack extends Stack {
       ["WorkerModelIdParameter", "modelId", modelId.valueAsString],
       ["WorkerPromptCacheRetentionParameter", "promptCacheRetention", promptCacheRetention.valueAsString],
       ["WorkerE2eAgentModelParameter", "e2eAgentModel", e2eAgentModelId.valueAsString],
+      ["WorkerModelFallbackParameter", "modelFallback", modelFallback.valueAsString],
     ];
     for (const [id, setting, value] of workerSettings) {
       new ssm.StringParameter(this, id, {

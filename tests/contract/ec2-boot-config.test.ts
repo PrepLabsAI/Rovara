@@ -56,6 +56,13 @@ describe("EC2 worker user data", () => {
       expect(() => ec2WorkerBootScript({ ...config, [field]: "sk-ant-api03-key" }, bootScript)).toThrow();
       expect(() => ec2WorkerBootScript({ ...config, [field]: `${secretArn}';touch /tmp/bad` }, bootScript)).toThrow();
     });
+  it("passes the chosen fallback model to the container as AGENTX_MODEL_FALLBACK, never as none, and rejects anything outside its alphabet (MODEL3)", () => {
+    const rendered = ec2WorkerBootScript({ ...config, modelFallback: "us.anthropic.claude-sonnet-4-6" }, bootScript);
+    expect(rendered).toContain("export AGENTX_MODEL_FALLBACK='us.anthropic.claude-sonnet-4-6'");
+    expect(rendered).toContain("AGENTX_MODEL_FALLBACK=${AGENTX_MODEL_FALLBACK:-}");
+    expect(ec2WorkerBootScript(config, bootScript)).not.toContain("export AGENTX_MODEL_FALLBACK=");
+    for (const bad of ["none", "us.anthropic.claude';touch /tmp/bad", "x".repeat(81), "has space", ""]) expect(() => ec2WorkerBootScript({ ...config, modelFallback: bad }, bootScript), bad).toThrow();
+  });
   it("prepends every boot value to the script as a quoted export", () => {
     const userData = ec2WorkerBootScript(config, bootScript);
     expect(userData.startsWith("#!/bin/bash\n")).toBe(true);
@@ -106,7 +113,10 @@ describe("EC2 worker user data", () => {
       openaiSecretArn: `${secretPrefix}${noise(SECRET_ARN_MAX_LENGTH - secretPrefix.length)}`,
       logGroupName: `/${noise(511)}`,
       executorImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/${lower(120)}@sha256:${"e".repeat(64)}`,
+      // Test 43 (MODEL3): the new variable at its longest, with every other value at its maximum too.
+      modelFallback: noise(80),
     });
+    expect(worstCase.modelFallback).toHaveLength(80);
     expect(worstCase.controlPlaneUrl).toHaveLength(512);
     expect(worstCase.openRouterProviders).toHaveLength(512);
     expect(worstCase.anthropicSecretArn).toHaveLength(SECRET_ARN_MAX_LENGTH);

@@ -70,9 +70,10 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
   foundation: [],
   identity: [],
   // The AI navigation model the customer chose (agentx config set models.e2eAgent): a stack parameter and not a model role, so it is not in the settings the upgrade's answers read.
-  runtime: ["E2eAgentModelId"],
+  // MODEL3: the fallback model the customer chose (agentx config set models.fallback), also a parameter of the Slack stack.
+  runtime: ["E2eAgentModelId", "ModelFallback"],
   "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "McpConfirmElicitation", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "TaskPersonProofEnabled", "WorkflowDependenciesEnabled"],
-  slack: ["SlowTurnMinutes"],
+  slack: ["SlowTurnMinutes", "ModelFallback"],
 };
 
 /** Fresh install order: the control plane needs the GitHub App. The `runtime` part is the EC2 worker settings (#117); the control plane reads them only when it boots a worker. */

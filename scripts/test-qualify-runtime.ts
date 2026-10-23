@@ -35,6 +35,7 @@ import {
   E2E_QUALIFICATION_PROFILE_ID,
   Ec2RuntimeBindingSchema,
   WORKER_SETTING_PARAMETERS,
+  chunkParameterNames,
   E2E_QUALIFICATION_ROLE_ID_PATTERN,
   e2eQualificationPrefix,
   ec2WorkerUserData,
@@ -593,7 +594,10 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
 
       const prefix = environmentSettingsPrefix(args.env);
       const names = Object.fromEntries(Object.entries(WORKER_SETTING_PARAMETERS).map(([key, name]) => [key, `${prefix}${name}`]));
-      const found = new Map(((await ssm.send(new GetParametersCommand({ Names: Object.values(names) }))).Parameters ?? []).map((parameter) => [parameter.Name, parameter.Value]));
+      const found = new Map<string | undefined, string | undefined>();
+      for (const chunk of chunkParameterNames(Object.values(names))) {
+        for (const parameter of (await ssm.send(new GetParametersCommand({ Names: chunk }))).Parameters ?? []) found.set(parameter.Name, parameter.Value);
+      }
       const value = (key: keyof typeof WORKER_SETTING_PARAMETERS) => found.get(names[key] ?? "");
       const required = (key: keyof typeof WORKER_SETTING_PARAMETERS) => {
         const setting = value(key);

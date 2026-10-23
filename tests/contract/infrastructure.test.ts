@@ -367,6 +367,7 @@ describe("production foundation and worker settings", () => {
       [expect.stringMatching(/^WorkerE2eAgentModelParameter/), "AWS::SSM::Parameter"],
       [expect.stringMatching(/^WorkerExecutorImageParameter/), "AWS::SSM::Parameter"],
       ["WorkerImageParameter7CA9ADBB", "AWS::SSM::Parameter"],
+      [expect.stringMatching(/^WorkerModelFallbackParameter/), "AWS::SSM::Parameter"],
       ["WorkerModelIdParameter02DE997A", "AWS::SSM::Parameter"],
       ["WorkerModelProviderParameterFBA25A19", "AWS::SSM::Parameter"],
       [expect.stringMatching(/^WorkerOpenAISecretParameter/), "AWS::SSM::Parameter"],

@@ -3037,6 +3037,26 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     ],
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-model-fallback",
+                    ],
+                  ],
+                },
               ],
             },
             {
@@ -5630,6 +5650,26 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                         "Ref": "AWS::AccountId",
                       },
                       ":parameter/agentx/staging/worker-e2e-agent-model",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-model-fallback",
                     ],
                   ],
                 },
@@ -9701,6 +9741,26 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     ],
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-model-fallback",
+                    ],
+                  ],
+                },
               ],
             },
             {
@@ -13169,6 +13229,12 @@ exports[`named environment templates > agentx-staging-runtime is unchanged 1`] =
       "Description": "Immutable private ECR linux/arm64 browser executor image URI, or none",
       "Type": "String",
     },
+    "ModelFallback": {
+      "AllowedPattern": "^(none|[A-Za-z0-9][A-Za-z0-9._:-]{0,79})$",
+      "Default": "none",
+      "Description": "Bedrock model used when a provider key secret is missing: none, or a Bedrock model id",
+      "Type": "String",
+    },
     "ModelId": {
       "Description": "pi model identifier available in the deployment region",
       "Type": "String",
@@ -13276,6 +13342,20 @@ exports[`named environment templates > agentx-staging-runtime is unchanged 1`] =
         "Type": "String",
         "Value": {
           "Ref": "WorkerImageUri",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "WorkerModelFallbackParameter4DCAF22C": {
+      "Properties": {
+        "Description": "AgentX worker modelFallback for EC2 workers",
+        "Name": "/agentx/staging/worker-model-fallback",
+        "Tags": {
+          "agentx:env": "staging",
+        },
+        "Type": "String",
+        "Value": {
+          "Ref": "ModelFallback",
         },
       },
       "Type": "AWS::SSM::Parameter",
@@ -13490,6 +13570,12 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
         "openai",
       ],
       "Default": "amazon-bedrock",
+      "Type": "String",
+    },
+    "ModelFallback": {
+      "AllowedPattern": "^(none|[A-Za-z0-9][A-Za-z0-9._:-]{0,79})$",
+      "Default": "none",
+      "Description": "Bedrock model used when a provider key secret is missing: none, or a Bedrock model id",
       "Type": "String",
     },
     "ModelId": {
@@ -14815,6 +14901,12 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
                 "Name": "AGENTX_GATE_CLASSIFIER_MODEL",
                 "Value": {
                   "Ref": "GateClassifierModelId",
+                },
+              },
+              {
+                "Name": "AGENTX_MODEL_FALLBACK",
+                "Value": {
+                  "Ref": "ModelFallback",
                 },
               },
             ],

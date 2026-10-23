@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { WORKER_SETTING_PARAMETERS } from "../../packages/contracts/src/session.js";
+import { WORKER_SETTING_PARAMETERS, chunkParameterNames } from "../../packages/contracts/src/session.js";
 
 // M1.4 Task 4.10A, test 9: the AI navigation model is a setting the broker reads, never a worker boot variable, and the code that reads every other worker setting copes with it.
 
@@ -36,16 +36,29 @@ describe("the session steps' read of the worker settings", () => {
     return handler({ action: "launchConfiguration", workspaceId: randomUUID(), generation: 1, volumeId: "vol-0123456789abcdef0", expectNewVolume: false }) as Promise<{ userData: string }>;
   };
 
-  it("asks for the model setting among at most ten names (GetParameters takes no more) and boots a worker with and without it", async () => {
+  it("reads the worker settings in chunks of at most ten names (GetParameters takes no more), asks for the model settings among them, and boots a worker with and without them", async () => {
     for (const present of [false, true]) {
-      answer({ ...settings, ...(present ? { "worker-e2e-agent-model": "us.anthropic.claude-haiku-4-5-20251001-v1:0" } : {}) });
+      answer({ ...settings, ...(present ? { "worker-e2e-agent-model": "us.anthropic.claude-haiku-4-5-20251001-v1:0", "worker-model-fallback": "us.anthropic.claude-sonnet-4-6" } : {}) });
+      ssmSend.mockClear();
       const result = await launch();
       expect(typeof result.userData).toBe("string");
-      const asked = (ssmSend.mock.calls.at(-1)![0] as { input: { Names: string[] } }).input.Names;
+      const calls = ssmSend.mock.calls.map((call) => (call[0] as { input: { Names: string[] } }).input.Names);
+      const asked = calls.flat();
       expect(asked).toContain(`${PREFIX}worker-e2e-agent-model`);
-      expect(asked.length).toBeLessThanOrEqual(10);
+      expect(asked).toContain(`${PREFIX}worker-model-fallback`);
+      expect(asked).toHaveLength(Object.keys(WORKER_SETTING_PARAMETERS).length);
       expect(new Set(asked).size).toBe(asked.length);
+      for (const names of calls) expect(names.length).toBeLessThanOrEqual(10);
+      expect(calls.length).toBeGreaterThan(1);
     }
+  });
+
+  it("puts the chosen fallback model in the boot user data, and nothing when it is none or absent (MODEL3)", async () => {
+    const { gunzipSync } = await import("node:zlib");
+    const boot = async (extra: Record<string, string>) => { answer({ ...settings, ...extra }); return gunzipSync(Buffer.from((await launch()).userData, "base64")).toString("utf8"); };
+    expect(await boot({ "worker-model-fallback": "us.anthropic.claude-sonnet-4-6" })).toContain("export AGENTX_MODEL_FALLBACK='us.anthropic.claude-sonnet-4-6'");
+    expect(await boot({ "worker-model-fallback": "none" })).not.toContain("AGENTX_MODEL_FALLBACK='");
+    expect(await boot({})).not.toContain("AGENTX_MODEL_FALLBACK='");
   });
 
   it("puts no AI navigation model in the worker's boot user data", async () => {
@@ -63,8 +76,16 @@ describe("the session steps' read of the worker settings", () => {
     expect(derive).not.toMatch(/AGENTX_E2E_/);
   });
 
-  it("keeps the number of worker settings within one GetParameters call: an eleventh must be read in chunks", () => {
-    expect(Object.keys(WORKER_SETTING_PARAMETERS).length).toBeLessThanOrEqual(10);
+  it("pins the chunking: the worker settings are more than one GetParameters call, so every reader of all of them goes through chunkParameterNames", () => {
+    expect(Object.keys(WORKER_SETTING_PARAMETERS).length).toBeGreaterThan(10);
+    expect(chunkParameterNames(Object.values(WORKER_SETTING_PARAMETERS)).every((names) => names.length <= 10)).toBe(true);
+    expect(chunkParameterNames(Object.values(WORKER_SETTING_PARAMETERS)).flat()).toEqual(Object.values(WORKER_SETTING_PARAMETERS));
+    expect(chunkParameterNames([])).toEqual([]);
+    for (const file of ["packages/broker/src/aws/session-steps.ts", "scripts/test-qualify-runtime.ts", "scripts/ec2-preflight.ts"]) {
+      const source = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
+      expect(source, file).toContain("chunkParameterNames(");
+      expect(source, file).not.toMatch(/Names: Object\.values\(\w*[nN]ames\)/);
+    }
   });
 });
 
@@ -75,6 +96,7 @@ describe("the qualification script's read of the worker settings", () => {
     expect(source).toContain("Object.entries(WORKER_SETTING_PARAMETERS)");
     const read = [...source.matchAll(/(?:required|optional)\("([A-Za-z]+)"\)/g)].map((match) => match[1]).sort();
     expect(read).toEqual(["anthropicSecretArn", "executorImage", "modelId", "modelProvider", "openRouterProviders", "openRouterSecretArn", "openaiSecretArn", "promptCacheRetention", "workerImage"]);
+    expect(source).not.toContain("modelFallback");
     expect(source).not.toContain("e2eAgentModel");
   });
 });
