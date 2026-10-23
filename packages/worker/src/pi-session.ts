@@ -392,8 +392,6 @@ export async function createWorkerResources(
   // Pi 0.86+ warms prompt caches with extra paid requests during long tool runs by default ("streaming"); 0.85.1 made
   // none. The mode is a global-only setting, so it is written to AgentX's own agent directory.
   settingsManager.setCacheWarmingMode("off");
-  // After the writes above: a settings save merges the stored files again and would drop an in-memory override.
-  applyWorkerRetryBudget(settingsManager);
   const resourceLoader = new DefaultResourceLoader({
     cwd: input.cwd,
     agentDir: input.agentDirectory,
@@ -412,6 +410,8 @@ export async function createWorkerResources(
     appendSystemPrompt: [AGENTX_PREAMBLE],
   });
   await resourceLoader.reload({ resolveProjectTrust: async () => false });
+  // Last, after every write and reload: each of them merges the stored settings files again, which drops an in-memory override.
+  applyWorkerRetryBudget(settingsManager);
   return { resourceLoader, settingsManager };
 }
 
