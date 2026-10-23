@@ -49,24 +49,30 @@ export function stoppedStepReason(mode: WorkflowMode, endedAs: string): string {
  * replay rounds, which are never the workflow's own step.
  */
 export function stopBlocksWorkflowStep(task: StoppedRunTask, run: StoppedRunOperation): boolean {
+  // A run that already ended settled its own step (or lost the race to something that did).
+  if (run.status === "SUCCEEDED" || run.status === "FAILED" || run.status === "CANCELLED") return false;
+  return runsRunningStep(task, run);
+}
+
+/** Whether `run` is the kind of run the task's RUNNING workflow step is waiting on (status aside: the caller fences it). */
+function runsRunningStep(task: StoppedRunTask, run: StoppedRunOperation): boolean {
   const workflow = task.workflow;
   const mode = run.workflowMode;
   if (workflow === undefined || mode === undefined || run.kind !== "task") return false;
   if (task.closedAt !== undefined || task.workspaceId !== run.workspaceId) return false;
   if (workflow.state !== "RUNNING" || workflow.stage !== WORKFLOW_STEP_STAGE[mode]) return false;
-  // A run that already ended settled its own step (or lost the race to something that did).
-  if (run.status === "SUCCEEDED" || run.status === "FAILED" || run.status === "CANCELLED") return false;
   if (run.workflowDependencies !== undefined) return false;
   if (run.workflowE2EAdmission !== undefined && (mode === "CHECKS" || run.workflowE2EAdmission.purpose !== undefined)) return false;
   return true;
 }
 
 /**
- * Best effort, after the stuck-cancel release committed: the task's own late result proved its run ended, so its
- * workflow step stops being RUNNING. Never throws (the worker's callback must not fail for it), and does nothing unless
+ * Best effort, after a run's workspace was freed without the run's own result moving the workflow (the stuck-cancel
+ * release, the reconciler's end of a task whose compute is gone, a cancel whose workflow item had to be dropped): the
+ * run is over, so its workflow step stops being RUNNING. `endedAs` words the reason ("<step> operation ended <status>"). Never throws (the worker's callback must not fail for it), and does nothing unless
  * the task is still running that exact step. Returns whether the step was blocked.
  */
-export async function blockStoppedWorkflowRun(client: Client, tableName: string, run: StoppedRunOperation, log: (entry: Record<string, unknown>) => void = (entry) => console.log(JSON.stringify(entry))): Promise<boolean> {
+export async function blockStoppedWorkflowRun(client: Client, tableName: string, run: StoppedRunOperation, endedAs: "CANCELLED" | "INTERRUPTED" | "FAILED" = "INTERRUPTED", log: (entry: Record<string, unknown>) => void = (entry) => console.log(JSON.stringify(entry))): Promise<boolean> {
   try {
     const read = async (key: { pk: string; sk: string }) => (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))).Item;
     const pointer = await read(taskPointerKey(run.workspaceId)) as { taskId?: unknown } | undefined;
@@ -76,21 +82,21 @@ export async function blockStoppedWorkflowRun(client: Client, tableName: string,
     if (task === undefined || !parsed.success) return false;
     const workflow = parsed.data;
     const mode = run.workflowMode;
-    if (mode === undefined || !stopBlocksWorkflowStep({ closedAt: task.closedAt, workspaceId: task.workspaceId, workflow }, run)) return false;
+    if (mode === undefined || !runsRunningStep({ closedAt: task.closedAt, workspaceId: task.workspaceId, workflow }, run)) return false;
     if (mode === "FEEDBACK_REVIEW") {
       const binding = run.workflowFeedbackReview;
       if (binding === undefined || workflow.revision !== binding.workflowRevision || workflow.taskId !== binding.taskId
         || workflow.candidate?.digest !== binding.candidateDigest || workflow.feedbackReview?.status !== "COLLECTING") return false;
     }
     const now = new Date().toISOString();
-    // The workspace must still be free: a newer run that holds it now is the step's own, and is not for this result to block.
+    // The workspace must still be free (no fence: every step claims the workspace in the transaction that sets it RUNNING): a newer run that holds it now is the step's own, and is not for this result to block.
     await client.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
         TableName: tableName, Key: taskKey(pointer.taskId),
         UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
         ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running AND attribute_not_exists(closedAt)",
         ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-        ExpressionAttributeValues: { ":workflow": blockWorkflow(workflow, stoppedStepReason(mode, "INTERRUPTED"), now), ":now": now,
+        ExpressionAttributeValues: { ":workflow": blockWorkflow(workflow, stoppedStepReason(mode, endedAs), now), ":now": now,
           ":revision": workflow.revision, ":stage": workflow.stage, ":running": "RUNNING" },
       } },
       { ConditionCheck: {

@@ -2403,6 +2403,7 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       if (request.expectedRevision !== undefined && request.expectedRevision !== task.workflow.revision) {
         throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
       }
+      // False means something moved first (another retry won, the workspace was taken, the run changed): the re-read below decides.
       await recoverStrandedPlanning(deps.documentClient, deps.tableName, { taskId, workflow: task.workflow }, workspace, stopped, iso(deps));
       const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
       if (fresh.workflow?.stage !== "PLAN" || fresh.workflow.state !== "BLOCKED") {

@@ -110,12 +110,18 @@ export function isFeedbackReviewFailure(blockReason: string | undefined): boolea
   return blockReason !== undefined && (blockReason === WORKFLOW_BLOCK_REASONS.feedbackReviewFailed || REWORDED_REASONS.get(blockReason) === WORKFLOW_BLOCK_REASONS.feedbackReviewFailed);
 }
 
+/** The step a stopped run ran, as the first word of the sentence that says it was stopped (keys: `workflowRunEndedReason`'s step names). */
+const STOPPED_STEP_NAME: Readonly<Record<string, string>> = { planning: "Planning", implementation: "Coding", "verification retry": "Checking", "independent review": "Reviewing" };
+
 /** The broker's own reason a step stopped, in words the owner can act on; any other reason is internal. */
 export function plainBlockReason(blockReason: string | undefined): string {
   if (blockReason === undefined) return GENERIC_REASON;
   if (isE2EPlanCorrectionBlockReason(blockReason)) return slackText(blockReason);
   const reworded = REWORDED_REASONS.get(blockReason);
   if (reworded !== undefined) return slackText(reworded);
+  // PLANINC-2: a stop the owner asked for (cancelled, or interrupted when the stop could not be delivered) says so and what to do; only a failed run is unexpected.
+  const stopped = /^(planning|implementation|verification retry|independent review) operation ended (cancelled|interrupted)$/.exec(blockReason);
+  if (stopped !== null) return `${STOPPED_STEP_NAME[stopped[1]!]!} was stopped before it finished. Choose Retry to run it again.`;
   if (/operation ended (failed|interrupted|cancelled)$/.test(blockReason)) return "The run stopped unexpectedly.";
   if (/ was invalid, incomplete, or stale$/.test(blockReason)) return "The result couldn't be trusted, so nothing moved forward.";
   return PLAIN_REASONS.has(blockReason) ? slackText(blockReason) : GENERIC_REASON;

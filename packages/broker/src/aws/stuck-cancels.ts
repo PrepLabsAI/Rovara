@@ -38,6 +38,7 @@ import {
   releasedStatus,
   type FailedCancelReleaseReason,
 } from "./failed-cancel-release.js";
+import { blockStoppedWorkflowRun, type StoppedRunOperation } from "./workflow-cancel-reconcile.js";
 import type { SlackThreadPlace } from "./unwaited-tasks.js";
 
 export { FAILED_CANCEL_GRACE_MS, FAILED_CANCEL_RELEASED_MESSAGE } from "./failed-cancel-release.js";
@@ -155,6 +156,8 @@ async function settle(
     }
     result.interrupted.push(operationId);
     log({ event: "stuck_cancel.released", workspaceId, operationId, reason });
+    // PLANINC-2: the freed workspace and the workflow step it held agree again (no late result will come from a dead or idle worker).
+    await blockStopped(dependencies, { workspaceId, operationId }, operation, "INTERRUPTED", log);
     if (dependencies.postNote !== undefined) await noteRelease(dependencies, workspace!, { workspaceId, operationId }, log);
     return;
   }
@@ -169,6 +172,7 @@ async function settle(
     if (await end(dependencies, ids, operation, at, "FAILED", STUCK_CANCEL_LOST_MESSAGE)) {
       result.ended.push(operationId);
       log({ event: "stuck_cancel.ended", ...ids, reason: "compute-gone" });
+      await blockStopped(dependencies, ids, operation, "FAILED", log);
     } else {
       log({ event: "stuck_cancel.skipped", ...ids, reason: "changed" });
     }
@@ -194,6 +198,7 @@ async function settle(
     if (await end(dependencies, ids, operation, at, "INTERRUPTED", STUCK_CANCEL_INTERRUPTED_MESSAGE)) {
       result.interrupted.push(operationId);
       log({ event: "stuck_cancel.interrupted", ...ids });
+      await blockStopped(dependencies, ids, operation, "INTERRUPTED", log);
     } else {
       log({ event: "stuck_cancel.skipped", ...ids, reason: "changed" });
     }
@@ -309,6 +314,23 @@ async function noteRelease(
     // Logged, not counted: the release stands, and the task's status carries the same message.
     log({ event: "stuck_cancel.note_failed", ...ids, errorName: error instanceof Error ? error.name : "unknown" });
   }
+}
+
+/**
+ * PLANINC-2: after a stuck run's workspace was freed (released, or ended for lost compute), its workflow step stops being
+ * RUNNING, so the owner is offered Retry instead of a step that runs nothing. Best effort and conditional (the workflow
+ * row's revision, stage and RUNNING state, and the workspace still being free); a task with no workflow, a Slack
+ * workspace and a step that already moved are left alone. Never throws: the release stands either way.
+ */
+async function blockStopped(
+  { client, tableName }: StuckCancelDependencies,
+  { workspaceId, operationId }: { workspaceId: string; operationId: string },
+  operation: StuckOperation,
+  endedAs: "INTERRUPTED" | "FAILED",
+  log: (entry: Record<string, unknown>) => void,
+): Promise<void> {
+  const run = { ...(operation as object), id: operationId, workspaceId } as unknown as StoppedRunOperation;
+  await blockStoppedWorkflowRun(client as never, tableName, run, endedAs, log);
 }
 
 /**
