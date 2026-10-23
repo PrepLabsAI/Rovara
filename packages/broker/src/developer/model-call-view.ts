@@ -67,7 +67,8 @@ function failureText(failure: Failure): string {
 function classify(provider: ModelProvider | undefined, signal: string | undefined): { cls: E2EModelFailureClass; signal?: string | undefined } {
   if (provider === undefined) return { cls: "unknown" };
   const result = classifyProviderFailure({ provider, signal });
-  return { cls: result.class, ...(result.signal === null ? {} : { signal: result.signal }) };
+  // A signal is shown only when it is a name this provider is known to use (its class is then not "unknown"): provider-controlled text that merely looks like a token is not shown.
+  return { cls: result.class, ...(result.signal === null || result.class === "unknown" ? {} : { signal: result.signal }) };
 }
 
 /** Pi's assistant `message_end` that ended in an error or was aborted. Its diagnostics carry the provider's error type and request id; nothing else of it is read. */
@@ -101,10 +102,13 @@ function retryStart(attempt: number | undefined, max: number | undefined, delayM
 
 /** Pi's `auto_retry_end`: only success, the attempt number and whether Pi's own fixed "Retry cancelled" marker was the final error are read. */
 function retryEnd(payload: Record<string, unknown>): View {
-  const attempt = count(payload.attempt);
+  if (payload.finalError === RETRY_CANCELLED && payload.success !== true) return { kind: "progress", text: "The model call retry was cancelled." };
+  return retryFinished(payload.success === true, count(payload.attempt));
+}
+
+function retryFinished(success: boolean, attempt: number | undefined): View {
   const suffix = attempt === undefined ? "" : ` (attempt ${attempt})`;
-  if (payload.success === true) return { kind: "progress", text: `The model call retry succeeded${suffix}.` };
-  if (payload.finalError === RETRY_CANCELLED) return { kind: "progress", text: "The model call retry was cancelled." };
+  if (success) return { kind: "progress", text: `The model call retry succeeded${suffix}.` };
   return { kind: "progress", text: `The model call retries ran out${suffix}. The step will fail; retry it from the task.` };
 }
 
@@ -118,13 +122,16 @@ function modelCall(value: unknown): View | undefined {
   const durationMs = millis(call.durationMs, MAX_DURATION_MS);
   switch (call.outcome) {
     case "failed": {
-      const given = classOf(call.class);
-      const signal = signalOf(call.signal);
-      const { cls, signal: known } = given === undefined ? classify(providerOf(call.provider), signal) : { cls: given, signal };
+      // The class the worker named, and a signal only when this provider's own list agrees with that class.
+      const derived = classify(providerOf(call.provider), signalOf(call.signal));
+      const cls = classOf(call.class) ?? derived.cls;
+      const known = derived.cls === cls ? derived.signal : undefined;
       return { kind: "error", text: failureText({ cls, signal: known, requestId: requestId(call.requestId), attempt: which, durationMs }) };
     }
     case "retrying":
       return retryStart(attempt, max, millis(call.delayMs, MAX_DELAY_MS));
+    case "retry-finished":
+      return retryFinished(call.success === true, attempt);
     case "stopped":
       return { kind: "progress", text: "The model call was stopped." };
     case "deadline":
@@ -147,6 +154,9 @@ function heartbeat(value: unknown): View | undefined {
   if (elapsed === undefined) return { kind: "progress", text: "Still waiting for the model." };
   return { kind: "progress", text: `Still waiting for the model${attempt === undefined ? "" : ` (attempt ${attempt})`}: ${duration(elapsed)} so far${quiet === undefined ? "" : `, nothing new for ${duration(quiet)}`}.` };
 }
+
+/** Whether a progress payload is the worker's heartbeat (a wait), which the event list keeps only the newest of. */
+export const isHeartbeat = (payload: unknown): boolean => record(payload) !== undefined && "heartbeat" in (payload as Record<string, unknown>);
 
 /**
  * The fixed-text view of a `progress` event payload when it is a model failure, a retry or a wait; undefined when it is none of these, so the caller reads it as it always did.

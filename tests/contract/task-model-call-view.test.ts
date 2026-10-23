@@ -2,6 +2,7 @@
 // (Pi's raw events, copied from the incident, operation 1910a8ce) and what the new worker's sanitized progress payloads carry.
 // Every view must be fixed text plus identifiers: never the provider's message, the model's thinking, or any prompt text.
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DEVELOPER_EVENT_TEXT_MAX, DeveloperTaskEventSchema } from "@agentx/contracts";
 import { recentTaskEvents, taskEvent, type StoredEvent } from "../../packages/broker/src/developer/task-records.js";
@@ -112,13 +113,27 @@ describe("retries in the task event view", () => {
 
 describe("the worker's sanitized model-call and heartbeat progress", () => {
   it("renders a sanitized model-call failure like a raw one", () => {
-    const view = taskEvent(stored("progress", { modelCall: { outcome: "failed", class: "provider-outage", signal: "InternalServerException", requestId: REQUEST_ID, attempt: 2, maxAttempts: 3, durationMs: 441950 } }));
+    const view = taskEvent(stored("progress", { modelCall: { outcome: "failed", provider: "amazon-bedrock", class: "provider-outage", signal: "InternalServerException", requestId: REQUEST_ID, attempt: 2, maxAttempts: 3, durationMs: 441950 } }));
     expect(view).toEqual({ at, kind: "error", text: `The model call failed: provider outage (InternalServerException), request ${REQUEST_ID}, attempt 2 of 3, after 7m22s. Retry the step.` });
   });
 
   it("classifies a sanitized failure that carries only the signal and provider", () => {
     const view = taskEvent(stored("progress", { modelCall: { outcome: "failed", provider: "amazon-bedrock", signal: "ThrottlingException", attempt: 1 } }));
     expect(view?.text).toBe("The model call failed: rate or quota limit (ThrottlingException), attempt 1. Wait a minute, or raise the model's limit.");
+  });
+
+  it("shows a signal only when the provider is known to use it for that class", () => {
+    const hostile = "x".repeat(64);
+    expect(taskEvent(stored("progress", messageEndError({}, { errorCode: hostile, requestId: REQUEST_ID })))?.text).toBe(`The model call failed: unknown cause, request ${REQUEST_ID}, after 7m22s. Retry the step.`);
+    // the worker named a class and a signal that does not belong to it: the class stays, the signal is not shown
+    expect(taskEvent(stored("progress", { modelCall: { outcome: "failed", provider: "amazon-bedrock", class: "provider-outage", signal: "ThrottlingException" } }))?.text).toBe("The model call failed: provider outage. Retry the step.");
+    // no provider named: the signal cannot be checked, so it is not shown
+    expect(taskEvent(stored("progress", { modelCall: { outcome: "failed", class: "provider-outage", signal: "InternalServerException" } }))?.text).toBe("The model call failed: provider outage. Retry the step.");
+  });
+
+  it("renders a finished retry (the worker's retry-finished) like Pi's auto_retry_end", () => {
+    expect(taskEvent(stored("progress", { modelCall: { outcome: "retry-finished", success: true, attempt: 1 } }))).toEqual({ at, kind: "progress", text: "The model call retry succeeded (attempt 1)." });
+    expect(taskEvent(stored("progress", { modelCall: { outcome: "retry-finished", success: false, attempt: 3 } }))).toEqual({ at, kind: "progress", text: "The model call retries ran out (attempt 3). The step will fail; retry it from the task." });
   });
 
   it("renders a retry, a deadline and a stall", () => {
@@ -147,7 +162,78 @@ describe("the worker's sanitized model-call and heartbeat progress", () => {
   });
 });
 
+// PLANINC-3a pins what the worker sends in tests/fixtures/planinc/model-call-events.json (the same bytes as on its branch). Every payload in it must render, and no planted text may show.
+interface FixtureCase { name: string; input: unknown; output: unknown; mustNotAppear: string[] }
+const fixture = JSON.parse(readFileSync(new URL("../fixtures/planinc/model-call-events.json", import.meta.url), "utf8")) as { cases: FixtureCase[]; payloads: Record<string, unknown> };
+
+describe("the worker's pinned payloads (PLANINC-3a fixture)", () => {
+  it.each(fixture.cases.map((entry) => [entry.name, entry] as const))("renders %s from the raw event and from the sanitized payload", (_name, entry) => {
+    const raw = taskEvent(stored("progress", entry.input));
+    const sanitized = taskEvent(stored("progress", entry.output));
+    expect(raw, "the raw Pi event renders").toBeDefined();
+    expect(sanitized, "the worker's payload renders").toBeDefined();
+    expect(DeveloperTaskEventSchema.safeParse(sanitized).success).toBe(true);
+    for (const view of [raw, sanitized]) for (const planted of entry.mustNotAppear) expect(everyField(view)).not.toContain(planted);
+  });
+
+  it("renders every payload that has no raw twin", () => {
+    expect(Object.keys(fixture.payloads).sort()).toEqual(["deadline", "heartbeat", "stall"]);
+    for (const [name, payload] of Object.entries(fixture.payloads)) expect(taskEvent(stored("progress", payload)), name).toBeDefined();
+  });
+
+  it("the sanitized incident failure carries the same facts as the raw one", () => {
+    const entry = fixture.cases[0]!;
+    expect(taskEvent(stored("progress", entry.output))?.text).toBe(`The model call failed: provider outage (InternalServerException), request ${REQUEST_ID}, attempt 1, after 7m22s. Retry the step.`);
+  });
+
+  it("every outcome the fixture uses is one the view reads (a renamed outcome would drop silently)", () => {
+    const outcomes = [...fixture.cases.map((entry) => entry.output), ...Object.values(fixture.payloads)].flatMap((payload) => {
+      const call = (payload as { modelCall?: { outcome?: string } }).modelCall;
+      return call === undefined ? [] : [call.outcome];
+    });
+    expect(new Set(outcomes)).toEqual(new Set(["failed", "stopped", "retrying", "retry-finished", "deadline", "stalled"]));
+  });
+});
+
+describe("hostile request ids", () => {
+  it.each([
+    ["a trailing newline", `${REQUEST_ID}\n`],
+    ["Cyrillic look-alikes", "9е7еа41c-561a-49e1-bbc3-2737b23fa76c"],
+    ["fullwidth digits", "９e7ea41c-561a-49e1-bbc3-2737b23fa76c"],
+    ["a space", `${REQUEST_ID} extra`],
+    ["65 characters", "a".repeat(65)],
+  ])("does not show an id with %s", (_name, bad) => {
+    const raw = taskEvent(stored("progress", messageEndError({}, { errorCode: "InternalServerException", requestId: bad })));
+    expect(raw?.text).toBe("The model call failed: provider outage (InternalServerException), after 7m22s. Retry the step.");
+    const sanitized = taskEvent(stored("progress", { modelCall: { outcome: "failed", provider: "amazon-bedrock", class: "provider-outage", requestId: bad } }));
+    expect(sanitized?.text).toBe("The model call failed: provider outage. Retry the step.");
+  });
+});
+
 describe("the view as a whole", () => {
+  it("shows a failure as the fixed line only; the partial text the model wrote before it is replaced (stated change)", () => {
+    const raw = messageEndError({ content: [{ type: "text", text: "PARTIAL-PLAN-TEXT" }] });
+    expect(everyField(taskEvent(stored("progress", raw)))).not.toContain("PARTIAL-PLAN-TEXT");
+  });
+
+  it("keeps only the newest heartbeat, so a 30-minute wait around a failure leaves the failure and the retry in view", () => {
+    const beat = (minute: number) => stored("progress", { heartbeat: { phase: "model", attempt: 1, elapsedMs: minute * 60_000, sinceActivityMs: 60_000 } }, 100 + minute);
+    // oldest first: RUNNING, 10 beats, the failure (seq 75), the retry (seq 76), then 30 more minutes of beats
+    const oldestFirst = [
+      stored("lifecycle", { status: "RUNNING" }, 1),
+      ...Array.from({ length: 10 }, (_, index) => beat(index + 1)),
+      stored("progress", messageEndError(), 75),
+      stored("progress", { type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000 }, 76),
+      ...Array.from({ length: 30 }, (_, index) => beat(index + 11)),
+    ];
+    const view = recentTaskEvents([...oldestFirst].reverse(), 10);
+    expect(view.map((entry) => entry.kind)).toEqual(["status", "error", "progress", "progress"]);
+    expect(view.filter((entry) => entry.text.startsWith("Still waiting"))).toHaveLength(1);
+    expect(view[2]?.text).toContain("retrying the model call");
+    expect(view.at(-1)?.text).toContain("40m0s so far");
+    expect(view.some((entry) => entry.kind === "error" && entry.text.includes(REQUEST_ID))).toBe(true);
+  });
+
   it("keeps every model line within the public text limit", () => {
     const view = taskEvent(stored("progress", messageEndError({}, { errorCode: "A".repeat(64), requestId: "r".repeat(64) })));
     expect((view?.text.length ?? 0) <= DEVELOPER_EVENT_TEXT_MAX).toBe(true);
