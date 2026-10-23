@@ -27,7 +27,7 @@ describe("the reason a schema refusal is stored under", () => {
       for (const issue of parsed.error!.issues) {
         const reason = e2eApplicationSchemaReason(new z.ZodError([issue]));
         // A `custom` issue is a sentence our own schema wrote; every other issue is a code and a path.
-        if (issue.code !== "custom") expect(reason).toMatch(/^schema-error: [a-z_]+( at [A-Za-z.\[\]*]+)?$/);
+        if (issue.code !== "custom") expect(reason).toMatch(/^schema-error: [a-z_]+( at [A-Za-z.[\]*]+)?$/);
         expect(reason).not.toContain(SECRET_KEY);
       }
       expect(e2eApplicationErrorReason(parsed.error)).not.toContain(SECRET_KEY);
