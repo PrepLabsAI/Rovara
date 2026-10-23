@@ -34,7 +34,9 @@ const definition = (models: unknown = { default: DEFAULT, approved: [DEFAULT, OP
   ...(models === null ? {} : { models }),
 });
 
-const failed = (cls: Extract<ModelCheckResult, { ok: false }>["class"], signal: string | null = null): ModelCheckResult => ({ ok: false, class: cls, signal, error: new Error(SECRET_TEXT) });
+type FailureClass = Extract<ModelCheckResult, { ok: false }>["class"];
+const failed = (cls: FailureClass, signal: string | null = null, quota?: { scope: "geographic" | "global"; code: string | null; tokensPerMinute: number | null }): ModelCheckResult =>
+  ({ ok: false, class: cls, signal, error: new Error(SECRET_TEXT), ...(quota === undefined ? {} : { quota }) });
 /** A checker that answers from a table by `provider/modelId`, and records the order of its calls and how many ran at once. */
 function checker(answers: Record<string, ModelCheckResult>) {
   const calls: string[] = [];
@@ -105,7 +107,7 @@ describe("project models are checked when a revision is registered", () => {
       const pending = checkProjectModels({ definition: definition({ default: DEFAULT, approved: [DEFAULT, OPUS] }), check: async (pair) => (pair.modelId === "claude-opus-5" ? hang(pair) : { ok: true }), now: () => Date.parse(NOW) });
       await vi.advanceTimersByTimeAsync(30_000);
       const timed = await pending;
-      expect(timed.definition.models?.approved.find((model) => model.modelId === "claude-opus-5")?.lastCheck).toEqual({ status: "failed", class: "provider-outage", checkedAt: NOW });
+      expect(timed.definition.models?.approved.find((model) => model.modelId === "claude-opus-5")?.lastCheck).toEqual({ status: "unchecked", class: "provider-outage", checkedAt: NOW });
     } finally { vi.useRealTimers(); }
   });
 
@@ -121,6 +123,9 @@ describe("project models are checked when a revision is registered", () => {
     await registerRevision({ env: "staging", session, definition: definition(), services: unchecked.services });
     expect((unchecked.plane.registered[0] as { definition: ProjectDefinition }).definition.models?.default.lastCheck).toBeUndefined();
     expect(ModelRefSchema.parse({ provider: "anthropic", modelId: "claude-sonnet-4-6" })).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-6" });
+    expect(ModelRefSchema.parse({ ...DEFAULT, lastCheck: { status: "unchecked", class: "provider-outage", checkedAt: NOW } }).lastCheck?.status).toBe("unchecked");
+    expect(ModelRefSchema.parse({ ...DEFAULT, lastCheck: { status: "failed", class: "model-not-found", checkedAt: NOW, acceptedReason: "the model arrives next week" } }).lastCheck?.acceptedReason).toBe("the model arrives next week");
+    expect(() => ModelRefSchema.parse({ ...DEFAULT, lastCheck: { status: "ok", checkedAt: NOW, acceptedReason: "x" } })).toThrow();
     expect(() => ModelRefSchema.parse({ ...DEFAULT, lastCheck: { status: "failed", checkedAt: NOW } })).toThrow();
     expect(() => ModelRefSchema.parse({ ...DEFAULT, lastCheck: { status: "ok", class: "unknown", checkedAt: NOW } })).toThrow();
     expect(() => ModelRefSchema.parse({ ...DEFAULT, lastCheck: { status: "failed", class: "unknown", checkedAt: NOW, message: "x" } })).toThrow();
@@ -132,6 +137,78 @@ describe("project models are checked when a revision is registered", () => {
     const result = await checkProjectModels({ definition: definition({ default: DEFAULT, approved: [DEFAULT, other] }), check: run.check, now: () => Date.parse(NOW) });
     expect(run.calls).toEqual(["anthropic/claude-sonnet-4-6"]);
     expect(result.definition.models?.approved[1]?.lastCheck).toBeUndefined();
+  });
+});
+
+// Ruling DY (review I-3): a registration is refused only for a failure about the model; anything that can be the caller's own access, a throttle or an outage is a warning, recorded as unchecked.
+describe("what refuses a registration, and what only warns (Ruling DY)", () => {
+  const quota = (tokensPerMinute: number | null) => ({ scope: "geographic" as const, code: "L-QUOTA", tokensPerMinute });
+  const refused: Array<[string, string, ModelCheckResult]> = [
+    ["model-not-found", "anthropic", failed("model-not-found", "not_found_error")],
+    ["not-in-catalog", "anthropic", failed("not-in-catalog", "not-in-catalog")],
+    ["key-rejected on a keyed provider", "anthropic", failed("key-rejected")],
+    ["a Bedrock quota known to be 0", "amazon-bedrock", failed("limit-or-rate-limited", "ThrottlingException", quota(0))],
+  ];
+  const warned: Array<[string, string, ModelCheckResult]> = [
+    ["key-rejected on Amazon Bedrock (the caller's own access may be denied)", "amazon-bedrock", failed("key-rejected", "AccessDeniedException")],
+    ["a Bedrock throttle with a quota above 0", "amazon-bedrock", failed("limit-or-rate-limited", "ThrottlingException", quota(5_000_000))],
+    ["a Bedrock throttle whose quota could not be read", "amazon-bedrock", failed("limit-or-rate-limited", "ThrottlingException", quota(null))],
+    ["a keyed provider's rate limit", "openai", failed("limit-or-rate-limited")],
+    ["an outage", "anthropic", failed("provider-outage")],
+    ["unreachable", "anthropic", failed("unreachable", "ENOTFOUND")],
+    ["unknown", "anthropic", failed("unknown")],
+    ["a key secret the caller cannot read", "anthropic", failed("secret-unreadable", "secret-unreadable")],
+    ["a refused request", "anthropic", failed("request-rejected")],
+  ];
+  const withDefault = (provider: string) => definition({ default: { ...DEFAULT, provider, modelId: provider === "amazon-bedrock" ? "us.anthropic.claude-sonnet-4-6" : "claude-sonnet-4-6" }, approved: [{ ...DEFAULT, provider, modelId: provider === "amazon-bedrock" ? "us.anthropic.claude-sonnet-4-6" : "claude-sonnet-4-6" }] });
+  const only = (result: ModelCheckResult) => ({ check: async () => result });
+
+  it.each(refused)("refuses the default model's registration on %s, naming the override", async (_label, provider, result) => {
+    const error = await checkProjectModels({ definition: withDefault(provider), check: only(result).check, now: () => Date.parse(NOW) }).then(() => undefined, (caught: unknown) => caught as Error);
+    expect(error?.message).toContain("was not registered");
+    expect(error?.message).toContain('--accept-unchecked-model "<reason>"');
+  });
+
+  it.each(refused)("registers a refused default anyway on %s when the administrator accepts it with a reason, and records the reason beside the class", async (_label, provider, result) => {
+    const accepted = await checkProjectModels({ definition: withDefault(provider), check: only(result).check, now: () => Date.parse(NOW), acceptUnchecked: { reason: "the model arrives with the next quota change" } });
+    const record = accepted.definition.models?.default.lastCheck;
+    expect(record).toMatchObject({ status: "failed", acceptedReason: "the model arrives with the next quota change" });
+    expect(record?.class).toBe((result as { class: string }).class);
+    expect(accepted.warnings.join("\n")).toContain("the model arrives with the next quota change");
+  });
+
+  it.each(warned)("registers the default model on %s with a warning, and records it as unchecked", async (_label, provider, result) => {
+    const outcome = await checkProjectModels({ definition: withDefault(provider), check: only(result).check, now: () => Date.parse(NOW) });
+    expect(outcome.definition.models?.default.lastCheck).toEqual({ status: "unchecked", class: (result as { class: string }).class, checkedAt: NOW });
+    expect(outcome.warnings).toHaveLength(1);
+    expect(outcome.warnings[0]).toContain("could not be checked");
+    expect(outcome.warnings[0]).toContain("its first use checks it again");
+    expect(outcome.warnings.join(" ")).not.toContain("sk-ant");
+  });
+
+  it("stores an approved pair's unchecked state the same way, and only a model-specific failure as failed", async () => {
+    const run = checker({ "anthropic/claude-opus-5": failed("provider-outage"), "amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0": failed("model-not-found") });
+    const outcome = await checkProjectModels({ definition: definition(), check: run.check, now: () => Date.parse(NOW) });
+    expect(outcome.definition.models?.approved.map((model) => model.lastCheck?.status)).toEqual(["ok", "unchecked", "failed"]);
+  });
+
+  it("registerRevision passes the administrator's acceptance on, and the registered definition carries the reason", async () => {
+    const run = checker({ "anthropic/claude-sonnet-4-6": failed("model-not-found") });
+    const context = services(run.check);
+    await expect(registerRevision({ env: "staging", session, definition: definition(), services: context.services })).rejects.toThrow("was not registered");
+    const registered = await registerRevision({ env: "staging", session, definition: definition(), services: { ...context.services, acceptUncheckedModel: "pilot account" } });
+    expect(registered.warnings.join("\n")).toContain("pilot account");
+    expect((context.plane.registered[0] as { definition: ProjectDefinition }).definition.models?.default.lastCheck).toMatchObject({ status: "failed", class: "model-not-found", acceptedReason: "pilot account" });
+  });
+
+  it("drops a stored check from a pair this run did not check (a fixed or changed model must not keep an old verdict)", async () => {
+    const stale = { status: "failed" as const, class: "model-not-found" as const, checkedAt: "2026-01-01T00:00:00.000Z" };
+    const other = { provider: "some-gateway", modelId: "alpha", label: "Alpha", lastCheck: stale };
+    const input = definition({ default: DEFAULT, approved: [{ ...DEFAULT, lastCheck: stale }, other] });
+    const checked = await checkProjectModels({ definition: input, check: checker({}).check, now: () => Date.parse(NOW) });
+    expect(checked.definition.models?.approved.map((model) => model.lastCheck?.status)).toEqual(["ok", undefined]);
+    const unchecked = await checkProjectModels({ definition: input, check: undefined });
+    expect(JSON.stringify(unchecked.definition)).not.toContain("lastCheck");
   });
 });
 

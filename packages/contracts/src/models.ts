@@ -10,16 +10,20 @@ export const ModelIdentifierSchema = z.object({
 export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
 /**
- * The last single-call check of a project model (Task 4.10D, MODEL1), written by the CLI when a project revision is registered: whether it answered, and, when it did not, the
- * provider-neutral class of the failure. Never a message, a signal or provider text. Absent on a model nobody has checked (every project file written before the check existed).
+ * The last single-call check of a project model (Task 4.10D, MODEL1), written by the CLI when a project revision is registered. `ok`: it answered. `failed`: the check found something about
+ * the model itself (not found, not in the catalog, the key refused, a Bedrock quota of 0), named by `class`. `unchecked`: the check could not tell (a throttle, an outage, unreachable, the
+ * caller's own access); `class` says why, and the first use checks it again. `acceptedReason` is the administrator's reason for registering a failed model anyway
+ * (`--accept-unchecked-model`); who accepted it is the registration's own record. Never a message, a signal or provider text. Absent on a model nobody has checked.
  */
 export const ModelCheckRecordSchema = z.object({
-  status: z.enum(["ok", "failed"]),
+  status: z.enum(["ok", "failed", "unchecked"]),
   class: z.enum(E2E_MODEL_FAILURE_CLASSES).optional(),
   checkedAt: z.string().datetime(),
+  acceptedReason: z.string().trim().min(1).max(200).optional(),
 }).strict().superRefine((record, context) => {
   if (record.status === "failed" && record.class === undefined) context.addIssue({ code: "custom", path: ["class"], message: "a failed check names its class" });
   if (record.status === "ok" && record.class !== undefined) context.addIssue({ code: "custom", path: ["class"], message: "a passed check has no class" });
+  if (record.status === "ok" && record.acceptedReason !== undefined) context.addIssue({ code: "custom", path: ["acceptedReason"], message: "a passed check needs no acceptance" });
 });
 export type ModelCheckRecord = z.infer<typeof ModelCheckRecordSchema>;
 

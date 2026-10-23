@@ -126,12 +126,13 @@ export async function writeProjectFile(configDir: string, definition: ProjectDef
 
 export async function registerRevision(request: {
   env: string; session: AdminSession; definition: ProjectDefinition;
-  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome" | "modelCheck" | "now">;
+  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome" | "modelCheck" | "now" | "acceptUncheckedModel">;
   setupApproval?: StoredSetupDecision;
   setupPolicy?: E2EPolicy;
 }): Promise<{ revision: number; preflight: ConnectorPreflight[]; warnings: string[]; file: string }> {
   // MODEL1: the project's models are checked before anything is registered; a failing default refuses here.
-  const modelChecked = await checkProjectModels({ definition: request.definition, check: request.services.modelCheck, now: request.services.now });
+  const modelChecked = await checkProjectModels({ definition: request.definition, check: request.services.modelCheck, now: request.services.now,
+    ...(request.services.acceptUncheckedModel === undefined ? {} : { acceptUnchecked: { reason: request.services.acceptUncheckedModel } }) });
   const input = { ...request, definition: modelChecked.definition };
   const foundation = environmentStackName(input.env, "foundation");
   const runtimeBinding = ec2Binding(await input.services.stackOutputs(foundation), foundation);
@@ -389,7 +390,7 @@ async function recordSetupDecision(input: { session: AdminSession; fetch: typeof
  */
 export async function reapproveProjectSetup(input: {
   env: string; session: AdminSession; prompter: Prompter; write: (line: string) => void;
-  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome" | "modelCheck" | "now">;
+  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome" | "modelCheck" | "now" | "acceptUncheckedModel">;
   projectName: string;
 }): Promise<{ name: string; revision: number; file: string; decision: "approve" | "decline"; modelRouteRevision: string | null }> {
   const name = input.projectName;

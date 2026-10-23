@@ -26,35 +26,71 @@ async function bounded(check: ProjectModelChecker, pair: { provider: ModelProvid
   finally { clearTimeout(timer); }
 }
 
+/** The administrator's explicit acceptance of a model whose check found something wrong with it (`--accept-unchecked-model "<reason>"`). */
+export interface AcceptUncheckedModel { reason: string }
+
 /**
- * Checks the default model first, then every other approved pair, one at a time. A failing default refuses the registration with the class sentence; a failing approved pair is a warning,
- * and registers. Each checked pair carries its result (`lastCheck`) in the returned definition. A definition without models, a missing checker, and a provider this agentx cannot
- * check leave the definition as it was.
+ * Ruling DY: a failure is about the model itself only when the provider says it does not have it (not found, not in the catalog), refuses the key of a keyed provider, or a Bedrock quota is known
+ * to be 0. A throttle, an outage, an unreachable provider, an unknown failure, a key secret the caller cannot read, and a Bedrock access denial (which can be the caller's own) say nothing certain
+ * about the model.
+ */
+export function modelSpecificFailure(provider: string, result: Extract<ModelCheckResult, { ok: false }>): boolean {
+  switch (result.class) {
+    case "model-not-found":
+    case "not-in-catalog":
+      return true;
+    case "key-rejected":
+      return provider !== "amazon-bedrock";
+    case "limit-or-rate-limited":
+      return result.quota?.tokensPerMinute === 0;
+    default:
+      return false;
+  }
+}
+
+/**
+ * Checks the default model first, then every other approved pair, one at a time. A failing default refuses the registration only for a failure about the model (`modelSpecificFailure`),
+ * and `acceptUnchecked` registers it anyway, with the reason recorded. Every other outcome is a warning and registers: a model-specific failure of an approved pair is stored as `failed`, anything
+ * the check could not tell as `unchecked` (the first use checks it again). Each checked pair carries its result (`lastCheck`) in the returned definition; a pair not checked in this run (no checker,
+ * or a provider this agentx cannot check) carries none, so an old result never outlives the model it was about.
  */
 export async function checkProjectModels(input: {
-  definition: ProjectDefinition; check: ProjectModelChecker | undefined; now?: (() => number) | undefined; timeoutMs?: number;
+  definition: ProjectDefinition; check: ProjectModelChecker | undefined; now?: (() => number) | undefined; timeoutMs?: number; acceptUnchecked?: AcceptUncheckedModel | undefined;
 }): Promise<{ definition: ProjectDefinition; warnings: string[] }> {
   const models = input.definition.models;
-  if (models === undefined || input.check === undefined) return { definition: input.definition, warnings: [] };
+  if (models === undefined) return { definition: input.definition, warnings: [] };
   const now = input.now ?? Date.now;
   const timeoutMs = input.timeoutMs ?? PROJECT_MODEL_CHECK_LIMIT_MS;
   const defaultKey = modelKey(models.default);
   const ordered = [...models.approved.filter((model) => modelKey(model) === defaultKey), ...models.approved.filter((model) => modelKey(model) !== defaultKey)].slice(0, PROJECT_MODEL_CHECK_MAX_PAIRS);
   const records = new Map<string, ModelCheckRecord>();
   const warnings: string[] = [];
-  for (const model of ordered) {
+  for (const model of input.check === undefined ? [] : ordered) {
     if (!isCheckableProvider(model.provider)) continue;
-    const result = await bounded(input.check, { provider: model.provider, modelId: model.modelId }, timeoutMs);
+    const result = await bounded(input.check!, { provider: model.provider, modelId: model.modelId }, timeoutMs);
     const checkedAt = new Date(now()).toISOString();
     if (result.ok) { records.set(modelKey(model), { status: "ok", checkedAt }); continue; }
     const sentence = modelCheckClassSentence({ provider: model.provider, modelId: model.modelId, class: result.class });
-    if (modelKey(model) === defaultKey) {
-      throw agentXError("CONFIG_INVALID", `${sentence} Project ${input.definition.name} was not registered; fix its default model, then register again.`);
+    if (!modelSpecificFailure(model.provider, result)) {
+      records.set(modelKey(model), { status: "unchecked", class: result.class, checkedAt });
+      warnings.push(`The ${modelKey(model) === defaultKey ? "default" : "approved"} model ${describePair(model)} could not be checked, and is registered anyway; its first use checks it again. ${sentence}`);
+      continue;
     }
-    records.set(modelKey(model), { status: "failed", class: result.class, checkedAt });
-    warnings.push(`The approved model ${describePair(model)} failed its check, and is registered anyway: ${sentence}`);
+    const isDefault = modelKey(model) === defaultKey;
+    if (isDefault && input.acceptUnchecked === undefined) {
+      throw agentXError("CONFIG_INVALID", `${sentence} Project ${input.definition.name} was not registered; fix its default model, then register again, or register it anyway with --accept-unchecked-model "<reason>" (the reason is recorded with the revision).`);
+    }
+    const accepted = isDefault ? input.acceptUnchecked : undefined;
+    records.set(modelKey(model), { status: "failed", class: result.class, checkedAt, ...(accepted === undefined ? {} : { acceptedReason: accepted.reason }) });
+    warnings.push(accepted === undefined
+      ? `The approved model ${describePair(model)} failed its check, and is registered anyway: ${sentence}`
+      : `The default model ${describePair(model)} failed its check, and is registered anyway because you accepted it (${accepted.reason}): ${sentence}`);
   }
-  const withRecord = (model: ModelRef): ModelRef => { const record = records.get(modelKey(model)); return record === undefined ? model : { ...model, lastCheck: record }; };
+  const withRecord = (model: ModelRef): ModelRef => {
+    const { lastCheck: _stale, ...rest } = model;
+    const record = records.get(modelKey(model));
+    return record === undefined ? rest : { ...rest, lastCheck: record };
+  };
   const definition = ProjectDefinitionSchema.parse({ ...input.definition, models: { default: withRecord(models.default), approved: models.approved.map(withRecord) } });
   return { definition, warnings };
 }
@@ -81,7 +117,9 @@ export async function projectModelChecks(context: DoctorContext): Promise<Doctor
       const name = `${file.name}: ${model.label ?? key}`;
       if (result.ok) { found.push(doctorCheck("models", name, "ok", `${model.modelId} answers a one-token test call`)); continue; }
       const isDefault = modelKey(model) === modelKey(models.default);
-      found.push(doctorCheck("models", name, isDefault ? "fail" : "warn", modelCheckClassSentence({ provider: model.provider, modelId: model.modelId, class: result.class }),
+      // Only a failure about the model fails doctor, and only for the default; anything the check could not tell (a throttle, an outage, this computer's own access) is a warning.
+      const status = isDefault && modelSpecificFailure(model.provider, result) ? "fail" : "warn";
+      found.push(doctorCheck("models", name, status, modelCheckClassSentence({ provider: model.provider, modelId: model.modelId, class: result.class }),
         `choose another model in ${file.path} and register it again, or fix the account's access to ${model.modelId}`));
     }
   }
