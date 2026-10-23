@@ -21,7 +21,7 @@ import {
   type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
-import { createModelRuntimeWithFallback, type ChatGptFallback, type ChatGptFallbackReason } from "@agentx/model-runtime";
+import { createModelRuntimeWithFallback, type ChatGptFallback, type ChatGptFallbackReason, type ModelFallbackNotice } from "@agentx/model-runtime";
 import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
@@ -174,8 +174,8 @@ export type PiModelRuntimeResolver = (
 ) => Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }>;
 
 /** The worker's Pi session adapter. Without `modelRuntime` it resolves the configured model as the worker always has. */
-export function createDefaultPiSessionAdapter(options: { modelRuntime?: PiModelRuntimeResolver } = {}): PiSessionAdapter {
-  const resolveModelRuntime = options.modelRuntime ?? workerModelRuntime;
+export function createDefaultPiSessionAdapter(options: { modelRuntime?: PiModelRuntimeResolver; onModelFallback?: WorkerModelFallbackReporter } = {}): PiSessionAdapter {
+  const resolveModelRuntime = options.modelRuntime ?? ((model: WorkspaceModelConfiguration) => workerModelRuntime(model, undefined, undefined, options.onModelFallback));
   return {
     async create(input) {
       return createDefaultSession(
@@ -231,12 +231,19 @@ export function createChatGptPiSessionAdapter(
   return createDefaultPiSessionAdapter({ modelRuntime: (model) => workerModelRuntime(model, apiKey, chatgptFallback) });
 }
 
-async function workerModelRuntime(
+/** MODEL3: told when a missing provider secret sent the worker to the installation's chosen fallback model. */
+export type WorkerModelFallbackReporter = (notice: ModelFallbackNotice) => void;
+
+export async function workerModelRuntime(
   configured: WorkspaceModelConfiguration,
   apiKey?: () => Promise<string>,
   chatgptFallback?: ChatGptFallback,
+  onModelFallback?: WorkerModelFallbackReporter,
 ): Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }> {
-  const resolved = await createModelRuntimeWithFallback(configured, "worker", apiKey === undefined ? {} : { apiKey, ...(chatgptFallback === undefined ? {} : { chatgptFallback }) });
+  const resolved = await createModelRuntimeWithFallback(configured, "worker", {
+    ...(apiKey === undefined ? {} : { apiKey, ...(chatgptFallback === undefined ? {} : { chatgptFallback }) }),
+    ...(onModelFallback === undefined ? {} : { onFallback: onModelFallback }),
+  });
   const modelRuntime = resolved.runtime;
   if (resolved.model.provider === "amazon-bedrock") {
     modelRuntime.registerNativeProvider(executionRoleBedrockProvider());

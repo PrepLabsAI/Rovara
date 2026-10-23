@@ -12,7 +12,8 @@ import { inspectWorkspaceForClose } from "./close-workspace.js";
 import { advertisedInvocationFeatures, createWorkerServerState, startWorkerServer } from "./server.js";
 import { consoleWorkerLog, logWorkerStarted } from "./worker-log.js";
 import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
-import { resolveTaskSessionModel } from "./task-model.js";
+import { modelFallbackReporter, resolveTaskSessionModel } from "./task-model.js";
+import { createDefaultPiSessionAdapter } from "./pi-session.js";
 import { chatGptTokenSource } from "./chatgpt-token.js";
 import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRuntime } from "./project-setup-executor.js";
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
@@ -82,7 +83,8 @@ const state = createWorkerServerState(
         return runTaskInvocation(invocation, {
           rootPath,
           model: session.model,
-          ...(session.piAdapter === undefined ? {} : { piAdapter: session.piAdapter }),
+          // MODEL3: a missing provider key that sent the task to the chosen fallback model is told to the task page, once, as a progress event.
+          piAdapter: session.piAdapter ?? createDefaultPiSessionAdapter({ onModelFallback: modelFallbackReporter(callbacks.eventSink) }),
           ...callbacks,
           ...(invocation.payload.workflowE2EAdmission === undefined ? {} : {
             workflowE2EEvidenceRoot: requiredEnvironment("CONTAINED_FOUNDATION_EVIDENCE_DIR"),

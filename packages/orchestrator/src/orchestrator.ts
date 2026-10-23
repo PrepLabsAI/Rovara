@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
+import { createModelRuntimeWithFallback, type ModelFallbackNotice } from "@agentx/model-runtime";
 import { resolve } from "node:path";
 import {
   createAgentSessionFromServices,
@@ -40,6 +40,8 @@ export interface OrchestratorOptions {
   refreshConnectors?: readonly string[];
   /** Told about each connector whose discovery failed this turn, so the host can log it. */
   onConnectorUnavailable?: (failure: ConnectorUnavailable) => void;
+  /** MODEL3: told when a missing provider key secret sent this turn to the installation's chosen fallback model; the host shows the notice with the reply. */
+  onModelFallback?: (notice: ModelFallbackNotice) => void;
   /** Receives safe extension failure metadata, never Pi's raw error message or stack. */
   onExtensionError?: (failure: ExtensionFailure) => void;
   /** Where replies are shown. "slack" adds the Slack reply style; absent, the prompt is unchanged. */
@@ -106,7 +108,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
   // Directories first, then the model check, then discovery: the order this function always had.
   await stateDirectories(options.stateDirectory);
   const resolved = options.modelRuntime ? { runtime: options.modelRuntime, model: options.model }
-    : await createModelRuntimeWithFallback(options.model, "orchestrator");
+    : await createModelRuntimeWithFallback(options.model, "orchestrator", options.onModelFallback === undefined ? {} : { onFallback: options.onModelFallback });
   options = { ...options, model: resolved.model };
   const modelRuntime = resolved.runtime;
   if (!modelRuntime.getModel(options.model.provider, options.model.modelId)) {
