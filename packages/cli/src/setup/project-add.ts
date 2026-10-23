@@ -346,6 +346,17 @@ async function confirmSetupPlan(input: { prompter: Prompter; write: (line: strin
   return input.prompter.confirm("Use this project setup plan? (" + commandSummary + "; targets: " + targetSummary + "; mock substitutions: " + mockSummary + "; unresolved inputs: " + blockerSummary + "; " + aiNavigationSummary + ")", { defaultValue: true });
 }
 
+/** What the administrator is told after declining the setup plan: the checks that are off, and the commands the project keeps (RUN-5). */
+function declinedPlanNotice(name: string, setup: ProjectDefinition["setup"], readiness: ProjectDefinition["readiness"]): string {
+  const setupText = setup.map(commandLine).join("; ");
+  const testText = readiness.map(commandLine).join("; ");
+  const kept = setup.length > 0 && readiness.length > 0 ? `its setup command (${setupText}) and test command (${testText}) are kept`
+    : setup.length > 0 ? `its setup command (${setupText}) is kept; it has no test command`
+    : readiness.length > 0 ? `its test command (${testText}) is kept; it has no setup command`
+    : "it has no setup or test command";
+  return `Browser and API checks are off for ${name}; ${kept}.`;
+}
+
 /** Records the administrator's decision on the proposal and holds the control plane's answer to exactly that decision. */
 async function recordSetupDecision(input: { session: AdminSession; fetch: typeof fetch; projectName: string; trusted: { proposalRef: string; proposalSha256: string }; decision: "approve" | "decline" }): Promise<StoredSetupDecision> {
   const { trusted, decision } = input;
@@ -502,13 +513,15 @@ export async function addProject(input: {
   const typed = (line: string, timeout: number) => (line.trim() === "" ? [] : [parseCommandLine(line, cwd, timeout)]);
   // Explicit command flags remain the user's selected ordinary project commands. They do not
   // replace or suppress the source-backed E2E proposal; the separate confirmation below still
-  // records the owner's approve/decline decision for that proposal.
+  // records the owner's approve/decline decision for that proposal, and a decline keeps them.
   if (flags.setupCommand !== undefined) setup = typed(flags.setupCommand, SETUP_TIMEOUT);
   if (flags.testCommand !== undefined) readiness = typed(flags.testCommand, TEST_TIMEOUT);
   if (setupProposal !== undefined && e2ePolicy !== undefined && trustedSetup !== undefined) {
     e2eAccepted = await confirmSetupPlan({ prompter, write: input.write, proposal: setupProposal, aiNavigation: trustedSetup.aiNavigation, setup, readiness });
-    if (!e2eAccepted) { setup = []; readiness = []; }
     setupApproval = await recordSetupDecision({ session: input.session, fetch: input.services.fetch, projectName: name, trusted: trustedSetup, decision: e2eAccepted ? "approve" : "decline" });
+    // RUN-5: declining the plan turns off only the browser and API checks (no `e2e` policy is registered). The project's own setup and test commands, the proposed ones and the ones given
+    // as flags, stay; they used to be erased, and every later task then ran with no setup and no test check.
+    if (!e2eAccepted) input.write(declinedPlanNotice(name, setup, readiness));
   } else {
     input.write(proposed.basis.length === 0
       ? `No build file AgentX knows in ${repository.fullName}. AgentX will propose checks for each task; you can add project checks later.`

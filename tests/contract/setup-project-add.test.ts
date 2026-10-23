@@ -156,8 +156,34 @@ describe("agentx project add (FR-040)", () => {
     await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", false]), write: () => undefined, services: services(plane, repositories), flags: {}, e2eSetup: { proposal, policy, snapshot } });
     const definition = (plane.registered[0] as { definition: { e2e?: E2EPolicy; setup: unknown[]; readiness: unknown[] } }).definition;
     expect(definition.e2e).toBeUndefined();
-    expect(definition.setup).toEqual([]);
-    expect(definition.readiness).toEqual([]);
+    // RUN-5: declining drops only the E2E part. The project keeps the commands it was proposed.
+    expect(definition.setup).toMatchObject([{ executable: "npm", args: ["ci"] }]);
+    expect(definition.readiness).toMatchObject([{ executable: "npm", args: ["test"] }]);
+  });
+
+  // Evaluation fix RUN-5: the decline used to erase the commands, including the ones the user typed as flags, and said only "Registered project X".
+  it("keeps the commands the user passed as flags when the setup plan is declined, records the decline, and says the commands were kept", async () => {
+    const plane = fakeControlPlane();
+    const bytes = Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } }));
+    const { proposal, policy, snapshot, repositories } = await sourceBackedSetup(bytes);
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([false]), write: (line) => lines.push(line), services: services(plane, repositories),
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "pnpm install", testCommand: "make check" }, e2eSetup: { proposal, policy, snapshot } });
+    const registration = plane.registered[0] as { definition: { e2e?: E2EPolicy; setup: Array<{ executable: string; args: string[] }>; readiness: Array<{ executable: string; args: string[] }> }; setupApproval?: { decision: string } };
+    expect(registration.definition.e2e).toBeUndefined();
+    expect(registration.definition.setup).toMatchObject([{ executable: "pnpm", args: ["install"] }]);
+    expect(registration.definition.readiness).toMatchObject([{ executable: "make", args: ["check"] }]);
+    expect(registration.setupApproval).toMatchObject({ decision: "decline" });
+    expect(plane.requests.filter((request) => request.path === "/v1/admin/projects/setup-approvals").map((request) => (request.body as { decision: string }).decision)).toEqual(["decline"]);
+    expect(lines.join("\n")).toContain("Browser and API checks are off for payments-api; its setup command (pnpm install) and test command (make check) are kept.");
+  });
+
+  it("says no commands were set when the plan is declined and the project has none", async () => {
+    const plane = fakeControlPlane();
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([false]), write: (line) => lines.push(line), services: services(plane),
+      flags: { repository: "acme/docs", projectName: "docs", setupCommand: "", testCommand: "" } });
+    expect(lines.join("\n")).toContain("Browser and API checks are off for docs; it has no setup or test command.");
   });
 
   it("connects the project when bounded source testing exploration is unavailable, and keeps the missing evidence visible", async () => {
@@ -358,10 +384,11 @@ describe("agentx project add (FR-040)", () => {
     expect((plane.registered[0] as { definition: { readiness: Array<{ executable: string; args: string[] }> } }).definition.readiness).toMatchObject([{ executable: "make", args: ["check"] }]);
   });
 
-  it("keeps ordinary commands empty when the owner declines the source-backed plan", async () => {
+  it("keeps the proposed ordinary commands when the owner declines the source-backed plan (RUN-5; they used to be erased)", async () => {
     const plane = fakeControlPlane();
     await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", false]), write: () => undefined, services: services(plane), flags: {} });
-    expect((plane.registered[0] as { definition: { setup: unknown[]; readiness: unknown[] } }).definition).toMatchObject({ setup: [], readiness: [] });
+    expect((plane.registered[0] as { definition: { setup: unknown[]; readiness: unknown[]; e2e?: unknown } }).definition).toMatchObject({ setup: [{ executable: "npm", args: ["ci"] }], readiness: [{ executable: "npm", args: ["test"] }] });
+    expect((plane.registered[0] as { definition: { e2e?: unknown } }).definition.e2e).toBeUndefined();
   });
 
   it("keeps empty-target obligations visible when no build file is known", async () => {
