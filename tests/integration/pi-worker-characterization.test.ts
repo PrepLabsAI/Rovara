@@ -784,6 +784,14 @@ function cancelledReport(run: Awaited<ReturnType<typeof cancelDuringTool>>) {
   };
 }
 
+/** The sanitized model-call notes the worker sent (PLANINC-3b). */
+function modelCallNotes(run: Awaited<ReturnType<typeof cancelDuringTool>>) {
+  return run.workerEvents.flatMap((event) => {
+    const note = (event.payload as { modelCall?: unknown } | null)?.modelCall;
+    return event.type === "progress" && note !== undefined ? [note] : [];
+  });
+}
+
 describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", () => {
   // Guards finishTurn (0.99): a cancel during a tool must abort the tool, end the task CANCELLED with no
   // result, and never call the model again. F3 (the loop calling the model after an aborted tool) is refuted on 0.85.1.
@@ -798,9 +806,11 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
       toolEnd: [{ type: "tool_execution_end", toolCallId: "call-cancel-1", toolName: "bash", isError: true, durationMs: anyNumber, // Ruling F (Pi 1.1+, additive)
         result: { content: [{ type: "text", text: "started\n\n\nCommand aborted" }], details: {} } }],
       usageOutcome: ["CANCELLED"],
-      // Pi starts the next turn, but its model call fails before the scripted model is asked.
-      lastAssistant: { stopReason: "error", errorMessage: "This operation was aborted" },
+      // Pi starts the next turn, but its model call fails before the scripted model is asked. PLANINC-3b: that failed message is no longer forwarded raw
+      // (its provider text stays out of the task's events); the task's events carry one sanitized note for it instead.
+      lastAssistant: { stopReason: "toolUse", errorMessage: undefined },
     });
+    expect(modelCallNotes(run)).toEqual([{ outcome: "failed", class: "unknown", signal: null, attempt: 1, durationMs: 0 }]);
     expect(run.factoryCalls).toBe(1);
     // The 5 s sleep was killed, not waited out.
     expect(run.elapsed).toBeLessThan(3_000);
@@ -816,8 +826,9 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
       toolEnd: [{ type: "tool_execution_end", toolCallId: "call-cancel-1", toolName: "bash", isError: true,
         result: { content: [{ type: "text", text: "Operation aborted" }], details: {} } }],
       usageOutcome: ["CANCELLED"],
-      lastAssistant: { stopReason: "error", errorMessage: "This operation was aborted" },
+      lastAssistant: { stopReason: "toolUse", errorMessage: undefined },
     });
+    expect(modelCallNotes(run)).toEqual([{ outcome: "failed", class: "unknown", signal: null, attempt: 1, durationMs: 0 }]);
     expect(run.factoryCalls).toBe(1);
   });
 });
