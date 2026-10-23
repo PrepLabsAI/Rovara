@@ -9,6 +9,7 @@ import type { StoredTokens, TokenStore } from "../token-store.js";
 import type { AlertsApi } from "./alerts.js";
 import type { SlackChannelApi } from "./channel-add.js";
 import type { VendorApi } from "./connectors/vendors.js";
+import type { ProjectModelChecker } from "./project-model-check.js";
 import type { GitHubRepositoryApi } from "./project-files.js";
 
 export interface AdminSession { controlPlaneUrl: string; accessToken: string }
@@ -25,6 +26,10 @@ export interface CognitoAdmin {
 }
 
 export interface SetupServices {
+  /** MODEL1: one single-call check of a project model with the environment's own keys and region; absent in a context that cannot make it (registration then checks nothing). */
+  modelCheck?: ProjectModelChecker;
+  /** The clock the model check stamps its results with; the system clock when absent. */
+  now?: () => number;
   /** Host home directory for writing native loop-enrollment receipts after successful registration. */
   loopHome?: string;
   tokenStore: TokenStore;

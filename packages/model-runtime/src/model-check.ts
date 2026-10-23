@@ -1,4 +1,4 @@
-import { KEYED_MODEL_PROVIDERS, bedrockProfileGeography, isKeyedModelProvider, type E2EModelFailure, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { bedrockProfileGeography, modelCheckClassSentence, type E2EModelFailure, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
 import { MissingProviderSecret } from "./config.js";
 import { classifyProviderFailure, isNetworkCode, signalPattern } from "./provider-failure.js";
 import { foundationModelIdOf, quotaHint, type QuotaClient } from "./model-discovery.js";
@@ -60,7 +60,8 @@ function networkCodeOf(error: unknown): string | undefined {
 
 /** The class of a failed check, from the error's status, name and network code. Message text is read only to tell the model-not-in-catalog refusal apart, never kept. */
 export function failureFromError(provider: ModelProvider, error: unknown): E2EModelFailure {
-  if (error instanceof MissingProviderSecret) return { class: "key-rejected", signal: "secret-unreadable" };
+  // By name too: the error may come from another copy of this package (the CLI loads the built one).
+  if (error instanceof MissingProviderSecret || (isRecord(error) && (error.name === "MissingProviderSecret" || error.name === "MissingOpenRouterSecret"))) return { class: "key-rejected", signal: "secret-unreadable" };
   if (isRecord(error) && error.code === "CONFIG_INVALID") {
     return typeof error.message === "string" && /not in the installed Pi catalog/.test(error.message) ? { class: "model-not-found", signal: "not-in-catalog" } : { class: "request-rejected", signal: null };
   }
@@ -133,19 +134,5 @@ export function bedrockThrottleSentence(input: { modelId: string; quota: ModelCh
   return `Amazon Bedrock throttled the check of ${modelId}; if this repeats, check Service Quotas → Amazon Bedrock (quota ${quota.code ?? "unknown"}: ${quota.tokensPerMinute} tokens per minute)`;
 }
 
-const providerLabel = (provider: ModelProvider): string => (isKeyedModelProvider(provider) ? KEYED_MODEL_PROVIDERS[provider].label : "Amazon Bedrock");
-
 /** One fixed sentence per class, naming the provider and the model, for a check that is stored or listed (a project's approved pair). It never quotes the provider. */
-export function classSentence(input: { provider: ModelProvider; modelId: string; class: E2EModelFailureClass }): string {
-  const label = providerLabel(input.provider);
-  const { modelId } = input;
-  switch (input.class) {
-    case "limit-or-rate-limited": return `${label}'s limit for ${modelId} is reached or set to 0; raise the limit (for Amazon Bedrock, in Service Quotas), or choose another model.`;
-    case "key-rejected": return `${label} refused the key for ${modelId}; check the key, and that it may use this model.`;
-    case "model-not-found": return `${label} does not have ${modelId} for this account; check the model id, or choose another model.`;
-    case "unreachable": return `${label} could not be reached for ${modelId}; check the network, then check again.`;
-    case "request-rejected": return `${label} refused the check request for ${modelId}; check the model id and its settings.`;
-    case "provider-outage": return `${label} did not answer the check of ${modelId} in time or reported a problem; try again later.`;
-    case "unknown": return `The check of ${modelId} on ${label} failed for a reason Rovara could not tell; check the model, then check again.`;
-  }
-}
+export const classSentence = (input: { provider: ModelProvider; modelId: string; class: E2EModelFailureClass }): string => modelCheckClassSentence(input);

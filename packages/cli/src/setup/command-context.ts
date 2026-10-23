@@ -13,6 +13,10 @@ import { processPrompter, unattendedPrompter, type Prompter, type TextWriter } f
 import { formatSuccess } from "../output.js";
 import type { TokenStore } from "../token-store.js";
 import { openAdminSession } from "./admin-session.js";
+import { awsPrerequisiteChecks } from "../init/prerequisites.js";
+import { realCommandRunner } from "../deploy/commands.js";
+import { runModelCheck } from "../init/run-model-check.js";
+import type { ProjectModelChecker } from "./project-model-check.js";
 import type { AdminSession, SetupServices } from "./services.js";
 
 export interface SetupRun {
@@ -46,6 +50,15 @@ function noTerminalPrompter(): Prompter {
   };
 }
 
+/** The model check of one environment: its AWS checks are built once, on the first pair. */
+function projectModelChecker(settings: EnvironmentSettings, input: { parameterStore: (region?: string) => ParameterStore; fetch: typeof fetch; stderr: TextWriter }): ProjectModelChecker {
+  let checks: ReturnType<typeof awsPrerequisiteChecks> | undefined;
+  return (pair) => {
+    checks ??= awsPrerequisiteChecks({ region: settings.region, account: settings.account, store: input.parameterStore(settings.region), runner: realCommandRunner(input.stderr), fetch: input.fetch });
+    return runModelCheck({ ...pair, region: settings.region, checks, config: settings.models, sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }) });
+  };
+}
+
 /** The real context: settings from SSM in --region (default: the AWS configuration's), clients in
  * the settings' region, and the admin session init uses. Your own OIDC's admin claim is not in the
  * settings, so a day-2 command relies on the admin route's own check. */
@@ -62,7 +75,11 @@ export function realSetupContext(input: {
     return {
       env: globals.env, settings,
       secrets: secretsManagerInitSecrets(new SecretsManagerClient({ region: settings.region })),
-      services: { ...realSetupServices({ region: settings.region, fetch: input.fetch, configDir: globals.configDir, tokenStore: input.tokenStore }), ...(input.home === undefined ? {} : { loopHome: input.home }) },
+      services: {
+        ...realSetupServices({ region: settings.region, fetch: input.fetch, configDir: globals.configDir, tokenStore: input.tokenStore }), ...(input.home === undefined ? {} : { loopHome: input.home }),
+        // MODEL1: a project's models are checked with the environment's own keys and region, through the same checks init and doctor make.
+        modelCheck: projectModelChecker(settings, input),
+      },
       prompter: process.stdin.isTTY === true ? processPrompter(input.stderr) : noTerminalPrompter(),
       write: (line) => { input.stderr.write(`${line}\n`); },
       sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),

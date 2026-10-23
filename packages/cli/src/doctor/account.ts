@@ -1,6 +1,6 @@
 // FR-050's model access, alert subscription and budget; the region's capacity (the vCPU quota and
 // free Elastic IPs init checks, item 5); and spec 025 FR-046's sign-in checks, unchanged.
-import { environmentStackName } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, environmentStackName, isKeyedModelProvider } from "@agentx/contracts";
 import { EC2_WORKER_VCPU_REQUIREMENT, modelCheckProblem, NAT_ELASTIC_IPS, type ModelRole } from "../init/prerequisites.js";
 import { runModelCheck } from "../init/run-model-check.js";
 import { plainMessage } from "../output.js";
@@ -18,6 +18,17 @@ export async function modelChecks(context: DoctorContext): Promise<DoctorCheck[]
     if (result === undefined) {
       const wording = { changeModel: `agentx --env ${env} config set models.${role} <model id>`, rerun: "run agentx doctor again", region: "check this computer's network access to AWS (an environment cannot move regions), then run agentx doctor again" };
       const outcome = await runModelCheck({ provider, modelId, region: settings.region, checks: services.checks, config: settings.models, sleep: services.sleep });
+      if (!outcome.ok && outcome.signal === "secret-unreadable" && isKeyedModelProvider(provider)) {
+        // MODEL3: a missing key is its own error, naming the role and what happens to its work.
+        const label = KEYED_MODEL_PROVIDERS[provider].label;
+        const fallback = (await services.stacks.describe(settings.stacks.runtime ?? environmentStackName(env, "runtime")))?.parameters.ModelFallback;
+        const chosen = fallback !== undefined && fallback !== "none" && fallback !== "" ? fallback : undefined;
+        checks.push(check("models", role, "fail", chosen === undefined
+          ? `the ${label} key secret for the ${role} model ${modelId} is missing, and no fallback model was chosen: the ${role}'s tasks fail by name until the key is restored`
+          : `the ${label} key secret for the ${role} model ${modelId} is missing: its tasks run on Amazon Bedrock ${chosen} (models.fallback) until the key is restored`,
+        `restore the key, or choose a fallback with agentx --env ${env} config set models.fallback <bedrock model id>`));
+        continue;
+      }
       result = outcome.ok ? { ok: true, detail: `${modelId} answers a one-token test call` }
         : { ok: false, detail: modelCheckProblem({ modelId, role, region: settings.region, error: outcome.error, ...(outcome.quota === undefined ? {} : { quota: outcome.quota }), wording }) };
       results.set(key, result);

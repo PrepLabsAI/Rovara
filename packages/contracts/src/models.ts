@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { E2E_MODEL_FAILURE_CLASSES, type E2EModelFailureClass } from "./e2e-model-channel.js";
+import { KEYED_MODEL_PROVIDERS, isKeyedModelProvider } from "./model-providers.js";
 
 export const ModelIdentifierSchema = z.object({
   provider: z.string().trim().min(1).max(128),
@@ -7,9 +9,24 @@ export const ModelIdentifierSchema = z.object({
 
 export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
+/**
+ * The last single-call check of a project model (Task 4.10D, MODEL1), written by the CLI when a project revision is registered: whether it answered, and, when it did not, the
+ * provider-neutral class of the failure. Never a message, a signal or provider text. Absent on a model nobody has checked (every project file written before the check existed).
+ */
+export const ModelCheckRecordSchema = z.object({
+  status: z.enum(["ok", "failed"]),
+  class: z.enum(E2E_MODEL_FAILURE_CLASSES).optional(),
+  checkedAt: z.string().datetime(),
+}).strict().superRefine((record, context) => {
+  if (record.status === "failed" && record.class === undefined) context.addIssue({ code: "custom", path: ["class"], message: "a failed check names its class" });
+  if (record.status === "ok" && record.class !== undefined) context.addIssue({ code: "custom", path: ["class"], message: "a passed check has no class" });
+});
+export type ModelCheckRecord = z.infer<typeof ModelCheckRecordSchema>;
+
 export const ModelRefSchema = ModelIdentifierSchema.extend({
   thinkingLevel: ThinkingLevelSchema.optional(),
   label: z.string().trim().min(1).max(64).optional(),
+  lastCheck: ModelCheckRecordSchema.optional(),
 }).strict();
 
 /** A model plus the thinking level to run it at, as carried by an invocation or an eval run. */
@@ -60,4 +77,22 @@ export type ProjectModelOptions = z.infer<typeof ProjectModelOptionsSchema>;
 
 export function modelKey(model: ModelIdentifier): string {
   return `${model.provider}\0${model.modelId}`;
+}
+
+/** The provider's name as people read it: a keyed provider's label, Amazon Bedrock otherwise. */
+const providerLabel = (provider: string): string => (isKeyedModelProvider(provider) ? KEYED_MODEL_PROVIDERS[provider].label : provider === "amazon-bedrock" ? "Amazon Bedrock" : provider);
+
+/** One fixed sentence per failure class, naming the provider and the model, for a check that is stored or listed. It never quotes the provider. */
+export function modelCheckClassSentence(input: { provider: string; modelId: string; class: E2EModelFailureClass }): string {
+  const label = providerLabel(input.provider);
+  const { modelId } = input;
+  switch (input.class) {
+    case "limit-or-rate-limited": return `${label}'s limit for ${modelId} is reached or set to 0; raise the limit (for Amazon Bedrock, in Service Quotas), or choose another model.`;
+    case "key-rejected": return `${label} refused the key for ${modelId}; check the key, and that it may use this model.`;
+    case "model-not-found": return `${label} does not have ${modelId} for this account; check the model id, or choose another model.`;
+    case "unreachable": return `${label} could not be reached for ${modelId}; check the network, then check again.`;
+    case "request-rejected": return `${label} refused the check request for ${modelId}; check the model id and its settings.`;
+    case "provider-outage": return `${label} did not answer the check of ${modelId} in time or reported a problem; try again later.`;
+    case "unknown": return `The check of ${modelId} on ${label} failed for a reason Rovara could not tell; check the model, then check again.`;
+  }
 }

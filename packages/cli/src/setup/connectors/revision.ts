@@ -80,7 +80,7 @@ export async function refuseLegacyGitHubMcp(input: { projectName: string; config
 
 export async function addConnectorRevision(input: {
   env: string; session: AdminSession; projectName: string; connector: ConnectorConfig;
-  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir">; write: (line: string) => void; rerun: string;
+  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "modelCheck" | "now">; write: (line: string) => void; rerun: string;
 }): Promise<{ revision: number }> {
   const current = await loadProjectFile({ projectName: input.projectName, configDir: input.services.configDir, rerun: input.rerun });
   const others = (current.integrations?.connectors ?? []).filter((entry) => entry.name !== input.connector.name);

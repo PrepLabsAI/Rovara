@@ -23,6 +23,7 @@ import type { Prompter } from "../init/prompts.js";
 import {
   agentxRepositoryName, commandLine, parseCommandLine, proposeCommands, BUILD_FILES, SETUP_TIMEOUT, TEST_TIMEOUT, type RepositoryInfo, type RepositorySnapshot,
 } from "./project-files.js";
+import { checkProjectModels } from "./project-model-check.js";
 import type { AdminSession, SetupServices } from "./services.js";
 
 export const DEFAULT_INSTRUCTIONS = "Delegate every repository read, edit, build, and test to the remote AgentX worker.";
@@ -123,17 +124,20 @@ export async function writeProjectFile(configDir: string, definition: ProjectDef
   return path;
 }
 
-export async function registerRevision(input: {
+export async function registerRevision(request: {
   env: string; session: AdminSession; definition: ProjectDefinition;
-  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome">;
+  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome" | "modelCheck" | "now">;
   setupApproval?: StoredSetupDecision;
   setupPolicy?: E2EPolicy;
 }): Promise<{ revision: number; preflight: ConnectorPreflight[]; warnings: string[]; file: string }> {
+  // MODEL1: the project's models are checked before anything is registered; a failing default refuses here.
+  const modelChecked = await checkProjectModels({ definition: request.definition, check: request.services.modelCheck, now: request.services.now });
+  const input = { ...request, definition: modelChecked.definition };
   const foundation = environmentStackName(input.env, "foundation");
   const runtimeBinding = ec2Binding(await input.services.stackOutputs(foundation), foundation);
   const result = (await registerProject({ controlPlaneUrl: input.session.controlPlaneUrl, accessToken: input.session.accessToken, definition: input.definition, runtimeBinding, ...(input.setupApproval === undefined ? {} : { setupApproval: input.setupApproval }) }, input.services.fetch)) as Record<string, unknown>;
   const preflight = RegistrationPreflightSchema.safeParse(result.preflight);
-  const warnings = Array.isArray(result.warnings) ? result.warnings.filter((entry): entry is string => typeof entry === "string") : [];
+  const warnings = [...modelChecked.warnings, ...(Array.isArray(result.warnings) ? result.warnings.filter((entry): entry is string => typeof entry === "string") : [])];
   if (input.setupApproval?.decision === "approve" && input.definition.e2e !== undefined) {
     if (result.setupRuntime === "QUEUED") warnings.push("E2E testing setup was queued; project registration is complete, but testing is not ready.");
     else if (result.setupRuntime === "UNAVAILABLE") warnings.push("E2E testing setup is unavailable; project registration is complete, but testing is not ready.");
@@ -377,7 +381,7 @@ async function recordSetupDecision(input: { session: AdminSession; fetch: typeof
  */
 export async function reapproveProjectSetup(input: {
   env: string; session: AdminSession; prompter: Prompter; write: (line: string) => void;
-  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome">;
+  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome" | "modelCheck" | "now">;
   projectName: string;
 }): Promise<{ name: string; revision: number; file: string; decision: "approve" | "decline"; modelRouteRevision: string | null }> {
   const name = input.projectName;
