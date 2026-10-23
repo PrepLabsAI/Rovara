@@ -163,7 +163,7 @@ const CONCLUDE: Answer = { tool: { id: "tooluse_b", name: "complete_step", input
 
 const stepContext = (recorded: unknown[] = []) => ({
   model: undefined, providerOptions: undefined, agentContext: undefined, signal: new AbortController().signal,
-  budgets: { maxModelCalls: 12, remainingMs: () => 60_000, recordModelCall: (call: unknown) => { recorded.push(call); } },
+  budgets: { maxModelCalls: 12, actionsUsed: () => 0, remainingMs: () => 60_000, recordModelCall: (call: unknown) => { recorded.push(call); } },
   step: { instruction: "export the orders" }, attachTurns: () => undefined, attachTranscript: () => undefined,
 });
 
@@ -249,7 +249,8 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
     ledger.beginStep(0, "export the orders");
     const executor = createRovaraE2EAgentExecutor({ position: () => position, ledger: () => ledger, origin: () => "http://127.0.0.1:4317" });
     const tapped: string[] = [];
-    const context = { ...stepContext(), model: adapter, step: { kind: "act", index: 0, instruction: "export the orders", params: undefined, secrets: [] },
+    // The step's own action count, as the SDK keeps it: the tap takes a slot.
+    const context = { ...stepContext(), budgets: { ...stepContext().budgets, actionsUsed: () => tapped.length }, model: adapter, step: { kind: "act", index: 0, instruction: "export the orders", params: undefined, secrets: [] },
       target: { name: "web", platform: "web", verbs: new Set(["tap"]) }, ledger: "", pixelsTainted: false, actions: { tap: async (target: { id: string }) => { tapped.push(target.id); } },
       observe: async () => ({ revision: "1", text: '#n1 heading "Orders"\n#n2 button "Export orders" testid="export"', truncated: false, viewport: { width: 1, height: 1 } }) };
     const fetchSpy = vi.spyOn(globalThis, "fetch");
