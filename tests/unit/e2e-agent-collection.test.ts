@@ -12,13 +12,16 @@ import { E2EApplicationCollectionOracleSchema, qualifyE2EApplicationCollection }
 // worker's receipts and the executor's ledgers that the host now carries. The pure function is tests/contract/workflow-e2e-agent-results.test.ts; the broker's side is
 // tests/contract/workflow-e2e-agent-evidence.test.ts. These need the built verifier and a Chromium, and run where the 4.3b agent tests run.
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-type Scenario = "ok" | "decoy" | "no-download" | "double" | "outage";
+type Scenario = "ok" | "decoy" | "no-download" | "double" | "outage" | "badkey" | "offorigin";
 const SCRIPTS = {
   ok: [{ kind: "tap", name: /Download orders/ }, { kind: "done" }],
   decoy: [{ kind: "tap", name: /Download invoices/ }, { kind: "done" }],
   "no-download": [{ kind: "done" }],
   double: [{ kind: "tap", name: /Download orders/ }, { kind: "tap", name: /Download invoices/ }, { kind: "done" }],
   outage: [{ kind: "fail", message: "provider down" }],
+  // Refused before the SDK takes an action slot: a key outside its grammar, and a navigation to another origin. Each is retried and the step concludes.
+  badkey: [{ kind: "press", name: /Download orders/, key: "Return" }, { kind: "tap", name: /Download orders/ }, { kind: "done" }],
+  offorigin: [{ kind: "navigate", url: "https://elsewhere.example/orders" }, { kind: "tap", name: /Download orders/ }, { kind: "done" }],
 } as const;
 
 describe.runIf(agentRunnable)("the collector over real agent runs", () => {
@@ -98,6 +101,28 @@ describe.runIf(agentRunnable)("the collector over real agent runs", () => {
     // AGENTCODES: the codes the case matched ride on the qualification (for the worker's log), and a clean case has none.
     expect(collected.qualification!.agentCodes).toEqual([{ caseId: a.run.caseId, codes: ["model-unavailable"] }]);
     expect(collectAssembled(await readBack("ok")).qualification!.agentCodes).toBeUndefined();
+  });
+
+  it.each(["badkey", "offorigin"] as const)("AGENTCOUNT: an action the SDK refused before taking a slot (%s) is in the ledger, marked uncounted, and the honest run stays PASS", async (name) => {
+    const a = await readBack(name);
+    const ledger = JSON.parse(Buffer.from(a.agentModel.ledgers[0]!.bytesBase64, "base64").toString("utf8")) as { steps: Array<{ actions: Array<{ tool: string; outcome: string; uncounted?: true }> }> };
+    const actions = ledger.steps[0]!.actions;
+    expect(actions.map((action) => [action.tool, action.outcome, action.uncounted === true])).toEqual(
+      name === "badkey" ? [["press", "action-failed", true], ["tap", "ok", false]] : [["navigate", "policy-denied", true], ["tap", "ok", false]]);
+    const report = JSON.parse(Buffer.from(a.actual.shards[0]!.rawReportBytes).toString("utf8")) as { run: { results: Array<{ attempts: Array<{ steps: Array<{ kind: string; metrics?: { actionSteps: number } }> }> }> } };
+    expect(report.run.results[0]!.attempts[0]!.steps.find((step) => step.kind === "agent")!.metrics!.actionSteps).toBe(1);
+    const collected = collectAssembled(a);
+    expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
+    expect(collected.qualification!.status).toBe("PASS");
+    expect(firstCase(collected)).toMatchObject({ status: "passed" });
+    // Without the mark (a ledger as an older executor wrote it, or one that hides the refusal) the counted rows exceed the report's count: refused, never read around.
+    const unmarked = JSON.parse(JSON.stringify(ledger)) as typeof ledger;
+    for (const action of unmarked.steps[0]!.actions) delete action.uncounted;
+    const bytes = Buffer.from(JSON.stringify(unmarked));
+    const entry = { ...a.agentModel.ledgers[0]!, bytesBase64: bytes.toString("base64"), sha256: sha(bytes) };
+    const refused = collectAssembled(a, { ...a.inputs, agentModel: { ...a.agentModel, ledgers: [entry] } });
+    expect(refused.qualification!.status).toBe("UNKNOWN");
+    expect(firstCase(refused)).toMatchObject({ status: "unavailable", reason: "model-receipts-mismatch" });
   });
 
   it("AGENTSTRAY: a transcript record that no receipt names, and a second ledger for one case, make the group UNKNOWN with the mismatch code", async () => {

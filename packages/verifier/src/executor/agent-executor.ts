@@ -189,9 +189,13 @@ export function createRovaraE2EAgentExecutor(options: E2EAgentExecutorOptions): 
         const resolved = spec.target === null ? null : nodeFor(spec.target);
         let outcome: "ok" | "action-failed" | "policy-denied" = "ok";
         let failure: unknown;
+        // The SDK counts an action when it takes its slot, and refuses some before that (an argument outside its grammar, a step out of time, an exhausted budget). The step's own count,
+        // read before and after, says which this was, so the ledger can be held to the report exactly.
+        const slotsBefore = ctx.budgets.actionsUsed();
         try { await spec.run(resolved === null ? null : resolved.id); }
         catch (error) { failure = error; outcome = isAgentError(error) && error.code === "POLICY_DENIED" ? "policy-denied" : "action-failed"; }
-        record(ledger, { tool: spec.tool, node: resolved === null ? null : resolved.node, value: spec.value, url: spec.url ?? null, snapshotSha256: seen.sha, outcome });
+        const counted = ctx.budgets.actionsUsed() > slotsBefore;
+        record(ledger, { tool: spec.tool, node: resolved === null ? null : resolved.node, value: spec.value, url: spec.url ?? null, snapshotSha256: seen.sha, outcome, ...(counted ? {} : { uncounted: true as const }) });
         if (failure !== undefined) throw failure instanceof Error ? failure : new Error("the action failed");
         return `Done.\n\n${AFTER_HEADER}\n${await look()}`;
       };
@@ -217,7 +221,7 @@ export function createRovaraE2EAgentExecutor(options: E2EAgentExecutorOptions): 
               const ledger = options.ledger();
               if (ledger === null) throw new Error("an agent tool was called outside an agent step");
               const seen = await current();
-              record(ledger, { tool: "navigate", node: null, value: null, url: "/", snapshotSha256: seen.sha, outcome: "policy-denied" });
+              record(ledger, { tool: "navigate", node: null, value: null, url: "/", snapshotSha256: seen.sha, outcome: "policy-denied", uncounted: true });
               throw new AgentError("POLICY_DENIED", "navigate only goes to pages of this application");
             }
             return act({ tool: "navigate", target: null, value: null, url: path, run: () => ctx.actions.navigate(new URL(url, `${origin}/`).toString()) });

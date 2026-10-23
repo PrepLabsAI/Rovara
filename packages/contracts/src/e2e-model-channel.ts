@@ -526,6 +526,12 @@ const ledgerAction = z.object({
   url: appRelativePath.nullable(),
   snapshotSha256: digest,
   outcome: z.enum(["ok", "action-failed", "policy-denied"]),
+  /**
+   * Present (and `true`) only on a row for an action the SDK refused before it took an action slot, so the step's report does not count it: an argument it rejects (a key outside its
+   * grammar), a step that timed out or was cancelled as the action was dispatched, the action that met an exhausted budget, a navigation to another origin that was never dispatched.
+   * The executor measures it from the step's own action count before and after the action. Absent means counted, which is every row an executor wrote before this field existed.
+   */
+  uncounted: z.literal(true).optional(),
 }).strict().superRefine((action, context) => {
   const issue = (path: string, message: string) => context.addIssue({ code: "custom", path: [path], message });
   const nodeRequired = action.tool === "tap" || action.tool === "type" || action.tool === "press" || action.tool === "select";

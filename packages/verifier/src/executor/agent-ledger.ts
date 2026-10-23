@@ -31,6 +31,8 @@ export type LedgerActionInput = Readonly<{
   /** SHA-256 of the observation text the model chose from. */
   snapshotSha256: string;
   outcome: "ok" | "action-failed" | "policy-denied";
+  /** True when the SDK refused the action before it took an action slot (the step's report does not count it); absent for a counted action. */
+  uncounted?: true;
 }>;
 export type LedgerStepEnd = Readonly<{ verdict: "concluded" | "failed"; stopCode: E2EAgentActionLedger["steps"][number]["stopCode"]; receiptIds: readonly string[] }>;
 
@@ -90,7 +92,7 @@ export function createE2EAgentLedgerWriter(options: { outDir: string; runId: str
       // Only text of the approved goal is kept as it is; every other value is a digest alone.
       const valueLiteral = value !== null && value.length > 0 && value.length <= LITERAL_MAX && goal.includes(value) ? value : null;
       current.actions.push({ tool: action.tool, node: action.node === null ? null : { role: ledgerRole(action.node.role), name: ledgerName(action.node.name), testId: action.node.testId === null ? null : action.node.testId.slice(0, NAME_MAX) },
-        valueDigest, valueLiteral, url: action.url, snapshotSha256: action.snapshotSha256, outcome: action.outcome });
+        valueDigest, valueLiteral, url: action.url, snapshotSha256: action.snapshotSha256, outcome: action.outcome, ...(action.uncounted === true ? { uncounted: true as const } : {}) });
       try { persist(); } catch (error) { current.actions.pop(); throw error; }
     },
     endStep(stepIndex: number, end: LedgerStepEnd): void {

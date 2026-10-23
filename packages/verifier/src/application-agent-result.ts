@@ -125,14 +125,12 @@ function evaluate(input: E2EAgentCaseInput): E2EAgentCaseResult {
     const report = step.report;
     if (report === null) return MISMATCH;
     const ledgerStep = ledger.steps.find((item) => item.stepIndex === step.declaredStepIndex);
-    if (ledgerStep === undefined || ledgerStep.actions.length > step.maxActions) return MISMATCH;
-    // The report's count of the step's actions and the ledger's are two accounts of one list, so they agree both ways (Task FU2, AGENTCOUNT): a ledger that shows fewer actions than the
-    // report counted hides some, and one that shows more adds some. The SDK counts a dispatched action even when it failed, and the executor writes a ledger row for each. The only rows it
-    // writes for an action the SDK never counted are a navigation to another origin, refused before it is dispatched (row: navigate, policy-denied, path "/"), and the one action that
-    // met an exhausted action budget (the last row of a step that ended STEP_BUDGET_EXHAUSTED, failed): at most those may be more than the report.
-    const uncounted = ledgerStep.actions.filter((action) => action.tool === "navigate" && action.outcome === "policy-denied" && action.url === "/").length
-      + (ledgerStep.stopCode === "STEP_BUDGET_EXHAUSTED" && ledgerStep.actions.at(-1)?.outcome === "action-failed" ? 1 : 0);
-    if (report.actionSteps > ledgerStep.actions.length || ledgerStep.actions.length - uncounted > report.actionSteps) return MISMATCH;
+    if (ledgerStep === undefined) return MISMATCH;
+    // The report's count of the step's actions and the ledger's are two accounts of one list, so the counted rows equal the report's count, both ways (Task FU2, AGENTCOUNT). The SDK
+    // counts a dispatched action even when it failed; it refuses some actions before taking a slot, and the executor marks the ledger row of each of those `uncounted` (measured from the
+    // step's own count). An unmarked row is counted. The approved action budget bounds the counted rows.
+    const counted = ledgerStep.actions.filter((action) => action.uncounted !== true).length;
+    if (counted > step.maxActions || counted !== report.actionSteps) return MISMATCH;
     // The ledger and the e2e report are two accounts of one step by the same executor; they must tell the same story.
     const reportPassed = report.status === "passed";
     if (ledgerStep.verdict === "concluded" ? !reportPassed || report.errorCode !== null
