@@ -1,0 +1,277 @@
+import { MODEL_PROVIDERS, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { classifyProviderFailure } from "@agentx/model-runtime";
+
+/**
+ * Model-call primitives for the worker (PLANINC-3a), all pure or driven by an injected clock:
+ *  - `sanitizeModelCallEvent` turns a Pi session event into a fixed-shape note that carries no provider text, prompt, reasoning or credential;
+ *  - `ModelCallMonitor` counts attempts, sends a numbers-only heartbeat while a model call is in flight, and trips a wall-clock deadline or a no-activity stall once.
+ * The wiring into a task run (subscribe, abort, flush order, the operation error) is PLANINC-3b.
+ *
+ * Every string in a note is one of: a fixed word from this file, a provider name from MODEL_PROVIDERS, an allow-listed error token (`classifyProviderFailure`),
+ * or a request id that is plain letters, digits and hyphens. Anything else is dropped, not cleaned.
+ */
+
+/** A request id as Bedrock and the keyed providers print it. Anything longer or with other characters is not kept. */
+export const MODEL_REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
+
+export type ModelCallNote =
+  | { event: "failed"; class: E2EModelFailureClass; signal: string | null; attempt: number; provider?: ModelProvider; requestId?: string; durationMs?: number }
+  | { event: "aborted"; attempt: number; provider?: ModelProvider; durationMs?: number }
+  /** Pi scheduled retry `attempt` of `maxAttempts` (both are retries, not model calls) after `delayMs`. */
+  | { event: "retry"; attempt: number; maxAttempts: number; delayMs: number }
+  | { event: "retry-finished"; success: boolean; attempt: number }
+  | { event: "deadline"; reason: ModelCallExpiry; limitMs: number; elapsedMs: number; attempt: number };
+
+export type ModelCallExpiry = "deadline" | "stall";
+
+export interface ModelCallNotePayload { modelCall: ModelCallNote }
+
+export interface HeartbeatNote {
+  phase: "model";
+  attempt: number;
+  elapsedMs: number;
+  sinceActivityMs: number;
+}
+
+export interface HeartbeatPayload { heartbeat: HeartbeatNote }
+
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+const wholeNumber = (value: unknown, max: number): number | undefined =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= max ? Math.round(value) : undefined;
+const MAX_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_ATTEMPT = 1_000;
+
+function providerOf(value: unknown): ModelProvider | undefined {
+  return typeof value === "string" && (MODEL_PROVIDERS as readonly string[]).includes(value) ? (value as ModelProvider) : undefined;
+}
+
+/** The first diagnostic that names a Bedrock-style error code, status or request id: only its tokens are read. */
+function failureFacts(message: Record<string, unknown>): { signal?: string; status?: number; requestId?: string } {
+  const found: { signal?: string; status?: number; requestId?: string } = {};
+  const diagnostics = Array.isArray(message.diagnostics) ? message.diagnostics.slice(0, 8) : [];
+  for (const diagnostic of diagnostics) {
+    const details = isRecord(diagnostic) && isRecord(diagnostic.details) ? diagnostic.details : undefined;
+    if (details === undefined) continue;
+    if (found.signal === undefined && typeof details.errorCode === "string") found.signal = details.errorCode;
+    const status = wholeNumber(details.status, 599);
+    if (found.status === undefined && status !== undefined && status >= 100) found.status = status;
+    if (found.requestId === undefined && typeof details.requestId === "string" && MODEL_REQUEST_ID_PATTERN.test(details.requestId)) found.requestId = details.requestId;
+  }
+  return found;
+}
+
+/**
+ * `event` (a Pi session event) as a model-call note, or `undefined` when it is not one. `attempt` is the model call this event belongs to (1 for the first), which the
+ * monitor counts. It reads only fixed fields: a `message_end`'s role, stop reason, provider, duration and diagnostic tokens, and a retry event's numbers. It never reads
+ * `errorMessage`, `finalError`, message content or reasoning.
+ */
+export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNotePayload | undefined {
+  if (!isRecord(event) || typeof event.type !== "string") return undefined;
+  const at = wholeNumber(attempt, MAX_ATTEMPT) ?? 1;
+  if (event.type === "message_end") {
+    const message = event.message;
+    if (!isRecord(message) || message.role !== "assistant") return undefined;
+    const provider = providerOf(message.provider);
+    const durationMs = wholeNumber(message.durationMs, MAX_DURATION_MS);
+    if (message.stopReason === "aborted") {
+      return { modelCall: { event: "aborted", attempt: at, ...(provider === undefined ? {} : { provider }), ...(durationMs === undefined ? {} : { durationMs }) } };
+    }
+    if (message.stopReason !== "error") return undefined;
+    const facts = failureFacts(message);
+    const failure = provider === undefined
+      ? { class: "unknown" as const, signal: null }
+      : classifyProviderFailure({ provider, signal: facts.signal, ...(facts.status === undefined ? {} : { status: facts.status }) });
+    return {
+      modelCall: {
+        event: "failed", class: failure.class, signal: failure.signal, attempt: at,
+        ...(provider === undefined ? {} : { provider }),
+        ...(facts.requestId === undefined ? {} : { requestId: facts.requestId }),
+        ...(durationMs === undefined ? {} : { durationMs }),
+      },
+    };
+  }
+  if (event.type === "auto_retry_start") {
+    const attemptNumber = wholeNumber(event.attempt, MAX_ATTEMPT);
+    const maxAttempts = wholeNumber(event.maxAttempts, MAX_ATTEMPT);
+    const delayMs = wholeNumber(event.delayMs, MAX_DURATION_MS);
+    if (attemptNumber === undefined || maxAttempts === undefined || delayMs === undefined) return undefined;
+    return { modelCall: { event: "retry", attempt: attemptNumber, maxAttempts, delayMs } };
+  }
+  if (event.type === "auto_retry_end") {
+    const attemptNumber = wholeNumber(event.attempt, MAX_ATTEMPT);
+    if (typeof event.success !== "boolean" || attemptNumber === undefined) return undefined;
+    return { modelCall: { event: "retry-finished", success: event.success, attempt: attemptNumber } };
+  }
+  return undefined;
+}
+
+/**
+ * The fixed sentence for a failed or aborted model call, for the operation's error and the worker log. Same tokens as the note, so it never carries provider text.
+ * Example: `the model call failed: provider-outage InternalServerException request 9e7ea41c-... attempt 4`.
+ */
+export function describeModelCallNote(note: ModelCallNote): string {
+  switch (note.event) {
+    case "failed":
+      return `the model call failed: ${note.class}${note.signal === null ? "" : ` ${note.signal}`}${note.requestId === undefined ? "" : ` request ${note.requestId}`} attempt ${note.attempt}`;
+    case "aborted": return `the model call was stopped: attempt ${note.attempt}`;
+    case "retry": return `the model call is retried: retry ${note.attempt} of ${note.maxAttempts}`;
+    case "retry-finished": return note.success ? `the model call succeeded after retry ${note.attempt}` : `the model call retries ended: retry ${note.attempt}`;
+    case "deadline": return `the model did not finish: ${note.reason === "stall" ? "no activity" : "time limit"} after ${Math.round(note.elapsedMs / 1000)} s, attempt ${note.attempt}`;
+  }
+}
+
+export const MODEL_CALL_HEARTBEAT_MS = 60_000;
+export const MODEL_CALL_MAX_HEARTBEATS = 60;
+export const PLANNING_STALL_MS = 240_000;
+export const PLANNING_DEADLINE_DEFAULT_MS = 25 * 60_000;
+export const PLANNING_DEADLINE_MIN_MS = 5 * 60_000;
+export const PLANNING_DEADLINE_MAX_MS = 60 * 60_000;
+const DEFAULT_TICK_MS = 5_000;
+
+/** The planning deadline: `AGENTX_PLAN_DEADLINE_MS` when it is a whole number from 5 to 60 minutes, else 25 minutes. Never throws on a bad value. */
+export function planningDeadlineMs(env: { AGENTX_PLAN_DEADLINE_MS?: string | undefined } = process.env): number {
+  const raw = env.AGENTX_PLAN_DEADLINE_MS;
+  if (raw === undefined || !/^\d{1,9}$/.test(raw)) return PLANNING_DEADLINE_DEFAULT_MS;
+  const value = Number(raw);
+  return value >= PLANNING_DEADLINE_MIN_MS && value <= PLANNING_DEADLINE_MAX_MS ? value : PLANNING_DEADLINE_DEFAULT_MS;
+}
+
+export interface ModelCallExpiryInfo {
+  reason: ModelCallExpiry;
+  /** The limit that was hit: the deadline, or the stall bound. */
+  limitMs: number;
+  elapsedMs: number;
+  sinceActivityMs: number;
+  attempt: number;
+}
+
+export interface ModelCallMonitorOptions {
+  /** Wall-clock limit from `start()`. Omit for none (IMPLEMENT and REVIEW keep no deadline in this task). */
+  deadlineMs?: number;
+  /** Longest a model call in flight may go without any session event. Omit for none. */
+  stallMs?: number;
+  heartbeatMs?: number;
+  maxHeartbeats?: number;
+  /** How often the clock is read. */
+  tickMs?: number;
+  now?: () => number;
+  onHeartbeat?: (payload: HeartbeatPayload) => void;
+  /** Called once, from the timer, when the deadline or the stall bound is reached. It must not throw; a throw is swallowed. */
+  onExpire?: (info: ModelCallExpiryInfo) => void;
+}
+
+/**
+ * One planning run's clock. `start()` begins the wall-clock deadline; `beginCall()` and `endCall()` bracket each `session.prompt` (the first prompt and a format retry
+ * share the one deadline); `observe(event)` is fed every Pi session event. While a call is in flight it sends one heartbeat each `heartbeatMs` without any event
+ * (numbers only, at most `maxHeartbeats`), and trips `onExpire` once when the stall bound or the deadline is reached. `stop()` clears the timer: call it in `finally`,
+ * and before a cancel or loop-guard stop, which take precedence over the deadline.
+ */
+export class ModelCallMonitor {
+  private readonly now: () => number;
+  private readonly tickMs: number;
+  private readonly heartbeatMs: number;
+  private readonly maxHeartbeats: number;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private startedAt = 0;
+  private lastActivityAt = 0;
+  private lastHeartbeatAt = 0;
+  private callStartedAt = 0;
+  private inFlight = false;
+  private attempts = 0;
+  private heartbeats = 0;
+  private expiredBy: ModelCallExpiry | undefined;
+  private stopped = false;
+
+  constructor(private readonly options: ModelCallMonitorOptions = {}) {
+    this.now = options.now ?? Date.now;
+    this.tickMs = options.tickMs ?? DEFAULT_TICK_MS;
+    this.heartbeatMs = options.heartbeatMs ?? MODEL_CALL_HEARTBEAT_MS;
+    this.maxHeartbeats = options.maxHeartbeats ?? MODEL_CALL_MAX_HEARTBEATS;
+    for (const [name, value] of [["tick", this.tickMs], ["heartbeat", this.heartbeatMs]] as const) {
+      if (!Number.isInteger(value) || value < 1) throw new Error(`model call ${name} interval must be a positive whole number of milliseconds`);
+    }
+    for (const [name, value] of [["deadline", options.deadlineMs], ["stall", options.stallMs]] as const) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 1)) throw new Error(`model call ${name} must be a positive whole number of milliseconds`);
+    }
+  }
+
+  /** Which limit tripped, once one has. */
+  get expired(): ModelCallExpiry | undefined { return this.expiredBy; }
+
+  /** The model call (1 for the first) in flight or last begun; Pi's own retries inside one prompt each count as a call. */
+  get attempt(): number { return Math.max(this.attempts, 1); }
+
+  start(): void {
+    if (this.timer !== undefined || this.stopped) return;
+    this.startedAt = this.lastActivityAt = this.lastHeartbeatAt = this.now();
+    this.timer = setInterval(() => this.tick(), this.tickMs);
+    this.timer.unref?.();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== undefined) clearInterval(this.timer);
+    this.timer = undefined;
+    this.inFlight = false;
+  }
+
+  /** A prompt starts (or Pi starts the next retry's stream). */
+  beginCall(): void {
+    this.attempts += 1;
+    this.inFlight = true;
+    this.callStartedAt = this.lastActivityAt = this.lastHeartbeatAt = this.now();
+  }
+
+  endCall(): void {
+    this.inFlight = false;
+  }
+
+  /**
+   * Feeds one Pi session event. Any event is activity. `auto_retry_start` ends the failed call and begins the next call's backoff, so the attempt counter moves here;
+   * the retried call is in flight again from that event, which keeps a hung retry under the stall bound.
+   */
+  observe(event: unknown): void {
+    if (this.stopped) return;
+    const at = this.now();
+    this.lastActivityAt = at;
+    this.lastHeartbeatAt = at;
+    if (isRecord(event) && event.type === "auto_retry_start") {
+      this.attempts = Math.max(this.attempts, 1) + 1;
+      this.inFlight = true;
+      this.callStartedAt = at;
+    }
+  }
+
+  /** Reads the clock once. The timer calls it; tests call it with an injected `now`. */
+  tick(): void {
+    if (this.stopped || this.expiredBy !== undefined || this.timer === undefined) return;
+    const at = this.now();
+    const elapsedMs = at - this.startedAt;
+    const sinceActivityMs = at - this.lastActivityAt;
+    const { deadlineMs, stallMs } = this.options;
+    // A stalled call and a spent deadline are both reported; when both hold, the stall is the more specific cause.
+    if (this.inFlight && stallMs !== undefined && sinceActivityMs >= stallMs) return this.expire("stall", stallMs, elapsedMs, sinceActivityMs);
+    if (deadlineMs !== undefined && elapsedMs >= deadlineMs) return this.expire("deadline", deadlineMs, elapsedMs, sinceActivityMs);
+    if (this.inFlight && this.heartbeats < this.maxHeartbeats && at - this.lastHeartbeatAt >= this.heartbeatMs) {
+      this.heartbeats += 1;
+      this.lastHeartbeatAt = at;
+      try {
+        this.options.onHeartbeat?.({ heartbeat: { phase: "model", attempt: this.attempt, elapsedMs: Math.max(0, at - this.callStartedAt), sinceActivityMs: Math.max(0, sinceActivityMs) } });
+      } catch { /* a heartbeat is informational and never stops a run */ }
+    }
+  }
+
+  private expire(reason: ModelCallExpiry, limitMs: number, elapsedMs: number, sinceActivityMs: number): void {
+    this.expiredBy = reason;
+    if (this.timer !== undefined) clearInterval(this.timer);
+    this.timer = undefined;
+    try {
+      this.options.onExpire?.({ reason, limitMs, elapsedMs: Math.max(0, elapsedMs), sinceActivityMs: Math.max(0, sinceActivityMs), attempt: this.attempt });
+    } catch { /* the caller owns abort; a throw here must not escape a timer */ }
+  }
+}
+
+/** The note to send when `onExpire` fires. */
+export function expiryNote(info: ModelCallExpiryInfo): ModelCallNotePayload {
+  return { modelCall: { event: "deadline", reason: info.reason, limitMs: info.limitMs, elapsedMs: info.elapsedMs, attempt: info.attempt } };
+}
