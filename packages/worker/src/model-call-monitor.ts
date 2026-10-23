@@ -1,5 +1,6 @@
 import { MODEL_PROVIDERS, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
 import { classifyProviderFailure } from "@agentx/model-runtime";
+import type { WorkerLogSink } from "./worker-log.js";
 
 /**
  * Model-call primitives for the worker (PLANINC-3a), all pure or driven by an injected clock:
@@ -19,7 +20,7 @@ export type ModelCallNote =
   | { outcome: "stopped"; attempt: number; provider?: ModelProvider; durationMs?: number }
   /** Pi scheduled retry `attempt` of `maxAttempts` (both are retries, not model calls) after `delayMs`. */
   | { outcome: "retrying"; attempt: number; maxAttempts: number; delayMs: number }
-  /** Not shown by PLANINC-1's view (the raw `auto_retry_end` is); kept for the worker log and 3b. */
+  /** Pi's retries ended: `success` says whether the retried call worked. */
   | { outcome: "retry-finished"; success: boolean; attempt: number }
   /** `durationMs` is the time since the run's clock started. `deadline` is the wall-clock limit, `stalled` the no-activity bound. */
   | { outcome: "deadline" | "stalled"; limitMs: number; durationMs: number; attempt: number };
@@ -129,6 +130,10 @@ export const PLANNING_STALL_MS = 240_000;
 export const PLANNING_DEADLINE_DEFAULT_MS = 25 * 60_000;
 export const PLANNING_DEADLINE_MIN_MS = 5 * 60_000;
 export const PLANNING_DEADLINE_MAX_MS = 60 * 60_000;
+/** After a planning deadline or stall the worker asks Pi to abort, then waits this long for the abort to be confirmed before it gives up and ends the run as interrupted. */
+export const PLANNING_ABORT_CONFIRM_MS = 30_000;
+/** A cancel waits at most this long for the buffered events to be sent before the cancel result is posted, so a hung event sink cannot hang a cancel. */
+export const CANCEL_FLUSH_MAX_MS = 5_000;
 const DEFAULT_TICK_MS = 5_000;
 
 /** The planning deadline: `AGENTX_PLAN_DEADLINE_MS` when it is a whole number from 5 to 60 minutes, else 25 minutes. Never throws on a bad value. */
@@ -277,4 +282,31 @@ export class ModelCallMonitor {
 /** The note to send when `onExpire` fires. */
 export function expiryNote(info: ModelCallExpiryInfo): ModelCallNotePayload {
   return { modelCall: { outcome: info.reason === "stall" ? "stalled" : "deadline", limitMs: info.limitMs, durationMs: info.elapsedMs, attempt: info.attempt } };
+}
+
+const LOG_REFUSED_MAX = 10;
+
+/**
+ * One structured worker log line (stdout, then CloudWatch) for a model-call note. The note holds only fixed words, allow-listed tokens, a bounded request id and numbers, so the line
+ * can carry all of it. It survives a refused event flush, which the task's event list does not.
+ */
+export function logModelCallNote(sink: WorkerLogSink, operationId: string, note: ModelCallNote): void {
+  const event = {
+    failed: "model.attempt_failed", stopped: "model.attempt_stopped", retrying: "model.retry_scheduled", "retry-finished": "model.retry_finished",
+    deadline: "planning.deadline", stalled: "planning.stalled",
+  }[note.outcome];
+  writeLine(sink, note.outcome === "failed" || note.outcome === "deadline" || note.outcome === "stalled" ? "error" : "info", { event, invocationId: operationId, ...note });
+}
+
+/** A line for an event batch the control plane refused or could not take. Only the error code is named, never a message; at most `LOG_REFUSED_MAX` lines per run (the caller counts). */
+export function logEventsRefused(sink: WorkerLogSink, operationId: string, error: unknown, refusedSoFar: number): void {
+  if (refusedSoFar >= LOG_REFUSED_MAX) return;
+  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+  writeLine(sink, "info", { event: "events.refused", invocationId: operationId, ...(typeof code === "string" && /^[A-Z_]{3,40}$/.test(code) ? { errorCode: code } : {}) });
+}
+
+function writeLine(sink: WorkerLogSink, level: "info" | "error", fields: Record<string, unknown>): void {
+  try {
+    sink(level, JSON.stringify({ component: "worker", ...fields }));
+  } catch { /* logging never changes what the worker does */ }
 }
