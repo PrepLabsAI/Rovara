@@ -1,5 +1,5 @@
-import type { E2EAgentUnknownCode } from "@agentx/verifier";
-import { KEYED_MODEL_PROVIDERS, isKeyedModelProvider, type E2E_DISPLAY_ASSERTION_KINDS } from "@agentx/contracts";
+import type { DockerApplicationUnavailableReason, E2EAgentUnknownCode } from "@agentx/verifier";
+import { E2E_APPLICATION_SEND_BACK_CODES, KEYED_MODEL_PROVIDERS, isKeyedModelProvider, type E2E_DISPLAY_ASSERTION_KINDS } from "@agentx/contracts";
 
 /**
  * M1.4 Tasks 4.4b and 4.4c: every sentence the owner reads about AI navigation, in one place. Change the wording here and nowhere else. The display, the Slack summary and the task page
@@ -91,6 +91,46 @@ const AGENT_SENTENCES = Object.freeze({
   "ambiguous-download": () => "The AI navigator started more than one download, so the CSV check can't tell which file to read; retry, or make the export button clear",
 } satisfies Record<E2EAgentUnknownCode, (who: Who) => string>);
 
+/**
+ * Every reason a whole group can end with that is put into words (RUN-2). `DockerApplicationUnavailableReason` is the app host's own list: a code added there is a compile error until
+ * it is worded below, exactly as `E2EAgentUnknownCode` is for `AGENT_SENTENCES`. The rest are the worker's `evidence too large`, the broker's own `runtime-expired`, the model
+ * channel's `model-environment-unsafe` and the three route codes.
+ */
+export type E2EGroupReasonCode = DockerApplicationUnavailableReason | "evidence too large" | "runtime-expired" | "model-environment-unsafe"
+  | "model-route-changed-reapprove" | "agent-route-not-approved" | "model-route-not-tested";
+
+/** What the owner is told to do when it is Rovara's side that stopped the checks: retry, and say which code if it keeps happening. */
+const RETRY_THEN_SUPPORT = (code: string): string => `Retry the checks; if it happens again, tell Rovara support (code ${code}).`;
+
+const GROUP_SENTENCES = Object.freeze({
+  // The candidate's own faults (Send back to coding is offered for these four).
+  "build-failed": "The app didn't install or build with this change. The coding agent needs to fix it.",
+  "app-exited": "The app stopped right after it started. The coding agent needs to fix it.",
+  "app-unhealthy": "The app didn't answer its health check in time. If it needs another port, path or a longer start, set `health` and `listenPort` in the project contract; otherwise the coding agent needs to fix it.",
+  "seed-failed": "The app couldn't load its test data. The coding agent needs to fix it.",
+  // The test account's sign-in (RUN-7): only an app's own email-and-password form with the accounts Rovara creates is supported.
+  "login-failed": "The test account couldn't sign in. Signed-in checks work only with a plain email-and-password form and the test accounts Rovara creates; sign-in through Auth0, Clerk, Google or similar is not supported yet.",
+  // Rovara's side or the environment's.
+  "deadline-exceeded": `The checks ran out of time before they finished. ${RETRY_THEN_SUPPORT("deadline-exceeded")}`,
+  "executor-failed": `The browser runner stopped before it finished. ${RETRY_THEN_SUPPORT("executor-failed")}`,
+  "executor-result-mismatch": `The browser runner's report didn't match what was run, so it can't be trusted. ${RETRY_THEN_SUPPORT("executor-result-mismatch")}`,
+  "mock-unavailable": `A stand-in for one of the app's outside services couldn't start. ${RETRY_THEN_SUPPORT("mock-unavailable")}`,
+  "model-channel-unavailable": `Rovara couldn't set up the AI navigation connection for these checks. ${RETRY_THEN_SUPPORT("model-channel-unavailable")}`,
+  cancelled: "The checks were stopped before they finished. Retry the checks.",
+  "evidence too large": `The checks produced more evidence than Rovara can keep, so they could not be decided. ${RETRY_THEN_SUPPORT("evidence too large")}`,
+  "runtime-expired": "The browser and API runtime's qualification expired. An administrator must qualify it again, then retry the checks.",
+  "model-environment-unsafe": "This runner's setup could let AI model calls be redirected, so AI navigation was not run. Tell Rovara support (code model-environment-unsafe).",
+  "model-route-changed-reapprove": "The AI navigation settings changed after setup was approved. Approve setup again to run these checks.",
+  "agent-route-not-approved": "AI navigation isn't approved for this project yet. Approve setup to run the AI-navigated checks.",
+  "model-route-not-tested": "AI navigation has not passed its driving test yet. Run the driving test, then approve setup again.",
+} satisfies Record<E2EGroupReasonCode, string>);
+
+/** The same sentences, read by a code that arrives as text (a lookup by any string). */
+const GROUP_SENTENCES_BY_TEXT: Readonly<Record<string, string>> = GROUP_SENTENCES;
+
+/** Every send-back code is one the host reports (the contracts list is checked against the host's type here, where both are known). */
+const SEND_BACK_CODES: ReadonlyArray<E2EGroupReasonCode> = E2E_APPLICATION_SEND_BACK_CODES;
+
 export const E2E_OWNER_SENTENCES = Object.freeze({
   /**
    * Why a scenario could not be decided, for the codes the collector gives a case whose AI navigation was not clean (`E2E_AGENT_UNKNOWN_CODES`). `ctx` is the provider and model of the
@@ -104,13 +144,11 @@ export const E2E_OWNER_SENTENCES = Object.freeze({
    * Why a whole group could not run, for the group reasons that are put into words (matched exactly on the code before the first colon; the rest of the group's text is never shown).
    * A group code that is not here is not repeated.
    */
-  groupCode: Object.freeze({
-    "model-route-changed-reapprove": "The AI navigation settings changed after setup was approved. Approve setup again to run these checks.",
-    "agent-route-not-approved": "AI navigation isn't approved for this project yet. Approve setup to run the AI-navigated checks.",
-    "runtime-expired": "The browser and API runtime's qualification expired. An administrator must qualify it again, then retry the checks.",
-    "model-route-not-tested": "AI navigation has not passed its driving test yet. Run the driving test, then approve setup again.",
-    "model-environment-unsafe": "This check could not be verified.",
-  } as Readonly<Record<string, string>>),
+  groupCode: GROUP_SENTENCES_BY_TEXT,
+  /** The sentence for a group code, or undefined for a code that is not worded here (matched exactly). */
+  groupSentence: (code: string): string | undefined => (Object.hasOwn(GROUP_SENTENCES, code) ? GROUP_SENTENCES[code as E2EGroupReasonCode] : undefined),
+  /** The group codes the candidate causes: Send back to coding is offered for these and no others. */
+  sendBackCodes: SEND_BACK_CODES,
 
   /** Group codes that are also noted for the operator by code only: the owner reads a plain sentence, the operator's log says which code it was. */
   groupCodeOperatorOnly: Object.freeze(["model-environment-unsafe"] as readonly string[]),

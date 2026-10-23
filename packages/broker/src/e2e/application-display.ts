@@ -199,8 +199,11 @@ const NOT_FINISHED = "the checks have not finished";
 /** The sentence for a collector reason code that is an AI navigation code (the closed set of `E2E_AGENT_UNKNOWN_CODES`), naming the group's stored provider and model where it has them. */
 const agentSentence = (code: string, model: ModelSentenceContext | undefined): string | undefined => (E2E_OWNER_SENTENCES.isAgentCode(code) ? E2E_OWNER_SENTENCES.agentCode(code, model) : undefined);
 
-/** The code at the start of a group's reason (`code` or `code: detail`), or undefined when the reason does not start with one. Only the code is ever read; the detail is never shown. */
-const groupReasonCode = (reason: string): string | undefined => /^([a-z][a-z0-9-]{0,62})(?::|$)/u.exec(reason)?.[1];
+/**
+ * The code at the start of a group's reason (`code` or `code: detail`), or undefined when the reason does not start with one. Only the code is ever read; the detail is never shown. The
+ * worker's one code with spaces in it, `evidence too large` (RUN-2), is read exactly.
+ */
+const groupReasonCode = (reason: string): string | undefined => /^([a-z][a-z0-9-]{0,62}|evidence too large)(?::|$)/u.exec(reason)?.[1];
 
 /**
  * The sentence for a group's own reason: only a code in the closed maps of `E2E_OWNER_SENTENCES` (the route codes, and the AI navigation codes a whole group can be refused with) is put

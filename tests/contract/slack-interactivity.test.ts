@@ -706,6 +706,28 @@ describe("Slack native workflow review controls", () => {
       expect(sent).toHaveLength(2);
     });
 
+    it("RUN-2: routes Send back for a browser and API round the app could not build, and refuses it for a code that is not the candidate's, a stale card and another member", async () => {
+      const e2e = { contractDigest: "1".repeat(64), policyDigest: "2".repeat(64), bundleDigest: "3".repeat(64), executionPlanDigest: "4".repeat(64), required: true,
+        currentRoundId: "44444444-4444-4444-8444-444444444444", currentGroupRunIds: ["44444444-4444-4444-8444-444444444444"], resultRefs: [] };
+      const checkPolicy = { required: [{ id: "required-1", label: "npm test", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 } }], optional: [], selectedOptionalIds: [] };
+      const blockedOn = (code: string) => WorkflowSnapshotSchema.parse({ ...reviewBlocked, stage: "VERIFY", reviews: [], checkPolicy, e2e,
+        blockReason: `admitted E2E evidence is incomplete or unknown (group-1: ${code})` });
+      let loaded: Record<string, unknown> = { ...task, workflow: blockedOn("build-failed") };
+      const sent: Array<Record<string, unknown>> = [];
+      const handlers = workflowSlackHandlers({ loadTask: async () => loaded, openView: async () => undefined, submit: async () => undefined, sendBack: async (input) => { sent.push(input); } });
+      const built = blockedOn("build-failed");
+      await handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: built.revision }));
+      expect(sent).toEqual([{ taskId, userId: requester, thread, expectedRevision: built.revision, requestId: expect.stringMatching(/^[0-9a-f-]{36}$/) as unknown }]);
+      await expect(handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: built.revision - 1 }))).rejects.toThrow(/out of date/);
+      await expect(handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: built.revision }, other))).rejects.toThrow(/Only/);
+      // A card left over from before: the task now reads an infrastructure code, or has moved on, so the press is refused and nothing is sent.
+      loaded = { ...task, workflow: blockedOn("executor-failed") };
+      await expect(handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: built.revision }))).rejects.toThrow(/out of date/);
+      loaded = { ...task, workflow: { ...built, stage: "IMPLEMENT", state: "RUNNING", blockReason: undefined } };
+      await expect(handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: built.revision }))).rejects.toThrow(/out of date/);
+      expect(sent).toHaveLength(1);
+    });
+
     it("retries blocked planning and blocked coding for the owner at the exact revision", async () => {
       let loaded: Record<string, unknown> = { ...task, workflow: { ...workflow, revision: 4, stage: "PLAN", state: "BLOCKED", blockReason: "planning operation ended failed" } };
       const plans: Array<Record<string, unknown>> = [];

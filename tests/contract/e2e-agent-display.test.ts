@@ -104,10 +104,12 @@ describe("test 24: a group that could not run says why for the closed set of rou
     expect(JSON.stringify(withDetail)).not.toContain("ops@tenant-a.example");
   });
 
-  it("says model-environment-unsafe in the owner's approved words and leaves one operator log line with the code only", () => {
+  it("says model-environment-unsafe in a fixed sentence of its own and leaves one operator log line with the code only", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const rows = rowsOf([group({ reason: "model-environment-unsafe: HTTPS_PROXY is set to http://10.0.0.5:3128 password=hunter2-secret" })]);
-    expect(rows[0]!.reason).toBe("This check could not be verified.");
+    // RUN-2: the owner is told what it is (a fixed sentence naming the code), where it was "This check could not be verified."
+    expect(rows[0]!.reason).toBe(E2E_OWNER_SENTENCES.groupCode["model-environment-unsafe"]);
+    expect(rows[0]!.reason).toContain("model-environment-unsafe");
     expect(log).toHaveBeenCalledTimes(1);
     const line = String(log.mock.calls[0]![0]);
     expect(JSON.parse(line)).toMatchObject({ component: "broker", event: "workflow.e2e_group_reason", code: "model-environment-unsafe" });

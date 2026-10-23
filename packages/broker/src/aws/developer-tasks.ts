@@ -209,6 +209,7 @@ import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskP
 import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeopleProposal as readPeopleProposal, getTaskPeopleProposalMetadata as readPeopleProposalMetadata, proposeTaskOwnership, proposeTaskPeopleRole,
   submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
+import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import {
   commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
   currentStepDocument, queueCommentAnswer, setSuggestion, suggestionsFor, type PageActor, type SlackRequestQueue,
@@ -2710,7 +2711,7 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
     resumeProgress: [],
   };
   // The problems are reviewer and check output, marked untrusted; the owner's note stays outside, as the instruction.
-  const problems = sendBackProblemsPromptSection(sendBackProblems(workflow), promptTagId(task, request.requestId));
+  const problems = sendBackProblemsPromptSection(sendBackProblems(workflow, E2E_OWNER_SENTENCES.groupSentence), promptTagId(task, request.requestId));
   const prompt = (notes: string) => `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nOwner note (the owner's own instructions for this step): ${request.instructions}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
   const next: WorkflowSnapshot = { ...returned, revision: returned.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next,

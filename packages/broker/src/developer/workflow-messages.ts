@@ -3,8 +3,9 @@
 // value from a record, the model or a reviewer is redacted where it is free text, cut short and escaped here.
 import {
   WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
-  WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, type WorkflowSnapshot,
+  WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, workflowApplicationEvidenceCodes, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import { WORKFLOW_ACTION_IDS } from "./workflow-actions.js";
 import { isE2EPlanCorrectionBlockReason } from "./task-records.js";
 
@@ -465,6 +466,14 @@ function verifyBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof
   }
   if (workflow.e2e?.required === true && workflow.e2e.currentRoundId !== undefined
     && workflow.blockReason?.startsWith("admitted E2E evidence is incomplete or unknown") === true) {
+    // RUN-2: when every group ended with a code that has a fixed sentence, say why in those sentences (each distinct one once, three at most), and offer Send back where the candidate
+    // is the cause (`workflowSendBackOffered`). Any reason that is not exactly `group: code` keeps the one fixed text: nothing the worker said is ever repeated.
+    const codes = [...new Set(workflowApplicationEvidenceCodes(workflow.blockReason) ?? [])];
+    const sentences = codes.map((code) => E2E_OWNER_SENTENCES.groupSentence(code));
+    if (codes.length > 0 && sentences.every((sentence) => sentence !== undefined)) {
+      return { text: `The required browser and API checks could not finish. ${sentences.slice(0, 3).join(" ")} Nothing was sent to GitHub.`,
+        buttons: [...exits.sendBack(), ...exits.retryChecks(), exits.close] };
+    }
     return { text: "The required E2E evidence is incomplete or unavailable. Some required runtime checks may not have run. Nothing was sent to GitHub.",
       buttons: [...exits.retryChecks(), exits.close] };
   }
