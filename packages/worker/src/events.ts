@@ -15,32 +15,114 @@ const EVENT_STRING_MAX_CHARS = 8_192;
 
 export type EventBatchSink = (events: readonly WorkerEvent[]) => Promise<void>;
 
+/** Pending events wait at most this long before the batcher sends them (PLANINC-3a). Without it a sparse run held its events until the 25th. */
+export const EVENT_BATCH_MAX_DELAY_MS = 5_000;
+
+export interface EventAppendOptions {
+  /** Send everything pending at once, not at the next full batch or timer tick. */
+  urgent?: boolean;
+}
+
+export interface EventBatcherOptions {
+  /** The longest an event waits in memory. Whole milliseconds from 10 to 60,000; `false` turns the timer off. */
+  maxDelayMs?: number | false;
+}
+
+/** The Pi session event types that carry a model failure or a retry: a person reading the task needs them now, not at the next batch. */
+const URGENT_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set(["auto_retry_start", "auto_retry_end"]);
+
+/**
+ * Whether an event must leave the worker at once: a lifecycle change, an error, a sanitized model-call or deadline note, a Pi retry or a failed model message.
+ * The first event of a run is urgent as well (the control plane moves the operation to RUNNING when it receives it); the batcher decides that itself.
+ */
+export function isUrgentWorkerEvent(type: WorkerEvent["type"], payload: unknown): boolean {
+  if (type === "lifecycle" || type === "error") return true;
+  if (payload === null || typeof payload !== "object") return false;
+  const record = payload as { type?: unknown; modelCall?: unknown; message?: unknown };
+  if (record.modelCall !== undefined) return true;
+  if (typeof record.type === "string" && URGENT_SESSION_EVENT_TYPES.has(record.type)) return true;
+  if (record.type === "message_end" && record.message !== null && typeof record.message === "object") {
+    const stopReason = (record.message as { stopReason?: unknown }).stopReason;
+    return stopReason === "error" || stopReason === "aborted";
+  }
+  return false;
+}
+
 export class EventBatcher {
   private pending: WorkerEvent[] = [];
+  private appended = 0;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private closed = false;
+  /** Every send runs after the one before it, so batches reach the sink in the order the events were appended. */
+  private sending: Promise<void> = Promise.resolve();
+  private readonly maxDelayMs: number | undefined;
 
   constructor(
     private readonly sink: EventBatchSink,
     private readonly maximumBatchSize = 25,
+    options: EventBatcherOptions = {},
   ) {
     if (!Number.isInteger(maximumBatchSize) || maximumBatchSize < 1 || maximumBatchSize > 500) {
       throw new Error("event batch size must be between 1 and 500");
     }
+    const delay = options.maxDelayMs ?? EVENT_BATCH_MAX_DELAY_MS;
+    if (delay !== false && (!Number.isInteger(delay) || delay < 10 || delay > 60_000)) {
+      throw new Error("event batch delay must be between 10 and 60000 milliseconds");
+    }
+    this.maxDelayMs = delay === false ? undefined : delay;
   }
 
-  async append(type: WorkerEvent["type"], payload: unknown): Promise<void> {
+  async append(type: WorkerEvent["type"], payload: unknown, options: EventAppendOptions = {}): Promise<void> {
+    const first = this.appended === 0;
+    this.appended += 1;
     this.pending.push({ type, payload: boundedPayload(redactCredentials(payload)), timestamp: new Date().toISOString() });
-    if (this.pending.length >= this.maximumBatchSize) await this.flush();
+    if (this.pending.length >= this.maximumBatchSize || first || options.urgent === true || isUrgentWorkerEvent(type, payload)) {
+      await this.flush();
+    } else {
+      this.arm();
+    }
   }
 
-  async flush(): Promise<void> {
-    if (this.pending.length === 0) return;
-    const batch = this.pending;
-    this.pending = [];
-    try {
-      await this.sink(batch);
-    } catch (error) {
-      this.pending = [...batch, ...this.pending];
-      throw error;
+  /** Sends everything pending, after any send already under way. A refused batch stays pending, in order, and the error comes back to the caller. */
+  flush(): Promise<void> {
+    const run = this.sending.then(() => this.sendPending());
+    this.sending = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Stops the timer. Pending events stay pending: flush them first if they matter. */
+  close(): void {
+    this.closed = true;
+    this.disarm();
+  }
+
+  private arm(): void {
+    if (this.maxDelayMs === undefined || this.closed || this.timer !== undefined) return;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      // A refused timer flush leaves the events pending for the next flush, which reports the error; it is not retried on a loop.
+      void this.flush().catch(() => undefined);
+    }, this.maxDelayMs);
+    this.timer.unref?.();
+  }
+
+  private disarm(): void {
+    if (this.timer === undefined) return;
+    clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  private async sendPending(): Promise<void> {
+    this.disarm();
+    while (this.pending.length > 0) {
+      const batch = this.pending.slice(0, this.maximumBatchSize);
+      this.pending = this.pending.slice(batch.length);
+      try {
+        await this.sink(batch);
+      } catch (error) {
+        this.pending = [...batch, ...this.pending];
+        throw error;
+      }
     }
   }
 }
