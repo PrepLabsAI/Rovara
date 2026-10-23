@@ -1,7 +1,8 @@
 // FR-048: agentx config's fixed, documented keys. Each maps to exactly one place: a stack parameter,
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
-import { CHATGPT_DEFAULT_PREFERRED_MODEL, ChatGptModelIdSchema, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { CHATGPT_DEFAULT_PREFERRED_MODEL, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { catalogModel } from "@agentx/model-runtime/catalog";
 import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
 import type { ModelRole } from "../init/prerequisites.js";
@@ -9,7 +10,8 @@ import type { ModelRole } from "../init/prerequisites.js";
 export type { ModelRole } from "../init/prerequisites.js";
 
 export type ConfigTarget =
-  | { kind: "stack-parameter"; part: DeployPart; parameter: string }
+  /** `also`: the same value goes to these stacks' parameters too, one after the other (models.fallback: the runtime and the Slack stack both need it). */
+  | { kind: "stack-parameter"; part: DeployPart; parameter: string; also?: ReadonlyArray<{ part: DeployPart; parameter: string }> }
   | { kind: "settings"; field: "alertAddress" }
   | { kind: "control-plane-setting"; field: "perPerson" | "perOrganization"; installDefault: { part: DeployPart; parameter: string } }
   // #343: Sign in with ChatGPT's settings, held by the control plane alone (no stack parameter).
@@ -23,6 +25,8 @@ export interface ConfigKey {
   defaultValue?: string;
   /** The AI navigation model choice (Task 4.10): held to the models Rovara can use with the environment's provider and region before anything changes. It has no coding-model test call. */
   e2eAgentModel?: true;
+  /** The coding roles' fallback model (Task 4.10D): `none`, or a Bedrock model of the pinned catalog that passes the one-token test call before anything changes. */
+  fallbackModel?: true;
   /** Model keys pass a one-token test call before anything changes (FR-049). */
   model?: ModelRole;
   /** The value to store, or CONFIG_INVALID saying what is allowed. */
@@ -52,6 +56,14 @@ const e2eAgentModel = (key: string) => (value: string): string => {
   return trimmed === "default" || MODEL_ID.test(trimmed) ? trimmed : refuse(key, "default or a model id");
 };
 
+/** `none`, or the id of a Bedrock model in the pinned catalog: the fallback is never a model this Rovara does not know. */
+const fallbackModel = (key: string) => (value: string): string => {
+  const trimmed = value.trim();
+  if (trimmed === MODEL_FALLBACK_NONE) return trimmed;
+  if (MODEL_FALLBACK_PATTERN.test(trimmed) && catalogModel({ provider: "amazon-bedrock", modelId: trimmed }) !== undefined) return trimmed;
+  return refuse(key, "none or a Bedrock model of this Rovara's model catalog");
+};
+
 const email = (key: string) => (value: string): string => (AlertEmailSchema.safeParse(value.trim()).success ? value.trim() : refuse(key, "an email address"));
 
 const parameter = (part: DeployPart, name: string): ConfigTarget => ({ kind: "stack-parameter", part, parameter: name });
@@ -63,6 +75,10 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   {
     key: "models.e2eAgent", description: "the AI model that navigates your app in browser checks: default (Rovara's recommendation) or a model id Rovara can use with your provider",
     target: parameter("runtime", "E2eAgentModelId"), defaultValue: "default", e2eAgentModel: true, parse: e2eAgentModel("models.e2eAgent"),
+  },
+  {
+    key: "models.fallback", description: "the Bedrock model the coding worker, orchestrator and classifier run on when their provider's key secret is missing: none (no fallback; the call fails by name) or a Bedrock model id",
+    target: { kind: "stack-parameter", part: "runtime", parameter: "ModelFallback", also: [{ part: "slack", parameter: "ModelFallback" }] }, defaultValue: "none", fallbackModel: true, parse: fallbackModel("models.fallback"),
   },
   {
     key: "models.chatgpt.enabled", description: "true: people may connect their own ChatGPT plan and their tasks run on it; false: every task uses the worker model",
@@ -101,7 +117,7 @@ export function configKey(name: string): ConfigKey {
 export function whereText(target: ConfigTarget, env: string): string {
   switch (target.kind) {
     case "stack-parameter":
-      return `stack parameter ${target.parameter} on ${environmentStackName(env, target.part)}`;
+      return `stack parameter ${target.parameter} on ${[target, ...(target.also ?? [])].map((each) => environmentStackName(env, each.part)).join(" and ")}`;
     case "settings":
       return `SSM ${environmentSettingsPrefix(env)}settings (${target.field})`;
     case "control-plane-setting":

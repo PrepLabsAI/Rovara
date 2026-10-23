@@ -209,19 +209,21 @@ checklist is executed with an authorized test environment and budget.
 The user authorized up to **$5 in inference spend** and requested open weights. The proposed
 model is `qwen/qwen3-coder` for worker, orchestrator, and classifier, with reasoning off and the
 `deepinfra/turbo` endpoint allowlisted. The pinned Pi catalog and OpenRouter's public model and
-endpoint APIs list this model with tool support. A populated Secrets Manager secret and the target AWS environment are needed for live OpenRouter verification. Deployment can proceed with missing-secret fallback until that secret is ready. No paid model
+endpoint APIs list this model with tool support. A populated Secrets Manager secret and the target AWS environment are needed for live OpenRouter verification. Deployment can proceed before that secret is ready; a role with no key then fails by name unless a fallback model was chosen. No paid model
 request or deployment was made during implementation.
 
-## Default model when the secret is missing
+## When the secret is missing
 
-An omitted ARN, a Secrets Manager `ResourceNotFoundException`, or an empty secret value selects
-the default Bedrock model before opening the session. The worker uses its deployment's Bedrock
-default when one is configured. Otherwise the role defaults match init: Claude Sonnet 4.6
-(`us.anthropic.claude-sonnet-4-6`) for the worker and orchestrator, and Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`) for the classifier. Logs emit `model_fallback`
-with the requested and effective model; session and usage records use the effective model. The
-project's selected OpenRouter model remains selected, so subsequent sessions can use it once the
-secret is populated. Restart the Slack service to reload the long-lived classifier.
+An omitted ARN, a Secrets Manager `ResourceNotFoundException`, or an empty secret value no longer selects a
+Bedrock model silently. Without a chosen fallback (`models.fallback`, default `none`) the session fails with a
+named error that says the OpenRouter key secret is missing and how to choose a fallback. With one, for example
+`agentx --env <env> config set models.fallback us.anthropic.claude-sonnet-4-6`, the work runs on that Bedrock
+model and says so on the task page and in the Slack thread. Logs emit `model_fallback` with the requested and
+effective model; session and usage records use the effective model. The project's selected OpenRouter model
+remains selected, so subsequent sessions can use it once the secret is populated. Restart the Slack service to
+reload the long-lived classifier.
 
-Malformed references/keys, access denied, throttling, and OpenRouter inference errors do not
-activate fallback. Bedrock access is needed if the missing-secret fallback is used; a deployment
-with a populated, usable OpenRouter secret continues to use OpenRouter without Bedrock inference.
+Malformed references/keys, access denied, throttling, and OpenRouter inference errors do not activate the
+fallback. Bedrock access is needed only if a fallback is chosen and used; a deployment with a populated, usable
+OpenRouter secret continues to use OpenRouter without Bedrock inference.
+

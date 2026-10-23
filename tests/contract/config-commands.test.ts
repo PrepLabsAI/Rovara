@@ -37,7 +37,7 @@ describe("agentx config list and get", () => {
     expect(rows.find((row) => row.key === "alerts.address")?.value).toBe("none");
     expect(rows.find((row) => row.key === "limits.workspacesPerMember")?.value).toBe("3 (install-time default; the control plane may hold a newer setting)");
     expect(rows.find((row) => row.key === "models.chatgpt.enabled")).toMatchObject({ value: "false unless an admin changed it (the control plane holds the setting)", where: "control-plane setting CHATGPT.enabled" });
-    expect(rows).toHaveLength(15);
+    expect(rows).toHaveLength(16);
   });
 
   it("never shows the alert address itself, only that it is set", async () => {

@@ -9,7 +9,7 @@ const declaredInInfra = (parameter: string) => new RegExp(`CfnParameter\\((this|
 describe("config keys (FR-048)", () => {
   it("has every key the spec names, plus the budget", () => {
     expect(CONFIG_KEYS.map((entry) => entry.key)).toEqual([
-      "models.orchestrator", "models.classifier", "models.worker", "models.e2eAgent", "models.chatgpt.enabled", "models.chatgpt.preferredModel",
+      "models.orchestrator", "models.classifier", "models.worker", "models.e2eAgent", "models.fallback", "models.chatgpt.enabled", "models.chatgpt.preferredModel",
       "limits.workspacesPerMember", "limits.workspacesPerOrg", "limits.threadTurnsPerMinute",
       "slack.appPostedMessages", "alerts.address", "alerts.slowTurnMinutes",
       "budget.monthlyUsd", "budget.scope", "mcp.confirmElicitation",
