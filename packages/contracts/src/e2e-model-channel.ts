@@ -354,6 +354,26 @@ export type E2EModelChannelResponse = z.infer<typeof E2EModelChannelResponseSche
 // ---------------------------------------------------------------------------------------------------------------------
 
 /**
+ * M1.4 Task 4.10B: why a provider call failed, in words that do not depend on the provider. `limit-or-rate-limited` is a quota or a rate limit, `key-rejected` an API key, role or
+ * model access the provider did not accept (or a key secret the worker could not read), `model-not-found` a model the provider does not have for this account, `unreachable` no answer at
+ * all (DNS, connection, TLS), `request-rejected` a request the provider refused as malformed or too large, `provider-outage` the provider's own fault or a timeout, `unknown` anything else.
+ */
+export const E2E_MODEL_FAILURE_CLASSES = ["limit-or-rate-limited", "key-rejected", "model-not-found", "unreachable", "request-rejected", "provider-outage", "unknown"] as const;
+export type E2EModelFailureClass = (typeof E2E_MODEL_FAILURE_CLASSES)[number];
+
+/**
+ * The most a failure's `signal` can be: the error's own name or code, never its message. It is one token of the shapes the producers emit (a Bedrock error type such as
+ * `ThrottlingException`: letters; a provider's error code such as `rate_limit_error`: lower case, digits and underscores; a network code such as `ECONNRESET` or `CERT_*`; or the fixed
+ * words `secret-unreadable` and `not-in-catalog`), up to 64 characters, so no sentence, key or prompt text can be carried in it. It is for the operator and never reaches Slack or the task page.
+ */
+export const E2E_MODEL_FAILURE_SIGNAL_PATTERN = /^(?:[A-Za-z]{1,64}|[a-z0-9_]{1,64}|E[A-Z_]{2,30}|UND_ERR_[A-Z_]{1,40}|CERT_[A-Z0-9_]{1,56}|secret-unreadable|not-in-catalog)$/;
+export const E2EModelFailureSchema = z.object({
+  class: z.enum(E2E_MODEL_FAILURE_CLASSES),
+  signal: z.string().regex(E2E_MODEL_FAILURE_SIGNAL_PATTERN).nullable(),
+}).strict();
+export type E2EModelFailure = z.infer<typeof E2EModelFailureSchema>;
+
+/**
  * One receipt per request the worker receives, written by the worker from its own state. Prompt and response are
  * digests; bodies live in operator-only evidence. `callIndex` is the worker's per-step counter.
  */
@@ -378,8 +398,14 @@ export const E2EModelReceiptSchema = z.object({
   promptSha256: digest,
   responseSha256: digest.nullable(),
   outcome: receiptOutcome,
+  /**
+   * Why the call failed (Task 4.10B), on a `provider-error` or `timeout` receipt only. Optional with no default: a receipt written before it existed parses without it and serializes
+   * byte for byte as it was, and a receipt without it is read as an unclassified failure.
+   */
+  failure: E2EModelFailureSchema.optional(),
 }).strict().superRefine((receipt, context) => {
   const issue = (path: string, message: string) => context.addIssue({ code: "custom", path: [path], message });
+  if (receipt.failure !== undefined && receipt.outcome !== "provider-error" && receipt.outcome !== "timeout") issue("failure", "only a provider error or a timeout has a failure");
   if ((receipt.provider === "rovara-scripted") !== receipt.routeId.startsWith(E2E_MODEL_SCRIPTED_ROUTE_PREFIX)) issue("provider", "the scripted provider and the scripted route id go together");
   if (receipt.outcome === "ok") {
     if (receipt.inputTokens > caps.maxInputTokens) issue("inputTokens", "a successful call stays within the per-call input bound");

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2EScenarioResultsSchema, E2E_DISPLAY_SCREENSHOT_MAX_BYTES, canonicalJson, redactText,
   type E2E_DISPLAY_ASSERTION_KINDS, type E2EAssertion, type E2EDisplayAgentNavigation, type E2EDisplayBaseline, type E2EDisplayScenario, type E2EScenarioResults } from "@agentx/contracts";
-import { E2E_OWNER_SENTENCES } from "./owner-sentences.js";
+import { E2E_OWNER_SENTENCES, type ModelSentenceContext } from "./owner-sentences.js";
 
 /**
  * M1.3 Task 3.7: the rows a browser and API round shows on the task page and in Slack.
@@ -173,6 +173,8 @@ export type DisplayGroupInput = Readonly<{
   screenshots: ReadonlyMap<string, Readonly<{ sha256: string; data: Uint8Array }>>;
   /** How the AI navigated each case that has an AI navigation step, derived from the verified action ledger (`agentNavigationOf`) and from nothing else. Absent for a group with none. */
   agentNavigation?: ReadonlyMap<string, E2EDisplayAgentNavigation> | undefined;
+  /** The provider and model of the route definition the broker stored for the admitted revision (`modelSentenceContext`), which the model sentences name. Never from the worker. */
+  model?: ModelSentenceContext | undefined;
 }>;
 
 export type BuildScenarioRowsInput = Readonly<{
@@ -194,8 +196,8 @@ const PLAIN_REASONS: ReadonlyMap<string, string> = new Map([
 const COULD_NOT_VERIFY = "this check could not be verified";
 const NOT_FINISHED = "the checks have not finished";
 
-/** The sentence for a collector reason code that is an AI navigation code (the closed set of `E2E_AGENT_UNKNOWN_CODES`). */
-const agentSentence = (code: string): string | undefined => (Object.hasOwn(E2E_OWNER_SENTENCES.agentCode, code) ? E2E_OWNER_SENTENCES.agentCode[code as keyof typeof E2E_OWNER_SENTENCES.agentCode] : undefined);
+/** The sentence for a collector reason code that is an AI navigation code (the closed set of `E2E_AGENT_UNKNOWN_CODES`), naming the group's stored provider and model where it has them. */
+const agentSentence = (code: string, model: ModelSentenceContext | undefined): string | undefined => (E2E_OWNER_SENTENCES.isAgentCode(code) ? E2E_OWNER_SENTENCES.agentCode(code, model) : undefined);
 
 /** The code at the start of a group's reason (`code` or `code: detail`), or undefined when the reason does not start with one. Only the code is ever read; the detail is never shown. */
 const groupReasonCode = (reason: string): string | undefined => /^([a-z][a-z0-9-]{0,62})(?::|$)/u.exec(reason)?.[1];
@@ -204,12 +206,12 @@ const groupReasonCode = (reason: string): string | undefined => /^([a-z][a-z0-9-
  * The sentence for a group's own reason: only a code in the closed maps of `E2E_OWNER_SENTENCES` (the route codes, and the AI navigation codes a whole group can be refused with) is put
  * into words, matched exactly on the code. A code that is also noted for the operator is logged by code. Every other reason gives nothing, and the row says "could not be verified".
  */
-function groupSentence(reason: string, onOperatorOnly: (code: string) => void): string | undefined {
+function groupSentence(reason: string, model: ModelSentenceContext | undefined, onOperatorOnly: (code: string) => void): string | undefined {
   const code = groupReasonCode(reason);
   if (code === undefined) return undefined;
   if (E2E_OWNER_SENTENCES.groupCodeOperatorOnly.includes(code)) onOperatorOnly(code);
   if (Object.hasOwn(E2E_OWNER_SENTENCES.groupCode, code)) return E2E_OWNER_SENTENCES.groupCode[code];
-  return agentSentence(code);
+  return agentSentence(code, model);
 }
 
 /** One line for the operator's log, with the code only: what the owner is told is "could not be verified", and the operator may need to know why. */
@@ -242,8 +244,8 @@ export function buildScenarioRows(input: BuildScenarioRowsInput): { scenarios: E
         // Only the collector's own reason codes are put into words; a group's reason sentence (which may quote the worker) is never repeated, except for the closed set of codes
         // it starts with (`groupSentence`).
         reason = !input.authoritative ? NOT_FINISHED
-          : PLAIN_REASONS.get(found?.reason ?? "") ?? agentSentence(found?.reason ?? "") ?? PLAIN_REASONS.get(group.result?.reason ?? "") ?? agentSentence(group.result?.reason ?? "")
-            ?? groupSentence(group.reason, noteOnce) ?? COULD_NOT_VERIFY;
+          : PLAIN_REASONS.get(found?.reason ?? "") ?? agentSentence(found?.reason ?? "", group.model) ?? PLAIN_REASONS.get(group.result?.reason ?? "") ?? agentSentence(group.result?.reason ?? "", group.model)
+            ?? groupSentence(group.reason, group.model, noteOnce) ?? COULD_NOT_VERIFY;
       }
       // The navigation block is the broker's, from the verified ledger; it is shown only for a case the broker decided (passed or failed on its assertions), once the round is whole.
       // A row the broker could not decide says why in its reason, and has no "the model clicked ..." beside it.

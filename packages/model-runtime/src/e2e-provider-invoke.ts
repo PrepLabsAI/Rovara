@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { agentXError, isKeyedModelProvider, type KeyedModelProvider } from "@agentx/contracts";
+import { agentXError, isKeyedModelProvider, type E2EModelFailure, type KeyedModelProvider } from "@agentx/contracts";
 import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Message, Model, Tool } from "@earendil-works/pi-ai";
 import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { stream as bedrockStream } from "@earendil-works/pi-ai/api/bedrock-converse-stream";
@@ -10,6 +10,7 @@ import { catalogModel } from "./catalog.js";
 import { readProviderKey, requireKeyedModel } from "./config.js";
 import { assertE2EEnvironmentCannotRedirect, assertE2ERouteMatchesInstallation } from "./e2e-environment-guard.js";
 import type { E2EInvoke, E2EInvokeInput, E2EInvokeOutput, E2EModelChannelCall } from "./e2e-route.js";
+import { BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, classifyProviderFailure, isNetworkCode } from "./provider-failure.js";
 import { TRANSPORTS, requestCompat } from "./transport.js";
 import type { E2EModelRouteDefinition } from "@agentx/contracts";
 
@@ -52,7 +53,7 @@ interface E2EProviderInvokeTesting { bedrockEndpoint?: string; providerEnv?: Rec
 /** An invoke that also names the secret values it holds, so the proxy can add them to its credential scan, and the Bedrock endpoint it names. */
 export type E2EProviderInvoke = E2EInvoke & { readonly secrets: readonly string[]; readonly endpoint?: string };
 
-type ProviderError = Error & { status?: number; mayHaveBeenBilled?: boolean };
+type ProviderError = Error & { status?: number; mayHaveBeenBilled?: boolean; failure?: E2EModelFailure };
 
 const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 const zeroUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
@@ -64,7 +65,7 @@ function notSent<T>(error: T): T {
   return target;
 }
 
-function providerError(message: string, extra: { status?: number; mayHaveBeenBilled?: boolean } = {}): ProviderError {
+function providerError(message: string, extra: { status?: number; mayHaveBeenBilled?: boolean; failure?: E2EModelFailure } = {}): ProviderError {
   return Object.assign(new Error(message), extra);
 }
 
@@ -72,15 +73,80 @@ function providerError(message: string, extra: { status?: number; mayHaveBeenBil
 // The served model, as the provider's stream says it
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** What a call saw: the status of a failed response, whether a 2xx response arrived, and the served model. */
-interface Observed { status?: number; accepted?: boolean; responses?: number; model?: string; upstream?: string }
+/**
+ * What a call saw: the status of a failed response, whether a 2xx response arrived, and the served model. Also (Task 4.10B) the failure's signal, one allow-listed token of the
+ * provider's own error type or code, and the network code of a call that got no answer. Never a message.
+ */
+interface Observed { status?: number; accepted?: boolean; responses?: number; model?: string; upstream?: string; signal?: string; networkCode?: string }
 
-/** Observes only the serving model and the router's upstream provider, and the status of a failed response; never a body. */
+/** The most of a failed response's body that is read to find its error type: 8 KiB, in memory, within two seconds. Nothing of it is kept but one token. */
+const ERROR_BODY_MAX_BYTES = 8_192;
+const ERROR_BODY_READ_MS = 2_000;
+
+/**
+ * The provider's own error type or code from a failed response's body (Anthropic `error.type`, OpenAI `error.code` else `error.type`, OpenRouter's numeric `error.code`), or undefined.
+ * The response is a clone, so the SDK still reads the original. The text is parsed and dropped: only a token that matches the keyed pattern leaves this function.
+ */
+async function readKeyedErrorSignal(response: Response): Promise<string | undefined> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  try {
+    reader = response.body?.getReader();
+    if (reader === undefined) return undefined;
+    const active = reader;
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    const read = (async () => {
+      while (total < ERROR_BODY_MAX_BYTES) {
+        const { done, value } = await active.read();
+        if (done) break;
+        chunks.push(value);
+        total += value.byteLength;
+      }
+    })();
+    read.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([read, new Promise<void>((resolve) => { timer = setTimeout(resolve, ERROR_BODY_READ_MS); })]);
+    clearTimeout(timer);
+    const text = new TextDecoder().decode(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).subarray(0, ERROR_BODY_MAX_BYTES));
+    const error = (JSON.parse(text) as { error?: unknown }).error;
+    if (typeof error !== "object" || error === null) return undefined;
+    const { code, type } = error as { code?: unknown; type?: unknown };
+    const token = [typeof code === "number" && Number.isInteger(code) ? String(code) : code, type].find((value): value is string => typeof value === "string" && KEYED_SIGNAL_PATTERN.test(value));
+    return token;
+  } catch { return undefined; }
+  finally { void reader?.cancel().catch(() => undefined); }
+}
+
+/** The network code of a transport error (`error.cause.code` for undici's fetch, else `error.code`), only when it is one of the allow-listed codes. */
+function networkCodeOf(error: unknown): string | undefined {
+  const record = (value: unknown) => (typeof value === "object" && value !== null ? value as { code?: unknown; cause?: unknown } : {});
+  const outer = record(error);
+  const code = [record(outer.cause).code, outer.code].find((value): value is string => typeof value === "string" && isNetworkCode(value));
+  return code;
+}
+
+/** A network code named in an adapter's error text (the AWS SDK's and pi-ai's errors carry the code in the message): only the allow-listed token is taken from it, never the text. */
+function networkCodeInText(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined;
+  const found = /\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET|CERT_[A-Z0-9_]{1,56})\b/.exec(text)?.[1];
+  return found;
+}
+
+/** Observes only the serving model and the router's upstream provider, the status of a failed response and its error type; never anything else of a body. */
 function observingFetch(transport: typeof fetch, observed: Observed): typeof fetch {
   return async (input, init) => {
-    const response = await transport(input, init);
-    if (!response.ok) observed.status = response.status;
-    else observed.accepted = true;
+    let response: Response;
+    try { response = await transport(input, init); }
+    catch (error) {
+      const code = networkCodeOf(error);
+      if (code !== undefined) observed.networkCode = code;
+      throw error;
+    }
+    if (!response.ok) {
+      observed.status = response.status;
+      const signal = await readKeyedErrorSignal(response.clone());
+      if (signal !== undefined) observed.signal = signal;
+    } else observed.accepted = true;
     if (!response.ok || !response.body) return response;
     const decoder = new TextDecoder();
     let pending = "";
@@ -104,6 +170,17 @@ function observingFetch(transport: typeof fetch, observed: Observed): typeof fet
     }));
     return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   };
+}
+
+/** The error type pi-ai's Bedrock adapter recorded for a failure that came as a stream event after a 200 (`bedrock_response_failure`), when it is one letters-only token. */
+function bedrockDiagnosticSignal(message: AssistantMessage): string | undefined {
+  const diagnostics = (message as { diagnostics?: unknown }).diagnostics;
+  if (!Array.isArray(diagnostics)) return undefined;
+  for (const item of diagnostics as Array<{ type?: unknown; details?: { errorCode?: unknown } }>) {
+    const code = item?.type === "bedrock_response_failure" ? item.details?.errorCode : undefined;
+    if (typeof code === "string" && BEDROCK_SIGNAL_PATTERN.test(code)) return code;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -286,17 +363,22 @@ async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition, depen
   const bedrockEndpoint = provider === "amazon-bedrock" ? (testing?.bedrockEndpoint ?? `https://bedrock-runtime.${definition.region ?? ""}.amazonaws.com`) : undefined;
 
   let setupFailure: unknown;
+  // Which fixed failure a setup error is, by the step it came from (Task 4.10B): the error's own text is never read. A route/installation mismatch has none.
+  let setupStep: "installation" | "secret" | "catalog" = "installation";
   let key: string | undefined;
   let model: Model<Api> | undefined;
   try {
     assertE2ERouteMatchesInstallation(definition, dependencies.environment ?? process.env);
     if (isKeyedModelProvider(provider)) {
       const keyed: KeyedModelProvider = provider;
+      setupStep = "secret";
       key = await readProviderKey(keyed, definition.secretArn ?? "", readSecret);
+      setupStep = "catalog";
       const entry = requireKeyedModel(keyed, definition.modelId);
       const { api, baseUrl } = TRANSPORTS[keyed];
       model = { ...entry, api, baseUrl, compat: requestCompat(keyed, entry.compat), samplingParams: undefined, samplingParamsByThinkingLevel: undefined } as unknown as Model<Api>;
     } else {
+      setupStep = "catalog";
       const entry = catalogModel({ provider, modelId: definition.modelId });
       if (entry === undefined) throw agentXError("CONFIG_INVALID", "the route's Bedrock model is not in the installed Pi catalog");
       model = { ...entry, id: identifier, baseUrl: bedrockEndpoint, samplingParams: undefined, samplingParamsByThinkingLevel: undefined } as unknown as Model<Api>;
@@ -304,9 +386,15 @@ async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition, depen
   } catch (error) {
     setupFailure = error;
   }
+  const setupClass: E2EModelFailure | undefined = setupFailure === undefined ? undefined
+    : setupStep === "secret" ? { class: "key-rejected", signal: "secret-unreadable" } : setupStep === "catalog" ? { class: "model-not-found", signal: "not-in-catalog" } : undefined;
 
   const invoke = async (input: E2EInvokeInput): Promise<E2EInvokeOutput> => {
-    if (setupFailure !== undefined) throw notSent(setupFailure) as Error;
+    if (setupFailure !== undefined) {
+      const refused = notSent(setupFailure) as Error & { failure?: E2EModelFailure };
+      if (setupClass !== undefined) refused.failure = setupClass;
+      throw refused;
+    }
     // pi-ai and the AWS SDK read the real process environment on every call, and so does this guard.
     try { assertE2EEnvironmentCannotRedirect(dependencies.environment); } catch (error) { throw notSent(error) as Error; }
     const activeModel = model as Model<Api>;
@@ -351,10 +439,14 @@ async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition, depen
           // pi sets no maxAttempts on its Bedrock client, so the SDK would retry a throttle or a 5xx twice more. Each HTTP
           // response passes here, inside the SDK's retry loop. Throwing a plain error for a failed response makes the loop
           // classify it as a client error and stop (aborting the signal here instead leaves the loop hanging; Step 0).
-          onResponse: (response: { status: number }) => {
+          onResponse: (response: { status: number; headers?: Record<string, string> }) => {
             observed.responses = (observed.responses ?? 0) + 1;
             if (response.status >= 400) {
               observed.status = response.status;
+              // The part of the error type header before the colon (`ThrottlingException:http://internal.amazon.com/coral/...`), when it is one letters-only token.
+              const header = Object.entries(response.headers ?? {}).find(([name]) => name.toLowerCase() === "x-amzn-errortype")?.[1];
+              const type = typeof header === "string" ? header.split(":")[0]!.trim() : "";
+              if (BEDROCK_SIGNAL_PATTERN.test(type)) observed.signal = type;
               // The SDK's retry loop records how many attempts it made on the error it throws.
               refusal = new Error("the provider refused the call");
               throw refusal;
@@ -396,7 +488,14 @@ async function buildE2EProviderInvoke(definition: E2EModelRouteDefinition, depen
       const unansweredAttempt = attempts !== undefined && attempts > (observed.responses ?? 0);
       const billed = unansweredAttempt || sawContent || final.usage.input > 0 || observed.accepted === true || (payloadSha256 !== undefined && status === undefined);
       if (input.signal.aborted && status === undefined) throw providerError("the model call was stopped", { mayHaveBeenBilled: billed });
-      throw providerError("the provider call failed", { ...(status === undefined ? {} : { status }), mayHaveBeenBilled: billed });
+      // Why it failed, as one fixed class (Task 4.10B). The adapter's error text is read for nothing but a timeout and an allow-listed network code; Bedrock's own diagnostic names a
+      // stream error that came after a 200.
+      // The adapter's text is read only when no 2xx response was seen: after one, it can hold what the model or the provider's stream said, which must not steer the class.
+      const text = observed.accepted === true ? undefined : final.errorMessage;
+      const networkCode = observed.networkCode ?? networkCodeInText(text);
+      const failure = classifyProviderFailure({ provider, status, signal: observed.signal ?? bedrockDiagnosticSignal(final), networkCode,
+        timedOut: status === undefined && (final.stopReason === "aborted" || (text !== undefined && /\btimed? ?out\b/i.test(text))) });
+      throw providerError("the provider call failed", { ...(status === undefined ? {} : { status }), mayHaveBeenBilled: billed, failure });
     }
 
     const usage = final.usage;

@@ -7,6 +7,7 @@ import { E2EAgentModelEvidenceSchema, E2E_AGENT_TRACE_BASE64_MAX, createE2EAppli
 import { readAdmittedE2EModelRoute } from "./model-route-registry.js";
 import { buildScenarioRows, readCaptureScreenshots, type DisplayArtifact, type DisplayGroupInput } from "./application-display.js";
 import { agentCaseDirectory, agentNavigationOf } from "./application-agent-display.js";
+import { modelSentenceContext } from "./owner-sentences.js";
 import { combineE2EVerdicts, type E2EVerdict } from "./verdict.js";
 
 /** What the broker itself knows about the CHECKS operation and the admission it signed. None of it comes from the worker. */
@@ -176,7 +177,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       if (!same(roundBinding, binding) || planGroup === undefined) refuse("a group binding differs from the admitted round or plan");
       const envelope = input.groupEvidence.get(binding.runId);
       // The group's cases and approved scenarios, which the rows of the display are built over (application-display.ts).
-      const displayBase = { cases: binding.expectedCases.map((item) => ({ caseId: item.caseId, scenarioId: item.scenarioId, targetId: item.targetId, accountProfileId: item.accountProfileId })),
+      const displayBase = { model: modelSentenceContext(input.modelRouteDefinition), cases: binding.expectedCases.map((item) => ({ caseId: item.caseId, scenarioId: item.scenarioId, targetId: item.targetId, accountProfileId: item.accountProfileId })),
         scenarios: new Map(suite.bundle.scenarios.map((scenario) => [scenario.scenarioId, { assertions: scenario.assertions }] as const)) };
       if (envelope === undefined) {
         groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: "UNKNOWN", reason: "no result was accepted for this group" });

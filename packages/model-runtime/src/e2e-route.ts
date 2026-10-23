@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   E2EModelChannelRequestSchema,
   E2EModelChannelResponseSchema,
+  E2EModelFailureSchema,
   E2EModelReceiptSchema,
   E2EModelRouteDefinitionSchema,
   canonicalJson,
@@ -10,6 +11,7 @@ import {
   e2eServedModelMatchesPin,
   type E2EModelChannelRequest,
   type E2EModelChannelResponse,
+  type E2EModelFailure,
   type E2EModelReceipt,
   type E2EModelRouteDefinition,
 } from "@agentx/contracts";
@@ -208,6 +210,19 @@ function describeProviderFailure(error: unknown): string {
   return detail === "" ? "provider call failed" : `provider call failed (${detail})`;
 }
 
+/**
+ * The failure an invoke attached to its error (Task 4.10B), or undefined. It is parsed again here and never copied as it came, so a class or a signal outside the fixed lists, or any
+ * other key, is dropped and the receipt carries nothing the schema does not hold.
+ */
+function failureOf(error: unknown): E2EModelFailure | undefined {
+  const raw = typeof error === "object" && error !== null ? (error as { failure?: unknown }).failure : undefined;
+  const parsed = E2EModelFailureSchema.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/** What a call that ran out of time was: the provider did not answer in time, which the owner reads as the provider's problem. */
+const TIMEOUT_FAILURE: E2EModelFailure = Object.freeze({ class: "provider-outage", signal: "timeout" });
+
 type Limits = Pick<Budgets, "callTimeoutMs" | "maxOutputTokens" | "maxPromptBytes" | "maxInputTokens">;
 type Failed = { ok: false; code: "invalid-output" | "provider-error"; message: string; inputTokens: number; outputTokens: number; raw: unknown; usageMissing?: true };
 type Checked = { ok: true; result: Extract<E2EModelChannelResult, { status: "ok" }>; inputTokens: number; outputTokens: number } | Failed;
@@ -226,7 +241,7 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
   const dayBudget: E2EDayBudget = givenDayBudget;
   const dayLimits: E2EDayLimits = { maxInputTokens: budgets.maxInputTokensPerProjectDay, maxCalls: budgets.maxCallsPerProjectDay };
 
-  function receiptFor(identity: E2EModelCallIdentity, receiptId: string, fields: { startedAtMs: number; outcome: E2EModelReceipt["outcome"]; inputTokens: number; outputTokens: number; latencyMs: number; promptSha256: string; responseSha256: string | null; served?: { model: string | null; upstream: string | null } }): E2EModelReceipt {
+  function receiptFor(identity: E2EModelCallIdentity, receiptId: string, fields: { startedAtMs: number; outcome: E2EModelReceipt["outcome"]; inputTokens: number; outputTokens: number; latencyMs: number; promptSha256: string; responseSha256: string | null; served?: { model: string | null; upstream: string | null }; failure?: E2EModelFailure | undefined }): E2EModelReceipt {
     return E2EModelReceiptSchema.parse({
       receiptId, runId: identity.runId, caseId: identity.caseId, stepIndex: identity.stepIndex, callIndex: identity.callIndex,
       routeId: definition.routeId, routeRevision, provider: definition.provider, modelId: definition.modelId,
@@ -235,6 +250,7 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
       latencyMs: clamp(fields.latencyMs, 120_000),
       servedModelId: fields.served?.model?.slice(0, 200) || null, servedUpstream: fields.served?.upstream?.slice(0, 200) || null,
       promptSha256: fields.promptSha256, responseSha256: fields.responseSha256, outcome: fields.outcome,
+      ...(fields.failure === undefined || (fields.outcome !== "provider-error" && fields.outcome !== "timeout") ? {} : { failure: fields.failure }),
     });
   }
 
@@ -359,7 +375,7 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
     }
     const latencyMs = Math.max(0, now() - startedAtMs);
 
-    type Extra = { neverSent?: true; usageMissing?: true; served?: { model: string | null; upstream: string | null }; providerPayloadSha256?: string };
+    type Extra = { neverSent?: true; usageMissing?: true; served?: { model: string | null; upstream: string | null }; providerPayloadSha256?: string; failure?: E2EModelFailure };
     const finish = async (outcome: E2EModelReceipt["outcome"], result: E2EModelChannelResult, tokens: { inputTokens: number; outputTokens: number }, responseSha256: string | null, spendKnown: boolean, extra: Extra = {}): Promise<E2EModelGenerateOutcome> => {
       const carried = { ...(extra.usageMissing === true ? { usageMissing: true as const } : {}), ...(extra.providerPayloadSha256 === undefined ? {} : { providerPayloadSha256: extra.providerPayloadSha256 }) };
       // A call that was sent is charged what the provider reported, but never zero: a sent call that reports no input tokens costs the reserved bound and keeps its call count.
@@ -367,11 +383,11 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
       if (extra.neverSent === true || spendKnown) {
         try { await (extra.neverSent === true ? reservation?.release() : reservation?.settle(charged)); }
         catch {
-          const receipt = receiptFor(identity, receiptId, { startedAtMs, outcome: "provider-error", ...tokens, latencyMs, promptSha256, responseSha256: null, ...(extra.served === undefined ? {} : { served: extra.served }) });
+          const receipt = receiptFor(identity, receiptId, { startedAtMs, outcome: "provider-error", ...tokens, latencyMs, promptSha256, responseSha256: null, ...(extra.served === undefined ? {} : { served: extra.served }), failure: extra.failure });
           return { result: { status: "error", code: "provider-error", message: "the project's daily model budget could not be settled" }, receipt, chargedInputTokens: charged, ...carried };
         }
       }
-      const receipt = receiptFor(identity, receiptId, { startedAtMs, outcome, ...tokens, latencyMs, promptSha256, responseSha256, ...(extra.served === undefined ? {} : { served: extra.served }) });
+      const receipt = receiptFor(identity, receiptId, { startedAtMs, outcome, ...tokens, latencyMs, promptSha256, responseSha256, ...(extra.served === undefined ? {} : { served: extra.served }), failure: extra.failure });
       return { result, receipt, chargedInputTokens: charged, ...carried };
     };
 
@@ -382,16 +398,18 @@ export function createGovernedE2EModelRoute(rawDefinition: E2EModelRouteDefiniti
       }
       // A failure before any request went out (a setup, guard, mismatch or shaping refusal) spent nothing: charge 0 and release the reservation.
       if ((failure as { requestNotSent?: unknown } | undefined)?.requestNotSent === true && !timedOut) {
-        return finish("provider-error", { status: "error", code: "provider-error", message: describeProviderFailure(failure) }, { inputTokens: 0, outputTokens: 0 }, null, true, { neverSent: true });
+        const why = failureOf(failure);
+        return finish("provider-error", { status: "error", code: "provider-error", message: describeProviderFailure(failure) }, { inputTokens: 0, outputTokens: 0 }, null, true, { neverSent: true, ...(why === undefined ? {} : { failure: why }) });
       }
-      if (timedOut) return finish("timeout", { status: "error", code: "timeout", message: "the model call exceeded its time limit" }, { inputTokens: reserved, outputTokens: 0 }, null, false);
+      if (timedOut) return finish("timeout", { status: "error", code: "timeout", message: "the model call exceeded its time limit" }, { inputTokens: reserved, outputTokens: 0 }, null, false, { failure: TIMEOUT_FAILURE });
       const cancelled = controller.signal.aborted;
       // A call that failed after the provider began to answer may have been billed: charge the reserved bound, as for a timeout.
       const billed = (failure as { mayHaveBeenBilled?: unknown } | undefined)?.mayHaveBeenBilled === true;
-      return finish("provider-error", { status: "error", code: "provider-error", message: cancelled ? "the model call was cancelled by the run" : describeProviderFailure(failure) }, { inputTokens: billed ? reserved : 0, outputTokens: 0 }, null, false);
+      const why = cancelled ? undefined : failureOf(failure);
+      return finish("provider-error", { status: "error", code: "provider-error", message: cancelled ? "the model call was cancelled by the run" : describeProviderFailure(failure) }, { inputTokens: billed ? reserved : 0, outputTokens: 0 }, null, false, why === undefined ? {} : { failure: why });
     }
     if (latencyMs > limits.callTimeoutMs) {
-      return finish("timeout", { status: "error", code: "timeout", message: "the model call exceeded its time limit" }, { inputTokens: reserved, outputTokens: 0 }, null, false);
+      return finish("timeout", { status: "error", code: "timeout", message: "the model call exceeded its time limit" }, { inputTokens: reserved, outputTokens: 0 }, null, false, { failure: TIMEOUT_FAILURE });
     }
     const checked = check(request, receiptId, output, limits, reserved);
     const extra: Extra = {
