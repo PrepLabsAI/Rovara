@@ -5613,26 +5613,6 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     ],
                   ],
                 },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":ssm:",
-                      {
-                        "Ref": "AWS::Region",
-                      },
-                      ":",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":parameter/agentx/staging/worker-e2e-agent-model",
-                    ],
-                  ],
-                },
               ],
               "Sid": "ReadEvalSettings",
             },

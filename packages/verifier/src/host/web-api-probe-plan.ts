@@ -2,10 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, WEB_API_AGENT_GUARD_MARKER_TESTID, WEB_API_AGENT_GUARD_PAGE_PATH, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_MAX_ACTIONS, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
-  E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
+import { DRIVING_TEST_BUDGET, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_EXECUTOR_APP_ORIGIN, E2E_MODEL_CHANNEL_SCHEMA_VERSION, WEB_API_AGENT_GUARD_MARKER_TESTID, WEB_API_AGENT_GUARD_PAGE_PATH, WEB_API_AGENT_PROBE_GOAL, WEB_API_AGENT_PROBE_MAX_ACTIONS, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, e2eAnonymousRuntimeAccountRef, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
+  E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, e2eModelRouteRevision, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2eEffectiveRoundLimitsBeforeRun1, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2EApplicationRepository, inspectE2ERepository, proposeE2ESetup, withE2EAnonymousTargets,
-  selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EReplaySourceCase, type E2EReplayTrace, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
+  selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EModelRouteDefinition, type E2EPolicy, type E2EReplaySourceCase, type E2EReplayTrace, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { compileE2EApplicationScenarios, e2eApplicationGroupUsesModel, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../application-build-source.js";
 import { loadWebApiQualificationProbeAssets, type E2EAgentProbeScriptTurn } from "../application-runtime-probes.js";
@@ -378,6 +378,34 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     seed: { accounts: inferred ? [] : [{ email, passwordDigest: createHash("sha256").update(password, "utf8").digest("hex"), subjectId: `subject-${randomUUID()}`,
       tenantId: "tenant-a", role, displayName: role === "owner" ? "Orders Owner" : "Orders Viewer" }] },
     account: { email, password } };
+}
+
+/** The scenario id of the driving test's one case. It is not a qualification probe: no pin names it, and the probe assets and pins are not touched. */
+export const DRIVING_TEST_SCENARIO_ID = "model-driving-test";
+
+/**
+ * The policy limits of the driving test's one group: the whole test's budget (Task 4.10C), so a round under them can make at most 6 model requests with 36,000 input tokens in all
+ * and 3,072 output tokens, and acts at most `maxActions` times.
+ */
+export const DRIVING_TEST_LIMITS = Object.freeze({ runTimeoutMs: DRIVING_TEST_BUDGET.testDeadlineMs, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: DRIVING_TEST_BUDGET.testDeadlineMs - 30_000,
+  maxActionsPerCase: DRIVING_TEST_BUDGET.maxActions + 30, maxModelRequests: DRIVING_TEST_BUDGET.maxCalls, maxInputTokens: DRIVING_TEST_BUDGET.maxInputTokensTotal,
+  maxOutputTokens: DRIVING_TEST_BUDGET.maxCalls * DRIVING_TEST_BUDGET.maxOutputTokensPerCall, maxSpendUsd: null });
+
+/**
+ * The plan of the on-account driving test (Task 4.10C): the built-in fixture of the `web-agent-v1` probe (the CSV export app) and that asset's goal and deterministic assertion (one
+ * download, the CSV check), run through the real executor and model channel under the REAL route the installation chose. It is a new plan function beside the probes' own: the
+ * `web-agent-scripted-v1` case, the probe assets and the qualification pins are not changed. The plan pins `route` (its id and revision), so the group's receipts are judged against it;
+ * the step allows `DRIVING_TEST_BUDGET.maxActions` actions.
+ */
+export function webApiDrivingTestPlan(route: Pick<E2EModelRouteDefinition, "routeId" | "revision"> & Record<string, unknown>, options: { appRoot: string; runId: string; taskId?: string; deadlineMs?: number }): WebApiProbePlan {
+  const routeRevision = e2eModelRouteRevision(route);
+  return createWebApiProbePlan({ probe: "web-agent-v1", appRoot: options.appRoot, runId: options.runId, ...(options.taskId === undefined ? {} : { taskId: options.taskId }),
+    modelRoute: { routeId: route.routeId, routeRevision }, routeLimits: { ...DRIVING_TEST_LIMITS }, deadlineMs: options.deadlineMs ?? DRIVING_TEST_BUDGET.testDeadlineMs,
+    accountScenarios: [{ accountProfileId: "orders-owner", scenario: (targetId) => {
+      const base = scenarioFor("web-agent-v1", targetId, "orders-owner");
+      return { ...base, scenarioId: DRIVING_TEST_SCENARIO_ID, requirementId: `${DRIVING_TEST_SCENARIO_ID}-requirement`,
+        steps: base.steps.map((step) => (step.kind === "agent" ? { ...step, maxActions: DRIVING_TEST_BUDGET.maxActions } : step)) };
+    } }] });
 }
 
 /** The outside host the egress probes try to reach; the qualification oracle requires exactly this one to be recorded as blocked. */

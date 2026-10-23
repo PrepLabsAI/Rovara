@@ -74,4 +74,7 @@ export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, Docke
 export { executorContainerArgs } from "./host/executor-container.js";
 export { installedExecutorSeccompProfilePath, verifyExecutorSeccompProfile } from "./host/executor-seccomp.js";
 export { deriveWebApiProbeObservation, verifyWebApiProbeRecord, type WebApiProbeDerivation } from "./web-api-probe-evidence.js";
+export { DRIVING_TEST_LIMITS, DRIVING_TEST_SCENARIO_ID, webApiDrivingTestPlan } from "./host/web-api-probe-plan.js";
+export { createDrivingNavigator, lastFailureOf, reasonCodeOf, runModelDrivingTest } from "./host/model-driving-test.js";
+export type { DrivingChannelRequest, DrivingNavigatorDependencies, DrivingShape, DrivingTestDependencies, DrivingTestOutcome, NavigationOutcome } from "./host/model-driving-test.js";
 export type { WebApiProbeModelChannelFactory, WebApiProbeModelChannelRequest } from "./host/web-api-probe-runner.js";

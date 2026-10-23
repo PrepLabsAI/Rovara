@@ -265,13 +265,13 @@ const E2E_AGENT_MODEL_PARAMETER = "E2eAgentModelId";
 const E2E_AGENT_MODEL_SETTING = { logicalIdPrefix: "WorkerE2eAgentModelParameter", construct: CDK_CONSTRUCT_IDS.runtime } as const;
 /**
  * What the `e2e-agent-settings` unit changes in the deployed control-plane stack, and nothing else: the broker's `AGENTX_E2E_AGENT_SETTINGS_PREFIX` variable (PREFIXGAP) and the ARN of the
- * `worker-e2e-agent-model` parameter in the `ssm:GetParameters` statement of the three role policies that read every worker setting (the broker's, the session steps' and the
- * eval batch tick's). All are declared IAM and environment changes of the head templates.
+ * `worker-e2e-agent-model` parameter in the `ssm:GetParameters` statement of the two role policies that read it (the broker's and the session steps'; the eval batch tick never reads
+ * it, 4.10A review M-2). All are declared IAM and environment changes of the head templates.
  */
 export const E2E_AGENT_SETTINGS_UNIT = {
   broker: CONTROL_PLANE_LAMBDAS.broker.logicalId,
   variable: "AGENTX_E2E_AGENT_SETTINGS_PREFIX",
-  policies: ["BrokerServiceRoleDefaultPolicyDDFD9E7E", "SessionsStepsServiceRoleDefaultPolicy9F4B87C9", "EvalBatchTickServiceRoleDefaultPolicyC35492F8"],
+  policies: ["BrokerServiceRoleDefaultPolicyDDFD9E7E", "SessionsStepsServiceRoleDefaultPolicy9F4B87C9"],
 } as const;
 
 /**

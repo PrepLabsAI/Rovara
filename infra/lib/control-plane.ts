@@ -211,6 +211,13 @@ export class ControlPlaneStack extends Stack {
       swebenchNames(naming).runnerFeaturesParameterName,
       ...Object.values(WORKER_SETTING_PARAMETERS).map((name) => `${naming.ec2.workerSettingsPrefix}${name}`),
     ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`);
+    // The eval batch tick reads the SWE-bench settings and the worker settings the deployment reads for an eval run, but never the AI navigation model setting (Task 4.10A review M-2).
+    const evalSettingArns = [
+      swebenchNames(naming).settingsParameterName,
+      swebenchNames(naming).runnerImageParameterName,
+      swebenchNames(naming).runnerFeaturesParameterName,
+      ...Object.entries(WORKER_SETTING_PARAMETERS).filter(([key]) => key !== "e2eAgentModel").map(([, name]) => `${naming.ec2.workerSettingsPrefix}${name}`),
+    ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`);
     const swebenchStateMachineArn = this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
     broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
@@ -1009,6 +1016,37 @@ export class ControlPlaneStack extends Stack {
           ],
         },
       });
+      // M1.4 Task 4.10C, read-only model discovery for the runner's worker (what the model check lists: Bedrock models and profiles, availability, and the tokens-per-minute quotas).
+      // No invoke grant is added: the driving test uses BedrockModelInvocation, which already covers the foundation models and this account's inference profiles (global. included).
+      // `bedrock:GetFoundationModelAvailability` is `*` until its resource-level support is confirmed in the Service Authorization Reference. Named like the transport policies so the
+      // qualification-transport unit adds it (prefix E2eQualificationTransport); its policy name is E2eModelDiscovery.
+      new iam.CfnPolicy(this, "E2eQualificationTransportDiscovery", {
+        policyName: "E2eModelDiscovery",
+        roles: [sessions.instanceRoleName],
+        policyDocument: {
+          Version: "2012-10-17",
+          Statement: [
+            { Sid: "ListBedrockModels", Effect: "Allow", Action: ["bedrock:ListFoundationModels", "bedrock:ListInferenceProfiles"], Resource: "*" },
+            { Sid: "ReadBedrockModelAvailability", Effect: "Allow", Action: "bedrock:GetFoundationModelAvailability", Resource: "*" },
+            { Sid: "ReadBedrockInferenceProfiles", Effect: "Allow", Action: "bedrock:GetInferenceProfile", Resource: `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/*` },
+            { Sid: "ListBedrockQuotas", Effect: "Allow", Action: "servicequotas:ListServiceQuotas", Resource: "*" },
+            { Sid: "ReadBedrockQuota", Effect: "Allow", Action: "servicequotas:GetServiceQuota", Resource: `arn:${Aws.PARTITION}:servicequotas:${Aws.REGION}:${Aws.ACCOUNT_ID}:bedrock/*` },
+          ],
+        },
+      });
+      // The broker puts a model check's request and reads its result: exactly these two keys under any runner's prefix, no List and no Delete. A policy of its own (added by the same
+      // unit) so the broker role's default policy is not modified.
+      new iam.CfnPolicy(this, "E2eQualificationTransportBrokerChecks", {
+        policyName: "E2eModelCheckBroker",
+        roles: [broker.role!.roleName],
+        policyDocument: {
+          Version: "2012-10-17",
+          Statement: [
+            { Sid: "PutModelCheckRequest", Effect: "Allow", Action: "s3:PutObject", Resource: artifacts.arnForObjects("e2e-runtime/*/canary-request.json") },
+            { Sid: "ReadModelCheckResult", Effect: "Allow", Action: "s3:GetObject", Resource: artifacts.arnForObjects("e2e-runtime/*/canary-result.json") },
+          ],
+        },
+      });
     }
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);
@@ -1031,7 +1069,7 @@ export class ControlPlaneStack extends Stack {
     state.grantReadWriteData(evalBatchTick);
     // A run's launch.json (evals/<runId>/) and a batch's results (evals/batches/<id>/); it reads nothing there.
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvalObjects", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("evals/*")] }));
-    evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadEvalSettings", actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
+    evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadEvalSettings", actions: ["ssm:GetParameters"], resources: evalSettingArns }));
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "StartEvalRuns", actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
     // Ruling 16: a dead run's instance, ended before the run is charged; this environment's eval instances only.
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({
