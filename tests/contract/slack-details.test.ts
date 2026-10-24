@@ -428,6 +428,9 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
   });
 
   function wire(tableName: string | undefined, readDelayMs = 0, pendingRequests = 1) {
+    // The stored turn is dated 2026-09-24 and Details keeps a turn for 30 days: pin the clock to an hour after its reply so these tests do not depend on the real date.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(repliedAt + 3_600_000);
     process.env.SLACK_THREADS_TABLE_NAME = "threads";
     process.env.SLACK_REQUEST_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789012/requests.fifo";
     process.env.SLACK_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:slack";
