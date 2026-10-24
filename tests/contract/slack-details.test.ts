@@ -472,6 +472,9 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
   }
 
   it("still queues Approve with TURN_RECORDS_TABLE_NAME unset, says so once at startup, and answers Details that the details are unavailable", async () => {
+    // Keep this wiring check inside the fixture reply's retention window.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(repliedAt + 3_600_000);
     const { handler, lines, queued, slack, confirmationId } = wire(undefined);
     expect(lines.filter((line) => line.event === "interaction.details_not_configured")).toEqual([
       { component: "slack-interactivity", event: "interaction.details_not_configured", variable: "TURN_RECORDS_TABLE_NAME" },
@@ -592,6 +595,9 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
   });
 
   it("reads the turn record table named by TURN_RECORDS_TABLE_NAME when it is set", async () => {
+    // Keep this wiring check inside the fixture reply's retention window.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(repliedAt + 3_600_000);
     const { handler, lines, dynamo } = wire("turn-records");
     expect(lines.map((line) => line.event)).not.toContain("interaction.details_not_configured");
     await handler(signed(payload(), Date.now()));

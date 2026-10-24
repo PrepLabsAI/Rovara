@@ -8,6 +8,7 @@ import { createCompiledApiApplicationFixture, createCompiledTwoShardApiApplicati
 import { e2eAgentValueKeyId, e2eModelRouteRevision } from "@agentx/contracts";
 import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
+import { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } from "../../packages/verifier/src/application-templates.js";
 import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
 
 const sha = "a".repeat(64);
@@ -788,7 +789,7 @@ describe("application collection contracts", () => {
           steps: [{ id: "assertion-step", index: 0, kind: "assertion", api: "assert.http-status", label: "health status", source: tuple.source,
             status: "failed", startedAt: reportStarted, durationMs: 1, events: [], artifacts: [] }] }] }], errors: [],
       summary: { discovered: 1, selected: 1, executed: 1, passed: 0, failed: 1, interrupted: 0, flaky: 0, skipped: 0 },
-      limits: { maxAgentContextBytes: 1024, maxLedgerBytes: 1024, maxObservationBytes: 1024, maxEventsPerStep: 1000, maxModelTokensPerCall: 1024 },
+      limits: { maxAgentContextBytes: 1024, maxLedgerBytes: 1024, maxObservationBytes: 1024, maxEventsPerStep: 1000, maxModelTokensPerCall: E2E_AGENT_CONFIG_MAX_INPUT_TOKENS },
       usage: { discoveredResults: 1, maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0,
         modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 } } };
     const reportBytes = Buffer.from(JSON.stringify(failedReport));
@@ -861,7 +862,7 @@ describe("application collection contracts", () => {
     };
     const timeAt = (offset: number) => new Date(Date.parse(round.admittedAt) + offset).toISOString();
     const reportEnvironment = { ci: true, trustNoticeShown: false, os: "linux 6.8.0", arch: "x64", runtime: "node v22.23.2" };
-    const reportLimits = { maxAgentContextBytes: 1024, maxLedgerBytes: 1024, maxObservationBytes: 1024, maxEventsPerStep: 1000, maxModelTokensPerCall: 1024 };
+    const reportLimits = { maxAgentContextBytes: 1024, maxLedgerBytes: 1024, maxObservationBytes: 1024, maxEventsPerStep: 1000, maxModelTokensPerCall: E2E_AGENT_CONFIG_MAX_INPUT_TOKENS };
     const aggregateUsage = { discoveredResults: 2, maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0,
       artifactBytes: 0, downloads: 0, events: 0, modelTokens: 1, maxModelCallsInStep: 1, maxActionStepsInStep: 0 };
     // What the worker hands over about the group's agent steps (Task 4.4a): `callsByShard[i]` ok receipts for shard i's case, and the ledger of each case's concluded step.
