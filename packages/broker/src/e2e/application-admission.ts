@@ -81,6 +81,33 @@ export type ApplicationAdmission = Readonly<{
   skippedAiScenarios: ReadonlyArray<Readonly<{ scenarioId: string; title: string }>>;
 }>;
 
+/** The approved plan a round runs under: the latest canonical plan artifact and its owner approval (`resolveWorkflowE2ECanonicalApproval`). */
+export type ApplicationRoundApproval = Readonly<{
+  artifactId: string; artifactDigest: string; graphDigest: string | null; runId: string | null; workflowRevision: number; actorId: string;
+}>;
+
+/**
+ * The plan identity a candidate round and an audit replay of it both run under. Every case id is derived from it (through the execution descriptor), so a replay that took any other
+ * value would run other cases than the round it replays and could not be served that round's recordings. One function, so the two cannot drift apart again.
+ */
+export function applicationApprovedPlanDigest(taskId: string, approval: ApplicationRoundApproval): string {
+  return sha256(canonicalJson({
+    domain: "workflow-application-e2e-approved-plan/v1", taskId, artifactId: approval.artifactId, artifactSha256: approval.artifactDigest,
+    graphDigest: approval.graphDigest, graphRunId: approval.runId, workflowRevision: approval.workflowRevision, actorId: approval.actorId,
+  }));
+}
+
+/** An audit replay's admission: the candidate round's inputs plus the round to replay. The plan identity is derived here, from the approval, never passed in. */
+export type ApplicationReplayAdmissionInput = Omit<ApplicationAdmissionInput, "planDigest" | "replay" | "baseline"> & Readonly<{
+  approval: ApplicationRoundApproval; replay: NonNullable<ApplicationAdmissionInput["replay"]>;
+}>;
+export function buildApplicationReplayAdmission(input: ApplicationReplayAdmissionInput): ApplicationAdmission {
+  const { approval, ...rest } = input;
+  // The round to replay and the attempt are signed by `replay`; they are not part of the plan identity, which every case id is derived from.
+  const planDigest = applicationApprovedPlanDigest(input.taskId, approval);
+  return buildApplicationExecutionAdmission({ ...rest, planDigest });
+}
+
 const refusal = applicationRoundRefusal;
 const failure = (error: unknown) => (error instanceof Error ? error.message : "unreadable input");
 

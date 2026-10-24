@@ -304,7 +304,7 @@ import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.j
 import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval, type ApplicationAccountsInput, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
-import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
+import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationReplayAdmission } from "../e2e/application-admission.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
 import { ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, untestedRouteSentence, type ModelCheckDependencies } from "../e2e/model-checks.js";
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, readE2EModelRouteShape, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
@@ -10868,10 +10868,7 @@ async function startApplicationE2EChecksDispatch(
   const creatorAuthority = await requireWorkflowE2ECreatorAuthority(dependencies, task);
   const workspace = await routeDependencies.actions.workspace(task.workspaceId);
   const operationId = randomUUID();
-  const planDigest = createHash("sha256").update(canonicalJson({
-    domain: "workflow-application-e2e-approved-plan/v1", taskId: task.taskId, artifactId: approval.artifactId, artifactSha256: approval.artifactDigest,
-    graphDigest: approval.graphDigest, graphRunId: approval.runId, workflowRevision: approval.workflowRevision, actorId: approval.actorId,
-  })).digest("hex");
+  const planDigest = applicationApprovedPlanDigest(task.taskId, approval);
   const built = buildApplicationExecutionAdmission({ taskId: task.taskId, operationId, operationFence: workspace.fence + 1, workflowRevision: workflow.revision + 1, roundId: randomUUID(),
     runId: randomUUID, intent, artifact, snapshot, setupProposal: current.inputs.setup.setupProposal, setupApproval: current.inputs.setup.setupApproval, policy: current.inputs.policy,
     registeredRuntimes: current.inputs.rows, runtimeCatalogId: current.inputs.runtimeCatalogId, runtimeBinding: current.inputs.runtimeBinding,
@@ -11119,14 +11116,10 @@ async function startReplayApplicationRound(
     const creatorAuthority = await requireWorkflowE2ECreatorAuthority(dependencies, task);
     const workspace = await routeDependencies.actions.workspace(task.workspaceId);
     operationId = randomUUID();
-    const planDigest = createHash("sha256").update(canonicalJson({
-      domain: "workflow-application-e2e-replay-plan/v1", taskId: task.taskId, artifactId: canonicalApproval.artifactId, artifactSha256: canonicalApproval.artifactDigest,
-      graphDigest: canonicalApproval.graphDigest, graphRunId: canonicalApproval.runId, workflowRevision: canonicalApproval.workflowRevision, actorId: canonicalApproval.actorId, sourceRoundId, attempt,
-    })).digest("hex");
-    built = buildApplicationExecutionAdmission({ taskId: task.taskId, operationId, operationFence: workspace.fence + 1, workflowRevision: workflow.revision, roundId: randomUUID(),
+    built = buildApplicationReplayAdmission({ taskId: task.taskId, operationId, operationFence: workspace.fence + 1, workflowRevision: workflow.revision, roundId: randomUUID(),
       runId: randomUUID, intent, artifact, snapshot, setupProposal: current.inputs.setup.setupProposal, setupApproval: current.inputs.setup.setupApproval, policy: current.inputs.policy,
       registeredRuntimes: current.inputs.rows, runtimeCatalogId: current.inputs.runtimeCatalogId, runtimeBinding: current.inputs.runtimeBinding,
-      buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored) }, planDigest, now: Date.now(), creatorAuthority, accountEntries: current.inputs.accountEntries,
+      buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored) }, approval: canonicalApproval, now: Date.now(), creatorAuthority, accountEntries: current.inputs.accountEntries,
       recordedSelection: E2EApplicationSelectionRecordSchema.parse(workflow.e2e?.applicationSelection),
       replay: { sourceRoundId, sourceAdmissionSha256: qualified.admissionSha256, sourceEvidenceSha256: qualified.evidenceSha256, attempt, sourceCases: source.sourceCases,
         traces: source.traces.map((trace) => ({ caseId: trace.caseId, stepIndex: trace.stepIndex, keyHash: trace.keyHash, traceBase64: Buffer.from(trace.bytes).toString("base64"), binding: trace.binding })) } });
