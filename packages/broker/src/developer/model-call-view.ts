@@ -131,6 +131,8 @@ function modelCall(value: unknown): View | undefined {
     case "retrying":
       return retryStart(attempt, max, millis(call.delayMs, MAX_DELAY_MS));
     case "retry-finished":
+      // `cancelled: true` (a cancel or a deadline landed during the retry wait) is not "retries ran out"; an absent field changes nothing.
+      if (call.success !== true && call.cancelled === true) return { kind: "progress", text: "Retrying stopped because the step was cancelled or ran out of time." };
       return retryFinished(call.success === true, attempt);
     case "stopped":
       return { kind: "progress", text: "The model call was stopped." };
