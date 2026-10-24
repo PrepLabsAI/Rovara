@@ -111,7 +111,7 @@ describe("sanitizeModelCallEvent on a keyed provider's failure", () => {
       text: "OpenAI request failed; rate limited or out of credits; check the key's usage limits before retrying" },
     { name: "AgentX transport: fixed text for an upstream 5xx", provider: "openrouter", cls: "provider-outage", signal: null, action: /retry/u, secret: "zzz",
       text: "OpenRouter request failed; upstream unavailable; check provider status before retrying" },
-    { name: "AgentX transport: ChatGPT plan, connection refused", provider: "openai", cls: "key-rejected", signal: null, action: /key/u, secret: "zzz",
+    { name: "AgentX transport: ChatGPT plan, connection refused", provider: "openai", cls: "key-rejected", signal: null, action: /connect ChatGPT again/u, secret: "zzz",
       text: "ChatGPT request failed; the ChatGPT connection was refused, so connect ChatGPT again" },
     { name: "AgentX transport: a model that does not exist", provider: "openrouter", cls: "model-not-found", signal: null, status: 404, action: /model setting/u, secret: "zzz",
       text: "OpenRouter request failed; check model availability and the provider allowlist" },
@@ -127,6 +127,16 @@ describe("sanitizeModelCallEvent on a keyed provider's failure", () => {
       for (const out of [JSON.stringify(note), describeModelCallNote(note), modelFailureNextAction(note)]) expect(out).not.toContain(testCase.secret);
     });
   }
+
+  it("a ChatGPT-plan 401 says to connect ChatGPT again, never to check a key; a keyed provider's 401 still says key", () => {
+    const chatgpt = read("openai", "ChatGPT request failed; the ChatGPT connection was refused, so connect ChatGPT again");
+    expect(chatgpt).toMatchObject({ chatgpt: true });
+    expect(modelFailureNextAction(chatgpt)).toBe("connect ChatGPT again, then retry");
+    expect(modelFailureNextAction(chatgpt)).not.toMatch(/key/u);
+    const keyed = read("openai", "OpenAI request failed; check the API key and its permissions");
+    expect(keyed.chatgpt).toBeUndefined();
+    expect(modelFailureNextAction(keyed)).toMatch(/model key/u);
+  });
 
   it("keeps an error token only when it is one the provider's allow-list knows, never an arbitrary body token", () => {
     const note = read("openai", '400 {"error":{"type":"sk_live_abc123_private","code":"my_customer_acme"}}');

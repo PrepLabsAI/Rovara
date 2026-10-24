@@ -16,7 +16,7 @@ import type { WorkerLogSink } from "./worker-log.js";
 export const MODEL_REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 
 export type ModelCallNote =
-  | { outcome: "failed"; class: E2EModelFailureClass; signal: string | null; attempt: number; provider?: ModelProvider; requestId?: string; durationMs?: number; status?: number }
+  | { outcome: "failed"; class: E2EModelFailureClass; signal: string | null; attempt: number; provider?: ModelProvider; requestId?: string; durationMs?: number; status?: number; chatgpt?: true }
   | { outcome: "stopped"; attempt: number; provider?: ModelProvider; durationMs?: number }
   /** Pi scheduled retry `attempt` of `maxAttempts` (both are retries, not model calls) after `delayMs`. */
   | { outcome: "retrying"; attempt: number; maxAttempts: number; delayMs: number }
@@ -70,7 +70,7 @@ const PI_RETRY_CANCELLED = "Retry cancelled";
  * What AgentX's own keyed-provider transport (packages/model-runtime `safeError`) writes after "<Label> request failed; ": one fixed sentence chosen from the HTTP status alone. Each is matched whole, and only a
  * status comes out of it: `classify` is the status the classifier decides on, `report` the status that is certain (a class of statuses has none). None of the text is copied.
  */
-const TRANSPORT_DETAILS: ReadonlyMap<string, { classify: number; report?: number }> = new Map([
+const TRANSPORT_DETAILS: ReadonlyMap<string, { classify: number; report?: number; chatgpt?: true }> = new Map([
   ["check the API key and its permissions", { classify: 401 }],
   ["check the key's credit balance and spending limit", { classify: 402, report: 402 }],
   ["check model availability and the provider allowlist", { classify: 404, report: 404 }],
@@ -80,7 +80,7 @@ const TRANSPORT_DETAILS: ReadonlyMap<string, { classify: number; report?: number
   ["the provider is overloaded; wait before retrying", { classify: 529, report: 529 }],
   ["upstream unavailable; check provider status before retrying", { classify: 500 }],
   ["the request was refused; check the model's context and output limits", { classify: 400 }],
-  ["the ChatGPT connection was refused, so connect ChatGPT again", { classify: 401 }],
+  ["the ChatGPT connection was refused, so connect ChatGPT again", { classify: 401, chatgpt: true }],
   ["your ChatGPT plan's usage limit may be reached, see https://chatgpt.com/settings/usage", { classify: 429, report: 429 }],
   ["your ChatGPT plan may not allow this model", { classify: 404 }],
 ]);
@@ -93,9 +93,9 @@ const BODY_TOKEN = /"(?:type|code)"\s*:\s*"([a-z0-9_]{1,64})"/gu;
  * What a keyed provider's failed message shows without diagnostics (only Bedrock adds them): a leading HTTP status, AgentX's own fixed transport sentence, and error tokens in a JSON body.
  * Only a status number and a token the provider's allow-list already knows come out; the text is matched, never copied, so a body or a message that echoes a prompt or a key leaves nothing behind.
  */
-function keyedFacts(provider: ModelProvider, message: Record<string, unknown>): { signal?: string; status?: number; classifyStatus?: number } {
+function keyedFacts(provider: ModelProvider, message: Record<string, unknown>): { signal?: string; status?: number; classifyStatus?: number; chatgpt?: true } {
   const text = typeof message.errorMessage === "string" ? message.errorMessage.slice(0, 4_000) : "";
-  const found: { signal?: string; status?: number; classifyStatus?: number } = {};
+  const found: { signal?: string; status?: number; classifyStatus?: number; chatgpt?: true } = {};
   for (const pattern of LEADING_STATUS) {
     const status = Number(pattern.exec(text)?.[1]);
     if (Number.isInteger(status)) { found.status = status; found.classifyStatus = status; break; }
@@ -103,7 +103,7 @@ function keyedFacts(provider: ModelProvider, message: Record<string, unknown>): 
   if (found.status === undefined) {
     const detail = TRANSPORT_FAILURE.exec(text)?.[1];
     const known = detail === undefined ? undefined : TRANSPORT_DETAILS.get(detail);
-    if (known !== undefined) { found.classifyStatus = known.classify; if (known.report !== undefined) found.status = known.report; }
+    if (known !== undefined) { found.classifyStatus = known.classify; if (known.report !== undefined) found.status = known.report; if (known.chatgpt === true) found.chatgpt = true; }
   }
   for (const match of text.matchAll(BODY_TOKEN)) {
     const token = match[1]!;
@@ -129,13 +129,14 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
       return { modelCall: { outcome: "stopped", attempt: at, ...(provider === undefined ? {} : { provider }), ...(durationMs === undefined ? {} : { durationMs }) } };
     }
     if (message.stopReason !== "error") return undefined;
-    const facts: { signal?: string; status?: number; requestId?: string; classifyStatus?: number } = failureFacts(message);
+    const facts: { signal?: string; status?: number; requestId?: string; classifyStatus?: number; chatgpt?: true } = failureFacts(message);
     if (provider !== undefined && provider !== "amazon-bedrock") {
       const keyed = keyedFacts(provider, message);
       if (facts.signal === undefined && keyed.signal !== undefined) facts.signal = keyed.signal;
       if (facts.status === undefined && keyed.status !== undefined) facts.status = keyed.status;
       const classifyStatus = facts.status ?? keyed.classifyStatus;
       if (classifyStatus !== undefined) facts.classifyStatus = classifyStatus;
+      if (keyed.chatgpt === true) facts.chatgpt = true;
     }
     const classifyStatus = facts.classifyStatus ?? facts.status;
     const failure = provider === undefined
@@ -147,6 +148,7 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
         ...(provider === undefined ? {} : { provider }),
         ...(facts.requestId === undefined ? {} : { requestId: facts.requestId }),
         ...(facts.status === undefined ? {} : { status: facts.status }),
+        ...(facts.chatgpt === true && failure.class === "key-rejected" ? { chatgpt: true as const } : {}),
         ...(durationMs === undefined ? {} : { durationMs }),
       },
     };
@@ -187,7 +189,7 @@ export function describeModelCallNote(note: ModelCallNote): string {
 export function modelFailureNextAction(note: Extract<ModelCallNote, { outcome: "failed" }>): string {
   if (note.status === 402) return "add credits to the model account, then retry";
   switch (note.class) {
-    case "key-rejected": return "check the model key and its permissions, then retry";
+    case "key-rejected": return note.chatgpt === true ? "connect ChatGPT again, then retry" : "check the model key and its permissions, then retry";
     case "limit-or-rate-limited": return "wait, then retry; if it keeps failing check the model's rate limit and credit balance";
     case "model-not-found": return "check the model setting, then retry";
     case "request-rejected": return "check the model settings, then retry";

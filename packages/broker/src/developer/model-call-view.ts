@@ -22,6 +22,9 @@ const CLASS_TEXT: Record<E2EModelFailureClass, { phrase: string; next: string }>
   unknown: { phrase: "unknown cause", next: "Retry the step." },
 };
 
+const OUT_OF_CREDITS = { phrase: "out of credits", next: "Add credits to the model account, then retry the step." };
+const CHATGPT_AGAIN = { phrase: "access refused", next: "Connect ChatGPT again, then retry the step." };
+
 /** A provider's request id is one short token; anything else (a sentence, markup) is not shown. */
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 const MAX_COUNT = 99;
@@ -52,11 +55,12 @@ const delay = (ms: number): string => `${Math.round(ms / 100) / 10} s`;
 const attemptOf = (attempt: number | undefined, max: number | undefined): string | undefined =>
   attempt === undefined ? undefined : max === undefined ? `attempt ${attempt}` : `attempt ${attempt} of ${max}`;
 
-interface Failure { cls: E2EModelFailureClass; signal?: string | undefined; requestId?: string | undefined; attempt?: string | undefined; durationMs?: number | undefined }
+interface Failure { cls: E2EModelFailureClass; /** The provider said the account is out of credits (HTTP 402), whatever class it was filed under. */ outOfCredits?: boolean | undefined; /** A ChatGPT plan connection was refused: there is no key to check. */ chatgpt?: boolean | undefined; signal?: string | undefined; requestId?: string | undefined; attempt?: string | undefined; durationMs?: number | undefined }
 
 function failureText(failure: Failure): string {
-  const { phrase, next } = CLASS_TEXT[failure.cls];
-  const parts = [`${phrase}${failure.signal === undefined ? "" : ` (${failure.signal})`}`];
+  const text = failure.outOfCredits === true ? OUT_OF_CREDITS : failure.chatgpt === true && failure.cls === "key-rejected" ? CHATGPT_AGAIN : CLASS_TEXT[failure.cls];
+  const { phrase, next } = text;
+  const parts = [`${phrase}${failure.signal === undefined || failure.outOfCredits === true ? "" : ` (${failure.signal})`}`];
   if (failure.requestId !== undefined) parts.push(`request ${failure.requestId}`);
   if (failure.attempt !== undefined) parts.push(failure.attempt);
   if (failure.durationMs !== undefined) parts.push(`after ${duration(failure.durationMs)}`);
@@ -126,7 +130,7 @@ function modelCall(value: unknown): View | undefined {
       const derived = classify(providerOf(call.provider), signalOf(call.signal));
       const cls = classOf(call.class) ?? derived.cls;
       const known = derived.cls === cls ? derived.signal : undefined;
-      return { kind: "error", text: failureText({ cls, signal: known, requestId: requestId(call.requestId), attempt: which, durationMs }) };
+      return { kind: "error", text: failureText({ cls, signal: known, requestId: requestId(call.requestId), attempt: which, durationMs, outOfCredits: call.status === 402, chatgpt: call.chatgpt === true }) };
     }
     case "retrying":
       return retryStart(attempt, max, millis(call.delayMs, MAX_DELAY_MS));
