@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MODEL_CALL_HEARTBEAT_MS, MODEL_CALL_MAX_HEARTBEATS, ModelCallMonitor, PLANNING_DEADLINE_DEFAULT_MS, PLANNING_STALL_MS,
-  describeModelCallNote, expiryNote, planningDeadlineMs, sanitizeModelCallEvent,
+  describeModelCallNote, expiryNote, modelFailureNextAction, planningDeadlineMs, sanitizeModelCallEvent,
   type HeartbeatPayload, type ModelCallExpiryInfo,
 } from "../../packages/worker/src/model-call-monitor.js";
 
@@ -78,9 +78,92 @@ describe("sanitizeModelCallEvent", () => {
     expect(describeModelCallNote(sanitizeModelCallEvent(fixture.cases[3]!.input)!.modelCall)).toBe("the model call was stopped: attempt 1");
     expect(describeModelCallNote(sanitizeModelCallEvent(fixture.cases[4]!.input)!.modelCall)).toBe("the model call is retried: retry 1 of 3");
     expect(describeModelCallNote(sanitizeModelCallEvent(fixture.cases[5]!.input)!.modelCall)).toBe("the model call retries ended: retry 3");
-    expect(describeModelCallNote(sanitizeModelCallEvent(fixture.cases[6]!.input)!.modelCall)).toBe("the model call succeeded after retry 1");
+    expect(describeModelCallNote(sanitizeModelCallEvent(fixture.cases[7]!.input)!.modelCall)).toBe("the model call succeeded after retry 1");
     expect(describeModelCallNote(expiryNote({ reason: "deadline", limitMs: 1_500_000, elapsedMs: 1_500_000, sinceActivityMs: 5_000, attempt: 3 }).modelCall)).toBe("the model did not finish: time limit after 1500 s, attempt 3");
     expect(describeModelCallNote(expiryNote({ reason: "stall", limitMs: 240_000, elapsedMs: 300_000, sinceActivityMs: 240_000, attempt: 1 }).modelCall)).toBe("the model did not finish: no activity after 300 s, attempt 1");
+  });
+});
+
+/** PLANINC-3 fix round 1 (I1): the keyed providers (Anthropic, OpenAI, OpenRouter, the ChatGPT plan) put no diagnostics on a failed message, only an error text. Only its status and fixed error tokens may be read. */
+describe("sanitizeModelCallEvent on a keyed provider's failure", () => {
+  const failure = (provider: string, errorMessage: string) => ({ type: "message_end", message: { role: "assistant", stopReason: "error", provider, content: [], errorMessage } });
+  const read = (provider: string, errorMessage: string) => {
+    const note = sanitizeModelCallEvent(failure(provider, errorMessage), 1)!.modelCall;
+    expect(note.outcome).toBe("failed");
+    return note as Extract<typeof note, { outcome: "failed" }>;
+  };
+  const cases: Array<{ name: string; provider: string; text: string; cls: string; signal: string | null; status?: number; action: RegExp; secret: string }> = [
+    { name: "Anthropic SDK: 401 with an authentication_error body", provider: "anthropic", cls: "key-rejected", signal: "authentication_error", status: 401, action: /key/u, secret: "sk-ant-SECRET-KEY",
+      text: '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key sk-ant-SECRET-KEY"}}' },
+    { name: "Anthropic SDK: 529 overloaded", provider: "anthropic", cls: "provider-outage", signal: "overloaded_error", status: 529, action: /retry/u, secret: "PRIVATE-BODY",
+      text: '529 {"type":"error","error":{"type":"overloaded_error","message":"PRIVATE-BODY"}}' },
+    { name: "OpenAI SDK: 429 insufficient_quota", provider: "openai", cls: "limit-or-rate-limited", signal: "insufficient_quota", status: 429, action: /rate limit and credit/u, secret: "PRIVATE-BODY",
+      text: '429 {"error":{"message":"You exceeded your current quota PRIVATE-BODY","type":"insufficient_quota","code":"insufficient_quota"}}' },
+    { name: "OpenAI responses API: a status in the prefix", provider: "openai", cls: "key-rejected", signal: null, status: 401, action: /key/u, secret: "sk-proj-SECRET",
+      text: "OpenAI API error (401): Incorrect API key provided: sk-proj-SECRET" },
+    { name: "OpenRouter: 402 out of credits, as the raw '<status>: <body>'", provider: "openrouter", cls: "limit-or-rate-limited", signal: null, status: 402, action: /add credits/u, secret: "PRIVATE-BODY",
+      text: '402: {"error":{"message":"Insufficient credits PRIVATE-BODY","code":402}}' },
+    { name: "OpenRouter through AgentX's own transport: fixed text for a 402", provider: "openrouter", cls: "limit-or-rate-limited", signal: null, status: 402, action: /add credits/u, secret: "zzz",
+      text: "OpenRouter request failed; check the key's credit balance and spending limit" },
+    { name: "AgentX transport: fixed text for a rejected key", provider: "anthropic", cls: "key-rejected", signal: null, action: /key/u, secret: "zzz",
+      text: "Anthropic request failed; check the API key and its permissions" },
+    { name: "AgentX transport: fixed text for a 429", provider: "openai", cls: "limit-or-rate-limited", signal: null, status: 429, action: /rate limit/u, secret: "zzz",
+      text: "OpenAI request failed; rate limited or out of credits; check the key's usage limits before retrying" },
+    { name: "AgentX transport: fixed text for an upstream 5xx", provider: "openrouter", cls: "provider-outage", signal: null, action: /retry/u, secret: "zzz",
+      text: "OpenRouter request failed; upstream unavailable; check provider status before retrying" },
+    { name: "AgentX transport: ChatGPT plan, connection refused", provider: "openai", cls: "key-rejected", signal: null, action: /key/u, secret: "zzz",
+      text: "ChatGPT request failed; the ChatGPT connection was refused, so connect ChatGPT again" },
+    { name: "AgentX transport: a model that does not exist", provider: "openrouter", cls: "model-not-found", signal: null, status: 404, action: /model setting/u, secret: "zzz",
+      text: "OpenRouter request failed; check model availability and the provider allowlist" },
+  ];
+  for (const testCase of cases) {
+    it(`${testCase.name}: class, status and next action, and none of the provider's text`, () => {
+      const note = read(testCase.provider, testCase.text);
+      expect(note).toMatchObject({ class: testCase.cls, signal: testCase.signal, provider: testCase.provider, attempt: 1 });
+      expect(note.status).toBe(testCase.status);
+      expect(modelFailureNextAction(note)).toMatch(testCase.action);
+      // positive control: the raw text carried the secret, the note and the sentences do not
+      if (testCase.secret !== "zzz") expect(testCase.text).toContain(testCase.secret);
+      for (const out of [JSON.stringify(note), describeModelCallNote(note), modelFailureNextAction(note)]) expect(out).not.toContain(testCase.secret);
+    });
+  }
+
+  it("keeps an error token only when it is one the provider's allow-list knows, never an arbitrary body token", () => {
+    const note = read("openai", '400 {"error":{"type":"sk_live_abc123_private","code":"my_customer_acme"}}');
+    expect(note).toMatchObject({ class: "request-rejected", signal: null, status: 400 });
+    expect(JSON.stringify(note)).not.toContain("acme");
+    expect(JSON.stringify(note)).not.toContain("sk_live");
+  });
+
+  it("does not read a number out of the middle of the text, or a status outside 400-599", () => {
+    expect(read("openai", "something failed after 429 attempts at port 503").status).toBeUndefined();
+    expect(read("openai", "200: all fine").status).toBeUndefined();
+    expect(read("openai", "request failed; check credentials, model availability, rate limits and provider status")).toMatchObject({ class: "unknown", signal: null });
+  });
+
+  it("gives Bedrock no text-derived facts: only its diagnostics count", () => {
+    expect(read("amazon-bedrock", "429: ThrottlingException rate limited")).toMatchObject({ class: "unknown", signal: null });
+  });
+
+  it("next actions: fix the key, add credits, wait for a limit, retry an outage", () => {
+    const action = (cls: string, status?: number) => modelFailureNextAction({ outcome: "failed", class: cls as never, signal: null, attempt: 1, ...(status === undefined ? {} : { status }) });
+    expect(action("key-rejected")).toBe("check the model key and its permissions, then retry");
+    expect(action("limit-or-rate-limited", 402)).toBe("add credits to the model account, then retry");
+    expect(action("limit-or-rate-limited", 429)).toBe("wait, then retry; if it keeps failing check the model's rate limit and credit balance");
+    expect(action("provider-outage")).toBe("retry the step");
+    expect(action("unknown")).toBe("retry the step");
+  });
+});
+
+describe("sanitizeModelCallEvent on a cancelled retry wait", () => {
+  it("marks retry-finished as cancelled only for Pi's exact fixed 'Retry cancelled', and never copies the text", () => {
+    const end = (finalError: unknown) => sanitizeModelCallEvent({ type: "auto_retry_end", success: false, attempt: 1, finalError }, 2);
+    expect(end("Retry cancelled")).toEqual({ modelCall: { outcome: "retry-finished", success: false, attempt: 1, cancelled: true } });
+    expect(end("Retry cancelled by PRIVATE")).toEqual({ modelCall: { outcome: "retry-finished", success: false, attempt: 1 } });
+    expect(end("retry cancelled")).toEqual({ modelCall: { outcome: "retry-finished", success: false, attempt: 1 } });
+    expect(end(undefined)).toEqual({ modelCall: { outcome: "retry-finished", success: false, attempt: 1 } });
+    expect(sanitizeModelCallEvent({ type: "auto_retry_end", success: true, attempt: 1, finalError: "Retry cancelled" }, 2)).toEqual({ modelCall: { outcome: "retry-finished", success: true, attempt: 1 } });
+    expect(describeModelCallNote(end("Retry cancelled")!.modelCall)).toBe("the model call retry was cancelled: retry 1");
   });
 });
 

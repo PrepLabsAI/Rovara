@@ -29,7 +29,7 @@
         "type": "message_end",
         "message": { "role": "assistant", "stopReason": "error", "content": [], "errorMessage": "Service unavailable, try again later.", "diagnostics": [{ "type": "bedrock_response_failure", "details": { "status": 503 } }], "provider": "amazon-bedrock", "durationMs": 1200 }
       },
-      "output": { "modelCall": { "outcome": "failed", "class": "provider-outage", "signal": null, "attempt": 2, "provider": "amazon-bedrock", "durationMs": 1200 } },
+      "output": { "modelCall": { "outcome": "failed", "class": "provider-outage", "signal": null, "attempt": 2, "provider": "amazon-bedrock", "status": 503, "durationMs": 1200 } },
       "mustNotAppear": ["Service unavailable"]
     },
     {
@@ -59,6 +59,13 @@
       "input": { "type": "auto_retry_end", "success": false, "attempt": 3, "finalError": "Internal server error: PRIVATE-FINAL-ERROR" },
       "output": { "modelCall": { "outcome": "retry-finished", "success": false, "attempt": 3 } },
       "mustNotAppear": ["PRIVATE-FINAL-ERROR"]
+    },
+    {
+      "name": "Pi's retry wait was cancelled (by a cancel or the planning deadline)",
+      "attempt": 2,
+      "input": { "type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled" },
+      "output": { "modelCall": { "outcome": "retry-finished", "success": false, "attempt": 1, "cancelled": true } },
+      "mustNotAppear": []
     },
     {
       "name": "a retry that worked",
