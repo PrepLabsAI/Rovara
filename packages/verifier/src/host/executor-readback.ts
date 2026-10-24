@@ -355,7 +355,11 @@ export function assembleDockerCollectionInputs(input: { snapshot: ExecutorOutput
   const first = reports[0];
   const usage = e2eApplicationAggregateRunUsage(reports.map((run) => run.usage as Readonly<Record<string, number>>));
   if (!first || !usage) throw new Error("shard reports do not reconcile to one group usage");
-  return Object.freeze({ environment: first.environment, usage, limits: first.limits,
+  // A mixed group can put a deterministic 64k report before an AI 32k report.
+  // Its shared ceiling is the strictest shard ceiling, independent of ordering;
+  // the broker and collector still validate every configured and reported limit.
+  const limits = { ...first.limits, maxModelTokensPerCall: Math.min(...reports.map(run => run.limits.maxModelTokensPerCall!)) };
+  return Object.freeze({ environment: first.environment, usage, limits,
     expectedSupervisorReceiptRefs: Object.freeze([ownedCleanupReceipt(input.binding, input.cleanup).ref]),
     ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(input.binding.runId, input.cleanup.mockOrigins),
     observationBindings: input.snapshot.observationBindings, assertionAssets: input.snapshot.assertionAssets, governedModelReceipts: Object.freeze([]),

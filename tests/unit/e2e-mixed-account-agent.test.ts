@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
 import { expect, it } from "vitest";
 import { agentRunnable, executorLog, runAgentCase } from "../support/agent-executor-run.js";
-import { assembleAgentRun, collectAssembled } from "../support/agent-collection.js";
+import { assembleAgentRun, collectAssembled, asLinuxRun, brokerRoundFor } from "../support/agent-collection.js";
+
+import { assembleDockerCollectionInputs } from "../../packages/verifier/src/host/executor-readback.js";
+import { assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
+
+assumeDrivingTestsPassed();
 
 it.runIf(agentRunnable)("an AI owner and a deterministic viewer run in separate shards without giving the viewer a model", async () => {
   const run = await runAgentCase({
@@ -12,6 +17,22 @@ it.runIf(agentRunnable)("an AI owner and a deterministic viewer run in separate 
     expect(run.fixture.compiled.shards).toHaveLength(2);
     expect(run.result, executorLog(run.out)).toEqual({ exitCode: 0, reason: null });
     const assembled = await assembleAgentRun(run);
+    // Group metadata must be independent of shard order, including when the
+    // deterministic viewer's 64k report precedes the AI owner's 32k report.
+    const ordered = [...assembled.snapshot.result.shards].sort((a, b) => {
+      const ceiling = (id: string) => {
+        const report = JSON.parse(Buffer.from(assembled.snapshot.shardFiles.get(id)!.report).toString("utf8")) as { run: { limits: { maxModelTokensPerCall: number } } };
+        return report.run.limits.maxModelTokensPerCall;
+      };
+      return ceiling(b.shardId) - ceiling(a.shardId);
+    });
+    for (const shards of [ordered, [...ordered].reverse()]) {
+      const base = assembleDockerCollectionInputs({ snapshot: { ...assembled.snapshot, result: { ...assembled.snapshot.result, shards } },
+        binding: assembled.resolved.binding, cleanup: assembled.cleanup });
+      expect(base.limits.maxModelTokensPerCall).toBe(32_000);
+      const broker = brokerRoundFor(asLinuxRun({ ...assembled, inputs: { ...base, agentModel: assembled.agentModel } })).verify();
+      expect(broker.verdict, broker.reason).toBe("PASS");
+    }
     const collected = collectAssembled(assembled);
     expect(collected.unavailableReason).toBeNull();
     expect(collected.qualification?.status).toBe("PASS");
