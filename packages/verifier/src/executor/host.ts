@@ -52,6 +52,7 @@ export const ExecutorHostContextSchema = z.object({
 export type ExecutorHostContext = z.infer<typeof ExecutorHostContextSchema>;
 
 type Declaration = Readonly<{
+  modelRoute: Readonly<{ routeId: string; routeRevision: string }> | null;
   preparedEnvironmentDigest: string;
   target: { targetId: string; app: { identity: string } | null; engine: { name: string; version: string; spiVersion: number; platform: string; workers?: number; capabilities: readonly string[] } | null };
   originByApplicationId: readonly { applicationId: string; origin: string }[];
@@ -184,7 +185,9 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
 
   // The agent step driver (Task 4.3b): only for a plan that carries a model channel. The model is the worker's channel and nothing else; the executor, the ledger and the capture store are
   // this process's, and the begin and end markers tell the worker which step each model call belongs to.
-  const channelPlan = plan.modelChannel;
+  // A group's model channel belongs only to shards whose declaration names a route.
+  // Other accounts in the group may have deterministic cases and must get no model.
+  const channelPlan = declaration.modelRoute === null ? undefined : plan.modelChannel;
   // This process loads the AI SDK (the CLI process, not the executor's parent that `entry.ts` guards): a model given as a string must still never reach its default gateway.
   const replayPlan = plan.replay;
   if (channelPlan !== undefined || replayPlan !== undefined) installRefusingE2EDefaultProvider();

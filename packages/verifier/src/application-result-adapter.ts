@@ -15,6 +15,8 @@ import { isPinnedRovaraHttpEngine } from "./rovara-http-engine-descriptor.js";
 import { SINKHOLE_ORIGIN_REF, planApplicationOrigins } from "./application-mocks.js";
 import { E2EAgentModelEvidenceSchema, evaluateE2EAgentCase, type E2EAgentCaseResult, type E2EAgentModelEvidence, type E2EAgentUnknownCode } from "./application-agent-result.js";
 import { agentCaseDirectoryName } from "./executor/evidence-paths.js";
+import { E2E_MODEL_BUDGET_MAX_CALL_TOKENS } from "@agentx/contracts";
+import { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } from "./application-templates.js";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const id = (max = 256) => z.string().min(1).max(max);
@@ -1347,6 +1349,13 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
         || reportStartedAt < admittedAt || reportFinishedAt > deadlineAt) {
         return unknown("application report or process timestamps are invalid or outside the original admitted round", oracle.binding.runId, parsed.rawSha256);
       }
+      // e2e 0.20 reports the configured agent input ceiling, or its pinned 64k
+      // default without an agent. A mixed-account group can contain both.
+      const shardUsesAgent = oracle.applicationIdsByCase.some(item => item.targetId === expectedPacket.targetId
+        && item.scenario.steps.some(step => step.kind === "agent"));
+      const expectedLimits = oracle.modelRoute !== null && oracle.replay === undefined
+        ? { ...oracle.limits, maxModelTokensPerCall: shardUsesAgent ? E2E_AGENT_CONFIG_MAX_INPUT_TOKENS : E2E_MODEL_BUDGET_MAX_CALL_TOKENS }
+        : oracle.limits;
       if (!startBytes.equals(Buffer.from(`${JSON.stringify(shard.runStart)}\n`))
         || canonicalJson(normalizeE2EApplicationPublicList(publicListFromBytes, expectedPacket.targetId)) !== canonicalJson(shard.publicList)
         || canonicalJson(capturedStart) !== canonicalJson(shard.runStart) || shard.runStart.challenge !== shard.launchId
@@ -1359,7 +1368,7 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
         || parsed.report.run.project.configDigest !== expectedConfig.configDigest || parsed.report.run.runner.name !== "e2e"
         || parsed.report.run.runner.version !== "0.20.0" || parsed.report.run.project.id !== "rovara-application-e2e"
         || canonicalJson(parsed.report.run.environment) !== canonicalJson(oracle.environment)
-        || canonicalJson(parsed.report.run.limits) !== canonicalJson(oracle.limits)
+        || canonicalJson(parsed.report.run.limits) !== canonicalJson(expectedLimits)
         || parsed.report.run.errors.length !== 0) return unknown("application report does not bind to actual process, config, challenge, runtime, environment, budget, and run-start evidence", oracle.binding.runId, parsed.rawSha256);
       shardUsageRows.push(Object.fromEntries(Object.entries(parsed.report.run.usage)
         .filter((entry): entry is [string, number] => entry[1] !== undefined)));

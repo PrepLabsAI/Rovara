@@ -46,6 +46,8 @@ export type AgentPlanOptions = {
   taskId?: string;
   /** Adds a second case to the group: a plain one with no agent step (open the page, see the identity), for the cases a group's deterministic and AI-navigated cases share. */
   withDeterministicCase?: boolean;
+  /** A separate account creates a deterministic shard beside the AI shard. */
+  deterministicAccountProfileId?: "orders-owner" | "orders-viewer";
   /** An audit replay of the case (Task 4.6b): the recordings it serves, as the verified round's upload carried them. The plan pins the scripted route's limits and names no route. */
   replay?: NonNullable<Parameters<typeof createWebApiProbePlan>[0]["replay"]>;
   /** The time the registered runtime row is dated from: a round and its replay pass the same one, so they have the same case ids (a case id is bound to the runtime row). */
@@ -62,8 +64,8 @@ export function createOrdersM14AgentPlan(options: AgentPlanOptions = {}): WebApi
       accountProfileId: "orders-owner", minimumEvidence: "runtime", requiredRealComponentIds: [],
       steps: [...(options.before ?? [{ kind: "navigate" as const, path: "/" }]), { kind: "agent" as const, goal, maxActions: options.maxActions ?? 4 }, ...(options.after ?? [])],
       assertions: options.assertions ?? [{ kind: "csv" as const, downloadName: "orders.csv", columns: ORDERS_CSV_COLUMNS, rows: options.mock === true ? ORDERS_CSV_ROWS_MOCKED : ORDERS_CSV_ROWS }] }) },
-    ...(options.withDeterministicCase === true ? [{ accountProfileId: "orders-owner", scenario: (targetId: string): E2EScenario => ({ scenarioId: "plain-identity", requirementId: "orders-identity", requestedTargetIds: [targetId], required: true,
-      accountProfileId: "orders-owner", minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "identity", equals: true }] }) }] : [])] });
+    ...(options.withDeterministicCase === true ? [{ accountProfileId: options.deterministicAccountProfileId ?? "orders-owner", scenario: (targetId: string): E2EScenario => ({ scenarioId: "plain-identity", requirementId: "orders-identity", requestedTargetIds: [targetId], required: true,
+      accountProfileId: options.deterministicAccountProfileId ?? "orders-owner", minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "identity", equals: true }] }) }] : [])] });
 }
 
 /** The plan as the Docker host writes it for such a group: the fixture's plan plus the model channel (fixed socket path, the admission's route, a fresh value key). */
