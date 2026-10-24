@@ -16,12 +16,12 @@ import type { WorkerLogSink } from "./worker-log.js";
 export const MODEL_REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 
 export type ModelCallNote =
-  | { outcome: "failed"; class: E2EModelFailureClass; signal: string | null; attempt: number; provider?: ModelProvider; requestId?: string; durationMs?: number }
+  | { outcome: "failed"; class: E2EModelFailureClass; signal: string | null; attempt: number; provider?: ModelProvider; requestId?: string; durationMs?: number; status?: number }
   | { outcome: "stopped"; attempt: number; provider?: ModelProvider; durationMs?: number }
   /** Pi scheduled retry `attempt` of `maxAttempts` (both are retries, not model calls) after `delayMs`. */
   | { outcome: "retrying"; attempt: number; maxAttempts: number; delayMs: number }
-  /** Pi's retries ended: `success` says whether the retried call worked. */
-  | { outcome: "retry-finished"; success: boolean; attempt: number }
+  /** Pi's retries ended: `success` says whether the retried call worked. `cancelled` is set when a cancel or the planning deadline ended a retry wait (Pi's own "Retry cancelled"). */
+  | { outcome: "retry-finished"; success: boolean; attempt: number; cancelled?: true }
   /** `durationMs` is the time since the run's clock started. `deadline` is the wall-clock limit, `stalled` the no-activity bound. */
   | { outcome: "deadline" | "stalled"; limitMs: number; durationMs: number; attempt: number };
 
@@ -63,6 +63,55 @@ function failureFacts(message: Record<string, unknown>): { signal?: string; stat
   return found;
 }
 
+/** Pi's fixed final error when an abort lands in a retry wait. Compared, never copied. */
+const PI_RETRY_CANCELLED = "Retry cancelled";
+
+/**
+ * What AgentX's own keyed-provider transport (packages/model-runtime `safeError`) writes after "<Label> request failed; ": one fixed sentence chosen from the HTTP status alone. Each is matched whole, and only a
+ * status comes out of it: `classify` is the status the classifier decides on, `report` the status that is certain (a class of statuses has none). None of the text is copied.
+ */
+const TRANSPORT_DETAILS: ReadonlyMap<string, { classify: number; report?: number }> = new Map([
+  ["check the API key and its permissions", { classify: 401 }],
+  ["check the key's credit balance and spending limit", { classify: 402, report: 402 }],
+  ["check model availability and the provider allowlist", { classify: 404, report: 404 }],
+  ["check the model ID and that the key's organization can use it", { classify: 404, report: 404 }],
+  ["rate limited; wait before retrying", { classify: 429, report: 429 }],
+  ["rate limited or out of credits; check the key's usage limits before retrying", { classify: 429, report: 429 }],
+  ["the provider is overloaded; wait before retrying", { classify: 529, report: 529 }],
+  ["upstream unavailable; check provider status before retrying", { classify: 500 }],
+  ["the request was refused; check the model's context and output limits", { classify: 400 }],
+  ["the ChatGPT connection was refused, so connect ChatGPT again", { classify: 401 }],
+  ["your ChatGPT plan's usage limit may be reached, see https://chatgpt.com/settings/usage", { classify: 429, report: 429 }],
+  ["your ChatGPT plan may not allow this model", { classify: 404 }],
+]);
+const TRANSPORT_FAILURE = /^[A-Za-z][A-Za-z0-9 ._-]{0,30} request failed; ([^\n]{1,200})$/u;
+/** A status the provider SDKs put first: "401 {json}", "402: {json}", or "OpenAI API error (401): ...". */
+const LEADING_STATUS = [/^([4-5]\d\d)(?=[\s:]|$)/u, /^[A-Za-z][A-Za-z0-9 ._-]{0,40} API error \(([4-5]\d\d)\)/u];
+const BODY_TOKEN = /"(?:type|code)"\s*:\s*"([a-z0-9_]{1,64})"/gu;
+
+/**
+ * What a keyed provider's failed message shows without diagnostics (only Bedrock adds them): a leading HTTP status, AgentX's own fixed transport sentence, and error tokens in a JSON body.
+ * Only a status number and a token the provider's allow-list already knows come out; the text is matched, never copied, so a body or a message that echoes a prompt or a key leaves nothing behind.
+ */
+function keyedFacts(provider: ModelProvider, message: Record<string, unknown>): { signal?: string; status?: number; classifyStatus?: number } {
+  const text = typeof message.errorMessage === "string" ? message.errorMessage.slice(0, 4_000) : "";
+  const found: { signal?: string; status?: number; classifyStatus?: number } = {};
+  for (const pattern of LEADING_STATUS) {
+    const status = Number(pattern.exec(text)?.[1]);
+    if (Number.isInteger(status)) { found.status = status; found.classifyStatus = status; break; }
+  }
+  if (found.status === undefined) {
+    const detail = TRANSPORT_FAILURE.exec(text)?.[1];
+    const known = detail === undefined ? undefined : TRANSPORT_DETAILS.get(detail);
+    if (known !== undefined) { found.classifyStatus = known.classify; if (known.report !== undefined) found.status = known.report; }
+  }
+  for (const match of text.matchAll(BODY_TOKEN)) {
+    const token = match[1]!;
+    if (classifyProviderFailure({ provider, signal: token }).class !== "unknown") { found.signal = token; break; }
+  }
+  return found;
+}
+
 /**
  * `event` (a Pi session event) as a model-call note, or `undefined` when it is not one. `attempt` is the model call this event belongs to (1 for the first), which the
  * monitor counts. It reads only fixed fields: a `message_end`'s role, stop reason, provider, duration and diagnostic tokens, and a retry event's numbers. It never reads
@@ -80,15 +129,24 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
       return { modelCall: { outcome: "stopped", attempt: at, ...(provider === undefined ? {} : { provider }), ...(durationMs === undefined ? {} : { durationMs }) } };
     }
     if (message.stopReason !== "error") return undefined;
-    const facts = failureFacts(message);
+    const facts: { signal?: string; status?: number; requestId?: string; classifyStatus?: number } = failureFacts(message);
+    if (provider !== undefined && provider !== "amazon-bedrock") {
+      const keyed = keyedFacts(provider, message);
+      if (facts.signal === undefined && keyed.signal !== undefined) facts.signal = keyed.signal;
+      if (facts.status === undefined && keyed.status !== undefined) facts.status = keyed.status;
+      const classifyStatus = facts.status ?? keyed.classifyStatus;
+      if (classifyStatus !== undefined) facts.classifyStatus = classifyStatus;
+    }
+    const classifyStatus = facts.classifyStatus ?? facts.status;
     const failure = provider === undefined
       ? { class: "unknown" as const, signal: null }
-      : classifyProviderFailure({ provider, signal: facts.signal, ...(facts.status === undefined ? {} : { status: facts.status }) });
+      : classifyProviderFailure({ provider, signal: facts.signal, ...(classifyStatus === undefined ? {} : { status: classifyStatus }) });
     return {
       modelCall: {
         outcome: "failed", class: failure.class, signal: failure.signal, attempt: at,
         ...(provider === undefined ? {} : { provider }),
         ...(facts.requestId === undefined ? {} : { requestId: facts.requestId }),
+        ...(facts.status === undefined ? {} : { status: facts.status }),
         ...(durationMs === undefined ? {} : { durationMs }),
       },
     };
@@ -103,7 +161,8 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
   if (event.type === "auto_retry_end") {
     const attemptNumber = wholeNumber(event.attempt, MAX_ATTEMPT);
     if (typeof event.success !== "boolean" || attemptNumber === undefined) return undefined;
-    return { modelCall: { outcome: "retry-finished", success: event.success, attempt: attemptNumber } };
+    const cancelled = !event.success && event.finalError === PI_RETRY_CANCELLED;
+    return { modelCall: { outcome: "retry-finished", success: event.success, attempt: attemptNumber, ...(cancelled ? { cancelled: true as const } : {}) } };
   }
   return undefined;
 }
@@ -115,12 +174,26 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
 export function describeModelCallNote(note: ModelCallNote): string {
   switch (note.outcome) {
     case "failed":
-      return `the model call failed: ${note.class}${note.signal === null ? "" : ` ${note.signal}`}${note.requestId === undefined ? "" : ` request ${note.requestId}`} attempt ${note.attempt}`;
+      return `the model call failed: ${note.class}${note.signal === null ? "" : ` ${note.signal}`}${note.status === undefined ? "" : ` HTTP ${note.status}`}${note.requestId === undefined ? "" : ` request ${note.requestId}`} attempt ${note.attempt}`;
     case "stopped": return `the model call was stopped: attempt ${note.attempt}`;
     case "retrying": return `the model call is retried: retry ${note.attempt} of ${note.maxAttempts}`;
-    case "retry-finished": return note.success ? `the model call succeeded after retry ${note.attempt}` : `the model call retries ended: retry ${note.attempt}`;
+    case "retry-finished": return note.cancelled === true ? `the model call retry was cancelled: retry ${note.attempt}` : note.success ? `the model call succeeded after retry ${note.attempt}` : `the model call retries ended: retry ${note.attempt}`;
     case "deadline":
     case "stalled": return `the model did not finish: ${note.outcome === "stalled" ? "no activity" : "time limit"} after ${Math.round(note.durationMs / 1000)} s, attempt ${note.attempt}`;
+  }
+}
+
+/** What a person should do next, from a failed call's class and status: fixed text. Used for the operation's error, beside `describeModelCallNote`. */
+export function modelFailureNextAction(note: Extract<ModelCallNote, { outcome: "failed" }>): string {
+  if (note.status === 402) return "add credits to the model account, then retry";
+  switch (note.class) {
+    case "key-rejected": return "check the model key and its permissions, then retry";
+    case "limit-or-rate-limited": return "wait, then retry; if it keeps failing check the model's rate limit and credit balance";
+    case "model-not-found": return "check the model setting, then retry";
+    case "request-rejected": return "check the model settings, then retry";
+    case "secret-unreadable": return "check the model key, then retry";
+    case "not-in-catalog": return "choose a supported model, then retry";
+    default: return "retry the step";
   }
 }
 
@@ -302,7 +375,9 @@ export function logModelCallNote(sink: WorkerLogSink, operationId: string, note:
 export function logEventsRefused(sink: WorkerLogSink, operationId: string, error: unknown, refusedSoFar: number): void {
   if (refusedSoFar >= LOG_REFUSED_MAX) return;
   const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
-  writeLine(sink, "info", { event: "events.refused", invocationId: operationId, ...(typeof code === "string" && /^[A-Z_]{3,40}$/.test(code) ? { errorCode: code } : {}) });
+  // The worker's callback client says "... failed with HTTP 409" for every refusal: only that number is read, so a stale-fence refusal (expected after a cancel) tells apart from a 5xx.
+  const status = Number(/ failed with HTTP ([1-5]\d\d)$/u.exec(error instanceof Error ? error.message : "")?.[1]);
+  writeLine(sink, "info", { event: "events.refused", invocationId: operationId, ...(typeof code === "string" && /^[A-Z_]{3,40}$/.test(code) ? { errorCode: code } : {}), ...(Number.isInteger(status) ? { httpStatus: status } : {}) });
 }
 
 function writeLine(sink: WorkerLogSink, level: "info" | "error", fields: Record<string, unknown>): void {

@@ -118,7 +118,7 @@ describe("a planning run whose model call stops answering", () => {
     const result = await settled;
     expect(result.ok).toBe(false);
     const message = (result as { error: Error }).error.message;
-    expect(message).toMatch(/^RUNTIME_UNAVAILABLE: planning stopped: the model sent nothing for \d+ s \(model call 1 of 3\)\. Retry planning\.$/u);
+    expect(message).toMatch(/^RUNTIME_UNAVAILABLE: planning stopped: the model sent nothing for \d+ s \(model call 1\)\. Retry planning\.$/u);
     expect(state.aborts).toBe(1);
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(notes(sent).map((note) => note.outcome)).toEqual(expect.arrayContaining(["stalled", "stopped"]));
@@ -141,7 +141,7 @@ describe("a planning run whose model call stops answering", () => {
       },
     }, { limits: { deadlineMs: 300, stallMs: 60_000, abortConfirmMs: 2_000 } });
     const result = await settled;
-    expect((result as { error: Error }).error.message).toMatch(/^RUNTIME_UNAVAILABLE: planning stopped: the model did not finish within \d+ s \(model call 1 of 3\)\. Retry planning\.$/u);
+    expect((result as { error: Error }).error.message).toMatch(/^RUNTIME_UNAVAILABLE: planning stopped: the model did not finish within \d+ s \(model call 1\)\. Retry planning\.$/u);
     expect(state.aborts).toBe(1);
     expect(notes(sent).map((note) => note.outcome)).toContain("deadline");
     expect(notes(sent).map((note) => note.outcome)).not.toContain("stalled");
@@ -155,7 +155,7 @@ describe("a planning run whose model call stops answering", () => {
     }, { limits: { stallMs: 100, deadlineMs: 60_000, abortConfirmMs: 250 } });
     const result = await settled;
     expect(result.ok).toBe(false);
-    expect((result as { error: Error & { code?: string } }).error.message).toMatch(/^OPERATION_INTERRUPTED: planning stopped: the model sent nothing for \d+ s \(model call 1 of 3\) and did not stop when asked\. Retry planning\.$/u);
+    expect((result as { error: Error & { code?: string } }).error.message).toMatch(/^OPERATION_INTERRUPTED: planning stopped: the model sent nothing for \d+ s \(model call 1\) and did not stop when asked\. Retry planning\.$/u);
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(notes(sent).map((note) => note.outcome)).toContain("stalled");
   });
@@ -228,6 +228,35 @@ describe("a model failure in the task's events", () => {
     expect(JSON.stringify(sent)).not.toContain("PRIVATE-PROVIDER-DETAIL");
   });
 
+  for (const keyed of [
+    { name: "a rejected Anthropic key", provider: "anthropic", text: '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key sk-ant-PRIVATE"}}',
+      error: "RUNTIME_UNAVAILABLE: the model call failed: key-rejected authentication_error HTTP 401 attempt 1; check the model key and its permissions, then retry" },
+    { name: "OpenRouter out of credits", provider: "openrouter", text: '402: {"error":{"message":"Insufficient credits PRIVATE","code":402}}',
+      error: "RUNTIME_UNAVAILABLE: the model call failed: limit-or-rate-limited HTTP 402 attempt 1; add credits to the model account, then retry" },
+    { name: "an OpenAI rate limit", provider: "openai", text: "OpenAI request failed; rate limited or out of credits; check the key's usage limits before retrying",
+      error: "RUNTIME_UNAVAILABLE: the model call failed: limit-or-rate-limited HTTP 429 attempt 1; wait, then retry; if it keeps failing check the model's rate limit and credit balance" },
+  ]) {
+    it(`tells a person what to do about ${keyed.name}, without the provider's text`, async () => {
+      const { settled, sent } = await run({ async prompt(emit) { emit({ type: "message_end", message: { role: "assistant", stopReason: "error", provider: keyed.provider, content: [], errorMessage: keyed.text } }); } });
+      expect((await settled as { error: Error }).error.message).toBe(keyed.error);
+      expect(sent.find((event) => event.type === "error")?.payload).toEqual({ message: keyed.error });
+      expect(JSON.stringify(sent)).not.toContain("PRIVATE");
+    });
+  }
+
+  it("forwards compaction and summarization errors without the provider's message", async () => {
+    const { settled, sent } = await run({
+      async prompt(emit) {
+        emit({ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false, errorMessage: "Auto-compaction failed: PRIVATE-PROVIDER-DETAIL" });
+        emit({ type: "summarization_retry_scheduled", attempt: 1, errorMessage: "PRIVATE-PROVIDER-DETAIL again" });
+        emit(planEnd());
+      },
+    });
+    expect((await settled).ok).toBe(true);
+    expect(sent.some((event) => (event.payload as { type?: string } | null)?.type === "compaction_end")).toBe(true);
+    expect(JSON.stringify(sent)).not.toContain("PRIVATE-PROVIDER-DETAIL");
+  });
+
   it("writes a worker log line per failed call, retry and deadline, with fixed fields only", async () => {
     const { settled, logs } = await run({
       async prompt(emit) { emit(iseMessageEnd()); emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2, delayMs: 2000, errorMessage: SECRET_PROVIDER_TEXT }); emit(planEnd()); },
@@ -253,7 +282,7 @@ describe("a refused event send", () => {
     const refused = logs.filter((line) => line.json.event === "events.refused");
     expect(refused.length).toBeGreaterThan(0);
     expect(refused.length).toBeLessThanOrEqual(10);
-    expect(refused[0]!.json).toMatchObject({ component: "worker", errorCode: "STALE_FENCE" });
+    expect(refused[0]!.json).toMatchObject({ component: "worker", errorCode: "STALE_FENCE", httpStatus: 409 });
     expect(JSON.stringify(logs)).not.toContain("HTTP 409");
   });
 
@@ -272,6 +301,21 @@ describe("a refused event send", () => {
     await controller.cancel(task.operationId);
     const result = await settled;
     expect((result as { error: unknown }).error).toBeInstanceOf(WorkerOperationCancelledError);
+  });
+});
+
+describe("a cancel while the session's abort hangs", () => {
+  it("returns within the abort bound instead of hanging with it", async () => {
+    const controller = new WorkerCancellationController();
+    const task = invocation();
+    await run({
+      async prompt() { await new Promise<void>(() => undefined); },
+      async abort() { await new Promise<void>(() => undefined); },
+    }, { controller, invocation: task, limits: { abortConfirmMs: 200, stallMs: 60_000, deadlineMs: 120_000 } });
+    await wait(50);
+    const started = Date.now();
+    await controller.cancel(task.operationId);
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 });
 
