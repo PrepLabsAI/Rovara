@@ -5,7 +5,7 @@
 // (the same allow-list a model check uses), the provider's request id, an attempt count, a delay and a duration. It never reads the provider's message, the model's thinking, the
 // final error text, any prompt or any other free text, so none of them can reach a person through this view. Anything it cannot read as one of these shapes is not shown.
 import { E2E_MODEL_FAILURE_CLASSES, E2E_MODEL_FAILURE_SIGNAL_PATTERN, MODEL_PROVIDERS, type DeveloperTaskEvent, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
-import { classifyProviderFailure } from "@agentx/model-runtime";
+import { classifyProviderFailure } from "@agentx/model-runtime/provider-failure";
 
 type View = Pick<DeveloperTaskEvent, "kind" | "text">;
 

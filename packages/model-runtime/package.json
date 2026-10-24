@@ -10,6 +10,7 @@
     "./e2e-route-derive": "./dist/e2e-route-derive.js",
     "./model-check": "./dist/model-check.js",
     "./model-discovery": "./dist/model-discovery.js",
+    "./provider-failure": "./dist/provider-failure.js",
     "./thinking-levels": "./dist/thinking-levels.js"
   },
   "types": "./dist/index.d.ts",
