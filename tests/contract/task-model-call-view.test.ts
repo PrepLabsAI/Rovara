@@ -136,6 +136,16 @@ describe("the worker's sanitized model-call and heartbeat progress", () => {
     expect(taskEvent(stored("progress", { modelCall: { outcome: "retry-finished", success: false, attempt: 3 } }))).toEqual({ at, kind: "progress", text: "The model call retries ran out (attempt 3). The step will fail; retry it from the task." });
   });
 
+  it("renders a retry that a cancel or deadline stopped as stopped, never as ran out", () => {
+    const view = taskEvent(stored("progress", { modelCall: { outcome: "retry-finished", success: false, cancelled: true, attempt: 1 } }));
+    expect(view).toEqual({ at, kind: "progress", text: "Retrying stopped because the step was cancelled or ran out of time." });
+    expect(view?.text).not.toContain("ran out (");
+    // an absent or false field keeps the old reading
+    expect(taskEvent(stored("progress", { modelCall: { outcome: "retry-finished", success: false, cancelled: false, attempt: 1 } }))?.text).toContain("retries ran out (attempt 1)");
+    // success wins over a stray cancelled flag
+    expect(taskEvent(stored("progress", { modelCall: { outcome: "retry-finished", success: true, cancelled: true, attempt: 1 } }))?.text).toBe("The model call retry succeeded (attempt 1).");
+  });
+
   it("renders a retry, a deadline and a stall", () => {
     expect(taskEvent(stored("progress", { modelCall: { outcome: "retrying", attempt: 1, maxAttempts: 3, delayMs: 4000 } }))?.text).toBe("AgentX is retrying the model call (attempt 1 of 3) in 4 s.");
     const deadline = taskEvent(stored("progress", { modelCall: { outcome: "deadline", attempt: 2, maxAttempts: 3, durationMs: 1_500_000 } }));
