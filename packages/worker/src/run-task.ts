@@ -17,7 +17,7 @@ import {
 } from "./devcontainer.js";
 import { EventBatcher, redactCredentials, type EventAppendOptions, type EventBatchSink, type WorkerEvent } from "./events.js";
 import {
-  CANCEL_FLUSH_MAX_MS, ModelCallMonitor, PLANNING_ABORT_CONFIRM_MS, PLANNING_STALL_MS, describeModelCallNote, expiryNote, logEventsRefused, logModelCallNote,
+  CANCEL_FLUSH_MAX_MS, ModelCallMonitor, PLANNING_ABORT_CONFIRM_MS, PLANNING_STALL_MS, describeModelCallNote, expiryNote, logEventsRefused, logModelCallNote, modelFailureNextAction,
   planningDeadlineMs, sanitizeModelCallEvent, type ModelCallExpiryInfo, type ModelCallNote,
 } from "./model-call-monitor.js";
 import { consoleWorkerLog, type WorkerLogSink } from "./worker-log.js";
@@ -25,7 +25,6 @@ import { ToolLoopGuard } from "./tool-loop-guard.js";
 import {
   createWorkspacePiSession,
   openRegisteredWorkspacePiSession,
-  WORKER_MODEL_RETRY,
   type PiSessionAdapter,
   type PiSessionHandle,
   type WorkspaceModelConfiguration,
@@ -469,7 +468,6 @@ export async function runTaskInvocation(
     onHeartbeat: (payload) => { void emit("progress", payload); },
     onExpire: (info) => { void handleExpiry(info); },
   });
-  const planningTotalCalls = WORKER_MODEL_RETRY.maxRetries + 1;
   // The call a deadline or stall stopped, once one has; and the gate that ends the run when Pi does not confirm its abort in time.
   let expiry: ModelCallExpiryInfo | undefined;
   let abortUnconfirmed = false;
@@ -481,7 +479,7 @@ export async function runTaskInvocation(
     const spent = info.reason === "deadline"
       ? `the model did not finish within ${info.limitMs >= 60_000 ? `${Math.round(info.limitMs / 60_000)} min` : `${Math.round(info.limitMs / 1_000)} s`}`
       : `the model sent nothing for ${Math.round(info.limitMs / 1_000)} s`;
-    const where = `model call ${info.attempt} of ${planningTotalCalls}`;
+    const where = `model call ${info.attempt}`;
     return abortUnconfirmed
       ? agentXError("OPERATION_INTERRUPTED", `planning stopped: ${spent} (${where}) and did not stop when asked. Retry planning.`)
       : agentXError("RUNTIME_UNAVAILABLE", `planning stopped: ${spent} (${where}). Retry planning.`);
@@ -512,7 +510,8 @@ export async function runTaskInvocation(
     abort: async () => {
       monitor.stop();
       verificationStop.abort();
-      await session.abort();
+      // Bounded: a session whose abort already hung (a deadline abort that was not confirmed) must not hang the cancel too.
+      await within(abortConfirmMs, async () => { await session.abort(); });
       // The cancel's own result ends the operation and refuses any later output, so what is buffered is sent first.
       await within(CANCEL_FLUSH_MAX_MS, async () => {
         await emit("progress", { message: "AgentX stopped this run because it was cancelled." }, { urgent: true });
@@ -832,6 +831,8 @@ export async function runTaskInvocation(
             plan = first.answer;
           }
         }
+        // The model is done: a deadline that passes while the plan is checked and saved must not report a stop on a run that then succeeds.
+        monitor.stop();
         if (!plan) throw agentXError("OPERATION_INTERRUPTED", "the planning run produced no plan artifact");
         if (Buffer.byteLength(plan, "utf8") > WORKFLOW_PLAN_MAX_BYTES) throw agentXError("OPERATION_INTERRUPTED", "the planning run exceeded the maximum plan size");
         await dependencies.artifactSink({ name: "plan.md", mediaType: "text/markdown; charset=utf-8", content: plan });
@@ -1193,8 +1194,10 @@ function assistantOutcome(event: unknown): AssistantOutcome | undefined {
 function failedTurn(outcome: AssistantOutcome | undefined, note: ModelCallNote | undefined): Error | undefined {
   if (outcome?.stopReason === "error") {
     // PLANINC-3b: fixed words and tokens only (failure class, error type, request id, call number), never the provider's message.
+    // The next action follows from the failure class and HTTP status: fix the key, add credits, wait for a limit, or retry.
     const detail = note === undefined ? "the model call failed: unknown" : describeModelCallNote(note);
-    return agentXError("RUNTIME_UNAVAILABLE", `${detail}; retry the step`);
+    const next = note?.outcome === "failed" ? modelFailureNextAction(note) : "retry the step";
+    return agentXError("RUNTIME_UNAVAILABLE", `${detail}; ${next}`);
   }
   // The caller reports it as CANCELLED when a cancellation was requested, and as FAILED otherwise.
   if (outcome?.stopReason === "aborted") return agentXError("OPERATION_INTERRUPTED", "the model call was aborted");
@@ -1242,6 +1245,12 @@ export function withoutModelFailureText(event: unknown): unknown {
   if (event === null || typeof event !== "object") return event;
   const value = event as { type?: unknown; message?: unknown; messages?: unknown };
   if (typeof value.type !== "string") return event;
+  // Pi's compaction and summarization retries quote the provider's message in `errorMessage`.
+  if ((value.type === "compaction_end" || value.type === "summarization_retry_scheduled") && "errorMessage" in value) {
+    const { errorMessage: _errorMessage, ...rest } = value as Record<string, unknown>;
+    void _errorMessage;
+    return rest;
+  }
   if (value.type === "agent_end" && Array.isArray(value.messages)) return { ...value, messages: value.messages.map(cleanAssistantMessage) };
   if (["message_start", "message_update", "message_end", "turn_end"].includes(value.type) && value.message !== undefined) return { ...value, message: cleanAssistantMessage(value.message) };
   return event;

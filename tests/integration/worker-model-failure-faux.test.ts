@@ -132,6 +132,8 @@ describe("a planning run on the real Pi loop whose model call fails", () => {
     await wait(500);
     expect(notes(sent).map((note) => note.outcome)).toEqual(["failed", "retrying"]);
     await controller.cancel(operationId);
+    // Pi ends the retry wait with its fixed "Retry cancelled": the task is told the wait was cancelled, not that the retries ran out.
+    expect(notes(sent).at(-1)).toEqual({ outcome: "retry-finished", success: false, attempt: 1, cancelled: true });
     const result = await settled;
     expect((result as { error: unknown }).error).toBeInstanceOf(WorkerOperationCancelledError);
     await wait(2_500);
