@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rm } from "node:fs/promises";
@@ -30,6 +30,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     mkdirSync(join(source, "src"), { recursive: true });
     writeFileSync(join(source, "src/app.js"), "export const flag = 'BASE-TOKEN';\n", { mode: 0o644 });
     writeFileSync(join(source, "keep.txt"), "kept\n", { mode: 0o644 });
+    // Writable to everyone on purpose: the only thing that stops the sandbox's user from writing is then the read-only mount, which the control below removes.
+    chmodSync(source, 0o777);
+    chmodSync(join(source, "keep.txt"), 0o666);
     listener = await listenOnAllAddresses();
   }, 120_000);
   afterAll(async () => {
@@ -72,15 +75,15 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(interfaces).toBe(0);
   }, 120_000);
 
-  it("cannot write to the base export or to the root, only to its small /tmp", async () => {
+  it("cannot write to the base export or to the image (a folder the user owns), only to its small /tmp", async () => {
     expect(await shell(`touch /work/${REPO}/new-file.txt`)).not.toBe(0);
     expect(existsSync(join(source, "new-file.txt"))).toBe(false);
     expect(await shell(`echo changed > /work/${REPO}/keep.txt`)).not.toBe(0);
-    expect(await shell("touch /root-file")).not.toBe(0);
+    expect(await shell("touch /home/node/root-file")).not.toBe(0);
     expect(await shell("touch /tmp/ok-file")).toBe(0);
     // Controls: with the protections taken away the very same writes succeed, so the failures above are the sandbox.
     expect(await shell(`touch /work/${REPO}/new-file.txt`, { mutate: (run) => { const at = run.indexOf("-v"); return [...run.slice(0, at), "-v", `${source}:/work/${REPO}`, ...run.slice(at + 2)]; } })).toBe(0);
-    expect(await shell("touch /root-file", { mutate: without("--read-only") })).toBe(0);
+    expect(await shell("touch /home/node/root-file", { mutate: without("--read-only") })).toBe(0);
     execFileSync("rm", ["-f", join(source, "new-file.txt")]);
   }, 120_000);
 
