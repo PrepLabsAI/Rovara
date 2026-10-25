@@ -8,6 +8,7 @@ import {
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import { WORKFLOW_ACTION_IDS } from "./workflow-actions.js";
 import { isE2EPlanCorrectionBlockReason } from "./task-records.js";
+import { PLAN_UNREADABLE_SENTENCES, type PlanUnreadableCategory } from "./plan-check-summary.js";
 
 export interface WorkflowMessageContext {
   taskId: string;
@@ -24,7 +25,15 @@ export interface WorkflowMessageContext {
    * A structured document's card: its top claims in rank order (for a tiny plan every claim, a child's text starting
    * with two spaces per level), how many claims and decisions it has in all, and whether it is tiny. Replaces `documentSummary`.
    */
-  structured?: { claims: string[]; claimCount: number; decisionCount: number; tiny: boolean } | undefined;
+  structured?: {
+    claims: string[]; claimCount: number; decisionCount: number; tiny: boolean;
+    /** PLANVIEW: the answer each decision gets if the owner approves here (AgentX's recommended option), in plan order. */
+    decisions?: ReadonlyArray<{ id: string; question: string; answer: string }> | undefined;
+    /** PLANVIEW: one plain line per browser or API scenario and proposed check the plan adds (`planCheckSummary(plan).lines`). */
+    checkLines?: readonly string[] | undefined;
+  } | undefined;
+  /** PLANREADMSG: why the plan could not be read, as a fixed category; absent when not known (the card then says only that it could not be read). */
+  planUnreadableCategory?: PlanUnreadableCategory | undefined;
   findingsUrl?: string | undefined;
   /** The task page, where every thread reply can be read. */
   taskPageUrl?: string | undefined;
@@ -113,6 +122,10 @@ export function isFeedbackReviewFailure(blockReason: string | undefined): boolea
 /** The step a stopped run ran, as the first word of the sentence that says it was stopped (keys: `workflowRunEndedReason`'s step names). */
 const STOPPED_STEP_NAME: Readonly<Record<string, string>> = { planning: "Planning", implementation: "Coding", "verification retry": "Checking", "independent review": "Reviewing" };
 
+const STOPPED_BY_OWNER = /^(planning|implementation|verification retry|independent review) operation ended (cancelled|interrupted)$/;
+/** Whether a step's block reason is a stop the owner asked for, which `plainBlockReason` words as a whole sentence of its own. */
+const stoppedByOwner = (blockReason: string | undefined): boolean => blockReason !== undefined && STOPPED_BY_OWNER.test(blockReason);
+
 /** The broker's own reason a step stopped, in words the owner can act on; any other reason is internal. */
 export function plainBlockReason(blockReason: string | undefined): string {
   if (blockReason === undefined) return GENERIC_REASON;
@@ -120,11 +133,19 @@ export function plainBlockReason(blockReason: string | undefined): string {
   const reworded = REWORDED_REASONS.get(blockReason);
   if (reworded !== undefined) return slackText(reworded);
   // PLANINC-2: a stop the owner asked for (cancelled, or interrupted when the stop could not be delivered) says so and what to do; only a failed run is unexpected.
-  const stopped = /^(planning|implementation|verification retry|independent review) operation ended (cancelled|interrupted)$/.exec(blockReason);
+  const stopped = STOPPED_BY_OWNER.exec(blockReason);
   if (stopped !== null) return `${STOPPED_STEP_NAME[stopped[1]!]!} was stopped before it finished. Choose Retry to run it again.`;
   if (/operation ended (failed|interrupted|cancelled)$/.test(blockReason)) return "The run stopped unexpectedly.";
   if (/ was invalid, incomplete, or stale$/.test(blockReason)) return "The result couldn't be trusted, so nothing moved forward.";
   return PLAIN_REASONS.has(blockReason) ? slackText(blockReason) : GENERIC_REASON;
+}
+
+/** PLANREADMSG: an unreadable plan says why in a fixed category sentence (never the validator's words) and what to do. */
+function planUnreadableText(context: WorkflowMessageContext): string {
+  const name = workflowDocumentName(context.workflow);
+  const category = context.planUnreadableCategory;
+  if (category === undefined) return `AgentX couldn't read the ${name} it wrote.`;
+  return `AgentX couldn't read the ${name} it wrote: ${PLAN_UNREADABLE_SENTENCES[category]}. Choose Retry planning (it gets the problems found), or Close.`;
 }
 
 /** A review-only task's blocked verification, without advice to rerun checks it does not have. */
@@ -338,6 +359,40 @@ function structuredClaimLines(structured: NonNullable<WorkflowMessageContext["st
   return moreLine(0).filter((line) => visibleLength(line) + 1 <= room);
 }
 
+/** PLANVIEW: what a plan card lists about the answers Approve takes and the checks the plan adds, within the same brief limit as every card. */
+const CARD_CLAIMS_RESERVE = 190;
+const CARD_DECISIONS_SHOWN = 3;
+const CARD_CHECK_LINES_SHOWN = 8;
+const CARD_CHECK_LINE_MAX = 280;
+const CARD_DECISION_QUESTION_MAX = 50;
+const CARD_DECISION_ANSWER_MAX = 40;
+
+/**
+ * The lines an Approve in Slack must show, in what is left of the brief limit once the fixed lines and a claim's worth of
+ * room are kept: the answer each decision gets (the owner sees them before approving), then up to 8 lines for the checks
+ * the plan adds, each with "And N more ..." when some are left out. Every value is the plan's own text: `cleanLine`
+ * redacts, cuts and escapes it. A line that does not fit is left out, never cut mid-sentence.
+ */
+function structuredExtraLines(structured: NonNullable<WorkflowMessageContext["structured"]>, room: number): string[] {
+  const out: string[] = [];
+  let left = room;
+  const cost = (lines: readonly string[]) => lines.reduce((total, line) => total + visibleLength(line) + 1, 0);
+  const takeUpTo = (lines: readonly string[], more: (taken: number) => string[]) => {
+    for (let taken = lines.length; taken > 0; taken -= 1) {
+      const block = [...lines.slice(0, taken), ...more(taken)];
+      if (cost(block) <= left) { out.push(...block); left -= cost(block); return; }
+    }
+  };
+  const decisions = structured.decisions ?? [];
+  takeUpTo(decisions.slice(0, CARD_DECISIONS_SHOWN)
+    .map((decision) => `• ${cleanLine(decision.id, 12)}: ${cleanLine(decision.question, CARD_DECISION_QUESTION_MAX)} Answer: ${cleanLine(decision.answer, CARD_DECISION_ANSWER_MAX)}`),
+  (taken) => (decisions.length > taken ? [`And ${decisions.length - taken} more decisions on the task page.`] : []));
+  const checks = structured.checkLines ?? [];
+  takeUpTo(checks.slice(0, CARD_CHECK_LINES_SHOWN).map((line) => `• ${cleanLine(line, CARD_CHECK_LINE_MAX)}`),
+    (taken) => (checks.length > taken ? [`And ${checks.length - taken} more on the task page.`] : []));
+  return out;
+}
+
 function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof exitButtons>): { text: string; buttons: Button[] } {
   const { workflow, structured } = context;
   const name = workflowDocumentName(workflow);
@@ -382,16 +437,20 @@ function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof ex
     return { text: lines.join("\n"), buttons: decisions };
   }
   // FR-036: what Approve in Slack takes. A tiny plan (FR-037) is approved in Slack as it is, so its card is unchanged.
-  if (structured.decisionCount > 0) {
-    tail.unshift(`Approve here uses AgentX's answers for ${plural(structured.decisionCount, "decision")} and includes the open comments (up to 25) from the task page.`);
-  } else if (!structured.tiny) tail.unshift("Approve here includes the open comments (up to 25) from the task page.");
+  const lead = structured.decisionCount > 0
+    ? [`Approve here uses AgentX's answers for ${plural(structured.decisionCount, "decision")} and includes the open comments (up to 25) from the task page.`]
+    : structured.tiny ? [] : ["Approve here includes the open comments (up to 25) from the task page."];
+  tail.unshift(...lead);
   tail.push(context.documentLink === undefined ? unlinked : link(context.documentLink.url, structured.tiny ? `Open the ${name}` : `Open the full ${name}`));
   const buttons: Button[] = context.documentLink === undefined ? decisions
     : [{ type: "button", action_id: "agentx_open_review", text: { type: "plain_text", text: "Open review" }, url: context.documentLink.url }, ...decisions];
   // What is fixed (the buttons' labels count toward the limit too), then the claims that fit in what is left.
   const labels = buttons.reduce((total, button) => total + (button["text"] as { text: string }).text.length, 0);
   const fixed = [header, ...tail].reduce((total, line) => total + visibleLength(line) + 1, 0) + labels;
-  return { text: [header, ...structuredClaimLines(structured, CARD_BRIEF_LIMIT - fixed), ...tail].join("\n"), buttons };
+  // The decision answers and the checks come right after the line that says what Approve takes; the claims get the room they leave.
+  const extras = structuredExtraLines(structured, Math.max(0, CARD_BRIEF_LIMIT - fixed - CARD_CLAIMS_RESERVE));
+  const extrasCost = extras.reduce((total, line) => total + visibleLength(line) + 1, 0);
+  return { text: [header, ...structuredClaimLines(structured, CARD_BRIEF_LIMIT - fixed - extrasCost), ...tail.slice(0, lead.length), ...extras, ...tail.slice(lead.length)].join("\n"), buttons };
 }
 
 function reviewBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof exitButtons>): { text: string; buttons: Button[] } {
@@ -710,7 +769,8 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
   switch (`${workflow.stage}/${workflow.state}`) {
     case "PLAN/RUNNING": return plain(planRunning(context));
     case "PLAN/BLOCKED": return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable
-      ? `AgentX couldn't read the ${workflowDocumentName(workflow)} it wrote.`
+      ? planUnreadableText(context)
+      : stoppedByOwner(workflow.blockReason) ? plainBlockReason(workflow.blockReason)
       : `I couldn't finish the ${workflowDocumentName(workflow)}. ${plainBlockReason(workflow.blockReason)}`,
       buttons: [exits.button("agentx_workflow_retry_plan", "Retry planning"), exits.close] };
     case "PLAN_REVIEW/WAITING": return planReview(context, exits);
@@ -721,6 +781,8 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
     case "IMPLEMENT/RUNNING": return plain(implementRunning(context));
     case "IMPLEMENT/BLOCKED": if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.fixChangedNothing) return fixChangedNothing(context, exits);
       return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.noCodeChanged ? WORKFLOW_BLOCK_REASONS.noCodeChanged
+      // CANCELDUP: a stop the owner asked for already reads "Coding was stopped before it finished. Choose Retry ..."; saying it twice is noise.
+      : stoppedByOwner(workflow.blockReason) ? plainBlockReason(workflow.blockReason)
       : `Coding stopped before it finished. ${plainBlockReason(workflow.blockReason)}`,
       // Rewritten history can't be coded on again: a new task is the way on.
       buttons: workflow.blockReason === WORKFLOW_HISTORY_REWRITTEN_MESSAGE ? [exits.close] : [exits.button("agentx_workflow_retry_implementation", "Retry coding"), exits.close] };

@@ -3,6 +3,7 @@ import { RelativeWorkspacePathSchema } from "./project.js";
 import { canonicalJson, sortKeys } from "./canonical-json.js";
 import { redactText } from "./redaction.js";
 import { WorkflowCheckSchema, WORKFLOW_PROPOSED_CHECKS_MAX, type WorkflowCheck, type WorkflowCheckProposal } from "./task-workflow.js";
+import { builtinFileCheckOf } from "./workflow-check-input.js";
 import { WorkflowCheckExpectOnBaseSchema, extractProposedChecks, hasControlCharacter, isNotChangingReference, lastFencedBlock, notChangingReference, proposedCheckTextIssues } from "./workflow-proposed-checks.js";
 import { TaskGraphV1Schema, taskGraphOrder, type TaskGraphV1 } from "./workflow-dependencies.js";
 import { E2EFeaturePlanIntentAnySchema, type E2EApplicationPlanIntent } from "./e2e-application.js";
@@ -529,6 +530,18 @@ function inlineCode(value: string): string {
   return longest > 0 ? `${fence} ${value} ${fence}` : `${fence}${value}${fence}`;
 }
 
+/**
+ * A proposed check's command as the Markdown copy shows it. A built-in file check (AgentX wrote its `sh -c` script) reads as
+ * what it does, never as the script; any other command shows its program and arguments and the folder it runs in.
+ */
+export function plainCheckCommand(command: { cwd: string; executable: string; args: readonly string[] }): string {
+  const builtin = builtinFileCheckOf(command);
+  if (builtin !== undefined) {
+    return `the file ${inlineCode(line(builtin.path))} ${builtin.kind === "file-contains" ? "contains" : "does not contain"} ${inlineCode(line(builtin.text))} in ${inlineCode(line(command.cwd))}`;
+  }
+  return `${inlineCode(line([command.executable, ...command.args].join(" ")))} in ${inlineCode(line(command.cwd))}`;
+}
+
 /** The words that describe a flow, schema or state machine: the Markdown copy's evidence line, and the text next to its diagram. */
 export function planDiagramText(evidence: Extract<PlanEvidenceInput, { kind: "flow" | "schema" | "stateMachine" }>): string {
   switch (evidence.kind) {
@@ -695,6 +708,17 @@ export function planDocumentMarkdown(plan: PlanDocument, input: {
     }
     for (const delta of plan.e2e.semanticExportDeltas) out.push(`- Proposed export delta ${inlineCode(line(delta.operationId))}: ${inlineCode(line(canonicalJson(delta)))}`);
   }
+  // The checks come right after the E2E intent, ahead of the decisions and lists, so a copy cut short keeps them.
+  const checks = plan.checks;
+  if (checks !== undefined && checks.proposed.length > 0) {
+    out.push("## Checks");
+    for (const check of checks.proposed) {
+      const proves = checks.proves[check.id] ?? [];
+      out.push(`- ${line(check.label)}: ${plainCheckCommand(check.command)}${proves.length === 0 ? "" : ` — proves ${proves.map(provedItem).join(", ")}`}`);
+    }
+  } else if (checks?.noneReason !== undefined) {
+    out.push("## Checks", `- None apply: ${line(checks.noneReason)}`);
+  }
   if (plan.decisions.length > 0) {
     out.push("## Decisions");
     if (input.answers === "recommended") out.push("The owner approved AgentX's recommended answer to every decision; treat each as decided.");
@@ -713,17 +737,6 @@ export function planDocumentMarkdown(plan: PlanDocument, input: {
   }
   out.push("## Not changing", ...plan.notChanging.map((entry) => `- ${line(entry)}`));
   out.push("## Risks", ...plan.risks.map((entry) => `- ${line(entry)}`));
-  const checks = plan.checks;
-  if (checks !== undefined && checks.proposed.length > 0) {
-    out.push("## Checks");
-    for (const check of checks.proposed) {
-      const proves = checks.proves[check.id] ?? [];
-      const command = line([check.command.executable, ...check.command.args].join(" "));
-      out.push(`- ${line(check.label)}: ${inlineCode(command)} in ${inlineCode(line(check.command.cwd))}${proves.length === 0 ? "" : ` — proves ${proves.map(provedItem).join(", ")}`}`);
-    }
-  } else if (checks?.noneReason !== undefined) {
-    out.push("## Checks", `- None apply: ${line(checks.noneReason)}`);
-  }
   out.push(...ownerCommentLines(owner?.comments ?? []));
   return `${out.join("\n")}\n`;
 }
