@@ -30,6 +30,7 @@ export type FindingKind =
   | "catalog-expiring"
   | "runner-image-mismatch"
   | "worker-feature-missing"
+  | "runner-restarted"
   | "model-route-not-approved"
   | "model-access-unverified"
   | "model-agreement-missing"
@@ -112,6 +113,8 @@ export interface CatalogRowFact {
   sk: string;
   state: string;
   expiresAt: string;
+  /** When the row was qualified. Absent on a read that did not project it (the runner-restarted warning then cannot be judged and says nothing). */
+  qualifiedAt?: string | undefined;
 }
 
 /** What the qualified runner's status object says, and the deployed `ExecutorImageUri` to compare it with. */
@@ -123,6 +126,8 @@ export interface RunnerFacts {
   invocationFeatures?: readonly string[] | undefined;
   /** The feature strings this head needs. WORKER_INVOCATION_FEATURES unless given. */
   requiredFeatures?: readonly string[] | undefined;
+  /** EC2's LaunchTime of the runner instance: it moves on every start, not only on a first launch (HARDEN-C I-4). Absent when not read. */
+  launchTime?: string | undefined;
 }
 
 export interface CheckInput {
@@ -267,6 +272,7 @@ export function evaluateTestDeployCheck(input: CheckInput): CheckResult {
     ...evaluateEnvironmentDrift(input.headTemplate, input.deployedTemplate),
     ...catalogFindings(input.catalogRows, input.now, input.renewCommand),
     ...runnerFindings(input.runnerFacts, input.renewCommand),
+    ...runnerRestartFindings(input.runnerFacts, input.catalogRows, input.renewCommand),
     ...(input.modelRoute === undefined ? [] : routeFindings(input.modelRoute)),
   ];
   return { ok: findings.every((finding) => finding.severity !== "error"), findings };
@@ -686,6 +692,25 @@ function runnerFindings(facts: RunnerFacts | undefined, renewCommand?: string): 
     if (missing.length > 0) findings.push(runner("worker-feature-missing", `the running worker lacks ${missing.join(", ")} (its /ping does not list them)`, { missing: [...missing] }));
   }
   return findings;
+}
+
+/**
+ * HARDEN-C I-4. A runner that was stopped and started after its runtime was qualified may come back on another kernel, and the broker refuses every round on a kernel other than the
+ * qualified one (the worker refuses it at the start as `runtime-environment-drifted`). The check cannot see the running kernel, so it warns on the sign it can read: the instance's
+ * launch time is later than the latest qualification of the catalog rows. A warning only: a pinned kernel survives a restart, and requalifying is cheap when it did not. A launch time
+ * that does not read as a time is warned about too, never passed; a launch time or a qualification that was not read says nothing.
+ */
+function runnerRestartFindings(facts: RunnerFacts | undefined, rows: readonly CatalogRowFact[], renewCommand?: string): Finding[] {
+  if (facts?.launchTime === undefined) return [];
+  const qualified = rows.filter((row) => row.state === "READY" && row.qualifiedAt !== undefined).map((row) => Date.parse(row.qualifiedAt!)).filter((time) => !Number.isNaN(time));
+  if (qualified.length === 0) return [];
+  const latest = Math.max(...qualified);
+  const launched = Date.parse(facts.launchTime);
+  const renew = renewCommand ?? E2E_RUNTIME_GENERIC_RENEW_COMMAND;
+  const warn = (why: string): Finding[] => [{ kind: "runner-restarted", severity: "warning", subject: "runner", label: "runner", message: `${why}; renew it with: ${renew}` }];
+  if (Number.isNaN(launched)) return warn(`the runner's launch time ${JSON.stringify(facts.launchTime.slice(0, 40))} is not a time, so it cannot be compared with when the runtime was qualified`);
+  if (launched <= latest) return [];
+  return warn(`the runner instance was started at ${facts.launchTime}, after the runtime was last qualified at ${new Date(latest).toISOString()}; a restart can change its kernel, and a round on another kernel than the qualified one is refused`);
 }
 
 // ---------------------------------------------------------------------------------------------

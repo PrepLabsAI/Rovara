@@ -1443,11 +1443,12 @@ function readCatalogRows(readers: CheckReaders, table: string, catalogId: string
     "--key-condition-expression", "pk = :pk AND begins_with(sk, :prefix)",
     "--expression-attribute-values", JSON.stringify({ ":pk": { S: `E2E_FEATURE_VERIFIER#${catalogId}` }, ":prefix": { S: CATALOG_PROFILE_PREFIX } }),
     "--expression-attribute-names", JSON.stringify({ "#s": "state" }),
-    "--projection-expression", "sk, #s, expiresAt, endpoint",
+    "--projection-expression", "sk, #s, expiresAt, qualifiedAt, endpoint",
   ]);
   if (result === undefined) throw new Error(`cannot read the feature-verifier catalog from ${table}`);
   return (result.Items ?? []).map((item) => ({
     sk: item.sk?.S ?? "", state: item.state?.S ?? "", expiresAt: item.expiresAt?.S ?? "",
+    ...(item.qualifiedAt?.S === undefined ? {} : { qualifiedAt: item.qualifiedAt.S }),
     ...(item.endpoint?.S === undefined ? {} : { endpoint: item.endpoint.S }),
   }));
 }
@@ -1468,6 +1469,9 @@ function readRunnerFacts(readers: CheckReaders, input: { bucket: string; foundat
   ]) ?? [];
   const [instanceId] = instances;
   if (instances.length !== 1 || instanceId === undefined) return none(`${instances.length} running qualification instances have the private IP ${host}; expected exactly one`);
+  // The launch time moves on every start of the instance, which is what a restart onto another kernel looks like from here (HARDEN-C I-4). A read that fails only leaves it out.
+  const launchTimes = awsJson<string[]>(readers, ["ec2", "describe-instances", "--instance-ids", instanceId, "--query", "Reservations[].Instances[].LaunchTime"]);
+  const launchTime = launchTimes?.length === 1 && typeof launchTimes[0] === "string" ? launchTimes[0] : undefined;
   const roleArn = stackOutput(describeStack(readers.runner, readers.region, input.foundationStack), "Ec2WorkerInstanceRoleArn");
   const roleId = awsJson<string>(readers, ["iam", "get-role", "--role-name", roleArn.slice(roleArn.lastIndexOf("/") + 1), "--query", "Role.RoleId"]);
   if (typeof roleId !== "string") return none(`the worker role ${roleArn} could not be read`);
@@ -1479,7 +1483,7 @@ function readRunnerFacts(readers: CheckReaders, input: { bucket: string; foundat
   if (status === undefined) return none(`s3://${input.bucket}/${key} is not a qualification status`);
   if (status.state !== "SUCCEEDED") return none(`the runner ${instanceId} qualification status is ${status.state} (${status.reason}), not SUCCEEDED`);
   return {
-    facts: { deployedExecutorImage: input.deployedExecutorImage, executorImage: status.executorImage, invocationFeatures: status.invocationFeatures },
+    facts: { deployedExecutorImage: input.deployedExecutorImage, executorImage: status.executorImage, invocationFeatures: status.invocationFeatures, launchTime },
     notes: [`runner ${instanceId} (${host}) qualified: ${status.reason}`],
   };
 }
@@ -1710,7 +1714,7 @@ export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts
       builtZipShas: built.shas,
       headRevision: readers.headRevision,
       inputsChanged,
-      catalogRows: catalog.map(({ sk, state, expiresAt }) => ({ sk, state, expiresAt })),
+      catalogRows: catalog.map(({ sk, state, expiresAt, qualifiedAt }) => ({ sk, state, expiresAt, ...(qualifiedAt === undefined ? {} : { qualifiedAt }) })),
       runnerFacts: runner.facts,
       modelRoute,
     },
