@@ -1,6 +1,9 @@
-import { resolve } from "node:path";
+import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { createCandidateManifest } from "@agentx/contracts";
 import { exportCandidateBuildSourceInScratch, type CandidateBuildSourceExport } from "./e2e-build-source-export.js";
+import { createProcessCandidateGit } from "./e2e-candidate-source.js";
 import { withIsolatedGit } from "./isolated-git.js";
 import { readCommittedCandidateSourceExport, type CandidateRepositoryInput, type CommittedCandidateSourceExport } from "./verification/candidate.js";
 
@@ -43,5 +46,33 @@ export async function exportBaselineSource(input: { repositories: readonly Candi
   } catch (error) {
     if (input.signal.aborted) throw cancelled(error);
     return unavailable(`the unchanged code could not be exported: ${error instanceof Error ? error.message : "unknown failure"}`);
+  }
+}
+
+/**
+ * PLANDRYRUN: the unchanged code as plain files, for the planning run to try a plan's proposed checks on. The task's recorded base commit is written (regular files only: no
+ * symlink, no submodule, no filter or attribute applied) into the new directory `destination` through the same safe git path as the exports above, so nothing in the
+ * workspace's repository is read except its objects and nothing in the workspace changes. The result carries no text: a base that cannot be written is UNAVAILABLE, and only the
+ * operation's own cancellation throws. A partly written directory is removed.
+ */
+export async function materializeBaseSource(input: { repositories: readonly CandidateRepositoryInput[]; destination: string; signal: AbortSignal; scratchRoot?: string }): Promise<{ status: "READY" | "UNAVAILABLE" }> {
+  const cancelled = (error?: unknown) => (input.signal.reason instanceof Error ? input.signal.reason : error instanceof Error ? error : new Error("the base source export was cancelled"));
+  if (input.signal.aborted) throw cancelled();
+  const [repository] = input.repositories;
+  if (input.repositories.length !== 1 || repository?.baseCommitSha === undefined) return { status: "UNAVAILABLE" };
+  let scratch: string | undefined;
+  try {
+    scratch = await mkdtemp(join(input.scratchRoot ?? tmpdir(), "agentx-plan-dry-run-git-"));
+    await mkdir(input.destination, { mode: 0o755 });
+    // The checks run as an unprivileged user through a read-only mount: the folder must be readable whatever the process umask is.
+    await chmod(input.destination, 0o755);
+    await createProcessCandidateGit(scratch).materializeInto(resolve(repository.directory), repository.baseCommitSha, input.destination, input.signal);
+    return { status: "READY" };
+  } catch (error) {
+    await rm(input.destination, { recursive: true, force: true }).catch(() => undefined);
+    if (input.signal.aborted) throw cancelled(error);
+    return { status: "UNAVAILABLE" };
+  } finally {
+    if (scratch !== undefined) await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
   }
 }
