@@ -1032,7 +1032,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     const text = h.posts.at(-1)!.text;
     expect(text).toContain("• d1: How many times should a payment be retried? Answer: Five times");
-    expect(text).toContain("• As viewer on api-viewer: sends GET /api/orders.csv; expects GET /api/orders.csv answers 403");
+    expect(text).toContain("• As viewer on api-viewer: expects GET /api/orders.csv answers 403; proves claim 2; no stand-ins; steps: sends GET /api/orders.csv");
     expect(visibleSlackText(text).length).toBeLessThanOrEqual(1_200);
   });
 

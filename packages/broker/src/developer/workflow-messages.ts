@@ -362,6 +362,8 @@ function structuredClaimLines(structured: NonNullable<WorkflowMessageContext["st
 /** PLANVIEW: what a plan card lists about the answers Approve takes and the checks the plan adds, within the same brief limit as every card. */
 const CARD_CLAIMS_RESERVE = 190;
 const CARD_DECISIONS_SHOWN = 3;
+/** With checks to list too, only the first two decisions are spelled out (the rest read "And N more decisions"). */
+const CARD_DECISIONS_WITH_CHECKS = 2;
 const CARD_CHECK_LINES_SHOWN = 8;
 const CARD_CHECK_LINE_MAX = 280;
 const CARD_DECISION_QUESTION_MAX = 50;
@@ -373,23 +375,30 @@ const CARD_DECISION_ANSWER_MAX = 40;
  * the plan adds, each with "And N more ..." when some are left out. Every value is the plan's own text: `cleanLine`
  * redacts, cuts and escapes it. A line that does not fit is left out, never cut mid-sentence.
  */
-function structuredExtraLines(structured: NonNullable<WorkflowMessageContext["structured"]>, room: number): string[] {
+export function structuredExtraLines(structured: NonNullable<WorkflowMessageContext["structured"]>, room: number): string[] {
   const out: string[] = [];
-  let left = room;
   const cost = (lines: readonly string[]) => lines.reduce((total, line) => total + visibleLength(line) + 1, 0);
-  const takeUpTo = (lines: readonly string[], more: (taken: number) => string[]) => {
+  const takeUpTo = (lines: readonly string[], more: (taken: number) => string[], left: number): number => {
     for (let taken = lines.length; taken > 0; taken -= 1) {
       const block = [...lines.slice(0, taken), ...more(taken)];
-      if (cost(block) <= left) { out.push(...block); left -= cost(block); return; }
+      if (cost(block) <= left) { out.push(...block); return cost(block); }
     }
+    return 0;
   };
-  const decisions = structured.decisions ?? [];
-  takeUpTo(decisions.slice(0, CARD_DECISIONS_SHOWN)
-    .map((decision) => `• ${cleanLine(decision.id, 12)}: ${cleanLine(decision.question, CARD_DECISION_QUESTION_MAX)} Answer: ${cleanLine(decision.answer, CARD_DECISION_ANSWER_MAX)}`),
-  (taken) => (decisions.length > taken ? [`And ${decisions.length - taken} more decisions on the task page.`] : []));
   const checks = structured.checkLines ?? [];
-  takeUpTo(checks.slice(0, CARD_CHECK_LINES_SHOWN).map((line) => `• ${cleanLine(line, CARD_CHECK_LINE_MAX)}`),
-    (taken) => (checks.length > taken ? [`And ${checks.length - taken} more on the task page.`] : []));
+  const checkLines = checks.slice(0, CARD_CHECK_LINES_SHOWN).map((line) => `• ${cleanLine(line, CARD_CHECK_LINE_MAX)}`);
+  const checkMore = (taken: number) => (checks.length > taken ? [`And ${checks.length - taken} more on the task page.`] : []);
+  // Never silent: when no check line fits, one line still says the plan adds checks and where they read.
+  const notice = checks.length === 0 ? [] : [`This plan adds ${plural(checks.length, "check")}; read ${checks.length === 1 ? "it" : "them"} on the task page.`];
+  // The decisions go first, but leave room for the first check line (with its "And N more"), or at least for the notice.
+  const firstCheck = checks.length === 0 ? 0 : cost([checkLines[0]!, ...checkMore(1)]);
+  const reserve = checks.length === 0 ? 0 : firstCheck <= room ? firstCheck : cost(notice);
+  const decisions = structured.decisions ?? [];
+  const shown = decisions.slice(0, checks.length === 0 ? CARD_DECISIONS_SHOWN : CARD_DECISIONS_WITH_CHECKS)
+    .map((decision) => `• ${cleanLine(decision.id, 12)}: ${cleanLine(decision.question, CARD_DECISION_QUESTION_MAX)} Answer: ${cleanLine(decision.answer, CARD_DECISION_ANSWER_MAX)}`);
+  const used = takeUpTo(shown, (taken) => (decisions.length > taken ? [`And ${decisions.length - taken} more decisions on the task page.`] : []), room - reserve);
+  const checksRoom = room - used;
+  if (takeUpTo(checkLines, checkMore, checksRoom) === 0 && checks.length > 0) out.push(...notice);
   return out;
 }
 

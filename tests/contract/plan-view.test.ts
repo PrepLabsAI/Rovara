@@ -7,7 +7,7 @@ import {
 } from "@agentx/contracts";
 import { shortenMarkdown } from "../../packages/broker/src/developer/plan-artifacts.js";
 import { PLAN_UNREADABLE_CATEGORIES, PLAN_UNREADABLE_SENTENCES, planCheckSummary, planUnreadableCategory } from "../../packages/broker/src/developer/plan-check-summary.js";
-import { plainBlockReason, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { plainBlockReason, structuredExtraLines, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { renderPlanDocument } from "../../packages/broker/src/aws/plan-page/render-plan.js";
 import { readTaskPlanDocument } from "../../packages/broker/src/aws/task-plan-document.js";
 import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -24,7 +24,7 @@ const scenario = (scenarioId: string, account: string, target: string, steps: Ra
 const request = (requestId: string, path: string): Raw => ({ kind: "request", requestId, path, method: "GET", body: {} });
 
 /** The coding plan of task ecf67d6a (Test 1): four scenarios (an AI step with a CSV, a viewer API 403, a viewer page, a form login) and two checks. */
-function ordersPlan(overrides: Partial<PlanDocument> = {}, extraScenarios: Raw[] = []): PlanDocument {
+function ordersPlan(overrides: Partial<PlanDocument> = {}, extraScenarios: Raw[] = [], mockTargets: string[] = ["web-owner", "api-viewer", "web-viewer"]): PlanDocument {
   const scenarios = [
     scenario("owner-exports-csv", "owner", "web-owner", [{ kind: "agent", goal: "Tap the Download orders button", maxActions: 5 }], [
       { kind: "visible", testId: "export-toolbar", equals: true }, { kind: "text", testId: "export-status", equals: "Orders exported" },
@@ -36,7 +36,7 @@ function ordersPlan(overrides: Partial<PlanDocument> = {}, extraScenarios: Raw[]
     ...extraScenarios,
   ];
   const e2e = { schemaVersion: 1 as const, requestedTargetIds: ["web-owner", "api-viewer", "web-viewer"], accountContextRefs: [], semanticExportDeltas: [], scenarios,
-    mockFixtureRefs: [{ componentId: "inventory-v1", requestedTargetId: "web-owner", operationId: "getStock", sourcePath: "e2e/mocks/inventory-v1.json", sourceSha256: SHA }] };
+    mockFixtureRefs: mockTargets.map((requestedTargetId) => ({ componentId: "inventory-v1", requestedTargetId, operationId: "getStock", sourcePath: "e2e/mocks/inventory-v1.json", sourceSha256: SHA })) };
   return planDocument({
     claims: [{ id: "1", text: "Owners can download the orders as a CSV." }, { id: "2", text: "Viewers cannot download the orders." }],
     notChanging: ["The login page stays as it is."],
@@ -55,11 +55,12 @@ describe("planCheckSummary", () => {
   it("says each scenario in plain words from its structured fields", () => {
     const summary = planCheckSummary(ordersPlan());
     expect(summary.scenarios).toHaveLength(4);
-    expect(summary.lines[0]).toBe('As owner on web-owner: an AI step ("Tap the Download orders button", up to 5 actions); expects export-toolbar is shown; '
-      + 'the text of export-status is "Orders exported"; the download orders.csv has the rows "a1,in-stock"; "a2,unavailable"');
-    expect(summary.lines[1]).toBe("As viewer on api-viewer: sends GET /api/tenants/t1/orders, sends GET /api/orders.csv; expects GET /api/orders.csv answers 403");
-    expect(summary.lines[2]).toBe("As viewer on web-viewer: opens /; expects export-csv is hidden; export-toolbar is hidden");
-    expect(summary.scenarios[0]).toMatchObject({ maxActions: 5, proves: ["claim 1"], mocks: ["inventory-v1 on web-owner"] });
+    // Expected values come first, then what it proves, the AI step limit and the stand-ins; the steps are what is cut to fit.
+    expect(summary.lines[0]).toBe('As owner on web-owner: expects export-toolbar is shown; the text of export-status is "Orders exported"; the download orders.csv has 2 rows: a1,in-stock; a2,unavailable; '
+      + "proves claim 1; AI steps take up to 5 actions; stand-ins: inventory-v1; steps: 1 step");
+    expect(summary.lines[1]).toBe("As viewer on api-viewer: expects GET /api/orders.csv answers 403; proves claim 2; stand-ins: inventory-v1; steps: sends GET /api/tenants/t1/orders, sends GET /api/orders.csv");
+    expect(summary.lines[2]).toBe("As viewer on web-viewer: expects export-csv is hidden; export-toolbar is hidden; proves claim 2; stand-ins: inventory-v1; steps: opens /");
+    expect(summary.scenarios[0]).toMatchObject({ maxActions: 5, proves: ["claim 1"], mocks: ["inventory-v1 on web-owner"], requiredReal: [], realAndStandIn: [] });
     expect(summary.scenarios[3]!.proves).toEqual(["Not changing 1"]);
   });
 
@@ -181,8 +182,8 @@ describe("the approval card", () => {
   it("lists the scenarios with their CSV rows and the decision answer Approve here uses, within the brief limit", () => {
     const card = cardOf(ordersPlan());
     expect(card.text).toContain("• d1: Which statuses does the CSV list? Answer: In stock and unavailable");
-    expect(card.text).toContain('the download orders.csv has the rows "a1,in-stock"; "a2,unavailable"');
-    expect(card.text).toContain("As viewer on api-viewer: sends GET /api/tenants/t1/orders");
+    expect(card.text).toContain("the download orders.csv has 2 rows: a1,in-stock; a2,unavailable; proves claim 1");
+    expect(card.text).toContain("As viewer on api-viewer: expects GET /api/orders.csv answers 403; proves claim 2");
     expect(card.text.split("\n").indexOf("• d1: Which statuses does the CSV list? Answer: In stock and unavailable"))
       .toBeGreaterThan(card.text.split("\n").findIndex((line) => line.startsWith("Approve here uses")));
     expect(card.text.replace(/<[^>]*\|([^>]*)>/g, "$1").length).toBeLessThanOrEqual(1_200);
@@ -263,6 +264,104 @@ describe("the task page section", () => {
     expect(html).toContain("Proves:");
     // A plan with no scenarios and no proposed checks has no such section.
     expect(await renderPlanDocument({ anchor: "design", kind: "design", version: 1, approved: false, current: true, plan: planDocument(), openWhatChanged: false })).not.toContain("Checks this plan adds");
+  });
+});
+
+describe("what the card and page show of tonight's plan mistakes (fix round 1)", () => {
+  const workflow = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId: "11111111-1111-4111-8111-111111111111", ownerId: "a".repeat(64), now: "2026-10-25T10:00:00.000Z" }),
+    revision: 4, stage: "PLAN_REVIEW", state: "WAITING", artifacts: [{ id: "plan-v1", type: "plan", version: 1, sha256: SHA, producer: "p", objectKey: "private/o/w/plan.json", createdAt: "2026-10-25T10:00:00.000Z" }] });
+  const cardOf = (plan: PlanDocument, extra: Record<string, unknown> = {}, claims = ["Owners can download the orders as a CSV."], only?: number) => {
+    const summary = planCheckSummary(plan);
+    if (only !== undefined) summary.lines = [summary.lines[only]!];
+    return workflowMessage({ taskId: workflow.taskId, workflow, taskPageUrl: "https://agentx.example.test/review/x/task", documentLink: { url: "https://agentx.example.test/review/x/task?doc=coding-plan&from=1#coding-plan" },
+      structured: { claims, claimCount: claims.length, decisionCount: plan.decisions.length, tiny: false, decisions: summary.decisions, checkLines: summary.lines }, ...extra })!;
+  };
+  const visible = (text: string) => text.replace(/<[^>]*\|([^>]*)>/g, "$1");
+  const page = (plan: PlanDocument) => renderPlanDocument({ anchor: "coding-plan", kind: "plan", version: 1, approved: false, current: true, plan, openWhatChanged: false });
+
+  // Task ecf67d6a, first plan: the stand-in service is selected for the owner target only.
+  const mockOnOwnerOnly = ordersPlan({}, [], ["web-owner"]);
+  // Task 65fd0cd0, first plan: the scenario says inventory must be real while the plan also mocks it on that target.
+  const realAndMocked = ordersPlan({}, [{ ...scenario("owner-real", "owner", "web-owner", [{ kind: "navigate", path: "/" }], [{ kind: "visible", testId: "t", equals: true }]), requiredRealComponentIds: ["inventory-v1"] }]);
+
+  it("shows which scenarios have no stand-in (the viewer targets of the plan that forgot them), on the card and the page", async () => {
+    const summary = planCheckSummary(mockOnOwnerOnly);
+    expect(summary.lines[0]).toContain("stand-ins: inventory-v1");
+    expect(summary.lines[1]).toContain("no stand-ins");
+    expect(summary.lines[2]).toContain("no stand-ins");
+    expect(visible(cardOf(mockOnOwnerOnly).text)).toContain("As viewer on api-viewer: expects GET /api/orders.csv answers 403; proves claim 2; no stand-ins");
+    const html = await page(mockOnOwnerOnly);
+    expect(html).toContain("No stand-in services on api-viewer.");
+    expect(html).toContain("No stand-in services on web-viewer.");
+    expect(html).toContain("Stand-in services: inventory-v1 on web-owner.");
+  });
+
+  it("flags a component that must be real and is also a stand-in, and lists the real ones", async () => {
+    const summary = planCheckSummary(realAndMocked);
+    const line = summary.lines[4]!;
+    expect(summary.scenarios[4]).toMatchObject({ requiredReal: ["inventory-v1"], realAndStandIn: ["inventory-v1"] });
+    expect(line).toContain("inventory-v1 must be real but is also a stand-in");
+    expect(line).toContain("real: inventory-v1");
+    expect(visible(cardOf(realAndMocked, {}, undefined, 4).text)).toContain("inventory-v1 must be real but is also a stand-in");
+    const html = await page(realAndMocked);
+    expect(html).toContain("Must run for real: inventory-v1.");
+    expect(html).toContain("inventory-v1 must run for real but is also a stand-in here; approval refuses this.");
+    // A scenario with only a real component and no stand-in raises no clash.
+    expect(planCheckSummary(ordersPlan({}, [{ ...scenario("real-only", "owner", "web-owner", [], [{ kind: "visible", testId: "t", equals: true }]), requiredRealComponentIds: ["db"] }], []))
+      .scenarios[4]).toMatchObject({ requiredReal: ["db"], realAndStandIn: [] });
+  });
+
+  it("shows an AI step's action limit next to its expected values (maxActions 8)", () => {
+    const eight = ordersPlan({}, [scenario("ai", "owner", "web-owner", [{ kind: "agent", goal: "Tap the Download orders button", maxActions: 8 }], [{ kind: "visible", testId: "t", equals: true }])]);
+    expect(planCheckSummary(eight).lines[4]).toContain("AI steps take up to 8 actions");
+  });
+
+  it("puts the expected values first and cuts the steps, then the service names, before any expected value", () => {
+    const longSteps = Array.from({ length: 12 }, (_, index) => ({ kind: "navigate", path: `/a/very/long/path/number/${index}/that/goes/on` }));
+    const assertions = [{ kind: "text", testId: "status", equals: "Orders exported for the whole tenant" }, { kind: "csv", downloadName: "orders.csv", columns: ["id", "name", "qty", "status"],
+      rows: [["a1", "Ada Lovelace", "12", "in-stock"], ["a2", "Grace Hopper", "3", "unavailable"]] }, { kind: "visible", testId: "export-toolbar", equals: true }];
+    const busy = ordersPlan({ scenarioProves: { busy: ["1", "2"] } }, [scenario("busy", "owner", "web-owner", longSteps, assertions)]);
+    const line = planCheckSummary(busy).lines[4]!;
+    expect(line.length).toBeLessThanOrEqual(280);
+    // The compact CSV: the count, then each row's first two cells, an ellipsis and its last cell.
+    expect(line).toContain("the download orders.csv has 2 rows: a1,Ada Lovelace,…,in-stock; a2,Grace Hopper,…,unavailable");
+    expect(line).toContain('the text of status is "Orders exported for the whole tenant"');
+    expect(line).toContain("proves claim 1 and claim 2");
+    expect(line.indexOf("expects")).toBeLessThan(line.indexOf("proves"));
+    expect(line).not.toContain("steps:");
+    expect(line).not.toContain("a/very/long/path");
+    // On the page nothing is dropped.
+    expect(planCheckSummary(busy, { detail: "page" }).scenarios[4]!.steps).toHaveLength(12);
+  });
+
+  it("always lists at least one check line, or says the plan adds checks, however many decisions and claims crowd the card", () => {
+    const decisions = Array.from({ length: 6 }, (_, index) => ({ id: `d${index + 1}`, claimId: "1", question: `Question number ${index + 1} is rather long and wordy?`.padEnd(120, "x"),
+      options: [{ id: "a", label: "A fairly long option label that goes on and on", consequence: "x" }, { id: "b", label: "B", consequence: "y" }], recommended: "a" }));
+    const plan = ordersPlan({ decisions });
+    const claims = Array.from({ length: 3 }, (_, index) => `${"Claim ".repeat(30)}${index}`);
+    for (const replies of [0, 3]) {
+      const text = visible(cardOf(plan, { newReplies: replies }, claims).text);
+      expect(text.length).toBeLessThanOrEqual(1_200);
+      expect(/^• As /m.test(text) || text.includes("This plan adds 6 checks; read them on the task page.")).toBe(true);
+      expect(text).toContain("• d1:");
+      // Decisions never crowd out every check line: at most two are spelled out when checks are listed.
+      expect(text.match(/^• d\d/gm)!.length).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it("says the plan adds checks when not even one line fits, and still lists the first line when one does", () => {
+    const summary = planCheckSummary(ordersPlan());
+    const structured = { claims: ["A."], claimCount: 1, decisionCount: 1, tiny: false, decisions: summary.decisions, checkLines: summary.lines };
+    // 100 characters of room hold neither a decision line nor a check line: the notice is still said.
+    expect(structuredExtraLines(structured, 100)).toEqual(["This plan adds 6 checks; read them on the task page."]);
+    // With room for one check line and its "And N more", that line is listed, not the decision.
+    const first = structuredExtraLines({ ...structured, decisions: [] }, 340);
+    expect(first[0]).toMatch(/^• As owner on web-owner: expects /);
+    expect(first.at(-1)).toBe("And 5 more on the task page.");
+    const withDecision = structuredExtraLines(structured, 340);
+    expect(withDecision.some((line) => line.startsWith("• As "))).toBe(true);
+    expect(planCheckSummary(ordersPlan({ checks: undefined, e2e: undefined, scenarioProves: undefined })).lines).toEqual([]);
+    expect(structuredExtraLines({ ...structured, decisions: [], checkLines: [] }, 100)).toEqual([]);
   });
 });
 
