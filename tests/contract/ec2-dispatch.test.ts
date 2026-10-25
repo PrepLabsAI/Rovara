@@ -914,6 +914,23 @@ describe("ec2-ebs delivery", () => {
       log.mockRestore();
     });
 
+    it("asks a planning run for the plan quality members only on a worker that lists task.workflowPlanDryRun.v1; an older worker is sent the prompt without them", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const asked = planDocumentInstructions({ kind: "plan", path: "QUICK", planQuality: true });
+      const plain = planDocumentInstructions({ kind: "plan", path: "QUICK" });
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", prompt: `Planning phase only.\n\n${asked}\n\nRequest:\nadd it` });
+      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowPlanDryRun.v1"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).prompt).toContain("scenarioProves");
+      const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post).prompt).toBe(`Planning phase only.\n\n${plain}\n\nRequest:\nadd it`);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.plan_quality_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
     it("sends a workflow mode only to a worker that advertises the read-only tool boundary", async () => {
       const { deliver, post } = delivery({ workerFeatures: async () => ["task.workflowMode"] });
       const record = taskRecord({ workflowMode: "PLAN" });
