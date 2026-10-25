@@ -19,6 +19,7 @@ import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, type PlanSelfCheckView } 
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
+import { AutoFixAskSchema } from "../developer/autofix-messages.js";
 import { deriveTaskStatus, failureCategory, plannerRepliesKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
@@ -842,6 +843,11 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   } else if (workflow.state === "BLOCKED" || (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING")) {
     // Replies that came in after the plan and that no step has taken: said, with where to read them.
     context.newReplies = await newThreadReplies(deps, task);
+    // AUTOFIX: what Rovara already tried and why it asks, from its decisions and the ask record kept for this blocked revision (nothing is added when it never acted).
+    if (workflow.state === "BLOCKED" && (workflow.stage === "VERIFY" || workflow.stage === "REVIEW")) {
+      const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
+      context.autoFix = { ask: ask.success ? ask.data : undefined };
+    }
     // PLANREADMSG: why the plan could not be read, as a fixed category (the stored problems quote the model and are never shown).
     if (workflow.stage === "PLAN" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable && task.planUnreadable?.workflowRevision === workflow.revision) {
       // The category the broker stored (a fixed set); a record from before it was stored is read from the problems.

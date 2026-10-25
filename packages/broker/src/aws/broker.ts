@@ -219,7 +219,7 @@ import {
   type E2EApplicationPlanIntent,
   type E2EApplicationSelectionRecord, type E2ERuntimeAccountRef, type E2EApplicationAccountDefinition, readE2EApplicationProjectContract, e2eSyntheticAccountContractDigest,
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eAnonymousTargetId, e2eAnonymousVariantOf,
-  E2E_AGENT_UNAVAILABLE_REASONS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
+  E2E_AGENT_UNAVAILABLE_REASONS, TaskUsageTelemetrySchema, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
   E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   type E2EScenarioResults, type E2ESharedView,
@@ -325,6 +325,7 @@ import { createDeveloperApiConfiguration } from "./workflow-dependencies-configu
 import { planQualityFindings } from "../developer/plan-quality.js";
 import { planDryRunFindings, readPlanDryRunOutcome } from "../developer/plan-dry-run-results.js";
 import { planUnreadableCategory } from "../developer/plan-check-summary.js";
+import { AUTOFIX_ROUND_ESTIMATE_USD, autofixConfigFromEnvironment, runWorkflowAutofix, type AutofixConfig, type AutofixDependencies } from "./workflow-autofix-runner.js";
 import { PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, planRevisionPrompt, planRevisionsUsed, planSelfCheckKey, planQualityContextOf, recordedPlanQualityContext, selfCheckNotes, type PlanSelfCheckSkipReason, type PlanSelfCheckState } from "../developer/plan-self-check.js";
 import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, candidateBuildSourceAdmissionReference, type StoredCandidateBuildSource } from "./candidate-build-source.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
@@ -558,6 +559,8 @@ interface AwsBrokerDependencies {
   startPlanEvidenceJob?: (event: PlanEvidenceEvent) => Promise<void>;
   /** Plan self-check (checks every coding plan, asks the planner again once when it finds a fixable problem): on unless this is false, the installation's kill switch (PLAN_SELF_CHECK_ENABLED=false). */
   planSelfCheck?: boolean;
+  /** AUTOFIX: automatic fixing of blocked checks and reviews. Absent: off (the harnesses); the deployed Lambda sets it from its environment (on unless AUTOFIX_ENABLED=false). */
+  autofix?: AutofixConfig;
   /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
   swebench?: Pick<EvalBatchDependencies, "deployment" | "startExecution" | "stopBatchForThread" | "onRunEnded" | "now" | "estimateRunCostUsd">;
 }
@@ -10620,6 +10623,7 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
       if (!isConditional(error)) throw error;
     }
   };
+  if (item.kind === "AUTOFIX") return runAutofixDispatch(dependencies, item, remove);
   try {
     // Access pauses are lifted only by an explicit, freshly authorized owner retry. Recovery sweeps,
     // ownership restoration and takeover may still encounter the row but never restart its work.
@@ -10725,6 +10729,87 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     await recordWorkflowDispatchFailure(dependencies, item);
     return "RETRY";
   }
+}
+
+/** At most this many looks at one blocked step: a failing look is retried each sweep, then dropped (the task stays blocked with its card). */
+const AUTOFIX_ATTEMPTS_MAX = 60;
+
+/** AUTOFIX: the whole task's recorded model spend. A run with no usage record that uses a model counts as one more round's estimate (never as zero). */
+async function autofixTaskSpendUsd(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<number | undefined> {
+  try {
+    const actions = developerTaskActions(dependencies);
+    const operations = (await actions.operations(task.workspaceId)).filter((operation) => operation.kind === "task");
+    let total = 0;
+    for (const operation of operations) {
+      if (operation.workflowMode === "CHECKS") continue;
+      const events = await actions.eventsNewestFirst(operation.id, 40);
+      const usage = TaskUsageTelemetrySchema.safeParse(events.find((event) => event.type === "usage")?.payload);
+      total += usage.success && usage.data.costUsd !== null ? usage.data.costUsd : AUTOFIX_ROUND_ESTIMATE_USD;
+    }
+    return total;
+  } catch { return undefined; }
+}
+
+/** AUTOFIX: whether the project's AI-navigation day budget has room for one more call; true where the task uses no AI navigation. Undefined when unreadable. */
+async function autofixDayBudgetHasRoom(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<boolean | undefined> {
+  if (task.workflow?.e2e?.required !== true || dependencies.e2eAgentInstallation === undefined) return true;
+  try {
+    const derived = deriveE2EAgentRoute(await dependencies.e2eAgentInstallation());
+    const budgets = derived.status === "available" ? derived.definition.budgets : E2E_MODEL_ROUTE_DEFAULT_BUDGETS;
+    return await e2eDayBudgetRoom({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, projectName: task.project, now: Date.now() }, { calls: 1, inputTokens: 1 },
+      { maxInputTokens: budgets.maxInputTokensPerProjectDay, maxCalls: budgets.maxCallsPerProjectDay });
+  } catch { return undefined; }
+}
+
+/**
+ * AUTOFIX dispatch row: look at the blocked step once. The row is removed when the task moved on or the policy acted or asked; it stays (the sweep looks again) while the original-code round is
+ * not in yet, and after a failed look, up to a bound. It never blocks or gives up on anything: the task is already blocked.
+ */
+async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: AccessPausedWorkflowDispatch, remove: () => Promise<void>): Promise<"DISPATCHED" | "STALE" | "RETRY"> {
+  const config = dependencies.autofix;
+  try {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
+    if (config?.enabled !== true || task === undefined || dependencies.developer === undefined) { await remove(); return "STALE"; }
+    const caller = { developerId: task.developerId, sessionId: "workflow-autofix", amr: task.provider, name: task.developerName };
+    const tasks = developerTaskActions(dependencies);
+    const route = developerTaskRouteDependencies({
+      documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+      refreshTaskFeedback: (taskId) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
+      workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+      workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+    }, caller, undefined, null);
+    const deps: AutofixDependencies = {
+      config, route, store: { documentClient: dependencies.documentClient, tableName: dependencies.tableName },
+      taskSpendUsd: (current) => autofixTaskSpendUsd(dependencies, current),
+      dayBudgetHasRoom: (current) => autofixDayBudgetHasRoom(dependencies, current),
+      scenarioResults: async (current) => loadWorkflowE2EScenarioResults(dependencies, current, [], "owner").catch(() => undefined),
+      ownerCancelledChecks: async (current) => {
+        const operations = await tasks.operations(current.workspaceId);
+        const latest = operations.filter((operation) => operation.kind === "task" && operation.workflowMode === "CHECKS").sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+        return latest !== undefined && operations.some((operation) => operation.kind === "cancel" && (operation as { targetOperationId?: string }).targetOperationId === latest.id);
+      },
+      readArtifactText: async (key) => { const bytes = await readStoredBytes(dependencies, key, 64 * 1024 + 1); return bytes?.toString("utf8"); },
+      now: Date.now,
+      log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+    };
+    const outcome = await runWorkflowAutofix(deps, task, { expectedRevision: item.workflowRevision, startedAt: item.createdAt });
+    if (outcome !== "WAITING") { await remove(); return outcome === "STALE" || outcome === "DISABLED" ? "STALE" : "DISPATCHED"; }
+    return "RETRY";
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "autofix.look_failed", taskId: item.taskId, attempt: (item.attempts ?? 0) + 1, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
+    if ((item.attempts ?? 0) + 1 >= AUTOFIX_ATTEMPTS_MAX) { await remove(); return "STALE"; }
+  }
+  // Look again at the next sweep, a minute from now.
+  const next = new Date(Date.now() + 60_000).toISOString();
+  try {
+    await dependencies.documentClient.send(new UpdateCommand({
+      TableName: dependencies.tableName, Key: { pk: item.pk, sk: item.sk },
+      UpdateExpression: "SET attempts = :attempts, nextAttemptAt = :next, dispatchDueSk = :due",
+      ConditionExpression: "attribute_exists(pk)",
+      ExpressionAttributeValues: { ":attempts": (item.attempts ?? 0) + 1, ":next": next, ":due": `${next}#${item.sk}` },
+    }));
+  } catch (error) { if (!isConditional(error)) throw error; }
+  return "RETRY";
 }
 
 /** Reads the original creator from its authoritative, separately scoped sign-in table. */
@@ -12109,6 +12194,9 @@ async function completedWorkflowItems(
     // Item 7: a fix of pull requests already open is pushed to them, not opened as new ones.
     : operation.workflowMode === "REVIEW" && next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
       ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, workflowPullRequestUpdateDue(next) ? "UPDATE" : "PUBLISH", next.candidate.digest, now)]
+    // AUTOFIX: checks or reviews that just blocked are looked at once by the automatic-fix policy; the row commits with the block, the broker runs it right after, and the sweep runs it if that is lost.
+    : dependencies.autofix?.enabled === true && next.state === "BLOCKED" && (next.stage === "VERIFY" || next.stage === "REVIEW") && task.workflow.state === "RUNNING"
+      ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "AUTOFIX", next.candidate?.digest ?? "0".repeat(64), now)]
       : [];
   // A saved plan forgets the reasons an earlier answer was unreadable; an unreadable answer keeps its own for Retry planning.
   const forget = planUnreadable === null && task.planUnreadable !== undefined;
@@ -13891,6 +13979,7 @@ export const handler = createAwsBrokerHandler({
   codeBuild,
   // Spec 061: set only where the PlanEvidence function exists (infra/lib/control-plane.ts).
   ...(process.env.PLAN_SELF_CHECK_ENABLED === "false" ? { planSelfCheck: false } : {}),
+  autofix: autofixConfigFromEnvironment(process.env),
   ...(process.env.PLAN_EVIDENCE_FUNCTION_NAME
     ? { startPlanEvidenceJob: async (event: PlanEvidenceEvent) => {
         const response = await lambdaClient.send(new InvokeCommand({ FunctionName: process.env.PLAN_EVIDENCE_FUNCTION_NAME, InvocationType: "Event", Payload: Buffer.from(JSON.stringify(event)) }));
