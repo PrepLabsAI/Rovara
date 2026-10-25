@@ -17,7 +17,7 @@ const HOST_CODES = Object.keys({
   "build-failed": 0, "app-unhealthy": 0, "app-exited": 0, "deadline-exceeded": 0, "executor-failed": 0, "executor-result-mismatch": 0, "mock-unavailable": 0, "seed-failed": 0,
   "login-failed": 0, "model-channel-unavailable": 0, cancelled: 0,
 } satisfies Record<DockerApplicationUnavailableReason, 0>) as DockerApplicationUnavailableReason[];
-const OTHER_CODES = ["evidence too large", "runtime-expired", "model-environment-unsafe"] as const;
+const OTHER_CODES = ["evidence too large", "runtime-expired", "model-environment-unsafe", "runtime-environment-drifted"] as const;
 const CANDIDATE_CODES = ["build-failed", "app-exited", "app-unhealthy", "seed-failed"] as const;
 const COULD_NOT_VERIFY = "this check could not be verified";
 
@@ -44,7 +44,7 @@ describe("RUN-2 item 1: a fixed owner sentence for every reason a group can end 
   it("shows the sentence on the rows, whatever worker text follows the code, instead of 'could not be verified'", () => {
     const secret = "password=hunter2-secret /srv/app/node_modules/.bin/x ops@tenant-a.example";
     for (const code of [...HOST_CODES, ...OTHER_CODES]) {
-      if (code === "model-environment-unsafe") vi.spyOn(console, "log").mockImplementation(() => undefined);
+      if (code === "model-environment-unsafe" || code === "runtime-environment-drifted") vi.spyOn(console, "log").mockImplementation(() => undefined);
       for (const reason of [code, `${code}: ${secret}`]) {
         const [row] = rowsOf(reason);
         expect(row!.status).toBe("UNKNOWN");
@@ -85,6 +85,7 @@ describe("RUN-2 item 1: a fixed owner sentence for every reason a group can end 
         "mock-unavailable": "A stand-in for one of the app's outside services couldn't start. Retry the checks; if it happens again, tell Rovara support (code mock-unavailable).",
         "model-channel-unavailable": "Rovara couldn't set up the AI navigation connection for these checks. Retry the checks; if it happens again, tell Rovara support (code model-channel-unavailable).",
         "model-environment-unsafe": "This runner's setup could let AI model calls be redirected, so AI navigation was not run. Tell Rovara support (code model-environment-unsafe).",
+        "runtime-environment-drifted": "The test machine changed since it was qualified. An administrator must qualify it again, then retry the checks.",
         "runtime-expired": "The browser and API runtime's qualification expired. An administrator must qualify it again, then retry the checks.",
         "seed-failed": "The app couldn't load its test data. The coding agent needs to fix it.",
       }

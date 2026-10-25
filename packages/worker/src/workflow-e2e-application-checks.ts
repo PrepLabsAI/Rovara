@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_HARD_LIMITS, canonicalJson, type E2ECollection, type E2EModelDayBudgetRequest, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_HARD_LIMITS, E2E_RUNTIME_ENVIRONMENT_DRIFTED_CODE, canonicalJson, type E2ECollection, type E2EModelDayBudgetRequest, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
   type WorkerInvocation } from "@agentx/contracts";
 import { resolveE2EAgentRouteForAdmission, type E2EInvoke } from "@agentx/model-runtime";
 import { E2E_AGENT_UNKNOWN_CODES, collectE2EApplicationRun, decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, e2eApplicationPrivateTransferMaxBytes, runIsolatedE2EApplication,
@@ -9,6 +9,7 @@ import { E2E_AGENT_UNKNOWN_CODES, collectE2EApplicationRun, decodeE2EApplication
 import { createE2EModelDayBudgetClient } from "./e2e-model-day-budget-client.js";
 import { createE2EModelEvidenceCollector, openE2EModelChannelSession, type E2EModelChannelSession } from "./e2e-model-channel-session.js";
 import { runWithConcurrency } from "./bounded-concurrency.js";
+import { runnerEnvironmentDrifted, type RunnerHostEnvironment } from "./e2e-runtime-environment.js";
 import { admittedRepositoryOf, assertBuildSourceBelongsToCandidate, createProcessCandidateGit, stageCandidateSource, type CandidateGit } from "./e2e-candidate-source.js";
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -44,6 +45,11 @@ export type WorkflowE2EApplicationRuntime = Readonly<{
   git?: CandidateGit;
   /** Default: the application collector. */
   collect?: typeof collectE2EApplicationRun;
+  /**
+   * This host's operating system (platform and kernel release) and architecture (HARDEN-C I-4). When set, a group whose admitted runtime was qualified on another one is refused at its
+   * start as `runtime-environment-drifted`, before any host, container or model channel is made. The production runtime always sets it; a runtime without it (a test double) skips the check.
+   */
+  hostEnvironment?: () => RunnerHostEnvironment;
 }>;
 
 /** The last `maxBytes` bytes of `text`, starting on a character boundary so no sequence is split into replacement characters. */
@@ -383,10 +389,15 @@ export async function executeWorkflowE2EApplicationChecks(input: {
       // A group with an agent step gets a model channel, decided by the group alone (Ruling DB-1). Its route is re-derived from this worker's own settings first: when it is not the
       // route the admission pins, the group is UNKNOWN with the reason the owner is told to act on, and no host, socket or container is ever made for it.
       const usesModel = groupUsesModel(compiled);
-      const channel = usesModel ? modelChannelFor(compiled, binding.runId) : undefined;
+      // The runner changed since the runtime was qualified (a new kernel after a restart): the broker would read this group as UNKNOWN whatever it did, so it does not run (HARDEN-C I-4).
+      const drifted = runtime.hostEnvironment !== undefined && runnerEnvironmentDrifted(runtime.hostEnvironment, e2eCompiledRuntime(compiled)?.runnerEnvironment);
+      if (drifted) console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_runtime_environment_drifted", groupRunId: binding.runId, code: E2E_RUNTIME_ENVIRONMENT_DRIFTED_CODE }));
+      const channel = usesModel && !drifted ? modelChannelFor(compiled, binding.runId) : undefined;
       let host: DockerApplicationHost | undefined;
       let run: { lifecycle: Pick<E2ECollection, "cleanup" | "process">; actualRun: Awaited<ReturnType<typeof runIsolatedE2EApplication>>["actualRun"]; unavailableReason: string | null };
-      if (channel !== undefined && !channel.ok) {
+      if (drifted) {
+        run = { lifecycle: SKIPPED_LIFECYCLE, actualRun: null, unavailableReason: E2E_RUNTIME_ENVIRONMENT_DRIFTED_CODE };
+      } else if (channel !== undefined && !channel.ok) {
         run = { lifecycle: SKIPPED_LIFECYCLE, actualRun: null, unavailableReason: channel.code };
       } else {
         host = runtime.createHost({ admission, groupId: compiled.group.groupId, candidateSourceDir: stagedSource, ...(channel === undefined ? {} : { modelChannel: channel.port }) });
