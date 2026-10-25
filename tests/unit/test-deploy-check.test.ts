@@ -297,6 +297,28 @@ describe("evaluateTestDeployCheck", () => {
     expect(kinds(evaluateTestDeployCheck(input({ runnerFacts: undefined })).findings)).toEqual(["runner-image-mismatch", "worker-feature-missing"]);
   });
 
+  describe("a runner started again after its runtime was qualified (HARDEN-C I-4)", () => {
+    const qualifiedAt = "2026-10-24T17:37:42.000Z";
+    const qualified = rows([{ qualifiedAt }, { qualifiedAt: "2026-10-24T17:38:10.000Z" }]);
+
+    it("warns, without failing the check, when the instance launched after the latest qualification: a start can change the kernel, and the worker refuses rounds on a changed one", () => {
+      const result = evaluateTestDeployCheck(input({ catalogRows: qualified, runnerFacts: { ...GOOD_RUNNER, launchTime: "2026-10-24T23:37:07.000Z" } }));
+      expect(result.ok).toBe(true);
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0]).toMatchObject({ kind: "runner-restarted", severity: "warning", subject: "runner" });
+      expect(result.findings[0]!.message).toContain("2026-10-24T23:37:07.000Z");
+      expect(result.findings[0]!.message).toContain("2026-10-24T17:38:10.000Z");
+      expect(result.findings[0]!.message).toContain("test-qualify-runtime.ts");
+    });
+
+    it("says nothing when the instance launched before it was qualified, or when either time is not reported; a launch time that does not read is warned about, never passed", () => {
+      expect(evaluateTestDeployCheck(input({ catalogRows: qualified, runnerFacts: { ...GOOD_RUNNER, launchTime: "2026-10-24T17:30:00.000Z" } }))).toEqual({ ok: true, findings: [] });
+      expect(evaluateTestDeployCheck(input({ catalogRows: qualified, runnerFacts: GOOD_RUNNER }))).toEqual({ ok: true, findings: [] });
+      expect(evaluateTestDeployCheck(input({ runnerFacts: { ...GOOD_RUNNER, launchTime: "2026-10-24T23:37:07.000Z" } }))).toEqual({ ok: true, findings: [] });
+      expect(evaluateTestDeployCheck(input({ catalogRows: qualified, runnerFacts: { ...GOOD_RUNNER, launchTime: "yesterday" } })).findings.map((finding) => finding.kind)).toEqual(["runner-restarted"]);
+    });
+  });
+
   it("flags the feature strings this head needs and the running worker's /ping lacks", () => {
     const lacking = READY_FEATURES.filter((feature) => feature !== "task.workflowE2EApplicationChecks");
     const result = evaluateTestDeployCheck(input({ runnerFacts: { ...GOOD_RUNNER, invocationFeatures: lacking } }));
@@ -1301,7 +1323,7 @@ describe("gatherCheckFacts", () => {
       },
     };
   };
-  function fakeAws(overrides: { instances?: string[]; statusBody?: string | null; catalogItems?: unknown[]; brokerSha?: string; brokerKey?: string; bedrock?: BedrockMode; routeRows?: number; scan?: "denied"; agreement?: string; ssm?: Record<string, string>; secretPolicy?: keyof typeof SECRET_PREFIX;
+  function fakeAws(overrides: { instances?: string[]; launchTimes?: string[]; statusBody?: string | null; catalogItems?: unknown[]; brokerSha?: string; brokerKey?: string; bedrock?: BedrockMode; routeRows?: number; scan?: "denied"; agreement?: string; ssm?: Record<string, string>; secretPolicy?: keyof typeof SECRET_PREFIX;
     quotas?: "denied" | "garbage" | Array<[string, string, number]>; shapeRow?: "minimal" | "standard" | "unreadable"; testRow?: "driving/v1" | "single-call" | "unreadable" } = {}) {
     const calls: string[][] = [];
     const runner = {
@@ -1379,6 +1401,7 @@ describe("gatherCheckFacts", () => {
             { sk: { S: "PROFILE#linux-arm64-web-api-v1#web" }, state: { S: "READY" }, expiresAt: { S: "2027-01-01T00:00:00.000Z" }, endpoint: { S: "http://10.0.1.5:8080" } },
           ] });
         }
+        if (args[0] === "ec2" && args[1] === "describe-instances" && args.includes("--instance-ids")) return ok(overrides.launchTimes ?? ["2026-10-01T00:00:00+00:00"]);
         if (args[0] === "ec2" && args[1] === "describe-instances") return ok(overrides.instances ?? ["i-0123456789abcdef0"]);
         if (args[0] === "iam" && args[1] === "get-role") return ok('"AROAEXAMPLEROLEID1234"');
         if (args[0] === "s3api" && args[1] === "get-object") {
@@ -1408,7 +1431,7 @@ describe("gatherCheckFacts", () => {
     expect(facts.lambdaCodeShas).toEqual({ BrokerE1355FD6: "sha-of-fn-broker", [NOTIFIER]: "sha-of-fn-notifier", SessionsSteps3B98DD2B: "sha-of-fn-sessions" });
     expect(facts.builtZipShas).toEqual({ BrokerE1355FD6: "b" });
     expect(facts.catalogRows.map((row) => row.sk).sort()).toEqual(["PROFILE#linux-arm64-web-api-v1#api", "PROFILE#linux-arm64-web-api-v1#web"]);
-    expect(facts.runnerFacts).toEqual({ deployedExecutorImage: ACCOUNT_IMAGE, executorImage: ACCOUNT_IMAGE, invocationFeatures: ["task.readiness"] });
+    expect(facts.runnerFacts).toEqual({ deployedExecutorImage: ACCOUNT_IMAGE, executorImage: ACCOUNT_IMAGE, invocationFeatures: ["task.readiness"], launchTime: "2026-10-01T00:00:00+00:00" });
     const readOnly = ["cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources", "lambda get-function", "dynamodb query", "ec2 describe-instances", "iam get-role", "s3api get-object", "bedrock get-inference-profile", "bedrock get-foundation-model-availability", "dynamodb scan", "ssm get-parameter", "service-quotas list-service-quotas"];
     for (const call of fake.calls) expect(readOnly, call.join(" ")).toContain(`${call[0]} ${call[1]}`);
   });
@@ -1738,6 +1761,19 @@ describe("gatherCheckFacts", () => {
     const query = fake.calls.find((call) => call[1] === "query")?.join(" ") ?? "";
     expect(query).toContain("--table-name state-table");
     expect(query).toContain("E2E_FEATURE_VERIFIER#agentx-agentxlivetest123-e2e-mock-runtime-v1");
+  });
+
+  it("reads the runner instance's launch time and the rows' qualification times, so a restart after qualification is warned about (HARDEN-C I-4)", async () => {
+    const row = (kind: string, qualifiedAt: string) => ({ sk: { S: `PROFILE#linux-arm64-web-api-v1#${kind}` }, state: { S: "READY" }, expiresAt: { S: "2027-01-01T00:00:00.000Z" }, qualifiedAt: { S: qualifiedAt }, endpoint: { S: "http://10.0.1.5:8080" } });
+    const catalogItems = [row("api", "2026-10-24T17:38:10.000Z"), row("web", "2026-10-24T17:37:42.000Z")];
+    const restarted = fakeAws({ catalogItems, launchTimes: ["2026-10-24T23:37:07+00:00"] });
+    const { facts } = await gather(restarted);
+    expect(restarted.calls.find((call) => call.includes("--instance-ids"))).toContain("Reservations[].Instances[].LaunchTime");
+    expect(facts.runnerFacts?.launchTime).toBe("2026-10-24T23:37:07+00:00");
+    expect(facts.catalogRows.map((item) => item.qualifiedAt)).toEqual(["2026-10-24T17:38:10.000Z", "2026-10-24T17:37:42.000Z"]);
+    expect(evaluateTestDeployCheck({ ...facts, now: NOW }).findings.map((finding) => [finding.kind, finding.severity]).filter(([kind]) => kind === "runner-restarted")).toEqual([["runner-restarted", "warning"]]);
+    const steady = await gather(fakeAws({ catalogItems, launchTimes: ["2026-10-24T17:00:00+00:00"] }));
+    expect(evaluateTestDeployCheck({ ...steady.facts, now: NOW }).findings.map((finding) => finding.kind)).not.toContain("runner-restarted");
   });
 
   it("reports no runner facts, with the reason, when the runner is not found, has no status or did not qualify", async () => {
