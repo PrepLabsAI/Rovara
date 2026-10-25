@@ -5,7 +5,7 @@ import type { WorkflowSnapshot } from "@agentx/contracts";
 import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
 import { runPlanEvidenceJob, type PlanEvidenceRunDependencies } from "../../packages/broker/src/aws/plan-evidence-handler.js";
 import { PLAN_EVIDENCE_EVENT_SOURCE, planEvidenceDueKey } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
-import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
@@ -13,8 +13,8 @@ const FILE = ["one", "two", "three", "four", "five"].join("\n") + "\n";
 const MINUTE = 60_000;
 
 /** A deployment with the PlanEvidence function: the broker queues a job row (the job is run by the test). */
-const jobBroker = () => createDeveloperTaskBroker({ brokerExtra: { startPlanEvidenceJob: async () => undefined } });
-type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
+const jobBroker = () => createSingleAnswerPlanBroker({ brokerExtra: { startPlanEvidenceJob: async () => undefined } });
+type Harness = Awaited<ReturnType<typeof createSingleAnswerPlanBroker>>;
 type Row = { pk: string; sk: string; attempts: number; nextAttemptAt: number; dispatchDueSk: string; taskId: string; artifactId: string; artifactSha256: string };
 type GetFile = PlanEvidenceRunDependencies["github"]["getFileAtCommit"];
 
@@ -262,7 +262,7 @@ describe("the PlanEvidence job", () => {
 describe("a deployment with no PlanEvidence function", () => {
   it("queues no job row and reads the cited code inside the plan callback, attaching it through the same pointer", async () => {
     const getFileAtCommit = vi.fn(async () => FILE);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getFileAtCommit } } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: { getFileAtCommit } } });
     const { taskId, artifact } = await plannedTask(harness);
     expect(rows(harness)).toEqual([]);
     expect(getFileAtCommit).toHaveBeenCalledWith("https://github.com/example/demo.git", "src/charge.ts", "e".repeat(40), { untilLine: 3 });
@@ -278,7 +278,7 @@ describe("a deployment with no PlanEvidence function", () => {
   });
 
   it("stores the plan with its places unavailable when GitHub cannot be read, and still leaves no job row", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getFileAtCommit: down } } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: { getFileAtCommit: down } } });
     const { taskId, artifact } = await plannedTask(harness);
     expect(taskRecord(harness, taskId).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
     expect(rows(harness)).toEqual([]);
@@ -287,7 +287,7 @@ describe("a deployment with no PlanEvidence function", () => {
 
   it("reads nothing in the callback when the evidence job is configured", async () => {
     const getFileAtCommit = vi.fn(async () => FILE);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { startPlanEvidenceJob: async () => undefined, githubPullRequests: { getFileAtCommit } } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { startPlanEvidenceJob: async () => undefined, githubPullRequests: { getFileAtCommit } } });
     const { taskId, artifact } = await plannedTask(harness);
     expect(getFileAtCommit).not.toHaveBeenCalled();
     expect(pointerOf(harness, taskId, artifact.id)).toBeUndefined();
@@ -298,11 +298,11 @@ describe("a deployment with no PlanEvidence function", () => {
 describe("starting the PlanEvidence job from the broker", () => {
   it("starts the job once, with the task and artifact, right after the plan commits; no job for a plan that cites no code", async () => {
     const start = vi.fn(async () => undefined);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { startPlanEvidenceJob: start } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { startPlanEvidenceJob: start } });
     const { taskId, artifact } = await plannedTask(harness);
     expect(start.mock.calls).toEqual([[{ source: PLAN_EVIDENCE_EVENT_SOURCE, taskId, artifactId: artifact.id }]]);
     const none = vi.fn(async () => undefined);
-    const quiet = await createDeveloperTaskBroker({ brokerExtra: { startPlanEvidenceJob: none } });
+    const quiet = await createSingleAnswerPlanBroker({ brokerExtra: { startPlanEvidenceJob: none } });
     const started = await quiet.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "QUICK" });
     const quietTask = String((started.body.task as { taskId: string }).taskId);
     const workspaceId = String(taskRecord(quiet, quietTask).workspaceId);
@@ -318,7 +318,7 @@ describe("starting the PlanEvidence job from the broker", () => {
     const start = vi.fn<() => Promise<void>>(async () => { throw new Error("lambda unavailable"); });
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
-      const harness = await createDeveloperTaskBroker({ brokerExtra: { startPlanEvidenceJob: start } });
+      const harness = await createSingleAnswerPlanBroker({ brokerExtra: { startPlanEvidenceJob: start } });
       const { taskId, artifact } = await plannedTask(harness);
       expect(taskRecord(harness, taskId).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
       expect(rows(harness)).toHaveLength(1);
@@ -336,7 +336,7 @@ describe("starting the PlanEvidence job from the broker", () => {
 
   it("sweeps due rows only: a row waiting out a backoff or held by a running job is left alone, and at most 25 are started", async () => {
     const start = vi.fn(async () => undefined);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { startPlanEvidenceJob: start } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { startPlanEvidenceJob: start } });
     const row = (n: number, at: number) => ({ pk: "PLAN_EVIDENCE", sk: `t${n}#a${n}`, entityType: "PLAN_EVIDENCE", taskId: `t${n}`, artifactId: `a${n}`, artifactSha256: "b".repeat(64), attempts: 0,
       nextAttemptAt: at, dispatchDuePk: "PLAN_EVIDENCE", dispatchDueSk: `${planEvidenceDueKey(at)}#t${n}#a${n}` });
     const now = Date.now();

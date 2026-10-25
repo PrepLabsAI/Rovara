@@ -63,6 +63,8 @@ export interface OperationRecord extends Operation {
   workflowE2EPlanVersion?: 2;
   /** A planning run: the part of the planning context its planner was given that the plan self-check reads (absent: it was given none). */
   planQualityContext?: PlanQualityContext;
+  /** A planning run whose prompt asked the planner for the plan quality members (absent: it was not, or delivery dropped the guidance for an older worker). */
+  planQualityAsked?: true;
   publication?: {
     repository: string;
     repositoryUrl: string;

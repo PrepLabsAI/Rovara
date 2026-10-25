@@ -5141,12 +5141,15 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
     const workspace = await deps.actions.workspace(task.workspaceId);
     if (workspace.status === "CLOSED") throw agentXError("CONFIG_INVALID", CLOSED_TASK);
     let outcome: "CANCEL_REQUESTED" | "NOTHING_RUNNING";
+    let stoppedRevision: boolean;
     try {
-      outcome = (await deps.actions.cancelRunning(developerTaskIdentity(task), workspace, (operation) => [
+      const cancelled = (await deps.actions.cancelRunning(developerTaskIdentity(task), workspace, (operation) => [
         record("Asked the worker to stop.", operation.id),
         marker,
         accessFence(deps, access),
-      ])).outcome;
+      ]));
+      outcome = cancelled.outcome;
+      stoppedRevision = cancelled.outcome === "NOTHING_RUNNING" && cancelled.stopped === "PLAN_REVISION";
     } catch (error) {
       if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "control");
       // The same cancel, sent again, committed first (its marker failed this transaction).
@@ -5162,7 +5165,7 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
       // record to join. It is written with the cancel's idempotency item in its own transaction.
       // A failed write is counted and logged, and never hides the answer.
       try {
-        await deps.actions.transact([marker, record("Nothing was running."), accessFence(deps, access)]);
+        await deps.actions.transact([marker, record(stoppedRevision ? "Stopped the automatic second planning run before it started." : "Nothing was running."), accessFence(deps, access)]);
       } catch (error) {
         if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "control");
         if (!isConditional(error)) turnRecordFailed(deps, error);

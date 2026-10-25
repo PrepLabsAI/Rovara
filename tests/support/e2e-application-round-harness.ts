@@ -10,7 +10,7 @@ import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/ap
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
-import { createDeveloperTaskBroker, MAYA, type Developer } from "./developer-task-broker.js";
+import { createSingleAnswerPlanBroker, MAYA, type Developer } from "./developer-task-broker.js";
 import { createRealCandidate } from "./e2e-application-candidate.js";
 import { call, type Handler } from "./slack-broker.js";
 import { planAnswer, planDocument } from "./plan-documents.js";
@@ -106,7 +106,7 @@ async function prepareRound(options: RoundOptions = {}) {
       if (options.githubBaseTree === "unreachable") throw new Error("GitHub is down");
       return options.githubBaseTree === "mismatch" ? "e".repeat(40) : github.baseTree ?? "0".repeat(40);
     } } };
-  const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...githubGateway, ...options.brokerExtra } });
+  const harness = await createSingleAnswerPlanBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...githubGateway, ...options.brokerExtra } });
   const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
   const projectBinding = projectRow().runtimeBinding as typeof binding;
   harness.db.set({ ...apiRowKey, ...webApiRow("api"), binding: projectBinding, bindingDigest: shaCanonical(projectBinding) });

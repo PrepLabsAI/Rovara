@@ -5,13 +5,13 @@ import { DeveloperTaskViewSchema, WorkflowDecisionSchema, createCandidateManifes
 import { decideTaskWorkflow, promptTagId, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { ownerAnswersFor, refusalMessage } from "../../packages/broker/src/developer/owner-answers.js";
-import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 import { validatingDocumentClient } from "../support/validating-document-client.js";
 
-type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
+type Harness = Awaited<ReturnType<typeof createSingleAnswerPlanBroker>>;
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
 const REQUIRED_CHECK = { id: "required-1", label: "npm test", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 } };
 const SAM_ID = "5".repeat(64);
@@ -43,7 +43,7 @@ function routeDeps(harness: Harness): DeveloperTaskRouteDependencies {
 
 /** A Quick task whose structured coding plan (`plan`) waits for its owner, Maya. */
 async function waitingPlan(plan: PlanDocument = PLAN, options: { markdown?: string; slackThread?: { teamId: string; channelId: string; threadTs: string } } = {}) {
-  const harness = await createDeveloperTaskBroker();
+  const harness = await createSingleAnswerPlanBroker();
   let taskId: string;
   if (options.slackThread === undefined) {
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "QUICK" });

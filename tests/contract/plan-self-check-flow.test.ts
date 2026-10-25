@@ -2,12 +2,13 @@
 // problem it can fix (or when the answer was unreadable), keeps the findings beside the plan, and never moves the digest the owner approves.
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_BLOCK_REASONS, planQualityFinding, type PlanDocument, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS, planQualityFinding, type WorkflowSnapshot } from "@agentx/contracts";
 import { planDocumentInstructions, withoutPlanQualityText, asksForPlanQuality } from "../../packages/broker/src/aws/broker-shared.js";
 import {
   PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, dryRunFindings, planRevisionPrompt, planRevisionsUsed, planUnreadableCategory, selfCheckNotes,
 } from "../../packages/broker/src/developer/plan-self-check.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { createPlanQualityNegotiationRecorder } from "../../packages/broker/src/aws/dispatcher.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
@@ -92,11 +93,10 @@ describe("a coding plan that fails the broker's own checks is not shown; the pla
     });
   });
 
-  it("keeps findings out of the stored document: its digest is the canonical plan's, whatever was found", async () => {
-    const withCheck = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
-    const off = await createDeveloperTaskBroker();
-    const digests: string[] = [];
-    for (const harness of [withCheck, off]) {
+  it("keeps findings out of the stored document: the digest is the canonical plan's, whatever was found, and the same as with the check off", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    for (const brokerExtra of [SELF_CHECK_ON, { planSelfCheck: false }]) {
+      const harness = await createDeveloperTaskBroker({ brokerExtra });
       const { taskId, workspaceId } = await startTask(harness);
       await finishPlanning(harness, workspaceId, uncovered());
       // Switched on, the first answer is sent back; the second is stored. Switched off, the first is stored.
@@ -106,11 +106,12 @@ describe("a coding plan that fails the broker's own checks is not shown; the pla
       expect(artifact.sha256).toBe(sha(stored));
       expect(stored).not.toContain("findings");
       expect(stored).not.toContain("claim-not-covered");
-      digests.push(artifact.sha256);
+      const { why: _why, ...body } = JSON.parse(stored) as Record<string, unknown>;
+      void _why;
+      bodies.push(body);
     }
-    // Same plan, same digest: findings are not part of what the owner's Approve binds (the plan's "why" differs per task, so compare the canonical shape's own digest).
-    expect(withCheck.s3.objects.size).toBeGreaterThan(off.s3.objects.size);
-    expect(digests).toHaveLength(2);
+    // The plan's "why" carries per-task text; everything else is byte-for-byte the plan the planner wrote.
+    expect(bodies[0]).toEqual(bodies[1]);
   });
 
   it("shows a plan with nothing to fix at once, with an empty finding list and the note that its checks were not tried on the current code", async () => {
@@ -153,13 +154,86 @@ describe("a coding plan that fails the broker's own checks is not shown; the pla
     expect(taskOf(harness, taskId).planSelfCheck).toEqual({ artifactType: "plan", version: 2, used: 1 });
   });
 
-  it("is off when the installation says so: the first answer is stored, with no record", async () => {
+  it("is off when the installation says so: the first answer is stored, with a record that says it was not checked", async () => {
     const harness = await createDeveloperTaskBroker({ brokerExtra: { planSelfCheck: false } });
     const { taskId, workspaceId } = await startTask(harness);
     await finishPlanning(harness, workspaceId, uncovered());
     expect(planRuns(harness, workspaceId)).toHaveLength(1);
     expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-    expect(storedQuality(harness, taskId)).toBeUndefined();
+    expect(storedQuality(harness, taskId)).toMatchObject({ status: "not-checked", reason: "disabled", findings: [], notes: [] });
+  });
+
+  it("is on in the default test harness, as in production", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { workspaceId } = await startTask(harness);
+    await finishPlanning(harness, workspaceId, uncovered());
+    expect(planRuns(harness, workspaceId)).toHaveLength(2);
+  });
+
+  it("writes an explicit not-checked record when the rules could not judge the plan", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+    const { taskId, workspaceId } = await startTask(harness);
+    // A task with no check policy: the plan's checks member is not read, so claims would all look unproved.
+    const record = taskOf(harness, taskId);
+    const { checkPolicy: _policy, ...bare } = record.workflow as WorkflowSnapshot & { checkPolicy?: unknown };
+    void _policy;
+    harness.db.set({ ...record, workflow: bare });
+    await finishPlanning(harness, workspaceId, uncovered());
+    expect(planRuns(harness, workspaceId)).toHaveLength(1);
+    expect(storedQuality(harness, taskId)).toMatchObject({ status: "not-checked", reason: "checks-not-read", findings: [], notes: [] });
+  });
+
+  it("records a checked plan as checked, with the exact fields a reader needs", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+    const { taskId, workspaceId } = await startTask(harness);
+    await finishPlanning(harness, workspaceId, covered());
+    const artifact = workflowOf(harness, taskId).artifacts.at(-1)!;
+    expect(storedQuality(harness, taskId)).toEqual({
+      schemaVersion: 1, status: "checked", artifactId: artifact.id, artifactSha256: artifact.sha256, checkedAt: expect.any(String) as string, findings: [],
+      notes: [{ code: "checks-not-tried", ownerSentence: "Proposed checks were not tried on the current code." }], autoRevisions: 0,
+    });
+  });
+
+  it("stops the second planning run when the owner cancels while it is waiting to start, and says so", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+    const { taskId, workspaceId } = await startTask(harness);
+    // The workspace is busy when the second run would start, so it waits in its dispatch row.
+    harness.db.injectFault({ command: "TransactWriteCommand", match: acceptsRevision, error: { name: "TransactionCanceledException" } });
+    await finishPlanning(harness, workspaceId, uncovered());
+    expect(dispatchRows(harness)).toHaveLength(1);
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN", state: "RUNNING" });
+    const cancelled = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() });
+    expect(cancelled.status).toBe(200);
+    // Planning is blocked (Retry planning is offered), the waiting row is gone, and the record says what was stopped.
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN", state: "BLOCKED" });
+    expect(dispatchRows(harness)).toEqual([]);
+    const said = (text: string) => harness.db.find((item) => JSON.stringify(item).includes(text)).length;
+    expect(said("Stopped the automatic second planning run before it started.")).toBeGreaterThan(0);
+    expect(said("Nothing was running.")).toBe(0);
+    // The sweep starts nothing afterwards, and no spend follows.
+    await harness.handler({ source: "agentx.workflow-dispatch-recovery" });
+    expect(planRuns(harness, workspaceId)).toHaveLength(1);
+    // The owner's Retry planning still works.
+    const retried = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/retry`, { requestId: randomUUID(), expectedRevision: workflowOf(harness, taskId).revision, instructions: "Plan again." });
+    expect(retried.status).toBe(200);
+    expect(planRuns(harness, workspaceId)).toHaveLength(2);
+  });
+
+  it("does not send a plan back for a finding that names the new plan members when delivery dropped that guidance for an older worker", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+    const { taskId, workspaceId } = await startTask(harness);
+    const planning = activePlanning(harness, workspaceId);
+    expect((harness.db.get(String(planning.pk), String(planning.sk)) as { planQualityAsked?: true }).planQualityAsked).toBe(true);
+    // What the dispatcher does when the worker does not list the plan-quality feature.
+    const outbox = harness.db.find((row) => row.entityType === "OUTBOX" && row.operationId === planning.id)[0]!;
+    const input = harness.brokerInput as unknown as { documentClient: never; tableName: string };
+    await createPlanQualityNegotiationRecorder({ documentClient: input.documentClient, tableName: input.tableName })(outbox as never);
+    expect(harness.db.get(String(planning.pk), String(planning.sk))).not.toHaveProperty("planQualityAsked");
+    await finishPlanning(harness, workspaceId, uncovered());
+    // The finding (claim-not-covered, whose fix says scenarioProves) is shown, not sent back: that planner's strict parser has no such member.
+    expect(planRuns(harness, workspaceId)).toHaveLength(1);
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(storedQuality(harness, taskId)).toMatchObject({ status: "checked", findings: [{ code: "claim-not-covered" }], autoRevisions: 0 });
   });
 
   it("holds a Quick plan and a Full coding plan to the same checks", async () => {
@@ -247,18 +321,14 @@ describe("an unreadable answer is asked again once by itself, then blocked with 
 describe("the pure parts", () => {
   const coverageFinding = planQualityFinding({ code: "claim-not-covered", claimIds: ["1", "nc1"] });
   const mockFinding = planQualityFinding({ code: "mock-missing-for-target", targetIds: ["viewer-api"], fixtureIds: ["inventory-v1"] });
-  const scenarioPlan = (extra: Partial<PlanDocument> = {}): PlanDocument => planDocument({
-    e2e: { schemaVersion: 1, requestedTargetIds: ["t1"], accountContextRefs: [], semanticExportDeltas: [], scenarios: [{ scenarioId: "s1" }] } as never, ...extra,
-  });
 
   it("revises for a finding that needs the new plan members only when the plan shows its planner knew them", () => {
-    const findings = [coverageFinding, mockFinding];
-    // A plan with scenarios and neither member comes from a planner that was never told about them: only the other finding is worth a run.
-    expect(autoRevisableFindings(scenarioPlan(), findings).map((finding) => finding.code)).toEqual(["mock-missing-for-target"]);
-    expect(autoRevisableFindings(scenarioPlan({ scenarioProves: { s1: ["1"] } }), findings).map((finding) => finding.code)).toEqual(["claim-not-covered", "mock-missing-for-target"]);
-    // A plan with no scenario has nothing to name in scenarioProves.
-    expect(autoRevisableFindings(planDocument(), findings)).toHaveLength(2);
-    expect(autoRevisableFindings(planDocument(), [planQualityFinding({ code: "checks-waived", count: 2 })])).toEqual([]);
+    const lint = planQualityFinding({ code: "check-command-lint", checkIds: ["proposed-1"], lint: "grep-count" });
+    const findings = [coverageFinding, mockFinding, lint];
+    // A run whose planner was never asked for the new members (older worker): only the finding that does not name them is worth a run.
+    expect(autoRevisableFindings(findings, false).map((finding) => finding.code)).toEqual(["mock-missing-for-target"]);
+    expect(autoRevisableFindings(findings, true).map((finding) => finding.code)).toEqual(["claim-not-covered", "mock-missing-for-target", "check-command-lint"]);
+    expect(autoRevisableFindings([planQualityFinding({ code: "checks-waived", count: 2 })], true)).toEqual([]);
   });
 
   it("builds the revision prompt from fixed text and plan IDs only", () => {

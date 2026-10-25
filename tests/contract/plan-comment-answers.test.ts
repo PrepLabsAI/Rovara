@@ -8,13 +8,13 @@ import { decideTaskWorkflow, listPageComments, type DeveloperTaskRouteDependenci
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { APPROVED_COMMENT_ANSWERS_INSTRUCTION, COMMENT_ANSWERS_INSTRUCTION, readDecisionDetail } from "../../packages/broker/src/developer/owner-answers.js";
 import { writePlannerReplies } from "../../packages/broker/src/developer/page-comments.js";
-import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";
 import { SLACK_CHANNEL } from "../support/slack-broker.js";
 import { validatingDocumentClient } from "../support/validating-document-client.js";
 
-type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
+type Harness = Awaited<ReturnType<typeof createSingleAnswerPlanBroker>>;
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
 const REQUIRED_CHECK = { id: "required-1", label: "npm test", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 } };
 const SAM_ID = "5".repeat(64);
@@ -39,7 +39,7 @@ const answersBlock = (entries: unknown) => `\`\`\`agentx-comment-answers\n${type
 
 /** A Quick task whose v1 coding plan the owner sent back with three comments: c1 and c3 on claim 2.1, c2 a reply to c1. */
 async function changesRequested() {
-  const harness = await createDeveloperTaskBroker();
+  const harness = await createSingleAnswerPlanBroker();
   const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "QUICK" });
   const taskId = String((started.body.task as { taskId: string }).taskId);
   const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workspaceId: string; workflow: WorkflowSnapshot };
@@ -258,7 +258,7 @@ async function changesRequestedAgainWith(prefix: string): Promise<{ stored: bool
  * is being written. The comments sit on the design; `plan` writes the coding plan's answer.
  */
 async function designApproved(options: { comments?: number; long?: boolean } = {}) {
-  const harness = await createDeveloperTaskBroker();
+  const harness = await createSingleAnswerPlanBroker();
   const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "FULL" });
   const taskId = String((started.body.task as { taskId: string }).taskId);
   const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workspaceId: string; workflow: WorkflowSnapshot };

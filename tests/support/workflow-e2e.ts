@@ -78,7 +78,7 @@ import { inspectWorkspaceForClose } from "../../packages/worker/src/close-worksp
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
-import { DEV_ISSUER, MAYA, bindChannel, createDeveloperTaskBroker, recordStream, type Developer } from "./developer-task-broker.js";
+import { DEV_ISSUER, MAYA, bindChannel, createSingleAnswerPlanBroker, recordStream, type Developer } from "./developer-task-broker.js";
 import { signedInClient, type ToolAnswer } from "./mcp-broker-client.js";
 import { FAUX_MODEL, fauxModelRuntime } from "./faux-model.js";
 import { workflowModel, type WorkflowTurn } from "./faux-scripts.js";
@@ -366,7 +366,7 @@ export async function createWorkflowE2E(options: {
   // The plan evidence jobs the broker started: the background Lambda is run by the test, with `runPlanEvidenceJobs`.
   const planEvidenceJobs: PlanEvidenceEvent[] = [];
   const workflowDependenciesConfiguration = workflowDependenciesConfigurationFromEnvironment(options.workflowDependenciesEnvironment ?? {});
-  const harness = await createDeveloperTaskBroker({
+  const harness = await createSingleAnswerPlanBroker({
     register: false,
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.channelMembers === undefined ? {} : { channelMembers: options.channelMembers }),
