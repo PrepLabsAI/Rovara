@@ -45,6 +45,19 @@ function tomlOf(text: string): { value: Record<string, unknown> } | { line: numb
   }
 }
 
+/**
+ * The same value with every table as an ordinary object. smol-toml 1.9 returns tables with a null prototype,
+ * and isDeepStrictEqual compares prototypes, so tables built here would never equal tables it parsed.
+ * Arrays are copied element by element and anything else (strings, numbers, TomlDate) is kept as it is.
+ */
+function plain(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(plain);
+  if (typeof value !== "object" || value === null) return value;
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (prototype !== null && prototype !== Object.prototype) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, plain(entry)]));
+}
+
 /** The parsed file with mcp_servers.agentx set to the entry: what the edited file must parse to. */
 function withEntry(document: Record<string, unknown>, entry: McpEntry): Record<string, unknown> {
   // Shallow copies only: a deep clone would turn the parser's TomlDate values into plain Dates,
@@ -96,7 +109,7 @@ export function codexToml(existing: string | undefined, entry: McpEntry, path = 
     result = { text: `${base}${separator}${tomlBlock(entry).join(eol)}${eol}`, action: "added" };
   }
   const edited = tomlOf(result.text);
-  if (!("value" in edited) || !isDeepStrictEqual(edited.value, withEntry(original.value, entry))) throw byHand("defines agentx in a form this command cannot edit safely");
+  if (!("value" in edited) || !isDeepStrictEqual(plain(edited.value), plain(withEntry(original.value, entry)))) throw byHand("defines agentx in a form this command cannot edit safely");
   return result;
 }
 
