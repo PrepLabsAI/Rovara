@@ -544,7 +544,7 @@ describe("Slack-only workflow, end to end in one process", () => {
     expect(e2e.workflow()).toMatchObject({ stage: "PLAN", state: "BLOCKED" });
     expect(e2e.workflow().artifacts).toHaveLength(0);
     const blocked = e2e.slack.lastPostWithAction("agentx_workflow_retry_plan");
-    expect(blocked.text).toBe("AgentX couldn't read the coding plan it wrote.");
+    expect(blocked.text).toBe("AgentX couldn't read the coding plan it wrote: its answer did not match the required format. Choose Retry planning (it gets the problems found), or Close.");
     expect(JSON.stringify(blocked.blocks)).toContain("Retry planning");
     expect(e2e.slack.posts.some((post) => JSON.stringify(post.blocks ?? []).includes("agentx_workflow_approve"))).toBe(false);
     expect(e2e.github.pullRequests).toEqual([]);

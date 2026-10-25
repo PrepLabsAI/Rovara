@@ -18,6 +18,7 @@
 import { afterEach, beforeEach } from "vitest";
 import { WorkflowSnapshotSchema, openReviewFindings, type WorkflowSnapshot } from "@agentx/contracts";
 import { FEEDBACK_REVIEW_RETRY_ACTION, workflowDocumentName, workflowDocumentType, workflowMessage, type WorkflowMessage, type WorkflowMessageContext } from "../../packages/broker/src/developer/workflow-messages.js";
+import { planUnreadableCategory } from "../../packages/broker/src/developer/plan-check-summary.js";
 import { briefLength, visibleSlackText } from "./strict-slack.js";
 
 /**
@@ -361,7 +362,10 @@ function checkVoice(journey: JourneyView): string[] {
         ok = newest !== undefined && (isCurrentMessage(journey, task, workflow, newest) || isCurrentMessage(journey, task, workflow, latest(newest)));
       }
       if (!ok) {
-        const expected = workflowMessage({ taskId, workflow, newReplies: 0 });
+        // An unreadable plan says why, by the category of the problems the broker kept for this block.
+        const unreadable = task.planUnreadable as { workflowRevision?: number; errors?: string[] } | undefined;
+        const category = workflow.stage === "PLAN" && unreadable?.workflowRevision === workflow.revision && Array.isArray(unreadable.errors) ? planUnreadableCategory(unreadable.errors) : undefined;
+        const expected = workflowMessage({ taskId, workflow, newReplies: 0, ...(category === undefined ? {} : { planUnreadableCategory: category }) });
         const newest = posts.at(-1);
         violations.push(`INV-VOICE: task ${taskId} is ${workflow.stage}/${workflow.state} (revision ${workflow.revision}), and the newest workflow message in its thread is not the message for that: ${newest === undefined ? "none" : visibleSlackText(newest.text).slice(0, 120)} (expected: ${visibleSlackText(expected?.text ?? "").slice(0, 120)})`
           + (process.env.E2E_DEBUG_VOICE === undefined ? "" : `\n${posts.map((message) => `   [${message.method}] ${visibleSlackText(message.text).slice(0, 100)}`).join("\n")}`));
