@@ -7,8 +7,8 @@
 // serving only the recordings the verified round left; its result is a record kept apart from the task. This script never retries, cancels, approves, sends a task back or publishes
 // anything: it cannot change a task's verdict, and neither can the replay.
 //
-// Exit codes: 0 when the replay was recorded (whether or not it reproduced the round: that is information), 1 when it could not be run or did not finish in time, 2 when the request was
-// refused or the arguments are wrong. Nothing is printed but the broker's own answers (state, times, status, reproduced, downloadSha256Match and a fixed reason code).
+// Exit codes: 0 when the replay was recorded (whether or not it reproduced the round: that is information) or, with --no-wait, was started; 1 when it could not be run, did not finish in
+// time, or the start's answer could not be understood; 2 when the request was refused or the arguments are wrong. Nothing is printed but the broker's own answers (state, times, status, reproduced, downloadSha256Match and a fixed reason code).
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -67,6 +67,19 @@ const refusalOf = (result: CliResult): string => {
   return typeof error?.message === "string" ? error.message.slice(0, 300) : result.stderr.trim().slice(0, 300) || `exit ${result.status}`;
 };
 
+/**
+ * What the CLI's answer carries. `agentx --json` wraps a success as `{ ok: true, data: <the broker's answer> }` (packages/cli/src/output.ts formatSuccess), and a failure as
+ * `{ ok: false, error }`. The broker's own answer is read from `data`; a bare answer (no envelope) is read as it is, so an older or direct caller still works. Reading the
+ * envelope's top level for `replay` is what made a started replay look refused (REPLAYCLI, 2026-10-24): `replay` is under `data`.
+ */
+const answerOf = (text: string): Json | undefined => {
+  const body = parse(text);
+  if (body === undefined) return undefined;
+  if (body["ok"] === false) return undefined;
+  const data = body["data"];
+  return body["ok"] === true && typeof data === "object" && data !== null && !Array.isArray(data) ? data as Json : body;
+};
+
 /** The fields of a replay record the operator is shown. */
 const VIEW_FIELDS = ["attempt", "state", "requestedAt", "startedAt", "recordedAt", "reason", "replay"] as const;
 export const viewOfRecord = (record: Json): Json => Object.fromEntries(VIEW_FIELDS.flatMap((name) => (record[name] === undefined ? [] : [[name, record[name]] as const])));
@@ -74,18 +87,23 @@ export const viewOfRecord = (record: Json): Json => Object.fromEntries(VIEW_FIEL
 export async function runReplayRound(args: ReplayArgs, dependencies: ReplayDependencies): Promise<number> {
   const target = ["--task", args.task, "--round", args.round];
   const started = dependencies.cli(["admin", "task", "e2e-replay", "start", ...target]);
-  const answer = parse(started.stdout);
-  const replay = answer?.["replay"] as { attempt?: unknown; sourceRoundId?: unknown } | undefined;
-  if (started.status !== 0 || typeof replay?.attempt !== "number") {
+  // A request the control plane refused, or a CLI that failed: nothing was started. (Exit 2: refused or wrong arguments.)
+  if (started.status !== 0 || parse(started.stdout)?.["ok"] === false) {
     dependencies.err(`the replay was refused: ${refusalOf(started)}`);
     return 2;
+  }
+  const replay = answerOf(started.stdout)?.["replay"] as { attempt?: unknown } | undefined;
+  // The CLI succeeded but its answer names no attempt: whether a replay started is not known, so say that (never "refused") and where to look. Fail closed: not a success.
+  if (typeof replay?.attempt !== "number") {
+    dependencies.err(`the replay request was answered with exit 0 but the answer did not name an attempt, so it is not known whether a replay started; read it with: agentx --env ${args.env} admin task e2e-replay show --task ${args.task} --round ${args.round}`);
+    return 1;
   }
   const attempt = replay.attempt;
   dependencies.err(`replay attempt ${attempt} of round ${args.round} started; nothing about the task changes whatever it finds`);
   const deadline = dependencies.now() + args.timeoutMinutes * 60_000;
   for (;;) {
     const shown = dependencies.cli(["admin", "task", "e2e-replay", "show", "--task", args.task, "--round", args.round]);
-    const records = (parse(shown.stdout)?.["replays"] as Json[] | undefined) ?? [];
+    const records = (answerOf(shown.stdout)?.["replays"] as Json[] | undefined) ?? [];
     const mine = records.find((item) => item["attempt"] === attempt);
     if (shown.status === 0 && mine !== undefined) {
       if (mine["state"] === "RECORDED" || mine["state"] === "UNAVAILABLE" || !args.wait) {
