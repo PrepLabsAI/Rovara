@@ -748,7 +748,13 @@ export const WorkflowDecisionSchema = z.object({
   /** Made on the task page; absent for Slack, MCP and older decisions. */
   via: z.literal("PAGE").optional(),
   at: z.string().datetime(),
-}).strict().superRefine((decision, context) => {
+}).strict();
+export type WorkflowDecision = z.infer<typeof WorkflowDecisionSchema>;
+/**
+ * A decision as the workflow stores it: the shape above plus the rules for the AGENTX actor. A separate schema because a refined object cannot be `.omit()`ted or `.extend()`ed,
+ * and clients and tests derive older shapes from the plain one.
+ */
+export const WorkflowDecisionRecordSchema = WorkflowDecisionSchema.superRefine((decision, context) => {
   const automatic = decision.source === "AUTO_FIX" || decision.source === "AUTO_RETRY";
   if (automatic !== (decision.actorRole === "AGENTX")) {
     context.addIssue({ code: "custom", path: ["actorRole"], message: "the AGENTX actor makes automatic decisions, and only it does" });
@@ -768,7 +774,6 @@ export const WorkflowDecisionSchema = z.object({
     context.addIssue({ code: "custom", path: ["auto"], message: "only an automatic decision names an automatic stage" });
   }
 });
-export type WorkflowDecision = z.infer<typeof WorkflowDecisionSchema>;
 
 export const WorkflowCheckSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
@@ -1083,7 +1088,7 @@ const WorkflowSnapshotShapeSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   artifacts: z.array(WorkflowArtifactSchema).max(100),
-  decisions: z.array(WorkflowDecisionSchema).max(100),
+  decisions: z.array(WorkflowDecisionRecordSchema).max(100),
   checkPolicy: WorkflowCheckPolicySchema.optional(),
   /** Frozen E2E references. Results remain separately qualified by the broker. */
   e2e: E2EWorkflowProgressSchema.optional(),
@@ -2010,7 +2015,7 @@ export function returnWorkflowToImplementationAutomatically(
   const counts = workflowAutoFixCounts(current.decisions);
   if (counts.sendBacksSincePlanApproval >= WORKFLOW_AUTO_SEND_BACK_LIMIT) throw new WorkflowTransitionError("the automatic send back limit for this plan is reached");
   if (counts.actions >= WORKFLOW_AUTO_ACTION_LIMIT) throw new WorkflowTransitionError("the automatic action limit for this task is reached");
-  const decision = WorkflowDecisionSchema.parse({
+  const decision = WorkflowDecisionRecordSchema.parse({
     requestId, workflowRevision: current.revision, decision: "REQUEST_CHANGES", actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX",
     reason: input.reason.trim().slice(0, 500), source: "AUTO_FIX",
     auto: { stage: current.stage, ...(current.candidate === undefined ? {} : { candidateDigest: current.candidate.digest }) }, at: input.now,
@@ -2046,7 +2051,7 @@ export function workflowAutomaticRetryDecision(
   const counts = workflowAutoFixCounts(current.decisions);
   if (counts.retriesFor(input.stage, current.candidate?.digest) >= WORKFLOW_AUTO_RETRY_LIMIT) throw new WorkflowTransitionError("this stage was already retried automatically for this code");
   if (counts.actions >= WORKFLOW_AUTO_ACTION_LIMIT) throw new WorkflowTransitionError("the automatic action limit for this task is reached");
-  return WorkflowDecisionSchema.parse({
+  return WorkflowDecisionRecordSchema.parse({
     requestId, workflowRevision: current.revision, decision: "REQUEST_CHANGES", actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX",
     reason: input.reason.trim().slice(0, 500), source: "AUTO_RETRY",
     auto: { stage: input.stage, ...(current.candidate === undefined ? {} : { candidateDigest: current.candidate.digest }) }, at: input.now,
