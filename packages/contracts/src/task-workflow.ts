@@ -1950,6 +1950,34 @@ export function returnWorkflowToImplementation(
   });
 }
 
+declare const wholeTaskSpendBrand: unique symbol;
+/**
+ * Model spend, in US dollars, of the WHOLE task so far (planning, every coding run, checks and reviews, from the task's cost records), not of the current plan version or round. The
+ * automatic-fixing cap is per task, so a number that counts less lets automatic fixing spend past it. The brand makes a caller say so through `wholeTaskSpendUsd`.
+ */
+export type WholeTaskSpendUsd = number & { readonly [wholeTaskSpendBrand]: true };
+export function wholeTaskSpendUsd(usd: number): WholeTaskSpendUsd {
+  return usd as WholeTaskSpendUsd;
+}
+/** The money inputs of one more automatic round. All three are required by the policy and by the guard functions below. */
+export interface WorkflowAutoSpend {
+  /** Whole-task spend so far. */
+  spentUsd: WholeTaskSpendUsd;
+  /** The estimate of one more round. */
+  roundEstimateUsd: number;
+  /** The most automatic fixing may spend on one task (default 15). */
+  capUsd: number;
+}
+/**
+ * Why one more automatic round is not allowed by the money: `inputs-missing` when any number is absent or not a finite, non-negative number (never read as zero), `spend-cap` when
+ * spent plus the estimate is over the cap. Undefined when it fits. Used by the policy and held again by the two guard functions.
+ */
+export function workflowAutoSpendRefusal(spend: Partial<WorkflowAutoSpend> | undefined): "inputs-missing" | "spend-cap" | undefined {
+  const numbers = [spend?.spentUsd, spend?.roundEstimateUsd, spend?.capUsd];
+  if (!numbers.every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)) return "inputs-missing";
+  return (spend?.spentUsd as number) + (spend?.roundEstimateUsd as number) > (spend?.capUsd as number) ? "spend-cap" : undefined;
+}
+
 /**
  * The request ID of one automatic action on one workflow revision. It depends only on the task, the revision the action was decided on and the kind of action, so a repeated trigger
  * (a recovered dispatch, the reconciler running again) reaches the idempotency check with the same key, and only one of two writers on the same revision can win.
@@ -1991,12 +2019,12 @@ function personOnlyBlock(blockReason: string | undefined): boolean {
  * The broker, by itself, sends blocked checks or reviews back to coding (automatic fixing). It records a REQUEST_CHANGES decision by the AGENTX actor with source AUTO_FIX and is
  * otherwise the same move as the owner's Send back. It is a different function on purpose: it can only make this one move, from a blocked VERIFY or REVIEW, and never approves, skips,
  * rejects, publishes or acts in a plan review or a pull request. It holds the limits itself (2 per approved plan version, 6 automatic actions in all), so the policy cannot be bypassed,
- * and it refuses a stale revision. The request ID is derived (`workflowAutoActionRequestId`): the same call again, on the same revision, returns the workflow as it already is.
+ * and it refuses a stale revision. It also refuses when the whole-task spend plus one more round is over the cap or any money input is missing (`workflowAutoSpendRefusal`). The request ID is derived (`workflowAutoActionRequestId`): the same call again, on the same revision, returns the workflow as it already is.
  * Whether to call it is the policy's decision (`autoFixDecision`); the owner pressing Send back first makes this one fail with an out-of-date revision.
  */
 export function returnWorkflowToImplementationAutomatically(
   currentInput: unknown,
-  input: { expectedRevision: number; reason: string; now: string },
+  input: { expectedRevision: number; reason: string; spend: WorkflowAutoSpend; now: string },
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   const requestId = workflowAutoActionRequestId(current.taskId, input.expectedRevision, "AUTO_FIX");
@@ -2015,6 +2043,7 @@ export function returnWorkflowToImplementationAutomatically(
   const counts = workflowAutoFixCounts(current.decisions);
   if (counts.sendBacksSincePlanApproval >= WORKFLOW_AUTO_SEND_BACK_LIMIT) throw new WorkflowTransitionError("the automatic send back limit for this plan is reached");
   if (counts.actions >= WORKFLOW_AUTO_ACTION_LIMIT) throw new WorkflowTransitionError("the automatic action limit for this task is reached");
+  if (workflowAutoSpendRefusal(input.spend) !== undefined) throw new WorkflowTransitionError("the whole-task spend is unknown or over the automatic fixing cap");
   const decision = WorkflowDecisionRecordSchema.parse({
     requestId, workflowRevision: current.revision, decision: "REQUEST_CHANGES", actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX",
     reason: input.reason.trim().slice(0, 500), source: "AUTO_FIX",
@@ -2035,7 +2064,7 @@ export function returnWorkflowToImplementationAutomatically(
  */
 export function workflowAutomaticRetryDecision(
   currentInput: unknown,
-  input: { expectedRevision: number; stage: (typeof WORKFLOW_AUTO_STAGES)[number]; reason: string; now: string },
+  input: { expectedRevision: number; stage: (typeof WORKFLOW_AUTO_STAGES)[number]; reason: string; spend: WorkflowAutoSpend; now: string },
 ): WorkflowDecision {
   const current = validSnapshot(currentInput);
   const requestId = workflowAutoActionRequestId(current.taskId, input.expectedRevision, "AUTO_RETRY");
@@ -2051,6 +2080,7 @@ export function workflowAutomaticRetryDecision(
   const counts = workflowAutoFixCounts(current.decisions);
   if (counts.retriesFor(input.stage, current.candidate?.digest) >= WORKFLOW_AUTO_RETRY_LIMIT) throw new WorkflowTransitionError("this stage was already retried automatically for this code");
   if (counts.actions >= WORKFLOW_AUTO_ACTION_LIMIT) throw new WorkflowTransitionError("the automatic action limit for this task is reached");
+  if (workflowAutoSpendRefusal(input.spend) !== undefined) throw new WorkflowTransitionError("the whole-task spend is unknown or over the automatic fixing cap");
   return WorkflowDecisionRecordSchema.parse({
     requestId, workflowRevision: current.revision, decision: "REQUEST_CHANGES", actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX",
     reason: input.reason.trim().slice(0, 500), source: "AUTO_RETRY",
