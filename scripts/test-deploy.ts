@@ -43,6 +43,7 @@ import {
 } from "@aws-sdk/client-cloudformation";
 import { GetFunctionConfigurationCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { build as bundle } from "esbuild";
+import { LAMBDA_BUNDLE_OPTIONS, checkLambdaBundles, lambdaLoadError } from "./lambda-load-check.js";
 import { CDK_CONSTRUCT_IDS, cdkAppArguments } from "../packages/cli/src/deploy/cdk-engine.js";
 import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
 import { E2E_AGENT_RECOMMENDED_MODELS, eligibleE2EAgentModel } from "../packages/contracts/src/e2e-agent-models.js";
@@ -1255,11 +1256,21 @@ function assertRepositoryExists(context: ApplyContext, repository: string): void
   }
 }
 
+/** Builds the repo, then bundles and loads each Lambda `units` moves (scripts/lambda-load-check.ts); throws, changing nothing, if one does not load. */
+export async function assertLambdasLoad(context: ApplyContext, units: readonly DeployUnit[]): Promise<void> {
+  runNpmBuild(context);
+  const entries = lambdaUnitsFor(units).map((unit) => ({ name: unit, entry: LAMBDAS[unit].entry }));
+  console.log(`\n== lambda-load-check (${entries.length} bundle(s))`);
+  const report = await checkLambdaBundles({ root: process.cwd(), entries });
+  for (const result of report.results) console.log(`${result.status} ${result.name}: ${result.detail}`);
+  if (!report.ok) throw lambdaLoadError(report);
+}
+
 /** Bundles one control-plane Lambda the way the release does and writes its zip; the zip's sha256 is what Lambda reports as CodeSha256 (base64). */
 async function buildLambdaZip(context: ApplyContext, step: Extract<DeployStep, { kind: "build-lambda-zip" }>): Promise<{ sha256Hex: string; sha256Base64: string; inputs: string[] }> {
   runNpmBuild(context);
   const result = await bundle({
-    entryPoints: [step.entry], outfile: "index.js", bundle: true, platform: "node", target: "node22", minify: true, sourcemap: true, external: [], write: false, metafile: true,
+    ...LAMBDA_BUNDLE_OPTIONS, entryPoints: [step.entry], outfile: "index.js", write: false, metafile: true,
   });
   const file = (name: string) => {
     const output = result.outputFiles.find((candidate) => candidate.path.endsWith(`/${name}`));
@@ -1847,6 +1858,9 @@ export async function main(argv: readonly string[]): Promise<void> {
     console.log(`\n${formatFindings(drift)}`);
     assertCheckAllowsApply(drift, args.only, headTemplate);
   }
+  // Also before anything is pushed or changed: every Lambda this deploy moves must load. A bundle that crashes at init (acb278a1: import.meta in
+  // CJS) would otherwise replace working code on TEST, and a code-only change set has nothing that stops it.
+  if (steps.some((step) => step.kind === "build-lambda-zip")) await assertLambdasLoad(context, args.only);
   for (const step of steps) await applyStep(context, step);
   console.log("\nTEST deploy complete.");
 }
