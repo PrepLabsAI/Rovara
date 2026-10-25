@@ -1,0 +1,225 @@
+import { builtinFileCheckOf, canonicalJson, notChangingReference, redactText, type PlanDocument, type PlanQualityFinding } from "@agentx/contracts";
+
+/**
+ * PLANVIEW: what a coding plan's checks say, in plain words, from structured fields only. Pure: the Slack card, the task
+ * page, the full-plan route and the MCP tool all read this one summary. Every value that came from the plan (a label, an
+ * expected value, a file name) is the plan's own text: it is redacted, put on one line and cut here, and the caller
+ * escapes it for its own medium (Slack, HTML). Sentence frames are fixed text. Form values typed into fields are never
+ * shown (they can hold a password); the model's own steps are shown as what they do.
+ */
+
+/** An expected value is cut to this many characters on a card; the task page, which has the room, shows 400. */
+export const PLAN_VALUE_MAX = 80;
+/** How much of the plan's own words a summary shows: the card's short form, or the task page's fuller one. */
+interface Limits { value: number; rows: number; goal: number; steps: number; columns: boolean }
+const CARD_LIMITS: Limits = { value: PLAN_VALUE_MAX, rows: 6, goal: 30, steps: 3, columns: false };
+const PAGE_LIMITS: Limits = { value: 400, rows: 40, goal: 400, steps: 30, columns: true };
+const QUESTION_MAX = 100;
+const OPTION_MAX = 80;
+
+/** Plan text on one line, secrets removed, cut to `max` characters. */
+function plain(value: string, max: number): string {
+  const characters = Array.from(redactText(value).replace(/\s+/gu, " ").trim());
+  return characters.length <= max ? characters.join("") : `${characters.slice(0, max - 1).join("")}…`;
+}
+
+/** A value of the plan's own, quoted: the quotes tell a reader it is the plan's word, not AgentX's. */
+const quoted = (value: string, max: number): string => `"${plain(value, max)}"`;
+
+type Scenario = NonNullable<PlanDocument["e2e"]>["scenarios"][number];
+type Step = Scenario["steps"][number];
+type Assertion = Scenario["assertions"][number];
+
+function stepText(step: Step, limits: Limits): string {
+  const v = limits.value;
+  switch (step.kind) {
+    case "navigate": return `opens ${plain(step.path, v)}`;
+    case "click": case "tap": return `clicks ${plain(step.testId, v)}`;
+    case "fill": return `fills in ${plain(step.testId, v)}`;
+    case "agent": return `an AI step (${quoted(step.goal, limits.goal)}, up to ${step.maxActions} actions)`;
+    case "request": return `sends ${step.method} ${plain(step.path, v)}`;
+    case "invoke-contract": return `calls ${plain(step.operationId, v)}`;
+    case "inspect-contract": return `reads the exports of ${plain(step.operationId, v)}`;
+    case "launch-app": return "starts the app";
+    case "restart-app": return "restarts the app";
+    case "swipe": return `swipes ${step.direction}`;
+    case "deep-link": return `opens the link ${plain(step.path, v)}`;
+    case "set-permission": return `${step.value === "grant" ? "grants" : step.value === "deny" ? "denies" : "resets"} the ${plain(step.permission, 40)} permission`;
+    case "choose-file": return `chooses the file ${plain(step.fixtureFileId, 40)}`;
+    default: return "does a step";
+  }
+}
+
+/** One expected result as a phrase; the rows of a CSV are shown, each cut to the value limit. */
+function assertionText(assertion: Assertion, limits: Limits): string {
+  const v = limits.value;
+  switch (assertion.kind) {
+    case "text": return `the text of ${plain(assertion.testId, v)} is ${quoted(assertion.equals, v)}`;
+    case "visible": return `${plain(assertion.testId, v)} is ${assertion.equals ? "shown" : "hidden"}`;
+    case "csv": {
+      const rows = assertion.rows.slice(0, limits.rows).map((row) => plain(row.join(","), v));
+      const more = assertion.rows.length > limits.rows ? ` and ${assertion.rows.length - limits.rows} more` : "";
+      const columns = limits.columns ? ` the columns ${plain(assertion.columns.join(", "), v)} and` : "";
+      return `the download ${plain(assertion.downloadName, v)} has${columns} ${assertion.rows.length === 0 ? "no rows" : `the rows ${rows.map((row) => `"${row}"`).join("; ")}${more}`}`;
+    }
+    case "http-status": return `${assertion.method} ${plain(assertion.path, v)} answers ${assertion.equals}`;
+    case "json": return `the response ${plain(assertion.responseId, v)} equals ${quoted(canonicalJson(assertion.equals), v)}`;
+    case "state": return `the state ${plain(assertion.probeId, v)} equals ${quoted(canonicalJson(assertion.equals), v)}`;
+    case "file": return `the file ${plain(assertion.relativePath, v)} has the expected content`;
+    default: return "an expected result holds";
+  }
+}
+
+/** "claim 2" or "Not changing 1": what a check or scenario proves, by number. */
+function provedName(id: string): string {
+  const position = notChangingReference(id);
+  return position === undefined ? `claim ${plain(id, 12)}` : `Not changing ${position}`;
+}
+
+const joinWords = (items: readonly string[]): string => (items.length <= 1 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)!}`);
+
+export interface PlanScenarioSummary {
+  scenarioId: string;
+  /** The account the steps run as and the targets they run on, as the plan names them. */
+  account: string;
+  targets: string[];
+  /** Every step, as what it does. */
+  steps: string[];
+  /** Every expected result. */
+  expects: string[];
+  /** Stand-in services the plan selects, as "<component> on <target>". */
+  mocks: string[];
+  /** The most actions any AI step may take; absent when no step is an AI step. */
+  maxActions?: number;
+  proves: string[];
+  /** The one-line form: who, where, what it does, what it expects. */
+  line: string;
+}
+
+export interface PlanCheckItemSummary {
+  checkId: string;
+  label: string;
+  /** What it does: a built-in file check in words, any other check as its command. */
+  does: string;
+  builtin: boolean;
+  proves: string[];
+  /** What a try on the unchanged code gave, when one is known. */
+  tried?: string;
+  line: string;
+}
+
+export interface PlanDecisionAnswer { id: string; question: string; answer: string }
+
+export interface PlanCheckSummary {
+  scenarios: PlanScenarioSummary[];
+  checks: PlanCheckItemSummary[];
+  /** The plan said no check applies, and why. */
+  noneReason?: string;
+  /** What approving without opening the page uses: AgentX's recommended option of each decision. */
+  decisions: PlanDecisionAnswer[];
+  /** Scenario lines, then check lines: what a card lists. */
+  lines: string[];
+  /** The self-check findings' sentences for the owner, when findings are given. */
+  findingSentences: string[];
+}
+
+export interface PlanCheckSummaryInput {
+  /** "card" (the default) cuts the plan's words short; "page" keeps far more of them, for the task page and the full-plan answer. */
+  detail?: "card" | "page" | undefined;
+  /** What a try of each proposed check on the unchanged code gave; absent for a check that was not tried. */
+  triedOnCurrentCode?: Readonly<Record<string, "passed" | "failed" | "broken">> | undefined;
+  findings?: readonly PlanQualityFinding[] | undefined;
+}
+
+function triedText(outcome: "passed" | "failed" | "broken", expected: "pass" | "fail" | undefined): string {
+  if (outcome === "broken") return "tried on current code: could not run";
+  const word = outcome === "passed" ? "passed" : "failed";
+  if (expected === undefined) return `tried on current code: ${word}`;
+  return (outcome === "passed") === (expected === "pass") ? `tried on current code: ${word} as expected` : `tried on current code: ${word}, not as expected`;
+}
+
+function scenarioSummary(plan: PlanDocument, scenario: Scenario, limits: Limits): PlanScenarioSummary {
+  const intent = plan.e2e!;
+  const targets = scenario.requestedTargetIds.map((id) => plain(id, 60));
+  const mocks = (intent.mockFixtureRefs ?? []).filter((ref) => scenario.requestedTargetIds.includes(ref.requestedTargetId))
+    .map((ref) => `${plain(ref.componentId, 60)} on ${plain(ref.requestedTargetId, 60)}`);
+  const agentActions = scenario.steps.flatMap((step) => (step.kind === "agent" ? [step.maxActions] : []));
+  const proves = (plan.scenarioProves?.[scenario.scenarioId] ?? []).map(provedName);
+  const account = plain(scenario.accountProfileId, 60);
+  const steps = scenario.steps.map((step) => stepText(step, limits));
+  const expects = scenario.assertions.map((assertion) => assertionText(assertion, limits));
+  const shownSteps = steps.slice(0, limits.steps);
+  const moreSteps = steps.length > limits.steps ? [`and ${steps.length - limits.steps} more steps`] : [];
+  const does = shownSteps.length === 0 ? "looks at the app" : [...shownSteps, ...moreSteps].join(", ");
+  return {
+    scenarioId: plain(scenario.scenarioId, 120), account, targets, steps, expects, mocks, ...(agentActions.length === 0 ? {} : { maxActions: Math.max(...agentActions) }), proves,
+    line: `As ${account} on ${joinWords(targets)}: ${does}; expects ${expects.join("; ")}`,
+  };
+}
+
+function checkSummary(plan: PlanDocument, input: PlanCheckSummaryInput, limits: Limits, check: NonNullable<PlanDocument["checks"]>["proposed"][number]): PlanCheckItemSummary {
+  const builtin = builtinFileCheckOf(check.command);
+  const does = builtin === undefined
+    ? `runs ${plain([check.command.executable, ...check.command.args].join(" "), 100)}`
+    : `checks that ${plain(builtin.path, limits.value)} ${builtin.kind === "file-contains" ? "contains" : "does not contain"} ${quoted(builtin.text, limits.value)}`;
+  const proves = (plan.checks?.proves[check.id] ?? []).map(provedName);
+  const outcome = input.triedOnCurrentCode?.[check.id];
+  const tried = outcome === undefined ? undefined : triedText(outcome, plan.checks?.expectOnBase?.[check.id]);
+  const label = plain(check.label, 80);
+  return {
+    checkId: check.id, label, does, builtin: builtin !== undefined, proves, ...(tried === undefined ? {} : { tried }),
+    line: `Check "${label}" ${does}${proves.length === 0 ? "" : `; proves ${joinWords(proves)}`}${tried === undefined ? "" : `; ${tried}`}`,
+  };
+}
+
+/** One line per scenario and per proposed check, the decision answers an Approve in Slack uses, and the self-check sentences. */
+export function planCheckSummary(plan: PlanDocument, input: PlanCheckSummaryInput = {}): PlanCheckSummary {
+  const limits = input.detail === "page" ? PAGE_LIMITS : CARD_LIMITS;
+  const scenarios = (plan.e2e?.scenarios ?? []).map((scenario) => scenarioSummary(plan, scenario, limits));
+  const checks = (plan.checks?.proposed ?? []).map((check) => checkSummary(plan, input, limits, check));
+  const decisions = plan.decisions.map((decision) => ({
+    id: plain(decision.id, 12), question: plain(decision.question, QUESTION_MAX),
+    answer: plain(decision.options.find((option) => option.id === decision.recommended)?.label ?? decision.recommended, OPTION_MAX),
+  }));
+  return {
+    scenarios, checks, decisions,
+    ...(plan.checks?.noneReason === undefined ? {} : { noneReason: plain(plan.checks.noneReason, 300) }),
+    lines: [...scenarios.map((scenario) => scenario.line), ...checks.map((check) => check.line)],
+    findingSentences: (input.findings ?? []).map((finding) => finding.ownerSentence),
+  };
+}
+
+export const PLAN_UNREADABLE_CATEGORIES = ["e2e-shape", "checks-shape", "claims-shape", "too-long", "wrong-e2e-version", "work-breakdown", "other"] as const;
+export type PlanUnreadableCategory = (typeof PLAN_UNREADABLE_CATEGORIES)[number];
+
+/** What the owner is told when a plan could not be read: one fixed sentence per category, never the validator's words. */
+export const PLAN_UNREADABLE_SENTENCES: Readonly<Record<PlanUnreadableCategory, string>> = {
+  "e2e-shape": "the browser and API checks part did not match the required format",
+  "checks-shape": "the checks it proposed did not match the required format",
+  "claims-shape": "the claims or decisions did not match the required format",
+  "too-long": "the plan was longer than the limit",
+  "wrong-e2e-version": "the browser and API checks part used a format version this project does not offer",
+  "work-breakdown": "the work breakdown did not match the required format",
+  "other": "its answer did not match the required format",
+};
+
+/**
+ * The category of an unreadable plan, from the fixed field words the validator puts at the start of each problem (its
+ * `<subject>: <field> <problem>` form), never from the model's own text. Several categories: the most telling one wins.
+ */
+export function planUnreadableCategory(errors: readonly string[]): PlanUnreadableCategory {
+  const found = new Set<PlanUnreadableCategory>();
+  for (const error of errors) {
+    const whole = error.trim();
+    const colon = whole.indexOf(": ");
+    const rest = colon < 0 ? whole : whole.slice(colon + 2);
+    if (/^e2e schemaVersion must be\b/u.test(rest)) found.add("wrong-e2e-version");
+    else if (whole === "the answer is too long") found.add("too-long");
+    else if (/^(?:e2e\b|E2E intent\b|scenarioProves\b)/u.test(rest) || /^scenarioProves\b/u.test(whole)) found.add("e2e-shape");
+    else if (/^checks?\b/u.test(rest) || /^check\s/u.test(whole)) found.add("checks-shape");
+    else if (/^work(?:Breakdown|\s+breakdown)\b/u.test(rest)) found.add("work-breakdown");
+    else if (/^(?:the plan|claim|decision)\b/u.test(whole) || /^(?:why|title|claims|decisions|notChanging|risks)\b/u.test(rest)) found.add("claims-shape");
+    else found.add("other");
+  }
+  return (["wrong-e2e-version", "e2e-shape", "checks-shape", "work-breakdown", "too-long", "claims-shape", "other"] as const).find((category) => found.has(category)) ?? "other";
+}

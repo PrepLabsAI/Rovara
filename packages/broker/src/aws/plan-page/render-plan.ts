@@ -4,6 +4,7 @@
 // owns the styles) and no inline style or event handler.
 import { commentIdInAuthor, commentRefInAuthor, creditsPageComment, diffPlanDocuments, redactText, taskGraphDigest, taskGraphOrder, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput, type WorkItemProgressV1 } from "@agentx/contracts";
 import { escapeHtml } from "../web-session.js";
+import { planCheckSummary } from "../../developer/plan-check-summary.js";
 import { renderDiagram } from "./diagrams.js";
 import { commentCountBadge, renderThreads, suggestionLines, targetKey, type PageCommentView, type PageSuggestionView } from "./comments.js";
 
@@ -373,6 +374,37 @@ function checksHtml(context: Context): string {
   return `<section id="${escapeHtml(checksAnchor(context.input.version))}" class="checks"><h3>Checks</h3><table><thead><tr><th class="check-label">Check</th><th class="check-from">From</th><th class="check-proves">Proves</th><th class="check-status">Status</th></tr></thead><tbody>${rows}</tbody></table>${threads}${others}</section>`;
 }
 
+/**
+ * PLANVIEW: "Checks this plan adds": every browser and API scenario (who runs it, where, every step, every expected value,
+ * the stand-in services per target, the AI step limit and what it proves) and every proposed check, in the same plain
+ * words the approval card uses. Nothing is left out here; the card lists the first few.
+ */
+function planChecksAddedHtml(context: Context): string {
+  const { plan, version } = context.input;
+  const summary = planCheckSummary(plan, { detail: "page" });
+  if (summary.scenarios.length === 0 && summary.checks.length === 0) return "";
+  const proofs = (ids: string[] | undefined): string => (ids === undefined || ids.length === 0 ? "" : ` <span class="proves">Proves: ${ids.map((id) => provesLink(context, id)).join(", ")}</span>`);
+  const scenarios = summary.scenarios.map((scenario, index) => {
+    const ids = plan.scenarioProves?.[plan.e2e!.scenarios[index]!.scenarioId];
+    const steps = scenario.steps.length === 0 ? "<li>Looks at the app</li>" : scenario.steps.map((step) => `<li>${t(step)}</li>`).join("");
+    return `<li class="plan-scenario"><p><strong>${t(scenario.scenarioId)}</strong>: as ${t(scenario.account)} on ${t(scenario.targets.join(" and "))}.${proofs(ids)}</p>`
+      + `<p>Steps</p><ol class="scenario-steps">${steps}</ol>`
+      + `<p>Expects</p><ul class="scenario-expects">${scenario.expects.map((expect) => `<li>${t(expect)}</li>`).join("")}</ul>`
+      + (scenario.mocks.length === 0 ? "" : `<p class="scenario-mocks">Stand-in services: ${t(scenario.mocks.join(", "))}.</p>`)
+      + (scenario.maxActions === undefined ? "" : `<p class="scenario-actions">An AI step may take up to ${scenario.maxActions} actions.</p>`)
+      + "</li>";
+  }).join("");
+  const checks = summary.checks.map((check) => {
+    const ids = plan.checks?.proves[check.checkId];
+    return `<li class="plan-added-check"><strong>${t(check.label)}</strong> ${t(check.does)}.${proofs(ids)}${check.tried === undefined ? "" : ` ${t(check.tried)}.`}</li>`;
+  }).join("");
+  return `<section id="${escapeHtml(`${context.input.anchor}-v${version}-added-checks`)}" class="plan-checks"><h3>Checks this plan adds</h3>`
+    + (scenarios === "" ? "" : `<h4>Browser and API scenarios</h4><ol class="plan-scenarios">${scenarios}</ol>`)
+    + (checks === "" ? "" : `<h4>Other checks</h4><ul class="plan-added-checks">${checks}</ul>`)
+    + (summary.noneReason !== undefined && checks === "" ? `<p>No other checks apply: ${t(summary.noneReason)}</p>` : "")
+    + "</section>";
+}
+
 /** "Comments on this document": the whole-document threads, and the Comment control for someone who may comment. */
 function documentCommentsHtml(context: Context): string {
   const threads = threadsHtml(context, "document", { controlLabel: "Comment on this document" });
@@ -462,6 +494,7 @@ export async function renderPlanDocument(input: RenderPlanInput): Promise<string
     whatChangedHtml(context),
     whyHtml(plan),
     `<div class="claims">${await claimList(context, plan.claims, 1)}${decisionsBlock}</div>`,
+    planChecksAddedHtml(context),
     notChangingHtml(context, plan.notChanging),
     list("Risks", "risks", plan.risks),
     checksHtml(context),

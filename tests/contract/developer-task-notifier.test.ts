@@ -631,6 +631,29 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(h.posts.at(-1)!.text).toBe("Coding stopped before it finished. The run stopped unexpectedly.");
   });
 
+  it("says a coding run the owner stopped once, and an unreadable plan by its category (CANCELDUP, PLANREADMSG)", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const set = (workflow: Record<string, unknown>, unreadable?: Record<string, unknown>) => h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: `SET workflow = :workflow, updatedAt = :now${unreadable === undefined ? "" : ", planUnreadable = :unreadable"}`,
+      ExpressionAttributeValues: { ":now": new Date().toISOString(), ":workflow": { artifacts: [], ...workflow }, ...(unreadable === undefined ? {} : { ":unreadable": unreadable }) } }));
+    await set({ revision: 7, stage: "IMPLEMENT", state: "BLOCKED", blockReason: "implementation operation ended cancelled" });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("Coding was stopped before it finished. Choose Retry to run it again.");
+    // The stored problems quote the model: only the category sentence reaches Slack.
+    await set({ revision: 8, stage: "PLAN", state: "BLOCKED", blockReason: "the plan couldn't be read" },
+      { workflowRevision: 8, errors: [`the plan: e2e scenarios 1 steps 2 maxActions is missing ${SECRET}`, "claim 1: text is empty"] });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("AgentX couldn't read the coding plan it wrote: the browser and API checks part did not match the required format. Choose Retry planning (it gets the problems found), or Close.");
+    expect(h.posts.map((post) => post.text).join("\n")).not.toContain(SECRET);
+    // Problems kept for an older block say nothing about this one.
+    await set({ revision: 9, stage: "PLAN", state: "BLOCKED", blockReason: "the plan couldn't be read" }, { workflowRevision: 8, errors: ["the plan: e2e scenarios 1 steps 2 maxActions is missing"] });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("AgentX couldn't read the coding plan it wrote.");
+  });
+
   it("posts one message per workflow step and never repeats a blocked review for a stale notice", async () => {
     const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
     await h.pump();
@@ -989,6 +1012,28 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     const actions = (message.blocks?.at(-1) as { elements: Array<{ action_id: string; url?: string }> }).elements;
     expect(actions.map((button) => button.action_id)).toEqual(["agentx_open_review", "agentx_workflow_approve", "agentx_workflow_changes", "agentx_workflow_close"]);
     expect(actions[0]!.url).toBe(opening);
+  });
+
+  it("lists the checks a structured plan adds and the answers Approve here uses, within the brief limit", async () => {
+    const plan = planDocument({
+      decisions: [{ id: "d1", claimId: "1", question: "How many times should a payment be retried?", options: [{ id: "three", label: "Three times", consequence: "Soon." }, { id: "five", label: "Five times", consequence: "Late." }], recommended: "five" }],
+      scenarioProves: { "viewer-api": ["2"] },
+      e2e: { schemaVersion: 1, requestedTargetIds: ["api-viewer"], accountContextRefs: [], semanticExportDeltas: [], scenarios: [{ scenarioId: "viewer-api", requirementId: "r", requestedTargetIds: ["api-viewer"], required: true,
+        accountProfileId: "viewer", minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "request", requestId: "r1", path: "/api/orders.csv", method: "GET", body: {} }],
+        assertions: [{ kind: "http-status", path: "/api/orders.csv", method: "GET", equals: 403 }] }] } as never,
+    });
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, { readArtifact: async (key) => String(h.s3.objects.get(key)), reviewUrlBase: "https://agentx.example.test" });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const planning = h.active();
+    await h.artifact(h.workspaceId, planning, "plan.md", planAnswer(plan));
+    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await h.pump();
+    const text = h.posts.at(-1)!.text;
+    expect(text).toContain("• d1: How many times should a payment be retried? Answer: Five times");
+    expect(text).toContain("• As viewer on api-viewer: sends GET /api/orders.csv; expects GET /api/orders.csv answers 403");
+    expect(visibleSlackText(text).length).toBeLessThanOrEqual(1_200);
   });
 
   it("lists every claim of a tiny structured plan, and keeps a plan of fifty long claims and twenty decisions within the brief limit", async () => {

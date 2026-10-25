@@ -203,6 +203,7 @@ import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "
 import { documentSummaryLines, isFeedbackReviewFailure, workflowDocumentName } from "../developer/workflow-messages.js";
 import type { TaskDocumentKind, TaskDocumentView, TaskFreshness } from "./task-web.js";
 import type { PageCommentInput, PageDecisionInput, PageRetryInput, PageSuggestionInput, TaskPageState } from "./task-web-api.js";
+import { readTaskPlanDocument, type TaskPlanDocumentView } from "./task-plan-document.js";
 import { pageCommentViews, type CommentViewContext, type PageCommentView } from "./plan-page/comments.js";
 import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
@@ -1608,6 +1609,14 @@ async function readTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperC
   const view = await taskView(deps, task, { events, details: true, ...(loaded === undefined ? {} : { loaded }) });
   await syncIndex(deps, task, view.status, view.updatedAt);
   return { task: view };
+}
+
+/** PLANFULLDOC: one stored version of the task's plan, whole; only the task's owner reads it (as `get_task`). */
+async function getTaskPlan(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, url: URL): Promise<{ plan: TaskPlanDocumentView }> {
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const version = url.searchParams.get("version");
+  return { plan: await readTaskPlanDocument(task, (objectKey, maxBytes) => deps.actions.readArtifact(objectKey, maxBytes),
+    { document: url.searchParams.get("document"), ...(version === null ? {} : { version: whole(version, 1, 1, 999, "version") }) }) };
 }
 
 const TASK_INDEX_SK = /^TASK#\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z#[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -5926,10 +5935,11 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
     const requestId = safeDecode(proposalRoute[2]!);
     return { change: await getTaskPeopleProposal(deps, caller, taskId, requestId) };
   }
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry|plan))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "plan") return getTaskPlan(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "people") return { view: await getTaskPeople(deps, caller, taskId) };
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/role") {
     const input = parse(TaskPeopleRoleRequestSchema, body(request), deps, "people/role");
