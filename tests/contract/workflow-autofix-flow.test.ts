@@ -6,10 +6,11 @@ import {
   WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, createCandidateManifest, workflowAutoActionRequestId, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { createTaskWeb } from "../../packages/broker/src/aws/task-web.js";
 import { AutoFixAskSchema } from "../../packages/broker/src/developer/autofix-messages.js";
-import { autofixConfigFromEnvironment } from "../../packages/broker/src/aws/workflow-autofix-runner.js";
+import { autofixConfigFromEnvironment, postponeAutofixRow, recordAutofixGiveUpAsk } from "../../packages/broker/src/aws/workflow-autofix-runner.js";
 import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
-import { publicWorkflowDecision } from "../../packages/broker/src/aws/developer-tasks.js";
+import { getTaskDocumentView, publicWorkflowDecision } from "../../packages/broker/src/aws/developer-tasks.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown } from "../support/plan-documents.js";
 
@@ -67,10 +68,11 @@ async function startCoding(harness: Harness) {
 }
 
 /** Coding ends with the nth candidate and its reviews find an introduced problem: REVIEW blocks. */
-async function blockOnFindings(harness: Harness, ctx: Awaited<ReturnType<typeof startCoding>>, n: number, costUsd: number | "none" = 0.1) {
+async function blockOnFindings(harness: Harness, ctx: Awaited<ReturnType<typeof startCoding>>, n: number, costUsd: number | "none" = 0.1, reviewEachUsd = 0.1) {
   const candidate = await ctx.finishCoding(n, costUsd);
   const review = reviewRuns(harness, ctx.workspaceId).at(-1)!;
-  if (costUsd !== "none") await harness.events(ctx.workspaceId, String(review.id), [{ type: "usage", payload: usagePayload(0.1) }]);
+  // A review run records one usage event per reviewer (code and security), as the worker does.
+  if (costUsd !== "none") await harness.events(ctx.workspaceId, String(review.id), [{ type: "usage", payload: usagePayload(reviewEachUsd) }, { type: "usage", payload: usagePayload(reviewEachUsd) }]);
   await harness.finish(ctx.workspaceId, String(review.id), "SUCCEEDED", findingsReview(String(review.id), candidate));
   return candidate;
 }
@@ -217,6 +219,85 @@ describe("automatic fixing of blocked checks and reviews (AUTOFIX)", () => {
     const ask = AutoFixAskSchema.parse(taskOf(harness, ctx.taskId).autofixAsk);
     expect(ask).toMatchObject({ reason: "spend-cap", capUsd: 15 });
     expect(workflowMessage({ taskId: ctx.taskId, workflow: workflowOf(harness, ctx.taskId), autoFix: { ask } })!.text).toContain("over the $15 per-task cap");
+  });
+
+  it("adds up EVERY usage record of a review run (one per reviewer), so the cap holds against both reviewers' cost", async () => {
+    const harness = await broker();
+    const ctx = await startCoding(harness);
+    // Planning 0.1 and coding 0.1, then a review of two reviewers at 7 dollars each: 14.2 spent, and 14.2 + 3 is over the 15 dollar cap. Counting one record per run sees only 7.3 and sends back.
+    await blockOnFindings(harness, ctx, 1, 0.1, 7);
+    expect(codingRuns(harness, ctx.workspaceId)).toHaveLength(1);
+    expect(automatic(harness, ctx.taskId)).toHaveLength(0);
+    expect(AutoFixAskSchema.parse(taskOf(harness, ctx.taskId).autofixAsk)).toMatchObject({ reason: "spend-cap", capUsd: 15 });
+  });
+
+  it("treats a usage record it cannot read as spend it does not know, and asks", async () => {
+    const harness = await broker();
+    const ctx = await startCoding(harness);
+    const candidate = await ctx.finishCoding(1);
+    const review = reviewRuns(harness, ctx.workspaceId).at(-1)!;
+    await harness.events(ctx.workspaceId, String(review.id), [{ type: "usage", payload: { schemaVersion: 1, costUsd: "lots" } }]);
+    await harness.finish(ctx.workspaceId, String(review.id), "SUCCEEDED", findingsReview(String(review.id), candidate));
+    expect(automatic(harness, ctx.taskId)).toHaveLength(0);
+    expect(AutoFixAskSchema.parse(taskOf(harness, ctx.taskId).autofixAsk)).toMatchObject({ reason: "inputs-missing" });
+  });
+
+  it("shows the ask on the task page, in the blocked step's place, with what Rovara tried and the cap", async () => {
+    const harness = await broker();
+    const ctx = await startCoding(harness);
+    await blockOnFindings(harness, ctx, 1, 0.1, 7);
+    const view = await getTaskDocumentView({ documentClient: harness.db, tableName: "state", actions: harness.actions, log: () => undefined,
+      checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }), projectChannelIds: async () => [], now: () => Date.now() },
+    { developerId: MAYA.developerId } as never, ctx.taskId);
+    expect(view.autofix?.lines.join("\n")).toContain("Why I'm asking you: Another automatic round would go over the $15 per-task cap on automatic fixing.");
+    const web = createTaskWeb({ authenticateSession: async () => ({ developerId: MAYA.developerId } as never), getTaskDocumentView: async () => view });
+    const answer = await web({ method: "GET", path: `/review/${ctx.taskId}/task`, headers: { cookie: "__Host-agentx_review_session=11111111-1111-4111-8111-111111111111" }, body: "" } as never, new URL(`https://agentx.example.test/review/${ctx.taskId}/task`));
+    expect(answer.body).toContain('id="autofix"');
+    expect(answer.body).toContain("$15 per-task cap");
+    // A task Rovara never touched has no such section.
+    const quiet = await broker({ ...ON, enabled: false });
+    const other = await startCoding(quiet);
+    await blockOnFindings(quiet, other, 1);
+    const quietView = await getTaskDocumentView({ documentClient: quiet.db, tableName: "state", actions: quiet.actions, log: () => undefined,
+      checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }), projectChannelIds: async () => [], now: () => Date.now() },
+    { developerId: MAYA.developerId } as never, other.taskId);
+    expect(quietView.autofix).toBeUndefined();
+  });
+
+  it("asks before giving up when the system move keeps failing, instead of leaving a card nobody is looking at", async () => {
+    const harness = await broker({ ...ON, enabled: false });
+    const ctx = await startCoding(harness);
+    const candidate = await blockOnFindings(harness, ctx, 1);
+    const blocked = workflowOf(harness, ctx.taskId);
+    harness.config!.enabled = true;
+    // Coding cannot be started (the workspace refuses every start), and this was the last look the row is allowed.
+    harness.db.injectFault({ command: "TransactWriteCommand", match: (input) => JSON.stringify(input).includes('"workflowMode":"IMPLEMENT"'), error: { name: "TransactionCanceledException" }, times: 5 });
+    const row = (workflowDispatchItem("state", ctx.taskId, blocked.revision, "AUTOFIX", candidate.digest, new Date().toISOString()).Put as { Item: Record<string, unknown> }).Item;
+    harness.db.set({ ...row, attempts: 59 });
+    await sweep(harness);
+    expect(dispatchRows(harness)).toEqual([]);
+    expect(codingRuns(harness, ctx.workspaceId)).toHaveLength(1);
+    expect(AutoFixAskSchema.parse(taskOf(harness, ctx.taskId).autofixAsk)).toMatchObject({ workflowRevision: blocked.revision, reason: "needs-a-person" });
+  });
+
+  it("moves a waiting row's next look a minute on, so waiting rows never sit at the head of the due index", async () => {
+    const harness = await broker({ ...ON, enabled: false });
+    const ctx = await startCoding(harness);
+    const candidate = await blockOnFindings(harness, ctx, 1);
+    const blocked = workflowOf(harness, ctx.taskId);
+    const created = new Date(Date.now() - 5 * 60_000).toISOString();
+    harness.db.set((workflowDispatchItem("state", ctx.taskId, blocked.revision, "AUTOFIX", candidate.digest, created).Put as { Item: Record<string, unknown> }).Item);
+    const stored = dispatchRows(harness)[0]!;
+    const now = Date.now();
+    await postponeAutofixRow({ documentClient: harness.db, tableName: "state" }, stored as { pk: string; sk: string }, now);
+    const moved = dispatchRows(harness)[0]!;
+    expect(moved.nextAttemptAt).toBe(new Date(now + 60_000).toISOString());
+    expect(moved.dispatchDueSk).toBe(`${String(moved.nextAttemptAt)}#${String(moved.sk)}`);
+    expect(moved.attempts).toBe(1);
+    // A give-up ask for a task that moved on writes nothing.
+    harness.db.set({ ...taskOf(harness, ctx.taskId), workflow: { ...blocked, revision: blocked.revision + 1, state: "RUNNING" } });
+    await recordAutofixGiveUpAsk({ documentClient: harness.db, tableName: "state" }, { ...taskOf(harness, ctx.taskId), workflow: blocked } as never, now);
+    expect(taskOf(harness, ctx.taskId).autofixAsk).toBeUndefined();
   });
 
   it("counts a run that used a model but reported no cost as one more round, never as free", async () => {

@@ -220,6 +220,7 @@ import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeoplePropos
   submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
+import { AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
 import {
   commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
   currentStepDocument, queueCommentAnswer, setSuggestion, suggestionsFor, type PageActor, type SlackRequestQueue,
@@ -4000,6 +4001,9 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     try { e2eResults = await deps.workflowE2EScenarioResults({ task, operations: (await workspaceReads(deps, task)).operations, actor: owner ? "owner" : "viewer" }); }
     catch (error) { log(deps, { event: "developer.task_e2e_results_unavailable", taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
   }
+  // AUTOFIX: what Rovara did by itself and, while the step is blocked, why it asks (the stored ask, read as data).
+  const autofixAsk = AutoFixAskSchema.safeParse(task.autofixAsk);
+  const autofixLines = workflow === undefined ? [] : autoFixCardLines(workflow, workflow.state === "BLOCKED" && autofixAsk.success ? autofixAsk.data : undefined, { plain: true });
   return {
     taskId, now: deps.now(), title: task.title, ...taskPageStage(workflow, task.closedAt !== undefined, owner, await publicationAttempts(deps, task)),
     ...(e2eResults === undefined ? {} : { e2eResults }),
@@ -4009,6 +4013,7 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     ...(visibleWorkflowDependenciesProgress === undefined ? {} : { workflowDependenciesProgress: visibleWorkflowDependenciesProgress }),
     pullRequests: (workflow?.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state })),
     ...(workflow !== undefined && task.closedAt === undefined && workflowApplicationRetryOffered(workflow) ? { applicationRetry: { canRetry: can(access.role, "retry") } } : {}),
+    ...(autofixLines.length === 0 ? {} : { autofix: { lines: autofixLines } }),
     history, access: pageAccess(access), ...(capabilities.peopleRevision === undefined ? {} : { peopleRevision: capabilities.peopleRevision }), canManagePeople: capabilities.canManagePeople,
     canTakeOwnership: capabilities.canTakeOwnership, comments, suggestions: shownSuggestions, askAvailable: await commentAnswersAvailable(deps, task),
     ...await pageDecidingView(deps, { task, caller, comments, suggestions: shownSuggestions, citations, claimIds }),

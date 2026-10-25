@@ -2294,3 +2294,80 @@ describe("page decisions and comments in Slack (spec 061 slice 2)", () => {
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "comment_nudge", outcome: "not_shared" }));
   });
 });
+
+describe("the blocked card carries what Rovara tried and why it asks (AUTOFIX)", () => {
+  const ASK = (revision: number) => ({ workflowRevision: revision, reason: "spend-cap", codes: ["review-findings"], capUsd: 15, at: new Date().toISOString() });
+  /** A workflow blocked in REVIEW with an introduced finding, and (when `looking`) the broker's automatic-fix row for it that has not been resolved yet. */
+  async function blockedTask(looking: boolean) {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const operationId = h.active();
+    const candidateDigest = "a".repeat(64);
+    await h.finish(h.workspaceId, operationId, "SUCCEEDED", { result: { result: "Both reviews PASS" } });
+    h.stream.take();
+    await h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now", ExpressionAttributeValues: { ":now": new Date().toISOString(), ":workflow": {
+        revision: 9, stage: "REVIEW", state: "BLOCKED", artifacts: [], decisions: [], candidate: { digest: candidateDigest },
+        verification: { candidateDigest, results: [{ checkId: "diff-check", status: "PASS" }] },
+        reviews: [{ operationId, candidateDigest, role: "CRITIC", provider: "t", version: "1", status: "FINDINGS", readOnly: true, recordedAt: new Date().toISOString(),
+          findings: [{ text: "The new parser drops the last line.", origin: "INTRODUCED", severity: "HIGH" }] }],
+      } } }));
+    if (looking) h.db.set({ pk: "WORKFLOW_DISPATCH", sk: `${h.taskId}#9`, entityType: "WORKFLOW_DISPATCH", taskId: h.taskId, workflowRevision: 9, kind: "AUTOFIX", candidateDigest, createdAt: new Date(h.now()).toISOString(), attempts: 0 });
+    return h;
+  }
+  const setAsk = (h: Awaited<ReturnType<typeof blockedTask>>, ask: unknown) => h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+    UpdateExpression: "SET autofixAsk = :ask", ExpressionAttributeValues: { ":ask": ask } }));
+
+  it("holds the card while Rovara is still looking, then posts it once with the ask", async () => {
+    const h = await blockedTask(true);
+    const before = h.posts.length;
+    await h.pump();
+    // Held: nothing posted for the blocked step, and the notice is retried.
+    expect(h.posts).toHaveLength(before);
+    expect(h.queue).toHaveLength(1);
+    // Rovara asks and resolves its row.
+    await setAsk(h, ASK(9));
+    h.db.delete("WORKFLOW_DISPATCH", `${h.taskId}#9`);
+    await h.pump();
+    const card = h.posts.at(-1)!;
+    expect(h.posts).toHaveLength(before + 1);
+    expect(card.text).toContain("Reviews found 1 issue in this change.");
+    expect(card.text).toContain("Why I'm asking you:* Another automatic round would go over the $15 per-task cap on automatic fixing.");
+    // The ask arriving also queued a notice of its own: the card already carries it, so nothing more is posted.
+    await h.pump();
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+  });
+
+  it("posts the card as it is after the hold, and the ask follows once as a post of its own", async () => {
+    const h = await blockedTask(true);
+    const before = h.posts.length;
+    await h.pump();
+    expect(h.posts).toHaveLength(before);
+    h.advance(11 * 60_000);
+    await h.pump();
+    const card = h.posts.at(-1)!;
+    expect(h.posts).toHaveLength(before + 1);
+    expect(card.text).not.toContain("Why I'm asking you");
+    // Later Rovara writes its ask: one follow-up with the lines, and no second card.
+    await setAsk(h, ASK(9));
+    await h.pump();
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 2);
+    expect(h.posts.at(-1)!.text).toContain("Why I'm asking you:* Another automatic round would go over the $15 per-task cap on automatic fixing.");
+    expect(h.posts.at(-1)!.blocks?.some((block) => (block as { type: string }).type === "actions")).toBeFalsy();
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 2);
+  });
+
+  it("adds nothing for a task Rovara never touched: the card is today's, with no wait", async () => {
+    const h = await blockedTask(false);
+    const before = h.posts.length;
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.posts.at(-1)!.text).not.toContain("Rovara");
+    expect(h.posts.at(-1)!.text).not.toContain("Why I'm asking you");
+  });
+});

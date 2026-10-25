@@ -9,7 +9,8 @@ vi.mock("../../packages/broker/src/aws/developer-tasks.js", () => ({
 }));
 
 import { runWorkflowAutofix, type AutofixDependencies } from "../../packages/broker/src/aws/workflow-autofix-runner.js";
-import { AutoFixAskSchema } from "../../packages/broker/src/developer/autofix-messages.js";
+import { AutoFixAskSchema, autoFixCardLines } from "../../packages/broker/src/developer/autofix-messages.js";
+import { autofixDayBudgetNeed } from "../../packages/broker/src/aws/workflow-autofix-runner.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 
 const CONTRACT = "c".repeat(64);
@@ -27,7 +28,7 @@ const task = (): DeveloperTaskRecord => ({
 } as unknown as DeveloperTaskRecord);
 
 type Baseline = { state: string; baseline?: unknown; reason?: string; deadlineAt?: string } | undefined;
-function deps(input: { baseline: Baseline; unknown: string[]; spent?: number; now?: number }): { deps: AutofixDependencies; writes: Array<Record<string, unknown>> } {
+function deps(input: { baseline: Baseline; unknown: string[]; spent?: number; now?: number; sourceReady?: boolean }): { deps: AutofixDependencies; writes: Array<Record<string, unknown>> } {
   const writes: Array<Record<string, unknown>> = [];
   const record = input.baseline === undefined ? undefined : { pk: `DEVTASK#${TASK}`, sk: `E2E_BASELINE#${CONTRACT}`, entityType: "WORKFLOW_E2E_BASELINE", taskId: TASK, contractDigest: CONTRACT, purpose: "baseline",
     attempt: 1, requestedAt: "2026-10-25T09:00:00.000Z", ...input.baseline };
@@ -35,7 +36,7 @@ function deps(input: { baseline: Baseline; unknown: string[]; spent?: number; no
     config: { enabled: true, capUsd: 15, roundEstimateUsd: 3 },
     route: {} as never,
     store: { tableName: "t", documentClient: { send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
-      if (command.constructor.name === "GetCommand") return { Item: record };
+      if (command.constructor.name === "GetCommand") return { Item: (command.input.Key as { sk: string }).sk === "META" ? task() : record };
       writes.push(command.input);
       return {};
     } } as never },
@@ -43,13 +44,14 @@ function deps(input: { baseline: Baseline; unknown: string[]; spent?: number; no
     dayBudgetHasRoom: async () => true,
     scenarioResults: async () => ({ scenarios: input.unknown.map((id) => row(id, "UNKNOWN")) }),
     ownerCancelledChecks: async () => false,
+    baselineSourceReady: async () => input.sourceReady === true,
     readArtifactText: async () => undefined,
     now: () => input.now ?? Date.parse("2026-10-25T10:05:00.000Z"),
     log: () => undefined,
   } };
 }
 const recorded = (rows: Array<ReturnType<typeof row>>, skipped: string[] = []) => ({ state: "RECORDED", baseline: { status: "PASSED", scenarios: rows, ...(skipped.length === 0 ? {} : { skippedAiScenarios: skipped.map((id) => ({ scenarioId: id, title: id })) }) } });
-const run = (d: AutofixDependencies) => runWorkflowAutofix(d, task(), { expectedRevision: 9, startedAt: "2026-10-25T10:00:00.000Z" });
+const run = (d: AutofixDependencies, mutate?: (t: DeveloperTaskRecord) => DeveloperTaskRecord) => runWorkflowAutofix(d, mutate === undefined ? task() : mutate(task()), { expectedRevision: 9, startedAt: "2026-10-25T10:00:00.000Z" });
 const asked = (writes: Array<Record<string, unknown>>) => AutoFixAskSchema.parse((writes.at(-1)!.ExpressionAttributeValues as { ":ask": unknown })[":ask"]);
 
 describe("an unclear browser and API fault is settled by each UNKNOWN scenario's own result on the original code", () => {
@@ -102,6 +104,60 @@ describe("an unclear browser and API fault is settled by each UNKNOWN scenario's
     expect(await run(d)).toBe("ASKED");
     expect(asked(writes)).toMatchObject({ reason: "unclear-fault", groups: [{ id: "a", original: "not-run" }, { id: "b", original: "not-run" }] });
     expect(moves.sendBack).not.toHaveBeenCalled();
+  });
+
+  it("runs the original-code round first, with the one automatic Retry checks, when it was requested but never started and its code is exported", async () => {
+    moves.sendBack.mockClear(); moves.retryChecks.mockClear();
+    const { deps: d, writes } = deps({ baseline: { state: "REQUESTED" }, unknown: ["a"], sourceReady: true });
+    expect(await run(d)).toBe("RETRIED");
+    expect(moves.retryChecks).toHaveBeenCalledTimes(1);
+    expect(moves.retryChecks).toHaveBeenCalledWith(expect.anything(), TASK, expect.objectContaining({ expectedRevision: 9, reason: expect.stringContaining("unchanged code is checked first") as string }));
+    expect(moves.sendBack).not.toHaveBeenCalled();
+    expect(writes).toEqual([]);
+  });
+
+  it("asks at once, never waiting, when the requested round cannot run (no exported code), was already retried for this code, or the money forbids a retry", async () => {
+    moves.retryChecks.mockClear();
+    const noSource = deps({ baseline: { state: "REQUESTED" }, unknown: ["a"], sourceReady: false });
+    expect(await run(noSource.deps)).toBe("ASKED");
+    expect(asked(noSource.writes)).toMatchObject({ reason: "unclear-fault", groups: [{ id: "a", original: "not-run" }] });
+    const retried = deps({ baseline: { state: "REQUESTED" }, unknown: ["a"], sourceReady: true });
+    expect(await run(retried.deps, (t) => ({ ...t, workflow: { ...t.workflow!, decisions: [{ requestId: "r", workflowRevision: 8, decision: "REQUEST_CHANGES", actorId: "x", actorRole: "AGENTX", reason: "x", source: "AUTO_RETRY",
+      auto: { stage: "VERIFY", candidateDigest: "d".repeat(64) }, at: "2026-10-25T09:00:00.000Z" }] } } as unknown as DeveloperTaskRecord))).toBe("ASKED");
+    const poor = deps({ baseline: { state: "REQUESTED" }, unknown: ["a"], sourceReady: true, spent: 14 });
+    expect(await run(poor.deps)).toBe("ASKED");
+    expect(asked(poor.writes)).toMatchObject({ reason: "unclear-fault" });
+    expect(moves.retryChecks).not.toHaveBeenCalled();
+  });
+
+  it("lists every UNKNOWN scenario of the round, however many, and says the original code could not be checked when none actually failed there", async () => {
+    const ids = Array.from({ length: 40 }, (_, index) => `s${index}`);
+    const { deps: d, writes } = deps({ baseline: { state: "UNAVAILABLE", reason: "not-exported" }, unknown: ids });
+    expect(await run(d)).toBe("ASKED");
+    const ask = asked(writes);
+    expect(ask.groups).toHaveLength(40);
+    const lines = autoFixCardLines({ decisions: [], revision: 9 }, ask);
+    expect(lines.filter((line) => line.startsWith("• s"))).toHaveLength(40);
+    expect(lines.join("\n")).not.toContain("And ");
+    expect(lines.join("\n")).toContain("The original code could not be checked, so I can't tell whether new code would fix it.");
+    expect(lines.join("\n")).not.toContain("also fail on the original code");
+    // When a scenario really failed on the original code, the card says so.
+    const failed = deps({ baseline: recorded([row("a", "FAILED")]), unknown: ["a"] });
+    await run(failed.deps);
+    expect(autoFixCardLines({ decisions: [], revision: 9 }, asked(failed.writes)).join("\n")).toContain("also fail on the original code");
+  });
+
+  it("asks when a guard in the move refuses although the policy allowed it, instead of leaving the card without an ask", async () => {
+    moves.sendBack.mockClear();
+    moves.sendBack.mockResolvedValueOnce("STALE" as never);
+    const { deps: d, writes } = deps({ baseline: recorded([row("a", "PASSED")]), unknown: ["a"] });
+    expect(await run(d)).toBe("ASKED");
+    expect(asked(writes)).toMatchObject({ reason: "inputs-missing" });
+    expect(moves.sendBack).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks the day budget for what one round needs (a group's worst case), not for a single call", () => {
+    expect(autofixDayBudgetNeed({ maxModelCallsPerGroup: 40, maxInputTokensPerGroup: 300_000 })).toEqual({ calls: 40, inputTokens: 300_000 });
   });
 
   it("asks when the whole task's spend is unreadable, before any move", async () => {

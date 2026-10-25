@@ -325,7 +325,7 @@ import { createDeveloperApiConfiguration } from "./workflow-dependencies-configu
 import { planQualityFindings } from "../developer/plan-quality.js";
 import { planDryRunFindings, readPlanDryRunOutcome } from "../developer/plan-dry-run-results.js";
 import { planUnreadableCategory } from "../developer/plan-check-summary.js";
-import { AUTOFIX_ROUND_ESTIMATE_USD, autofixConfigFromEnvironment, runWorkflowAutofix, type AutofixConfig, type AutofixDependencies } from "./workflow-autofix-runner.js";
+import { AUTOFIX_ROUND_ESTIMATE_USD, autofixConfigFromEnvironment, autofixDayBudgetNeed, postponeAutofixRow, recordAutofixGiveUpAsk, runWorkflowAutofix, type AutofixConfig, type AutofixDependencies } from "./workflow-autofix-runner.js";
 import { PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, planRevisionPrompt, planRevisionsUsed, planSelfCheckKey, planQualityContextOf, recordedPlanQualityContext, selfCheckNotes, type PlanSelfCheckSkipReason, type PlanSelfCheckState } from "../developer/plan-self-check.js";
 import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, candidateBuildSourceAdmissionReference, type StoredCandidateBuildSource } from "./candidate-build-source.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
@@ -10734,17 +10734,46 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
 /** At most this many looks at one blocked step: a failing look is retried each sweep, then dropped (the task stays blocked with its card). */
 const AUTOFIX_ATTEMPTS_MAX = 60;
 
-/** AUTOFIX: the whole task's recorded model spend. A run with no usage record that uses a model counts as one more round's estimate (never as zero). */
+/** At most this many pages of one operation's events are read for its usage records; an operation with more is spend that cannot be read. */
+const AUTOFIX_USAGE_PAGES_MAX = 40;
+
+/**
+ * Every usage record of one operation, added up: a review run records one per reviewer (code and security), a coding run one. Undefined when the events cannot all be read (more pages than
+ * the bound, or a read that failed): spend that is not known is never counted as zero.
+ */
+async function autofixOperationUsage(dependencies: AwsBrokerDependencies, operationId: string): Promise<{ total: number; records: number } | undefined> {
+  let total = 0;
+  let records = 0;
+  let start: Record<string, unknown> | undefined;
+  for (let page = 0; page < AUTOFIX_USAGE_PAGES_MAX; page += 1) {
+    const response = await dependencies.documentClient.send(new QueryCommand({
+      TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :event)", FilterExpression: "#type = :usage",
+      ExpressionAttributeNames: { "#type": "type" }, ExpressionAttributeValues: { ":pk": `OPERATION#${operationId}`, ":event": "EVENT#", ":usage": "usage" },
+      ConsistentRead: true, ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: Array<{ payload?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
+    for (const item of response.Items ?? []) {
+      const usage = TaskUsageTelemetrySchema.safeParse(item.payload);
+      records += 1;
+      // A usage record with no cost (an unpriced model) counts as one more round's estimate, never as free; one that cannot be read makes the whole spend unknown.
+      if (!usage.success) return undefined;
+      total += usage.data.costUsd !== null ? usage.data.costUsd : AUTOFIX_ROUND_ESTIMATE_USD;
+    }
+    start = response.LastEvaluatedKey;
+    if (start === undefined) return { total, records };
+  }
+  return undefined;
+}
+
+/** AUTOFIX: the whole task's recorded model spend, every usage record of every run of the task. A model run with no usage record counts as one more round's estimate (never as zero). */
 async function autofixTaskSpendUsd(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<number | undefined> {
   try {
-    const actions = developerTaskActions(dependencies);
-    const operations = (await actions.operations(task.workspaceId)).filter((operation) => operation.kind === "task");
+    const operations = (await developerTaskActions(dependencies).operations(task.workspaceId)).filter((operation) => operation.kind === "task");
     let total = 0;
     for (const operation of operations) {
       if (operation.workflowMode === "CHECKS") continue;
-      const events = await actions.eventsNewestFirst(operation.id, 40);
-      const usage = TaskUsageTelemetrySchema.safeParse(events.find((event) => event.type === "usage")?.payload);
-      total += usage.success && usage.data.costUsd !== null ? usage.data.costUsd : AUTOFIX_ROUND_ESTIMATE_USD;
+      const usage = await autofixOperationUsage(dependencies, operation.id);
+      if (usage === undefined) return undefined;
+      total += usage.records === 0 ? AUTOFIX_ROUND_ESTIMATE_USD : usage.total;
     }
     return total;
   } catch { return undefined; }
@@ -10756,7 +10785,7 @@ async function autofixDayBudgetHasRoom(dependencies: AwsBrokerDependencies, task
   try {
     const derived = deriveE2EAgentRoute(await dependencies.e2eAgentInstallation());
     const budgets = derived.status === "available" ? derived.definition.budgets : E2E_MODEL_ROUTE_DEFAULT_BUDGETS;
-    return await e2eDayBudgetRoom({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, projectName: task.project, now: Date.now() }, { calls: 1, inputTokens: 1 },
+    return await e2eDayBudgetRoom({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, projectName: task.project, now: Date.now() }, autofixDayBudgetNeed(budgets),
       { maxInputTokens: budgets.maxInputTokensPerProjectDay, maxCalls: budgets.maxCallsPerProjectDay });
   } catch { return undefined; }
 }
@@ -10767,8 +10796,10 @@ async function autofixDayBudgetHasRoom(dependencies: AwsBrokerDependencies, task
  */
 async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: AccessPausedWorkflowDispatch, remove: () => Promise<void>): Promise<"DISPATCHED" | "STALE" | "RETRY"> {
   const config = dependencies.autofix;
+  const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
+  let task: DeveloperTaskRecord | undefined;
   try {
-    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
+    task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
     if (config?.enabled !== true || task === undefined || dependencies.developer === undefined) { await remove(); return "STALE"; }
     const caller = { developerId: task.developerId, sessionId: "workflow-autofix", amr: task.provider, name: task.developerName };
     const tasks = developerTaskActions(dependencies);
@@ -10788,27 +10819,31 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
         const latest = operations.filter((operation) => operation.kind === "task" && operation.workflowMode === "CHECKS").sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
         return latest !== undefined && operations.some((operation) => operation.kind === "cancel" && (operation as { targetOperationId?: string }).targetOperationId === latest.id);
       },
+      baselineSourceReady: async (current) => {
+        const digest = current.workflow?.candidate?.digest;
+        if (digest === undefined) return false;
+        const source = await candidateSourceOperation(dependencies, current, digest);
+        const exported = StoredBaselineSourceSchema.safeParse(source?.baselineSource);
+        return exported.success && exported.data.status === "READY";
+      },
       readArtifactText: async (key) => { const bytes = await readStoredBytes(dependencies, key, 64 * 1024 + 1); return bytes?.toString("utf8"); },
       now: Date.now,
       log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
     };
     const outcome = await runWorkflowAutofix(deps, task, { expectedRevision: item.workflowRevision, startedAt: item.createdAt });
     if (outcome !== "WAITING") { await remove(); return outcome === "STALE" || outcome === "DISABLED" ? "STALE" : "DISPATCHED"; }
-    return "RETRY";
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "autofix.look_failed", taskId: item.taskId, attempt: (item.attempts ?? 0) + 1, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
-    if ((item.attempts ?? 0) + 1 >= AUTOFIX_ATTEMPTS_MAX) { await remove(); return "STALE"; }
+    if ((item.attempts ?? 0) + 1 >= AUTOFIX_ATTEMPTS_MAX) {
+      // Giving up: the owner is told a person must act, so the card never stands for a task nobody is looking at.
+      try { if (task !== undefined) await recordAutofixGiveUpAsk(store, task, Date.now()); }
+      catch (askError) { console.log(JSON.stringify({ component: "broker", event: "autofix.give_up_ask_failed", taskId: item.taskId, error: askError instanceof Error ? askError.name : "unknown" })); }
+      await remove();
+      return "STALE";
+    }
   }
-  // Look again at the next sweep, a minute from now.
-  const next = new Date(Date.now() + 60_000).toISOString();
-  try {
-    await dependencies.documentClient.send(new UpdateCommand({
-      TableName: dependencies.tableName, Key: { pk: item.pk, sk: item.sk },
-      UpdateExpression: "SET attempts = :attempts, nextAttemptAt = :next, dispatchDueSk = :due",
-      ConditionExpression: "attribute_exists(pk)",
-      ExpressionAttributeValues: { ":attempts": (item.attempts ?? 0) + 1, ":next": next, ":due": `${next}#${item.sk}` },
-    }));
-  } catch (error) { if (!isConditional(error)) throw error; }
+  // Look again at the next sweep, a minute from now (a waiting row too, so it never sits at the head of the due index).
+  await postponeAutofixRow(store, item, Date.now());
   return "RETRY";
 }
 

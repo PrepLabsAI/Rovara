@@ -12,8 +12,10 @@ import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 export const AUTO_FIX_GROUP_RESULTS = ["passed", "failed", "cannot-run", "skipped", "pending", "not-run"] as const;
 export type AutoFixGroupResult = (typeof AUTO_FIX_GROUP_RESULTS)[number];
 
-/** At most this many UNKNOWN groups are listed on one ask card (and kept on its record); the card says how many more there were. */
-export const AUTOFIX_ASK_GROUPS_MAX = 12;
+/** Every UNKNOWN group of the round is listed on the ask card and kept on its record: a round has at most this many scenarios (the display's limit), so none is left out. */
+export const AUTOFIX_ASK_GROUPS_MAX = 64;
+/** How long the blocked card waits for the automatic-fix look at it to finish, so the card can carry the ask; after it the card is posted as it is and a follow-up carries the ask. */
+export const AUTOFIX_CARD_HOLD_MS = 10 * 60_000;
 
 /**
  * Why Rovara asked instead of acting, kept on the task beside the blocked revision it is for so the Slack card and the page can say it. `capUsd` is the cap that was hit (spend-cap).
@@ -87,10 +89,10 @@ export function autoFixCodeSentence(code: AutoFixCode): string {
 }
 
 /** Why Rovara asked, in a sentence that names the limit, the cap or the budget it hit. */
-export function autoFixAskReasonSentence(reason: AutoFixAskReason, capUsd?: number): string {
+export function autoFixAskReasonSentence(reason: AutoFixAskReason, capUsd?: number, failedOnOriginal = true): string {
   switch (reason) {
     case "needs-a-person": return "Only a person can fix this; new code or a retry would not.";
-    case "original-code-also-fails": return "The same checks also fail on the original code, so new code may not fix it.";
+    case "original-code-also-fails": return failedOnOriginal ? "The same checks also fail on the original code, so new code may not fix it." : "The original code could not be checked, so I can't tell whether new code would fix it.";
     case "unclear-fault": return "I could not tell whether the code or the setup is at fault.";
     case "send-back-limit": return "I already sent this back to coding twice for this plan, which is my limit.";
     case "retry-limit": return "I already retried this once for this code, which is my limit.";
@@ -131,17 +133,19 @@ export function autoFixTriedSentence(workflow: Pick<WorkflowSnapshot, "decisions
  * The lines the blocked card adds when Rovara handled this task by itself or asks because of a limit: what it already tried, why it is asking, and every UNKNOWN group with its own result
  * on the original code. Empty when there is nothing to add (so the card reads as it did before). The options are the card's own buttons.
  */
-export function autoFixCardLines(workflow: Pick<WorkflowSnapshot, "decisions" | "revision">, ask: AutoFixAsk | undefined): string[] {
+export function autoFixCardLines(workflow: Pick<WorkflowSnapshot, "decisions" | "revision">, ask: AutoFixAsk | undefined, options: { plain?: boolean } = {}): string[] {
+  const bold = (text: string): string => (options.plain === true ? text : `*${text}*`);
   const current = ask !== undefined && ask.workflowRevision === workflow.revision ? ask : undefined;
   const tried = autoFixTriedSentence(workflow);
   if (tried === undefined && current === undefined) return [];
   const lines: string[] = [];
-  if (tried !== undefined) lines.push(`*What Rovara already tried:* ${tried}`);
+  if (tried !== undefined) lines.push(`${bold("What Rovara already tried:")} ${tried}`);
   if (current !== undefined) {
-    lines.push(`*Why I'm asking you:* ${autoFixAskReasonSentence(current.reason, current.capUsd)}`);
     const groups = current.groups ?? [];
+    // "Also fails on the original code" is said only when a scenario really failed there; a round that could not run says so instead.
+    lines.push(`${bold("Why I'm asking you:")} ${autoFixAskReasonSentence(current.reason, current.capUsd, groups.length === 0 || groups.some((group) => group.original === "failed"))}`);
     if (groups.length > 0) {
-      lines.push("*Not decided yet:*");
+      lines.push(bold("Not decided yet:"));
       for (const group of groups) lines.push(`• ${group.id} ${ORIGINAL_SENTENCES[group.original]}`);
       const more = (current.groupCount ?? groups.length) - groups.length;
       if (more > 0) lines.push(`• And ${more} more.`);

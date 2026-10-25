@@ -1,6 +1,6 @@
 import { GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  AUTO_FIX_DEFAULT_CAP_USD, autoFixDecision, classifyBlockedWorkflow, wholeTaskSpendUsd,
+  AUTO_FIX_DEFAULT_CAP_USD, WORKFLOW_AUTO_ACTION_LIMIT, autoFixDecision, classifyBlockedWorkflow, wholeTaskSpendUsd, workflowAutoFixCounts, workflowAutoSpendRefusal,
   type AutoFixAskReason, type AutoFixCode, type AutoFixDecision, type AutoFixFacts, type E2EScenarioResults, type GroupOriginalResult, type OriginalCodeResult, type WorkflowAutoSpend,
 } from "@agentx/contracts";
 import { AUTOFIX_ASK_GROUPS_MAX, AutoFixAskSchema, autoFixRetryReason, autoFixSendBackReason, type AutoFixAsk } from "../developer/autofix-messages.js";
@@ -33,6 +33,8 @@ export interface AutofixConfig {
 export const AUTOFIX_ROUND_ESTIMATE_USD = 3;
 /** How long a task waits for the original-code round before Rovara stops waiting and asks. */
 export const AUTOFIX_BASELINE_WAIT_MS = 45 * 60_000;
+/** What the one automatic Retry checks records when it is made to run the original-code round first. */
+const AUTOFIX_BASELINE_RETRY_REASON = "Rovara retried the checks by itself so the unchanged code is checked first and the fault can be told apart.";
 
 export function autofixConfigFromEnvironment(env: Readonly<Record<string, string | undefined>>): AutofixConfig {
   const cap = env.AUTOFIX_CAP_USD === undefined ? AUTO_FIX_DEFAULT_CAP_USD : Number(env.AUTOFIX_CAP_USD);
@@ -57,6 +59,8 @@ export interface AutofixDependencies {
   dayBudgetHasRoom(task: DeveloperTaskRecord): Promise<boolean | undefined>;
   /** The task's current browser and API rows, and the baseline's. */
   scenarioResults(task: DeveloperTaskRecord): Promise<E2EScenarioResults | undefined>;
+  /** Whether the candidate's coding run exported the unchanged code a baseline round needs (a READY baseline source), so one Retry checks would run that round first. */
+  baselineSourceReady(task: DeveloperTaskRecord): Promise<boolean>;
   /** Whether the owner stopped the task's latest checks. */
   ownerCancelledChecks(task: DeveloperTaskRecord): Promise<boolean>;
   /** The text at an object key (a plan's stored self-check record), or undefined. */
@@ -68,7 +72,7 @@ export interface AutofixDependencies {
 export type AutofixOutcome = "DISABLED" | "STALE" | "NONE" | "SENT_BACK" | "RETRIED" | "DUPLICATE" | "WAITING" | "ASKED";
 
 /** The original-code result of an UNKNOWN row of the current round, from the baseline record of the approved plan. */
-async function unknownGroupResults(deps: AutofixDependencies, task: DeveloperTaskRecord): Promise<{ groups: Record<string, GroupOriginalResult>; baselineRequests: number }> {
+async function unknownGroupResults(deps: AutofixDependencies, task: DeveloperTaskRecord): Promise<{ groups: Record<string, GroupOriginalResult>; baselineRequests: number; recordState: string | undefined }> {
   const [results, record] = await Promise.all([deps.scenarioResults(task), readWorkflowE2EBaselineRecord(deps.store, task)]);
   const unknown = (results?.scenarios ?? []).filter((row) => row.status === "UNKNOWN");
   const baselineRequests = record === undefined ? 0 : 1;
@@ -76,7 +80,8 @@ async function unknownGroupResults(deps: AutofixDependencies, task: DeveloperTas
   const groups: Record<string, GroupOriginalResult> = {};
   for (const row of unknown) {
     let original: GroupOriginalResult;
-    if (record === undefined) original = "not-run";
+    // A record still only REQUESTED was never started, and nothing starts it while the task is blocked: it is a round that was not run, never one to wait for.
+    if (record === undefined || record.state === "REQUESTED") original = "not-run";
     else if (view?.status === "UNAVAILABLE") original = "cannot-run";
     else if (view === undefined) original = "pending";
     else {
@@ -86,7 +91,7 @@ async function unknownGroupResults(deps: AutofixDependencies, task: DeveloperTas
     }
     groups[row.scenarioId] = original;
   }
-  return { groups, baselineRequests };
+  return { groups, baselineRequests, recordState: record?.state };
 }
 
 /** What a proposed check did on the original code, from the dry run recorded beside its plan. */
@@ -114,6 +119,32 @@ async function writeAsk(deps: AutofixDependencies, task: DeveloperTaskRecord, as
   }
 }
 
+/** Rovara could not act on a blocked step and gives up looking: the owner is told a person must act, so a card without an ask never stands for a task nobody is looking at. */
+export async function recordAutofixGiveUpAsk(store: WorkflowE2EBaselineStore, task: DeveloperTaskRecord, nowMs: number, reason: AutoFixAskReason = "needs-a-person"): Promise<void> {
+  const workflow = task.workflow;
+  if (workflow === undefined) return;
+  const codes = classifyBlockedWorkflow(workflow).map((entry) => entry.code);
+  await writeAsk({ store } as AutofixDependencies, task, { workflowRevision: workflow.revision, reason, codes: codes.slice(0, 30), at: new Date(nowMs).toISOString() });
+}
+
+/** The original-code round is not in yet: look again in a minute (the row moves out of the head of the due index, so waiting rows never crowd out other recovery). */
+export async function postponeAutofixRow(store: WorkflowE2EBaselineStore, row: { pk: string; sk: string; attempts?: number | undefined }, nowMs: number): Promise<void> {
+  const next = new Date(nowMs + 60_000).toISOString();
+  try {
+    await store.documentClient.send(new UpdateCommand({
+      TableName: store.tableName, Key: { pk: row.pk, sk: row.sk },
+      UpdateExpression: "SET attempts = :attempts, nextAttemptAt = :next, dispatchDueSk = :due",
+      ConditionExpression: "attribute_exists(pk)",
+      ExpressionAttributeValues: { ":attempts": (row.attempts ?? 0) + 1, ":next": next, ":due": `${next}#${row.sk}` },
+    }));
+  } catch (error) { if (!isConditional(error)) throw error; }
+}
+
+/** What one more round needs of the project's AI-navigation day budget: one group's worst case under the route's per-group budgets (a round runs one or more groups; the budget is checked again per call). */
+export function autofixDayBudgetNeed(budgets: { maxModelCallsPerGroup: number; maxInputTokensPerGroup: number }): { calls: number; inputTokens: number } {
+  return { calls: budgets.maxModelCallsPerGroup, inputTokens: budgets.maxInputTokensPerGroup };
+}
+
 /**
  * Looks at one blocked VERIFY or REVIEW once and acts or asks. `expectedRevision` is the blocked revision the trigger was made for; `startedAt` is when the trigger's row was written
  * (the wait for the original-code round is bounded from it). Returns what happened; WAITING means the original-code round is not in yet and the caller should look again soon.
@@ -133,10 +164,12 @@ export async function runWorkflowAutofix(deps: AutofixDependencies, task: Develo
   const facts: AutoFixFacts = {};
   let baselineRequests = 0;
   let groups: Record<string, GroupOriginalResult> = {};
+  let recordState: string | undefined;
   if (codes.has("e2e-evidence-unknown")) {
     const found = await unknownGroupResults(deps, task);
     groups = found.groups;
     baselineRequests = found.baselineRequests;
+    recordState = found.recordState;
     facts.e2eUnknownGroups = groups;
   } else if (workflow.e2e?.required === true) {
     baselineRequests = (await readWorkflowE2EBaselineRecord(deps.store, task)) === undefined ? 0 : 1;
@@ -166,15 +199,35 @@ export async function runWorkflowAutofix(deps: AutofixDependencies, task: Develo
     log("ASK", { reason, codes: [...askCodes] });
     return "ASKED";
   };
+  const blockedHere = async (): Promise<boolean> => {
+    const fresh = await deps.store.documentClient.send(new GetCommand({ TableName: deps.store.tableName, Key: taskKey(task.taskId), ConsistentRead: true })) as unknown as { Item?: DeveloperTaskRecord };
+    return fresh.Item?.workflow?.revision === workflow.revision && fresh.Item.workflow.state === "BLOCKED" && fresh.Item.closedAt === undefined;
+  };
   const moved = async (error: unknown): Promise<AutofixOutcome> => {
     // The owner pressed first (the revision moved): theirs stands and nothing else is done. Any other failure is the caller's to retry.
-    const fresh = await deps.store.documentClient.send(new GetCommand({ TableName: deps.store.tableName, Key: taskKey(task.taskId), ConsistentRead: true })) as unknown as { Item?: DeveloperTaskRecord };
-    if (fresh.Item?.workflow?.revision !== workflow.revision) {
+    if (!await blockedHere()) {
       log("RACE_LOST");
       return "STALE";
     }
     throw error;
   };
+  /** A guard in the system move refused although the policy allowed it (the limits or the money read differently): nobody else will look, so the owner is asked. */
+  const guardRefused = async (askCodes: readonly AutoFixCode[]): Promise<AutofixOutcome> => ((await blockedHere()) ? ask("inputs-missing", askCodes) : "STALE");
+
+  // The original-code result decides send back or ask (owner rule). A round that was requested at approval but never started can still run: the first CHECKS dispatch after a retry runs it
+  // before the candidate's checks. So when its code is exported, the one automatic Retry checks (counted as this stage's retry) is used, and the next block is decided with the result.
+  if (first.action === "ASK" && first.reason === "unclear-fault" && recordState === "REQUESTED" && !workflowAutoSpendRefusal(spend) && room === true
+    && workflowAutoFixCounts(workflow.decisions).retriesFor("VERIFY", workflow.candidate?.digest) === 0 && workflowAutoFixCounts(workflow.decisions).actions < WORKFLOW_AUTO_ACTION_LIMIT
+    && workflow.stage === "VERIFY" && await deps.baselineSourceReady(task)) {
+    let outcome: Awaited<ReturnType<typeof autoRetryChecksFromSystem>>;
+    try {
+      outcome = await autoRetryChecksFromSystem(deps.route, task.taskId, { expectedRevision: workflow.revision, spend, reason: AUTOFIX_BASELINE_RETRY_REASON });
+    } catch (error) { return moved(error); }
+    deps.log({ event: "autofix.decided", taskId: task.taskId, stage: workflow.stage, revision: workflow.revision, action: "RETRY", result: outcome, retryStage: "VERIFY", codes: first.codes, why: "original-code-round" });
+    if (outcome === "STARTED") return "RETRIED";
+    if (outcome === "DUPLICATE") return "DUPLICATE";
+    return guardRefused(first.codes);
+  }
 
   switch (decision.action) {
     case "NONE": return "NONE";
@@ -186,7 +239,7 @@ export async function runWorkflowAutofix(deps: AutofixDependencies, task: Develo
         outcome = await autoSendBackToCodingFromSystem(deps.route, task.taskId, { expectedRevision: workflow.revision, reason: autoFixSendBackReason(decision.codes), spend });
       } catch (error) { return moved(error); }
       log("SEND_BACK", { result: outcome, codes: decision.codes });
-      return outcome === "STARTED" ? "SENT_BACK" : outcome === "DUPLICATE" ? "DUPLICATE" : "STALE";
+      return outcome === "STARTED" ? "SENT_BACK" : outcome === "DUPLICATE" ? "DUPLICATE" : guardRefused(decision.codes);
     }
     case "RETRY": {
       const input2 = { expectedRevision: workflow.revision, spend, reason: autoFixRetryReason(decision.stage, decision.codes) };
@@ -195,7 +248,7 @@ export async function runWorkflowAutofix(deps: AutofixDependencies, task: Develo
         outcome = decision.stage === "VERIFY" ? await autoRetryChecksFromSystem(deps.route, task.taskId, input2) : await autoRetryReviewsFromSystem(deps.route, task.taskId, input2);
       } catch (error) { return moved(error); }
       log("RETRY", { result: outcome, retryStage: decision.stage, codes: decision.codes });
-      return outcome === "STARTED" ? "RETRIED" : outcome === "DUPLICATE" ? "DUPLICATE" : "STALE";
+      return outcome === "STARTED" ? "RETRIED" : outcome === "DUPLICATE" ? "DUPLICATE" : guardRefused(decision.codes);
     }
   }
 }
