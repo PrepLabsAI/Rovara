@@ -113,10 +113,12 @@ const ORIGINAL_SENTENCES: Readonly<Record<AutoFixGroupResult, string>> = Object.
 
 /** What Rovara already did by itself on this task, from the decisions it recorded; undefined when it did nothing. */
 export function autoFixTriedSentence(workflow: Pick<WorkflowSnapshot, "decisions">): string | undefined {
-  const counts = workflowAutoFixCounts(workflow.decisions);
-  const retries = workflow.decisions.filter((decision) => decision.source === "AUTO_RETRY");
+  // A stored workflow always has its decisions; a card built from a partial one (an old record) simply has nothing to add.
+  const decisions = workflow.decisions ?? [];
+  const counts = workflowAutoFixCounts(decisions);
+  const retries = decisions.filter((decision) => decision.source === "AUTO_RETRY");
   const parts: string[] = [];
-  const sentBack = workflow.decisions.filter((decision) => decision.source === "AUTO_FIX").length;
+  const sentBack = decisions.filter((decision) => decision.source === "AUTO_FIX").length;
   if (sentBack > 0) parts.push(`Sent back to coding ${times(sentBack)}${counts.sendBacksSincePlanApproval === sentBack ? "" : ` (${times(counts.sendBacksSincePlanApproval)} for this plan)`}`);
   const checks = retries.filter((decision) => decision.auto?.stage === "VERIFY").length;
   const reviews = retries.filter((decision) => decision.auto?.stage === "REVIEW").length;
