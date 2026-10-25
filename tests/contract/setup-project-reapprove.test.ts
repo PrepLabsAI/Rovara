@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { E2EPolicySchema, type E2EPolicy } from "@agentx/contracts";
-import { addProject, reapproveProjectSetup } from "../../packages/cli/src/setup/project-add.js";
+import { readFile } from "node:fs/promises";
+import YAML from "yaml";
+import { addProject, projectFilePath, reapproveProjectSetup } from "../../packages/cli/src/setup/project-add.js";
 import { scriptedPrompter } from "../support/init-fakes.js";
 import { CONTROL_PLANE, bindSetupSourceProvider, fakeControlPlane, fakeRepositories } from "../support/setup-fakes.js";
 
@@ -140,5 +142,91 @@ describe("agentx project setup-approve (re-approval of an already registered pro
     await expect(reapproveProjectSetup({ env: "staging", session, prompter, write: () => undefined, services: broken, projectName: "payments-api" })).rejects.toThrow();
     expect(prompter.asked).toEqual([]);
     expect(context.plane.registered).toHaveLength(1);
+  });
+
+  // I-2 SETUPAPPROVEREV: the next revision comes from the registry's head, never from the local file, and no approval is recorded unless a revision can carry it.
+  const localRevision = async () => (YAML.parse(await readFile(projectFilePath(configDir, "payments-api"), "utf8")) as { revision: number }).revision;
+  // Only the approvals recorded after `registered()` (which records its own, at project add).
+  const approvals = (context: ReturnType<typeof setup>) => context.plane.requests.filter((request) => request.path === "/v1/admin/projects/setup-approvals").slice(1);
+
+  it("builds the next revision from the registered head when the local file is stale, and updates the local file (live case: file revision 1, registry revision 2)", async () => {
+    const context = setup();
+    await registered(context);
+    context.pinNow();
+    context.plane.registryHeads.set("payments-api", { revision: 2 });
+    const lines: string[] = [];
+    const result = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: context.services, projectName: "payments-api" });
+    expect(result).toMatchObject({ revision: 3, decision: "approve" });
+    expect((context.plane.registered.at(-1) as { definition: { revision: number } }).definition.revision).toBe(3);
+    expect(await localRevision()).toBe(3);
+    expect(lines.join("\n")).toContain("local file said revision 1");
+  });
+
+  it("refuses before recording any approval when the registry head holds repositories or connectors the local file lacks", async () => {
+    const context = setup();
+    await registered(context);
+    context.pinNow();
+    context.plane.registryHeads.set("payments-api", { revision: 2, connectors: [{ name: "linear", type: "linear" }] });
+    await expect(reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: context.services, projectName: "payments-api" }))
+      .rejects.toThrow(/registered revision 2 .* differs from the local file/);
+    expect(approvals(context)).toEqual([]);
+    expect(context.plane.registered).toHaveLength(1);
+    expect(await localRevision()).toBe(1);
+  });
+
+  it("refuses before recording any approval when the registry cannot be read", async () => {
+    const context = setup();
+    await registered(context);
+    context.pinNow();
+    context.plane.projectsListStatus = 503;
+    await expect(reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: context.services, projectName: "payments-api" }))
+      .rejects.toThrow(/could not read the registered revision of payments-api; nothing was approved or registered/);
+    expect(approvals(context)).toEqual([]);
+    expect(context.plane.registered).toHaveLength(1);
+  });
+
+  it("refuses before recording any approval when the control plane does not list the project (a local file from another environment)", async () => {
+    const context = setup();
+    await registered(context);
+    const other = setup();
+    const services = { ...other.services, configDir };
+    other.pinNow();
+    await expect(reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services, projectName: "payments-api" }))
+      .rejects.toThrow(/payments-api is not registered with this control plane/);
+    expect(approvals(other)).toEqual([]);
+    expect(other.plane.registered).toEqual([]);
+  });
+
+  it("says exactly what happened and what to run when registration fails after the approval was recorded, and the rerun completes", async () => {
+    const context = setup();
+    await registered(context);
+    context.pinNow();
+    let failRegistration = true;
+    const flaky = { ...context.services, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const target = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url);
+      if (failRegistration && target.pathname === "/v1/admin/projects" && init?.method === "POST") return new Response(JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: "unavailable" } }), { status: 503, headers: { "content-type": "application/json" } });
+      return context.services.fetch(url, init);
+    }) as typeof globalThis.fetch };
+    const failure = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: flaky, projectName: "payments-api" }).then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toContain("approval of the setup proposal is recorded, but revision 2 of payments-api was NOT registered");
+    expect(failure?.message).toContain("agentx --env staging project setup-approve --project-name payments-api");
+    expect(approvals(context)).toHaveLength(1);
+    expect(context.plane.registered).toHaveLength(1);
+    expect(await localRevision()).toBe(1);
+    failRegistration = false;
+    const result = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: flaky, projectName: "payments-api" });
+    expect(result).toMatchObject({ revision: 2, decision: "approve" });
+    expect(await localRevision()).toBe(2);
+  });
+
+  it("a decline reads the registry too and keeps the registered head in its message", async () => {
+    const context = setup();
+    await registered(context);
+    context.pinNow();
+    context.plane.registryHeads.set("payments-api", { revision: 2 });
+    const lines: string[] = [];
+    const result = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([false]), write: (line) => lines.push(line), services: context.services, projectName: "payments-api" });
+    expect(result).toMatchObject({ revision: 2, decision: "decline" });
+    expect(lines.join("\n")).toContain("revision 2 stays as it is");
   });
 });

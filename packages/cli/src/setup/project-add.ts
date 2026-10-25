@@ -10,7 +10,7 @@ import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
 import { verifyE2ESetupProposal } from "@agentx/broker/e2e/discovery";
 import {
-  AgentXError, AgentXErrorCodeSchema, ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, canonicalJson, environmentStackName,
+  AdminProjectsResponseSchema, AgentXError, AgentXErrorCodeSchema, ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, canonicalJson, environmentStackName,
   type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition, type E2EPolicy, type E2ESetupProposal,
 } from "@agentx/contracts";
 import { listCredentials } from "../admin/credential.js";
@@ -382,6 +382,39 @@ async function recordSetupDecision(input: { session: AdminSession; fetch: typeof
   return { proposalRef: trusted.proposalRef, proposalSha256: trusted.proposalSha256, decision };
 }
 
+/** The head of the registry for one project: the revision the control plane holds, and the repositories and connectors that revision names (the listing carries nothing else). */
+interface RegisteredHead { revision: number; repositories: string[]; connectors: string[] }
+
+/**
+ * I-2: the next revision is built on what the control plane has registered, not on the local file, which is only a copy that another machine or person can leave behind. Anything
+ * unclear (the listing unreadable, the project not listed) refuses before any approval is recorded: an approval no registered revision carries pins nothing.
+ */
+async function registeredHead(input: { session: AdminSession; fetch: typeof fetch; name: string }): Promise<RegisteredHead> {
+  const unreadable = (reason: string) => agentXError("RUNTIME_UNAVAILABLE", `could not read the registered revision of ${input.name}; nothing was approved or registered${reason}. Run the command again when the control plane answers`);
+  let listing: ReturnType<typeof AdminProjectsResponseSchema.safeParse>;
+  try {
+    const response = await input.fetch(`${input.session.controlPlaneUrl.replace(/\/$/, "")}/v1/admin/projects`, { headers: { authorization: `Bearer ${input.session.accessToken}` }, signal: AbortSignal.timeout(30_000) });
+    const { ok, status, body } = await readJsonResponse(response);
+    if (!ok) throw unreadable(` (HTTP ${status})`);
+    listing = AdminProjectsResponseSchema.safeParse(body);
+  } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw unreadable("");
+  }
+  if (!listing.success) throw unreadable(" (the answer was not a project list)");
+  const found = listing.data.projects.find((project) => project.name === input.name);
+  if (found === undefined) throw agentXError("CONFIG_INVALID", `${input.name} is not registered with this control plane (check --env), so there is no revision to build on; nothing was approved or registered. Register it with agentx project add first`);
+  return { revision: found.latestRevision, repositories: found.repositories.map((repository) => repository.url.toLowerCase()).sort(), connectors: found.connectors.map((connector) => `${connector.type}:${connector.name}`).sort() };
+}
+
+/** What the local file would register that the registered head does not match: a connector or repository the head has that the file lacks would be silently dropped by the next revision. */
+function headDiffersFromFile(head: RegisteredHead, file: ProjectDefinition): boolean {
+  const connectors = new Set((file.integrations?.connectors ?? []).map((connector) => `${connector.type}:${connector.name}`));
+  if (file.integrations?.githubMcp !== undefined) connectors.add("github:github");
+  const repositories = file.repositories.map((repository) => repository.url.toLowerCase()).sort();
+  return JSON.stringify(repositories) !== JSON.stringify(head.repositories) || head.connectors.some((connector) => !connectors.has(connector));
+}
+
 /**
  * `agentx project setup-approve` (M1.4 Task 4.9): proposes the setup of a project already registered from this machine again, from its registered repository and default
  * branch, and asks the administrator the same one question `project add` asks (with the AI navigation sentence, D5). An approval is recorded with the control plane, through the
@@ -401,6 +434,11 @@ export async function reapproveProjectSetup(input: {
   if (existing === undefined) throw agentXError("CONFIG_INVALID", `project ${name} is not registered from this machine (no ${file}); register it with agentx project add first`);
   const repository = existing.repositories[0];
   if (repository === undefined) throw agentXError("CONFIG_INVALID", `project ${name} has no repository to propose its setup from`);
+  // I-2: read the registry's head before anything is proposed or recorded.
+  const head = await registeredHead({ session: input.session, fetch: input.services.fetch, name });
+  if (head.revision !== existing.revision && headDiffersFromFile(head, existing)) {
+    throw agentXError("CONFIG_INVALID", `the registered revision ${head.revision} of ${name} differs from the local file ${file} (revision ${existing.revision}) in its repositories or connectors, so a new revision built from the file would drop them; nothing was approved or registered. Copy the registered settings into that file, set its revision to ${head.revision}, and run this again`);
+  }
   // No quarantine here, unlike project add: without a trusted proposal there is nothing to approve.
   const trusted = validateSetupProposalResponse(await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-proposals", {
     repositoryUrl: repository.url, ref: repository.defaultBranch,
@@ -408,11 +446,20 @@ export async function reapproveProjectSetup(input: {
   const accepted = await confirmSetupPlan({ prompter: input.prompter, write: input.write, proposal: trusted.proposal, aiNavigation: trusted.aiNavigation, env: input.env, aiNavigationUntested: trusted.aiNavigationUntested, setup: existing.setup, readiness: existing.readiness });
   const setupApproval = await recordSetupDecision({ session: input.session, fetch: input.services.fetch, projectName: name, trusted, decision: accepted ? "approve" : "decline" });
   if (!accepted) {
-    input.write(`Declined the setup of ${name}; the decision is recorded and revision ${existing.revision} stays as it is.`);
-    return { name, revision: existing.revision, file, decision: "decline", modelRouteRevision: null };
+    input.write(`Declined the setup of ${name}; the decision is recorded and revision ${head.revision} stays as it is.`);
+    return { name, revision: head.revision, file, decision: "decline", modelRouteRevision: null };
   }
-  const definition = ProjectDefinitionSchema.parse({ ...existing, revision: existing.revision + 1, e2e: trusted.policy });
-  const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services, setupApproval, setupPolicy: trusted.policy });
+  const definition = ProjectDefinitionSchema.parse({ ...existing, revision: head.revision + 1, e2e: trusted.policy });
+  if (head.revision !== existing.revision) input.write(`The local file said revision ${existing.revision}, but revision ${head.revision} is the registered head; registering revision ${definition.revision} on it.`);
+  let registered: Awaited<ReturnType<typeof registerRevision>>;
+  try {
+    registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services, setupApproval, setupPolicy: trusted.policy });
+  } catch (error) {
+    // The control plane needs the recorded decision before it accepts the revision, so a failure here leaves an approval that no revision carries. Say so, and what to run.
+    const code = error instanceof AgentXError ? error.code : "RUNTIME_UNAVAILABLE";
+    const cause = error instanceof AgentXError ? error.message : "an unexpected error";
+    throw agentXError(code, `your approval of the setup proposal is recorded, but revision ${definition.revision} of ${name} was NOT registered, so no revision carries it and tasks keep running on revision ${head.revision} (${cause}). Run agentx --env ${input.env} project setup-approve --project-name ${name} again; it records the same approval again and registers the revision`);
+  }
   input.write(`Approved the setup of ${name} and registered revision ${definition.revision}${trusted.policy.modelRouteRevision === null ? "" : `, pinning AI navigation route revision ${trusted.policy.modelRouteRevision}`}. Its file is ${registered.file}.`);
   for (const warning of registered.warnings) input.write(`Warning: ${warning}`);
   return { name, revision: definition.revision, file: registered.file, decision: "approve", modelRouteRevision: trusted.policy.modelRouteRevision };
