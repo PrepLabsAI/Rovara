@@ -52,6 +52,8 @@ export interface ControlPlaneClient {
   projects(): Promise<DeveloperProjectsResponse>;
   startTask(request: StartDeveloperTaskRequest): Promise<DeveloperTaskView>;
   getTask(taskId: string, events: number, options?: CallOptions): Promise<DeveloperTaskView>;
+  /** PLANFULLDOC: one stored version of the task's plan, whole (the latest when `version` is left out). */
+  getTaskPlan(taskId: string, query: { document?: "requirements" | "design" | "plan"; version?: number }): Promise<TaskPlanView>;
   listTasks(query: { project?: string; status?: DeveloperTaskStatus; limit: number }): Promise<DeveloperTaskListItem[]>;
   continueTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
   decideWorkflowTask(taskId: string, request: WorkflowDecisionRequest): Promise<DeveloperTaskView>;
@@ -85,6 +87,20 @@ export interface ControlPlaneClient {
 /** Spec 025 A1: adminApiVersion is absent from a control plane from before 25d. */
 /** Spec 025 E16 (C22): confirm is absent from a control plane from before 25e. */
 const ConfigurationSchema = z.object({ env: z.string(), apiVersion: z.string(), adminApiVersion: z.string().optional(), confirm: AgentXConfigurationConfirmSchema.optional() });
+/** The full-plan answer: the canonical document is untrusted model text, kept as data; the summary is AgentX's plain wording of its checks. */
+const TaskPlanResponseSchema = z.object({
+  plan: z.object({
+    taskId: z.string(), document: z.enum(["requirements", "design", "plan"]), version: z.number().int().positive(), sha256: z.string(),
+    approved: z.boolean(), current: z.boolean(), versions: z.array(z.number().int().positive()),
+    content: z.record(z.string(), z.unknown()),
+    summary: z.object({
+      lines: z.array(z.string()),
+      decisions: z.array(z.object({ id: z.string(), question: z.string(), answer: z.string() })),
+      noneReason: z.string().optional(),
+    }),
+  }),
+});
+export type TaskPlanView = z.infer<typeof TaskPlanResponseSchema>["plan"];
 /** The feedback page's view of a PR feedback proposal; the tool reads only the fields it shows. */
 const FeedbackReviewResponseSchema = z.object({ review: z.record(z.string(), z.unknown()) });
 const UNREADABLE = "AgentX answered with something this version of the CLI cannot read; upgrade it";
@@ -240,6 +256,12 @@ export function httpControlPlaneClient(options: {
     projects: () => call(DeveloperProjectsResponseSchema, "GET", "/v1/dev/projects"),
     startTask: async (request) => task(await call(DeveloperTaskResponseSchema, "POST", "/v1/dev/tasks", request, true, { busyStep: START_BUSY_STEP })),
     getTask: async (taskId, events, options) => task(await call(DeveloperTaskResponseSchema, "GET", path(taskId, `?events=${events}`), undefined, true, options)),
+    getTaskPlan: async (taskId, query) => {
+      const search = new URLSearchParams();
+      if (query.document !== undefined) search.set("document", query.document);
+      if (query.version !== undefined) search.set("version", String(query.version));
+      return (await call(TaskPlanResponseSchema, "GET", path(taskId, `/plan${search.size === 0 ? "" : `?${search.toString()}`}`))).plan;
+    },
     listTasks: async (query) => {
       const search = new URLSearchParams({ limit: String(query.limit) });
       if (query.project !== undefined) search.set("project", query.project);

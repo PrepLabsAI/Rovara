@@ -173,7 +173,7 @@ describe("agentx mcp over stdio (FR-026)", () => {
     await client.connect(transport);
     try {
       const { tools } = await client.listTools();
-      expect(tools).toHaveLength(25);
+      expect(tools).toHaveLength(26);
       // Ruling F3: the tools were listed first, and the error result still passes the SDK's checks.
       const result = await client.callTool({ name: "agentx_whoami", arguments: {} });
       expect(toolError(result)).toMatchObject({ code: "SIGN_IN_REQUIRED", next_step: "run npx @preplabsai/rovara-code login <your AgentX URL>" });
@@ -195,7 +195,7 @@ describe("agentx mcp over stdio (FR-026)", () => {
 
     const initialized = await mcp.initialize();
     expect(initialized.result).toMatchObject({ serverInfo: { name: "agentx" } });
-    expect(((await mcp.request("tools/list")).result?.tools as unknown[]).length).toBe(25);
+    expect(((await mcp.request("tools/list")).result?.tools as unknown[]).length).toBe(26);
 
     const whoami = await mcp.callTool("agentx_whoami");
     expect(whoami.isError).not.toBe(true);
