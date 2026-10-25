@@ -1,6 +1,6 @@
 // T2 PLANRULES: the pure plan self-check rules, the built-in file checks, and the contract members they read.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -40,6 +40,8 @@ const TARGETS = [{ targetId: "orders-owner-web", kind: "web" }, { targetId: "ord
 const MOCKS = [{ componentId: "inventory-v1", requestedTargetIds: TARGETS.map((target) => target.targetId) }];
 const webSteps = ["navigate", "fill", "click", "request"];
 const KINDS_WITH_AGENT = [{ kind: "web", steps: [...webSteps, "agent"], assertions: ["text", "visible", "csv", "http-status"] }, { kind: "api", steps: ["request"], assertions: ["http-status", "json"] }];
+type QualityInput = Omit<Parameters<typeof planQualityFindings>[1], "kind">;
+const quality = (plan: PlanDocument, input: QualityInput = {}) => planQualityFindings(plan, { kind: "plan", ...input });
 const context = (overrides: Partial<PlanQualityContext> = {}): PlanQualityContext => ({ targets: TARGETS, mockFixtures: MOCKS, executableKinds: KINDS_WITH_AGENT, unavailableReasons: [], ...overrides });
 
 describe("built-in file checks have fixed meanings", () => {
@@ -157,7 +159,7 @@ describe("scenarioProves", () => {
   });
 
   it("an old stored plan, without the new members, still parses and reads back unchanged", () => {
-    const old = withChecks([check("proposed-1", "Retry tests", "npx", ["vitest", "run"])], { "proposed-1": ["1"] });
+    const old = withChecks([check("proposed-1", "Retry tests", "npx", ["vitest", "run"])], { "proposed-1": ["1.1"] });
     expect(readCanonicalPlan(canonicalPlanJson(old))).toEqual(old);
     expect(parsePlanDocument(planAnswer(planDocument()), { kind: "plan" }).ok).toBe(true);
   });
@@ -174,7 +176,7 @@ describe("mock-missing-for-target", () => {
   const plan = (mocks: string[], list = scenarios) => withChecks([], {}, { e2e: intentOf({ targets, scenarios: list, mocks }) });
 
   it("names every viewer target that has no mock selected, and only those", () => {
-    const findings = planQualityFindings(plan(["orders-owner-web"]), { context: context() }).filter((finding) => finding.code === "mock-missing-for-target");
+    const findings = quality(plan(["orders-owner-web"]), { context: context() }).filter((finding) => finding.code === "mock-missing-for-target");
     expect(findings.map((finding) => finding.targetIds)).toEqual([["orders-viewer-web"], ["orders-viewer-api"]]);
     expect(findings[0]).toMatchObject({ fixtureIds: ["inventory-v1"], revisable: true });
     expect(findings[0]!.plannerLine).toContain("orders-viewer-web");
@@ -182,22 +184,22 @@ describe("mock-missing-for-target", () => {
   });
 
   it("is quiet once every target that runs the app selects the mock, or when no mock is offered for it", () => {
-    expect(codesOf(planQualityFindings(plan(targets), { context: context() }))).not.toContain("mock-missing-for-target");
-    expect(codesOf(planQualityFindings(plan([]), { context: context({ mockFixtures: [] }) }))).not.toContain("mock-missing-for-target");
-    expect(codesOf(planQualityFindings(plan(["orders-owner-web"]), { context: context({ mockFixtures: [{ componentId: "inventory-v1", requestedTargetIds: ["orders-owner-web"] }] }) }))).not.toContain("mock-missing-for-target");
+    expect(codesOf(quality(plan(targets), { context: context() }))).not.toContain("mock-missing-for-target");
+    expect(codesOf(quality(plan([]), { context: context({ mockFixtures: [] }) }))).not.toContain("mock-missing-for-target");
+    expect(codesOf(quality(plan(["orders-owner-web"]), { context: context({ mockFixtures: [{ componentId: "inventory-v1", requestedTargetIds: ["orders-owner-web"] }] }) }))).not.toContain("mock-missing-for-target");
   });
 
   it("ignores a target whose scenarios only call source-interface contracts, and skips the rule without a planning context", () => {
     const portable = [scenario("p", ["orders-viewer-web"], [step("invoke-contract", { operationId: "op", input: {} })])];
-    expect(codesOf(planQualityFindings(plan([], portable), { context: context() }))).not.toContain("mock-missing-for-target");
-    expect(codesOf(planQualityFindings(plan(["orders-owner-web"])))).not.toContain("mock-missing-for-target");
+    expect(codesOf(quality(plan([], portable), { context: context() }))).not.toContain("mock-missing-for-target");
+    expect(codesOf(quality(plan(["orders-owner-web"])))).not.toContain("mock-missing-for-target");
   });
 });
 
 describe("check-command-lint", () => {
   const lintOf = (label: string, executable: string, args: string[]) => {
-    const plan = withChecks([check("proposed-1", label, executable, args)], { "proposed-1": ["1", "2", "nc1"] });
-    return planQualityFindings(plan).filter((finding) => finding.code === "check-command-lint");
+    const plan = withChecks([check("proposed-1", label, executable, args)], { "proposed-1": ["1.1"] });
+    return quality(plan).filter((finding) => finding.code === "check-command-lint");
   };
 
   it("flags ecf67d6a's grep -cL, in any spelling, and a shell script that runs it", () => {
@@ -208,11 +210,11 @@ describe("check-command-lint", () => {
     expect(lintOf("Export button removed", "grep", ["-L", "export-csv", "public/app.js"])).toMatchObject([{ lint: "grep-files-without-match" }]);
   });
 
-  it("flags ecf67d6a's exact double-quoted selector, and a quoted literal in a file check", () => {
+  it("flags ecf67d6a's exact double-quoted selector in a grep, but not the fixed text of a file check", () => {
     expect(lintOf("Selector present", "grep", ["-q", "querySelector(\"#export-csv\")", "public/app.js"])).toMatchObject([{ lint: "quoted-literal" }]);
     expect(lintOf("Selector present", "grep", ["-q", "-e", "getElementById('export')", "public/app.js"])).toMatchObject([{ lint: "quoted-literal" }]);
     const builtin = builtinFileCheckCommand({ kind: "file-contains", cwd: FOLDER, path: "public/app.js", text: "getElementById(\"export\")" });
-    expect(lintOf("Selector present", builtin.executable, builtin.args)).toMatchObject([{ lint: "quoted-literal" }]);
+    expect(lintOf("Selector present", builtin.executable, builtin.args)).toEqual([]);
   });
 
   it("flags grep used for absence (counting, or plain) unless the script negates it, and never a sound presence grep", () => {
@@ -220,7 +222,8 @@ describe("check-command-lint", () => {
     expect(lintOf("Server does not use the old route", "grep", ["-q", "oldRoute", "server.js"])).toMatchObject([{ lint: "grep-absence" }]);
     expect(lintOf("Server does not use the old route", "sh", ["-c", "grep -q oldRoute server.js"])).toMatchObject([{ lint: "grep-absence" }]);
     expect(lintOf("Server does not use the old route", "sh", ["-c", "! grep -q oldRoute server.js"])).toEqual([]);
-    expect(lintOf("Route handler exists", "grep", ["-c", "orders.csv", "server.js"])).toEqual([]);
+    expect(lintOf("Route handler exists", "grep", ["-q", "orders.csv", "server.js"])).toEqual([]);
+    expect(lintOf("Route handler exists", "grep", ["-c", "orders.csv", "server.js"])).toMatchObject([{ lint: "grep-count" }]);
     expect(lintOf("Retry tests", "npx", ["vitest", "run"])).toEqual([]);
   });
 
@@ -237,28 +240,27 @@ describe("check-command-lint", () => {
 describe("claim-not-covered and claim-static-only", () => {
   const grep = check("proposed-1", "Route exists", "grep", ["-c", "orders.csv", "server.js"]);
   const runner = check("proposed-2", "Retry tests", "npx", ["vitest", "run"]);
-  const coverage = (plan: PlanDocument) => planQualityFindings(plan).filter((finding) => finding.code.startsWith("claim-"));
+  const coverage = (plan: PlanDocument) => quality(plan).filter((finding) => finding.code.startsWith("claim-"));
 
   it("reports a claim proved only by a grep as static-only, and one with no check as not covered", () => {
-    const findings = coverage(withChecks([grep], { "proposed-1": ["1"] }));
-    expect(findings).toMatchObject([{ code: "claim-not-covered", claimIds: ["2", "nc1"], revisable: true }, { code: "claim-static-only", claimIds: ["1"], revisable: true }]);
+    const findings = coverage(withChecks([grep], { "proposed-1": ["1.1"] }));
+    expect(findings).toMatchObject([{ code: "claim-not-covered", claimIds: ["2", "nc1"], revisable: true }, { code: "claim-static-only", claimIds: ["1.1"], revisable: true }]);
     expect(findings[0]!.ownerSentence).toContain("Not changing 1");
   });
 
   it("counts a running check, a scenario that drives the app, and a child claim's proof", () => {
-    expect(coverage(withChecks([runner], { "proposed-2": ["1", "2", "nc1"] }))).toEqual([]);
     expect(coverage(withChecks([runner], { "proposed-2": ["1.1", "2", "nc1"] }))).toEqual([]);
     const intent = intentOf({ targets: ["orders-owner-web"], scenarios: [scenario("owner-csv", ["orders-owner-web"], [step("navigate", { path: "/" })])] });
-    expect(coverage(withChecks([grep], { "proposed-1": ["1"] }, { e2e: intent, scenarioProves: { "owner-csv": ["1", "2", "nc1"] } }))).toEqual([]);
+    expect(coverage(withChecks([grep], { "proposed-1": ["1.1"] }, { e2e: intent, scenarioProves: { "owner-csv": ["1.1", "2", "nc1"] } }))).toEqual([]);
     // A scenario that does not say what it proves covers nothing.
-    expect(coverage(withChecks([grep], { "proposed-1": ["1"] }, { e2e: intent }))).toHaveLength(2);
+    expect(coverage(withChecks([grep], { "proposed-1": ["1.1"] }, { e2e: intent }))).toHaveLength(2);
   });
 
   it("treats a built-in file check as reading files, and a source-interface-only scenario the same way", () => {
     const builtin = { id: "proposed-1", label: "No export", command: { ...builtinFileCheckCommand({ kind: "file-not-contains", cwd: FOLDER, path: "a.js", text: "x" }), timeoutSeconds: 60 } };
-    expect(coverage(withChecks([builtin], { "proposed-1": ["1", "2", "nc1"] }))).toMatchObject([{ code: "claim-static-only", claimIds: ["1", "2", "nc1"] }]);
+    expect(coverage(withChecks([builtin], { "proposed-1": ["1.1", "2", "nc1"] }))).toMatchObject([{ code: "claim-static-only", claimIds: ["1.1", "2", "nc1"] }]);
     const portable = intentOf({ targets: ["orders-owner-web"], scenarios: [scenario("p", ["orders-owner-web"], [step("inspect-contract", { operationId: "op" })])] });
-    expect(coverage(withChecks([], {}, { e2e: portable, scenarioProves: { p: ["1"] } })).map((finding) => finding.code)).toEqual(["claim-not-covered", "claim-static-only"]);
+    expect(coverage(withChecks([], {}, { e2e: portable, scenarioProves: { p: ["1.1"] } })).map((finding) => finding.code)).toEqual(["claim-not-covered", "claim-static-only"]);
   });
 
   it("classifies commands: readers read, runners run, a find that executes runs", () => {
@@ -273,10 +275,10 @@ describe("claim-not-covered and claim-static-only", () => {
   it("gives an old stored plan (no checks, no scenarios, no new members) warnings and no errors, and leaves a plan that says no check applies alone", () => {
     const old = planDocument();
     expect(readCanonicalPlan(canonicalPlanJson(old))).toEqual(old);
-    const findings = planQualityFindings(old);
-    expect(findings).toMatchObject([{ code: "claim-not-covered", claimIds: ["1", "2", "nc1"] }]);
+    const findings = quality(old);
+    expect(findings).toMatchObject([{ code: "claim-not-covered", claimIds: ["1.1", "2", "nc1"] }]);
     expect(findings.every((finding) => PlanQualityFindingSchema.safeParse(finding).success)).toBe(true);
-    expect(planQualityFindings(codingPlan({ checks: { proposed: [], noneReason: "Docs-only change.", proves: {} } }))).toEqual([]);
+    expect(quality(codingPlan({ checks: { proposed: [], noneReason: "Docs-only change.", proves: {} } })).map((finding) => finding.code)).toEqual(["checks-waived"]);
   });
 });
 
@@ -289,7 +291,7 @@ describe("e2e-kind-unavailable and e2e-target-unavailable", () => {
   const ownerScenario = scenario("owner-ai", ["orders-owner-web"], [step("agent", { goal: "export", maxActions: 5 })], [{ kind: "text", testId: "status", equals: "ok" }]);
 
   it("says the AI steps are off when the request needs them and the pinned revision has no AI route", () => {
-    const findings = planQualityFindings(codingPlan(), { context: demo, needs: { stepKinds: ["agent"] } });
+    const findings = quality(codingPlan(), { context: demo, needs: { stepKinds: ["agent"] } });
     expect(findings[0]).toMatchObject({ code: "e2e-kind-unavailable", kinds: ["agent"], revisable: false });
     expect(findings[0]!.ownerSentence).toBe("AI navigation steps are off for this project revision: its AI route is not approved. Run project setup-approve, then close and restart the task.");
   });
@@ -297,13 +299,13 @@ describe("e2e-kind-unavailable and e2e-target-unavailable", () => {
   it("flags an agent step the plan wrote anyway, and a kind the runtime does not offer for the scenario's target kind", () => {
     const targetsAvailable = context({ executableKinds: [{ kind: "web", steps: webSteps, assertions: ["text"] }, { kind: "api", steps: ["request"], assertions: ["http-status"] }] });
     const plan = codingPlan({ e2e: intentOf({ targets: ["orders-owner-web", "orders-viewer-api"], scenarios: [ownerScenario, scenario("api-json", ["orders-viewer-api"], [step("request", { requestId: "r", path: "/x", method: "GET", body: null })], [{ kind: "json", responseId: "r", schemaRef: "s", equals: {} }])] }) });
-    expect(planQualityFindings(plan, { context: targetsAvailable }).filter((finding) => finding.code === "e2e-kind-unavailable")).toMatchObject([{ kinds: ["agent", "json"] }]);
-    expect(planQualityFindings(plan, { context: context() }).filter((finding) => finding.code === "e2e-kind-unavailable")).toEqual([]);
+    expect(quality(plan, { context: targetsAvailable }).filter((finding) => finding.code === "e2e-kind-unavailable")).toMatchObject([{ kinds: ["agent", "json"] }]);
+    expect(quality(plan, { context: context() }).filter((finding) => finding.code === "e2e-kind-unavailable")).toEqual([]);
   });
 
   it("names each target the plan requests that cannot run now, with the cause, grouped by cause, and puts the gaps before everything else", () => {
     const plan = codingPlan({ e2e: intentOf({ targets: ["orders-owner-web", "orders-viewer-web", "orders-viewer-api"], scenarios: [scenario("s", ["orders-owner-web"], [step("navigate", { path: "/" })])], unavailable: [{ targetId: "orders-viewer-web" }] }) });
-    const findings = planQualityFindings(plan, { context: demo, needs: { targetIds: ["orders-viewer-web", "not-in-policy"] } });
+    const findings = quality(plan, { context: demo, needs: { targetIds: ["orders-viewer-web", "not-in-policy"] } });
     const gaps = findings.filter((finding) => finding.code === "e2e-target-unavailable");
     expect(gaps).toMatchObject([
       { targetIds: ["not-in-policy"], targetReason: "not-offered", revisable: false },
@@ -316,27 +318,221 @@ describe("e2e-kind-unavailable and e2e-target-unavailable", () => {
   });
 
   it("is quiet when everything the plan needs is offered", () => {
-    expect(planQualityFindings(codingPlan({ e2e: intentOf({ targets: ["orders-owner-web"], scenarios: [ownerScenario] }) }), { context: context(), needs: { stepKinds: ["agent"] } })
+    expect(quality(codingPlan({ e2e: intentOf({ targets: ["orders-owner-web"], scenarios: [ownerScenario] }) }), { context: context(), needs: { stepKinds: ["agent"] } })
       .filter((finding) => finding.code.startsWith("e2e-"))).toEqual([]);
   });
 });
 
 describe("the same findings for every path, in the stored shape", () => {
   it("gives identical findings for Quick and Full, and every finding parses as the stored shape", () => {
-    const plan = withChecks([check("proposed-1", "No default remains", "grep", ["-cL", "default", "a.js"])], { "proposed-1": ["1"] }, {
+    const plan = withChecks([check("proposed-1", "No default remains", "grep", ["-cL", "default", "a.js"])], { "proposed-1": ["1.1"] }, {
       e2e: intentOf({ targets: TARGETS.map((target) => target.targetId), scenarios: [scenario("v", ["orders-viewer-api"], [step("request", { requestId: "r", path: "/x", method: "GET", body: null })])] }),
     });
     const input = { context: context({ unavailableReasons: [{ targetId: "orders-owner-web", reason: "runtime-not-ready" }] }), needs: { stepKinds: ["agent"] } };
-    const quick = planQualityFindings(plan, { ...input, path: "QUICK" } as never);
-    const full = planQualityFindings(plan, { ...input, path: "FULL" } as never);
+    const quick = quality(plan, { ...input, path: "QUICK" } as never);
+    const full = quality(plan, { ...input, path: "FULL" } as never);
     expect(quick).toEqual(full);
-    expect(quick).toEqual(planQualityFindings(plan, input));
+    expect(quick).toEqual(quality(plan, input));
     expect(new Set(codesOf(quick))).toEqual(new Set(["e2e-target-unavailable", "mock-missing-for-target", "check-command-lint", "claim-not-covered", "claim-static-only"]));
     for (const finding of quick) expect(PlanQualityFindingSchema.parse(finding)).toEqual(finding);
   });
 
   it("accepts the planning context the broker builds as it is", () => {
-    const fromBroker = (built: FeatureE2EPlanningContext) => planQualityFindings(codingPlan(), { context: built });
+    const fromBroker = (built: FeatureE2EPlanningContext) => quality(codingPlan(), { context: built });
     expect(typeof fromBroker).toBe("function");
+  });
+});
+
+// Fix round 1 (review I1-I7 and M1, M2, M4). Inputs are from the failures of 2026-10-24 and 2026-10-25 where one applies.
+describe("fix round 1: requiredReal and mocks (65fd0cd0)", () => {
+  const real = { ...scenario("viewer-web-hidden", ["orders-viewer-web"], [step("navigate", { path: "/" })], [{ kind: "visible", testId: "export", equals: false }]), requiredRealComponentIds: ["inventory-v1"] };
+
+  it("does not ask for the mock of a component a scenario on the target requires real", () => {
+    const plan = withChecks([], {}, { e2e: intentOf({ targets: ["orders-viewer-web"], scenarios: [real] }) });
+    const codes = codesOf(quality(plan, { context: context() }));
+    expect(codes).not.toContain("mock-missing-for-target");
+    expect(codes).not.toContain("real-component-mocked");
+  });
+
+  it("flags a component that is mocked and required real on the same target, naming target, component and scenario, with or without a planning context", () => {
+    const plan = withChecks([], {}, { e2e: intentOf({ targets: ["orders-viewer-web", "orders-owner-web"], mocks: ["orders-viewer-web", "orders-owner-web"], scenarios: [real, scenario("owner", ["orders-owner-web"], [step("navigate", { path: "/" })])] }) });
+    for (const input of [{ context: context() }, {}]) {
+      expect(quality(plan, input).filter((finding) => finding.code === "real-component-mocked")).toMatchObject([
+        { targetIds: ["orders-viewer-web"], fixtureIds: ["inventory-v1"], scenarioIds: ["viewer-web-hidden"], revisable: true },
+      ]);
+    }
+  });
+});
+
+describe("fix round 1: AI step budget", () => {
+  const agentPlan = (maxActions: number) => withChecks([], {}, { e2e: intentOf({ targets: ["orders-owner-web"], scenarios: [scenario("owner-ai", ["orders-owner-web"], [step("agent", { goal: "export", maxActions })], [{ kind: "text", testId: "status", equals: "ok" }])] }) });
+  const budget = (maxActions: number, needs?: { maxActions: number }) => quality(agentPlan(maxActions), needs === undefined ? {} : { needs }).filter((finding) => finding.code === "agent-budget-exceeded");
+
+  it("flags an agent step above the request's number, or above the route cap of 8 when the request says nothing or more", () => {
+    expect(budget(12, { maxActions: 5 })).toMatchObject([{ scenarioIds: ["owner-ai"], limit: 5, revisable: true }]);
+    expect(budget(6, { maxActions: 5 })).toMatchObject([{ limit: 5 }]);
+    expect(budget(9)).toMatchObject([{ limit: 8 }]);
+    expect(budget(9, { maxActions: 20 })).toMatchObject([{ limit: 8 }]);
+  });
+
+  it("accepts a step within the limit", () => {
+    expect(budget(5, { maxActions: 5 })).toEqual([]);
+    expect(budget(8)).toEqual([]);
+  });
+});
+
+describe("fix round 1: proof by scenario", () => {
+  const claims = [{ id: "1", text: "Viewers do not see the export button; it is hidden for them." }, { id: "2", text: "Owners can download the CSV." }];
+  const viewer = (assertions: unknown[]) => scenario("viewer-web-hidden", ["orders-viewer-web"], [step("navigate", { path: "/" })], assertions);
+  const plan = (scenarios: unknown[], proves: Record<string, string[]>) => codingPlan({ claims, notChanging: ["Refunds stay."], e2e: intentOf({ targets: ["orders-viewer-web"], scenarios }), scenarioProves: proves });
+
+  it("asks for a hidden assertion when a mapped scenario only checks a status (the missing viewer hidden scenario)", () => {
+    const mapped = plan([viewer([{ kind: "http-status", path: "/api/orders.csv", method: "GET", equals: 403 }])], { "viewer-web-hidden": ["1", "2", "nc1"] });
+    expect(quality(mapped).filter((finding) => finding.code === "hidden-assertion-missing")).toMatchObject([{ claimIds: ["1"], revisable: true }]);
+    const hidden = plan([viewer([{ kind: "visible", testId: "export", equals: false }])], { "viewer-web-hidden": ["1", "2", "nc1"] });
+    expect(codesOf(quality(hidden))).not.toContain("hidden-assertion-missing");
+    // Asserting that it IS visible does not do.
+    expect(codesOf(quality(plan([viewer([{ kind: "visible", testId: "export", equals: true }])], { "viewer-web-hidden": ["1", "2", "nc1"] })))).toContain("hidden-assertion-missing");
+  });
+
+  it("does not count a scenario with no assertion as proof", () => {
+    const empty = plan([viewer([])], { "viewer-web-hidden": ["1", "2", "nc1"] });
+    expect(quality(empty).filter((finding) => finding.code === "claim-not-covered")).toMatchObject([{ claimIds: ["1", "2", "nc1"] }]);
+  });
+
+  it("holds every leaf claim to a proof: a child is not exempt, and its proof covers its ancestors but not the reverse", () => {
+    const runner = check("proposed-1", "Retry tests", "npx", ["vitest", "run"]);
+    const covered = (proves: string[]) => quality(withChecks([runner], { "proposed-1": proves })).filter((finding) => finding.code.startsWith("claim-"));
+    expect(covered(["1", "2", "nc1"])).toMatchObject([{ code: "claim-not-covered", claimIds: ["1.1"] }]);
+    expect(covered(["1.1", "2", "nc1"])).toEqual([]);
+  });
+});
+
+describe("fix round 1: reading scripts", () => {
+  const cwd = FOLDER;
+  const staticCases: Array<[string, string, string[]]> = [
+    ["quoted | in a pattern", "sh", ["-c", "grep -E 'a|b' public/app.js"]],
+    ["quoted ; in a pattern", "sh", ["-c", "grep -q \"a;b\" public/app.js"]],
+    ["-ec", "sh", ["-ec", "grep -q x public/app.js"]],
+    ["bash -lc", "bash", ["-lc", "grep -q x public/app.js"]],
+    ["git grep", "git", ["grep", "-q", "x"]],
+    ["git -C dir grep", "git", ["-C", "sub", "grep", "-q", "x"]],
+    ["sed -n", "sed", ["-n", "/x/p", "public/app.js"]],
+    ["awk", "awk", ["/x/", "public/app.js"]],
+    ["jq", "jq", [".a", "package.json"]],
+    ["subshell", "sh", ["-c", "(grep -q x public/app.js)"]],
+    ["redirect to /dev/null", "sh", ["-c", "grep -q x public/app.js 2>/dev/null"]],
+    ["nested shell", "sh", ["-c", "bash -c 'grep -q x public/app.js'"]],
+  ];
+  const runningCases: Array<[string, string, string[]]> = [
+    ["quoted | then a test run", "sh", ["-c", "grep -E 'a|b' public/app.js && npm test"]],
+    ["sed -i", "sed", ["-i", "s/a/b/", "public/app.js"]],
+    ["sed with a w command", "sed", ["-n", "w out.txt", "public/app.js"]],
+    ["awk system", "awk", ["BEGIN{system(\"npm test\")}"]],
+    ["redirect to a file", "sh", ["-c", "grep -q x public/app.js > out.txt"]],
+    ["git commit", "git", ["commit", "-m", "x"]],
+    ["unknown program", "node", ["check.js"]],
+    ["command substitution of a runner", "sh", ["-c", "echo $(npm test)"]],
+  ];
+
+  it.each(staticCases)("reads files only: %s", (_name, executable, args) => {
+    expect(isStaticReaderCommand({ executable, args })).toBe(true);
+  });
+
+  it.each(runningCases)("is not a plain reader (or not recognised): %s", (_name, executable, args) => {
+    expect(isStaticReaderCommand({ executable, args })).toBe(false);
+  });
+
+  it("sees a quoted separator as part of the pattern, so a grep-only check is still static-only and lint reads the whole pattern", () => {
+    const grepOnly = check("proposed-1", "Route exists", "sh", ["-c", "grep -E 'a|b' public/app.js"]);
+    const found = quality(withChecks([grepOnly], { "proposed-1": ["1.1", "2", "nc1"] })).filter((finding) => finding.code.startsWith("claim-"));
+    expect(found).toMatchObject([{ code: "claim-static-only", claimIds: ["1.1", "2", "nc1"] }]);
+    const withQuote = check("proposed-1", "Route exists", "sh", ["-c", "grep -q 'a;b\"c' public/app.js"]);
+    expect(quality(withChecks([withQuote], { "proposed-1": ["1.1"] })).filter((finding) => finding.code === "check-command-lint")).toMatchObject([{ lint: "quoted-literal" }]);
+  });
+
+  it("finds ecf67d6a's grep -cL inside a quoted script and in git grep", () => {
+    const lint = (executable: string, args: string[]) => quality(withChecks([check("proposed-1", "Export button removed", executable, args)], { "proposed-1": ["1.1"] })).filter((finding) => finding.code === "check-command-lint");
+    expect(lint("sh", ["-c", "grep -cL \"export-csv\" public/app.js"])).toMatchObject([{ lint: "grep-files-without-match-count" }]);
+    expect(lint("git", ["grep", "-cL", "export-csv"])).toMatchObject([{ lint: "grep-files-without-match-count" }]);
+  });
+
+  it("flags a check that ends in a command whose exit code ignores the match (sed, awk, wc), unless it decides on purpose", () => {
+    const lint = (executable: string, args: string[]) => quality(withChecks([check("proposed-1", "Route present", executable, args)], { "proposed-1": ["1.1"] })).filter((finding) => finding.code === "check-command-lint");
+    expect(lint("sed", ["-n", "/x/p", "public/app.js"])).toMatchObject([{ lint: "exit-ignores-match" }]);
+    expect(lint("awk", ["/x/", "public/app.js"])).toMatchObject([{ lint: "exit-ignores-match" }]);
+    expect(lint("sh", ["-c", "grep -q x public/app.js | wc -l"])).toMatchObject([{ lint: "exit-ignores-match" }]);
+    expect(lint("sed", ["-n", "/x/q1", "public/app.js"])).toEqual([]);
+    expect(lint("awk", ["/x/{f=1} END{exit !f}", "public/app.js"])).toEqual([]);
+    expect(lint("sh", ["-c", "sed -n '/x/p' public/app.js | grep -q x"])).toEqual([]);
+    expect(cwd).toBe(FOLDER);
+  });
+});
+
+describe("fix round 1: absence lint reads semantics, the wording is a hint", () => {
+  const lint = (label: string, executable: string, args: string[], proves = ["1.1"]) => quality(withChecks([check("proposed-1", label, executable, args)], { "proposed-1": proves })).filter((finding) => finding.code === "check-command-lint");
+
+  it("flags grep -v whatever the label says (it passes whenever any other line exists)", () => {
+    expect(lint("No default port remains", "grep", ["-v", "3000", "server.js"])).toMatchObject([{ lint: "grep-invert-match" }]);
+    expect(lint("Server check", "grep", ["--invert-match", "3000", "server.js"])).toMatchObject([{ lint: "grep-invert-match" }]);
+  });
+
+  it("flags every grep -c, because the count never reaches the exit code", () => {
+    expect(lint("Route handler exists", "grep", ["-c", "orders.csv", "server.js"])).toMatchObject([{ lint: "grep-count" }]);
+    expect(lint("Route handler exists", "grep", ["-q", "orders.csv", "server.js"])).toEqual([]);
+  });
+
+  it("reads absence from more words, and from the claim the check proves", () => {
+    expect(lint("Default port dropped", "grep", ["-q", "3000", "server.js"])).toMatchObject([{ lint: "grep-absence" }]);
+    expect(lint("fallback eliminated", "grep", ["-q", "fallback", "server.js"])).toMatchObject([{ lint: "grep-absence" }]);
+    // Claim 2 reads "A payment is never charged twice."
+    expect(lint("Server check", "grep", ["-q", "chargeOnce", "server.js"], ["2"])).toMatchObject([{ lint: "grep-absence" }]);
+    expect(lint("Server check", "grep", ["-q", "chargeOnce", "server.js"], ["1.1"])).toEqual([]);
+  });
+});
+
+describe("fix round 1: built-in file checks stay inside the repository", () => {
+  const parse = (overrides: Record<string, unknown>) => parsePlanDocument(planAnswer(planDocument(), {
+    checks: { checks: [{ label: "L", kind: "file-contains", cwd: FOLDER, path: "src/app.js", text: "x", proves: ["1.1"], ...overrides }] } as never,
+  }), codingInput);
+
+  it("accepts an ordinary source path", () => {
+    expect(parse({}).ok && (parse({}) as { proposal: { proposed: unknown[] } }).proposal.proposed).toHaveLength(1);
+  });
+
+  it.each(["a\nb.js", "\u001b[31m.js", "a\tb.js", ".git/config", "sub/.git/hooks/x", ".env", "app/.env.production", "keys/server.pem", "id_rsa", ".npmrc", ".ssh/known_hosts"])("refuses the path %j", (path) => {
+    const result = parse({ path });
+    expect(result.ok && result.proposal).toEqual({ proposed: [], proposalNote: "AgentX could not read the proposed checks" });
+  });
+
+  it("fails both kinds on a symbolic link and on a directory", () => {
+    const folder = mkdtempSync(join(tmpdir(), "plan-quality-link-"));
+    writeFileSync(join(folder, "real.txt"), "needle\n");
+    symlinkSync(join(folder, "real.txt"), join(folder, "link.txt"));
+    mkdirSync(join(folder, "dir"));
+    const status = (kind: "file-contains" | "file-not-contains", path: string, text: string): number => {
+      const { executable, args } = builtinFileCheckCommand({ kind, cwd: ".", path, text });
+      try { execFileSync(executable, args, { cwd: folder, stdio: "pipe" }); return 0; } catch (error) { return (error as { status: number }).status; }
+    };
+    expect(status("file-contains", "real.txt", "needle")).toBe(0);
+    expect(status("file-contains", "link.txt", "needle")).not.toBe(0);
+    expect(status("file-not-contains", "link.txt", "absent")).not.toBe(0);
+    expect(status("file-contains", "dir", "needle")).not.toBe(0);
+    expect(status("file-not-contains", "dir", "absent")).not.toBe(0);
+  });
+});
+
+describe("fix round 1: a waived check list is shown, and only coding plans are judged", () => {
+  it("surfaces none_reason with behaviour claims as a finding the planner is not asked to revise", () => {
+    const claims = ["Exports are logged.", "Viewers cannot export.", "Owners can export.", "The CSV has a header.", "Empty exports are refused."].map((text, index) => ({ id: String(index + 1), text }));
+    const waived = quality(codingPlan({ claims, checks: { proposed: [], noneReason: "Docs-only change.", proves: {} } }));
+    expect(waived).toMatchObject([{ code: "checks-waived", revisable: false, count: 6 }]);
+    expect(waived[0]!.ownerSentence).toBe("The plan says no check applies, so 6 claims have no proof.");
+    expect(revisablePlanQualityFindings(waived)).toEqual([]);
+    expect(PlanQualityFindingSchema.parse(waived[0])).toEqual(waived[0]);
+  });
+
+  it("returns nothing for a requirements or design document", () => {
+    for (const kind of ["requirements", "design"] as const) expect(planQualityFindings(planDocument(), { kind })).toEqual([]);
   });
 });

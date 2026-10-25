@@ -9,6 +9,14 @@ import { z } from "zod";
 export const PLAN_QUALITY_CODES = [
   /** A requested target runs the app but the plan selects no stand-in service (mock) for it, though the planning context offers one. */
   "mock-missing-for-target",
+  /** A scenario lists a component as real that the plan also mocks on the same target (approval refuses that). */
+  "real-component-mocked",
+  /** An AI navigation step may take more actions than the request (or the route) allows. */
+  "agent-budget-exceeded",
+  /** A claim that says something is hidden has no scenario asserting it is not visible. */
+  "hidden-assertion-missing",
+  /** The plan says no check applies, so its claims have no proof (shown to the owner; not worth an automatic revision). */
+  "checks-waived",
   /** A claim or Not changing entry that no runtime check proves. */
   "claim-not-covered",
   /** A claim or Not changing entry proved only by checks that read files. */
@@ -34,6 +42,9 @@ export const PLAN_QUALITY_LINTS = [
   "grep-files-without-match",
   "grep-count-absence",
   "grep-absence",
+  "grep-invert-match",
+  "grep-count",
+  "exit-ignores-match",
   "quoted-literal",
 ] as const;
 export type PlanQualityLint = (typeof PLAN_QUALITY_LINTS)[number];
@@ -45,6 +56,10 @@ export type PlanQualityTargetReason = (typeof PLAN_QUALITY_TARGET_REASONS)[numbe
 /** Findings the planner can fix by writing the plan again; the others need a person (or a new project revision). */
 const REVISABLE: Record<PlanQualityCode, boolean> = {
   "mock-missing-for-target": true,
+  "real-component-mocked": true,
+  "agent-budget-exceeded": true,
+  "hidden-assertion-missing": true,
+  "checks-waived": false,
   "claim-not-covered": true,
   "claim-static-only": true,
   "e2e-kind-unavailable": false,
@@ -67,6 +82,10 @@ export const PlanQualityFindingSchema = z.object({
   /** The step or assertion kinds an `e2e-kind-unavailable` finding names. */
   kinds: FindingIds,
   lint: z.enum(PLAN_QUALITY_LINTS).optional(),
+  /** The most actions an agent step may take (`agent-budget-exceeded`). */
+  limit: z.number().int().min(1).max(100).optional(),
+  /** How many claims and Not changing entries a `checks-waived` finding leaves without proof. */
+  count: z.number().int().min(0).max(1_000).optional(),
   targetReason: z.enum(PLAN_QUALITY_TARGET_REASONS).optional(),
   /** For the owner: one fixed sentence. */
   ownerSentence: z.string().min(1).max(1_000),
@@ -84,6 +103,8 @@ export type PlanQualityFindingInput = {
   fixtureIds?: readonly string[];
   kinds?: readonly string[];
   lint?: PlanQualityLint;
+  limit?: number;
+  count?: number;
   targetReason?: PlanQualityTargetReason;
 };
 
@@ -118,6 +139,18 @@ const LINT_SENTENCES: Record<PlanQualityLint, { owner: string; planner: string }
     owner: "uses grep to prove that something is absent, but a plain grep passes only when the text is found",
     planner: "uses grep to test absence; grep passes only when the text is found",
   },
+  "grep-invert-match": {
+    owner: "uses grep -v, which passes whenever any other line exists, so it does not show that the text is absent",
+    planner: "uses grep -v; it passes when any other line exists, which does not prove absence",
+  },
+  "grep-count": {
+    owner: "uses grep -c, whose count the exit code ignores, so -q says the same thing more clearly",
+    planner: "uses grep -c; the count is not used by the exit code, so use -q (or a file-contains check)",
+  },
+  "exit-ignores-match": {
+    owner: "ends with a command (sed, awk, wc, head...) that succeeds whether or not the text is found, so it can pass without proving anything",
+    planner: "ends with a command that exits 0 whether or not the text is found (sed, awk, wc, head, tail, cut, sort, jq without -e)",
+  },
   "quoted-literal": {
     owner: "searches for text with a quote mark in it, but the quote style in source files (single, double or template) is not stable",
     planner: "searches for text with a quote mark in it; match the part without quotes instead",
@@ -145,6 +178,26 @@ function sentences(input: PlanQualityFindingInput): { owner: string; planner: st
       return {
         owner: `The plan selects no stand-in service for ${idList(input.targetIds)}, though one is offered (${idList(input.fixtureIds)}). Its checks may call the real service.`,
         planner: `mock-missing-for-target: no mockFixtureRefs entry for target ${idList(input.targetIds)}; offered for it: ${idList(input.fixtureIds)}. Add one entry per target that runs the app.`,
+      };
+    case "real-component-mocked":
+      return {
+        owner: `On ${idList(input.targetIds)} the plan both uses a stand-in for ${idList(input.fixtureIds)} and requires the real one (${idList(input.scenarioIds)}). The approval will refuse that.`,
+        planner: `real-component-mocked: target ${idList(input.targetIds)} has a mockFixtureRefs entry for ${idList(input.fixtureIds)}, and scenario ${idList(input.scenarioIds)} lists it in requiredRealComponentIds. Remove one of them.`,
+      };
+    case "agent-budget-exceeded":
+      return {
+        owner: `An AI navigation step in ${idList(input.scenarioIds)} may take more than ${String(input.limit ?? 8)} actions, which is the most allowed.`,
+        planner: `agent-budget-exceeded: scenario ${idList(input.scenarioIds)} has an agent step with maxActions above ${String(input.limit ?? 8)}. Lower it to ${String(input.limit ?? 8)} or less.`,
+      };
+    case "hidden-assertion-missing":
+      return {
+        owner: `${claimWords(input.claimIds)} says something is hidden, but no check asserts that it is not visible.`,
+        planner: `hidden-assertion-missing: ${idList(input.claimIds)} says something is hidden, but no scenario that proves it has a "visible" assertion with equals false. Add one for the account that must not see it.`,
+      };
+    case "checks-waived":
+      return {
+        owner: `The plan says no check applies, so ${String(input.count ?? 0)} claims have no proof.`,
+        planner: `checks-waived: the plan says no check applies; ${String(input.count ?? 0)} claims and Not changing entries have no proof.`,
       };
     case "claim-not-covered":
       return {
@@ -206,6 +259,8 @@ export function planQualityFinding(input: PlanQualityFindingInput): PlanQualityF
     revisable: REVISABLE[input.code],
     ...ids("scenarioIds"), ...ids("targetIds"), ...ids("claimIds"), ...ids("checkIds"), ...ids("fixtureIds"), ...ids("kinds"),
     ...(input.lint === undefined ? {} : { lint: input.lint }),
+    ...(input.limit === undefined ? {} : { limit: input.limit }),
+    ...(input.count === undefined ? {} : { count: input.count }),
     ...(input.targetReason === undefined ? {} : { targetReason: input.targetReason }),
     ownerSentence: text.owner,
     plannerLine: text.planner,
