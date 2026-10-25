@@ -11,9 +11,9 @@ import { builtinFileCheckOf, canonicalJson, notChangingReference, redactText, ty
 /** An expected value is cut to this many characters on a card; the task page, which has the room, shows 400. */
 export const PLAN_VALUE_MAX = 80;
 /** How much of the plan's own words a summary shows: the card's short form, or the task page's fuller one. */
-interface Limits { value: number; rows: number; goal: number; steps: number; columns: boolean }
-const CARD_LIMITS: Limits = { value: PLAN_VALUE_MAX, rows: 6, goal: 30, steps: 3, columns: false };
-const PAGE_LIMITS: Limits = { value: 400, rows: 40, goal: 400, steps: 30, columns: true };
+interface Limits { value: number; rows: number; goal: number; steps: number; columns: boolean; lineMax: number }
+const CARD_LIMITS: Limits = { value: PLAN_VALUE_MAX, rows: 6, goal: 30, steps: 3, columns: false, lineMax: 280 };
+const PAGE_LIMITS: Limits = { value: 400, rows: 40, goal: 400, steps: 30, columns: true, lineMax: Number.POSITIVE_INFINITY };
 const QUESTION_MAX = 100;
 const OPTION_MAX = 80;
 
@@ -57,10 +57,16 @@ function assertionText(assertion: Assertion, limits: Limits): string {
     case "text": return `the text of ${plain(assertion.testId, v)} is ${quoted(assertion.equals, v)}`;
     case "visible": return `${plain(assertion.testId, v)} is ${assertion.equals ? "shown" : "hidden"}`;
     case "csv": {
+      if (!limits.columns) {
+        // Compact, for a card: the row count, then each row with its first two cells and its last when it has more than three.
+        const compact = (row: readonly string[]) => plain((row.length > 3 ? [...row.slice(0, 2), "…", row.at(-1)!] : row).join(","), v);
+        const shown = assertion.rows.slice(0, limits.rows).map(compact);
+        const more = assertion.rows.length > limits.rows ? ` and ${assertion.rows.length - limits.rows} more rows` : "";
+        return `the download ${plain(assertion.downloadName, v)} has ${assertion.rows.length === 0 ? "no rows" : `${assertion.rows.length} ${assertion.rows.length === 1 ? "row" : "rows"}: ${shown.join("; ")}${more}`}`;
+      }
       const rows = assertion.rows.slice(0, limits.rows).map((row) => plain(row.join(","), v));
       const more = assertion.rows.length > limits.rows ? ` and ${assertion.rows.length - limits.rows} more` : "";
-      const columns = limits.columns ? ` the columns ${plain(assertion.columns.join(", "), v)} and` : "";
-      return `the download ${plain(assertion.downloadName, v)} has${columns} ${assertion.rows.length === 0 ? "no rows" : `the rows ${rows.map((row) => `"${row}"`).join("; ")}${more}`}`;
+      return `the download ${plain(assertion.downloadName, v)} has the columns ${plain(assertion.columns.join(", "), v)} and ${assertion.rows.length === 0 ? "no rows" : `the rows ${rows.map((row) => `"${row}"`).join("; ")}${more}`}`;
     }
     case "http-status": return `${assertion.method} ${plain(assertion.path, v)} answers ${assertion.equals}`;
     case "json": return `the response ${plain(assertion.responseId, v)} equals ${quoted(canonicalJson(assertion.equals), v)}`;
@@ -87,12 +93,16 @@ export interface PlanScenarioSummary {
   steps: string[];
   /** Every expected result. */
   expects: string[];
-  /** Stand-in services the plan selects, as "<component> on <target>". */
+  /** Stand-in services the plan selects for this scenario's targets, as "<component> on <target>"; empty when it selects none. */
   mocks: string[];
+  /** The components the scenario says must run for real. */
+  requiredReal: string[];
+  /** Components that are both required to run for real and selected as stand-ins on one of the scenario's targets (approval refuses that). */
+  realAndStandIn: string[];
   /** The most actions any AI step may take; absent when no step is an AI step. */
   maxActions?: number;
   proves: string[];
-  /** The one-line form: who, where, what it does, what it expects. */
+  /** The one-line form: who and where, what it expects, what it proves, its stand-ins, then its steps; the least important parts are cut first. */
   line: string;
 }
 
@@ -141,19 +151,48 @@ function triedText(outcome: "passed" | "failed" | "broken", expected: "pass" | "
 function scenarioSummary(plan: PlanDocument, scenario: Scenario, limits: Limits): PlanScenarioSummary {
   const intent = plan.e2e!;
   const targets = scenario.requestedTargetIds.map((id) => plain(id, 60));
-  const mocks = (intent.mockFixtureRefs ?? []).filter((ref) => scenario.requestedTargetIds.includes(ref.requestedTargetId))
-    .map((ref) => `${plain(ref.componentId, 60)} on ${plain(ref.requestedTargetId, 60)}`);
+  const refs = (intent.mockFixtureRefs ?? []).filter((ref) => scenario.requestedTargetIds.includes(ref.requestedTargetId));
+  const mocks = refs.map((ref) => `${plain(ref.componentId, 60)} on ${plain(ref.requestedTargetId, 60)}`);
+  const standIns = [...new Set(refs.map((ref) => plain(ref.componentId, 60)))];
+  const requiredReal = scenario.requiredRealComponentIds.map((id) => plain(id, 60));
+  const realAndStandIn = requiredReal.filter((id) => standIns.includes(id));
   const agentActions = scenario.steps.flatMap((step) => (step.kind === "agent" ? [step.maxActions] : []));
   const proves = (plan.scenarioProves?.[scenario.scenarioId] ?? []).map(provedName);
   const account = plain(scenario.accountProfileId, 60);
   const steps = scenario.steps.map((step) => stepText(step, limits));
-  const expects = scenario.assertions.map((assertion) => assertionText(assertion, limits));
-  const shownSteps = steps.slice(0, limits.steps);
-  const moreSteps = steps.length > limits.steps ? [`and ${steps.length - limits.steps} more steps`] : [];
-  const does = shownSteps.length === 0 ? "looks at the app" : [...shownSteps, ...moreSteps].join(", ");
+  const expectsAt = (value: number) => scenario.assertions.map((assertion) => assertionText(assertion, { ...limits, value }));
+  const expects = expectsAt(limits.value);
+  // The line, most important first: expected values, what it proves, the stand-in and real services (a missing stand-in and a
+  // real-and-stand-in clash must show), then the steps. When it is too long the steps go first, then the names of the services,
+  // and the expected values are shortened last.
+  const head = `As ${account} on ${joinWords(targets)}:`;
+  const build = (expectList: readonly string[], stepsPart: string, servicesPart: string): string => [
+    `expects ${expectList.join("; ")}`, proves.length === 0 ? "proves no claim" : `proves ${joinWords(proves)}`,
+    ...(realAndStandIn.length === 0 ? [] : [`${joinWords(realAndStandIn)} must be real but is also a stand-in`]),
+    ...(agentActions.length === 0 ? [] : [`AI steps take up to ${Math.max(...agentActions)} actions`]),
+    servicesPart, ...(stepsPart === "" ? [] : [`steps: ${stepsPart}`])].join("; ");
+  const services = (named: boolean): string => [
+    standIns.length === 0 ? "no stand-ins" : named ? `stand-ins: ${joinWords(standIns)}` : `${standIns.length} ${standIns.length === 1 ? "stand-in" : "stand-ins"}`,
+    ...(requiredReal.length === 0 ? [] : [named ? `real: ${joinWords(requiredReal)}` : `${requiredReal.length} real`])].join("; ");
+  const stepsFull = steps.length === 0 ? "" : [...steps.slice(0, limits.steps), ...(steps.length > limits.steps ? [`and ${steps.length - limits.steps} more steps`] : [])].join(", ");
+  const attempts = [
+    () => build(expects, stepsFull, services(true)),
+    () => build(expects, steps.length === 0 ? "" : `${steps.length} ${steps.length === 1 ? "step" : "steps"}`, services(true)),
+    () => build(expects, "", services(true)),
+    () => build(expects, "", services(false)),
+    () => build(expectsAt(40), "", services(false)),
+    () => build(expectsAt(20), "", services(false)),
+  ];
+  let body = attempts[0]!();
+  for (const attempt of attempts) {
+    body = attempt();
+    if (head.length + 1 + body.length <= limits.lineMax) break;
+  }
+  const line = `${head} ${body}`;
   return {
-    scenarioId: plain(scenario.scenarioId, 120), account, targets, steps, expects, mocks, ...(agentActions.length === 0 ? {} : { maxActions: Math.max(...agentActions) }), proves,
-    line: `As ${account} on ${joinWords(targets)}: ${does}; expects ${expects.join("; ")}`,
+    scenarioId: plain(scenario.scenarioId, 120), account, targets, steps, expects, mocks, requiredReal, realAndStandIn,
+    ...(agentActions.length === 0 ? {} : { maxActions: Math.max(...agentActions) }), proves,
+    line: line.length <= limits.lineMax ? line : plain(line, limits.lineMax),
   };
 }
 

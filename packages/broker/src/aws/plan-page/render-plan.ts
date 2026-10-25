@@ -379,6 +379,8 @@ function checksHtml(context: Context): string {
  * the stand-in services per target, the AI step limit and what it proves) and every proposed check, in the same plain
  * words the approval card uses. Nothing is left out here; the card lists the first few.
  */
+const joinTargets = (targets: string[]): string => (targets.length <= 1 ? targets.join("") : `${targets.slice(0, -1).join(", ")} and ${targets.at(-1)!}`);
+
 function planChecksAddedHtml(context: Context): string {
   const { plan, version } = context.input;
   const summary = planCheckSummary(plan, { detail: "page" });
@@ -390,7 +392,9 @@ function planChecksAddedHtml(context: Context): string {
     return `<li class="plan-scenario"><p><strong>${t(scenario.scenarioId)}</strong>: as ${t(scenario.account)} on ${t(scenario.targets.join(" and "))}.${proofs(ids)}</p>`
       + `<p>Steps</p><ol class="scenario-steps">${steps}</ol>`
       + `<p>Expects</p><ul class="scenario-expects">${scenario.expects.map((expect) => `<li>${t(expect)}</li>`).join("")}</ul>`
-      + (scenario.mocks.length === 0 ? "" : `<p class="scenario-mocks">Stand-in services: ${t(scenario.mocks.join(", "))}.</p>`)
+      + (scenario.mocks.length === 0 ? `<p class="scenario-mocks scenario-no-mocks">No stand-in services on ${t(joinTargets(scenario.targets))}.</p>` : `<p class="scenario-mocks">Stand-in services: ${t(scenario.mocks.join(", "))}.</p>`)
+      + (scenario.requiredReal.length === 0 ? "" : `<p class="scenario-real">Must run for real: ${t(scenario.requiredReal.join(", "))}.</p>`)
+      + (scenario.realAndStandIn.length === 0 ? "" : `<p class="scenario-clash">${t(scenario.realAndStandIn.join(", "))} must run for real but is also a stand-in here; approval refuses this.</p>`)
       + (scenario.maxActions === undefined ? "" : `<p class="scenario-actions">An AI step may take up to ${scenario.maxActions} actions.</p>`)
       + "</li>";
   }).join("");
@@ -398,7 +402,7 @@ function planChecksAddedHtml(context: Context): string {
     const ids = plan.checks?.proves[check.checkId];
     return `<li class="plan-added-check"><strong>${t(check.label)}</strong> ${t(check.does)}.${proofs(ids)}${check.tried === undefined ? "" : ` ${t(check.tried)}.`}</li>`;
   }).join("");
-  return `<section id="${escapeHtml(`${context.input.anchor}-v${version}-added-checks`)}" class="plan-checks"><h3>Checks this plan adds</h3>`
+  return `<section id="${escapeHtml(`${context.input.anchor}-v${version}-added-checks`)}" class="plan-checks"><h3>Checks this plan adds <span class="as-proposed">(as proposed in this version)</span></h3>`
     + (scenarios === "" ? "" : `<h4>Browser and API scenarios</h4><ol class="plan-scenarios">${scenarios}</ol>`)
     + (checks === "" ? "" : `<h4>Other checks</h4><ul class="plan-added-checks">${checks}</ul>`)
     + (summary.noneReason !== undefined && checks === "" ? `<p>No other checks apply: ${t(summary.noneReason)}</p>` : "")
