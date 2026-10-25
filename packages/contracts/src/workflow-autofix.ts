@@ -3,8 +3,8 @@ import {
   E2E_APPLICATION_SEND_BACK_CODES, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX, WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX,
   WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_AUTO_ACTION_LIMIT,
   WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_AUTO_RETRY_LIMIT, WORKFLOW_AUTO_SEND_BACK_LIMIT, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
-  WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, blockingFindings, workflowApplicationEvidenceCodes, workflowAutoFixCounts, workflowCheckResultBroken,
-  type WorkflowSnapshot,
+  WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, blockingFindings, workflowApplicationEvidenceCodes, workflowAutoFixCounts, workflowAutoSpendRefusal, workflowCheckResultBroken,
+  type WorkflowAutoSpend, type WorkflowSnapshot,
 } from "./task-workflow.js";
 
 /**
@@ -49,12 +49,15 @@ export const AUTO_FIX_PERSON_GROUP_CODES = ["runtime-expired", "runtime-environm
 /** Why Rovara asks instead of acting. The limit reasons name the limit the ask card tells the person about. */
 export const AUTO_FIX_ASK_REASONS = [
   "needs-a-person", "original-code-also-fails", "unclear-fault",
-  "send-back-limit", "retry-limit", "total-limit", "spend-cap", "day-budget", "history-full",
+  "send-back-limit", "retry-limit", "total-limit", "spend-cap", "day-budget", "history-full", "inputs-missing",
 ] as const;
 export type AutoFixAskReason = (typeof AUTO_FIX_ASK_REASONS)[number];
 
 /** How a check or the E2E checks behaved on the original code (the code the task started from). */
 export type OriginalCodeResult = "passed" | "failed" | "cannot-run";
+
+/** One UNKNOWN group's own result on the original code (see `AutoFixFacts.e2eUnknownGroups`). */
+export type GroupOriginalResult = OriginalCodeResult | "skipped" | "pending" | "not-run";
 
 /** What the caller knows that the workflow does not store. Every member is optional: what is missing is unknown, and unknown never counts as a pass. */
 export interface AutoFixFacts {
@@ -62,8 +65,13 @@ export interface AutoFixFacts {
   checkOriginal?: Readonly<Record<string, OriginalCodeResult>> | undefined;
   /** Proposed checks that declared `expectOnBase: pass`: with no original-code result yet they are still expected to pass on the original code. */
   checkExpectsPass?: readonly string[] | undefined;
-  /** The E2E baseline round for the approved plan: absent when it was not requested, `pending` while requested and not recorded yet. */
-  e2eOriginal?: OriginalCodeResult | "pending" | undefined;
+  /**
+   * The groups of the blocked round that ended UNKNOWN (their plan-derived group IDs), each with that group's OWN result on the original code: `passed`/`failed`/`cannot-run` from the
+   * original-code round, `skipped` when the original-code round did not run that group (an AI-navigated group is skipped there), `pending` while the round is requested and not
+   * recorded, `not-run` when it was not requested. One overall baseline result must never be mapped onto these: a group is sent back only when it itself passed on the original code.
+   * The caller always lists every UNKNOWN group of the round (from the stored round); an empty or absent list means the groups are not known yet.
+   */
+  e2eUnknownGroups?: Readonly<Record<string, GroupOriginalResult>> | undefined;
   /** The blocked run ended RUNTIME_UNAVAILABLE with a provider-outage class. */
   providerOutage?: boolean | undefined;
   /** The runner was busy. */
@@ -72,16 +80,16 @@ export interface AutoFixFacts {
   ownerCancelled?: boolean | undefined;
 }
 
-/** The money and quota room for one more automatic round. The caller reads them (the task's spend, the project's day budgets); this module only compares. */
+/**
+ * The money and quota room for one more automatic round. Every member is required, and the policy asks (`inputs-missing`) when one is absent or unreadable: nothing is assumed.
+ * The caller (T8) reads them from records, never from the plan version or round: `spend.spentUsd` is the WHOLE task's recorded model spend (`wholeTaskSpendUsd`, planning included),
+ * and `baselineRequests` is the number of original-code rounds already requested for the approved plan, counted from the stored baseline record.
+ */
 export interface AutoFixBudget {
   /** The installation kill switch (`AUTOFIX_ENABLED`, default on). Off: nothing is automatic and the answer is `NONE`. */
   enabled: boolean;
-  /** Model spend of the task so far, in US dollars. */
-  spentUsd: number;
-  /** The estimate of one more round, in US dollars. */
-  roundEstimateUsd: number;
-  /** The most automatic fixing may spend on one task (default 15). */
-  capUsd: number;
+  /** Whole-task spend, the estimate of one more round and the per-task cap (default 15). */
+  spend: WorkflowAutoSpend;
   /** Whether the project's day budgets (the E2E model day budget, the per-day call caps) have room for one more round. */
   dayBudgetHasRoom: boolean;
   /** How many original-code (baseline) rounds were already requested for the approved plan. At most one is. */
@@ -209,10 +217,15 @@ export function classifyBlockedWorkflow(workflow: WorkflowSnapshot, facts: AutoF
 
 const uniqueCodes = (signals: readonly Signal[]): AutoFixCode[] => [...new Set(signals.map((signal) => signal.code))];
 
-/** Whether one more automatic round fits the money and quota. A number that is not a finite, non-negative one fails closed. */
+/** Whether one more automatic round's inputs are all there and readable. */
+function inputsMissing(budget: AutoFixBudget | undefined): boolean {
+  return budget === undefined || typeof budget.dayBudgetHasRoom !== "boolean" || !Number.isInteger(budget.baselineRequests) || budget.baselineRequests < 0
+    || workflowAutoSpendRefusal(budget.spend) === "inputs-missing";
+}
+
+/** Whether one more automatic round fits the money and quota. */
 function budgetRefusal(budget: AutoFixBudget): AutoFixAskReason | undefined {
-  const numbers = [budget.spentUsd, budget.roundEstimateUsd, budget.capUsd];
-  if (numbers.some((value) => !Number.isFinite(value) || value < 0) || budget.spentUsd + budget.roundEstimateUsd > budget.capUsd) return "spend-cap";
+  if (workflowAutoSpendRefusal(budget.spend) === "spend-cap") return "spend-cap";
   return budget.dayBudgetHasRoom ? undefined : "day-budget";
 }
 
@@ -220,12 +233,12 @@ function budgetRefusal(budget: AutoFixBudget): AutoFixAskReason | undefined {
  * What to do about a blocked VERIFY or REVIEW of the current candidate.
  *
  * Order: a fault only a person can fix asks; then code-caused faults send back (alone or mixed with transient ones: the next round re-runs everything); then transient ones retry once;
- * then an unclear E2E fault is settled by the original-code round (passes there: the candidate is the cause, send back; fails or cannot run there: ask; not requested: request it; requested:
- * wait), and any other unclear fault asks. Limits (from the workflow's decisions): 2 automatic send backs per approved plan, 1 automatic retry per stage per candidate, 6 automatic
+ * then an unclear E2E fault is settled by each UNKNOWN group's own original-code result (all passed there: the candidate is the cause, send back; any failed, cannot run or was skipped there: ask;
+ * not requested: request it; requested: wait), and any other unclear fault asks. Limits (from the workflow's decisions): 2 automatic send backs per approved plan, 1 automatic retry per stage per candidate, 6 automatic
  * actions per task, the decision history, the per-task spend cap and the day budgets; over any of them the answer is an ask that names it.
  */
 export function autoFixDecision(workflow: WorkflowSnapshot, facts: AutoFixFacts, budget: AutoFixBudget): AutoFixDecision {
-  if (!budget.enabled) return { action: "NONE" };
+  if (budget?.enabled === false) return { action: "NONE" };
   if (workflow.state !== "BLOCKED" || (workflow.stage !== "VERIFY" && workflow.stage !== "REVIEW")) return { action: "NONE" };
   const stage = workflow.stage;
   const signals = blockSignals(workflow, facts);
@@ -235,6 +248,8 @@ export function autoFixDecision(workflow: WorkflowSnapshot, facts: AutoFixFacts,
 
   const people = of("person");
   if (people.length > 0) return ask(people[0]?.code === "fails-on-original-code" ? "original-code-also-fails" : "needs-a-person");
+  // Everything below acts or waits on money and counts: with an input missing, a person decides.
+  if (inputsMissing(budget)) return ask("inputs-missing");
 
   const counts = workflowAutoFixCounts(workflow.decisions);
   const limitRefusal = (kind: "send-back" | "retry"): AutoFixAskReason | undefined => {
@@ -256,10 +271,15 @@ export function autoFixDecision(workflow: WorkflowSnapshot, facts: AutoFixFacts,
     return refusal === undefined ? { action: "RETRY", stage, codes } : ask(refusal);
   }
 
-  // Only unclear faults are left. The original-code E2E round settles the E2E ones; the others have no original-code round to wait for.
+  // Only unclear faults are left. The original-code E2E round settles the E2E ones, group by group; the others have no original-code round to wait for.
   if (of("unclear").some((signal) => signal.e2e !== true)) return ask("unclear-fault");
-  if (facts.e2eOriginal === "passed") return sendBack();
-  if (facts.e2eOriginal === "failed" || facts.e2eOriginal === "cannot-run") return ask("original-code-also-fails");
-  if (facts.e2eOriginal === "pending") return { action: "WAIT_FOR_BASELINE", codes };
-  return budget.baselineRequests < AUTO_FIX_BASELINE_REQUEST_LIMIT ? { action: "REQUEST_BASELINE", codes } : ask("unclear-fault");
+  const groups = Object.values(facts.e2eUnknownGroups ?? {});
+  const requestOrAsk = (): AutoFixDecision => (budget.baselineRequests < AUTO_FIX_BASELINE_REQUEST_LIMIT ? { action: "REQUEST_BASELINE", codes } : ask("unclear-fault"));
+  if (groups.length === 0) return requestOrAsk();
+  if (groups.some((result) => result === "failed" || result === "cannot-run")) return ask("original-code-also-fails");
+  // A group the original-code round did not run says nothing about the original code: it is never decided on another group's result.
+  if (groups.some((result) => result === "skipped")) return ask("unclear-fault");
+  if (groups.some((result) => result === "pending")) return { action: "WAIT_FOR_BASELINE", codes };
+  if (groups.some((result) => result === "not-run")) return requestOrAsk();
+  return sendBack();
 }

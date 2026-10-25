@@ -4,8 +4,8 @@ import {
   WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE,
   WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WorkflowDecisionRecordSchema, WorkflowSnapshotSchema, WorkflowTransitionError, autoFixDecision, createCandidateManifest,
   createWorkflowSnapshot, decideWorkflow, workflowFindingFingerprint, returnWorkflowToImplementation, returnWorkflowToImplementationAutomatically, submitWorkflowArtifact, workflowAutoActionRequestId,
-  workflowAutoFixCounts, workflowAutomaticRetryDecision,
-  type AutoFixBudget, type AutoFixFacts, type WorkflowDecision, type WorkflowSnapshot,
+  workflowAutoFixCounts, workflowAutomaticRetryDecision, wholeTaskSpendUsd,
+  type AutoFixBudget, type AutoFixFacts, type WorkflowAutoSpend, type WorkflowDecision, type WorkflowSnapshot,
 } from "@agentx/contracts";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
@@ -21,7 +21,13 @@ const hex = (char: string): string => char.repeat(64);
 const GROUPS_FAILED = "one or more admitted E2E groups failed";
 const incomplete = (...entries: string[]): string => `${WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX} (${entries.join("; ")})`;
 
-const budget = (over: Partial<AutoFixBudget> = {}): AutoFixBudget => ({ enabled: true, spentUsd: 2, roundEstimateUsd: 2, capUsd: 15, dayBudgetHasRoom: true, baselineRequests: 0, ...over });
+const SPEND: WorkflowAutoSpend = { spentUsd: wholeTaskSpendUsd(2), roundEstimateUsd: 2, capUsd: 15 };
+type BudgetOver = Partial<Omit<AutoFixBudget, "spend">> & { spentUsd?: number; roundEstimateUsd?: number; capUsd?: number };
+const budget = (over: BudgetOver = {}): AutoFixBudget => {
+  const { spentUsd, roundEstimateUsd, capUsd, ...rest } = over;
+  return { enabled: true, dayBudgetHasRoom: true, baselineRequests: 0, ...rest,
+    spend: { spentUsd: spentUsd === undefined ? SPEND.spentUsd : wholeTaskSpendUsd(spentUsd), roundEstimateUsd: roundEstimateUsd ?? SPEND.roundEstimateUsd, capUsd: capUsd ?? SPEND.capUsd } };
+};
 
 const approval = (n: number, at = NOW): WorkflowDecision => WorkflowDecisionRecordSchema.parse({
   requestId: uuid(n), workflowRevision: 2, decision: "APPROVE", actorId: ownerId, actorRole: "TASK_OWNER", reason: "approved", artifactDigest: hex("b"), at,
@@ -53,7 +59,7 @@ const review = (role: "CRITIC" | "SECURITY", status: string, findings: Over[] = 
 });
 const finding = (text: string, over: Over = {}): Over => ({ text, origin: "INTRODUCED", ...over });
 
-function decide(workflow: WorkflowSnapshot, facts: AutoFixFacts = {}, over: Partial<AutoFixBudget> = {}) {
+function decide(workflow: WorkflowSnapshot, facts: AutoFixFacts = {}, over: BudgetOver = {}) {
   return autoFixDecision(workflow, facts, budget(over));
 }
 
@@ -179,25 +185,76 @@ describe("AUTOFIX policy: reviews", () => {
   });
 });
 
-describe("AUTOFIX policy: unclear faults are settled by the original code", () => {
+describe("AUTOFIX policy: unclear faults are settled by each group's own original-code result", () => {
   const unknown = (): WorkflowSnapshot => verify(`${WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX} (evidence floor unmet)`);
+  const groups = (g: Record<string, "passed" | "failed" | "cannot-run" | "skipped" | "pending" | "not-run">): AutoFixFacts => ({ e2eUnknownGroups: g });
 
-  it("requests the original-code round once, waits for it, and then decides", () => {
+  it("requests the original-code round once when it does not know yet, and asks when it was requested and still does not know the groups", () => {
     expect(decide(unknown())).toEqual({ action: "REQUEST_BASELINE", codes: ["e2e-evidence-unknown"] });
-    expect(decide(unknown(), { e2eOriginal: "pending" })).toEqual({ action: "WAIT_FOR_BASELINE", codes: ["e2e-evidence-unknown"] });
-    expect(decide(unknown(), { e2eOriginal: "passed" })).toEqual({ action: "SEND_BACK", codes: ["e2e-evidence-unknown"] });
-    expect(decide(unknown(), { e2eOriginal: "failed" })).toEqual({ action: "ASK", reason: "original-code-also-fails", codes: ["e2e-evidence-unknown"] });
-    expect(decide(unknown(), { e2eOriginal: "cannot-run" })).toEqual({ action: "ASK", reason: "original-code-also-fails", codes: ["e2e-evidence-unknown"] });
+    expect(decide(unknown(), groups({ g1: "not-run" }))).toEqual({ action: "REQUEST_BASELINE", codes: ["e2e-evidence-unknown"] });
+    expect(decide(unknown(), {}, { baselineRequests: 1 })).toEqual({ action: "ASK", reason: "unclear-fault", codes: ["e2e-evidence-unknown"] });
+    expect(decide(unknown(), groups({ g1: "not-run" }), { baselineRequests: 1 })).toEqual({ action: "ASK", reason: "unclear-fault", codes: ["e2e-evidence-unknown"] });
   });
 
-  it("never requests a second original-code round", () => {
-    expect(decide(unknown(), {}, { baselineRequests: 1 })).toEqual({ action: "ASK", reason: "unclear-fault", codes: ["e2e-evidence-unknown"] });
+  it("waits while a group's original-code result is pending, and sends back only when every UNKNOWN group itself passed", () => {
+    expect(decide(unknown(), groups({ g1: "pending" }))).toEqual({ action: "WAIT_FOR_BASELINE", codes: ["e2e-evidence-unknown"] });
+    expect(decide(unknown(), groups({ g1: "passed", g2: "pending" }))).toEqual({ action: "WAIT_FOR_BASELINE", codes: ["e2e-evidence-unknown"] });
+    expect(decide(unknown(), groups({ g1: "passed" }))).toEqual({ action: "SEND_BACK", codes: ["e2e-evidence-unknown"] });
+    expect(decide(unknown(), groups({ g1: "passed", g2: "passed" }))).toEqual({ action: "SEND_BACK", codes: ["e2e-evidence-unknown"] });
+  });
+
+  it("asks when any UNKNOWN group failed or could not run on the original code, whatever the others did", () => {
+    expect(decide(unknown(), groups({ g1: "failed" }))).toEqual({ action: "ASK", reason: "original-code-also-fails", codes: ["e2e-evidence-unknown"] });
+    expect(decide(unknown(), groups({ g1: "passed", g2: "cannot-run" }))).toEqual({ action: "ASK", reason: "original-code-also-fails", codes: ["e2e-evidence-unknown"] });
+    expect(decide(unknown(), groups({ g1: "pending", g2: "failed" }))).toMatchObject({ action: "ASK", reason: "original-code-also-fails" });
+  });
+
+  it("never sends back a group the baseline skipped (an AI-navigated group) on another group's result", () => {
+    // g-web passed on the original code; g-ai was skipped there: the overall baseline "passed", but g-ai has no evidence of its own.
+    expect(decide(unknown(), groups({ "g-web": "passed", "g-ai": "skipped" }))).toEqual({ action: "ASK", reason: "unclear-fault", codes: ["e2e-evidence-unknown"] });
+    expect(decide(unknown(), groups({ "g-ai": "skipped" }))).toMatchObject({ action: "ASK", reason: "unclear-fault" });
+    expect(decide(unknown(), groups({ "g-ai": "skipped", "g-web": "pending" }))).toMatchObject({ action: "ASK", reason: "unclear-fault" });
   });
 
   it("does not let the E2E baseline settle a check, and an infrastructure fault retries before the baseline is asked", () => {
     const check = blocked("VERIFY", undefined, verification([{ checkId: "c", status: "FAILED" }]));
-    expect(decide(check, { e2eOriginal: "passed" })).toMatchObject({ action: "ASK", reason: "unclear-fault" });
-    expect(decide(verify(incomplete("g1: executor-failed")), { e2eOriginal: "failed" })).toMatchObject({ action: "RETRY" });
+    expect(decide(check, groups({ g1: "passed" }))).toMatchObject({ action: "ASK", reason: "unclear-fault" });
+    expect(decide(verify(incomplete("g1: executor-failed")), groups({ g1: "failed" }))).toMatchObject({ action: "RETRY" });
+  });
+});
+
+describe("AUTOFIX policy: the money and counts are required inputs", () => {
+  const buildFailed = (): WorkflowSnapshot => verify(incomplete("g1: build-failed"));
+  const withBudget = (over: Record<string, unknown>) => autoFixDecision(buildFailed(), {}, { ...budget(), ...over });
+
+  it("asks, naming the missing input, when whole-task spend, the day budget or the baseline count is missing or unreadable", () => {
+    expect(withBudget({})).toMatchObject({ action: "SEND_BACK" });
+    for (const over of [{ spend: undefined }, { spend: { roundEstimateUsd: 2, capUsd: 15 } }, { spend: { ...SPEND, spentUsd: "2" } }, { spend: { ...SPEND, capUsd: undefined } },
+      { dayBudgetHasRoom: undefined }, { baselineRequests: undefined }, { baselineRequests: 0.5 }, { baselineRequests: -1 }]) {
+      expect(withBudget(over)).toEqual({ action: "ASK", reason: "inputs-missing", codes: ["build-failed"] });
+    }
+    expect(autoFixDecision(buildFailed(), {}, undefined as unknown as AutoFixBudget)).toMatchObject({ action: "ASK", reason: "inputs-missing" });
+  });
+
+  it("also asks for a retry and for the original-code request, and still asks a person first", () => {
+    expect(autoFixDecision(verify(incomplete("g1: executor-failed")), {}, { ...budget(), spend: undefined } as unknown as AutoFixBudget)).toMatchObject({ action: "ASK", reason: "inputs-missing" });
+    expect(autoFixDecision(verify(`${WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX} (floor)`), {}, { ...budget(), spend: undefined } as unknown as AutoFixBudget)).toMatchObject({ action: "ASK", reason: "inputs-missing" });
+    expect(autoFixDecision(verify(incomplete("g1: login-failed")), {}, { ...budget(), spend: undefined } as unknown as AutoFixBudget)).toMatchObject({ action: "ASK", reason: "needs-a-person" });
+  });
+
+  it("is held by the guard functions too: over the cap, unreadable or missing spend is refused there", () => {
+    const base = verify(incomplete("g1: build-failed"));
+    const retryBase = verify(incomplete("g1: executor-failed"));
+    const over = { spentUsd: wholeTaskSpendUsd(14), roundEstimateUsd: 2, capUsd: 15 };
+    expect(() => returnWorkflowToImplementationAutomatically(base, { expectedRevision: 7, reason: "r", spend: over, now: NOW })).toThrow(/spend/);
+    expect(() => workflowAutomaticRetryDecision(retryBase, { expectedRevision: 7, stage: "VERIFY", reason: "r", spend: over, now: NOW })).toThrow(/spend/);
+    for (const spend of [undefined, { ...SPEND, spentUsd: Number.NaN }, { ...SPEND, capUsd: Number.POSITIVE_INFINITY }, { ...SPEND, roundEstimateUsd: -1 }, { spentUsd: 1 }]) {
+      expect(() => returnWorkflowToImplementationAutomatically(base, { expectedRevision: 7, reason: "r", spend: spend as never, now: NOW })).toThrow(/spend/);
+      expect(() => workflowAutomaticRetryDecision(retryBase, { expectedRevision: 7, stage: "VERIFY", reason: "r", spend: spend as never, now: NOW })).toThrow(/spend/);
+    }
+    // Exactly at the cap is allowed, as in the policy.
+    const exact = { spentUsd: wholeTaskSpendUsd(13), roundEstimateUsd: 2, capUsd: 15 };
+    expect(returnWorkflowToImplementationAutomatically(base, { expectedRevision: 7, reason: "r", spend: exact, now: NOW }).stage).toBe("IMPLEMENT");
   });
 });
 
@@ -236,7 +293,7 @@ describe("AUTOFIX policy: limits", () => {
     const base = buildFailed([approval(1)]);
     expect(decide(base, {}, { spentUsd: 13.5, roundEstimateUsd: 2 })).toEqual({ action: "ASK", reason: "spend-cap", codes: ["build-failed"] });
     expect(decide(base, {}, { spentUsd: 13, roundEstimateUsd: 2 })).toMatchObject({ action: "SEND_BACK" });
-    for (const spentUsd of [Number.NaN, Number.POSITIVE_INFINITY, -1]) expect(decide(base, {}, { spentUsd })).toMatchObject({ action: "ASK", reason: "spend-cap" });
+    for (const spentUsd of [Number.NaN, Number.POSITIVE_INFINITY, -1]) expect(decide(base, {}, { spentUsd })).toMatchObject({ action: "ASK", reason: "inputs-missing" });
     expect(decide(base, {}, { dayBudgetHasRoom: false })).toMatchObject({ action: "ASK", reason: "day-budget" });
     const full = [approval(1), ...Array.from({ length: 99 }, (_, index) => ownerSendBack(index + 100))];
     expect(decide(buildFailed(full))).toMatchObject({ action: "ASK", reason: "history-full" });
@@ -261,7 +318,7 @@ describe("AUTOFIX: the AGENTX actor", () => {
 
   it("sends blocked work back as AGENTX with a derived request ID, and clears the block like the owner's Send back", () => {
     const before = blockedForSendBack();
-    const after = returnWorkflowToImplementationAutomatically(before, { expectedRevision: 7, reason: "The app did not build.", now: NOW });
+    const after = returnWorkflowToImplementationAutomatically(before, { expectedRevision: 7, reason: "The app did not build.", spend: SPEND, now: NOW });
     expect(after).toMatchObject({ stage: "IMPLEMENT", state: "READY", revision: 8 });
     expect(after.blockReason).toBeUndefined();
     const added = after.decisions.at(-1)!;
@@ -276,26 +333,26 @@ describe("AUTOFIX: the AGENTX actor", () => {
 
   it("is idempotent for the same revision, and only one of two writers on a revision wins", () => {
     const before = blockedForSendBack();
-    const once = returnWorkflowToImplementationAutomatically(before, { expectedRevision: 7, reason: "r", now: NOW });
-    expect(returnWorkflowToImplementationAutomatically(once, { expectedRevision: 7, reason: "r", now: NOW })).toEqual(once);
+    const once = returnWorkflowToImplementationAutomatically(before, { expectedRevision: 7, reason: "r", spend: SPEND, now: NOW });
+    expect(returnWorkflowToImplementationAutomatically(once, { expectedRevision: 7, reason: "r", spend: SPEND, now: NOW })).toEqual(once);
     expect(once.decisions.filter((decision) => decision.source === "AUTO_FIX")).toHaveLength(1);
     // The owner pressed Send back first: the automatic one is out of date.
     const ownerFirst = returnWorkflowToImplementation(before, { requestId: uuid(501), actorId: ownerId, reason: "x", now: NOW });
-    expect(() => returnWorkflowToImplementationAutomatically(ownerFirst, { expectedRevision: 7, reason: "r", now: NOW })).toThrow(/out of date/);
+    expect(() => returnWorkflowToImplementationAutomatically(ownerFirst, { expectedRevision: 7, reason: "r", spend: SPEND, now: NOW })).toThrow(/out of date/);
     // And the other way round: the owner presses after the automatic one, and finds the work no longer blocked.
     expect(() => returnWorkflowToImplementation(once, { requestId: uuid(502), actorId: ownerId, reason: "x", now: NOW })).toThrow(WorkflowTransitionError);
-    expect(() => returnWorkflowToImplementationAutomatically(before, { expectedRevision: 6, reason: "r", now: NOW })).toThrow(/out of date/);
+    expect(() => returnWorkflowToImplementationAutomatically(before, { expectedRevision: 6, reason: "r", spend: SPEND, now: NOW })).toThrow(/out of date/);
   });
 
   it("works from a blocked REVIEW too, naming that stage", () => {
     const reviewBlocked = blocked("REVIEW", undefined, { reviews: [review("CRITIC", "FINDINGS", [finding("bug")]), review("SECURITY", "PASS")] });
-    const after = returnWorkflowToImplementationAutomatically(reviewBlocked, { expectedRevision: 7, reason: "findings", now: NOW });
+    const after = returnWorkflowToImplementationAutomatically(reviewBlocked, { expectedRevision: 7, reason: "findings", spend: SPEND, now: NOW });
     expect(after.decisions.at(-1)).toMatchObject({ source: "AUTO_FIX", auto: { stage: "REVIEW" } });
   });
 
   it("refuses everywhere except a blocked VERIFY or REVIEW", () => {
     const base = blockedForSendBack();
-    const tryIt = (workflow: unknown) => () => returnWorkflowToImplementationAutomatically(workflow, { expectedRevision: (workflow as WorkflowSnapshot).revision, reason: "r", now: NOW });
+    const tryIt = (workflow: unknown) => () => returnWorkflowToImplementationAutomatically(workflow, { expectedRevision: (workflow as WorkflowSnapshot).revision, reason: "r", spend: SPEND, now: NOW });
     expect(tryIt(WorkflowSnapshotSchema.parse({ ...base, stage: "IMPLEMENT" }))).toThrow(WorkflowTransitionError);
     expect(tryIt(WorkflowSnapshotSchema.parse({ ...base, state: "RUNNING", blockReason: undefined }))).toThrow(WorkflowTransitionError);
     // A plan waiting for its owner's approval.
@@ -314,33 +371,33 @@ describe("AUTOFIX: the AGENTX actor", () => {
 
   it("refuses blocks only a person fixes, whatever the caller decided", () => {
     for (const reason of [WORKFLOW_HISTORY_REWRITTEN_MESSAGE, `${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}x`, `${WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX}x`]) {
-      expect(() => returnWorkflowToImplementationAutomatically(verify(reason), { expectedRevision: 7, reason: "r", now: NOW })).toThrow(/needs a person/);
+      expect(() => returnWorkflowToImplementationAutomatically(verify(reason), { expectedRevision: 7, reason: "r", spend: SPEND, now: NOW })).toThrow(/needs a person/);
     }
   });
 
   it("holds the limits itself: 2 automatic send backs per plan, 6 automatic actions, a full history", () => {
     const two = blockedForSendBack({ decisions: [approval(1), automatic(2, "AUTO_FIX"), automatic(3, "AUTO_FIX")] });
-    expect(() => returnWorkflowToImplementationAutomatically(two, { expectedRevision: 7, reason: "r", now: NOW })).toThrow(/limit/);
+    expect(() => returnWorkflowToImplementationAutomatically(two, { expectedRevision: 7, reason: "r", spend: SPEND, now: NOW })).toThrow(/limit/);
     const newPlan = blockedForSendBack({ decisions: [approval(1), automatic(2, "AUTO_FIX"), automatic(3, "AUTO_FIX"), approval(4)] });
-    expect(returnWorkflowToImplementationAutomatically(newPlan, { expectedRevision: 7, reason: "r", now: NOW }).stage).toBe("IMPLEMENT");
+    expect(returnWorkflowToImplementationAutomatically(newPlan, { expectedRevision: 7, reason: "r", spend: SPEND, now: NOW }).stage).toBe("IMPLEMENT");
     const six = blockedForSendBack({ decisions: [approval(1), automatic(2, "AUTO_FIX"), automatic(3, "AUTO_FIX"), approval(4), automatic(5, "AUTO_FIX"), automatic(6, "AUTO_FIX"), approval(7),
       automatic(8, "AUTO_RETRY", "REVIEW", hex("9")), automatic(9, "AUTO_RETRY", "REVIEW", hex("a"))] });
-    expect(() => returnWorkflowToImplementationAutomatically(six, { expectedRevision: 7, reason: "r", now: NOW })).toThrow(/limit/);
+    expect(() => returnWorkflowToImplementationAutomatically(six, { expectedRevision: 7, reason: "r", spend: SPEND, now: NOW })).toThrow(/limit/);
     const full = blockedForSendBack({ decisions: [approval(1), ...Array.from({ length: 99 }, (_, index) => ownerSendBack(index + 100))] });
-    expect(() => returnWorkflowToImplementationAutomatically(full, { expectedRevision: 7, reason: "r", now: NOW })).toThrow(/history is full/);
+    expect(() => returnWorkflowToImplementationAutomatically(full, { expectedRevision: 7, reason: "r", spend: SPEND, now: NOW })).toThrow(/history is full/);
   });
 
   it("records an automatic retry once per stage and candidate, and not for another stage or a stale revision", () => {
     const base = verify(incomplete("g1: executor-failed"));
-    const decision = workflowAutomaticRetryDecision(base, { expectedRevision: 7, stage: "VERIFY", reason: "retry", now: NOW });
+    const decision = workflowAutomaticRetryDecision(base, { expectedRevision: 7, stage: "VERIFY", reason: "retry", spend: SPEND, now: NOW });
     expect(decision).toMatchObject({ requestId: workflowAutoActionRequestId(taskId, 7, "AUTO_RETRY"), actorRole: "AGENTX", source: "AUTO_RETRY", auto: { stage: "VERIFY", candidateDigest: candidate.digest } });
     const recorded = WorkflowSnapshotSchema.parse({ ...base, decisions: [...base.decisions, decision] });
-    expect(workflowAutomaticRetryDecision(recorded, { expectedRevision: 7, stage: "VERIFY", reason: "retry", now: NOW })).toEqual(decision);
+    expect(workflowAutomaticRetryDecision(recorded, { expectedRevision: 7, stage: "VERIFY", reason: "retry", spend: SPEND, now: NOW })).toEqual(decision);
     const next = WorkflowSnapshotSchema.parse({ ...recorded, revision: 9 });
-    expect(() => workflowAutomaticRetryDecision(next, { expectedRevision: 9, stage: "VERIFY", reason: "retry", now: NOW })).toThrow(/already retried/);
-    expect(() => workflowAutomaticRetryDecision(base, { expectedRevision: 7, stage: "REVIEW", reason: "retry", now: NOW })).toThrow(/blocked stage/);
-    expect(() => workflowAutomaticRetryDecision(base, { expectedRevision: 6, stage: "VERIFY", reason: "retry", now: NOW })).toThrow(/out of date/);
-    expect(() => workflowAutomaticRetryDecision(verify(WORKFLOW_HISTORY_REWRITTEN_MESSAGE), { expectedRevision: 7, stage: "VERIFY", reason: "r", now: NOW })).toThrow(/needs a person/);
+    expect(() => workflowAutomaticRetryDecision(next, { expectedRevision: 9, stage: "VERIFY", reason: "retry", spend: SPEND, now: NOW })).toThrow(/already retried/);
+    expect(() => workflowAutomaticRetryDecision(base, { expectedRevision: 7, stage: "REVIEW", reason: "retry", spend: SPEND, now: NOW })).toThrow(/blocked stage/);
+    expect(() => workflowAutomaticRetryDecision(base, { expectedRevision: 6, stage: "VERIFY", reason: "retry", spend: SPEND, now: NOW })).toThrow(/out of date/);
+    expect(() => workflowAutomaticRetryDecision(verify(WORKFLOW_HISTORY_REWRITTEN_MESSAGE), { expectedRevision: 7, stage: "VERIFY", reason: "r", spend: SPEND, now: NOW })).toThrow(/needs a person/);
   });
 
   it("can never approve, skip, reject, publish or carry an approval's fields", () => {
