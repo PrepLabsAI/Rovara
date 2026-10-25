@@ -3,7 +3,7 @@ import { RelativeWorkspacePathSchema } from "./project.js";
 import { canonicalJson, sortKeys } from "./canonical-json.js";
 import { redactText } from "./redaction.js";
 import { WorkflowCheckSchema, WORKFLOW_PROPOSED_CHECKS_MAX, type WorkflowCheck, type WorkflowCheckProposal } from "./task-workflow.js";
-import { extractProposedChecks, hasControlCharacter, isNotChangingReference, lastFencedBlock, notChangingReference, proposedCheckTextIssues } from "./workflow-proposed-checks.js";
+import { WorkflowCheckExpectOnBaseSchema, extractProposedChecks, hasControlCharacter, isNotChangingReference, lastFencedBlock, notChangingReference, proposedCheckTextIssues } from "./workflow-proposed-checks.js";
 import { TaskGraphV1Schema, taskGraphOrder, type TaskGraphV1 } from "./workflow-dependencies.js";
 import { E2EFeaturePlanIntentAnySchema, type E2EApplicationPlanIntent } from "./e2e-application.js";
 import type { E2EFeaturePlanIntent } from "./e2e.js";
@@ -44,9 +44,13 @@ export interface PlanDocument {
   /** Optional strict ordered work breakdown for coding plans only. */
   workBreakdown?: TaskGraphV1 | undefined;
   /** Coding plans only. The validated checks the owner's approval covers, and the claims each proves. */
-  checks?: { proposed: WorkflowCheck[]; noneReason?: string | undefined; proposalNote?: string | undefined; proves: Record<string, string[]> };
+  checks?: { proposed: WorkflowCheck[]; noneReason?: string | undefined; proposalNote?: string | undefined; proves: Record<string, string[]>;
+    /** What the planner predicted each proposed check does on the unchanged code; a check with no prediction is not listed. */
+    expectOnBase?: Record<string, "pass" | "fail"> };
   /** Untrusted feature E2E intent, approved only as part of the canonical workflow artifact. */
   e2e?: WorkflowFeatureE2EIntent | undefined;
+  /** Coding plans only. The claims (or `nc<N>` Not changing entries) each E2E scenario proves; kept outside `e2e` so the E2E intent digest does not move. */
+  scenarioProves?: Record<string, string[]> | undefined;
 }
 
 const text = (max: number) => z.string().trim().min(1).max(max);
@@ -153,7 +157,13 @@ const StoredChecksSchema = z.object({
   noneReason: z.string().min(1).max(300).optional(),
   proposalNote: z.string().min(1).max(200).optional(),
   proves: z.record(z.string().max(64), z.array(z.string().min(1).max(60)).max(PLAN_CLAIMS_MAX)),
+  expectOnBase: z.record(z.string().max(64), WorkflowCheckExpectOnBaseSchema).optional(),
 }).strict();
+
+/** The most scenarios an E2E intent holds, so the most entries `scenarioProves` may have. */
+const SCENARIO_PROVES_MAX_SCENARIOS = 32;
+const ScenarioProvesSchema = z.record(z.string().min(1).max(120), z.array(z.string().min(1).max(60)).max(PLAN_CLAIMS_MAX + 10))
+  .refine((value) => Object.keys(value).length <= SCENARIO_PROVES_MAX_SCENARIOS, { error: `has more than ${SCENARIO_PROVES_MAX_SCENARIOS} scenarios` });
 
 const planBodyShape = {
   schemaVersion: z.literal(1),
@@ -165,6 +175,7 @@ const planBodyShape = {
   decisions: z.array(DecisionSchema).max(PLAN_DECISIONS_MAX),
   workBreakdown: TaskGraphV1Schema.optional(),
   e2e: E2EFeaturePlanIntentAnySchema.optional(),
+  scenarioProves: ScenarioProvesSchema.optional(),
 };
 
 /** The document as the planner writes it: everything but `checks`, which is read separately. */
@@ -285,15 +296,29 @@ function treeIssues(plan: PlanDocument, retired: ReadonlySet<string> | undefined
   return issues;
 }
 
+/** Plain-English problems in `scenarioProves`: every key must be a scenario of the plan's E2E intent and every entry a claim or Not changing entry of the plan. */
+function scenarioProvesIssues(plan: PlanDocument): string[] {
+  if (plan.scenarioProves === undefined) return [];
+  const claimIds = new Set(planClaimIds(plan));
+  const scenarioIds = new Set((plan.e2e?.scenarios ?? []).map((scenario) => scenario.scenarioId));
+  return Object.entries(plan.scenarioProves).flatMap(([scenarioId, proves]) => [
+    ...(scenarioIds.has(scenarioId) ? [] : [`scenarioProves: ${shortLabel(scenarioId)} is not one of the E2E scenarios`]),
+    ...proves.filter((id) => !claimIds.has(id) && !isNotChangingReference(id, plan.notChanging.length)).map((id) => `scenarioProves: scenario ${shortLabel(scenarioId)} proves claim ${shortLabel(id)}, which the plan does not have`),
+  ]);
+}
+
 /** Plain-English problems in a stored plan's checks: every proof must name a proposed check and a claim of the plan. */
 function checksIssues(plan: PlanDocument): string[] {
   if (plan.checks === undefined) return [];
   const claimIds = new Set(planClaimIds(plan));
   const proposedIds = new Set(plan.checks.proposed.map((check) => check.id));
-  return Object.entries(plan.checks.proves).flatMap(([checkId, proves]) => [
+  return [
+    ...Object.keys(plan.checks.expectOnBase ?? {}).filter((checkId) => !proposedIds.has(checkId)).map((checkId) => `check ${shortLabel(checkId)}: it has an expected result on the unchanged code but is not one of the proposed checks`),
+    ...Object.entries(plan.checks.proves).flatMap(([checkId, proves]) => [
     ...(proposedIds.has(checkId) ? [] : [`check ${shortLabel(checkId)}: it proves claims but is not one of the proposed checks`]),
     ...proves.filter((id) => !claimIds.has(id) && !isNotChangingReference(id, plan.notChanging.length)).map((id) => `check ${shortLabel(checkId)}: it proves claim ${shortLabel(id)}, which the plan does not have`),
-  ]);
+    ]),
+  ];
 }
 
 /** The ID or position of the entry at `raw[...path]`, for naming it in an error. */
@@ -423,13 +448,15 @@ export function parsePlanDocument(answer: string, input: {
   if (!parsed.success) return { ok: false, errors: capErrors([...errors, ...zodIssueMessages(body, parsed.error)]) };
   const plan: PlanDocument = parsed.data;
   errors.push(...treeIssues(plan, input.retiredClaimIds));
+  if (Object.hasOwn(json, "scenarioProves") && input.kind !== "plan") errors.push("the plan: scenarioProves belongs only in the coding plan");
+  else errors.push(...scenarioProvesIssues(plan));
   if (errors.length > 0) return { ok: false, errors: capErrors(errors) };
 
   if (input.kind !== "plan" || input.checks === undefined) return { ok: true, plan };
-  const { proves, ...proposal } = extractProposedChecks(Object.hasOwn(json, "checks") ? rawChecks : { checks: [] }, {
+  const { proves, expectOnBase, ...proposal } = extractProposedChecks(Object.hasOwn(json, "checks") ? rawChecks : { checks: [] }, {
     ...input.checks, allowProves: true, claimIds: new Set(planClaimIds(plan)), notChangingCount: plan.notChanging.length,
   });
-  return { ok: true, plan: { ...plan, checks: { ...proposal, proves } }, proposal };
+  return { ok: true, plan: { ...plan, checks: { ...proposal, proves, ...(expectOnBase === undefined ? {} : { expectOnBase }) } }, proposal };
 }
 
 /** Reads a stored plan document back (the JSON `canonicalPlanJson` wrote); undefined when it is not a valid plan document. */
@@ -443,7 +470,7 @@ export function readCanonicalPlan(json: string): PlanDocument | undefined {
   if (!isRecord(raw) || rawClaimDepth(raw["claims"]) > PLAN_CLAIM_DEPTH_MAX) return undefined;
   const parsed = PlanDocumentSchema.safeParse(raw);
   if (!parsed.success) return undefined;
-  return treeIssues(parsed.data, undefined).length === 0 && checksIssues(parsed.data).length === 0 ? parsed.data : undefined;
+  return treeIssues(parsed.data, undefined).length === 0 && checksIssues(parsed.data).length === 0 && scenarioProvesIssues(parsed.data).length === 0 ? parsed.data : undefined;
 }
 
 export function planClaimCount(plan: PlanDocument): number {
