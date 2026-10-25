@@ -1,8 +1,15 @@
 import { z } from "zod";
 import { WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, type WorkflowCheck, type WorkflowCheckProposal } from "./task-workflow.js";
-import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema as ProposedCheckInputSchema, hasControlCharacter } from "./workflow-check-input.js";
+import {
+  WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowBuiltinCheckInputSchema, WorkflowCheckExpectOnBaseSchema, WorkflowProposedCheckInputSchema as ProposedCheckInputSchema, builtinFileCheckCommand,
+  hasControlCharacter, type WorkflowCheckExpectOnBase,
+} from "./workflow-check-input.js";
 
-export { WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX, WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema, feedbackReplacementCheckProblem, hasControlCharacter, proposedCheckExecutableAllowed, proposedCheckProblem, type WorkflowProposedCheckInput } from "./workflow-check-input.js";
+export {
+  WORKFLOW_BUILTIN_CHECK_KINDS, WORKFLOW_BUILTIN_CHECK_TEXT_MAX, WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX, WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowBuiltinCheckInputSchema, WorkflowCheckExpectOnBaseSchema,
+  WorkflowProposedCheckInputSchema, builtinFileCheckCommand, builtinFileCheckOf, feedbackReplacementCheckProblem, hasControlCharacter, proposedCheckExecutableAllowed, proposedCheckProblem,
+  type WorkflowBuiltinCheckInput, type WorkflowBuiltinCheckKind, type WorkflowCheckExpectOnBase, type WorkflowProposedCheckInput,
+} from "./workflow-check-input.js";
 
 /** The note shown when a plan's `agentx-checks` block is malformed or over a limit. */
 export const WORKFLOW_PROPOSED_CHECKS_UNREADABLE = "AgentX could not read the proposed checks";
@@ -17,8 +24,10 @@ const ProposedChecksBlockSchema = z.object({
   none_reason: z.string().trim().max(300).nullable().optional(),
 }).strict();
 
+/** A plan document's check: a command, or a built-in file check; either one says which claims it proves and may predict its result on the unchanged code. */
+const PlanCheckExtras = { proves: ProvesSchema, expectOnBase: WorkflowCheckExpectOnBaseSchema.optional() };
 const ProposedChecksWithProvesBlockSchema = z.object({
-  checks: z.array(ProposedCheckInputSchema.extend({ proves: ProvesSchema }).strict()).max(WORKFLOW_PROPOSED_CHECKS_MAX),
+  checks: z.array(z.union([ProposedCheckInputSchema.extend(PlanCheckExtras).strict(), WorkflowBuiltinCheckInputSchema.extend(PlanCheckExtras).strict()])).max(WORKFLOW_PROPOSED_CHECKS_MAX),
   none_reason: z.string().trim().max(300).nullable().optional(),
 }).strict();
 
@@ -46,12 +55,15 @@ export function proposedCheckTextIssues(rawChecks: unknown): string[] {
   const issues: string[] = [];
   for (const entry of list as unknown[]) {
     if (typeof entry !== "object" || entry === null) continue;
-    const { label, args } = entry as { label?: unknown; args?: unknown };
+    const { label, args, text, path } = entry as { label?: unknown; args?: unknown; text?: unknown; path?: unknown };
     // Control characters are shown as spaces: the problem is that they are there, and they would garble the message.
     const shown = typeof label === "string" ? Array.from(label, (char) => (hasControlCharacter(char) ? " " : char)).join("").replace(/\s+/gu, " ").trim().slice(0, 80) : "";
     const name = shown === "" ? "(unnamed)" : shown;
     if (typeof label === "string" && hasControlCharacter(label.trim())) {
       issues.push(`check ${name}: the label may not contain line breaks or control characters`);
+    }
+    if ([text, path].some((value) => typeof value === "string" && hasControlCharacter(value))) {
+      issues.push(`check ${name}: the text and the file path of a file check may not contain line breaks or control characters`);
     }
     if (Array.isArray(args) && (args as unknown[]).some((arg) => typeof arg === "string" && hasControlCharacter(arg))) {
       issues.push(`check ${name}: arguments may not contain line breaks or control characters; write \\n as a two-character escape inside your script if you need it`);
@@ -127,32 +139,43 @@ export interface ProposedChecksWithProvesInput extends ProposedChecksInput {
  * required and optional (`optionalCount`) checks. With `allowProves`, each check also names the claims it proves
  * (`proves`: claim IDs, or `nc<N>` for the N-th Not changing entry); the result then maps every proposed ID to those claim IDs, merged when a duplicate proposal was dropped.
  */
-export function extractProposedChecks(json: unknown, input: ProposedChecksWithProvesInput): WorkflowCheckProposal & { proves: Record<string, string[]> };
+export function extractProposedChecks(json: unknown, input: ProposedChecksWithProvesInput): WorkflowCheckProposal & { proves: Record<string, string[]>; expectOnBase?: Record<string, WorkflowCheckExpectOnBase> };
 export function extractProposedChecks(json: unknown, input: ProposedChecksInput): WorkflowCheckProposal;
-export function extractProposedChecks(json: unknown, input: ProposedChecksInput | ProposedChecksWithProvesInput): WorkflowCheckProposal & { proves?: Record<string, string[]> } {
+export function extractProposedChecks(json: unknown, input: ProposedChecksInput | ProposedChecksWithProvesInput): WorkflowCheckProposal & { proves?: Record<string, string[]>; expectOnBase?: Record<string, WorkflowCheckExpectOnBase> } {
   const withProves = "allowProves" in input;
   const unreadable = { proposed: [], proposalNote: WORKFLOW_PROPOSED_CHECKS_UNREADABLE, ...(withProves ? { proves: {} } : {}) };
   const parsed = (withProves ? ProposedChecksWithProvesBlockSchema : ProposedChecksBlockSchema).safeParse(json);
   if (!parsed.success) return unreadable;
-  const checks: Array<z.infer<typeof ProposedCheckInputSchema> & { proves?: string[] }> = parsed.data.checks;
+  const checks: Array<{ label: string; cwd: string; timeoutSeconds?: number | undefined; proves?: string[]; expectOnBase?: WorkflowCheckExpectOnBase | undefined } & (
+    { executable: string; args: string[] } | { kind: "file-contains" | "file-not-contains"; path: string; text: string }
+  )> = parsed.data.checks;
   const insideRepository = (cwd: string) => input.repositoryPaths.some((path) => cwd === path || cwd.startsWith(`${path}/`));
   if (checks.some((check) => !insideRepository(check.cwd))) return unreadable;
   if (withProves && checks.some((check) => (check.proves ?? []).some((id) => !input.claimIds.has(id) && !isNotChangingReference(id, input.notChangingCount ?? 0)))) return unreadable;
-  const entries = checks.map((check) => ({ label: check.label, proves: check.proves ?? [], command: { cwd: check.cwd, executable: check.executable, args: check.args,
-    timeoutSeconds: check.timeoutSeconds ?? WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS } }));
+  const entries = checks.map((check) => {
+    const run = "kind" in check ? builtinFileCheckCommand(check) : { cwd: check.cwd, executable: check.executable, args: check.args };
+    return { label: check.label, proves: check.proves ?? [], expectOnBase: check.expectOnBase,
+      command: { ...run, timeoutSeconds: check.timeoutSeconds ?? WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS } };
+  });
   const kept: typeof entries = [];
   for (const entry of entries) {
     if (input.required.some((required) => sameCommand(required.command, entry.command))) continue;
     const earlier = kept.find((other) => sameCommand(other.command, entry.command));
     if (earlier === undefined) kept.push(entry);
-    else earlier.proves = [...new Set([...earlier.proves, ...entry.proves])];
+    else {
+      earlier.proves = [...new Set([...earlier.proves, ...entry.proves])];
+      earlier.expectOnBase ??= entry.expectOnBase;
+    }
   }
   const proposed = kept.map((check, index) => ({ id: `proposed-${index + 1}`, label: check.label, command: check.command }));
   if (proposed.length > Math.min(WORKFLOW_PROPOSED_CHECKS_MAX, TASK_CHECKS_MAX - input.required.length - (input.optionalCount ?? 0))) return unreadable;
   const noneReason = parsed.data.none_reason ?? "";
   const result = WorkflowCheckProposalSchema.safeParse({ proposed, ...(noneReason === "" ? {} : { noneReason }) });
   if (!result.success) return unreadable;
-  return withProves ? { ...result.data, proves: Object.fromEntries(kept.map((check, index) => [`proposed-${index + 1}`, check.proves])) } : result.data;
+  if (!withProves) return result.data;
+  // The key is left out when the planner predicted nothing, so a plan without predictions stays byte-for-byte what it was.
+  const expectOnBase = Object.fromEntries(kept.flatMap((check, index) => (check.expectOnBase === undefined ? [] : [[`proposed-${index + 1}`, check.expectOnBase] as const])));
+  return { ...result.data, proves: Object.fromEntries(kept.map((check, index) => [`proposed-${index + 1}`, check.proves])), ...(Object.keys(expectOnBase).length === 0 ? {} : { expectOnBase }) };
 }
 
 /** The checks a coding plan proposes in its last `agentx-checks` block; no block proposes nothing, an unclosed or malformed one is unreadable. */
