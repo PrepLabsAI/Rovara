@@ -54,17 +54,29 @@ export const WORKFLOW_BUILTIN_CHECK_TEXT_MAX = 300;
 
 /** The fixed script of each built-in kind: `$1` is the literal text, `$2` the file (relative to the check's folder). */
 const BUILTIN_SCRIPTS: Record<WorkflowBuiltinCheckKind, string> = {
-  "file-contains": 'grep -qF -e "$1" -- "$2"',
+  // A symbolic link may point outside the repository, so neither kind follows one (the check fails).
+  "file-contains": 'test ! -L "$2" && grep -qF -e "$1" -- "$2"',
   // grep exits 1 for "no match" and 2 for a trouble (such as a missing file); only "no match" passes.
-  "file-not-contains": 'grep -qF -e "$1" -- "$2"; test "$?" -eq 1',
+  "file-not-contains": 'test ! -L "$2" && { grep -qF -e "$1" -- "$2"; test "$?" -eq 1; }',
 };
+
+const SECRET_FILE_NAME = /^(?:\.env(?:\..*)?|\.npmrc|\.netrc|id_.*|.*\.pem|.*\.key)$/u;
+/**
+ * True when a built-in file check may not read the path: anything in a `.git` folder, a dotenv file, a key or a token
+ * file. A check that says "this file holds, or lacks, this text" would leak one bit about it, and a file check has no
+ * reason to read them.
+ */
+export function builtinCheckPathRefused(path: string): boolean {
+  const segments = path.split("/");
+  return segments.some((segment) => segment === ".git" || segment === ".ssh" || segment === ".aws") || SECRET_FILE_NAME.test(segments.at(-1) ?? "");
+}
 
 /** A built-in check as the planner writes it in a plan's `checks` member: the kind, a file in its folder and the exact text. */
 export const WorkflowBuiltinCheckInputSchema = z.object({
   label: PlainText(z.string().trim().min(1).max(80)),
   kind: z.enum(WORKFLOW_BUILTIN_CHECK_KINDS),
   cwd: RelativeWorkspacePathSchema,
-  path: RelativeWorkspacePathSchema,
+  path: PlainText(RelativeWorkspacePathSchema).refine((value) => !builtinCheckPathRefused(value)),
   text: PlainText(z.string().min(1).max(WORKFLOW_BUILTIN_CHECK_TEXT_MAX)),
   timeoutSeconds: z.number().int().min(1).max(1_800).optional(),
 }).strict();
