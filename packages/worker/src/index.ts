@@ -21,3 +21,4 @@ export * from "./run-task.js";
 export * from "./task-model.js";
 export * from "./server.js";
 export * from "./usage.js";
+export * from "./worker-log.js";

@@ -178,11 +178,11 @@ describe("prerequisites with a direct provider", () => {
     expect(lines.join("\n")).not.toContain(OPENAI_KEY);
   });
 
-  it("checks the Bedrock default when a role's key is missing, and reports a refused key as a problem", async () => {
+  it("refuses a role whose key is missing without checking a Bedrock default, and reports a refused key as a problem (MODEL3)", async () => {
     const missing = passingChecks({ directProvider: async (provider) => { throw new MissingProviderSecret(provider); } });
-    const lines = await run(sampleAnswers({ models: { ...models, anthropic: { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:a-AbCdEf" }, openai: { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:o-AbCdEf" } } }), missing);
-    expect(missing.models).toContain(DEFAULT_BEDROCK_MODELS.worker);
-    expect(lines.join("\n")).toContain("OpenAI secret missing; using default amazon-bedrock/");
+    await expect(run(sampleAnswers({ models: { ...models, anthropic: { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:a-AbCdEf" }, openai: { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:o-AbCdEf" } } }), missing))
+      .rejects.toThrow("openai/gpt-5.4: there is no OpenAI key, and no other model would be used in its place; pass --openai-key-file or --openai-key-env (or --openai-secret-arn), or choose an Amazon Bedrock model for this role");
+    expect(missing.models).not.toContain(DEFAULT_BEDROCK_MODELS.worker);
 
     const refused = passingChecks({ directProvider: async () => { throw new Error("the API key was refused; check it, and that it may use this model"); } });
     await expect(run(sampleAnswers({ models }), refused, { anthropic: ANTHROPIC_KEY, openai: OPENAI_KEY })).rejects.toThrow("anthropic/claude-sonnet-4-6: Anthropic preflight failed: the API key was refused");

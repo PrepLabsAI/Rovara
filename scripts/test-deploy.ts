@@ -2,7 +2,19 @@
 //
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test [--apply]
 //     [--only control-plane-code,broker,dispatcher,worker-image,executor-image,qualification-transport]
+//   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only model-fallback-settings [--apply]
+//   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only e2e-agent-settings [--apply]
+//   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only e2e-agent-model --e2e-model <model id or default> [--apply]
+//   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --check
 //
+// `--check [--json]` is read-only and exits 0 only when every check passes (1: findings, 2: the check could not run). It looks for
+// control-plane Lambdas not on head's code (by provenance: the deployed S3Key names the commit, and git says whether anything the
+// bundle comes from changed since), IAM grants and environment variables head needs that the deployed stack lacks, READY catalog rows
+// about to expire, a qualified runner and worker that match this build (including the agent-steps feature), and the e2e model route
+// for the installation's provider, read from its `worker-model-provider` SSM setting (approval; for Bedrock, model access and agreement
+// through read-only control-plane calls and the worker role's invoke grants; for Anthropic, OpenAI or OpenRouter, the secret ARN setting
+// and the worker role's grant on it). No model is invoked and no secret is read. `--apply` of Lambda code runs the IAM and environment parts
+// first and refuses on a gap (stale code is expected before a deploy); it never applies IAM or stack changes itself.
 // Without --apply it prints the plan and exits 0 (it only reads: DescribeStacks for the current
 // parameters). With --apply it runs the plan. The plan reproduces the P0 TEST procedure: every
 // CloudFormation step is a change set that changes only the named Lambda code, image parameter or
@@ -31,8 +43,15 @@ import {
 } from "@aws-sdk/client-cloudformation";
 import { GetFunctionConfigurationCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { build as bundle } from "esbuild";
+import { LAMBDA_BUNDLE_OPTIONS, checkLambdaBundles, lambdaLoadError } from "./lambda-load-check.js";
 import { CDK_CONSTRUCT_IDS, cdkAppArguments } from "../packages/cli/src/deploy/cdk-engine.js";
-import { environmentStackName } from "../packages/contracts/src/environments.js";
+import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
+import { E2E_AGENT_RECOMMENDED_MODELS, eligibleE2EAgentModel } from "../packages/contracts/src/e2e-agent-models.js";
+import { KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, isKeyedModelProvider, type ModelProvider } from "../packages/contracts/src/model-providers.js";
+import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest } from "../packages/model-runtime/src/e2e-route-derive.js";
+import { WORKER_SETTING_PARAMETERS } from "../packages/contracts/src/session.js";
+import { WEB_API_RUNTIME_PROFILE_ID } from "../packages/contracts/src/e2e-web-api-qualification.js";
+import { e2eRuntimeRenewCommand } from "../packages/contracts/src/e2e-runtime-expiry.js";
 import {
   Runner,
   assertDigestImage,
@@ -43,17 +62,45 @@ import {
   smokeTestWorker,
   stackExists,
   stackOutput,
+  stackParameter,
   verifyRepositoryImage,
   type ReleaseOptions,
 } from "./release-common.js";
 import { deterministicZip } from "./release/zip.js";
+import {
+  E2E_MODEL_ROUTE_ID,
+  deriveE2EModelRoute,
+  e2eModelChoice,
+  evaluateEnvironmentDrift,
+  evaluateIamDrift,
+  evaluateTestDeployCheck,
+  formatFindings,
+  iamEvaluationNotes,
+  lambdaRoleIds,
+  matchBedrockQuotas,
+  parseDeployedCodeKey,
+  parseRunnerStatus,
+  sourcePathsFor,
+  tier3Request,
+  type CheckResult,
+  type CatalogRowFact,
+  type E2EModelRoute,
+  type Finding,
+  type ModelAccessFacts,
+  type ModelAvailabilityFact,
+  type ModelChoiceFacts,
+  type ModelRouteCheck,
+  type QuotaFacts,
+  type RunnerFacts,
+  type SettingFact,
+} from "./test-deploy-check.js";
 
 /**
  * `control-plane-code` rebuilds every packaged control-plane Lambda (CONTROL_PLANE_LAMBDAS) in one change set; `broker` and
  * `dispatcher` rebuild just those two, and are contained in `control-plane-code`.
  */
-export type DeployUnit = "control-plane-code" | "broker" | "dispatcher" | "worker-image" | "executor-image" | "qualification-transport";
-export const DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "broker", "dispatcher", "worker-image", "executor-image", "qualification-transport"];
+export type DeployUnit = "control-plane-code" | "broker" | "dispatcher" | "worker-image" | "executor-image" | "qualification-transport" | "e2e-agent-settings" | "e2e-agent-model" | "model-fallback-settings";
+export const DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "broker", "dispatcher", "worker-image", "executor-image", "qualification-transport", "e2e-agent-settings", "e2e-agent-model", "model-fallback-settings"];
 /** What a normal TEST deploy changes: all control-plane code, so no function is left on old code, and the worker image. */
 export const DEFAULT_DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "worker-image"];
 const DEFAULT_REGION = "us-east-1";
@@ -74,7 +121,8 @@ export interface StepRef {
   fromStep: string;
   output: StepOutputName;
 }
-export type ParameterSpec = { key: string; usePreviousValue: true } | { key: string; value: StepRef };
+/** A parameter of a change set: its previous value, the output of an earlier step, or a literal the plan itself carries (the chosen AI navigation model). */
+export type ParameterSpec = { key: string; usePreviousValue: true } | { key: string; value: StepRef } | { key: string; literal: string };
 
 export interface ChangeExpectation {
   action: "Add" | "Modify";
@@ -82,12 +130,16 @@ export interface ChangeExpectation {
   logicalIdPrefixes?: readonly string[];
   /** Modify only: the only attributes (as `Properties.<Name>`) the change may touch. */
   allowedAttributes?: readonly string[];
+  /** Modify only: attributes by logical ID, for a change set whose resources are not changed in the same way (the broker's Environment, a policy's PolicyDocument). Falls back to `allowedAttributes`. */
+  allowedAttributesByLogicalId?: Readonly<Record<string, readonly string[]>>;
   /**
    * Modify only, for Lambda code units (`logicalIds`): also accept a Modify of any other resource when every one of its
    * Details is a Dynamic ResourceAttribute re-evaluation caused by `<code unit>.Arn`. A code-only update cannot change a
    * function's Arn, so these are CloudFormation's conservative no-ops; anything else is still refused.
    */
   allowArnReevaluations?: boolean;
+  /** With allowArnReevaluations: the only resources among `logicalIds` whose Arn may cause a re-evaluation (default: all of them). A role policy has no Arn to re-evaluate. */
+  arnSources?: readonly string[];
 }
 export interface ObservedDetail {
   evaluation?: string;
@@ -105,6 +157,14 @@ export interface ObservedChange {
 }
 
 export type IdentityMode = "cognito" | "oidc";
+/** What a synth of head is taken from: the CDK construct, its context and the identity mode the deploy engine passes. */
+export interface LiftSynthPlan {
+  construct: string;
+  cdkContext: Readonly<Record<string, string>>;
+  /** The synth runs with the app and context the deploy engine passes, which depend on this. */
+  identityMode: IdentityMode;
+}
+
 export type TemplatePlan =
   | { source: "previous" }
   | { source: "lambda-code"; patches: ReadonlyArray<{ logicalId: string; zip: string }> }
@@ -117,7 +177,16 @@ export type TemplatePlan =
       cdkContext: Readonly<Record<string, string>>;
       /** The synth runs with the app and context the deploy engine passes, which depend on this. */
       identityMode: IdentityMode;
-    };
+    }
+  | ({
+      /**
+       * The deployed template with exactly the declared additions taken from a synth of head: environment variables of a Lambda, and an SSM parameter's ARN in the
+       * `ssm:GetParameters` statement of a role policy. Anything else that differs between head and the deployed template refuses (`liftDeclaredSettings`).
+       */
+      source: "lift-declared";
+      environment: ReadonlyArray<{ logicalId: string; variable: string }>;
+      grants: ReadonlyArray<{ logicalId: string; parameterName: string }>;
+    } & LiftSynthPlan);
 
 export type DeployStep =
   | { id: string; kind: "build-lambda-zip"; unit: LambdaUnit; logicalId: string; entry: string; zipPath: string; extraFiles?: ReadonlyArray<ExtraFile> }
@@ -136,7 +205,8 @@ export type DeployStep =
   | { id: string; kind: "execute-change-set"; stack: string; createdBy: string }
   | { id: string; kind: "verify-lambda-code"; stack: string; logicalId: string; expectedSha256Base64: StepRef }
   | { id: string; kind: "verify-stack-resources"; stack: string; createdBy: string; logicalIdPrefix: string; expectedStatus: string }
-  | { id: string; kind: "verify-stack-parameter"; stack: string; key: string; expected: StepRef };
+  | { id: string; kind: "verify-stack-parameter"; stack: string; key: string; expected: StepRef | { literal: string } }
+  | { id: string; kind: "verify-lambda-environment"; stack: string; logicalId: string; key: string; expected: { literal: string } };
 
 /** A file the release bundle holds beside the handler (`packagedFunction`'s extraFiles): repo-relative source, name in the zip. */
 export interface ExtraFile {
@@ -181,10 +251,37 @@ export const CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED: Readonly<Record<string, string>
 export type LambdaUnit = keyof typeof CONTROL_PLANE_LAMBDAS;
 const LAMBDAS: Readonly<Record<LambdaUnit, LambdaSpec>> = CONTROL_PLANE_LAMBDAS;
 const LAMBDA_UNITS = Object.keys(CONTROL_PLANE_LAMBDAS) as LambdaUnit[];
+/** The Lambda units a deploy of `units` moves: `control-plane-code` is all of them. */
+export function lambdaUnitsFor(units: readonly DeployUnit[]): LambdaUnit[] {
+  const allCode = units.includes("control-plane-code");
+  return LAMBDA_UNITS.filter((unit) => allCode || units.some((chosen) => chosen === unit));
+}
+function buildStepFor(unit: LambdaUnit, zipPath: string): Extract<DeployStep, { kind: "build-lambda-zip" }> {
+  const { logicalId, entry, extraFiles } = LAMBDAS[unit];
+  return { id: `build-${unit}`, kind: "build-lambda-zip", unit, logicalId, entry, zipPath, ...(extraFiles === undefined ? {} : { extraFiles }) };
+}
 const QUALIFICATION = { logicalIdPrefix: "E2eQualificationTransport", construct: CDK_CONSTRUCT_IDS["control-plane"], context: { "agentx:e2eQualificationTransport": "enabled" } } as const;
 const WORKER_IMAGE_PARAMETER = "WorkerImageUri";
 const EXECUTOR_IMAGE_PARAMETER = "ExecutorImageUri";
 const EXECUTOR_SETTING = { logicalIdPrefix: "WorkerExecutorImageParameter", construct: CDK_CONSTRUCT_IDS.runtime } as const;
+/** The AI navigation model setting (Task 4.10): a runtime stack parameter and the SSM parameter it fills. */
+const E2E_AGENT_MODEL_PARAMETER = "E2eAgentModelId";
+const E2E_AGENT_MODEL_SETTING = { logicalIdPrefix: "WorkerE2eAgentModelParameter", construct: CDK_CONSTRUCT_IDS.runtime } as const;
+/** The model fallback setting (Task 4.10D, MODEL3): a runtime stack parameter (default `none`) and the SSM parameter it fills. */
+const MODEL_FALLBACK_PARAMETER = "ModelFallback";
+const MODEL_FALLBACK_SETTING = { logicalIdPrefix: "WorkerModelFallbackParameter", construct: CDK_CONSTRUCT_IDS.runtime } as const;
+/**
+ * What the `e2e-agent-settings` unit changes in the deployed control-plane stack, and nothing else: the broker's `AGENTX_E2E_AGENT_SETTINGS_PREFIX` variable (PREFIXGAP) and the ARNs of the
+ * `worker-e2e-agent-model` (4.10A) and `worker-model-fallback` (4.10D) parameters in the `ssm:GetParameters` statement of the two role policies that read every worker setting (the broker's
+ * and the session steps'; the eval batch tick reads neither, 4.10A review M-2 and 4.10D, so TEST's deployed policy of it already is head's). All are declared IAM and environment changes of
+ * the head templates. A setting's ARN may be granted before its SSM parameter exists (`model-fallback-settings` adds that one on the runtime stack).
+ */
+export const E2E_AGENT_SETTINGS_UNIT = {
+  broker: CONTROL_PLANE_LAMBDAS.broker.logicalId,
+  variable: "AGENTX_E2E_AGENT_SETTINGS_PREFIX",
+  policies: ["BrokerServiceRoleDefaultPolicyDDFD9E7E", "SessionsStepsServiceRoleDefaultPolicy9F4B87C9"],
+  settings: ["e2eAgentModel", "modelFallback"],
+} as const satisfies { broker: string; variable: string; policies: readonly string[]; settings: ReadonlyArray<keyof typeof WORKER_SETTING_PARAMETERS> };
 
 /**
  * The executor image's repository: the worker's, with its own name changed (`.../worker` to `.../executor`, `.../agentx-worker` to
@@ -232,6 +329,12 @@ export function resolveArtifactBucket(runner: AwsReader, region: string, env: st
   return bucket;
 }
 
+/** The template a stack was last deployed from, as CloudFormation holds it (`Original`: before the transforms). */
+export function deployedTemplateOf(runner: AwsReader, region: string, stack: string): CfnTemplate {
+  const body = runner.aws(["cloudformation", "get-template", "--stack-name", stack, "--template-stage", "Original", "--query", "TemplateBody", "--region", region, "--output", "json"]).stdout;
+  return JSON.parse(body) as CfnTemplate;
+}
+
 /**
  * As `resolveArtifactBucket`, and the control-plane stack's deployed `logicalId` Lambda must already read its code from that bucket.
  * A function the release pipeline deployed names its bucket through a stack parameter (`{ Ref }`); that parameter's current value
@@ -240,8 +343,7 @@ export function resolveArtifactBucket(runner: AwsReader, region: string, env: st
 export function resolveCodeArtifactBucket(runner: AwsReader, region: string, env: string, logicalId: string): string {
   const bucket = resolveArtifactBucket(runner, region, env);
   const stack = resolveTestStacks(env)["control-plane"];
-  const body = runner.aws(["cloudformation", "get-template", "--stack-name", stack, "--template-stage", "Original", "--query", "TemplateBody", "--region", region, "--output", "json"]).stdout;
-  const template = JSON.parse(body) as CfnTemplate;
+  const template = deployedTemplateOf(runner, region, stack);
   const declared = (template.Resources?.[logicalId]?.Properties?.Code as { S3Bucket?: unknown } | undefined)?.S3Bucket;
   let deployed: string | undefined;
   if (typeof declared === "string") deployed = declared;
@@ -257,7 +359,7 @@ export function resolveCodeArtifactBucket(runner: AwsReader, region: string, env
 }
 
 export function planTestDeploy(
-  input: { env: string; only: DeployUnit[]; artifacts: BuiltArtifacts; previous: StackParameters; identityMode?: IdentityMode },
+  input: { env: string; only: DeployUnit[]; artifacts: BuiltArtifacts; previous: StackParameters; identityMode?: IdentityMode; e2eModel?: string; region?: string },
   allowlist: readonly string[] = loadAllowlist(),
 ): DeployStep[] {
   if (!allowlist.includes(input.env)) throw new Error(ALLOWLIST_ERROR);
@@ -267,6 +369,11 @@ export function planTestDeploy(
   if (units.includes("qualification-transport") && units.some((unit) => unit === "broker" || unit === "dispatcher" || unit === "control-plane-code")) {
     throw new Error("qualification-transport changes the control-plane template; run it on its own, apart from control-plane-code, broker and dispatcher");
   }
+  // These two change a stack's template or settings by themselves: each runs on its own, so the exact-change guard of one never has to judge another's changes.
+  for (const unit of ["e2e-agent-settings", "e2e-agent-model", "model-fallback-settings"] as const) {
+    if (units.includes(unit) && units.length > 1) throw new Error(`${unit} changes a stack template or setting; run it on its own, apart from the other units`);
+  }
+  if (input.e2eModel !== undefined && !units.includes("e2e-agent-model")) throw new Error("--e2e-model goes only with the e2e-agent-model unit");
   const { revision } = input.artifacts;
   if (!/^[a-f0-9]{7,40}$/.test(revision)) throw new Error("the revision must be a hexadecimal git commit");
   const stacks = resolveTestStacks(input.env);
@@ -332,14 +439,102 @@ export function planTestDeploy(
     );
   }
 
+  if (units.includes("model-fallback-settings")) {
+    // A runtime stack deployed before 4.10D has neither the parameter nor its SSM setting: the change set adds both, lifted from a synth of the runtime stack, and changes nothing else. The
+    // value stays none (no fallback, the worker fails by name when a keyed provider's secret is missing); `agentx config set models.fallback` is how an owner chooses one afterwards.
+    if (input.previous.runtime[MODEL_FALLBACK_PARAMETER] !== undefined) {
+      throw new Error(`the runtime stack already has ${MODEL_FALLBACK_PARAMETER}; model-fallback-settings only adds it. Change its value with agentx config set models.fallback`);
+    }
+    const previousKeys = Object.keys(input.previous.runtime);
+    steps.push(
+      {
+        id: "change-set-model-fallback",
+        kind: "create-change-set",
+        stack: stacks.runtime,
+        stackKind: "runtime",
+        changeSetPrefix: `test-deploy-model-fallback-${revision.slice(0, 12)}`,
+        template: { source: "lift-resources", logicalIdPrefix: MODEL_FALLBACK_SETTING.logicalIdPrefix, parameterNames: [MODEL_FALLBACK_PARAMETER], construct: MODEL_FALLBACK_SETTING.construct, cdkContext: {}, identityMode },
+        parameters: [
+          { key: MODEL_FALLBACK_PARAMETER, literal: "none" },
+          ...previousKeys.sort().map((key): ParameterSpec => ({ key, usePreviousValue: true })),
+        ],
+        expect: { action: "Add", logicalIdPrefixes: [MODEL_FALLBACK_SETTING.logicalIdPrefix] },
+      },
+      { id: "execute-model-fallback", kind: "execute-change-set", stack: stacks.runtime, createdBy: "change-set-model-fallback" },
+      { id: "verify-model-fallback", kind: "verify-stack-parameter", stack: stacks.runtime, key: MODEL_FALLBACK_PARAMETER, expected: { literal: "none" } },
+    );
+  }
+
+  if (units.includes("e2e-agent-model")) {
+    if (input.e2eModel === undefined) throw new Error("e2e-agent-model needs --e2e-model <model id or default>");
+    const provider = input.previous.runtime["ModelProvider"] ?? "amazon-bedrock";
+    const region = input.region ?? DEFAULT_REGION;
+    const known = (MODEL_PROVIDERS as readonly string[]).includes(provider) ? provider as ModelProvider : undefined;
+    if (input.e2eModel !== "default" && (known === undefined || eligibleE2EAgentModel(known, input.e2eModel, region) === null)) {
+      throw new Error(`--e2e-model ${JSON.stringify(input.e2eModel)} is not a model Rovara can use with ${provider} in ${region}; choose a model of its table (agentx project model-check discover lists them) or default`);
+    }
+    // A runtime stack deployed before the setting has neither the parameter nor its SSM setting: the first change set adds both, lifted from a synth of the runtime stack, and changes nothing else.
+    const exists = input.previous.runtime[E2E_AGENT_MODEL_PARAMETER] !== undefined;
+    const previousKeys = Object.keys(input.previous.runtime).filter((key) => key !== E2E_AGENT_MODEL_PARAMETER);
+    steps.push(
+      {
+        id: "change-set-e2e-agent-model",
+        kind: "create-change-set",
+        stack: stacks.runtime,
+        stackKind: "runtime",
+        changeSetPrefix: `test-deploy-e2e-model-${revision.slice(0, 12)}`,
+        template: exists
+          ? { source: "previous" }
+          : { source: "lift-resources", logicalIdPrefix: E2E_AGENT_MODEL_SETTING.logicalIdPrefix, parameterNames: [E2E_AGENT_MODEL_PARAMETER], construct: E2E_AGENT_MODEL_SETTING.construct, cdkContext: {}, identityMode },
+        parameters: [
+          { key: E2E_AGENT_MODEL_PARAMETER, literal: input.e2eModel },
+          ...previousKeys.sort().map((key): ParameterSpec => ({ key, usePreviousValue: true })),
+        ],
+        expect: exists
+          ? { action: "Modify", logicalIdPrefixes: [E2E_AGENT_MODEL_SETTING.logicalIdPrefix], allowedAttributes: ["Properties.Value"] }
+          : { action: "Add", logicalIdPrefixes: [E2E_AGENT_MODEL_SETTING.logicalIdPrefix] },
+      },
+      { id: "execute-e2e-agent-model", kind: "execute-change-set", stack: stacks.runtime, createdBy: "change-set-e2e-agent-model" },
+      { id: "verify-e2e-agent-model", kind: "verify-stack-parameter", stack: stacks.runtime, key: E2E_AGENT_MODEL_PARAMETER, expected: { literal: input.e2eModel } },
+    );
+  }
+
+  if (units.includes("e2e-agent-settings")) {
+    const parameterNames = E2E_AGENT_SETTINGS_UNIT.settings.map((setting) => `${environmentSettingsPrefix(input.env)}${WORKER_SETTING_PARAMETERS[setting]}`);
+    const { broker, variable, policies } = E2E_AGENT_SETTINGS_UNIT;
+    steps.push(
+      {
+        id: "change-set-e2e-agent-settings",
+        kind: "create-change-set",
+        stack: stacks["control-plane"],
+        stackKind: "control-plane",
+        changeSetPrefix: `test-deploy-e2e-settings-${revision.slice(0, 12)}`,
+        template: {
+          source: "lift-declared", construct: QUALIFICATION.construct, cdkContext: QUALIFICATION.context, identityMode,
+          environment: [{ logicalId: broker, variable }], grants: policies.flatMap((logicalId) => parameterNames.map((parameterName) => ({ logicalId, parameterName }))),
+        },
+        parameters: usePrevious("control-plane"),
+        expect: {
+          action: "Modify", logicalIds: [broker, ...policies], allowedAttributes: [],
+          allowedAttributesByLogicalId: { [broker]: ["Properties.Environment"], ...Object.fromEntries(policies.map((logicalId) => [logicalId, ["Properties.PolicyDocument"]])) },
+          // CloudFormation lists every resource that reads the Broker's Arn as a Dynamic re-evaluation (API integration, invoke permission, schedules, role policies) when the Broker changes at
+          // all; the same no-op re-evaluations control-plane-code accepts, on the same terms (never a Static detail, another cause, or a replacement).
+          allowArnReevaluations: true, arnSources: [broker],
+        },
+      },
+      { id: "execute-e2e-agent-settings", kind: "execute-change-set", stack: stacks["control-plane"], createdBy: "change-set-e2e-agent-settings" },
+      // Read back what the change set moved: the broker runs with the variable, not merely UPDATE_COMPLETE.
+      { id: "verify-e2e-agent-settings", kind: "verify-lambda-environment", stack: stacks["control-plane"], logicalId: broker, key: variable, expected: { literal: environmentSettingsPrefix(input.env) } },
+    );
+  }
+
   // One change set holds every Lambda code change of the run, so the exact-change guard has one list of code units to check.
-  const allCode = units.includes("control-plane-code");
-  const lambdas = LAMBDA_UNITS.filter((unit) => allCode || units.some((chosen) => chosen === unit));
+  const lambdas = lambdaUnitsFor(units);
   if (lambdas.length > 0) {
     for (const unit of lambdas) {
-      const { logicalId, entry, extraFiles } = LAMBDAS[unit];
+      const { logicalId } = LAMBDAS[unit];
       steps.push(
-        { id: `build-${unit}`, kind: "build-lambda-zip", unit, logicalId, entry, zipPath: join(input.artifacts.outputDir, `${unit}-${revision}.zip`), ...(extraFiles === undefined ? {} : { extraFiles }) },
+        buildStepFor(unit, join(input.artifacts.outputDir, `${unit}-${revision}.zip`)),
         { id: `upload-${unit}`, kind: "upload-artifact", bucketFromStack: "access", logicalId, from: `build-${unit}`, keyPrefix: `test-deploy/${revision}/${logicalId}-` },
       );
     }
@@ -401,6 +596,7 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
   const problems: string[] = [];
   // The code units whose own change is exactly the expected one: only their Arn re-evaluations may be accepted.
   const exactUnits = new Set<string>();
+  const arnSources = expected.arnSources ?? expected.logicalIds ?? [];
   const reevaluations: ObservedChange[] = [];
   const unitChanges: ObservedChange[] = [];
   for (const change of changes) {
@@ -426,16 +622,18 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
       if (details.length === 0) problems.push(`${label}: its change details are not reported, so they cannot be checked`);
       else if (details.some((detail) => !isOwn(detail) && !isCross(detail))) problems.push(`${label}: has a change that is not a Static DirectModification`);
       else if (!details.some(isOwn)) problems.push(`${label}: has no Static DirectModification of its own, only re-evaluations`);
-      else if (expected.allowedAttributes !== undefined) {
+      else if (expected.allowedAttributes !== undefined || expected.allowedAttributesByLogicalId !== undefined) {
         // Only the unit's own (Static) details name what it changes; attributes and details are reported in the same order.
         const own = attributes.length === details.length ? attributes.filter((_, index) => isOwn(details[index]!)) : attributes;
-        const extra = own.filter((attribute) => !(expected.allowedAttributes ?? []).includes(attribute));
+        const allowed = expected.allowedAttributesByLogicalId?.[change.logicalId] ?? expected.allowedAttributes ?? [];
+        const extra = own.filter((attribute) => !allowed.includes(attribute));
         if (own.length === 0) problems.push(`${label}: changed attributes are not reported, so they cannot be checked`);
         else if (extra.length > 0) problems.push(`${label}: also changes ${extra.join(", ")}`);
       }
       crossDetails.set(change.logicalId, details.filter(isCross));
-    } else if (expected.allowedAttributes !== undefined) {
-      const extra = attributes.filter((attribute) => !(expected.allowedAttributes ?? []).includes(attribute));
+    } else if (expected.allowedAttributes !== undefined || expected.allowedAttributesByLogicalId !== undefined) {
+      const allowed = expected.allowedAttributesByLogicalId?.[change.logicalId] ?? expected.allowedAttributes ?? [];
+      const extra = attributes.filter((attribute) => !allowed.includes(attribute));
       if (attributes.length === 0) problems.push(`${label}: changed attributes are not reported, so they cannot be checked`);
       else if (extra.length > 0) problems.push(`${label}: also changes ${extra.join(", ")}`);
     }
@@ -447,7 +645,7 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
     if (!baseClean.has(change.logicalId)) continue;
     const label = labelOf(change);
     const bad = (crossDetails.get(change.logicalId) ?? []).filter((detail) =>
-      !(detail.causingEntity !== undefined && [...baseClean].some((unit) => unit !== change.logicalId && detail.causingEntity === arnOf(unit))));
+      !(detail.causingEntity !== undefined && [...baseClean].some((unit) => unit !== change.logicalId && arnSources.includes(unit) && detail.causingEntity === arnOf(unit))));
     if (bad.length > 0) problems.push(`${label}: re-evaluates on ${bad.map((detail) => detail.causingEntity ?? "no entity").join(", ")}, which is not the Arn of another code unit changed only in Code`);
     else exactUnits.add(change.logicalId);
   }
@@ -457,7 +655,7 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
     const details = change.details ?? [];
     const causedByExactUnit = (detail: ObservedDetail) =>
       detail.evaluation === "Dynamic" && detail.changeSource === "ResourceAttribute"
-      && (expected.logicalIds ?? []).some((unit) => exactUnits.has(unit) && detail.causingEntity === arnOf(unit));
+      && arnSources.some((unit) => exactUnits.has(unit) && detail.causingEntity === arnOf(unit));
     let unsafe: string | undefined;
     if (details.length === 0) unsafe = "its change details are not reported, so they cannot be checked";
     else if (change.replacement === "True") unsafe = `would replace the resource (Replacement ${change.replacement})`;
@@ -469,7 +667,7 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
     if (!changes.some((change) => change.logicalId === logicalId && change.action === expected.action)) problems.push(`missing the expected ${expected.action} ${logicalId}`);
   }
   if (problems.length > 0) {
-    const accepted = noOpReevaluations.length === 0 ? "" : `; accepted separately as no-op re-evaluations caused by ${(expected.logicalIds ?? []).map(arnOf).join(", ")}: ${noOpReevaluations.join(", ")}`;
+    const accepted = noOpReevaluations.length === 0 ? "" : `; accepted separately as no-op re-evaluations caused by ${arnSources.map(arnOf).join(", ")}: ${noOpReevaluations.join(", ")}`;
     throw new Error(`the change set holds unexpected changes: ${problems.join("; ")}${accepted}`);
   }
   return { noOpReevaluations };
@@ -522,9 +720,105 @@ export function liftResources(deployed: CfnTemplate, synthesized: CfnTemplate, p
   };
 }
 
+const canonical = (value: unknown): string => JSON.stringify(value, (_key, inner: unknown) => (inner !== null && typeof inner === "object" && !Array.isArray(inner)
+  ? Object.fromEntries(Object.entries(inner as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1))) : inner));
+const asRecord = (value: unknown): Record<string, unknown> | undefined => (value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined);
+
+/**
+ * The deployed template with exactly the declared additions taken from head's (`lift-declared`), and every other byte of it as it is:
+ * - each `environment` entry: the Lambda's environment variable, which head sets and the deployed function lacks; the other variables of head and the deployed function must be equal;
+ * - each `grants` entry: the ARN of an SSM parameter in the `ssm:GetParameters` statement of a role policy (several entries may name the same policy, and are judged together); the rest of
+ *   head's policy (its other statements, resources and roles) must be equal to the deployed policy's, whatever the order of its statements and of their Action and Resource lists.
+ * A resource that is already as head has it is left alone (a re-run). Anything head and the deployed template differ by beyond that refuses, naming the resource: this change set is
+ * allow-listed to the declared additions and must never carry another IAM or environment change along with them.
+ */
+export function liftDeclaredSettings(
+  deployed: CfnTemplate,
+  head: CfnTemplate,
+  declared: { environment: ReadonlyArray<{ logicalId: string; variable: string }>; grants: ReadonlyArray<{ logicalId: string; parameterName: string }> },
+): CfnTemplate {
+  const resources: Record<string, CfnResource> = { ...(deployed.Resources ?? {}) };
+  const need = (logicalId: string, template: CfnTemplate, where: string): CfnResource => {
+    const resource = template.Resources?.[logicalId];
+    if (resource === undefined) throw new Error(`${logicalId} is not in ${where}; stop for review`);
+    return resource;
+  };
+  for (const { logicalId, variable } of declared.environment) {
+    const deployedResource = need(logicalId, deployed, "the deployed template");
+    const headResource = need(logicalId, head, "head's template");
+    const deployedVariables = asRecord(asRecord(deployedResource.Properties?.Environment)?.Variables) ?? {};
+    const headVariables = asRecord(asRecord(headResource.Properties?.Environment)?.Variables);
+    if (headVariables === undefined || !(variable in headVariables)) throw new Error(`head's ${logicalId} does not set ${variable}; stop for review`);
+    const { [variable]: headValue, ...headRest } = headVariables;
+    const { [variable]: deployedValue, ...deployedRest } = deployedVariables;
+    if (canonical(headRest) !== canonical(deployedRest)) throw new Error(`head's ${logicalId} differs from the deployed function by more than the declared ${variable}: its other environment variables differ; deploy those with their own unit first`);
+    // Everything but the environment is the deployed resource's, byte for byte; head's other properties must be the deployed ones. The code is the one thing allowed to differ: it
+    // is moved by the code units, and this change set keeps the deployed function's.
+    const strip = (resource: CfnResource) => { const { Environment: _environment, Code: _code, ...rest } = resource.Properties ?? {}; void _environment; void _code; return canonical(rest); };
+    if (strip(headResource) !== strip(deployedResource)) throw new Error(`head's ${logicalId} differs from the deployed function by more than the declared ${variable}: another property differs; deploy that with its own unit first`);
+    if (deployedValue !== undefined && canonical(deployedValue) !== canonical(headValue)) throw new Error(`the deployed ${logicalId} already sets ${variable} to another value than head's; stop for review`);
+    resources[logicalId] = { ...deployedResource, Properties: { ...(deployedResource.Properties ?? {}), Environment: { ...(asRecord(deployedResource.Properties?.Environment) ?? {}), Variables: { ...deployedVariables, [variable]: headValue } } } };
+  }
+  // One policy can take several declared ARNs: they are judged together, against the deployed policy, so each is not compared with a deployed policy that still lacks the others.
+  const grantsByPolicy = new Map<string, string[]>();
+  for (const { logicalId, parameterName } of declared.grants) grantsByPolicy.set(logicalId, [...(grantsByPolicy.get(logicalId) ?? []), parameterName]);
+  for (const [logicalId, parameterNames] of grantsByPolicy) {
+    const deployedResource = need(logicalId, deployed, "the deployed template");
+    const headResource = need(logicalId, head, "head's template");
+    for (const [where, resource] of [["the deployed template", deployedResource], ["head's template", headResource]] as const) {
+      if (resource.Type !== "AWS::IAM::Policy") throw new Error(`${logicalId} is not an AWS::IAM::Policy in ${where}; stop for review`);
+    }
+    // A declared ARN is matched only as the exact entry CDK synthesizes (partition, region and account refs, then exactly `:parameter<name>`): a wildcard, a longer name that starts with the
+    // declared one, or an ARN of another region or account is a different grant, stays in the comparison, and so refuses.
+    const exactArns = parameterNames.map((parameterName) => canonical({ "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ssm:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, `:parameter${parameterName}`]] }));
+    const named = parameterNames.join(", ");
+    const statementsOf = (properties: Record<string, unknown> | undefined): Array<Record<string, unknown>> => ((asRecord(properties?.PolicyDocument)?.Statement ?? []) as Array<Record<string, unknown>>);
+    const entriesOf = (statement: Record<string, unknown>): unknown[] => (Array.isArray(statement.Resource) ? statement.Resource : []);
+    const occurrences = (statement: Record<string, unknown>, exact: string): number => entriesOf(statement).filter((entry) => canonical(entry) === exact).length;
+    const actionKey = (statement: Record<string, unknown>): string => canonical(Array.isArray(statement.Action) ? (statement.Action as unknown[]).map((entry) => canonical(entry)).sort() : statement.Action);
+    // Every declared ARN is in head's policy exactly once, all of them in the one same statement.
+    const holders = new Set(exactArns.map((exact, position) => {
+      const where = statementsOf(headResource.Properties).flatMap((statement, index) => (occurrences(statement, exact) > 0 ? [index] : []));
+      const statement = statementsOf(headResource.Properties)[where[0] ?? 0];
+      if (where.length !== 1 || statement === undefined || occurrences(statement, exact) !== 1) throw new Error(`head's ${logicalId} has no grant for ${parameterNames[position]} in exactly one statement; stop for review`);
+      return where[0]!;
+    }));
+    if (holders.size !== 1) throw new Error(`head's ${logicalId} does not hold ${named} in one statement; stop for review`);
+    // Only statements of the holder's Action (ssm:GetParameters) may have the declared ARNs taken out: the same ARN in a statement of another Action is not the declared grant.
+    const holderAction = actionKey(statementsOf(headResource.Properties)[[...holders][0]!]!);
+    if (exactArns.every((exact) => statementsOf(deployedResource.Properties).some((statement) => occurrences(statement, exact) > 0))) {
+      // Already granted in the deployed policy (a re-run): it must be head's policy exactly, or something else changed and this unit is not the way to apply it.
+      if (canonical(headResource.Properties) !== canonical(deployedResource.Properties)) throw new Error(`head's ${logicalId} differs from the deployed policy by more than the declared grant for ${named}: the deployed policy already has it, and another statement, resource or role differs; stop for review (Tier 3)`);
+      continue;
+    }
+    // Head's policy with the declared ARNs taken out must be the deployed policy with the same ARNs taken out (a half-applied policy has some of them): nothing else of it differs. IAM reads the
+    // statements, and the Action and Resource lists inside them, as sets, and a synth orders them by how the code granted them (TEST's deployed Broker policy holds head's statements in another
+    // order), so the comparison ignores the order of the statements and of those lists. Every other property (name, roles, conditions, effects) is compared exactly.
+    const normalised = (properties: Record<string, unknown> | undefined): string => {
+      const copy = JSON.parse(JSON.stringify(properties ?? {})) as Record<string, unknown>;
+      const document = asRecord(copy.PolicyDocument);
+      if (document !== undefined && Array.isArray(document.Statement)) {
+        const statements = (document.Statement as Array<Record<string, unknown>>).map((statement) => {
+          const listed = { ...statement };
+          if (Array.isArray(listed.Resource) && actionKey(statement) === holderAction) listed.Resource = (listed.Resource as unknown[]).filter((entry) => !exactArns.includes(canonical(entry)));
+          for (const key of ["Action", "Resource"]) if (Array.isArray(listed[key])) listed[key] = (listed[key] as unknown[]).map((entry) => canonical(entry)).sort();
+          return canonical(listed);
+        });
+        document.Statement = statements.sort();
+      }
+      return canonical(copy);
+    };
+    if (normalised(headResource.Properties) !== normalised(deployedResource.Properties)) {
+      throw new Error(`head's ${logicalId} differs from the deployed policy by more than the declared grant for ${named}: another statement, resource or role differs; stop for review (Tier 3)`);
+    }
+    resources[logicalId] = { ...deployedResource, Properties: { ...(deployedResource.Properties ?? {}), PolicyDocument: headResource.Properties?.PolicyDocument } };
+  }
+  return { ...deployed, Resources: resources };
+}
+
 /** The arguments of `npx cdk synth <construct>` for a lifted template: the profile, and the app and context the repo's deploy engine passes. */
 export function liftSynthArguments(
-  plan: Extract<TemplatePlan, { source: "lift-resources" }>,
+  plan: LiftSynthPlan,
   input: { env: string; region: string; profile: string; outDir: string },
 ): string[] {
   return [
@@ -648,7 +942,13 @@ export interface TestDeployArgs {
   profile: string;
   region: string;
   apply: boolean;
+  /** Read-only: report stale code, IAM drift, catalog and runner problems, and change nothing. */
+  check: boolean;
+  /** With --check: print the report as one JSON line at the end of stdout. */
+  json: boolean;
   only: DeployUnit[];
+  /** With --only e2e-agent-model: the AI navigation model to set, or `default`. */
+  e2eModel?: string;
 }
 
 /**
@@ -678,18 +978,25 @@ export function parseOptions(argv: readonly string[], spec: { values: readonly s
 }
 
 export function parseTestDeployArgs(argv: readonly string[]): TestDeployArgs {
-  const { values, flags } = parseOptions(argv, { values: ["--env", "--profile", "--region", "--only"], flags: ["--apply"] });
+  const { values, flags } = parseOptions(argv, { values: ["--env", "--profile", "--region", "--only", "--e2e-model"], flags: ["--apply", "--check", "--json"] });
   const env = values.get("--env");
   if (env === undefined) throw new Error("--env is required");
   const profile = values.get("--profile");
   if (profile === undefined) throw new Error("--profile is required");
   const onlyValue = values.get("--only");
+  if (flags.has("--check") && flags.has("--apply")) throw new Error("--check is read-only; it cannot be combined with --apply");
+  if (flags.has("--json") && !flags.has("--check")) throw new Error("--json only goes with --check");
+  if (flags.has("--check") && onlyValue !== undefined) throw new Error("--check checks every unit; it does not take --only");
+  const e2eModel = values.get("--e2e-model");
+  if (flags.has("--check") && e2eModel !== undefined) throw new Error("--check is read-only; it does not take --e2e-model");
   const only = onlyValue === undefined ? [...DEFAULT_DEPLOY_UNITS] : onlyValue.split(",").map((name) => {
     const unit = DEPLOY_UNITS.find((candidate) => candidate === name.trim());
     if (unit === undefined) throw new Error(`unknown deploy unit ${name}; expected one of ${DEPLOY_UNITS.join(", ")}`);
     return unit;
   });
-  return { env, profile, region: values.get("--region") ?? DEFAULT_REGION, apply: flags.has("--apply"), only };
+  if (e2eModel !== undefined && !(only.length === 1 && only[0] === "e2e-agent-model")) throw new Error("--e2e-model goes only with --only e2e-agent-model");
+  if (only.includes("e2e-agent-model") && e2eModel === undefined) throw new Error("e2e-agent-model needs --e2e-model <model id or default>");
+  return { env, profile, region: values.get("--region") ?? DEFAULT_REGION, apply: flags.has("--apply"), check: flags.has("--check"), json: flags.has("--json"), only, ...(e2eModel === undefined ? {} : { e2eModel }) };
 }
 
 function describeRef(ref: StepRef): string {
@@ -704,20 +1011,23 @@ export function formatPlan(steps: readonly DeployStep[]): string {
       case "upload-artifact": return `${head} upload ${step.from} zip to the access stack's versioned artifact bucket (after checking versioning is Enabled and that ${step.logicalId} already reads its code from it) under ${step.keyPrefix}<sha256>.zip`;
       case "ecr-push": return `${head} build the ${step.image} image and push it to the existing repository ${step.repositoryUri} (tag test-*), then pin its digest; test-deploy never creates a repository, and stops if this one is missing`;
       case "create-change-set": {
-        const changed = step.parameters.flatMap((parameter) => ("value" in parameter ? [`${parameter.key}=${describeRef(parameter.value)}`] : []));
+        const changed = step.parameters.flatMap((parameter) => ("value" in parameter ? [`${parameter.key}=${describeRef(parameter.value)}`] : "literal" in parameter ? [`${parameter.key}=${parameter.literal}`] : []));
         const template = step.template.source === "previous" ? "previous template"
           : step.template.source === "lambda-code" ? `deployed template with Code replaced for ${step.template.patches.map((patch) => patch.logicalId).join(", ")}`
+          : step.template.source === "lift-declared"
+            ? `deployed template plus only ${[...step.template.environment.map((entry) => `${entry.logicalId} environment variable ${entry.variable}`), ...step.template.grants.map((entry) => `the ssm:GetParameters grant for ${entry.parameterName} in ${entry.logicalId}`)].join(", ")}, taken from a CDK synth of ${step.template.construct} (identity=${step.template.identityMode}, ${Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`).join(", ")}); refuses if head differs from the deployed template by anything more`
           : `deployed template plus ${step.template.logicalIdPrefix}*${(step.template.parameterNames ?? []).length === 0 ? "" : ` and parameter ${(step.template.parameterNames ?? []).join(", ")}`} from a CDK synth of ${step.template.construct} (${[`identity=${step.template.identityMode}`, ...Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`)].join(", ")})`;
         const allowed = [...(step.expect.logicalIds ?? []), ...(step.expect.logicalIdPrefixes ?? []).map((prefix) => `${prefix}*`)].join(", ");
         const reevaluations = step.expect.allowArnReevaluations === true
-          ? `, plus Modify entries accepted only as no-op re-evaluations caused by ${(step.expect.logicalIds ?? []).map(arnOf).join(", ")} (every detail Dynamic ResourceAttribute, never a replacement; a code unit may carry such a detail only when another listed code unit's Arn causes it)`
+          ? `, plus Modify entries accepted only as no-op re-evaluations caused by ${(step.expect.arnSources ?? step.expect.logicalIds ?? []).map(arnOf).join(", ")} (every detail Dynamic ResourceAttribute, never a replacement; a code unit may carry such a detail only when another listed code unit's Arn causes it)`
           : "";
         return `${head} create change set on ${step.stack}: ${template}; ${step.parameters.length} parameters, ${changed.length === 0 ? "all UsePreviousValue" : `changing only ${changed.join(", ")}`}; abort unless the only changes are ${step.expect.action} ${allowed}${reevaluations}`;
       }
       case "execute-change-set": return `${head} execute the change set from ${step.createdBy} on ${step.stack} and wait for UPDATE_COMPLETE`;
       case "verify-stack-resources": return `${head} verify with DescribeStackResource that every ${step.logicalIdPrefix}* resource ${step.createdBy} added in ${step.stack} is ${step.expectedStatus}`;
       case "verify-lambda-code": return `${head} verify ${step.logicalId} CodeSha256 equals ${describeRef(step.expectedSha256Base64)}`;
-      case "verify-stack-parameter": return `${head} verify ${step.stack} parameter ${step.key} equals ${describeRef(step.expected)}`;
+      case "verify-stack-parameter": return `${head} verify ${step.stack} parameter ${step.key} equals ${"literal" in step.expected ? step.expected.literal : describeRef(step.expected)}`;
+      case "verify-lambda-environment": return `${head} verify ${step.logicalId} runs with environment variable ${step.key}=${step.expected.literal} (GetFunctionConfiguration)`;
     }
   }).join("\n");
 }
@@ -838,7 +1148,7 @@ export function observedChanges(changes: readonly Change[]): ObservedChange[] {
   });
 }
 
-function synthesizeLiftSource(context: ApplyContext, plan: Extract<TemplatePlan, { source: "lift-resources" }>): CfnTemplate {
+function synthesizeLiftSource(context: ApplyContext, plan: LiftSynthPlan): CfnTemplate {
   runNpmBuild(context);
   const outDir = mkdtempSync(join(tmpdir(), "test-deploy-synth-"));
   context.runner.run("npx", liftSynthArguments(plan, { env: context.env, region: context.region, profile: context.options.profile ?? "", outDir }));
@@ -868,7 +1178,9 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
         if (upload?.bucket === undefined || upload.s3Key === undefined || upload.s3ObjectVersion === undefined) throw new Error(`step ${patch.zip} did not upload`);
         return { logicalId: patch.logicalId, code: { S3Bucket: upload.bucket, S3Key: upload.s3Key, S3ObjectVersion: upload.s3ObjectVersion } };
       }))
-      : liftResources(deployed, synthesizeLiftSource(context, step.template), step.template.logicalIdPrefix, step.template.parameterNames);
+      : step.template.source === "lift-declared"
+        ? liftDeclaredSettings(deployed, synthesizeLiftSource(context, step.template), { environment: step.template.environment, grants: step.template.grants })
+        : liftResources(deployed, synthesizeLiftSource(context, step.template), step.template.logicalIdPrefix, step.template.parameterNames);
     const body = Buffer.from(`${JSON.stringify(prepared, null, 2)}\n`);
     const bucket = resolveArtifactBucket(context.runner, context.region, context.env);
     const key = `test-deploy/${context.revision}/${step.stackKind}-template-${sha256(body).digest("hex")}.json`;
@@ -886,6 +1198,7 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
     ...(templateUrl === undefined ? { UsePreviousTemplate: true } : { TemplateURL: templateUrl }),
     Parameters: step.parameters.map((parameter) => ("value" in parameter
       ? { ParameterKey: parameter.key, ParameterValue: outputOf(context, parameter.value) }
+      : "literal" in parameter ? { ParameterKey: parameter.key, ParameterValue: parameter.literal }
       : { ParameterKey: parameter.key, UsePreviousValue: true })),
     Capabilities: stack.Capabilities ?? [],
     Description: `TEST fast-lane deploy ${context.revision.slice(0, 12)} (scripts/test-deploy.ts)`,
@@ -919,7 +1232,7 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
   console.log(`change set ${changeSetName}:\n${observed.map((change) => `  ${change.action} ${change.logicalId} ${change.type ?? ""} ${(change.attributes ?? []).join(",")}`).join("\n")}`);
   try {
     const { noOpReevaluations } = assertOnlyExpectedChanges(observed, step.expect);
-    if (noOpReevaluations.length > 0) console.log(`accepted as no-op re-evaluations caused by ${(step.expect.logicalIds ?? []).map(arnOf).join(", ")}: ${noOpReevaluations.join(", ")}`);
+    if (noOpReevaluations.length > 0) console.log(`accepted as no-op re-evaluations caused by ${(step.expect.arnSources ?? step.expect.logicalIds ?? []).map(arnOf).join(", ")}: ${noOpReevaluations.join(", ")}`);
   } catch (error) {
     await dropChangeSet();
     throw new Error(`${error instanceof Error ? error.message : String(error)}. The change set was deleted and nothing was applied.`, { cause: error });
@@ -943,29 +1256,46 @@ function assertRepositoryExists(context: ApplyContext, repository: string): void
   }
 }
 
+/** Builds the repo, then bundles and loads each Lambda `units` moves (scripts/lambda-load-check.ts); throws, changing nothing, if one does not load. */
+export async function assertLambdasLoad(context: ApplyContext, units: readonly DeployUnit[]): Promise<void> {
+  runNpmBuild(context);
+  const entries = lambdaUnitsFor(units).map((unit) => ({ name: unit, entry: LAMBDAS[unit].entry }));
+  console.log(`\n== lambda-load-check (${entries.length} bundle(s))`);
+  const report = await checkLambdaBundles({ root: process.cwd(), entries });
+  for (const result of report.results) console.log(`${result.status} ${result.name}: ${result.detail}`);
+  if (!report.ok) throw lambdaLoadError(report);
+}
+
+/** Bundles one control-plane Lambda the way the release does and writes its zip; the zip's sha256 is what Lambda reports as CodeSha256 (base64). */
+async function buildLambdaZip(context: ApplyContext, step: Extract<DeployStep, { kind: "build-lambda-zip" }>): Promise<{ sha256Hex: string; sha256Base64: string; inputs: string[] }> {
+  runNpmBuild(context);
+  const result = await bundle({
+    ...LAMBDA_BUNDLE_OPTIONS, entryPoints: [step.entry], outfile: "index.js", write: false, metafile: true,
+  });
+  const file = (name: string) => {
+    const output = result.outputFiles.find((candidate) => candidate.path.endsWith(`/${name}`));
+    if (output === undefined) throw new Error(`esbuild produced no ${name} for ${step.entry}`);
+    return Buffer.from(output.contents);
+  };
+  // The release bundle holds the handler, its source map and any extra files copied beside it.
+  const zip = deterministicZip([
+    { path: "index.js", data: file("index.js") },
+    { path: "index.js.map", data: file("index.js.map") },
+    ...(step.extraFiles ?? []).map((extra) => ({ path: extra.name, data: readFileSync(extra.from) })),
+  ]);
+  mkdirSync(join(step.zipPath, ".."), { recursive: true });
+  writeFileSync(step.zipPath, zip);
+  return { sha256Hex: sha256(zip).digest("hex"), sha256Base64: sha256(zip).digest("base64"), inputs: Object.keys(result.metafile.inputs) };
+}
+
 async function applyStep(context: ApplyContext, step: DeployStep): Promise<void> {
   console.log(`\n== ${step.id}`);
   switch (step.kind) {
     case "build-lambda-zip": {
-      runNpmBuild(context);
-      const result = await bundle({
-        entryPoints: [step.entry], outfile: "index.js", bundle: true, platform: "node", target: "node22", minify: true, sourcemap: true, external: [], write: false,
-      });
-      const file = (name: string) => {
-        const output = result.outputFiles.find((candidate) => candidate.path.endsWith(`/${name}`));
-        if (output === undefined) throw new Error(`esbuild produced no ${name} for ${step.entry}`);
-        return Buffer.from(output.contents);
-      };
-      // The release bundle holds the handler, its source map and any extra files copied beside it.
-      const zip = deterministicZip([
-        { path: "index.js", data: file("index.js") },
-        { path: "index.js.map", data: file("index.js.map") },
-        ...(step.extraFiles ?? []).map((extra) => ({ path: extra.name, data: readFileSync(extra.from) })),
-      ]);
-      mkdirSync(join(step.zipPath, ".."), { recursive: true });
-      writeFileSync(step.zipPath, zip);
-      recordOutput(context, step.id, { zipPath: step.zipPath, sha256Hex: sha256(zip).digest("hex"), sha256Base64: sha256(zip).digest("base64") });
-      console.log(`${step.zipPath} sha256 ${context.outputs.get(step.id)?.sha256Hex}`);
+      const { inputs: _inputs, ...built } = await buildLambdaZip(context, step);
+      void _inputs;
+      recordOutput(context, step.id, { zipPath: step.zipPath, ...built });
+      console.log(`${step.zipPath} sha256 ${built.sha256Hex}`);
       return;
     }
     case "upload-artifact": {
@@ -1016,12 +1346,439 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
     }
     case "verify-stack-parameter": {
       const actual = (await describeStackSdk(context, step.stack)).Parameters?.find((parameter) => parameter.ParameterKey === step.key)?.ParameterValue;
-      const expected = outputOf(context, step.expected);
+      const expected = "literal" in step.expected ? step.expected.literal : outputOf(context, step.expected);
       if (actual !== expected) throw new Error(`${step.stack} ${step.key} is ${actual ?? "missing"}, not ${expected}`);
       console.log(`${step.key} is ${expected}`);
       return;
     }
+    case "verify-lambda-environment": {
+      const resource = (await context.cloudFormation.send(new DescribeStackResourceCommand({ StackName: step.stack, LogicalResourceId: step.logicalId }))).StackResourceDetail;
+      const configuration = await context.lambda.send(new GetFunctionConfigurationCommand({ FunctionName: resource?.PhysicalResourceId }));
+      const actual = configuration.Environment?.Variables?.[step.key];
+      if (actual !== step.expected.literal) throw new Error(`${step.logicalId} ${step.key} is ${actual ?? "not set"}, not ${step.expected.literal}`);
+      console.log(`${step.logicalId} runs with ${step.key}=${actual}`);
+      return;
+    }
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// --check: the read-only gatherer. Every AWS call below is one of CHECK_READ_VERBS, and the reader refuses any other before it reaches
+// the CLI: cloudformation describe-stacks, get-template and list-stack-resources; lambda get-function; dynamodb query and scan (COUNT);
+// ec2 describe-instances; iam get-role; s3api get-object; bedrock get-inference-profile and get-foundation-model-availability; and
+// ssm get-parameter (no decryption), and service-quotas list-service-quotas for the Bedrock tokens-per-minute hint. The head synth and build are injected so the unit tests run without either.
+// ---------------------------------------------------------------------------------------------
+
+/** The catalog rows' key: the profile the web/API runtime registers its web and API rows under. */
+const CATALOG_PROFILE_PREFIX = `PROFILE#${WEB_API_RUNTIME_PROFILE_ID}#`;
+const CATALOG_ID_VARIABLE = "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID";
+
+/** The only AWS verbs `--check` runs, as `<service> <operation>`. Every one reads; no secret, no KMS, no model invocation. */
+export const CHECK_READ_VERBS: ReadonlySet<string> = new Set([
+  "cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources",
+  "lambda get-function",
+  "dynamodb query", "dynamodb scan",
+  "ec2 describe-instances",
+  "iam get-role",
+  "s3api get-object",
+  "bedrock get-inference-profile", "bedrock get-foundation-model-availability",
+  "ssm get-parameter",
+  "service-quotas list-service-quotas",
+]);
+
+/** The reader the check gathers through: it refuses any verb outside CHECK_READ_VERBS, so a later edit cannot add a write or a secret read by accident. */
+export function readOnlyAws(runner: AwsReader): AwsReader {
+  return {
+    aws(args: readonly string[], allowFailure?: boolean) {
+      const verb = `${args[0] ?? ""} ${args[1] ?? ""}`;
+      if (!CHECK_READ_VERBS.has(verb)) throw new Error(`test-deploy --check is read-only and "aws ${verb.trim()}" is not a read it runs`);
+      return runner.aws(args, allowFailure);
+    },
+  };
+}
+
+export interface CheckReaders {
+  runner: AwsReader;
+  region: string;
+  env: string;
+  /** The control-plane template head synthesizes. */
+  headTemplate: () => CfnTemplate;
+  /** The head build of every control-plane Lambda: its zip sha256 (base64) and the repo paths the bundle comes from, by logical ID. */
+  builtZips: () => Promise<{ shas: Record<string, string>; sources: Record<string, string[]> }>;
+  headRevision: string;
+  /** Whether any of `paths` differs between `revision` and head; undefined when git cannot tell. */
+  changedSince: (revision: string, paths: readonly string[]) => boolean | undefined;
+}
+
+type CheckFacts = Omit<Parameters<typeof evaluateTestDeployCheck>[0], "now">;
+
+function awsJson<T>(readers: Pick<CheckReaders, "runner" | "region">, args: readonly string[], allowFailure = false): T | undefined {
+  const result = readers.runner.aws([...args, "--region", readers.region, "--output", "json"], allowFailure);
+  if (result.status !== 0) return undefined;
+  return JSON.parse(result.stdout) as T;
+}
+
+/** The deployed Lambdas' CodeSha256 by logical ID, for every control-plane Lambda this script moves. list-stack-resources pages through all of them; describe-stack-resources stops at 100 and the stack has more. */
+function deployedCodeShas(readers: CheckReaders, stack: string): Record<string, string> {
+  const resources = awsJson<Array<[string, string]>>(readers, ["cloudformation", "list-stack-resources", "--stack-name", stack, "--query", "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]"]) ?? [];
+  const physical = new Map(resources);
+  const shas: Record<string, string> = {};
+  for (const { logicalId } of Object.values(CONTROL_PLANE_LAMBDAS)) {
+    const functionName = physical.get(logicalId);
+    if (functionName === undefined) continue;
+    const sha = awsJson<string>(readers, ["lambda", "get-function", "--function-name", functionName, "--query", "Configuration.CodeSha256"]);
+    if (typeof sha === "string") shas[logicalId] = sha;
+  }
+  return shas;
+}
+
+interface CatalogRead extends CatalogRowFact {
+  endpoint?: string;
+}
+
+/** The web and API rows of the web/API profile in the feature-verifier catalog. The state table is read directly: the admin API has no catalog read route. */
+function readCatalogRows(readers: CheckReaders, table: string, catalogId: string): CatalogRead[] {
+  const result = awsJson<{ Items?: Array<Record<string, { S?: string }>> }>(readers, [
+    "dynamodb", "query", "--table-name", table, "--consistent-read",
+    "--key-condition-expression", "pk = :pk AND begins_with(sk, :prefix)",
+    "--expression-attribute-values", JSON.stringify({ ":pk": { S: `E2E_FEATURE_VERIFIER#${catalogId}` }, ":prefix": { S: CATALOG_PROFILE_PREFIX } }),
+    "--expression-attribute-names", JSON.stringify({ "#s": "state" }),
+    "--projection-expression", "sk, #s, expiresAt, qualifiedAt, endpoint",
+  ]);
+  if (result === undefined) throw new Error(`cannot read the feature-verifier catalog from ${table}`);
+  return (result.Items ?? []).map((item) => ({
+    sk: item.sk?.S ?? "", state: item.state?.S ?? "", expiresAt: item.expiresAt?.S ?? "",
+    ...(item.qualifiedAt?.S === undefined ? {} : { qualifiedAt: item.qualifiedAt.S }),
+    ...(item.endpoint?.S === undefined ? {} : { endpoint: item.endpoint.S }),
+  }));
+}
+
+/**
+ * The qualified runner's facts, from the status.json its qualification hook uploaded under `e2e-runtime/<worker role ID>:<instance ID>/`.
+ * The instance is the running qualification worker at the web row's endpoint; nothing connects to it.
+ */
+function readRunnerFacts(readers: CheckReaders, input: { bucket: string; foundationStack: string; endpoint: string | undefined; deployedExecutorImage: string | undefined }): { facts: RunnerFacts | undefined; notes: string[] } {
+  const none = (note: string) => ({ facts: undefined, notes: [note] });
+  if (input.endpoint === undefined) return none("the catalog's web row has no endpoint, so no runner could be found");
+  const host = /^https?:\/\/(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(?:\/|$)/.exec(input.endpoint)?.[1];
+  if (host === undefined) return none(`the catalog's web row endpoint ${input.endpoint} is not a private IP address, so no runner could be found`);
+  const instances = awsJson<string[]>(readers, [
+    "ec2", "describe-instances",
+    "--filters", `Name=private-ip-address,Values=${host}`, "Name=tag:DeploymentMode,Values=e2e-qualification", "Name=instance-state-name,Values=running",
+    "--query", "Reservations[].Instances[].InstanceId",
+  ]) ?? [];
+  const [instanceId] = instances;
+  if (instances.length !== 1 || instanceId === undefined) return none(`${instances.length} running qualification instances have the private IP ${host}; expected exactly one`);
+  // The launch time moves on every start of the instance, which is what a restart onto another kernel looks like from here (HARDEN-C I-4). A read that fails only leaves it out.
+  const launchTimes = awsJson<string[]>(readers, ["ec2", "describe-instances", "--instance-ids", instanceId, "--query", "Reservations[].Instances[].LaunchTime"]);
+  const launchTime = launchTimes?.length === 1 && typeof launchTimes[0] === "string" ? launchTimes[0] : undefined;
+  const roleArn = stackOutput(describeStack(readers.runner, readers.region, input.foundationStack), "Ec2WorkerInstanceRoleArn");
+  const roleId = awsJson<string>(readers, ["iam", "get-role", "--role-name", roleArn.slice(roleArn.lastIndexOf("/") + 1), "--query", "Role.RoleId"]);
+  if (typeof roleId !== "string") return none(`the worker role ${roleArn} could not be read`);
+  const key = `e2e-runtime/${roleId}:${instanceId}/status.json`;
+  const file = join(mkdtempSync(join(tmpdir(), "test-deploy-check-")), "status.json");
+  const fetched = readers.runner.aws(["s3api", "get-object", "--bucket", input.bucket, "--key", key, "--region", readers.region, file], true);
+  if (fetched.status !== 0) return none(`s3://${input.bucket}/${key} could not be read: ${fetched.stderr.trim().slice(0, 200)}`);
+  const status = parseRunnerStatus(readFileSync(file, "utf8"));
+  if (status === undefined) return none(`s3://${input.bucket}/${key} is not a qualification status`);
+  if (status.state !== "SUCCEEDED") return none(`the runner ${instanceId} qualification status is ${status.state} (${status.reason}), not SUCCEEDED`);
+  return {
+    facts: { deployedExecutorImage: input.deployedExecutorImage, executorImage: status.executorImage, invocationFeatures: status.invocationFeatures, launchTime },
+    notes: [`runner ${instanceId} (${host}) qualified: ${status.reason}`],
+  };
+}
+
+/** The last line of a failed read-only call's stderr, bounded. */
+const failureText = (stderr: string): string => stderr.trim().split("\n").filter(Boolean).slice(-1)[0]?.slice(0, 300) ?? "no error text";
+
+/** `us.`, `eu.`, `apac.` and the other geography prefixes of a system-defined cross-region inference profile id; a foundation model id has none. */
+const INFERENCE_PROFILE_ID = /^(us|us-gov|eu|apac|global|jp|au|ca)\./;
+
+/**
+ * Whether Bedrock lists the route's model for this account and region, from two control-plane reads: get-inference-profile (for a profile:
+ * its status and the foundation models behind it; needs bedrock:GetInferenceProfile) and get-foundation-model-availability (authorization,
+ * entitlement, agreement and region; needs bedrock:GetFoundationModelAvailability). These were chosen over list-foundation-models, which lists
+ * every model Bedrock offers in the region whether or not the account may use it, and over any invocation, which this check must never make.
+ * A denied or failing read is `unverifiable`, never a pass.
+ */
+function readModelAccess(readers: CheckReaders, route: E2EModelRoute): { access: ModelAccessFacts; profileArn: string | undefined; modelArns: string[] } {
+  const read = (args: readonly string[]): { value: Record<string, unknown> } | { failure: ModelAccessFacts } => {
+    const result = readers.runner.aws([...args, "--region", readers.region, "--output", "json"], true);
+    if (result.status === 0) return { value: JSON.parse(result.stdout) as Record<string, unknown> };
+    const text = failureText(result.stderr);
+    // A model or profile Bedrock does not know is a definite answer; anything else (AccessDenied, throttling, no network) leaves it unknown.
+    return { failure: /ResourceNotFound|ValidationException/.test(text) && !/AccessDenied/.test(text) ? { state: "not-found", detail: text } : { state: "unverifiable", reason: text } };
+  };
+  // The e2e default on Bedrock is always a geography inference profile (a test pins that): its status, and the foundation models in every Region it routes to.
+  const profile = read(["bedrock", "get-inference-profile", "--inference-profile-identifier", route.modelId]);
+  if ("failure" in profile) return { access: profile.failure, profileArn: undefined, modelArns: [] };
+  const profileStatus = typeof profile.value.status === "string" ? profile.value.status : "UNKNOWN";
+  const profileArn = typeof profile.value.inferenceProfileArn === "string" ? profile.value.inferenceProfileArn : undefined;
+  const modelArns = (Array.isArray(profile.value.models) ? profile.value.models : [])
+    .flatMap((entry) => typeof (entry as { modelArn?: unknown }).modelArn === "string" ? [(entry as { modelArn: string }).modelArn] : []);
+  const modelIds = [...new Set(modelArns.map((arn) => arn.slice(arn.indexOf("foundation-model/") + "foundation-model/".length)).filter((id) => id !== ""))];
+  const models: ModelAvailabilityFact[] = [];
+  for (const modelId of modelIds) {
+    const availability = read(["bedrock", "get-foundation-model-availability", "--model-id", modelId]);
+    if ("failure" in availability) return { access: availability.failure, profileArn, modelArns };
+    const text = (key: string) => (typeof availability.value[key] === "string" ? availability.value[key] : undefined);
+    const agreement = (availability.value.agreementAvailability as { status?: unknown } | undefined)?.status;
+    models.push({
+      modelId, authorizationStatus: text("authorizationStatus"), entitlementAvailability: text("entitlementAvailability"), regionAvailability: text("regionAvailability"),
+      agreementStatus: typeof agreement === "string" ? agreement : undefined,
+    });
+  }
+  return { access: { state: "checked", profileStatus, models }, profileArn, modelArns };
+}
+
+/**
+ * Whether the broker's route registry holds the route. Task 4.2 keeps `E2E_MODEL_ROUTE_LATEST#<routeId>` rows in the state table under the
+ * project's partition key, and the check does not know the project, so it counts rows by sort key with a filtered scan (read-only).
+ */
+function readRouteApproval(readers: CheckReaders, table: string, routeId: string): ModelRouteCheck["approval"] {
+  const result = readers.runner.aws([
+    "dynamodb", "scan", "--table-name", table, "--select", "COUNT",
+    "--filter-expression", "sk = :sk", "--expression-attribute-values", JSON.stringify({ ":sk": { S: `E2E_MODEL_ROUTE_LATEST#${routeId}` } }),
+    "--region", readers.region, "--output", "json",
+  ], true);
+  if (result.status !== 0) return { unreadable: failureText(result.stderr) };
+  return { approved: ((JSON.parse(result.stdout) as { Count?: number }).Count ?? 0) > 0 };
+}
+
+/**
+ * One worker setting from SSM (`/agentx/<env>/<name>`), through `ssm get-parameter` without decryption: these settings hold an id or an ARN,
+ * never a secret. A parameter that does not exist reads as no value; a denied or failed read is unverifiable, never a pass.
+ */
+function readWorkerSetting(readers: CheckReaders, name: string): SettingFact {
+  const result = readers.runner.aws(["ssm", "get-parameter", "--name", `${environmentSettingsPrefix(readers.env)}${name}`, "--region", readers.region, "--output", "json"], true);
+  if (result.status === 0) {
+    const value = (JSON.parse(result.stdout) as { Parameter?: { Value?: unknown } }).Parameter?.Value;
+    return { state: "read", value: typeof value === "string" ? value : undefined };
+  }
+  const text = failureText(result.stderr);
+  return /ParameterNotFound/.test(text) && !/AccessDenied/.test(text) ? { state: "read", value: undefined } : { state: "unverifiable", reason: text };
+}
+
+/**
+ * The Bedrock tokens-per-minute quotas of the route's model, from `service-quotas list-service-quotas` (needs servicequotas:ListServiceQuotas on the operator profile): a hint.
+ * A denied or failed read is `unverifiable`, which is information in the check, never an error.
+ */
+function readBedrockQuotas(readers: CheckReaders, route: E2EModelRoute): QuotaFacts {
+  const result = readers.runner.aws([
+    "service-quotas", "list-service-quotas", "--service-code", "bedrock",
+    "--query", "Quotas[?contains(QuotaName, 'tokens per minute')].[QuotaCode,QuotaName,Value]", "--region", readers.region, "--output", "json",
+  ], true);
+  if (result.status !== 0) return { state: "unverifiable", reason: failureText(result.stderr) };
+  let parsed: unknown;
+  try { parsed = JSON.parse(result.stdout); } catch { return { state: "unverifiable", reason: "the answer was not JSON" }; }
+  if (!Array.isArray(parsed)) return { state: "unverifiable", reason: "the answer was not a list of quotas" };
+  const rows = parsed.flatMap((row): Array<[string, string, number]> => Array.isArray(row) && typeof row[0] === "string" && typeof row[1] === "string" && typeof row[2] === "number" ? [[row[0], row[1], row[2]]] : []);
+  return { state: "read", ...matchBedrockQuotas(rows, route, eligibleE2EAgentModel("amazon-bedrock", route.modelId, readers.region)?.label) };
+}
+
+/** One row of the broker's registry partition by key (`dynamodb query`, consistent, read-only): its item as DynamoDB JSON, undefined when absent, or why it could not be read. */
+function readRegistryRow(readers: CheckReaders, table: string, sk: string, projection: string, names: Record<string, string>): { item: Record<string, { S?: string }> | undefined } | { unreadable: string } {
+  const result = readers.runner.aws([
+    "dynamodb", "query", "--table-name", table, "--consistent-read", "--key-condition-expression", "pk = :pk AND sk = :sk",
+    "--expression-attribute-values", JSON.stringify({ ":pk": { S: "E2E_MODEL_ROUTES" }, ":sk": { S: sk } }),
+    ...(Object.keys(names).length === 0 ? [] : ["--expression-attribute-names", JSON.stringify(names)]), "--projection-expression", projection, "--region", readers.region, "--output", "json",
+  ], true);
+  if (result.status !== 0) return { unreadable: failureText(result.stderr) };
+  return { item: (JSON.parse(result.stdout) as { Items?: Array<Record<string, { S?: string }>> }).Items?.[0] };
+}
+
+/**
+ * Whether a passing driving test exists for the exact definition the installation would approve (Task 4.10): the broker's `E2E_MODEL_ROUTE_CANARY#<routeId>#<digest>` row with
+ * `test: "driving/v1"`, where the digest is the one the broker derives from this installation's settings and the recorded request shape. A route that cannot be derived is judged
+ * by the other findings, not here.
+ */
+function readRouteTested(readers: CheckReaders, input: { table: string; installation: Parameters<typeof deriveE2EAgentRoute>[0] }): ModelRouteCheck["tested"] {
+  const modelId = input.installation.e2eModel ?? DEFAULT_E2E_AGENT_MODELS_FOR(input.installation.provider);
+  if (modelId === undefined) return undefined;
+  const shape = readRegistryRow(readers, input.table, `E2E_MODEL_ROUTE_SHAPE#${E2E_MODEL_ROUTE_ID}#${modelId}`, "payloadShape", {});
+  if ("unreadable" in shape) return { unreadable: shape.unreadable };
+  const payloadShape = shape.item?.payloadShape?.S;
+  const derived = deriveE2EAgentRoute({ ...input.installation, ...(payloadShape === "minimal" ? { payloadShape: "minimal" as const } : {}) });
+  if (derived.status === "unavailable") return undefined;
+  const row = readRegistryRow(readers, input.table, `E2E_MODEL_ROUTE_CANARY#${E2E_MODEL_ROUTE_ID}#${e2eAgentRouteDefinitionDigest(derived.definition)}`, "#t", { "#t": "test" });
+  if ("unreadable" in row) return { unreadable: row.unreadable };
+  return { tested: row.item?.test?.S === "driving/v1" };
+}
+
+const DEFAULT_E2E_AGENT_MODELS_FOR = (provider: string | undefined): string | undefined =>
+  provider !== undefined && (MODEL_PROVIDERS as readonly string[]).includes(provider) ? E2E_AGENT_RECOMMENDED_MODELS[provider as ModelProvider] : undefined;
+
+/**
+ * The route's checks, for the installation's provider: approval, the installation's choice of AI navigation model (`worker-e2e-agent-model`; a model the table does not list is
+ * `model-route-choice-unsupported`), whether the route has a passing driving test, and either Bedrock (reads only, with the tokens-per-minute hint) or the keyed provider's secret
+ * ARN, with the worker instance role's grants.
+ */
+export function readModelRoute(readers: CheckReaders, input: { table: string; foundationStack: string; roleArn: string; controlPlaneTemplate: CfnTemplate; controlPlaneParameters: Record<string, string> }): ModelRouteCheck {
+  const approval = (routeId: string) => readRouteApproval(readers, input.table, routeId);
+  const providerSetting = readWorkerSetting(readers, WORKER_SETTING_PARAMETERS.modelProvider);
+  if (providerSetting.state === "unverifiable") return { provider: { state: "unverifiable", reason: `worker-model-provider could not be read: ${providerSetting.reason}` }, approval: approval(E2E_MODEL_ROUTE_ID) };
+  const provider = providerSetting.value?.trim();
+  if (provider === undefined || !(MODEL_PROVIDERS as readonly string[]).includes(provider)) {
+    return { provider: { state: "unverifiable", reason: provider === undefined ? "the worker-model-provider setting does not exist" : `worker-model-provider is ${JSON.stringify(provider)}, which is not one of ${MODEL_PROVIDERS.join(", ")}` }, approval: approval(E2E_MODEL_ROUTE_ID) };
+  }
+  const modelProvider = provider as ModelProvider;
+  const choiceSetting = readWorkerSetting(readers, WORKER_SETTING_PARAMETERS.e2eAgentModel);
+  const choice: ModelChoiceFacts = choiceSetting.state === "unverifiable"
+    ? { state: "unverifiable", reason: `worker-e2e-agent-model could not be read: ${choiceSetting.reason}` }
+    : e2eModelChoice(modelProvider, choiceSetting.value, readers.region);
+  const route = deriveE2EModelRoute(modelProvider, choice.state === "chosen" ? choice.modelId : undefined);
+  const foundationTemplate = deployedTemplateOf(readers.runner, readers.region, input.foundationStack);
+  const output = (foundationTemplate as { Outputs?: Record<string, { Value?: { "Fn::GetAtt"?: unknown } }> }).Outputs?.Ec2WorkerInstanceRoleArn?.Value?.["Fn::GetAtt"];
+  const roleLogicalId = Array.isArray(output) && typeof output[0] === "string" ? output[0] : undefined;
+  if (roleLogicalId === undefined) throw new Error(`${input.foundationStack}'s Ec2WorkerInstanceRoleArn output is not a GetAtt of a role, so the worker instance role cannot be found in its template`);
+  // The installation as the broker reads it, for the digest of the definition it would approve: the secret ARN of a keyed provider and OpenRouter's allowlist are settings too.
+  const keyedSettings = isKeyedModelProvider(route.provider) ? {
+    secretArn: readWorkerSetting(readers, WORKER_SETTING_PARAMETERS[KEYED_MODEL_PROVIDERS[route.provider].workerSetting]),
+    ...(route.provider === "openrouter" ? { openRouterProviders: readWorkerSetting(readers, WORKER_SETTING_PARAMETERS.openRouterProviders) } : {}),
+  } : undefined;
+  const settingValue = (fact: SettingFact | undefined): string | undefined => (fact?.state === "read" && fact.value !== undefined && fact.value.trim() !== "" && fact.value !== "none" ? fact.value.trim() : undefined);
+  const installation = {
+    provider: modelProvider, region: readers.region,
+    ...(settingValue(keyedSettings?.secretArn) === undefined ? {} : { secretArn: settingValue(keyedSettings?.secretArn)! }),
+    ...(settingValue(keyedSettings?.openRouterProviders) === undefined ? {} : { openRouterProviders: settingValue(keyedSettings?.openRouterProviders)! }),
+    ...(choice.state === "chosen" ? { e2eModel: choice.modelId } : {}),
+  };
+  const tested = choice.state === "unsupported" || choice.state === "unverifiable" ? undefined : readRouteTested(readers, { table: input.table, installation });
+  const [, partition = "aws", , , accountId = ""] = input.roleArn.split(":");
+  const roleName = input.roleArn.slice(input.roleArn.lastIndexOf("/") + 1);
+  // An unsupported or unreadable choice has no route to look at: the finding says so, and nothing else about it is read.
+  if (choice.state === "unsupported" || choice.state === "unverifiable") return { choice, provider: { state: "known", route }, approval: approval(route.routeId) };
+  if (isKeyedModelProvider(route.provider) && keyedSettings !== undefined) {
+    return {
+      choice, tested, provider: { state: "known", route }, approval: approval(route.routeId),
+      keyed: {
+        secretArn: keyedSettings.secretArn,
+        ...(keyedSettings.openRouterProviders === undefined ? {} : { openRouterProviders: keyedSettings.openRouterProviders }),
+        iam: {
+          foundationTemplate, roleLogicalId, roleName, controlPlaneTemplate: input.controlPlaneTemplate,
+          scope: { partition, region: readers.region, accountId, parameters: input.controlPlaneParameters },
+        },
+      },
+    };
+  }
+  const scope = { partition, region: readers.region, accountId };
+  const { access, profileArn, modelArns } = readModelAccess(readers, route);
+  // What the route invokes: the profile (when it uses one) and each foundation model behind it, in every Region the profile routes to.
+  // Without Bedrock's answer, the profile's own ARN and the model in this region.
+  const profileResource = [profileArn ?? `arn:${partition}:bedrock:${readers.region}:${accountId}:inference-profile/${route.modelId}`];
+  const modelResources = modelArns.length > 0 ? modelArns : [`arn:${partition}:bedrock:${readers.region}::foundation-model/${route.modelId.replace(INFERENCE_PROFILE_ID, "")}`];
+  return {
+    choice, tested, quota: readBedrockQuotas(readers, route),
+    provider: { state: "known", route }, approval: approval(route.routeId),
+    bedrock: { access, iam: { foundationTemplate, roleLogicalId, resources: [...new Set([...profileResource, ...modelResources])], scope } },
+  };
+}
+
+/** Everything `evaluateTestDeployCheck` needs but the time, read from the live installation and the head build. */
+export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts: CheckFacts; notes: string[] }> {
+  const readers: CheckReaders = { ...unchecked, runner: readOnlyAws(unchecked.runner) };
+  const stacks = resolveTestStacks(readers.env);
+  const controlPlane = describeStack(readers.runner, readers.region, stacks["control-plane"]);
+  const deployedTemplate = deployedTemplateOf(readers.runner, readers.region, stacks["control-plane"]);
+  const catalogId = (deployedTemplate.Resources?.[CONTROL_PLANE_LAMBDAS.broker.logicalId]?.Properties?.Environment as { Variables?: Record<string, unknown> } | undefined)?.Variables?.[CATALOG_ID_VARIABLE];
+  if (typeof catalogId !== "string") throw new Error(`the deployed Broker has no literal ${CATALOG_ID_VARIABLE}, so the feature-verifier catalog cannot be found`);
+  const catalog = readCatalogRows(readers, stackOutput(controlPlane, "StateTableName"), catalogId);
+  const deployedExecutorImage = stackParameter(describeStack(readers.runner, readers.region, stacks.runtime), EXECUTOR_IMAGE_PARAMETER);
+  const web = catalog.find((row) => row.sk.endsWith("#web"));
+  const runner = readRunnerFacts(readers, { bucket: stackOutput(controlPlane, "ArtifactBucketName"), foundationStack: environmentStackName(readers.env, "foundation"), endpoint: web?.endpoint, deployedExecutorImage });
+  const foundationStack = environmentStackName(readers.env, "foundation");
+  const controlPlaneParameters: Record<string, string> = {};
+  for (const parameter of controlPlane.Parameters ?? []) if (parameter.ParameterKey) controlPlaneParameters[parameter.ParameterKey] = parameter.ParameterValue ?? "";
+  const modelRoute = readModelRoute(readers, {
+    table: stackOutput(controlPlane, "StateTableName"), foundationStack,
+    roleArn: stackOutput(describeStack(readers.runner, readers.region, foundationStack), "Ec2WorkerInstanceRoleArn"),
+    controlPlaneTemplate: deployedTemplate, controlPlaneParameters,
+  });
+  const lambdaCodeShas = deployedCodeShas(readers, stacks["control-plane"]);
+  const built = await readers.builtZips();
+  // Only a Lambda whose zip differs from head's, and whose key proves where its code came from, needs a look at what changed since.
+  const inputsChanged: Record<string, boolean | undefined> = {};
+  for (const [logicalId, sha] of Object.entries(built.shas)) {
+    const deployedSha = lambdaCodeShas[logicalId];
+    if (deployedSha === undefined || deployedSha === sha) continue;
+    const key = (deployedTemplate.Resources?.[logicalId]?.Properties?.Code as { S3Key?: unknown } | undefined)?.S3Key;
+    const provenance = parseDeployedCodeKey(typeof key === "string" ? key : undefined, logicalId, deployedSha);
+    if ("revision" in provenance) inputsChanged[logicalId] = readers.changedSince(provenance.revision, built.sources[logicalId] ?? []);
+  }
+  const headTemplate = readers.headTemplate();
+  return {
+    facts: {
+      headTemplate,
+      deployedTemplate,
+      lambdaCodeShas,
+      builtZipShas: built.shas,
+      headRevision: readers.headRevision,
+      inputsChanged,
+      catalogRows: catalog.map(({ sk, state, expiresAt, qualifiedAt }) => ({ sk, state, expiresAt, ...(qualifiedAt === undefined ? {} : { qualifiedAt }) })),
+      runnerFacts: runner.facts,
+      modelRoute,
+    },
+    notes: [...runner.notes, ...iamEvaluationNotes(headTemplate, deployedTemplate)],
+  };
+}
+
+/**
+ * Refuses a deploy of Lambda code that cannot work on the deployed function: a role one of its Lambdas runs as lacks a grant head needs, or the
+ * function lacks an environment variable head sets. The new code would run and fail (AccessDenied as SessionsSteps did in the M1.2 demo, or a
+ * missing setting), and a code-only change set can fix neither. The message carries the statements for a Tier 3 request. IAM is never applied here.
+ */
+export function assertCheckAllowsApply(findings: readonly Finding[], units: readonly DeployUnit[], headTemplate: CfnTemplate): void {
+  const roles = lambdaRoleIds(headTemplate);
+  const moving = lambdaUnitsFor(units).map((unit) => LAMBDAS[unit].logicalId);
+  const deployingRoles = new Set(moving.flatMap((logicalId) => roles[logicalId] ?? []));
+  const grants = findings.filter((finding) => finding.kind === "iam-missing-grant" && finding.roleLogicalId !== undefined && deployingRoles.has(finding.roleLogicalId));
+  const environments = findings.filter((finding) => finding.kind === "lambda-env-missing" && moving.includes(finding.subject));
+  if (grants.length + environments.length === 0) return;
+  const named = [...new Set([
+    ...grants.map((finding) => `${finding.kind} ${finding.label} (needs Tier 3 approval)`),
+    ...environments.map((finding) => `${finding.kind} ${finding.label} (needs a control-plane stack update: ${(finding.missing ?? []).join(", ")})`),
+  ])];
+  const details = [
+    ...(grants.length === 0 ? [] : [`Tier 3 request, the exact statements to add (this script never applies IAM):\n${tier3Request(grants)}`]),
+    ...environments.map((finding) => finding.message),
+  ];
+  throw new Error(`deploy check failed: ${named.join("; ")}\n\n${details.join("\n\n")}`);
+}
+
+function builtLambdaZips(context: ApplyContext): CheckReaders["builtZips"] {
+  return async () => {
+    const shas: Record<string, string> = {};
+    const sources: Record<string, string[]> = {};
+    for (const unit of LAMBDA_UNITS) {
+      const step = buildStepFor(unit, join(context.outputDir, `${unit}-${context.revision}.zip`));
+      const built = await buildLambdaZip(context, step);
+      shas[step.logicalId] = built.sha256Base64;
+      sources[step.logicalId] = sourcePathsFor(built.inputs, (step.extraFiles ?? []).map((extra) => extra.from));
+    }
+    return { shas, sources };
+  };
+}
+
+/** `git diff --quiet <revision> HEAD -- <paths>`: 0 is unchanged, 1 changed, anything else (an unknown revision) is that git cannot tell. */
+function gitChangedSince(runner: Runner): CheckReaders["changedSince"] {
+  return (revision, paths) => {
+    const result = runner.capture("git", ["diff", "--quiet", revision, "HEAD", "--", "package-lock.json", ...paths], true);
+    return result.status === 0 ? false : result.status === 1 ? true : undefined;
+  };
+}
+
+/** Head's control-plane template: the engine's synth with the standing qualification transport, as TEST runs it. */
+function synthesizeHeadTemplate(context: ApplyContext, identityMode: IdentityMode): CfnTemplate {
+  return synthesizeLiftSource(context, { construct: QUALIFICATION.construct, cdkContext: QUALIFICATION.context, identityMode });
+}
+
+function checkContext(args: TestDeployArgs, runner: Runner, options: ReleaseOptions, revision: string, outputDir: string): ApplyContext {
+  return {
+    runner, options, region: args.region, env: args.env, revision,
+    cloudFormation: new CloudFormationClient({ region: args.region, profile: args.profile }),
+    lambda: new LambdaClient({ region: args.region, profile: args.profile }),
+    outputs: new Map(), built: false, outputDir,
+  };
 }
 
 function currentParameters(runner: Runner, region: string, stack: string): Record<string, string> {
@@ -1030,34 +1787,84 @@ function currentParameters(runner: Runner, region: string, stack: string): Recor
   return parameters;
 }
 
+/** The check found problems (as opposed to being unable to run): exit 1. */
+export class DeployCheckFindingsError extends Error {
+  constructor(readonly errors: number) {
+    super(`TEST deploy check failed: ${errors} problem(s) above`);
+  }
+}
+
+/** Exit 1 for findings, 2 when `--check` could not run (an unreadable stack, a git or build failure, a bad option), 1 for a failure of any other mode. */
+export function checkExitCode(argv: readonly string[], error: unknown): number {
+  if (error instanceof DeployCheckFindingsError) return 1;
+  return argv.includes("--check") ? 2 : 1;
+}
+
+/** The machine-readable report of a check. */
+export function checkReport(result: CheckResult, notes: readonly string[], context: { env: string; revision: string }) {
+  const count = (severity: Finding["severity"]) => result.findings.filter((finding) => finding.severity === severity).length;
+  return { ok: result.ok, env: context.env, revision: context.revision, errors: count("error"), warnings: count("warning"), infos: count("info"), findings: result.findings, notes: [...notes] };
+}
+
+/** `--check`: gathers the facts read-only, prints every finding, and fails when one is an error. */
+async function runCheck(args: TestDeployArgs, runner: Runner, options: ReleaseOptions, build: { revision: string; identityMode: IdentityMode; outputDir: string }): Promise<void> {
+  // With --json stdout ends in the report; everything else this script prints goes to stderr.
+  const say = args.json ? (text: string) => console.error(text) : (text: string) => console.log(text);
+  if (runner.capture("git", ["status", "--porcelain"]).stdout.trim() !== "") throw new Error("the working tree is dirty; commit first so the check compares the deployed code with the head build");
+  say(`TEST deploy check for ${args.env} (${args.region}), revision ${build.revision}`);
+  const context = checkContext(args, runner, options, build.revision, build.outputDir);
+  const { facts, notes } = await gatherCheckFacts({
+    runner, region: args.region, env: args.env,
+    headTemplate: () => synthesizeHeadTemplate(context, build.identityMode),
+    builtZips: builtLambdaZips(context),
+    headRevision: build.revision,
+    changedSince: gitChangedSince(runner),
+  });
+  for (const note of notes) say(note);
+  const result = evaluateTestDeployCheck({ ...facts, now: new Date(), renewCommand: e2eRuntimeRenewCommand({ env: args.env, profile: args.profile }) });
+  say(`\n${formatFindings(result.findings)}`);
+  const request = tier3Request(result.findings);
+  if (request !== "") say(`\nTier 3 request, the exact statements to add (this script never applies IAM):\n${request}`);
+  if (args.json) console.log(JSON.stringify(checkReport(result, notes, { env: args.env, revision: build.revision })));
+  if (!result.ok) throw new DeployCheckFindingsError(result.findings.filter((finding) => finding.severity === "error").length);
+  say("\nTEST deploy check passed.");
+}
+
 export async function main(argv: readonly string[]): Promise<void> {
   const args = parseTestDeployArgs(argv);
   if (!loadAllowlist().includes(args.env)) throw new Error(ALLOWLIST_ERROR);
   const options: ReleaseOptions = { region: args.region, repository: "", profile: args.profile, allowDirty: false, skipChecks: false, dryRun: !args.apply };
   const runner = new Runner(options);
   const revision = runner.capture("git", ["rev-parse", "HEAD"]).stdout.trim();
+  // The identity stack exists only for a Cognito environment; the engine's synth context differs for an own-OIDC one.
+  const identityMode = stackExists(runner, args.region, environmentStackName(args.env, "identity")) ? "cognito" : "oidc";
+  const outputDir = join(tmpdir(), `test-deploy-${revision.slice(0, 12)}`);
+  if (args.check) return runCheck(args, runner, options, { revision, identityMode, outputDir });
   const stacks = resolveTestStacks(args.env);
-  const needsRuntime = args.only.includes("worker-image") || args.only.includes("executor-image");
+  const needsRuntime = args.only.includes("worker-image") || args.only.includes("executor-image") || args.only.includes("e2e-agent-model") || args.only.includes("model-fallback-settings");
   const previous: StackParameters = {
     "control-plane": currentParameters(runner, args.region, stacks["control-plane"]),
     runtime: needsRuntime ? currentParameters(runner, args.region, stacks.runtime) : {},
   };
-  // The identity stack exists only for a Cognito environment; the engine's synth context differs for an own-OIDC one.
-  const identityMode = stackExists(runner, args.region, environmentStackName(args.env, "identity")) ? "cognito" : "oidc";
-  const outputDir = join(tmpdir(), `test-deploy-${revision.slice(0, 12)}`);
-  const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir }, previous, identityMode });
+  const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir }, previous, identityMode, region: args.region, ...(args.e2eModel === undefined ? {} : { e2eModel: args.e2eModel }) });
   console.log(`TEST deploy plan for ${args.env} (${args.region}), revision ${revision}\n${formatPlan(steps)}`);
   if (!args.apply) {
     console.log("\nDry run: nothing was changed. Add --apply to run this plan.");
     return;
   }
   if (runner.capture("git", ["status", "--porcelain"]).stdout.trim() !== "") throw new Error("the working tree is dirty; commit first so the deployed bytes match the revision");
-  const context: ApplyContext = {
-    runner, options, region: args.region, env: args.env, revision,
-    cloudFormation: new CloudFormationClient({ region: args.region, profile: args.profile }),
-    lambda: new LambdaClient({ region: args.region, profile: args.profile }),
-    outputs: new Map(), built: false, outputDir,
-  };
+  const context = checkContext(args, runner, options, revision, outputDir);
+  // Before anything is pushed or changed: new Lambda code must not go onto a role that lacks a grant head needs.
+  if (steps.some((step) => step.kind === "build-lambda-zip")) {
+    const headTemplate = synthesizeHeadTemplate(context, identityMode);
+    const deployedTemplate = deployedTemplateOf(runner, args.region, resolveTestStacks(args.env)["control-plane"]);
+    const drift = [...evaluateIamDrift(headTemplate, deployedTemplate), ...evaluateEnvironmentDrift(headTemplate, deployedTemplate)];
+    console.log(`\n${formatFindings(drift)}`);
+    assertCheckAllowsApply(drift, args.only, headTemplate);
+  }
+  // Also before anything is pushed or changed: every Lambda this deploy moves must load. A bundle that crashes at init (acb278a1: import.meta in
+  // CJS) would otherwise replace working code on TEST, and a code-only change set has nothing that stops it.
+  if (steps.some((step) => step.kind === "build-lambda-zip")) await assertLambdasLoad(context, args.only);
   for (const step of steps) await applyStep(context, step);
   console.log("\nTEST deploy complete.");
 }
@@ -1065,6 +1872,6 @@ export async function main(argv: readonly string[]): Promise<void> {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main(process.argv.slice(2)).catch((error: unknown) => {
     console.error(`ERROR: ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 1;
+    process.exitCode = checkExitCode(process.argv.slice(2), error);
   });
 }

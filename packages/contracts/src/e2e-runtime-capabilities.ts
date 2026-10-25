@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { E2E_MODEL_CHANNEL_SCHEMA_VERSION } from "./e2e-model-channel.js";
 import {
   E2EEvidenceScopeSchema,
   E2ERuntimeAvailabilitySchema,
@@ -29,8 +30,14 @@ const common = {
   supportedAssertions: unique(z.enum(assertionKinds), { max: 7 }),
   evidenceScopes: unique(E2EEvidenceScopeSchema, { max: 4 }),
   networkPolicyDigest: digest,
+  /** The fixture formats the runtime can serve to the application as in-network mocks of its declared external origins; absent means it serves none. */
+  mocks: unique(z.literal("source-backed-api-fixtures/v1"), { max: 1 }).optional(),
 };
-const webDetails = { browsers: unique(z.enum(["chromium", "firefox", "webkit"]), { min: 1, max: 3 }) };
+/**
+ * A web runtime that lists the `agent` step also names the model channel protocol it serves (Task 4.5): the AI navigation step needs the worker's channel, and the descriptor says
+ * which version of it the qualified runtime speaks. Absent means the runtime was not qualified for AI navigation.
+ */
+const webDetails = { browsers: unique(z.enum(["chromium", "firefox", "webkit"]), { min: 1, max: 3 }), modelChannel: z.literal(E2E_MODEL_CHANNEL_SCHEMA_VERSION).optional() };
 const apiDetails = { protocols: unique(z.literal("http"), { min: 1, max: 1 }) };
 const mobileDetails = {
   deviceProfileIds: unique(id(120), { max: 64 }),
@@ -52,6 +59,7 @@ export const E2ERuntimeCapabilityDescriptorSchema = z.discriminatedUnion("kind",
   z.object({ ...common, kind: z.literal("electron"), ...desktopDetails, driver: z.literal("electron") }).strict(),
   z.object({ ...common, kind: z.literal("native-desktop"), ...desktopDetails, driver: z.literal("native") }).strict(),
 ]).superRefine((descriptor, context) => {
+  if (descriptor.kind === "web" && descriptor.modelChannel !== undefined && !descriptor.supportedSteps.includes("agent")) context.addIssue({ code: "custom", path: ["modelChannel"], message: "a model channel belongs to a web runtime that lists the agent step" });
   if (descriptor.kind === "ios" && descriptor.host.os !== "darwin") context.addIssue({ code: "custom", path: ["host", "os"], message: "iOS profiles require a Darwin host" });
   if (descriptor.kind === "android" && descriptor.host.os !== "linux" && descriptor.host.os !== "darwin") context.addIssue({ code: "custom", path: ["host", "os"], message: "Android profiles require a Linux or Darwin host" });
   if (descriptor.kind === "native-desktop" && hostOsForTarget(descriptor.os) !== descriptor.host.os) context.addIssue({ code: "custom", path: ["host", "os"], message: "native desktop OS must match its host" });

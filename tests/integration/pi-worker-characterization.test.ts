@@ -163,6 +163,7 @@ describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
       expect(contexts).toHaveLength(1);
       expect(contexts[0]!.messages.at(-1)).toEqual({
         role: "toolResult", toolCallId: "call-bash-1", toolName: "bash", content: [{ type: "text", text: "pinned\n" }], isError: false, timestamp: anyNumber,
+        durationMs: anyNumber, // Ruling F (Pi 1.1+, additive): a final tool result carries its recorded execution time.
       });
     } finally { handle.dispose(); }
   });
@@ -186,9 +187,9 @@ describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
       expect(await settle(handle, "edit a.txt")).toBe("resolved");
       const file = join(hostFolder, "a.txt");
       expect(results).toEqual([
-        { role: "toolResult", toolCallId: "call-read-1", toolName: "read", content: [{ type: "text", text: "alpha\n" }], isError: false, timestamp: anyNumber },
+        { role: "toolResult", toolCallId: "call-read-1", toolName: "read", content: [{ type: "text", text: "alpha\n" }], isError: false, timestamp: anyNumber, durationMs: anyNumber },
         { role: "toolResult", toolCallId: "call-edit-1", toolName: "edit", content: [{ type: "text", text: `Successfully replaced 1 block(s) in ${file}.` }],
-          details: { diff: "-1 alpha\n+1 beta", patch: `--- ${file}\n+++ ${file}\n@@ -1,1 +1,1 @@\n-alpha\n+beta\n`, firstChangedLine: 1 }, isError: false, timestamp: anyNumber },
+          details: { diff: "-1 alpha\n+1 beta", patch: `--- ${file}\n+++ ${file}\n@@ -1,1 +1,1 @@\n-alpha\n+beta\n`, firstChangedLine: 1 }, isError: false, timestamp: anyNumber, durationMs: anyNumber },
       ]);
       expect(await readFile(file, "utf8")).toBe("beta\n");
       expect(existsSync("/workspaces/repo/a.txt")).toBe(false);
@@ -318,7 +319,8 @@ describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
       // before it streams, and Pi reports it as an error with the AbortSignal's message.
       const last = ends.at(-1)!;
       // Ruling D (Pi 0.99+, additive): assistant messages also carry the thinkingLevel they ran at.
-      expect(keys(last)).toEqual(["api", "content", "errorMessage", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"]);
+      // Ruling F (Pi 1.1+, additive): an assistant message ended by an abort also carries durationMs.
+      expect(keys(last)).toEqual(["api", "content", "durationMs", "errorMessage", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"]);
       expect({ role: last.role, stopReason: last.stopReason, errorMessage: last.errorMessage, content: last.content }).toEqual({
         role: "assistant", stopReason: "error", errorMessage: "This operation was aborted", content: [],
       });
@@ -371,8 +373,9 @@ describe("the worker's message_end payloads, as pinned on Pi 0.85.1", () => {
       expect(assistantEnds.map((event) => keys(event.message))).toEqual([
         ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
         ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
+        // Ruling F (Pi 1.1+, additive): the aborted message also carries durationMs; the error one does not.
         ["api", "content", "errorMessage", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
-        ["api", "content", "errorMessage", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
+        ["api", "content", "durationMs", "errorMessage", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
       ]);
       expect(assistantEnds.map(({ message }) => ({ role: message!.role, stopReason: message!.stopReason, errorMessage: message!.errorMessage }))).toEqual([
         { role: "assistant", stopReason: "toolUse", errorMessage: undefined },
@@ -386,7 +389,7 @@ describe("the worker's message_end payloads, as pinned on Pi 0.85.1", () => {
       const otherEnds = events.filter((event) => event.type === "message_end" && event.message?.role !== "assistant");
       expect(otherEnds.map((event) => [event.message!.role, keys(event.message)])).toEqual([
         ["user", ["content", "role", "timestamp"]],
-        ["toolResult", ["content", "details", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"]],
+        ["toolResult", ["content", "details", "durationMs", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"]],
         ["user", ["content", "role", "timestamp"]],
         ["user", ["content", "role", "timestamp"]],
       ]);
@@ -640,7 +643,8 @@ describe("the worker's session event shapes, as pinned on Pi 0.85.1", () => {
     const end = one("tool_execution_end");
     const agentEnd = one("agent_end");
     expect(keys(one("agent_start"))).toEqual(["type"]);
-    expect(keys(one("agent_settled"))).toEqual(["type"]);
+    // Ruling F (Pi 1.1+, additive): agent_settled says whether the run was aborted.
+    expect(keys(one("agent_settled"))).toEqual(["aborted", "type"]);
     expect(events.filter((event) => event.type === "turn_start").map((event) => keys(event))).toEqual([["type"], ["type"]]);
     const messageUpdates = events.filter((event) => event.type === "message_update");
     expect(messageUpdates.length).toBeGreaterThan(0);
@@ -654,10 +658,11 @@ describe("the worker's session event shapes, as pinned on Pi 0.85.1", () => {
       { type: "tool_execution_update", toolCallId: "call-bash-1", toolName: "bash", args: { command: "echo pinned" }, partialResult: { content: [] } },
       { type: "tool_execution_update", toolCallId: "call-bash-1", toolName: "bash", args: { command: "echo pinned" }, partialResult: { content: [{ type: "text", text: "pinned\n" }], details: {} } },
     ]);
-    expect(keys(end)).toEqual(["isError", "result", "toolCallId", "toolName", "type"]);
+    // Ruling F (Pi 1.1+, additive): tool_execution_end carries the recorded execution time.
+    expect(keys(end)).toEqual(["durationMs", "isError", "result", "toolCallId", "toolName", "type"]);
     // The result carries a details key whose value is undefined; toEqual ignores undefined, so it is pinned on its own.
     // Ruling E (amends D): the worker handle strips bash structuredContent from tool_end, so the 0.85.1 pin holds again.
-    expect(end).toEqual({ type: "tool_execution_end", toolCallId: "call-bash-1", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "pinned\n" }], details: undefined } });
+    expect(end).toEqual({ type: "tool_execution_end", toolCallId: "call-bash-1", toolName: "bash", isError: false, durationMs: anyNumber, result: { content: [{ type: "text", text: "pinned\n" }], details: undefined } });
     expect(keys(end.result)).toEqual(["content", "details"]);
     expect((end.result as { details?: unknown }).details).toBeUndefined();
 
@@ -667,7 +672,7 @@ describe("the worker's session event shapes, as pinned on Pi 0.85.1", () => {
     expect(messageEnds.map((event) => keys(event.message))).toEqual([
       ["content", "role", "timestamp"],
       ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
-      ["content", "details", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
+      ["content", "details", "durationMs", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
       ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
     ]);
     const turnEnds = events.filter((event) => event.type === "turn_end");
@@ -681,7 +686,7 @@ describe("the worker's session event shapes, as pinned on Pi 0.85.1", () => {
     expect(messages.map((message) => keys(message))).toEqual([
       ["content", "role", "timestamp"],
       ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
-      ["content", "details", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
+      ["content", "details", "durationMs", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
       ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
     ]);
     expect(messages.map((message) => [message.role, message.stopReason])).toEqual([["user", undefined], ["assistant", "toolUse"], ["toolResult", undefined], ["assistant", "stop"]]);
@@ -779,6 +784,14 @@ function cancelledReport(run: Awaited<ReturnType<typeof cancelDuringTool>>) {
   };
 }
 
+/** The sanitized model-call notes the worker sent (PLANINC-3b). */
+function modelCallNotes(run: Awaited<ReturnType<typeof cancelDuringTool>>) {
+  return run.workerEvents.flatMap((event) => {
+    const note = (event.payload as { modelCall?: unknown } | null)?.modelCall;
+    return event.type === "progress" && note !== undefined ? [note] : [];
+  });
+}
+
 describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", () => {
   // Guards finishTurn (0.99): a cancel during a tool must abort the tool, end the task CANCELLED with no
   // result, and never call the model again. F3 (the loop calling the model after an aborted tool) is refuted on 0.85.1.
@@ -790,12 +803,14 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
     expect(cancelledReport(run)).toEqual({
       types: ["lifecycle", "tool_start", "tool_end", "lifecycle", "usage"],
       lifecycle: ["RUNNING", "CANCELLED"],
-      toolEnd: [{ type: "tool_execution_end", toolCallId: "call-cancel-1", toolName: "bash", isError: true,
+      toolEnd: [{ type: "tool_execution_end", toolCallId: "call-cancel-1", toolName: "bash", isError: true, durationMs: anyNumber, // Ruling F (Pi 1.1+, additive)
         result: { content: [{ type: "text", text: "started\n\n\nCommand aborted" }], details: {} } }],
       usageOutcome: ["CANCELLED"],
-      // Pi starts the next turn, but its model call fails before the scripted model is asked.
-      lastAssistant: { stopReason: "error", errorMessage: "This operation was aborted" },
+      // Pi starts the next turn, but its model call fails before the scripted model is asked. PLANINC-3b: that failed message is no longer forwarded raw
+      // (its provider text stays out of the task's events); the task's events carry one sanitized note for it instead.
+      lastAssistant: { stopReason: "toolUse", errorMessage: undefined },
     });
+    expect(modelCallNotes(run)).toEqual([{ outcome: "failed", class: "unknown", signal: null, attempt: 1, durationMs: 0 }]);
     expect(run.factoryCalls).toBe(1);
     // The 5 s sleep was killed, not waited out.
     expect(run.elapsed).toBeLessThan(3_000);
@@ -811,8 +826,9 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
       toolEnd: [{ type: "tool_execution_end", toolCallId: "call-cancel-1", toolName: "bash", isError: true,
         result: { content: [{ type: "text", text: "Operation aborted" }], details: {} } }],
       usageOutcome: ["CANCELLED"],
-      lastAssistant: { stopReason: "error", errorMessage: "This operation was aborted" },
+      lastAssistant: { stopReason: "toolUse", errorMessage: undefined },
     });
+    expect(modelCallNotes(run)).toEqual([{ outcome: "failed", class: "unknown", signal: null, attempt: 1, durationMs: 0 }]);
     expect(run.factoryCalls).toBe(1);
   });
 });

@@ -1,5 +1,5 @@
 import { createHash, createSign } from "node:crypto";
-import { agentXError, createCandidateManifest, isSafeE2ESourcePath, type AgentXError, type E2ESourceSnapshot } from "@agentx/contracts";
+import { PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, isSafeE2ESourcePath, type AgentXError, type E2ESourceSnapshot } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "./repository-access.js";
 import type { GithubMergeReadBudget } from "./aws/workflow-merge-recovery.js";
 
@@ -32,6 +32,80 @@ export interface GitHubPullRequestResult {
   number: number;
   url: string;
   reconciled: boolean;
+  /** Set when the pull request was asked to be a draft, GitHub refused drafts for this repository, and it was opened once as a normal pull request instead (INTG1). */
+  draftRefused?: true;
+}
+
+/** The line a pull request opened in place of a refused draft starts with, so a reviewer is told it is not a draft and must not be merged unreviewed (INTG1). */
+export const DRAFT_REFUSED_PULL_REQUEST_NOTE = "Draft pull requests are not available for this repository, so this one is open for review. Do not merge it until it has been reviewed.";
+
+/** A pull request's description with the draft-refused note first, cut at its end so the whole stays within GitHub's limit. */
+export function pullRequestBodyWithDraftNote(body: string | undefined): string {
+  if (body === undefined || body === "") return DRAFT_REFUSED_PULL_REQUEST_NOTE;
+  const separator = "\n\n";
+  let room = Math.max(0, PULL_REQUEST_BODY_MAX_CHARS - DRAFT_REFUSED_PULL_REQUEST_NOTE.length - separator.length);
+  // Cut between characters: a surrogate pair is never split at the end.
+  if (room < body.length && room > 0 && /[\uD800-\uDBFF]/u.test(body.charAt(room - 1))) room -= 1;
+  return `${DRAFT_REFUSED_PULL_REQUEST_NOTE}${separator}${body.slice(0, room)}`;
+}
+
+/**
+ * Why GitHub answered 422 to a pull request creation, from a fixed list. GitHub's own text is only matched against, never kept: it is user content and goes nowhere (not into the
+ * error, a log or a record). `draft-unsupported` is the answer to a draft request on a private repository whose plan has no drafts.
+ */
+type PullRequestRefusal = "draft-unsupported" | "no-commits" | "head-not-found" | "base-not-found" | "already-exists" | "unknown";
+const PULL_REQUEST_REFUSAL_SENTENCES: Record<PullRequestRefusal, string> = {
+  "draft-unsupported": "this repository does not allow draft pull requests",
+  "no-commits": "the head branch has no commits that the base branch lacks",
+  "head-not-found": "GitHub cannot find the head branch",
+  "base-not-found": "GitHub cannot find the base branch",
+  "already-exists": "a pull request for this branch already exists",
+  unknown: "GitHub rejected the pull request and gave a reason AgentX does not recognise",
+};
+const MAX_REFUSAL_BODY_CHARS = 16_384;
+
+/** The body's first 16 KiB, read through the stream so that a larger body is never read in full; a body that goes on past that is not read as JSON (it cannot be one of the short answers listed). */
+async function boundedRefusalText(response: Response): Promise<string | undefined> {
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const next = await reader.read() as { done: boolean; value?: Uint8Array };
+      if (next.done || next.value === undefined) break;
+      chunks.push(next.value);
+      total += next.value.byteLength;
+      if (total > MAX_REFUSAL_BODY_CHARS) { await reader.cancel().catch(() => undefined); return undefined; }
+    }
+  } catch { return undefined; }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function pullRequestRefusalOf(response: Response): Promise<PullRequestRefusal> {
+  let parsed: unknown;
+  try {
+    const text = await boundedRefusalText(response);
+    if (text === undefined) return "unknown";
+    parsed = JSON.parse(text);
+  } catch { return "unknown"; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "unknown";
+  const errors = (parsed as { errors?: unknown }).errors;
+  if (!Array.isArray(errors)) return "unknown";
+  const found = new Set<PullRequestRefusal>();
+  for (const item of errors.slice(0, 20)) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const { message, field, code } = item as { message?: unknown; field?: unknown; code?: unknown };
+    const text = typeof message === "string" ? message.toLowerCase() : "";
+    if (/draft pull requests are not supported/.test(text)) found.add("draft-unsupported");
+    else if (/^no commits between /.test(text)) found.add("no-commits");
+    else if (/^a pull request already exists/.test(text)) found.add("already-exists");
+    else if (code === "invalid" && field === "head") found.add("head-not-found");
+    else if (code === "invalid" && field === "base") found.add("base-not-found");
+  }
+  // A draft refusal is read only when it is the whole answer: another reason beside it is that reason's to tell.
+  if (found.size === 1) return [...found][0]!;
+  return found.size === 0 ? "unknown" : [...found].find((reason) => reason !== "draft-unsupported") ?? "unknown";
 }
 
 export interface GitHubPullRequestDetails {
@@ -187,11 +261,17 @@ export class GitHubAppCredentialProvider {
       contents: "read",
       pull_requests: "write",
     });
+    // The draft state is GitHub's, read from the pull request object on every path (created, or found again after a lost response or a broker retry), so the record and the
+    // owner's message are always truthful (I2): a draft was refused when one was asked for and the pull request is not a draft.
+    const finish = (found: FoundPullRequest, reconciled: boolean, refusedForSure = false): GitHubPullRequestResult => {
+      const { isDraft, ...result } = found;
+      return { ...result, reconciled, ...(refusedForSure || (input.draft === true && isDraft === false) ? { draftRefused: true as const } : {}) };
+    };
     const existing = await this.findOpenPullRequest(repository, input, token);
-    if (existing) return { ...existing, reconciled: true };
+    if (existing) return finish(existing, true);
 
     try {
-      const response = await this.fetchImplementation(
+      const create = (draft: boolean | undefined, body: string | undefined) => this.fetchImplementation(
         `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls`,
         {
           method: "POST",
@@ -200,19 +280,28 @@ export class GitHubAppCredentialProvider {
             title: input.title,
             head: input.headBranch,
             base: input.baseBranch,
-            ...(input.body === undefined ? {} : { body: input.body }),
-            ...(input.draft === undefined ? {} : { draft: input.draft }),
+            ...(body === undefined ? {} : { body }),
+            ...(draft === undefined ? {} : { draft }),
           }),
         },
       );
-      if (response.ok) return { ...parsePullRequest(await response.json(), repository), reconciled: false };
+      let response = await create(input.draft, input.body);
+      if (response.ok) return finish(parsePullRequestWithDraft(await response.json(), repository), false);
+      // INTG1: GitHub answers 422 to a draft on a private repository whose plan has no drafts. That answer, and only that, is retried once as a normal pull request with the
+      // do-not-merge note; the result says so. Any other answer, and a second refusal, fails below.
+      let refusal = response.status === 422 ? await pullRequestRefusalOf(response) : undefined;
+      if (refusal === "draft-unsupported" && input.draft === true) {
+        response = await create(undefined, pullRequestBodyWithDraftNote(input.body));
+        if (response.ok) return finish(parsePullRequestWithDraft(await response.json(), repository), false, true);
+        refusal = response.status === 422 ? await pullRequestRefusalOf(response) : undefined;
+      }
       const afterFailure = await this.findOpenPullRequest(repository, input, token);
-      if (afterFailure) return { ...afterFailure, reconciled: true };
-      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request creation failed with HTTP ${response.status}`);
+      if (afterFailure) return finish(afterFailure, true);
+      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request creation failed with HTTP ${response.status}${refusal === undefined ? "" : `: ${PULL_REQUEST_REFUSAL_SENTENCES[refusal]}`}`);
     } catch (error) {
       if (isAgentXError(error)) throw error;
       const afterFailure = await this.findOpenPullRequest(repository, input, token);
-      if (afterFailure) return { ...afterFailure, reconciled: true };
+      if (afterFailure) return finish(afterFailure, true);
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub pull request creation outcome is unknown");
     }
   }
@@ -827,7 +916,7 @@ export class GitHubAppCredentialProvider {
     repository: InstalledRepository,
     input: GitHubPullRequestInput,
     token: string,
-  ): Promise<Omit<GitHubPullRequestResult, "reconciled"> | undefined> {
+  ): Promise<FoundPullRequest | undefined> {
     const query = new URLSearchParams({
       state: "open",
       head: `${repository.owner}:${input.headBranch}`,
@@ -846,7 +935,7 @@ export class GitHubAppCredentialProvider {
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
     }
     if (value.length === 0) return undefined;
-    return parsePullRequest(value[0], repository);
+    return parsePullRequestWithDraft(value[0], repository);
   }
 }
 
@@ -978,6 +1067,14 @@ function parsePullRequest(
     throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned a non-canonical pull request URL");
   }
   return { number: candidate.number as number, url: candidate.html_url };
+}
+
+/** A pull request as the reconcile paths read it: the result without `reconciled`, and GitHub's own `draft` flag when it gives one. */
+type FoundPullRequest = Omit<GitHubPullRequestResult, "reconciled" | "draftRefused"> & { isDraft?: boolean };
+function parsePullRequestWithDraft(value: unknown, repository: InstalledRepository): FoundPullRequest {
+  const basic = parsePullRequest(value, repository);
+  const draft = (value as Record<string, unknown>).draft;
+  return typeof draft === "boolean" ? { ...basic, isDraft: draft } : basic;
 }
 
 function parsePullRequestDetails(

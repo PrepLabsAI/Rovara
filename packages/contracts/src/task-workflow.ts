@@ -48,9 +48,87 @@ export const WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX = "The approved browser a
  * keeps its first 500 characters); send-back to coding is never offered for it.
  */
 export const WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX = "The approved browser and API checks cannot run on the runtime as it is now. An administrator must qualify the runtime again, then retry the checks to approve the plan again. Why: ";
-/** The approved plan itself can no longer be approved (portable criteria, web and API together): the task goes back to plan review, where Request changes is the way on. */
+/**
+ * The code that opens the reason of a runtime refusal when the runtime's qualification has expired (or would before the round could end): it is `runtime-expired: ...` where the generic
+ * reasons say only that no runtime is READY, so an owner and an operator can tell "qualify it again" from "never qualified" (evaluation fix RUN-3).
+ */
+export const E2E_RUNTIME_EXPIRED_CODE = "runtime-expired" as const;
+/**
+ * The code of a group that did not run (or could not be trusted) because the runner's environment (its kernel release or architecture) is no longer the one the runtime was qualified on
+ * (HARDEN-C I-4). The worker ends the group with exactly this code before it builds a host; the broker opens the reason of a group an older worker ran anyway with it. Infrastructure
+ * only: send-back to coding is never offered, and an administrator qualifies the runtime again.
+ */
+export const E2E_RUNTIME_ENVIRONMENT_DRIFTED_CODE = "runtime-environment-drifted" as const;
+/**
+ * How the block reason of a CHECKS round begins when the broker could not confirm every admitted group (`admitted E2E evidence is incomplete or unknown (<group>: <reason>; ...)`).
+ * For a group the app host or the worker ended with one of its fixed codes, the reason after the group's id is exactly that code.
+ */
+export const WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX = "admitted E2E evidence is incomplete or unknown";
+/**
+ * The codes a group of a browser and API round can end with that the candidate itself causes (RUN-2): the app did not build, stopped right after it started, did not answer its health
+ * check, or its seed failed. New code can fix these, so Send back to coding is offered for them. Every other code is Rovara's or the environment's (or says nothing about who is at fault).
+ */
+export const E2E_APPLICATION_SEND_BACK_CODES = ["build-failed", "app-exited", "app-unhealthy", "seed-failed"] as const;
+/** One group's entry in the block reason: its id (plan-derived, never worker text) then the group's code, or the worker's one fixed phrase for evidence over the cap. */
+const EVIDENCE_GROUP_CODE = /^[A-Za-z0-9._-]{1,80}: ([a-z][a-z0-9-]{0,62}|evidence too large)$/u;
+/**
+ * The group codes in the block reason of an incomplete round, in group order, or undefined when the reason is not that block or any group's entry is not exactly `group: code`. A group
+ * whose reason is anything else (a sentence the collector wrote, text from the worker) makes the whole reason unreadable, so nothing is offered on a guess. A reason the broker cut on
+ * whole entries (`cutEvidenceReason`) ends with the marker entry "…": the entries before it are read, the marker is not a code, and only a last entry may be one.
+ */
+export function workflowApplicationEvidenceCodes(blockReason: string | undefined): readonly string[] | undefined {
+  const open = `${WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX} (`;
+  if (blockReason === undefined || !blockReason.startsWith(open) || !blockReason.endsWith(")")) return undefined;
+  const codes: string[] = [];
+  const entries = blockReason.slice(open.length, -1).split("; ");
+  for (const [index, entry] of entries.entries()) {
+    if (entry === "…" && index === entries.length - 1 && codes.length > 0) break;
+    const code = EVIDENCE_GROUP_CODE.exec(entry)?.[1];
+    if (code === undefined) return undefined;
+    codes.push(code);
+  }
+  return codes;
+}
+/**
+ * Cuts the reason a block keeps (the groups' `id: code` entries joined with "; ") to at most `max` characters on whole entries, ending with "; …", a marker that is not a code (the parser
+ * reads the entries before it, and what Send back depends on is those parsed codes, never the text). A reason that fits is unchanged; one whose first entry alone is over the limit is cut as plain text, as it always was.
+ */
+export function cutEvidenceReason(reason: string, max: number): string {
+  if (reason.length <= max) return reason;
+  const marker = "; …";
+  const kept: string[] = [];
+  let length = 0;
+  for (const entry of reason.split("; ")) {
+    const next = length + (kept.length === 0 ? 0 : 2) + entry.length;
+    if (next + marker.length > max) break;
+    kept.push(entry);
+    length = next;
+  }
+  return kept.length === 0 ? reason.slice(0, max) : `${kept.join("; ")}${marker}`;
+}
+/**
+ * Whether a retry re-admits an approved browser and API round (a required round with an approved selection): it runs no project check of its own, so a task with none can retry it
+ * with no check chosen. The retry route and the Slack form both read this.
+ */
+export function workflowReadmitsApplicationRound(workflow: { e2e?: { required?: boolean | undefined; applicationSelection?: unknown } | undefined }): boolean {
+  return workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined;
+}
+/**
+ * The distinct codes among a round's groups that the candidate causes (see `E2E_APPLICATION_SEND_BACK_CODES`), in group order; empty when the reason is unreadable or holds none. A round
+ * that also ended other groups with infrastructure codes still has these (the owner chose to offer Send back for them: the change needs new code either way, and the next round re-runs
+ * every group).
+ */
+function evidenceCandidateCodes(blockReason: string | undefined): string[] {
+  return [...new Set(workflowApplicationEvidenceCodes(blockReason) ?? [])].filter((code) => (E2E_APPLICATION_SEND_BACK_CODES as readonly string[]).includes(code));
+}
+/** The approved plan itself can no longer be approved (portable criteria, a target with no source-owned identity): the task goes back to plan review, where Request changes is the way on. */
 export const WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX = "The approved browser and API plan can no longer run as written. Request changes and submit a corrected plan before coding resumes. Why: ";
 export const WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX = "The approved browser and API checks can no longer run as approved. Retry the checks to approve the plan again against what is ready now. What changed: ";
+/**
+ * A test account the plan was approved with has a newer registered definition (the setup was approved again, or the definition expired and was written again). The way on is
+ * the same re-approval as for a requalified runtime: one retry approves the plan again against the accounts that are registered now.
+ */
+export const WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX = "The test accounts changed; approve the checks again. What changed: ";
 
 export const WORKFLOW_BLOCK_REASONS = {
   checksUnconfirmed: "AgentX couldn't confirm the selected checks ran on the final code. Choose checks and retry.",
@@ -110,7 +188,7 @@ export const WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED = "pushing a reviewed 
 export function workflowApplicationRetryOffered(workflow: { stage: string; state: string; blockReason?: string | undefined;
   e2e?: { required?: boolean | undefined; applicationSelection?: unknown } | undefined }): boolean {
   return workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined
-    && [WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX]
+    && [WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX]
       .some((prefix) => workflow.blockReason?.startsWith(prefix) === true);
 }
 
@@ -1768,9 +1846,15 @@ export function workflowSendBackOffered(workflow: {
     // Review only: a rerun of the agent's own tests regressed, and no result was recorded for it.
     if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.regressionFound) return true;
     // Blocks that only an administrator qualifying the runtime, or approving the plan again, can fix: new code cannot, even for a task with no checks.
-    if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true) return false;
+    if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true
+      || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) === true) return false;
     // A required browser and API round that could not be admitted from this candidate (its build source or inputs are unusable): only new code can fix that.
     if (workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX) === true) return true;
+    // A required round whose groups ended with codes: new code fixes it when at least one group ended with a code the candidate causes (it did not build, stopped at start, never
+    // answered, or its seed failed), whatever the other groups ended with. When none did, the codes are Rovara's or the environment's, and a task with no checks of its own (review
+    // only) must not be sent back for them by the rule below.
+    // An incomplete-evidence block whose reason holds no readable code says nothing about who is at fault, and gives the coder nothing to fix: no Send back, not even by the rule below.
+    if (workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX) === true) return evidenceCandidateCodes(workflow.blockReason).length > 0;
     // Review only: there is no check to retry, so coding again is the way on, except from rewritten history.
     if (workflowIsReviewOnly(workflow.checkPolicy)) return workflow.blockReason !== WORKFLOW_HISTORY_REWRITTEN_MESSAGE;
     const failedOrdinaryCheck = current !== undefined && workflow.verification?.candidateDigest === current
@@ -1922,7 +2006,7 @@ export function workflowFindingProblem(role: "CRITIC" | "SECURITY", finding: { t
  * rerun found regressed, as "<test> passed before this change and fails now". Pre-existing findings, and reviews or
  * checks of older code, are left out.
  */
-export function sendBackProblems(workflow: WorkflowSnapshot): WorkflowSendBackProblem[] {
+export function sendBackProblems(workflow: WorkflowSnapshot, describeApplicationCode?: (code: string) => string | undefined): WorkflowSendBackProblem[] {
   const regressed = (workflow.regressedChecks ?? []).map((test) => ({ source: "check" as const, text: `${test} passed before this change and fails now`, regressed: true as const }));
   const current = workflow.candidate?.digest;
   if (current === undefined) return regressed;
@@ -1942,7 +2026,14 @@ export function sendBackProblems(workflow: WorkflowSnapshot): WorkflowSendBackPr
   const refusedRound = workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX) === true
     ? [{ source: "check" as const, text: `the browser and API checks could not be started: ${workflow.blockReason.slice(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX.length).replace(/ Send the task back to coding, or close it\.$/, "")}` }]
     : [];
-  return [...findings, ...failed, ...failedE2E, ...refusedRound, ...regressed];
+  // A browser and API round with groups that ended with a code the candidate causes: the coder is told those fixed codes and their fixed sentences (never the infrastructure codes of other
+  // groups, a log or what the app printed).
+  const evidenceCodes = workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.e2e?.required === true ? evidenceCandidateCodes(workflow.blockReason) : [];
+  const appFailures = evidenceCodes.map((code) => {
+    const sentence = describeApplicationCode?.(code);
+    return { source: "check" as const, text: `the browser and API checks could not run on this change (${code})${sentence === undefined ? "" : `: ${sentence}`}` };
+  });
+  return [...findings, ...failed, ...failedE2E, ...refusedRound, ...appFailures, ...regressed];
 }
 
 /** The problems as plain lines, "- [code review] text (file:line)" and "- check <label> failed", for people to read. */

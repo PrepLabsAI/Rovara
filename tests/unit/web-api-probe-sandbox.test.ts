@@ -19,8 +19,8 @@ const derive = (evidence: unknown, probeId = PROBE) => deriveWebApiProbeObservat
 const mismatch = { ok: false, reason: `probe-evidence-mismatch:${PROBE}` };
 
 describe("the chromium-sandbox-v1 qualification probe", () => {
-  it("is the last required probe: a passing web probe on the CSV scenario that pins the sandbox attestation", () => {
-    const probe = WEB_API_REQUIRED_PROBES.at(-1)!;
+  it("is the last of the eleven base probes: a passing web probe on the CSV scenario that pins the sandbox attestation", () => {
+    const probe = WEB_API_REQUIRED_PROBES[10]!;
     const csv = WEB_API_REQUIRED_PROBES.find((item) => item.probeId === "web-csv-positive-v1")!;
     expect(probe).toMatchObject({ probeId: PROBE, kind: "web", expectedOutcome: "PASS", cause: null, buildCommandDigest: null, chromiumSandbox: true });
     expect([probe.scenarioDigest, probe.bundleDigest]).toEqual([csv.scenarioDigest, csv.bundleDigest]);

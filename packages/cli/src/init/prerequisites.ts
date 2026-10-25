@@ -4,10 +4,12 @@ import type { DirectProvider, ModelsAnswers } from "../deploy/answer-schemas.js"
 // reported together, with what to change; cdk bootstrap (which creates the CDKToolkit stack) is
 // offered only when every other check has passed.
 import { DescribeAddressesCommand, EC2Client } from "@aws-sdk/client-ec2";
-import { ServiceQuotasClient, GetServiceQuotaCommand } from "@aws-sdk/client-service-quotas";
+import { ServiceQuotasClient, GetServiceQuotaCommand, ListServiceQuotasCommand } from "@aws-sdk/client-service-quotas";
+import { ProviderCheckHttpError, bedrockThrottleSentence, checkModel, type ModelCheckQuota } from "@agentx/model-runtime/model-check";
+import type { QuotaClient } from "@agentx/model-runtime/model-discovery";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import { agentXError, AgentXError, KEYED_MODEL_PROVIDERS } from "@agentx/contracts";
+import { agentXError, AgentXError, KEYED_MODEL_PROVIDERS, type ModelProvider } from "@agentx/contracts";
 import { assertCdkBootstrapped, type CommandRunner } from "../deploy/cdk-engine.js";
 import { releaseRegionProblem, type ReleaseCoverage } from "../deploy/release.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -24,6 +26,8 @@ export interface PrerequisiteChecks {
    * `key`, when given, is a key init collected but has not stored yet; otherwise it is read from
    * config.secretArn. A failure's message is safe to show: it never holds the key or a provider body. */
   directProvider?(provider: DirectProvider, modelId: string, config: { secretArn?: string }, key?: string): Promise<void>;
+  /** Service Quotas' Bedrock quotas, read only after a Bedrock check was throttled twice (INST-8): a quota of 0 is then reported as a limit. Optional: without it the old text stands. */
+  quotas?: QuotaClient;
   /** Regional on-demand Standard EC2 vCPU quota. */
   ec2Quota(): Promise<number>;
   /** The regional EC2-VPC Elastic IP quota (L-0263D0A3) and how many addresses are allocated now. */
@@ -148,7 +152,7 @@ const pageWording = (): ModelProblemWording => ({ changeModel: "the model questi
  * model id that must be called through an inference profile, an id Bedrock does not recognize in
  * this region, access denied for some other reason, a throttled check, a timed-out check, and a
  * model that failed for no clear reason at all. Every branch ends by saying what to try next. */
-export function modelCheckProblem(input: { modelId: string; role: ModelRole; region: string; error: unknown; wording?: ModelProblemWording }): string {
+export function modelCheckProblem(input: { modelId: string; role: ModelRole; region: string; error: unknown; wording?: ModelProblemWording; quota?: ModelCheckQuota }): string {
   const { modelId, role, region, error } = input;
   const wording = input.wording ?? initWording(role);
   const name = errorName(error);
@@ -173,7 +177,8 @@ export function modelCheckProblem(input: { modelId: string; role: ModelRole; reg
     // is missing aws-marketplace:Subscribe.
     return `${modelId}: this account or your credentials cannot call it in ${region} (${message}). Your role or an SCP may deny bedrock:InvokeModel for this model; for a Marketplace model, the role also needs aws-marketplace:Subscribe. Check your permissions, or choose another model with ${wording.changeModel}`;
   }
-  if (name === "ThrottlingException") return `Bedrock throttled the check of ${modelId}; wait a minute and ${wording.rerun}`;
+  // INST-8: a throttle that persisted is read against the model's quota, so a limit of 0 is not told to wait.
+  if (name === "ThrottlingException") return bedrockThrottleSentence({ modelId, quota: input.quota, rerun: wording.rerun, changeModel: wording.changeModel });
   // Item 2: awsPrerequisiteChecks' own withDeadline already builds this exact, complete message
   // (naming the model, the region, and what to try), so it is returned as-is rather than wrapped
   // a second time.
@@ -344,18 +349,12 @@ export async function checkPrerequisites(input: {
     ["worker", answers.models.worker],
   ];
   const seen = new Set<string>();
-  // A keyed provider without a configured or stored key runs on the role's Bedrock default (specs
-  // 032 and 054), so that is the model checked.
-  const checkFallback = async (role: ModelRole, identifier: string, label: string) => {
-    const fallback = defaultBedrockModel(role);
-    try {
-      const fallbackKey = `${fallback.provider}/${fallback.modelId}`;
-      if (!seen.has(fallbackKey)) await checks.converse(fallback.modelId);
-      seen.add(fallbackKey);
-      passed(`Model ${identifier}`, `ok ${identifier}: ${label} secret missing; using default ${fallback.provider}/${fallback.modelId}`);
-    } catch (fallbackError) {
-      failed(`Model ${fallback.modelId}`, modelCheckProblem({ modelId: fallback.modelId, role, region, error: fallbackError, ...(audience === "page" ? { wording: pageWording() } : {}) }));
-    }
+  // A keyed provider without a configured or stored key has no fallback (MODEL3): the work would fail by name at its first call, so init refuses it now and says what to give.
+  const checkFallback = async (provider: Exclude<ModelProvider, "amazon-bedrock">, identifier: string) => {
+    const { label, flag } = KEYED_MODEL_PROVIDERS[provider];
+    failed(`Model ${identifier}`, audience === "page"
+      ? `${identifier}: there is no ${label} key, and no other model would be used in its place. Add the ${label} key, or choose an Amazon Bedrock model for this role.`
+      : `${identifier}: there is no ${label} key, and no other model would be used in its place; pass --${flag}-key-file or --${flag}-key-env (or --${flag}-secret-arn), or choose an Amazon Bedrock model for this role`);
   };
   for (const [role, modelId] of roles) {
     const provider = answers.models.providers?.[role] ?? "amazon-bedrock";
@@ -374,7 +373,7 @@ export async function checkPrerequisites(input: {
         seen.add(identifier);
         passed(`Model ${identifier}`, `ok ${identifier} supports tools and answers`);
       } catch (error) {
-        if (error instanceof MissingProviderSecret) await checkFallback(role, identifier, "OpenRouter");
+        if (error instanceof MissingProviderSecret) await checkFallback("openrouter", identifier);
         else failed(`Model ${identifier}`, `${identifier}: OpenRouter preflight failed; check the model's tool support, secret read permission, key credits and routing allowlist`);
       }
       continue;
@@ -393,24 +392,15 @@ export async function checkPrerequisites(input: {
         seen.add(identifier);
         passed(`Model ${identifier}`, `ok ${identifier} supports tools and answers`);
       } catch (error) {
-        if (error instanceof MissingProviderSecret) await checkFallback(role, identifier, label);
+        if (error instanceof MissingProviderSecret) await checkFallback(provider, identifier);
         else failed(`Model ${identifier}`, `${identifier}: ${label} preflight failed: ${errorMessage(error).replace(/^[A-Z_]+: /, "")}`);
       }
       continue;
     }
     seen.add(identifier);
-    try {
-      try {
-        await checks.converse(modelId);
-      } catch (error) {
-        if (errorName(error) !== "ThrottlingException") throw error;
-        await checks.sleep(2000);
-        await checks.converse(modelId);
-      }
-      passed(`Model ${modelId}`, `ok ${modelId} answers`);
-    } catch (error) {
-      failed(`Model ${modelId}`, modelCheckProblem({ modelId, role, region, error, ...(audience === "page" ? { wording: pageWording() } : {}) }));
-    }
+    const result = await checkModel({ provider: "amazon-bedrock", modelId, region }, { run: () => checks.converse(modelId), sleep: (ms) => checks.sleep(ms), ...(checks.quotas === undefined ? {} : { quotas: checks.quotas }), now: Date.now });
+    if (result.ok) passed(`Model ${modelId}`, `ok ${modelId} answers`);
+    else failed(`Model ${modelId}`, modelCheckProblem({ modelId, role, region, error: result.error, ...(result.quota === undefined ? {} : { quota: result.quota }), ...(audience === "page" ? { wording: pageWording() } : {}) }));
   }
 
   // On the page, "check --oidc-issuer" names a terminal flag nobody can type there; the page's own
@@ -523,14 +513,25 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
     CONVERSE_DEADLINE_MS,
     `${modelId} did not answer a one-token test call in ${input.region} within ${CONVERSE_DEADLINE_MS / 1000}s; check your credentials or network, or try again`,
   ).then(() => undefined);
+  // Service Quotas' Bedrock quotas, a page at a time; only ids, names and values are read.
+  const bedrockQuotas: QuotaClient = {
+    async list(page) {
+      const response = await quotas.send(new ListServiceQuotasCommand({ ServiceCode: "bedrock", ...(page.nextToken === undefined ? {} : { NextToken: page.nextToken }), MaxResults: 100 }));
+      return {
+        quotas: (response.Quotas ?? []).flatMap((quota) => (quota.QuotaCode === undefined || quota.QuotaName === undefined || typeof quota.Value !== "number" ? [] : [{ code: quota.QuotaCode, name: quota.QuotaName, value: quota.Value }])),
+        nextToken: response.NextToken,
+      };
+    },
+  };
   return {
+    quotas: bedrockQuotas,
     async openRouter(modelId, config, suppliedKey) {
       openRouterModel(modelId);
       const key = suppliedKey ?? await readOpenRouterKey(config.secretArn ?? "");
       const headers = { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
       await withDeadline(async (signal) => {
         const catalog = await input.fetch("https://openrouter.ai/api/v1/models", { headers, signal });
-        if (!catalog.ok) throw new Error("model catalog unavailable");
+        if (!catalog.ok) throw new ProviderCheckHttpError(catalog.status, "model catalog unavailable");
         const body = await catalog.json() as { data?: Array<{ id: string; supported_parameters?: string[] }> };
         if (!body.data?.some((model) => model.id === modelId && model.supported_parameters?.includes("tools"))) throw new Error("model must support tools");
         const response = await input.fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -540,7 +541,7 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
             provider: openRouterRouting({ AGENTX_OPENROUTER_PROVIDERS: config.providers?.join(",") ?? "" }),
           }),
         });
-        if (!response.ok) throw new Error("model check failed");
+        if (!response.ok) throw new ProviderCheckHttpError(response.status, "model check failed");
         const result = await response.json() as { choices?: unknown[]; error?: unknown };
         if (result.error || !result.choices?.length) throw new Error("model returned no completion");
       }, CONVERSE_DEADLINE_MS, "OpenRouter preflight timed out");
@@ -642,14 +643,14 @@ export async function directProviderCheck(input: { provider: DirectProvider; mod
     ? { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json" }
     : { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
   const lookup = await input.fetch(`${base}/models/${encodeURIComponent(modelId)}`, { headers, signal });
-  if (!lookup.ok) throw new Error(directProviderStatusProblem(lookup.status));
+  if (!lookup.ok) throw new ProviderCheckHttpError(lookup.status, directProviderStatusProblem(lookup.status));
   const body = anthropic
     ? { model: modelId, max_tokens: 16, messages: [{ role: "user", content: "Reply OK." }],
       tools: [{ name: "ping", description: "Return OK", input_schema: { type: "object", properties: {} } }] }
     : { model: modelId, max_output_tokens: 16, input: "Reply OK.", store: false,
       tools: [{ type: "function", name: "ping", description: "Return OK", parameters: { type: "object", properties: {} } }] };
   const response = await input.fetch(`${base}/${anthropic ? "messages" : "responses"}`, { method: "POST", headers, signal, body: JSON.stringify(body) });
-  if (!response.ok) throw new Error(directProviderStatusProblem(response.status));
+  if (!response.ok) throw new ProviderCheckHttpError(response.status, directProviderStatusProblem(response.status));
   const result = await response.json() as { content?: unknown[]; output?: unknown[]; status?: string };
   // A reasoning model can spend all 16 tokens thinking; OpenAI then answers "incomplete", which still proves access.
   const answered = anthropic ? Array.isArray(result.content) : Array.isArray(result.output) && (result.status === "completed" || result.status === "incomplete");

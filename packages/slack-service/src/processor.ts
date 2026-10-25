@@ -34,7 +34,7 @@ import { createLazyWorker } from "./lazy-worker.js";
 import { NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, limitMessage, preparationFailedMessage } from "./messages.js";
 import { escapeText, slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
-import { matchApprovedModel, modelName, modelOptionsMessage, parseModelCommand } from "./model-command.js";
+import { matchApprovedModel, modelCheckWarning, modelName, modelOptionsMessage, parseModelCommand } from "./model-command.js";
 import {
   ABANDONED_TASK_CANCEL_FAILED_TEXT, ABANDONED_TASK_FINISHED_TEXT, ABANDONED_TASK_TEXT, HANDOFF_APPROVED_TEXT, HANDOFF_FINAL_CANCEL_FAILED_TEXT,
   HANDOFF_FINAL_FINISHED_TEXT, HANDOFF_FINAL_IDLE_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, RESUME_NOT_FOUND_TEXT, TurnHandedOffError, resumedResultText, turnNoteText,
@@ -468,7 +468,7 @@ export async function processSlackRequest(
         } else {
           if (api.selectProjectModel === undefined) throw new Error("project model selection is unavailable in this deployment");
           const selected = await api.selectProjectModel({ provider: matches[0]!.provider, modelId: matches[0]!.modelId });
-          await post(`Project \`${escapeText(selected.projectName)}\` now uses ${escapeText(modelName(selected.current))} (\`${escapeText(selected.current.provider)}/${escapeText(selected.current.modelId)}\`) for coding work. This applies to every Slack workspace in the project on its next turn.`);
+          await post(`Project \`${escapeText(selected.projectName)}\` now uses ${escapeText(modelName(selected.current))} (\`${escapeText(selected.current.provider)}/${escapeText(selected.current.modelId)}\`) for coding work. This applies to every Slack workspace in the project on its next turn.${modelCheckWarning(matches[0]!)}`);
         }
       }
       finished = true;

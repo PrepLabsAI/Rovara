@@ -1,0 +1,35 @@
+name: Mirror CI images
+
+# Copies each public image CI pulls (.github/ci-images.json) to ghcr.io/<owner>/rovara-ci/<name>, by digest, so CI does not depend on the anonymous pull limit of a public
+# registry. Run it by hand once after .github/ci-images.json is added or changes; it is safe to run again (a copy that is already there is left alone).
+# It uses only GITHUB_TOKEN with packages: write, never cloud credentials. `docker buildx imagetools create` copies the multi-architecture index registry to registry without
+# changing it, and the script fails unless the copy's digest equals the pinned one. CI falls back to the upstream registry while a copy is missing.
+#
+# After the first run, check the packages (Packages tab of the owner): each rovara-ci/<name> package must be readable by this repository's workflows (Package settings,
+# "Manage Actions access", or inherit the repository's visibility), or CI keeps using the upstream fallback and says so in a warning.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: mirror-ci-images
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+      - name: Log in to GHCR
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Copy the pinned images to GHCR
+        run: node scripts/ci-images.ts mirror

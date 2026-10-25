@@ -22,7 +22,19 @@ byId("download-orders").addEventListener("click", async () => {
   const anchor = document.createElement("a"); anchor.href = url; anchor.download = "orders.csv"; anchor.click(); URL.revokeObjectURL(url);
   byId("orders-export-status").textContent = "Orders exported";
 });
+byId("download-orders-inventory").addEventListener("click", async () => {
+  const response = await fetch("/api/orders-inventory.csv");
+  if (!response.ok) { byId("orders-access-error").textContent = `Access refused (${response.status})`; return; }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a"); anchor.href = url; anchor.download = "orders-inventory.csv"; anchor.click(); URL.revokeObjectURL(url);
+  byId("orders-export-status").textContent = "Orders with inventory exported";
+});
 const egressProbe = document.querySelector('meta[name="egress-probe"]')?.getAttribute("content");
 if (egressProbe) {
   fetch(egressProbe, { mode: "no-cors" }).then(() => { byId("network-denial").textContent = "reachable"; }, () => { byId("network-denial").textContent = "blocked"; });
+}
+const wsProbe = document.querySelector('meta[name="ws-probe"]')?.getAttribute("content");
+if (wsProbe) {
+  try { const socket = new WebSocket(wsProbe); socket.addEventListener("error", () => undefined); } catch { /* a blocked or invalid address is the page's own concern */ }
 }

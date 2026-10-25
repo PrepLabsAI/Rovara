@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { E2EApplicationExecutionAdmissionSchema } from "./e2e-application-execution.js";
+import { E2EFormLoginSchema } from "./e2e.js";
+import { E2E_MODEL_CHANNEL_SCHEMA_VERSION, E2E_MODEL_CHANNEL_SOCKET_PATH } from "./e2e-model-channel.js";
+import { E2EReplayTraceSchema, E2E_REPLAY_TRACES_MAX } from "./e2e-replay.js";
 
 /** The only application an executor run may reach: the candidate app's alias on the per-run internal network. */
 export const E2E_EXECUTOR_APP_ORIGIN = "http://app:4317" as const;
@@ -26,6 +29,8 @@ export const E2EExecutorAccountSchema = z.object({
   profileId: z.string().min(1).max(120),
   email: z.string().min(3).max(256).regex(/^[^\s@]+@[^\s@]+$/),
   password: z.string().min(16).max(256),
+  /** Present for a `rovara-form-login/v1` account: the form the executor signs in through. Equal to the login the source contract declares. */
+  login: E2EFormLoginSchema.optional(),
 }).strict();
 export type E2EExecutorAccount = z.infer<typeof E2EExecutorAccountSchema>;
 
@@ -56,12 +61,50 @@ export const E2EExecutorPlanSchema = z.object({
   }).strict(),
   deadlineAt: z.number().int().positive(),
   accounts: z.array(E2EExecutorAccountSchema).max(E2E_EXECUTOR_MAX_ACCOUNTS),
+  /**
+   * Present only for a group that has an `agent` step: the worker's model socket, mounted into this executor container alone, and the route it serves. The route must be
+   * the one the admission pins. An executor built before this field refuses the plan (the schema is strict), so a mixed fleet fails cleanly.
+   */
+  modelChannel: z.object({
+    protocol: z.literal(E2E_MODEL_CHANNEL_SCHEMA_VERSION),
+    socketPath: z.literal(E2E_MODEL_CHANNEL_SOCKET_PATH),
+    routeId: z.string().min(1).max(120),
+    routeRevision: z.string().min(1).max(120),
+    /**
+     * The run's HMAC key for the digests the agent's action ledger keeps of what it typed (`e2eAgentValueDigest`), 32 random bytes in hex. The worker makes it for the run and
+     * keeps it (Ruling DB-6); the executor reads it from this read-only plan, and it appears in no file the executor writes. A plan without it is refused (an executor that
+     * could not key its ledger would have no ledger worth reading).
+     */
+    valueKey: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict().optional(),
+  /**
+   * Present only for an audit replay (Task 4.6b): the recordings the read-only store serves for this group, as its admission binds them. The executor holds no model and gets no model
+   * channel; a plan with both is refused. An executor built before this field refuses the plan (the schema is strict), so a mixed fleet fails cleanly.
+   */
+  replay: z.object({ traces: z.array(E2EReplayTraceSchema).max(E2E_REPLAY_TRACES_MAX) }).strict().optional(),
 }).strict().superRefine((plan, context) => {
   if (plan.admission.admissionDigest !== plan.admissionDigest || e2eExecutorAdmissionDigest(plan.admission) !== plan.admissionDigest) {
     context.addIssue({ code: "custom", path: ["admissionDigest"], message: "executor plan admission digest does not bind its admission" });
   }
   if (!plan.admission.groups.some((group) => group.outerBinding.groupId === plan.groupId && group.outerBinding.runId === plan.runId)) {
     context.addIssue({ code: "custom", path: ["groupId"], message: "executor plan group and run are not in its admission" });
+  }
+  if (plan.modelChannel !== undefined
+    && (plan.admission.modelRoute === null || plan.admission.modelRoute.routeId !== plan.modelChannel.routeId || plan.admission.modelRoute.routeRevision !== plan.modelChannel.routeRevision)) {
+    context.addIssue({ code: "custom", path: ["modelChannel"], message: "executor plan model channel is not the route its admission pins" });
+  }
+  if (plan.replay !== undefined && plan.modelChannel !== undefined) {
+    context.addIssue({ code: "custom", path: ["replay"], message: "an executor plan for a replay has no model channel" });
+  }
+  if ((plan.replay !== undefined) !== (plan.admission.replay !== undefined)) {
+    context.addIssue({ code: "custom", path: ["replay"], message: "an executor plan carries its replay recordings exactly when its admission is a replay" });
+  } else if (plan.replay !== undefined && plan.admission.replay !== undefined) {
+    // Each recording the plan serves is one the admission binds (same case, step, key and binding); the bytes themselves are held to the binding by the store, not here.
+    const bound = new Map(plan.admission.replay.traces.map((trace) => [`${trace.caseId}\u0000${trace.stepIndex}`, canonicalJson({ keyHash: trace.keyHash, binding: trace.binding })]));
+    const serves = plan.replay.traces.map((trace) => `${trace.caseId}\u0000${trace.stepIndex}`);
+    if (new Set(serves).size !== serves.length || plan.replay.traces.some((trace) => bound.get(`${trace.caseId}\u0000${trace.stepIndex}`) !== canonicalJson({ keyHash: trace.keyHash, binding: trace.binding }))) {
+      context.addIssue({ code: "custom", path: ["replay"], message: "an executor plan serves a replay recording its admission does not bind" });
+    }
   }
   if (new Set(plan.accounts.map((account) => account.profileId)).size !== plan.accounts.length) {
     context.addIssue({ code: "custom", path: ["accounts"], message: "executor plan accounts must have unique profiles" });

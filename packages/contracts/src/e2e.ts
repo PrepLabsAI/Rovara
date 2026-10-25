@@ -6,6 +6,7 @@ import { redactText } from "./redaction.js";
 import { e2eApplicationUpstreamTestIdFromIdentity, e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
 import { copyBoundedE2EJsonArrayItems } from "./e2e-safe-data.js";
 import { E2ECallableSelectorSchema } from "./e2e-portable.js";
+import { E2E_AGENT_APPROVAL_REFUSALS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS } from "./e2e-model-channel.js";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const id = (max = 120) => z.string().trim().min(1).max(max);
@@ -190,6 +191,12 @@ export const E2EApplicationSelectionRecordSchema = z.object({
   unavailableCriteria: z.array(z.object({ criterionId: id(120), reason: id(500) }).strict()).max(64),
   runtimeRows: z.array(z.object({ kind: z.enum(["web", "api"]), profileId: id(120), runtimeCatalogId: id(120), catalogRevision: positiveInt, generation: positiveInt,
     bindingDigest: digest, capabilityDigest: digest, expiresAt: id(40) }).strict()).max(2),
+  /**
+   * The account refs the approval pinned, one per executable (application, account profile): the registry's latest at approval (owner decision D5). Dispatch and
+   * verification re-read the registry and refuse any other (`accounts-changed-reapprove`). A record approved under M1.2 has none: its plan's refs are the
+   * recipe-derived stand-ins, which are read as they are.
+   */
+  accountRefs: z.array(z.object({ applicationId: id(120), profileId: id(120), revision: positiveInt, definitionDigest: digest }).strict()).max(12).default([]),
   evaluatedAt: id(40),
 }).strict();
 export type E2EApplicationSelectionRecord = z.infer<typeof E2EApplicationSelectionRecordSchema>;
@@ -205,8 +212,23 @@ export function e2eApplicationSelectionFingerprint(record: E2EApplicationSelecti
  * it replaced and the one it recorded. Appended, never overwritten, so what the owner authorized can always be reconstructed.
  */
 export const E2EApplicationReapprovalSchema = z.object({ requestId: id(120), actorId: id(200), reason: id(500), at: id(40),
-  previous: E2EApplicationSelectionFingerprintSchema, current: E2EApplicationSelectionFingerprintSchema }).strict();
+  previous: E2EApplicationSelectionFingerprintSchema, current: E2EApplicationSelectionFingerprintSchema,
+  /** Which test accounts moved: one entry per (application, account profile) whose pinned ref differs, with the revisions before and after (null: none pinned then or now). */
+  accounts: z.array(z.object({ applicationId: id(120), profileId: id(120), from: positiveInt.nullable(), to: positiveInt.nullable() }).strict()).max(24).optional() }).strict();
 export type E2EApplicationReapproval = z.infer<typeof E2EApplicationReapprovalSchema>;
+/** The test accounts whose pinned ref differs between two approvals of one plan, for the re-approval audit. */
+export function e2eApplicationAccountChanges(previous: E2EApplicationSelectionRecord, current: E2EApplicationSelectionRecord): NonNullable<E2EApplicationReapproval["accounts"]> {
+  const keyOf = (ref: { applicationId: string; profileId: string }) => `${ref.applicationId}\0${ref.profileId}`;
+  const before = new Map(previous.accountRefs.map((ref) => [keyOf(ref), ref]));
+  const after = new Map(current.accountRefs.map((ref) => [keyOf(ref), ref]));
+  return [...new Set([...before.keys(), ...after.keys()])].sort().flatMap((key) => {
+    const from = before.get(key);
+    const to = after.get(key);
+    if (from !== undefined && to !== undefined && from.revision === to.revision && from.definitionDigest === to.definitionDigest) return [];
+    const ref = (to ?? from)!;
+    return [{ applicationId: ref.applicationId, profileId: ref.profileId, from: from?.revision ?? null, to: to?.revision ?? null }];
+  });
+}
 export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional(), displayRef: E2EWorkflowDisplayRefSchema.optional(), applicationSelection: E2EApplicationSelectionRecordSchema.optional(), applicationReapprovals: z.array(E2EApplicationReapprovalSchema).max(20).optional() }).strict();
 export type E2EWorkflowProgress = z.infer<typeof E2EWorkflowProgressSchema>;
 export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;
@@ -218,12 +240,32 @@ export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;
  * kind and admission schemaVersion disagree.
  */
 export const E2EWorkflowAdmissionRefSchema = z.object({
-  schemaVersion: z.literal(1), kind: z.literal("application").optional(), taskId: z.string().uuid(), workflowRevision: positiveInt,
+  schemaVersion: z.literal(1), kind: z.literal("application").optional(),
+  /** True when a group of the round has an `agent` step: the dispatcher then hands the round only to a worker that lists `task.workflowE2EAgentSteps.v1` (M1.4). */
+  agentSteps: z.literal(true).optional(), taskId: z.string().uuid(), workflowRevision: positiveInt,
   candidateDigest: digest, roundId: z.string().uuid(), groupRunIds: z.array(z.string().uuid()).min(1).max(4).refine((values) => new Set(values).size === values.length), admissionRef: z.object({
     key: z.string().regex(/^workflow-e2e-admissions\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest,
     byteLength: positiveInt.max(24 * 1024 * 1024),
   }).strict(),
-}).strict();
+  /**
+   * M1.3 Task 3.7b: a baseline round (the approved scenarios on the unchanged code, for information only) says so here, with the base commit it runs and the attempt, and the
+   * admission it names signs the same. A reference without these is a candidate round's. Only an application round can be a baseline.
+   */
+  purpose: z.enum(["baseline", "replay"]).optional(), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(), attempt: positiveInt.optional(),
+  /**
+   * M1.4 Task 4.6b: an audit replay of a verified round (the same candidate run again with no model, for an operator's check) names the round it replays. A reference without a
+   * purpose is a candidate round's. Only an application round can be a replay.
+   */
+  sourceRoundId: z.string().uuid().optional(),
+}).strict().superRefine((reference, context) => {
+  const baseline = reference.purpose === "baseline";
+  const replay = reference.purpose === "replay";
+  if (baseline !== (reference.baseCommitSha !== undefined) || (baseline || replay) !== (reference.attempt !== undefined)) {
+    context.addIssue({ code: "custom", path: ["purpose"], message: "a baseline or replay reference carries its attempt (a baseline also its base commit), and only those references do" });
+  }
+  if (replay !== (reference.sourceRoundId !== undefined)) context.addIssue({ code: "custom", path: ["sourceRoundId"], message: "a replay reference names the round it replays, and only a replay reference does" });
+  if ((baseline || replay) && reference.kind !== "application") context.addIssue({ code: "custom", path: ["kind"], message: "only an application round can be a baseline or a replay" });
+});
 export type E2EWorkflowAdmissionRef = z.infer<typeof E2EWorkflowAdmissionRefSchema>;
 /**
  * What an application round's evidence may weigh (Ruling BV): the worker refuses to upload more (the group is UNKNOWN, "evidence too large"), the broker accepts and reads no more.
@@ -245,8 +287,34 @@ const CommandRecipeSchema = z.object({ program: id(256), args: z.array(z.string(
   if (/(^|[/\\])(?:sh|bash|zsh|cmd|powershell|pwsh)(\.exe)?$/i.test(command.program) || command.args.some((arg) => /(^|\s)(?:\||&&|;|>|<|\$\(|`)/.test(arg))) context.addIssue({ code: "custom", message: "shell wrappers and shell-interpreted arguments are forbidden" });
 });
 export type E2ECommandRecipe = z.infer<typeof CommandRecipeSchema>;
-export const E2EAppRecipeSchema = z.object({ schemaVersion: z.literal(1), recipeDigest: digest, build: z.array(CommandRecipeSchema).max(16), launch: z.discriminatedUnion("kind", [z.object({ kind: z.literal("service"), start: CommandRecipeSchema, health: z.object({ path: sameOriginAppPath, expectedStatus: z.number().int().min(100).max(599) }).strict() }).strict(), z.object({ kind: z.literal("application"), appId: id(200), artifactRef: id(500), arguments: z.array(z.string().max(8192)).max(100) }).strict(), z.object({ kind: z.literal("contract"), adapterProfileId: id(120), operationIds: ids(200) }).strict()]), serviceProfileIds: z.array(id(120)).max(8), seedProfileId: id(120), accountProfileIds: ids(32), allowedOrigins: z.array(id(200)).max(64) }).strict();
+/**
+ * The smallest, largest and default size of the data volume a recipe may ask for, in MiB. The volume is a tmpfs, so every MiB of it is runner memory, next to the app container, its
+ * seed and the executor: two concurrent groups at the cap use 1 GiB of an 8 GiB `m6g.large`. The cap stays at 512 until the sizes real apps ask for are measured live.
+ */
+export const E2E_DATA_VOLUME_MIN_MIB = 16;
+export const E2E_DATA_VOLUME_MAX_MIB = 512;
+export const E2E_DATA_VOLUME_DEFAULT_MIB = 256;
+/** The longest a recipe's seed command may run (Task 3.2). */
+export const E2E_SEED_COMMAND_MAX_TIMEOUT_MS = 60_000;
+export const E2EAppRecipeSchema = z.object({ schemaVersion: z.literal(1), recipeDigest: digest, build: z.array(CommandRecipeSchema).max(16), launch: z.discriminatedUnion("kind", [z.object({ kind: z.literal("service"), start: CommandRecipeSchema, health: z.object({ path: sameOriginAppPath, expectedStatus: z.number().int().min(100).max(599) }).strict() }).strict(), z.object({ kind: z.literal("application"), appId: id(200), artifactRef: id(500), arguments: z.array(z.string().max(8192)).max(100) }).strict(), z.object({ kind: z.literal("contract"), adapterProfileId: id(120), operationIds: ids(200) }).strict()]), serviceProfileIds: z.array(id(120)).max(8), seedProfileId: id(120), accountProfileIds: ids(32), allowedOrigins: z.array(id(200)).max(64),
+  /** Seeds the app's own data from the accounts file (`rovara-accounts-file/v1`) before the app starts; at most a minute. Part of the recipe digest, so a change re-versions every account that runs under it. */
+  seed: CommandRecipeSchema.refine((command) => command.timeoutMs <= E2E_SEED_COMMAND_MAX_TIMEOUT_MS, "the seed command may run for at most 60000 ms").optional(),
+  /** The size of the run's data volume (a tmpfs) under `rovara-accounts-file/v1`, in MiB; 256 when not stated. Part of the recipe digest. */
+  dataSizeMiB: z.number().int().min(E2E_DATA_VOLUME_MIN_MIB).max(E2E_DATA_VOLUME_MAX_MIB).optional() }).strict();
 export type E2EAppRecipe = z.infer<typeof E2EAppRecipeSchema>;
+/** The seed profile whose accounts file the host writes for the app (`/app/.owned/rovara-accounts.json`) and the recipe's `seed` command reads (Task 3.2). */
+export const E2E_ACCOUNTS_FILE_SEED_PROFILE = "rovara-accounts-file/v1" as const;
+/** The auth profile whose accounts sign in through the app's own login form (Task 3.2). */
+export const E2E_FORM_LOGIN_AUTH_PROFILE = "rovara-form-login/v1" as const;
+/** How long the executor waits for the signed-in marker after submitting the login form. */
+export const E2E_FORM_LOGIN_SUCCESS_TIMEOUT_MS = 10_000;
+/**
+ * The login form of `rovara-form-login/v1`: the executor opens `path` in a fresh browser context, fills the field named by `usernameTestId` with the account's email and the
+ * one named by `passwordTestId` with its password, clicks `submitTestId`, and waits for `successTestId` to be visible. All four are `data-testid` values.
+ */
+export const E2EFormLoginSchema = z.object({ kind: z.literal("form"), path: sameOriginAppPath, usernameTestId: id(256), passwordTestId: id(256),
+  submitTestId: id(256), successTestId: id(256) }).strict();
+export type E2EFormLogin = z.infer<typeof E2EFormLoginSchema>;
 
 const stepSchemas = [
   z.object({ kind: z.literal("navigate"), path: sameOriginAppPath }), z.object({ kind: z.literal("fill"), testId: id(256), value: z.string().max(8192) }), z.object({ kind: z.literal("click"), testId: id(256) }),
@@ -349,7 +417,16 @@ export function validateE2EScenarioBundleForPolicy(bundle: unknown, policy: unkn
       if (target.kind === "api" && scenario.steps.some((step) => ["navigate", "fill", "click", "launch-app", "tap", "swipe", "deep-link", "restart-app", "set-permission", "choose-file"].includes(step.kind))) throw new Error(`UI scenario steps are incompatible with API target ${requestedTargetId}`);
     }
   }
-  if (parsedPolicy.modelRouteRevision === null && parsedBundle.scenarios.some((scenario) => scenario.steps.some((step) => step.kind === "agent"))) throw new Error("agent steps require an approved model route revision");
+  // An `agent` step only navigates; its verdict is never a case verdict (M1.4). Whether the policy has an approved route is not judged here: a scenario with an agent step but no route is
+  // unavailable (`agent-route-not-approved`), which the execution plan decides, so the same plan becomes executable once the route is approved.
+  const budgets = E2E_MODEL_ROUTE_DEFAULT_BUDGETS;
+  for (const scenario of parsedBundle.scenarios) {
+    const agentSteps = scenario.steps.filter((step): step is Extract<E2EStep, { kind: "agent" }> => step.kind === "agent");
+    if (agentSteps.some((step) => step.maxActions > budgets.maxActionsPerStep)) throw new Error(`${E2E_AGENT_APPROVAL_REFUSALS.overBudget}: an agent step may take at most ${budgets.maxActionsPerStep} actions (scenario ${scenario.scenarioId})`);
+    if (agentSteps.length > budgets.maxAgentStepsPerGroup) throw new Error(`${E2E_AGENT_APPROVAL_REFUSALS.overGroupLimit}: a scenario may have at most ${budgets.maxAgentStepsPerGroup} agent steps (scenario ${scenario.scenarioId})`);
+    // Checks decide: an agent scenario needs a deterministic assertion after its last agent step. `E2EScenarioSchema` already requires at least one assertion, and assertions
+    // run after all steps, so no separate refusal is needed here.
+  }
   return parsedBundle;
 }
 
@@ -458,16 +535,20 @@ export type E2ERound = z.infer<typeof E2ERoundSchema>;
 
 export const E2ECaseStatusSchema = z.enum(["passed", "failed", "unavailable", "skipped", "unstable", "cancelled", "stale"]);
 export type E2ECaseStatus = z.infer<typeof E2ECaseStatusSchema>;
-export const E2EArtifactRefSchema = z.object({ artifactId: id(200), sha256: digest, bytes: z.number().int().nonnegative().max(26_214_400), mediaType: id(120), kind: z.enum(["report", "screenshot", "trace", "video", "download"]), captureQualification: z.enum(["synthetic", "redacted", "restricted"]) }).strict();
+export const E2EArtifactRefSchema = z.object({ artifactId: id(200), sha256: digest, bytes: z.number().int().nonnegative().max(26_214_400), mediaType: id(120), kind: z.enum(["report", "screenshot", "video", "download"]), captureQualification: z.enum(["synthetic", "redacted", "restricted"]) }).strict();
 export type E2EArtifactRef = z.infer<typeof E2EArtifactRefSchema>;
 export const E2EAssertionReceiptSchema = z.object({ assertionIndex: z.number().int().min(0).max(19), assertionDigest: digest, status: E2ECaseStatusSchema, reason: id(500) }).strict();
 export type E2EAssertionReceipt = z.infer<typeof E2EAssertionReceiptSchema>;
-export const E2ECaseResultSchema = z.object({ caseId: id(160), executionDescriptorDigest: digest, accountContextId: id(120), accountContextDigest: digest, status: E2ECaseStatusSchema, reason: id(500), attemptCount: positiveInt.max(2), assertionDigest: digest, assertionReceipts: z.array(E2EAssertionReceiptSchema).min(1).max(20), artifacts: z.array(E2EArtifactRefSchema).max(200), coverage: E2ECaseCoverageSchema }).strict().superRefine((result, context) => {
+export const E2ECaseResultSchema = z.object({ caseId: id(160), executionDescriptorDigest: digest, accountContextId: id(120), accountContextDigest: digest, status: E2ECaseStatusSchema, reason: id(500), attemptCount: positiveInt.max(2), assertionDigest: digest, assertionReceipts: z.array(E2EAssertionReceiptSchema).min(1).max(20), artifacts: z.array(E2EArtifactRefSchema).max(200), coverage: E2ECaseCoverageSchema,
+  /** The declared external origins whose approved in-network mock stood in for the real service in this case; present only when there is one. */
+  mockedOrigins: z.array(id(200)).max(32).optional() }).strict().superRefine((result, context) => {
   if (new Set(result.assertionReceipts.map((receipt) => receipt.assertionIndex)).size !== result.assertionReceipts.length) context.addIssue({ code: "custom", path: ["assertionReceipts"], message: "assertion receipt indices must be unique" });
   if (result.assertionReceipts.some((receipt, index) => receipt.assertionIndex !== index)) context.addIssue({ code: "custom", path: ["assertionReceipts"], message: "assertion receipts must cover contiguous ordered indices" });
 });
 export type E2ECaseResult = z.infer<typeof E2ECaseResultSchema>;
-export const E2EQualifiedResultSchema = z.object({ schemaVersion: z.literal(1), binding: E2ERunBindingSchema, producer: id(120), startedAt: timestamp, finishedAt: timestamp, receivedAt: timestamp, status: E2ECaseStatusSchema, qualification: z.enum(["trusted", "exploratory"]), executionMode: E2EExecutionModeSchema, reason: id(500), cases: z.array(E2ECaseResultSchema).max(64), rawReportSha256: digest.nullable(), modelReceiptIds: z.array(id(200)).max(200), cleanup: z.enum(["confirmed", "pending", "failed"]) }).strict().superRefine((result, context) => {
+export const E2EQualifiedResultSchema = z.object({ schemaVersion: z.literal(1), binding: E2ERunBindingSchema, producer: id(120), startedAt: timestamp, finishedAt: timestamp, receivedAt: timestamp, status: E2ECaseStatusSchema, qualification: z.enum(["trusted", "exploratory"]), executionMode: E2EExecutionModeSchema, reason: id(500), cases: z.array(E2ECaseResultSchema).max(64), rawReportSha256: digest.nullable(), modelReceiptIds: z.array(id(200)).max(200), cleanup: z.enum(["confirmed", "pending", "failed"]),
+  /** The union of the cases' mocked origins; present only when some case had one. */
+  mockedOrigins: z.array(id(200)).max(64).optional() }).strict().superRefine((result, context) => {
   if (Date.parse(result.finishedAt) < Date.parse(result.startedAt)) context.addIssue({ code: "custom", path: ["finishedAt"], message: "finish precedes start" });
   if (new Set(result.cases.map((item) => item.caseId)).size !== result.cases.length) context.addIssue({ code: "custom", path: ["cases"], message: "case results must be unique" });
   const expected = new Set(result.binding.expectedCases.map((item) => item.caseId));

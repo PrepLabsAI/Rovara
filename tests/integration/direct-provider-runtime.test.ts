@@ -191,21 +191,26 @@ describe.each(cases)("$label through the installed Pi transport", (provider) => 
     expect(message.errorMessage).toBe(`${provider.label} request cancelled`);
   });
 
-  it.each(["worker", "orchestrator", "classifier"] as const)("uses the %s's Bedrock default when no secret is configured", async (role) => {
+  it.each(["worker", "orchestrator", "classifier"] as const)("fails the %s's call by name when no secret is configured and no fallback was chosen (MODEL3)", async (role) => {
+    await expect(createModelRuntimeWithFallback(selected, role, { environment: {} })).rejects.toThrow(`The ${provider.label} key secret is missing, and no fallback model was chosen`);
+  });
+
+  it.each(["worker", "orchestrator", "classifier"] as const)("runs the %s on the chosen fallback and logs it when no secret is configured", async (role) => {
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
-      const resolved = await createModelRuntimeWithFallback(selected, role, { environment: {} });
-      expect(resolved.model).toEqual({ provider: "amazon-bedrock", modelId: DEFAULT_BEDROCK_MODELS[role] });
+      const resolved = await createModelRuntimeWithFallback(selected, role, { environment: { AGENTX_MODEL_FALLBACK: DEFAULT_BEDROCK_MODELS.worker } });
+      expect(resolved.model).toEqual({ provider: "amazon-bedrock", modelId: DEFAULT_BEDROCK_MODELS.worker });
       expect(log).toHaveBeenCalledWith(expect.stringContaining(`"reason":"${provider.provider}_secret_missing"`));
     } finally { log.mockRestore(); }
   });
 
-  it("falls back for a nonexistent or empty secret, but not for access denied", async () => {
+  it("uses the chosen fallback for a nonexistent or empty secret, but not for access denied", async () => {
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
       for (const read of [async () => undefined, async () => "  \n", async () => { throw Object.assign(new Error("missing"), { name: "ResourceNotFoundException" }); }]) {
-        const resolved = await createModelRuntimeWithFallback(selected, "worker", { environment, readSecret: read });
+        const resolved = await createModelRuntimeWithFallback(selected, "worker", { environment: { ...environment, AGENTX_MODEL_FALLBACK: DEFAULT_BEDROCK_MODELS.worker }, readSecret: read });
         expect(resolved.model.provider).toBe("amazon-bedrock");
+        await expect(createModelRuntimeWithFallback(selected, "worker", { environment, readSecret: read })).rejects.toThrow("no fallback model was chosen");
       }
       await expect(createModelRuntimeWithFallback(selected, "worker", { environment,
         readSecret: async () => { throw Object.assign(new Error(provider.key), { name: "AccessDeniedException" }); },

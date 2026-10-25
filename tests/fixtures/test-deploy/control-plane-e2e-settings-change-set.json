@@ -1,0 +1,276 @@
+{
+    "Changes": [
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "BrokerApiInvokeC6C766F0",
+                "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-BrokerApiInvokeC6C766F0-rwTIDA7Dn11s",
+                "ResourceType": "AWS::Lambda::Permission",
+                "Replacement": "Conditional",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "FunctionName",
+                            "RequiresRecreation": "Always"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "BrokerE1355FD6",
+                "PhysicalResourceId": "agentx-agentxlivetest123-control-pl-BrokerE1355FD6-8biQFqdYC9Bk",
+                "ResourceType": "AWS::Lambda::Function",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "Environment",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Static",
+                        "ChangeSource": "DirectModification"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "BrokerIntegration",
+                "PhysicalResourceId": "v1dblx5",
+                "ResourceType": "AWS::ApiGatewayV2::Integration",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "IntegrationUri",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "BrokerServiceRoleDefaultPolicyDDFD9E7E",
+                "PhysicalResourceId": "agent-Broke-hTYUgb0ood1T",
+                "ResourceType": "AWS::IAM::Policy",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "PolicyDocument",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Static",
+                        "ChangeSource": "DirectModification"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "GithubWebhookRecoveryRoleDefaultPolicyDC13C89E",
+                "PhysicalResourceId": "agent-Githu-ysgIM4TB7Vwv",
+                "ResourceType": "AWS::IAM::Policy",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "PolicyDocument",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "GithubWebhookRecoverySchedule",
+                "PhysicalResourceId": "agentx-agentxlivetest123-GithubWebhookRecoverySch-1UT8E40VTUX8H",
+                "ResourceType": "AWS::Scheduler::Schedule",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "Target",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "SessionsStepsServiceRoleDefaultPolicy9F4B87C9",
+                "PhysicalResourceId": "agent-Sessi-8yItjXEqlJBG",
+                "ResourceType": "AWS::IAM::Policy",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "PolicyDocument",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Static",
+                        "ChangeSource": "DirectModification"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "SlackIngressServiceRoleDefaultPolicy6F2F26FC",
+                "PhysicalResourceId": "agent-Slack-WOBs6TjhuSDd",
+                "ResourceType": "AWS::IAM::Policy",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "PolicyDocument",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "WorkflowDispatchRecoveryRoleDefaultPolicy083213B6",
+                "PhysicalResourceId": "agent-Workf-VxOg2i8Z7cil",
+                "ResourceType": "AWS::IAM::Policy",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "PolicyDocument",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "WorkflowDispatchRecoverySchedule",
+                "PhysicalResourceId": "agentx-agentxlivetest123-WorkflowDispatchRecovery-TD3ZHR4KVNID",
+                "ResourceType": "AWS::Scheduler::Schedule",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "Target",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "WorkflowMergeRecoverySchedule",
+                "PhysicalResourceId": "agentx-agentxlivetest123-WorkflowMergeRecoverySch-937OL25UEDBR",
+                "ResourceType": "AWS::Scheduler::Schedule",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "Target",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        }
+    ]
+}

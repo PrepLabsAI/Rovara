@@ -18,7 +18,7 @@ function qualifiedWebRuntime(profileId: string, now: number) {
   const capabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ schemaVersion: "e2e-runtime-capabilities/v1", profileId,
     kind: "web", host: { os: "linux", arch: "x64" }, engine: { name: "playwright", version: "1.0.0", spiVersion: 1 },
     runtimeManifestDigest: "a".repeat(64), supportedSteps: ["navigate"], supportedAssertions: ["visible"],
-    evidenceScopes: ["runtime"], networkPolicyDigest: "b".repeat(64), browsers: ["chromium"] });
+    evidenceScopes: ["runtime"], networkPolicyDigest: "b".repeat(64), browsers: ["chromium"], mocks: ["source-backed-api-fixtures/v1"] });
   const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
     subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" as const };
   const runnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: "linux 6.8.0", arch: "x64", runtime: "node v22.23.2" };
@@ -232,8 +232,13 @@ describe("application execution plan selection", () => {
       runtimeAvailability: [{ targetId: web.targetId, profileId: runtimeRef.runtimeProfileId, connection: "connected" as const,
         approval: "approved" as const, qualification: "qualified" as const, authorizationRevision: "web-auth-r1" }] };
     const agentIntent = E2EApplicationPlanIntentSchema.parse({ ...intent, scenarios: [agentScenario, portableScenario, nativeScenario] });
-    expect(() => selectE2EApplicationExecutionPlan({ ...input, policy: { ...policy, modelRouteRevision: null },
-      intent: agentIntent, scenarios: agentIntent.scenarios, intentDigest: hash(canonicalJson(agentIntent)) })).toThrow(/agent steps require an approved model route revision/);
+    // With no approved route an agent step is unavailable, never a thrown refusal and never executable (Task 4.2).
+    const withoutRoute = selectE2EApplicationExecutionPlan({ ...input, policy: { ...policy, modelRouteRevision: null },
+      intent: agentIntent, scenarios: agentIntent.scenarios, intentDigest: hash(canonicalJson(agentIntent)) });
+    const agentCriterion = withoutRoute.criteria.find((item) => item.scenarioId === agentScenario.scenarioId)!;
+    expect(withoutRoute.unavailableCriteria.find((item) => item.criterionId === agentCriterion.criterionId)?.reason).toBe("agent-runtime-not-qualified");
+    expect(agentCriterion.expectedCaseIds).toEqual([]);
+    expect(withoutRoute.groups.flatMap((item) => item.expectedCases).some((item) => item.scenarioId === agentScenario.scenarioId)).toBe(false);
     const ready = selectE2EApplicationExecutionPlan(readyInput);
     expect(ready.criteria.find((item) => item.scenarioId === "web-ui")?.expectedCaseIds).toHaveLength(1);
     expect(ready.groups.find((item) => item.mode === "real-runtime")?.expectedCases[0]?.upstreamTestId)

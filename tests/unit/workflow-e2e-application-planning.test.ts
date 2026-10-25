@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, createCandidateManifest,
+  E2EApplicationAccountDefinitionSchema, E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, createCandidateManifest,
+  WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, deriveE2EApplicationRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, workflowApplicationRetryOffered,
   E2EWorkflowAdmissionRefSchema, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
   WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, canonicalPlanJson, workflowSendBackOffered,
   WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey, readCanonicalPlan, portableOperationId, type E2EApplicationPlanIntent,
-  selectE2EApplicationExecutionPlan,
+  selectE2EApplicationExecutionPlan, E2EScenarioSchema, e2eAnonymousRuntimeAccountRef, E2E_APPLICATION_ADMISSION_SCHEMA_V2,
   type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
@@ -22,12 +23,18 @@ import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/de
 import * as routes from "../../packages/broker/src/aws/developer-routes.js";
 import { decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, isE2EPlanCorrectionBlockReason } from "../../packages/broker/src/developer/task-records.js";
+import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
+import { ordersManifestWith, registryFor } from "../support/e2e-account-registry-fixtures.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { call, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
-import { NOW, PROFILE, apiSnapshot, approvedSetup, binding, contractSnapshot, csvScenario, inferredSnapshot, ordersContractManifest, planFixture, sha, shaCanonical, snapshotOf, webAndApiFixture, webApiRow,
+import { NOW, PROFILE, anonymousScenario, anonymousTargetOf, apiSnapshot, approvedSetup, binding, contractSnapshot, csvScenario, inferredSnapshot, ordersContractManifest, planFixture, sha, shaCanonical, snapshotOf, webAndApiFixture, webApiRow,
   type PlanInput } from "../support/e2e-application-plan-fixtures.js";
+import { assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
+
+// The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
+assumeDrivingTestsPassed();
 
 
 /** Runs the production selection facade for one web scenario against the approved setup. */
@@ -61,12 +68,79 @@ describe("browser and API scenarios on a qualified runtime profile", () => {
     expect(selected.criteria[0]?.expectedCaseIds).toEqual([]);
   });
 
-  it("keeps an agent step unavailable until M1.4", () => {
-    const agent: E2EScenario = { ...csvScenario, scenarioId: "agent-orders",
-      steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] };
-    const { plan: selected } = plan({ scenario: agent, modelRouteRevision: "route-v1" });
-    expect(selected.groups).toEqual([]);
-    expect(selected.unavailableCriteria).toEqual([{ criterionId: selected.criteria[0]!.criterionId, reason: "agent-steps-arrive-in-m1.4" }]);
+  describe("an agent step is executable only on a qualified web runtime, with an approved route", () => {
+    const agentScenario = (steps: E2EScenario["steps"] = [{ kind: "agent", goal: "open the orders page", maxActions: 3 }]): E2EScenario => ({ ...csvScenario, scenarioId: "agent-orders",
+      steps, assertions: [{ kind: "visible", testId: "orders", equals: true }] });
+    const withAgentSupport = (kind: "web" | "api" = "web") => webApiRow(kind, {}, (value) => ({ ...value, supportedSteps: [...value.supportedSteps, "agent" as const] }));
+
+    it("stays unavailable with agent-runtime-not-qualified while the READY descriptor declares no agent support", () => {
+      const { plan: selected } = plan({ scenario: agentScenario(), modelRouteRevision: "r1-0123456789ab" });
+      expect(selected.groups).toEqual([]);
+      expect(selected.unavailableCriteria).toEqual([{ criterionId: selected.criteria[0]!.criterionId, reason: "agent-runtime-not-qualified" }]);
+    });
+
+    it("stays unavailable with agent-route-not-approved while the project policy has no route", () => {
+      const { plan: selected } = plan({ scenario: agentScenario(), registeredRuntimes: [withAgentSupport()] });
+      expect(selected.groups).toEqual([]);
+      expect(selected.unavailableCriteria).toEqual([{ criterionId: selected.criteria[0]!.criterionId, reason: "agent-route-not-approved" }]);
+    });
+
+    it("is one application group with nothing unavailable when the descriptor supports agent and the policy pins a route", () => {
+      const { plan: selected } = plan({ scenario: agentScenario(), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" });
+      expect(selected.unavailableCriteria).toEqual([]);
+      expect(selected.groups).toHaveLength(1);
+      expect(selected.groups[0]).toMatchObject({ mode: "real-runtime", runtimeProfileId: PROFILE, targetIds: ["web-1"] });
+    });
+
+    it("binds the route revision into the case identity, so another route is another case", () => {
+      const one = plan({ scenario: agentScenario(), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" }).plan;
+      const two = plan({ scenario: agentScenario(), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r2-ba9876543210" }).plan;
+      expect(one.groups[0]!.expectedCases[0]!.caseId).not.toBe(two.groups[0]!.expectedCases[0]!.caseId);
+    });
+
+    it("is refused at approval with agent-steps-web-only on an API target, even when its descriptor claims agent support", () => {
+      const apiAgent: E2EScenario = { ...agentScenario(), requestedTargetIds: ["api-1"], steps: [{ kind: "agent", goal: "call the orders endpoint", maxActions: 3 }],
+        assertions: [{ kind: "http-status", path: "/api/orders", method: "GET", equals: 200 }] };
+      const fixture = planFixture({ snapshot: apiSnapshot, targetId: "api-1", scenario: apiAgent, setupReady: [{ kind: "api", profileId: PROFILE }], modelRouteRevision: "r1-0123456789ab" });
+      const result = evaluateApplicationPlanApproval({ intent: fixture.intent, taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) },
+        snapshot: fixture.snapshot, setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy,
+        registeredRuntimes: [webApiRow("web"), withAgentSupport("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW,
+        accounts: { entries: fixture.registry, mode: "approve", pinned: [] } });
+      expect(result).toMatchObject({ ok: false, scope: "plan" });
+      expect(!result.ok && result.reason).toMatch(/^agent-steps-web-only: scenario agent-orders/);
+    });
+
+    it("leaves a plan with no agent step exactly as it was", () => {
+      const without = plan({ registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" }).plan;
+      expect(without.unavailableCriteria).toEqual([]);
+      expect(without.groups).toHaveLength(1);
+    });
+
+    it("refuses at approval an agent step that asks for more than 8 actions", () => {
+      expect(() => plan({ scenario: agentScenario([{ kind: "agent", goal: "open the orders page", maxActions: 9 }]), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" }))
+        .toThrow(/agent-step-over-budget/);
+      expect(() => plan({ scenario: agentScenario([{ kind: "agent", goal: "open the orders page", maxActions: 8 }]), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" })).not.toThrow();
+    });
+
+    it("refuses at approval a group of more than 3 agent steps", () => {
+      const step = { kind: "agent" as const, goal: "open the orders page", maxActions: 2 };
+      expect(() => plan({ scenario: agentScenario([step, step, step, step]), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" })).toThrow(/agent-steps-over-group-limit/);
+      expect(() => plan({ scenario: agentScenario([step, step, step]), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" })).not.toThrow();
+    });
+
+    it("cannot be written without a deterministic assertion after its last agent step: the scenario schema requires one (so approval needs no separate refusal)", () => {
+      expect(() => E2EScenarioSchema.parse({ ...agentScenario(), assertions: [] })).toThrow();
+      expect(E2EScenarioSchema.parse(agentScenario()).assertions.length).toBeGreaterThan(0);
+    });
+
+    it("refuses at approval more than 3 agent steps in one group, counted across its scenarios (2 + 2), and accepts 2 + 1", () => {
+      const step = { kind: "agent" as const, goal: "open the orders page", maxActions: 2 };
+      const two = (id: string): E2EScenario => ({ ...agentScenario([step, step]), scenarioId: id });
+      const one = (id: string): E2EScenario => ({ ...agentScenario([step]), scenarioId: id });
+      const withScenarios = (scenarios: E2EScenario[]) => () => plan({ scenario: scenarios[0]!, extraScenarios: scenarios.slice(1), registeredRuntimes: [withAgentSupport()], modelRouteRevision: "r1-0123456789ab" });
+      expect(withScenarios([two("agent-a"), two("agent-b")])).toThrow(/agent-steps-over-group-limit/);
+      expect(withScenarios([two("agent-a"), one("agent-b")])).not.toThrow();
+    });
   });
 
   it("admits an API scenario with a status and a json assertion on the READY api row", () => {
@@ -122,13 +196,16 @@ const APPROVED_REF = { artifactId: APPROVED_ARTIFACT.id, digest: APPROVED_ARTIFA
 
 /** The approval evaluation of the same fixture the selection facade tests use, with the rows the broker would have admitted. */
 function evaluate(input: PlanInput & { runtimeBinding?: typeof binding; artifact?: typeof APPROVED_ARTIFACT; policyBaselineIds?: string[]; setupSnapshot?: E2ESourceSnapshot;
+  expiredRuntimes?: ReadonlyArray<{ kind: "web" | "api"; profileId: string; expiresAt: string }>;
   mutateIntent?: (intent: E2EApplicationPlanIntent, fixture: ReturnType<typeof planFixture>) => unknown; mutatePolicy?: (policy: ReturnType<typeof planFixture>["policy"]) => ReturnType<typeof planFixture>["policy"] }) {
   const fx = planFixture(input);
   const policy = { ...fx.policy, baselineScenarioIds: input.policyBaselineIds ?? fx.policy.baselineScenarioIds };
   return evaluateApplicationPlanApproval({ intent: input.mutateIntent === undefined ? fx.intent : E2EApplicationPlanIntentSchema.parse(input.mutateIntent(fx.intent, fx)), taskId: TASK_ID, artifact: input.artifact ?? APPROVED_ARTIFACT,
     snapshot: input.setupSnapshot ?? fx.snapshot, setupProposal: fx.setup.proposal, setupApproval: fx.setup.setupApproval,
     policy: input.mutatePolicy === undefined ? policy : input.mutatePolicy(policy),
-    registeredRuntimes: input.registeredRuntimes ?? [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: input.runtimeBinding ?? binding, now: NOW });
+    registeredRuntimes: input.registeredRuntimes ?? [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: input.runtimeBinding ?? binding, now: NOW,
+    ...(input.expiredRuntimes === undefined ? {} : { expiredRuntimes: input.expiredRuntimes }),
+    accounts: { entries: fx.registry, mode: "approve", pinned: [] } });
 }
 const refusal = (result: ReturnType<typeof evaluate>) => (result.ok ? "approved" : result.reason);
 
@@ -166,12 +243,12 @@ describe("approving a plan that carries an application intent", () => {
       ["the runtime row is missing", { registeredRuntimes: [] }, /web runtime.*READY/i],
       ["only the other kind's row is READY", { registeredRuntimes: [webApiRow("api")] }, /web runtime.*READY/i],
       ["the row is bound to another runtime binding", { runtimeBinding: { ...binding, launchTemplateId: "lt-fedcba9876543210" } }, /another runtime binding/i],
-      ["the row has expired", { registeredRuntimes: [webApiRow("web", { qualifiedAt: new Date(NOW - 7_200_000).toISOString(), expiresAt: new Date(NOW - 1_000).toISOString() })] }, /not READY/i],
+      ["the row has expired", { registeredRuntimes: [webApiRow("web", { qualifiedAt: new Date(NOW - 7_200_000).toISOString(), expiresAt: new Date(NOW - 1_000).toISOString() })] }, /^runtime-expired: .*expired at/],
       ["the row is parked", { registeredRuntimes: [webApiRow("web", { state: "UNAVAILABLE" })] }, /not READY/i],
       ["the descriptor does not support a step the scenario uses", { registeredRuntimes: [webApiRow("web", {}, (value) => ({ ...value,
         supportedSteps: value.supportedSteps.filter((step) => step !== "click") }))] }, /not ready|unsupported|capabilit/i],
-      ["the scenario has an agent step", { modelRouteRevision: "route-v1", scenario: { ...csvScenario, scenarioId: "agent-orders",
-        steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] } }, /agent-steps-arrive-in-m1\.4/],
+      ["the scenario has an agent step and the descriptor declares no agent support", { modelRouteRevision: "r1-0123456789ab", scenario: { ...csvScenario, scenarioId: "agent-orders",
+        steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] } }, /agent-runtime-not-qualified/],
       ["the launch recipe is only inferred, without a project contract", { snapshot: inferredSnapshot }, /needs-project-contract/],
       ["the target is approved on the phase-unavailable profile but the plan names the qualified one", { setupReady: [], planRuntimeProfileId: PROFILE }, /runtime profile/i],
       ["the plan names a runtime profile the target does not carry", { planRuntimeProfileId: "foreign-runtime-profile" }, /runtime profile/i],
@@ -262,13 +339,9 @@ describe("a v2 intent with portable criteria is refused at approval (Ruling BE, 
     expect(refusal(result)).toContain("semanticExportDeltas");
   });
 
-  it("marks a plan-intrinsic refusal (portable criteria, web and api together) apart from a runtime one, so dispatch can send the plan back to planning", () => {
+  it("marks a plan-intrinsic refusal (portable criteria) apart from a runtime one, so dispatch can send the plan back to planning", () => {
     const portable = evaluate({ snapshot: mixedSnapshot, mutateIntent: withProposedCallable });
     expect(!portable.ok && portable.scope).toBe("plan");
-    const bf = webAndApiFixture();
-    const both = evaluateApplicationPlanApproval({ intent: bf.build({ web: true, api: true }), taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot: bf.snapshot, setupProposal: bf.setup.proposal,
-      setupApproval: bf.setup.setupApproval, policy: bf.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW });
-    expect(!both.ok && both.scope).toBe("plan");
     const noRow = evaluate({ registeredRuntimes: [] });
     expect(!noRow.ok && noRow.scope).toBe("runtime");
     const expired = evaluate({ registeredRuntimes: [webApiRow("web", { qualifiedAt: new Date(NOW - 7_200_000).toISOString(), expiresAt: new Date(NOW - 1_000).toISOString() })] });
@@ -284,7 +357,7 @@ describe("a v2 intent with portable criteria is refused at approval (Ruling BE, 
     const readyWeb = [{ kind: "web" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedSteps,
       supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions }];
     const setup = approvedSetup(contractSnapshot, [{ kind: "web", profileId: PROFILE }], ["web-1"]);
-    const context = buildFeatureE2EPlanningContext(setup.policy, contractSnapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: readyWeb });
+    const context = buildFeatureE2EPlanningContext(setup.policy, contractSnapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: readyWeb, accountRegistry: registryFor(contractSnapshot) });
     if (context.status !== "available") throw new Error(context.reason);
     const v2 = planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context });
     expect(v2).toContain("Application E2E plan guidance (schemaVersion 2):");
@@ -325,6 +398,31 @@ describe("approval refusals the first round left untested", () => {
       .toMatch(/approved on runtime profile web-phase-unavailable, which cannot run application scenarios/);
   });
 
+  // Evaluation fix RUN-3: a runtime that has expired (or whose row says it did) is refused under its own code, runtime-expired, not the generic "no runtime is READY", so the owner
+  // and the operator can tell "qualify it again" from "never qualified".
+  describe("a runtime that expired (RUN-3)", () => {
+    const EXPIRED_AT = new Date(NOW - 3_600_000).toISOString();
+    it("is refused as runtime-expired, naming the kind, the profile and when it expired, when the broker read an expired row for it", () => {
+      const result = evaluate({ registeredRuntimes: [], expiredRuntimes: [{ kind: "web", profileId: PROFILE, expiresAt: EXPIRED_AT }] });
+      expect(result.ok).toBe(false);
+      expect(refusal(result)).toMatch(new RegExp(`^runtime-expired: the web runtime of profile ${PROFILE} expired at ${EXPIRED_AT.replaceAll(".", "\\.")}`));
+      expect(!result.ok && result.scope).toBe("runtime");
+    });
+
+    it("is refused as runtime-expired too when the expired row itself is among the rows given", () => {
+      const result = evaluate({ registeredRuntimes: [webApiRow("web", { expiresAt: EXPIRED_AT, qualifiedAt: new Date(NOW - 7_200_000).toISOString() })] });
+      expect(refusal(result)).toMatch(/^runtime-expired: the web runtime of profile .* expired at /);
+      expect(!result.ok && result.scope).toBe("runtime");
+    });
+
+    it("keeps the generic reason for a kind that was never qualified, for an expired row of the other kind, and for a row that is not READY", () => {
+      expect(refusal(evaluate({ registeredRuntimes: [] }))).toMatch(/^no web runtime of profile .* is READY/);
+      expect(refusal(evaluate({ registeredRuntimes: [], expiredRuntimes: [{ kind: "api", profileId: PROFILE, expiresAt: EXPIRED_AT }] }))).toMatch(/^no web runtime of profile .* is READY/);
+      expect(refusal(evaluate({ registeredRuntimes: [webApiRow("web", { state: "PARKED" })] }))).toMatch(/is not READY now \(state PARKED/);
+      expect(refusal(evaluate({ registeredRuntimes: [webApiRow("web", { state: "PARKED", expiresAt: EXPIRED_AT, qualifiedAt: new Date(NOW - 7_200_000).toISOString() })] }))).not.toMatch(/runtime-expired/);
+    });
+  });
+
   it("names the specific refusal when the descriptor lacks a step, not the row-not-READY one", () => {
     const reason = refusal(evaluate({ registeredRuntimes: [webApiRow("web", {}, (value) => ({ ...value, supportedSteps: value.supportedSteps.filter((step) => step !== "click") }))] }));
     expect(reason).toMatch(/scenario export-csv on target web-1: application runtime is not ready: /);
@@ -340,21 +438,24 @@ function workflowFixtureFor(blockReason: string) {
     e2e: { contractDigest: "a".repeat(64), policyDigest: "b".repeat(64), bundleDigest: "c".repeat(64), executionPlanDigest: "d".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] } };
 }
 
-describe("one runtime kind per application plan (Ruling BF)", () => {
-  const BF_REASON = "one runtime kind per plan in M1.2";
+describe("web and API targets in one application plan (Ruling BF, Task 3.4)", () => {
   const bothKinds = () => {
     const fixture = webAndApiFixture();
-    const run = (intent: E2EApplicationPlanIntent) => evaluateApplicationPlanApproval({ intent, taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot: fixture.snapshot,
-      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
-      runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW });
+    const run = (intent: E2EApplicationPlanIntent, registeredRuntimes = [webApiRow("web"), webApiRow("api")]) => evaluateApplicationPlanApproval({ intent, taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot: fixture.snapshot,
+      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes,
+      runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW, accounts: { entries: fixture.registry, mode: "approve", pinned: [] } });
     return { ...fixture, run };
   };
 
-  it("refuses an intent whose executable targets span web and api, saying why", () => {
+  it("approves an intent whose executable targets span web and api, recording the row of each kind", () => {
     const fixture = bothKinds();
     const result = fixture.run(fixture.build({ web: true, api: true }));
-    expect(result.ok).toBe(false);
-    expect(result.ok ? "" : result.reason).toContain(BF_REASON);
+    expect(result.ok, result.ok ? "" : result.reason).toBe(true);
+    if (result.ok) {
+      expect(result.selection.executableTargetIds).toEqual([fixture.web.targetId, fixture.api.targetId].sort());
+      expect(result.selection.runtimeRows.map((row) => row.kind).sort()).toEqual(["api", "web"]);
+      expect(result.derivation.plan.groups.map((group) => group.targetIds)).toHaveLength(2);
+    }
   });
 
   it("approves either kind alone, with the other target listed as unavailable", () => {
@@ -365,6 +466,27 @@ describe("one runtime kind per application plan (Ruling BF)", () => {
     const apiOnly = fixture.run(fixture.build({ web: false, api: true }));
     expect(apiOnly.ok, apiOnly.ok ? "" : apiOnly.reason).toBe(true);
     if (apiOnly.ok) expect(apiOnly.selection).toMatchObject({ executableTargetIds: [fixture.api.targetId], runtimeRows: [{ kind: "api" }] });
+  });
+
+  it("still refuses a plan that needs a kind with no READY row, naming the kind (the runtime is at fault, not the plan)", () => {
+    const fixture = bothKinds();
+    const noApiRow = fixture.run(fixture.build({ web: true, api: true }), [webApiRow("web")]);
+    expect(noApiRow.ok).toBe(false);
+    expect(noApiRow.ok ? "" : noApiRow.reason).toMatch(/no api runtime of profile .* is READY/);
+    expect(!noApiRow.ok && noApiRow.scope).toBe("runtime");
+  });
+
+  it("refuses a request step on a web target and a browser step on an api target, each against its own kind's descriptor", () => {
+    const fixture = bothKinds();
+    const intent = fixture.build({ web: true, api: true });
+    const requestOnWeb = fixture.run({ ...intent, scenarios: intent.scenarios.map((scenario) => scenario.requestedTargetIds[0] === fixture.web.targetId
+      ? { ...scenario, steps: [{ kind: "request" as const, requestId: "r", path: "/health", method: "GET" as const, body: {} }], assertions: [{ kind: "http-status" as const, path: "/health", method: "GET" as const, equals: 200 }] } : scenario) });
+    expect(requestOnWeb.ok).toBe(false);
+    expect(requestOnWeb.ok ? "" : requestOnWeb.reason).toMatch(new RegExp(`target ${fixture.web.targetId}: application runtime is not ready`));
+    const browserOnApi = fixture.run({ ...intent, scenarios: intent.scenarios.map((scenario) => scenario.requestedTargetIds[0] === fixture.api.targetId
+      ? { ...scenario, steps: [{ kind: "navigate" as const, path: "/" }], assertions: [{ kind: "visible" as const, testId: "x", equals: true }] } : scenario) });
+    expect(browserOnApi.ok).toBe(false);
+    expect(browserOnApi.ok ? "" : browserOnApi.reason).toMatch(/UI scenario steps are incompatible with API target/);
   });
 });
 
@@ -391,14 +513,15 @@ describe("planning context for a qualified web target", () => {
   const contextFor = (snapshot: E2ESourceSnapshot, ...[readyRuntimes]: [typeof ready | undefined] | []) => {
     const setup = approvedSetup(snapshot, [{ kind: "web", profileId: PROFILE }], ["web-1"]);
     const result = buildFeatureE2EPlanningContext(setup.policy, snapshot, { origin: "approved-setup", preparedCommitSha: null,
-      ...(readyRuntimes === undefined ? {} : { readyRuntimes }) });
+      accountRegistry: registryFor(snapshot), ...(readyRuntimes === undefined ? {} : { readyRuntimes }) });
     if (result.status !== "available") throw new Error(result.reason);
     return result;
   };
 
   it("takes the runtime profile from the approved target and lists the executable step and assertion kinds", () => {
     const context = contextFor(contractSnapshot, ready);
-    expect(context.runtimeRefs).toMatchObject([{ targetId: "web-1", runtimeProfileId: PROFILE }]);
+    // (The target also offers the signed-out visitor, as a variant of its own on the same runtime profile.)
+    expect(context.runtimeRefs).toMatchObject([{ targetId: "web-1", runtimeProfileId: PROFILE }, { targetId: "web-1-anonymous", runtimeProfileId: PROFILE, accountProfileId: "rovara-anonymous" }]);
     expect(context.unavailableTargetRefs).toEqual([]);
     expect(context.unavailableReasons).toEqual([]);
     expect(context.executableKinds).toEqual([{ kind: "web", steps: ["navigate", "fill", "click", "choose-file"], assertions: ["text", "visible", "csv"] }]);
@@ -410,17 +533,32 @@ describe("planning context for a qualified web target", () => {
     expect(offered[0]).not.toContain("agent");
   });
 
-  it("never offers agent steps, even when a registered descriptor lists them", () => {
-    const text = describeFeatureE2EExecutableKinds({ targets: [{ targetId: "web-1", applicationId: "app", kind: "web", accountProfileId: "synthetic" }],
-      unavailableTargetRefs: [], executableKinds: [{ kind: "web", steps: ["navigate", "agent", "click"], assertions: ["visible"] }] });
-    expect(text).toContain("steps navigate, click;");
-    expect(text.split("\n").filter((line) => line.startsWith("- web targets"))[0]).not.toContain("agent");
+  it("offers agent steps only for a web target whose project has an approved, current route, and says how to use them (Task 4.2)", () => {
+    const readyWithAgent = [{ ...ready[0]!, supportedSteps: [...ready[0]!.supportedSteps, "agent" as const] }];
+    const build = (agentRouteApproved?: boolean) => {
+      const setup = approvedSetup(contractSnapshot, [{ kind: "web", profileId: PROFILE }], ["web-1"]);
+      const result = buildFeatureE2EPlanningContext(setup.policy, contractSnapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: readyWithAgent,
+        accountRegistry: registryFor(contractSnapshot), ...(agentRouteApproved === undefined ? {} : { agentRouteApproved }) });
+      if (result.status !== "available") throw new Error(result.reason);
+      return result;
+    };
+    // A registered descriptor that lists agent is not enough: without an approved, current route the planner is told agent steps are unavailable.
+    for (const withheld of [build(), build(false)]) {
+      expect(withheld.executableKinds![0]!.steps).not.toContain("agent");
+      expect(describeFeatureE2EExecutableKinds(withheld)).toContain("Do not use `agent` steps; they stay unavailable.");
+    }
+    const offered = build(true);
+    expect(offered.executableKinds![0]!.steps).toContain("agent");
+    const text = describeFeatureE2EExecutableKinds(offered);
+    expect(text.split("\n").filter((line) => line.startsWith("- web targets"))[0]).toContain("agent");
+    expect(text).toMatch(/Use deterministic steps where test IDs are known and stable/);
+    expect(text).not.toContain("Do not use `agent` steps");
   });
 
   it("puts the same target in the unavailable list while its runtime is not READY now", () => {
     const context = contextFor(contractSnapshot);
-    expect(context.unavailableTargetRefs).toMatchObject([{ targetId: "web-1" }]);
-    expect(context.unavailableReasons).toEqual([{ targetId: "web-1", reason: "runtime-not-ready" }]);
+    expect(context.unavailableTargetRefs).toMatchObject([{ targetId: "web-1" }, { targetId: "web-1-anonymous" }]);
+    expect(context.unavailableReasons).toEqual([{ targetId: "web-1", reason: "runtime-not-ready" }, { targetId: "web-1-anonymous", reason: "runtime-not-ready" }]);
     expect(context.executableKinds).toEqual([]);
     expect(describeFeatureE2EExecutableKinds(context)).toBe("");
   });
@@ -429,7 +567,8 @@ describe("planning context for a qualified web target", () => {
     const context = contextFor(inferredSnapshot, ready);
     expect(context.unavailableTargetRefs).toMatchObject([{ targetId: "web-1" }]);
     expect(context.unavailableReasons).toEqual([{ targetId: "web-1", reason: "needs-project-contract" }]);
-    expect(context.executableKinds).toEqual([]);
+    // Only its signed-out variant is executable (Ruling AZ).
+    expect(context.executableKinds).toMatchObject([{ kind: "web" }]);
   });
 
   it("states the executable kinds in the planner prompt only for an executable target", () => {
@@ -450,15 +589,15 @@ describe("planning context for a qualified web target", () => {
   it("keeps the exact pre-2.2 context and prompt for a policy with no target on a qualified profile (Ruling AQ)", () => {
     const setup = approvedSetup(contractSnapshot, [], ["web-1"]);
     const context = buildFeatureE2EPlanningContext(setup.policy, contractSnapshot, { origin: "approved-setup", preparedCommitSha: null,
-      readyRuntimes: ready });
+      readyRuntimes: ready, accountRegistry: registryFor(contractSnapshot) });
     if (context.status !== "available") throw new Error(context.reason);
     expect(context.runtimeRefs?.every((item) => item.runtimeProfileId === "web-phase-unavailable")).toBe(true);
     expect(context.unavailableTargetRefs?.map((item) => item.targetId)).toEqual(["web-1"]);
     expect(Object.keys(context)).not.toContain("unavailableReasons");
     expect(Object.keys(context)).not.toContain("executableKinds");
-    // Hashes of the context JSON and of the planner instructions, computed from the code at 8ec3eb02 (before Task 2.2).
-    expect(sha(JSON.stringify(context))).toBe("08406287d684d9347d93acf5a2b7f392795721d4451f1042ef6ac4b9ec86067e");
-    expect(sha(planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context }))).toBe("17dbd45eb17aaabb817ba1c866c0561db14525f43f6e2ee5663ad266e6afaf2f");
+    // Hashes of the context JSON and of the planner instructions, computed from the code at 8ec3eb02 (before Task 2.2); re-pinned in M1.3 for the fixture contract gaining the inventory origin's contractPath and renaming the orders origin variable.
+    expect(sha(JSON.stringify(context))).toBe("a08213eb26bb5a1f8defff6b6d7b85fcd7f93a9dedef45b3e05c969fcda82cbc");
+    expect(sha(planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context }))).toBe("86217ec02fcdf178489faed92ebc046f7e47b074e564d355ef662e3a9fd9b352");
   });
 });
 
@@ -469,10 +608,10 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
   type Rows = Record<"web" | "api", Record<string, unknown> | undefined>;
   const SLACK_THREAD = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000099" };
   /** Registers the project against its approved setup and the catalog rows, then starts a task and runs its preparation, up to the planning invocation. */
-  async function startPlanning(rows: Rows, afterApproval?: (harness: Harness) => void, viaSlack = false) {
+  async function startPlanning(rows: Rows, afterApproval?: (harness: Harness) => void, viaSlack = false, brokerExtra: Record<string, unknown> = {}) {
     const snapshot = contractSnapshot;
     const capture = vi.fn(async () => snapshot);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...brokerExtra } });
     const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     const projectBinding = projectRow().runtimeBinding as typeof binding;
     for (const kind of ["web", "api"] as const) {
@@ -557,11 +696,13 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
   const webKey = e2eRegisteredRuntimeKey("catalog", PROFILE, "web");
 
   /** A planning task whose planner has answered with the v2 intent a planner would build from the prompt's own context. */
-  async function plannedWithApplicationIntent(options: { viaSlack?: boolean; afterApproval?: (harness: Harness) => void; scenarios?: (target: { targetId: string; accountProfileId: string }) => E2EScenario[] } = {}) {
-    const started = await startPlanning({ web: webApiRow("web"), api: webApiRow("api") }, options.afterApproval, options.viaSlack === true);
+  async function plannedWithApplicationIntent(options: { viaSlack?: boolean; afterApproval?: (harness: Harness) => void; scenarios?: (target: { targetId: string; accountProfileId: string }) => E2EScenario[];
+    /** Extra broker dependencies, for example the installation's AI navigation settings. */ brokerExtra?: Record<string, unknown>; rows?: Rows } = {}) {
+    const started = await startPlanning(options.rows ?? { web: webApiRow("web"), api: webApiRow("api") }, options.afterApproval, options.viaSlack === true, options.brokerExtra);
     const { harness, workspaceId, planningId, snapshot } = started;
     const { policy } = started;
-    const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_WEB] });
+    const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_WEB],
+      accountRegistry: accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments")) });
     if (context.status !== "available") throw new Error(context.reason);
     const target = context.targets.find((item) => item.targetId === "web-1")!;
     const forTarget = <T extends { applicationId: string }>(refs: readonly T[]) => refs.filter((ref) => ref.applicationId === target.applicationId);
@@ -680,11 +821,24 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     it("when a scenario uses an agent step", async () => {
       const planned = await plannedWithApplicationIntent({ scenarios: (target) => [{ ...csvScenario, scenarioId: "agent-orders", requestedTargetIds: [target.targetId],
         accountProfileId: target.accountProfileId, steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] }] });
-      // The pinned policy has no model route, so the agent step is refused outright (with a route it waits as agent-steps-arrive-in-m1.4; see the evaluation cases).
-      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /agent steps require an approved model route/i);
+      // The READY descriptor declares no agent support yet (Task 4.5), so the plan lists a target as executable whose scenario cannot run (it needs the route as well; see the evaluation cases).
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /agent-runtime-not-qualified/i);
     });
 
-    it("when the plan's account reference is not the synthetic account identity", async () => {
+    it("when an agent step asks for more than 8 actions (agent-step-over-budget)", async () => {
+      const planned = await plannedWithApplicationIntent({ scenarios: (target) => [{ ...csvScenario, scenarioId: "agent-orders", requestedTargetIds: [target.targetId],
+        accountProfileId: target.accountProfileId, steps: [{ kind: "agent", goal: "open the orders page", maxActions: 9 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] }] });
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /agent-step-over-budget/);
+    });
+
+    it("when a scenario has more than 3 agent steps (agent-steps-over-group-limit)", async () => {
+      const step = { kind: "agent" as const, goal: "open the orders page", maxActions: 2 };
+      const planned = await plannedWithApplicationIntent({ scenarios: (target) => [{ ...csvScenario, scenarioId: "agent-orders", requestedTargetIds: [target.targetId],
+        accountProfileId: target.accountProfileId, steps: [step, step, step, step], assertions: [{ kind: "visible", testId: "orders", equals: true }] }] });
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /agent-steps-over-group-limit/);
+    });
+
+    it("when the plan's account reference is not the registered account's (the M1.2 stand-in and any forged ref alike)", async () => {
       const planned = await plannedWithApplicationIntent();
       const workflow = workflowOf(planned);
       const artifact = workflow.artifacts.at(-1)!;
@@ -698,7 +852,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
       await planned.harness.artifact(planned.workspaceId, String(replanning.id), "plan.md",
         planAnswer(planDocument({ title: "Export CSV", claims: [{ id: "1", text: "Orders can be exported as CSV." }], e2e: forged })));
       await planned.harness.finish(planned.workspaceId, String(replanning.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
-      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /synthetic account identity/i);
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /accounts-changed-reapprove.*runtime account reference/i);
     });
 
     it("when the approved setup proposal can no longer be verified, saying it could not check rather than approving", async () => {
@@ -806,7 +960,8 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     const input = started.harness.brokerInput as unknown as { documentClient: never; tableName: string };
     await createApplicationPlanNegotiationRecorder({ documentClient: input.documentClient, tableName: input.tableName })(outbox as never);
     expect(started.harness.db.get(operationKey.pk, operationKey.sk)).not.toHaveProperty("workflowE2EPlanVersion");
-    const context = buildFeatureE2EPlanningContext(started.policy, started.snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_WEB] });
+    const context = buildFeatureE2EPlanningContext(started.policy, started.snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_WEB],
+      accountRegistry: accountRegistryEntriesFromRows("payments", started.harness.db.find((row) => row.pk === "PROJECT#payments")) });
     if (context.status !== "available") throw new Error(context.reason);
     const target = context.targets.find((item) => item.targetId === "web-1")!;
     const forTarget = <T extends { applicationId: string; profileId?: string; accountProfileId?: string }>(refs: readonly T[]) => refs.filter((ref) => ref.applicationId === target.applicationId);
@@ -900,7 +1055,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
 
   const noPortableAdmission = (dispatched: Awaited<ReturnType<typeof atChecksDispatch>>) => {
     for (const name of dispatched.admissionObjects()) {
-      expect((JSON.parse(dispatched.harness.s3.objects.get(name)!) as { schemaVersion?: unknown }).schemaVersion, name).toBe("workflow-e2e-application-admission/v1");
+      expect((JSON.parse(dispatched.harness.s3.objects.get(name)!) as { schemaVersion?: unknown }).schemaVersion, name).toBe(E2E_APPLICATION_ADMISSION_SCHEMA_V2);
     }
   };
 
@@ -910,6 +1065,126 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     await expectBlockedAtDispatch(dispatched, /no committed source export/);
     expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX);
     noPortableAdmission(dispatched);
+  });
+
+  // M1.4 Task 4.2: the route the project's setup pinned is re-derived when a round with AI navigation steps is dispatched. These go through the whole broker path (setup approval that
+  // pins the route, plan APPROVE, the dispatch sweep), so deleting the dispatch check from `startApplicationE2EChecksDispatch` fails them.
+  describe("a round with AI navigation steps is dispatched only on the route the setup pinned", () => {
+    const anthropic = { provider: "anthropic", secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/provider-key-AbCdEf" };
+    const agentRows: Rows = { web: webApiRow("web", {}, (value) => ({ ...value, supportedSteps: [...value.supportedSteps, "agent" as const] })), api: webApiRow("api") };
+    const agentScenarios = (target: { targetId: string; accountProfileId: string }): E2EScenario[] => [{ ...csvScenario, scenarioId: "agent-orders", requestedTargetIds: [target.targetId],
+      accountProfileId: target.accountProfileId, steps: [{ kind: "agent", goal: "Export the orders as a CSV file", maxActions: 4 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] }];
+    async function agentRound(installation: { current: () => Promise<Record<string, unknown>> }, scenarios = agentScenarios) {
+      const planned = await plannedWithApplicationIntent({ rows: agentRows, scenarios, brokerExtra: { e2eAgentInstallation: () => installation.current() } });
+      return { planned, dispatched: await atChecksDispatch(planned) };
+    }
+    const reason = (code: string) => new RegExp(`${code}: `);
+
+    it("pins the route in the project's policy and plans the agent scenario as executable", async () => {
+      const planned = await plannedWithApplicationIntent({ rows: agentRows, scenarios: agentScenarios, brokerExtra: { e2eAgentInstallation: async () => anthropic } });
+      expect(planned.policy.modelRouteRevision).toMatch(/^r1-[a-f0-9]{12}$/);
+      expect((await decide(planned, "APPROVE")).status).toBe(200);
+      expect(E2EApplicationSelectionRecordSchema.parse(workflowOf(planned).e2e!.applicationSelection).unavailableCriteria).toEqual([]);
+    });
+
+    it("goes past the route check while the installation is unchanged (what stops it is the candidate export)", async () => {
+      const { dispatched } = await agentRound({ current: async () => anthropic });
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow.blockReason).toContain("no committed source export");
+    });
+
+    it("blocks with model-route-changed-reapprove when the installation's provider changed since the setup was approved", async () => {
+      const state = { current: async () => anthropic as Record<string, unknown> };
+      const { dispatched } = await agentRound(state);
+      state.current = async () => ({ provider: "amazon-bedrock", region: "us-east-1" });
+      await expectBlockedAtDispatch(dispatched, reason("model-route-changed-reapprove"));
+      expect(dispatched.taskNow().workflow.blockReason).toContain("The AI navigation settings changed");
+    });
+
+    const awsError = (name: string, status?: number) => Object.assign(new Error(name), { name, ...(status === undefined ? {} : { $metadata: { httpStatusCode: status } }) });
+    const latestRead = (input: Record<string, unknown>) => String((input.Key as { sk?: string } | undefined)?.sk).startsWith("E2E_MODEL_ROUTE_LATEST#");
+    const budgetRead = (input: Record<string, unknown>) => String((input.Key as { sk?: string } | undefined)?.sk).startsWith("E2E_MODEL_BUDGET#");
+
+    describe("a fault that is not deterministic stays retryable (Ruling M4-AE): the dispatch row is kept, with its attempt counted, and the task is not blocked", () => {
+      async function expectRetryable(dispatched: Awaited<ReturnType<typeof atChecksDispatch>>) {
+        await dispatched.runDispatch();
+        expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+        expect(dispatched.taskNow().workflow.blockReason).toBeUndefined();
+        expect(dispatched.dispatchRow()).toMatchObject({ attempts: 1 });
+        expect(dispatched.checksOperations()).toEqual([]);
+      }
+
+      it.each([["DynamoDB throttling", awsError("ProvisionedThroughputExceededException")], ["DynamoDB request limit", awsError("RequestLimitExceeded")],
+        ["DynamoDB throttling by name", awsError("ThrottlingException")], ["an InternalServerError", awsError("InternalServerError")], ["a 503", awsError("ServiceUnavailable", 503)],
+        ["an abort", awsError("AbortError")], ["a timeout", awsError("TimeoutError")]])(
+        "when the registry read fails with %s", async (_name, error) => {
+          const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+          planned.harness.db.injectFault({ command: "GetCommand", match: latestRead, error, times: 1 });
+          await expectRetryable(dispatched);
+        });
+
+      it("when the budget row read fails with throttling", async () => {
+        const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+        planned.harness.db.injectFault({ command: "GetCommand", match: budgetRead, error: awsError("ThrottlingException"), times: 1 });
+        await expectRetryable(dispatched);
+      });
+
+      it.each([["SSM throttling", awsError("ThrottlingException")], ["an SSM 5xx", awsError("InternalServerError", 500)], ["a network error", Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" })]])(
+        "when the installation's settings fail with %s", async (_name, error) => {
+          const state = { current: async () => anthropic as Record<string, unknown> };
+          const { dispatched } = await agentRound(state);
+          state.current = async () => { throw error; };
+          await expectRetryable(dispatched);
+        });
+
+      it("and the next sweep, once the fault is gone, goes on to the candidate checks", async () => {
+        const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+        planned.harness.db.injectFault({ command: "GetCommand", match: latestRead, error: awsError("ThrottlingException"), times: 1 });
+        await dispatched.runDispatch();
+        expect(dispatched.taskNow().workflow.state).toBe("WAITING");
+        // The backoff is not waited out here: the row is made due again.
+        planned.harness.db.set({ ...dispatched.dispatchRow()!, dispatchDueSk: `2000-01-01T00:00:00.000Z#${String(dispatched.dispatchRow()!.sk)}`, nextAttemptAt: "2000-01-01T00:00:00.000Z" });
+        await dispatched.runDispatch();
+        expect(dispatched.taskNow().workflow.blockReason).toContain("no committed source export");
+      });
+    });
+
+    describe("a refusal that is deterministic is a terminal block with its code", () => {
+      it.each([["settings that are missing (ParameterNotFound)", awsError("ParameterNotFound")], ["settings that cannot be read for want of permission (AccessDenied)", awsError("AccessDeniedException")],
+        ["settings that fail for a reason of their own", new Error("ssm down")]])("for %s", async (_name, error) => {
+        const state = { current: async () => anthropic as Record<string, unknown> };
+        const { dispatched } = await agentRound(state);
+        state.current = async () => { throw error; };
+        await expectBlockedAtDispatch(dispatched, reason("agent-route-not-approved"));
+        expect(dispatched.taskNow().workflow.blockReason).toMatch(/could not be read/);
+      });
+
+      it("for a registry read that is denied", async () => {
+        const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+        planned.harness.db.injectFault({ command: "GetCommand", match: latestRead, error: awsError("AccessDeniedException"), times: 5 });
+        await expectBlockedAtDispatch(dispatched, reason("agent-route-not-approved"));
+      });
+
+      it("for a latest-route row that is malformed", async () => {
+        const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+        const row = planned.harness.db.get("E2E_MODEL_ROUTES", "E2E_MODEL_ROUTE_LATEST#rovara-e2e-default")!;
+        planned.harness.db.set({ ...row, revisionNumber: "not-a-number" });
+        await expectBlockedAtDispatch(dispatched, reason("agent-route-not-approved"));
+      });
+    });
+
+    it("blocks with model-route-budget-exhausted before anything starts when the project's day has no room", async () => {
+      const { planned, dispatched } = await agentRound({ current: async () => anthropic });
+      planned.harness.db.set({ pk: "PROJECT#payments", sk: `E2E_MODEL_BUDGET#${new Date().toISOString().slice(0, 10)}`, inputTokens: 1_999_000, calls: 10 });
+      await expectBlockedAtDispatch(dispatched, reason("model-route-budget-exhausted"));
+    });
+
+    it("does not judge the route for a round with no AI navigation step", async () => {
+      const planned = await plannedWithApplicationIntent({ rows: agentRows, brokerExtra: { e2eAgentInstallation: async () => anthropic } });
+      const dispatched = await atChecksDispatch(planned);
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow.blockReason).toContain("no committed source export");
+    });
   });
 
   describe("the selection approved at plan APPROVE must still be the one dispatched (Ruling AL)", () => {
@@ -1287,6 +1562,179 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
         // And the comparison is still exact: a row that moves again after this approval blocks again.
       });
 
+      describe("when the test account the plan was approved with is registered again (Task 3.1)", () => {
+        /** The next revision of the target's account, as an approval of the setup writes it when a definition changes or expires: same contract, a later expiry. */
+        const registerNextRevision = (planned: Planned, edit: (definition: Record<string, unknown>) => Record<string, unknown> = (definition) => definition) => {
+          const profileId = planned.target.accountProfileId;
+          const latest = planned.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#") && String(row.sk).endsWith(`#${profileId}`))[0]!;
+          const current = planned.harness.db.get("PROJECT#payments", String(latest.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
+          const { pk: _pk, sk: _sk, entityType: _entity, ...body } = current;
+          void _pk; void _sk; void _entity;
+          const next = edit({ ...body, revision: 2, expiresAt: new Date(Date.now() + 100 * 86_400_000).toISOString() });
+          const definition = E2EApplicationAccountDefinitionSchema.parse(next);
+          planned.harness.db.set({ pk: current.pk, sk: String(current.sk).replace("#REV#1", "#REV#2"), entityType: "E2E_ACCOUNT", ...definition });
+          planned.harness.db.set({ ...latest, revision: 2, definitionDigest: e2eApplicationAccountDefinitionDigest(definition) });
+          return deriveE2EApplicationRuntimeAccountRef(definition);
+        };
+
+        it("blocks the dispatch with accounts-changed-reapprove, offers retry (not send-back), and the retry approves the same plan against the new revision, after which the round starts", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          const approvedBefore = selectionOf(planned);
+          expect(approvedBefore.accountRefs).toMatchObject([{ profileId: planned.target.accountProfileId, revision: 1 }]);
+          const next = registerNextRevision(planned);
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+          const { blockReason } = dispatched.taskNow().workflow;
+          expect(blockReason).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+          expect(blockReason).toContain("accounts-changed-reapprove");
+          expect(blockReason).toContain(planned.target.accountProfileId);
+          expect(blockReason!.length).toBeLessThanOrEqual(500);
+          expect(dispatched.checksOperations()).toEqual([]);
+          const task = dispatched.taskNow() as unknown as { workflow: Parameters<typeof workflowSendBackOffered>[0] & Parameters<typeof workflowApplicationRetryOffered>[0] };
+          expect(workflowSendBackOffered(task.workflow)).toBe(false);
+          expect(workflowApplicationRetryOffered(task.workflow)).toBe(true);
+
+          const artifact = workflowOf(planned).artifacts.at(-1)!;
+          const planText = planned.harness.s3.objects.get(artifact.objectKey)!;
+          expect((await retry(planned, dispatched)).status).toBe(200);
+          // The plan is the one the owner approved (it still carries the first revision's ref); the selection pins the revision registered now.
+          expect(planned.harness.s3.objects.get(artifact.objectKey)).toBe(planText);
+          expect(planText).toContain(approvedBefore.accountRefs[0]!.definitionDigest);
+          const approvedAfter = selectionOf(planned);
+          expect(approvedAfter.accountRefs).toEqual([next]);
+          expect(approvedAfter.intentDigest).toBe(approvedBefore.intentDigest);
+          expect(workflowOf(planned).e2e!.applicationReapprovals).toHaveLength(1);
+
+          dispatched.reseedReadiness();
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+          const admission = decodeE2EApplicationExecutionAdmission(planned.harness.s3.objects.get(E2EWorkflowAdmissionRefSchema.parse(dispatched.checksOperations()[0]!.workflowE2EAdmission).admissionRef.key)!);
+          expect(admission.selectionInput.runtimeAccountRefs).toEqual([next]);
+          expect(admission.intent.runtimeAccountRefs).toEqual([next]);
+        });
+
+        it("blocks the dispatch when the pinned definition has expired, and a retry is refused while no newer one is registered", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          const profileId = planned.target.accountProfileId;
+          const latest = planned.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#") && String(row.sk).endsWith(`#${profileId}`))[0]!;
+          const definitionRow = planned.harness.db.get("PROJECT#payments", String(latest.sk).replace("E2E_ACCOUNT_LATEST#", "E2E_ACCOUNT#") + "#REV#1")!;
+          const { pk: _pk, sk: _sk, entityType: _entity, ...body } = definitionRow;
+          void _pk; void _sk; void _entity;
+          const expired = E2EApplicationAccountDefinitionSchema.parse({ ...body, expiresAt: new Date(Date.now() - 1_000).toISOString() });
+          planned.harness.db.set({ ...definitionRow, ...expired });
+          planned.harness.db.set({ ...latest, definitionDigest: e2eApplicationAccountDefinitionDigest(expired) });
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+          expect(dispatched.taskNow().workflow.blockReason).toMatch(/accounts-changed-reapprove.*expired/);
+          expect(dispatched.checksOperations()).toEqual([]);
+          // Approving again cannot help while the registry holds only the expired definition: the owner is told so, and nothing changes.
+          const before = workflowOf(planned);
+          const retried = await retry(planned, dispatched);
+          expect(retried.status).toBeGreaterThanOrEqual(400);
+          expect(errorOf(retried).message).toMatch(/accounts-changed-reapprove.*expired/);
+          expect(workflowOf(planned)).toEqual(before);
+        });
+
+        it("refuses a definition the approved contract no longer stands behind (a changed role), even when it is the latest", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          registerNextRevision(planned, (definition) => ({ ...definition, roleRef: "admin" }));
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+          expect((await retry(planned, dispatched)).status).toBeGreaterThanOrEqual(400);
+          expect(dispatched.checksOperations()).toEqual([]);
+        });
+
+        /** A newer setup approved and registered as a new project revision: the synthetic account's role changes, so it gets a revision of its own contract. */
+        const registerNewerSetup = async (planned: Planned) => {
+          const admin = { subject: "admin-subject", admin: true };
+          planned.capture.mockImplementation(async () => snapshotOf({ "package.json": ordersManifestWith((e2e) => {
+            e2e.accountProfiles.find((profile) => profile.profileId === planned.target.accountProfileId)!.roleRef = "editor";
+          }) }));
+          const proposal = await call(planned.harness.handler, { method: "POST", path: "/v1/admin/projects/setup-proposals", user: admin, body: { repositoryUrl: "https://github.com/example/demo.git", ref: "main" } });
+          expect(proposal.status, JSON.stringify(proposal.body)).toBe(200);
+          const approved = await call(planned.harness.handler, { method: "POST", path: "/v1/admin/projects/setup-approvals", user: admin,
+            body: { projectName: "payments", proposalRef: String(proposal.body.proposalRef), proposalSha256: String(proposal.body.proposalSha256), decision: "approve" } });
+          expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+          const definition = planned.projectRow().definition as Record<string, unknown> & { revision: number };
+          const latestRevision = Math.max(...planned.harness.db.find((row) => row.entityType === "PROJECT").map((row) => Number((row.definition as { revision: number }).revision)));
+          const registered = await call(planned.harness.handler, { method: "POST", path: "/v1/admin/projects", user: admin,
+            body: { definition: { ...definition, revision: latestRevision + 1, e2e: proposal.body.policy }, runtimeBinding: planned.projectRow().runtimeBinding,
+              setupApproval: { proposalRef: String(proposal.body.proposalRef), proposalSha256: String(proposal.body.proposalSha256), decision: "approve" } } });
+          expect(registered.status, JSON.stringify(registered.body)).toBe(201);
+        };
+        const accountRevision = (planned: Planned) => (planned.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).startsWith("E2E_ACCOUNT_LATEST#")
+          && String(row.sk).endsWith(`#${planned.target.accountProfileId}`))[0] as unknown as { revision: number }).revision;
+
+        it("does not strand a task pinned to an older project revision: its own line of definitions still runs, and a retry re-approves within that line, recording which account moved", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          const approvedBefore = selectionOf(planned);
+          // Revision 1 is the approval's. Revision 2 is the same contract renewed; revision 3 comes with a newer setup (another contract).
+          const renewed = registerNextRevision(planned);
+          await registerNewerSetup(planned);
+          expect(accountRevision(planned)).toBe(3);
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+          expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+          expect(dispatched.taskNow().workflow.blockReason).toMatch(/revision 1.*revision 2/);
+          const task = dispatched.taskNow() as unknown as { workflow: Parameters<typeof workflowApplicationRetryOffered>[0] };
+          expect(workflowApplicationRetryOffered(task.workflow)).toBe(true);
+
+          expect((await retry(planned, dispatched)).status).toBe(200);
+          // The retry pins the newest definition this task's contract stands behind (revision 2), not the newer setup's (revision 3).
+          expect(selectionOf(planned).accountRefs).toEqual([renewed]);
+          const audit = workflowOf(planned).e2e!.applicationReapprovals as Array<{ accounts?: unknown }>;
+          expect(audit).toHaveLength(1);
+          expect(audit[0]!.accounts).toEqual([{ applicationId: approvedBefore.accountRefs[0]!.applicationId, profileId: planned.target.accountProfileId, from: 1, to: 2 }]);
+          dispatched.reseedReadiness();
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+        });
+
+        it("keeps running a task pinned to an older project revision while its own definition is the newest its contract stands behind", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          await registerNewerSetup(planned);
+          expect(accountRevision(planned)).toBe(2);
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+          expect(dispatched.checksOperations()).toHaveLength(1);
+        });
+
+        it("tells a stranded task's owner what to do, in the block and in the retry's refusal, once its own line has expired", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          await registerNewerSetup(planned);
+          const first = planned.harness.db.find((row) => row.pk === "PROJECT#payments" && String(row.sk).includes("#REV#1") && String(row.sk).endsWith(`${planned.target.accountProfileId}#REV#1`))[0]!;
+          planned.harness.db.set({ ...first, expiresAt: new Date(Date.now() - 1_000).toISOString() });
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+          const before = workflowOf(planned);
+          const retried = await retry(planned, dispatched);
+          expect(retried.status).toBeGreaterThanOrEqual(400);
+          expect(errorOf(retried).message).toMatch(/accounts-changed-reapprove/);
+          expect(errorOf(retried).message).toMatch(/start the task again on the current project revision|expired/);
+          expect(workflowOf(planned)).toEqual(before);
+        });
+
+        it("keeps the commit fenced on the account pointer: an approval that read revision 1 does not commit once revision 2 is registered", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          const fence = (await import("../../packages/broker/src/aws/e2e-account-registry.js")).accountRegistryFences;
+          const entries = accountRegistryEntriesFromRows("payments", planned.harness.db.find((row) => row.pk === "PROJECT#payments"));
+          const items = fence({ tableName: "state", projectId: "payments", refs: selectionOf(planned).accountRefs, entries });
+          expect(items).toHaveLength(1);
+          registerNextRevision(planned);
+          const check = (items[0] as unknown as { ConditionCheck: { Key: { pk: string; sk: string }; ExpressionAttributeValues: Record<string, unknown> } }).ConditionCheck;
+          expect(planned.harness.db.get(check.Key.pk, check.Key.sk)).toMatchObject({ revision: 2 });
+          expect(check.ExpressionAttributeValues[":revision"]).toBe(1);
+          void dispatched;
+        });
+      });
+
       it("does not loosen the comparison: a row that moves after the plan is approved again blocks the next dispatch again", async () => {
         const planned = await plannedWithApplicationIntent();
         const dispatched = await atApplicationDispatch(planned);
@@ -1440,6 +1888,8 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
           await dispatched.runDispatch();
           expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
           expect(dispatched.taskNow().workflow.blockReason).toMatch(/expires at .* before this round could end/);
+          // RUN-3: it says so under its own code, which the generic "no runtime is READY" never carries.
+          expect(dispatched.taskNow().workflow.blockReason).toMatch(/Why: runtime-expired: the web runtime of profile linux-arm64-web-api-v1 expires at /);
           remedy(dispatched);
           expect(dispatched.checksOperations()).toEqual([]);
           // The administrator qualifies the runtime again: a new generation that lives long enough.
@@ -1452,6 +1902,22 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
           expect(dispatched.checksOperations()).toHaveLength(1);
         });
 
+        it("a runtime that has already expired: its own reason code, remedy text, no send-back, and a retry that is refused until it is qualified again (RUN-3)", async () => {
+          const planned = await plannedWithApplicationIntent();
+          const dispatched = await atApplicationDispatch(planned);
+          const row = planned.harness.db.get(webKey.pk, webKey.sk)!;
+          const expired = { ...row, qualifiedAt: new Date(Date.now() - 7_200_000).toISOString(), expiresAt: new Date(Date.now() - 3_600_000).toISOString() };
+          planned.harness.db.set(expired);
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow.blockReason).toMatch(/Why: runtime-expired: the web runtime of profile linux-arm64-web-api-v1 expired at /);
+          remedy(dispatched);
+          const early = await retry(planned, dispatched);
+          expect(early.status).toBeGreaterThanOrEqual(400);
+          expect(errorOf(early).message).toMatch(/runtime-expired: the web runtime/);
+          planned.harness.db.set({ ...row, generation: 5 });
+          expect((await retry(planned, dispatched)).status).toBe(200);
+        });
+
         it("no READY row of the kind: remedy text, a retry that is refused while the runtime is still not READY, and one retry after it is restored", async () => {
           const planned = await plannedWithApplicationIntent();
           const dispatched = await atApplicationDispatch(planned);
@@ -1459,6 +1925,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
           planned.harness.db.set({ ...row, state: "REVOKED" });
           await dispatched.runDispatch();
           expect(dispatched.taskNow().workflow.blockReason).toMatch(/web runtime of profile linux-arm64-web-api-v1/);
+          expect(dispatched.taskNow().workflow.blockReason).not.toContain("runtime-expired");
           remedy(dispatched);
           const early = await retry(planned, dispatched);
           expect(early.status).toBeGreaterThanOrEqual(400);
@@ -1570,4 +2037,155 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     });
   });
 
+});
+
+
+describe("anonymous scenarios and inferred-recipe apps (Ruling AZ)", () => {
+  const anonymousOnInferred = () => {
+    const targetId = anonymousTargetOf(inferredSnapshot);
+    return { targetId, scenario: anonymousScenario(targetId) };
+  };
+  const readyWeb = [{ kind: "web" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedSteps,
+    supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions }];
+
+  it("selects one application group with no unavailable criteria for a rovara-anonymous web scenario on an inferred target", () => {
+    const { targetId, scenario } = anonymousOnInferred();
+    const { plan: selected } = plan({ snapshot: inferredSnapshot, targetId, scenario });
+    expect(selected.unavailableCriteria).toEqual([]);
+    expect(selected.groups).toHaveLength(1);
+    expect(selected.groups[0]).toMatchObject({ mode: "real-runtime", runtimeProfileId: PROFILE, targetIds: [targetId] });
+    expect(selected.groups[0]?.expectedCases).toHaveLength(1);
+    expect(selected.groups[0]?.expectedCases[0]).toMatchObject({ accountProfileId: "rovara-anonymous", targetId });
+  });
+
+  it("keeps a signed-in scenario on the same inferred app unavailable with needs-project-contract", () => {
+    const { plan: selected } = plan({ snapshot: inferredSnapshot });
+    expect(selected.groups).toEqual([]);
+    expect(selected.unavailableCriteria).toEqual([{ criterionId: selected.criteria[0]!.criterionId, reason: "needs-project-contract" }]);
+  });
+
+  it("runs an anonymous scenario on a project-contract app too, as a variant of the same target", () => {
+    const targetId = anonymousTargetOf(contractSnapshot);
+    const { plan: selected } = plan({ snapshot: contractSnapshot, targetId, scenario: anonymousScenario(targetId) });
+    expect(selected.unavailableCriteria).toEqual([]);
+    expect(selected.groups[0]?.expectedCases[0]).toMatchObject({ accountProfileId: "rovara-anonymous" });
+  });
+
+  it("gives the anonymous case the account context of the fixed anonymous reference, not of a registered account", () => {
+    const { targetId, scenario } = anonymousOnInferred();
+    const { plan: selected } = plan({ snapshot: inferredSnapshot, targetId, scenario });
+    const other = plan({ snapshot: inferredSnapshot, targetId, scenario, accountRef: { definitionDigest: "2".repeat(64) } });
+    // A different reference is a different context, which is what makes the fixed reference the only one the case can be bound to.
+    expect(other.plan.groups[0]?.expectedCases[0]?.accountContextDigest).not.toBe(selected.groups[0]?.expectedCases[0]?.accountContextDigest);
+  });
+
+  it("offers the planner the anonymous target as executable with the fixed reference, and the inferred base target still as needs-project-contract", () => {
+    const { targetId } = anonymousOnInferred();
+    const setup = approvedSetup(inferredSnapshot, [{ kind: "web", profileId: PROFILE }]);
+    const result = buildFeatureE2EPlanningContext(setup.policy, inferredSnapshot, { origin: "approved-setup", preparedCommitSha: null, accountRegistry: [], readyRuntimes: readyWeb });
+    if (result.status !== "available") throw new Error(result.reason);
+    expect(result.unavailableReasons).toEqual([{ targetId: "web-1", reason: "needs-project-contract" }]);
+    expect(result.runtimeRefs?.map((ref) => [ref.targetId, ref.accountProfileId])).toEqual([["web-1", "synthetic"], [targetId, "rovara-anonymous"]]);
+    const application = result.applicationRefs![0]!.applicationId;
+    expect(result.runtimeAccountRefs).toEqual([e2eAnonymousRuntimeAccountRef(application)]);
+    expect(result.executableKinds).toMatchObject([{ kind: "web" }]);
+  });
+
+  it("tells the planner in the version 2 prompt that a rovara-anonymous target runs its scenario signed out, with no account", () => {
+    const setup = approvedSetup(inferredSnapshot, [{ kind: "web", profileId: PROFILE }]);
+    const context = buildFeatureE2EPlanningContext(setup.policy, inferredSnapshot, { origin: "approved-setup", preparedCommitSha: null, accountRegistry: [], readyRuntimes: readyWeb });
+    if (context.status !== "available") throw new Error(context.reason);
+    const prompt = planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context });
+    expect(prompt).toContain("Application E2E plan guidance (schemaVersion 2):");
+    expect(prompt).toMatch(/accountProfileId is rovara-anonymous.*signed out/);
+    expect(prompt).toContain('"accountProfileId":"rovara-anonymous"');
+  });
+
+  it("tells the planner which base targets got no signed-out variant because the 12-target inventory is full (F7)", () => {
+    const manifest = JSON.parse(ordersContractManifest) as { agentx: { e2e: { accountProfiles: Record<string, unknown>[]; targetAccounts: unknown[]; recipe: Record<string, unknown> } } };
+    const e2e = manifest.agentx.e2e;
+    const names = Array.from({ length: 11 }, (_, index) => `acct-${index + 1}`);
+    const profile = e2e.accountProfiles[0]!;
+    e2e.accountProfiles = names.map((profileId) => ({ ...profile, profileId }));
+    const { recipeDigest: _digest, ...recipeBody } = { ...e2e.recipe, accountProfileIds: names } as Record<string, unknown>;
+    void _digest;
+    e2e.recipe = { ...recipeBody, recipeDigest: shaCanonical(recipeBody) };
+    e2e.targetAccounts = names.map((profileId) => ({ baseTargetId: "web-1", profileId }));
+    const full = snapshotOf({ "package.json": JSON.stringify(manifest) });
+    // The repository's discovery holds 12 targets; the policy pins the base alone, to keep the planner's context within its bound.
+    const setup = approvedSetup(full, [{ kind: "web", profileId: PROFILE }], ["web-1"]);
+    expect(setup.proposal.targets).toHaveLength(12);
+    const context = buildFeatureE2EPlanningContext(setup.policy, full, { origin: "approved-setup", preparedCommitSha: null, accountRegistry: registryFor(full), readyRuntimes: readyWeb });
+    if (context.status !== "available") throw new Error(context.reason);
+    expect(context.targets.map((target) => target.accountProfileId)).not.toContain("rovara-anonymous");
+    expect(context.anonymousVariantsOmitted).toEqual([{ targetId: "web-1", reason: "target-inventory-full" }]);
+    expect(planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context })).toContain('"anonymousVariantsOmitted":[{"targetId":"web-1","reason":"target-inventory-full"}]');
+    // Where every variant fits there is nothing to say.
+    const fits = buildFeatureE2EPlanningContext(approvedSetup(inferredSnapshot, [{ kind: "web", profileId: PROFILE }]).policy, inferredSnapshot,
+      { origin: "approved-setup", preparedCommitSha: null, accountRegistry: [], readyRuntimes: readyWeb });
+    if (fits.status !== "available") throw new Error(fits.reason);
+    expect(fits.anonymousVariantsOmitted).toBeUndefined();
+  });
+
+  it("derives the variant from a policy and a setup proposal stored without it, so a project approved before Task 3.3 can plan a signed-out scenario (F1)", () => {
+    const { targetId, scenario } = anonymousOnInferred();
+    const fx = planFixture({ snapshot: inferredSnapshot, targetId, scenario });
+    // What was stored: the base targets alone.
+    expect(fx.setup.proposal.targets.map((target) => target.targetId)).toEqual(["web-1"]);
+    expect(fx.policy.targets.map((target) => target.targetId)).toEqual(["web-1"]);
+    const result = evaluate({ snapshot: inferredSnapshot, targetId, scenario });
+    expect(result.ok, refusal(result)).toBe(true);
+  });
+
+  describe("approving the plan", () => {
+    it("accepts an anonymous scenario on an inferred target, pins the fixed reference, and needs no registered account", () => {
+      const { targetId, scenario } = anonymousOnInferred();
+      const result = evaluate({ snapshot: inferredSnapshot, targetId, scenario });
+      expect(result.ok, refusal(result)).toBe(true);
+      if (!result.ok) return;
+      const application = result.derivation.selectionInput.intent.applicationRuntimeRefs[0]!.applicationId;
+      expect(result.accountRefs).toEqual([e2eAnonymousRuntimeAccountRef(application)]);
+      expect(result.selection).toMatchObject({ executableTargetIds: [targetId], unavailableCriteria: [] });
+    });
+
+    it("refuses a signed-in scenario on an inferred target with needs-project-contract, and an anonymous one whose reference is not the fixed one", () => {
+      expect(refusal(evaluate({ snapshot: inferredSnapshot }))).toMatch(/needs-project-contract/);
+      const { targetId, scenario } = anonymousOnInferred();
+      expect(refusal(evaluate({ snapshot: inferredSnapshot, targetId, scenario, accountRef: { definitionDigest: "2".repeat(64) } }))).toMatch(/account/i);
+      expect(refusal(evaluate({ snapshot: inferredSnapshot, targetId, scenario, accountRef: { revision: 2 } }))).toMatch(/account/i);
+    });
+
+    it("approves it again after dispatch-time re-evaluation too (the fixed reference needs no pinned or registered row)", () => {
+      const { targetId, scenario } = anonymousOnInferred();
+      const fx = planFixture({ snapshot: inferredSnapshot, targetId, scenario });
+      const pinned = [fx.accountRef];
+      for (const mode of ["approve", "reapprove", "current"] as const) {
+        const result = evaluateApplicationPlanApproval({ intent: fx.intent, taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot: fx.snapshot, setupProposal: fx.setup.proposal,
+          setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW,
+          accounts: { entries: [], mode, pinned: mode === "current" ? pinned : [] } });
+        expect(result.ok, `${mode}: ${refusal(result)}`).toBe(true);
+      }
+    });
+  });
+});
+
+// Ruling CY (review F1): the broker's setup decision for a proposal made on a repository with a web app answers a retry as it always did.
+describe("the setup decision of a project with a web app (nothing stored changed with the signed-out variants)", () => {
+  it("proposes the base targets alone, approves, and answers an approval retried with duplicate: true; the policy it registers holds no variant", async () => {
+    const capture = vi.fn(async () => contractSnapshot);
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+    const admin = { subject: "admin-subject", admin: true };
+    const proposal = await call(harness.handler, { method: "POST", path: "/v1/admin/projects/setup-proposals", user: admin, body: { repositoryUrl: "https://github.com/example/demo.git", ref: "main" } });
+    expect(proposal.status, JSON.stringify(proposal.body)).toBe(200);
+    const policy = E2EPolicySchema.parse(proposal.body.policy);
+    expect(policy.targets.map((target) => target.accountProfileId)).not.toContain("rovara-anonymous");
+    const decide = () => call(harness.handler, { method: "POST", path: "/v1/admin/projects/setup-approvals", user: admin,
+      body: { projectName: "payments", proposalRef: String(proposal.body.proposalRef), proposalSha256: String(proposal.body.proposalSha256), decision: "approve" } });
+    const first = await decide();
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+    expect(first.body.duplicate).toBe(false);
+    const retry = await decide();
+    expect(retry.status, JSON.stringify(retry.body)).toBe(200);
+    expect(retry.body.duplicate).toBe(true);
+  });
 });

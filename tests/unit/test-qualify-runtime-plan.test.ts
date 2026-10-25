@@ -81,6 +81,7 @@ describe("planTestQualification", () => {
       "poll-status",
       "download-proposal",
       "register",
+      "record-model-check-runner",
       "delete-challenge",
       "print-registered-rows",
     ]);
@@ -317,6 +318,7 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
     },
     async deleteObject(key) { calls.push(`deleteObject ${key}`); maybeFail(key === PREFLIGHT_KEY ? "deletePreflight" : "deleteObject"); },
     saveProposal(bytes) { calls.push(`saveProposal ${bytes.toString()}`); return "/tmp/proposal.json"; },
+    async recordModelCheckRunner(runner) { calls.push(`recordModelCheckRunner ${runner.roleId} ${runner.instanceId} ${runner.transportCorrelationId}`); maybeFail("recordModelCheckRunner"); },
     async register(file) { calls.push(`register ${file}`); maybeFail("register"); return JSON.stringify({ profileId: "linux-arm64-web-api-v1", featureCatalogId: "catalog-1", featureRevisions: { web: 1, api: 1 } }); },
     now: () => clock,
     async sleep(ms) { clock += ms; },
@@ -334,8 +336,11 @@ describe("runTestQualification", () => {
     const names = calls.map((call) => call.split(" ")[0]);
     expect(names).toEqual([
       "checkAdminSession", "resolveFacts", "putBytes", "getObjectStrict", "deleteObject", "createVolume", "runInstance", "attachVolume", "privateIpOf", "getObject", "issueChallenge", "putObject",
-      "getObject", "getObject", "getObject", "getObject", "saveProposal", "register", "deleteObject",
+      "getObject", "getObject", "getObject", "getObject", "saveProposal", "register", "recordModelCheckRunner", "deleteObject",
     ]);
+    // Task 4.10C: the runner that serves model checks is recorded after the registration, bound to its transport correlation, and never before a successful one.
+    expect(calls).toContain(`recordModelCheckRunner ${facts.workerRoleId} ${INSTANCE_ID} ${WORKSPACE_ID}`);
+    expect(calls.findIndex((call) => call.startsWith("recordModelCheckRunner"))).toBeGreaterThan(calls.findIndex((call) => call.startsWith("register ")));
     // The ready marker is read before the challenge is issued, never after.
     expect(calls.indexOf(`getObject ${PREFIX}ready.json`)).toBeLessThan(calls.findIndex((call) => call.startsWith("issueChallenge")));
     // The preflight object is put, read back and deleted before anything is launched.
@@ -363,6 +368,25 @@ describe("runTestQualification", () => {
     expect(text).toContain("vol-0123456789abcdef0");
     expect(text).toContain("aws ec2 terminate-instances --instance-ids i-0123456789abcdef0 --profile agentx-test --region us-east-1");
     expect(text).toMatch(/still running/);
+  });
+
+  it("prints the failure codes the hook reported next to qualification-failed-exit-N, and nothing that is not a code", async () => {
+    const withFailure = (failure: unknown) => Buffer.from(JSON.stringify({ state: "FAILED", reason: "qualification-failed-exit-1", finishedAt: "2026-10-19T12:00:00Z", failure }));
+    const options = { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" };
+    const { effects, calls } = harness({ statuses: [withFailure({ codes: ["qualification-rejected", "probe-wrong-cause:api-egress-denial-v1", "api-egress-denial-v1:sinkhole-0"] })] });
+    await expect(runTestQualification(plan(), effects, options)).rejects.toThrow(
+      "the worker reported FAILED: qualification-failed-exit-1 (failure: qualification-rejected, probe-wrong-cause:api-egress-denial-v1, api-egress-denial-v1:sinkhole-0)");
+    expect(calls.some((call) => call.startsWith("register"))).toBe(false);
+    // The status object is read from a bucket: free text in it is not printed, and more than 16 codes are cut.
+    const hostile = harness({ statuses: [withFailure({ codes: ["Error: secret AKIAIOSFODNN7EXAMPLE", "probe-wrong-cause:ok", "has space", 7, ...Array.from({ length: 30 }, (_, index) => `c-${index}`)] })] });
+    const error = await runTestQualification(plan(), hostile.effects, options).then(() => new Error("unexpectedly passed"), (thrown: Error) => thrown);
+    expect(error.message).toBe(`the worker reported FAILED: qualification-failed-exit-1 (failure: probe-wrong-cause:ok, ${Array.from({ length: 15 }, (_, index) => `c-${index}`).join(", ")})`);
+    expect(error.message).not.toMatch(/AKIA|secret|space/);
+    // A failure object that is not an object of codes is ignored, as is a status without one.
+    for (const failure of [undefined, null, "x", { codes: "x" }, { codes: [] }]) {
+      const quiet = harness({ statuses: [withFailure(failure)] });
+      await expect(runTestQualification(plan(), quiet.effects, options)).rejects.toThrow(/^the worker reported FAILED: qualification-failed-exit-1$/);
+    }
   });
 
   it("never registers on a malformed, unrecognised or SUCCEEDED-looking-but-wrong status", async () => {

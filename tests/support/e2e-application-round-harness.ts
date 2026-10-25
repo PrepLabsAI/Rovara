@@ -1,3 +1,4 @@
+import { vi } from "vitest";
 import { createHash, randomUUID } from "node:crypto";
 import {
   E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey,
@@ -5,12 +6,13 @@ import {
 } from "@agentx/contracts";
 import { decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
+import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
 import { createDeveloperTaskBroker, MAYA, type Developer } from "./developer-task-broker.js";
 import { createRealCandidate } from "./e2e-application-candidate.js";
-import { call } from "./slack-broker.js";
+import { call, type Handler } from "./slack-broker.js";
 import { planAnswer, planDocument } from "./plan-documents.js";
 import type { binding} from "./e2e-application-plan-fixtures.js";
 import { PROFILE, ordersContractManifest, shaCanonical, snapshotOf, webApiRow } from "./e2e-application-plan-fixtures.js";
@@ -54,6 +56,8 @@ export interface RoundBrokerHarness {
   s3: { objects: Map<string, string>; send: (command: { constructor: { name: string }; input?: { Key?: string } }) => Promise<unknown> };
   brokerInput: unknown;
   actions: unknown;
+  handler: Handler;
+  finish(workspaceId: string, operationId: string, status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED", detail?: { result?: unknown; error?: string }): Promise<Record<string, unknown>>;
   dev(who: Developer, method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }>;
 }
 
@@ -70,23 +74,39 @@ export type RoundOptions = {
   storedIntent?: "planner" | "normalized";
   /** Account profiles of the one application's project contract, each with its own target and scenario (needs `applications` of 1). Without it, the application has one account. */
   accounts?: readonly string[];
+  /** Spread into the broker's dependencies last. */
+  brokerExtra?: Record<string, unknown>;
+  /**
+   * The baseline round (Task 3.7b, owner decision D2). Absent or "off": the project switched it off (so the rounds of the other tests are what they were). "source": it is on
+   * and the coding run exported the unchanged code (a real base commit under the candidate). "missing": on, but the worker exported nothing. "refused": on, and the export is a refusal.
+   */
+  baseline?: "off" | "source" | "missing" | "refused";
+  /** With the baseline's source exported: "other" pins a base commit that is not the exported one. */
+  baselinePin?: "other";
+  /** What GitHub says the tree of the pinned base commit is (the broker holds the exported tree to it): the exported one, another, or nothing (GitHub cannot be asked). Absent: GitHub is not consulted. */
+  githubBaseTree?: "match" | "mismatch" | "unreachable";
+  /** Runs once the candidate is committed and exported, just before the first dispatch (to seed a row the dispatch reads, say). */
+  beforeDispatch?: (harness: RoundBrokerHarness) => void;
 };
 
 const READY_API = { kind: "api" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedSteps,
   supportedAssertions: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedAssertions };
 export const apiRowKey = e2eRegisteredRuntimeKey("catalog", PROFILE, "api");
 
-/**
- * Plans, approves and dispatches one application round, and returns the handles a test needs. The CHECKS operation it starts is the real one: its admission, round and
- * group run ids are the broker's own; `markRunning` is the only thing the missing worker would have done to it before it uploads.
- */
-export async function startApplicationRound(options: RoundOptions = {}) {
+/** Registers the project against its approved setup and writes the plan a planner would write, up to (not including) the owner's APPROVE. */
+async function prepareRound(options: RoundOptions = {}) {
   const applications = options.applications ?? 1;
   const accounts = options.accounts ?? [];
   if (accounts.length > 0 && applications !== 1) throw new Error("accounts need exactly one application");
   const { snapshot, tree } = apiApplicationsSnapshot(applications, accounts);
   const capture = async () => snapshot;
-  const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+  const github = { baseTree: undefined as string | undefined };
+  const githubGateway = options.githubBaseTree === undefined ? {} : { githubPullRequests: { reconcilePullRequest: vi.fn(), getPullRequest: vi.fn(), updatePullRequest: vi.fn(),
+    getCommitTree: async (): Promise<string> => {
+      if (options.githubBaseTree === "unreachable") throw new Error("GitHub is down");
+      return options.githubBaseTree === "mismatch" ? "e".repeat(40) : github.baseTree ?? "0".repeat(40);
+    } } };
+  const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...githubGateway, ...options.brokerExtra } });
   const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
   const projectBinding = projectRow().runtimeBinding as typeof binding;
   harness.db.set({ ...apiRowKey, ...webApiRow("api"), binding: projectBinding, bindingDigest: shaCanonical(projectBinding) });
@@ -98,8 +118,10 @@ export async function startApplicationRound(options: RoundOptions = {}) {
   const approval = await call(harness.handler, { method: "POST", path: "/v1/admin/projects/setup-approvals", user: admin, body: { projectName: "payments", proposalRef, proposalSha256, decision: "approve" } });
   if (approval.status !== 200) throw new Error(`setup approval failed: ${JSON.stringify(approval.body)}`);
   const definition = projectRow().definition as Record<string, unknown> & { revision: number };
+  const baselineOff = options.baseline === undefined || options.baseline === "off";
   const registration = await call(harness.handler, { method: "POST", path: "/v1/admin/projects", user: admin,
-    body: { definition: { ...definition, revision: definition.revision + 1, e2e: proposalResponse.body.policy }, runtimeBinding: projectRow().runtimeBinding, setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
+    body: { definition: { ...definition, revision: definition.revision + 1, e2e: proposalResponse.body.policy,
+      ...(baselineOff ? { developerTasks: { ...((definition as { developerTasks?: object }).developerTasks ?? {}), e2eBaselineRound: false } } : {}) }, runtimeBinding: projectRow().runtimeBinding, setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
   if (registration.status !== 201) throw new Error(`project registration failed: ${JSON.stringify(registration.body)}`);
   const policy = E2EPolicySchema.parse(proposalResponse.body.policy);
 
@@ -113,9 +135,12 @@ export async function startApplicationRound(options: RoundOptions = {}) {
   await harness.finish(workspaceId, String(preparation.id), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: snapshot.commitSha }] } });
   const planning = operationRows((row) => row.workflowMode === "PLAN")[0]!;
 
-  const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_API] });
+  // The accounts the setup approval registered, as the broker shows them to the planner.
+  const accountRegistry = accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments"));
+  const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_API], accountRegistry });
   if (context.status !== "available") throw new Error(context.reason);
-  const targets = context.targets.filter((item) => item.kind === "api" && (accounts.length === 0 || accounts.includes(item.accountProfileId)))
+  // (Every qualified web and API target also offers the signed-out visitor as a variant of its own; these rounds run the apps' own accounts.)
+  const targets = context.targets.filter((item) => item.kind === "api" && item.accountProfileId !== "rovara-anonymous" && (accounts.length === 0 || accounts.includes(item.accountProfileId)))
     .sort((left, right) => left.accountProfileId.localeCompare(right.accountProfileId) || left.targetId.localeCompare(right.targetId));
   const expectedTargets = accounts.length > 0 ? accounts.length : applications;
   if (targets.length !== expectedTargets) throw new Error(`expected ${expectedTargets} api targets, found ${targets.length}: ${JSON.stringify(context.targets.map((item) => [item.targetId, item.accountProfileId]))}`);
@@ -134,16 +159,42 @@ export async function startApplicationRound(options: RoundOptions = {}) {
 
   const workflowNow = () => (harness.db.get(taskKey.pk, taskKey.sk) as { workflow: { revision: number; stage: string; state: string; blockReason?: string; artifacts: Array<{ sha256: string }>;
     candidate?: { digest: string }; e2e?: Record<string, unknown> } }).workflow;
-  const approved = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: workflowNow().revision, decision: "APPROVE",
+  /** The owner's APPROVE of the written plan; a test that wants to change something before it (a registry row, say) calls it itself. */
+  const approve = () => harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: workflowNow().revision, decision: "APPROVE",
     reason: "Approve the exact application intent", artifactDigest: workflowNow().artifacts.at(-1)!.sha256 });
+  return { harness, snapshot, tree, taskId, taskKey, workspaceId, operationRows, workflowNow, approve, policy, intent, targets, projectBinding, github };
+}
+
+/**
+ * A round planned and waiting for the owner's APPROVE: for a test that changes something first (a registry row, say) and then approves (`approve`) or expects it refused.
+ */
+export async function prepareApplicationRound(options: RoundOptions = {}) {
+  const prepared = await prepareRound(options);
+  return { harness: prepared.harness as unknown as RoundBrokerHarness, taskId: prepared.taskId, workflowNow: prepared.workflowNow, approve: prepared.approve };
+}
+
+/**
+ * Plans, approves and dispatches one application round, and returns the handles a test needs. The CHECKS operation it starts is the real one: its admission, round and
+ * group run ids are the broker's own; `markRunning` is the only thing the missing worker would have done to it before it uploads.
+ */
+export async function startApplicationRound(options: RoundOptions = {}) {
+  const prepared = await prepareRound(options);
+  const { harness, snapshot, tree, taskId, taskKey, workspaceId, operationRows, workflowNow, policy, intent, targets, projectBinding, github } = prepared;
+  const approved = await prepared.approve();
   if (approved.status !== 200) throw new Error(`plan approval failed: ${JSON.stringify(approved.body)}`);
 
   // The candidate is a real commit whose tree holds the approved applications, exported the way the worker exports one at the end of an IMPLEMENT run.
-  const real = await createRealCandidate({ ...tree, "src/orders.js": "export const orders = [];\n" }, { repositoryId: "demo", baseCommitSha: snapshot.commitSha });
+  // With the baseline round's source exported, the repository holds the task's base commit under the candidate, as the worker's repository does.
+  const withBase = options.baseline === "source";
+  const real = await createRealCandidate({ ...tree, "src/orders.js": "export const orders = [];\n" },
+    withBase ? { repositoryId: "demo", baseTree: tree } : { repositoryId: "demo", baseCommitSha: snapshot.commitSha });
+  github.baseTree = real.baseline?.baseTreeSha;
   const task = harness.db.get(taskKey.pk, taskKey.sk)!;
   const approvedWorkflow = WorkflowSnapshotSchema.parse(task.workflow);
-  const verifying = WorkflowSnapshotSchema.parse({ ...approvedWorkflow, revision: approvedWorkflow.revision + 1, stage: "VERIFY", state: "WAITING", candidate: real.source.candidate });
-  harness.db.set({ ...task, workflow: verifying });
+  const pinnedBase = real.baseline === undefined ? undefined : [{ repositoryId: "demo", baseCommitSha: options.baselinePin === "other" ? "7".repeat(40) : real.baseline.baseCommitSha }];
+  const verifying = WorkflowSnapshotSchema.parse({ ...approvedWorkflow, revision: approvedWorkflow.revision + 1, stage: "VERIFY", state: "WAITING", candidate: real.source.candidate,
+    ...(pinnedBase === undefined ? {} : { reviewBase: pinnedBase }) });
+  harness.db.set({ ...task, workflow: verifying, ...(pinnedBase === undefined ? {} : { preparedBase: pinnedBase }) });
   const candidate = real.source.candidate;
   const readyOperationId = randomUUID();
   const dispatch = (workflowDispatchItem("state", taskId, verifying.revision, "CHECKS", candidate.digest, new Date().toISOString()) as { Put: { Item: Record<string, unknown> } }).Put.Item;
@@ -171,16 +222,25 @@ export async function startApplicationRound(options: RoundOptions = {}) {
   const at = new Date(Date.now() + 1000).toISOString();
   harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${exportOperationId}`, entityType: "OPERATION", id: exportOperationId, workspaceId, kind: "task", workflowMode: "IMPLEMENT", status: "SUCCEEDED",
     fence: 1, requestId: randomUUID(), payloadHash: "a".repeat(64), createdAt: at, updatedAt: at,
-    candidateSourceRef: { key: exportKey, sha256: sha(exportText), byteLength: Buffer.byteLength(exportText), candidateDigest: candidate.digest }, candidateBuildSource: real.stored });
+    candidateSourceRef: { key: exportKey, sha256: sha(exportText), byteLength: Buffer.byteLength(exportText), candidateDigest: candidate.digest }, candidateBuildSource: real.stored,
+    // What the coding run's baseline-source callback leaves on its operation (Task 3.7b).
+    ...(real.baseline !== undefined ? { baselineSource: real.baseline.stored }
+      : options.baseline === "refused" ? { baselineSource: { status: "REFUSED", reason: "the worker could not export the unchanged code: the task recorded no base commit" } } : {}) });
+  if (real.baseline?.stored.status === "READY") {
+    harness.s3.objects.set(real.baseline.stored.sourceRef.key, real.baseline.sourceBytes.toString("utf8"));
+    harness.s3.objects.set(real.baseline.stored.buildSource.manifestRef.key, real.baseline.manifestBytes.toString("utf8"));
+  }
   harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_EXPORT#${exportOperationId}`, entityType: "WORKFLOW_CANDIDATE_EXPORT", schemaVersion: 1, operationId: exportOperationId,
     status: "COMPLETE", createdAt: at, buildSource: real.stored });
 
   const runDispatch = async () => { await harness.handler({ source: "agentx.workflow-dispatch-recovery" }); };
+  options.beforeDispatch?.(harness as unknown as RoundBrokerHarness);
   await runDispatch();
   const checksOperations = () => operationRows((row) => row.workflowMode === "CHECKS");
   const checks = checksOperations();
   if (checks.length !== 1) throw new Error(`the dispatch started ${checks.length} CHECKS operations: ${workflowNow().blockReason ?? workflowNow().state}`);
-  const operationId = String(checks[0]!.id);
+  /** The handles of one CHECKS operation: the candidate's, or (when the baseline round is on) the baseline's first. */
+  const handlesFor = (operationId: string) => {
   const operationNow = () => harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`) as Record<string, unknown> & { status: string; fence: number; workflowE2EGroupEvidenceRefs?: unknown[];
     workflowE2EGroupRunIds?: string[]; workflowE2EEvidenceRef?: { key: string; sha256: string; byteLength: number }; workflowE2EAdmission: E2EWorkflowAdmissionRef };
   const admissionRef = E2EWorkflowAdmissionRefSchema.parse(operationNow().workflowE2EAdmission);
@@ -251,6 +311,18 @@ export async function startApplicationRound(options: RoundOptions = {}) {
 
   return { reseedReadiness, harness: harness as unknown as RoundBrokerHarness, taskId, workspaceId, operationId, snapshot, policy, intent, targets, real, candidate, admission, admissionRef, admissionBytes, applicationGroups, groupIds, projectBinding,
     workflowNow, taskNow: () => harness.db.get(taskKey.pk, taskKey.sk)!, operationNow, markRunning, upload, evidenceCall, groupEnvelope, aggregateEnvelope, collectGroup, finishChecks, uploadRow, clearUpload,
-    runDispatch, checksOperations, operationRows };
+    runDispatch, checksOperations, operationRows, capabilityFor };
+  };
+  const first = handlesFor(String(checks[0]!.id));
+  return { ...first,
+    /** Runs the dispatch once more and returns the handles of the CHECKS operation it starts next (the candidate's, after a baseline round has been recorded). */
+    nextRound: async () => {
+      await runDispatch();
+      const started = checksOperations().filter((row) => row.id !== first.operationId);
+      if (started.length !== 1) throw new Error(`the dispatch started ${started.length} further CHECKS operations: ${workflowNow().blockReason ?? workflowNow().state}`);
+      return handlesFor(String(started[0]!.id));
+    } };
 }
 export type ApplicationRound = Awaited<ReturnType<typeof startApplicationRound>>;
+/** The handles of one round (its operation, admission and callbacks), without the means of running the dispatch on to the next: what the round helpers need. */
+export type RoundCore = Omit<ApplicationRound, "nextRound">;

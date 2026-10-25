@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { E2ERoundSchema, E2ERunBindingSchema, ProjectSetupRunnerToolchainSchema, canonicalJson } from "@agentx/contracts";
 import type { E2EApplicationEvidenceRef, E2ERound, E2ERunBinding, ProjectSetupRunnerToolchain } from "@agentx/contracts";
-import { collectE2EApplicationRun as collect, encodeE2EApplicationSupervisorReadback, e2eApplicationPrivateTransferMaxBytes,
+import { collectE2EApplicationRun as collect, encodeE2EApplicationSupervisorReadback, e2eApplicationErrorReason, e2eApplicationPrivateTransferMaxBytes,
   normalizeE2EApplicationPublicList, readE2EApplicationSupervisorProof } from "./application-result-adapter.js";
 import type { E2EApplicationCaseCapture, E2EApplicationSupervisorReadback } from "./application-result-adapter.js";
 import { validateE2ECompiledApplicationAdmission, type E2ECompiledApplicationSuite } from "./application-scenarios.js";
 import type { E2EApplicationCollectionResult } from "./application-result-adapter.js";
+import type { ExecutorOutputEvidence } from "./host/executor-readback.js";
 
 function encoded(bytes: Uint8Array) {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength > 4_194_304) throw new Error("application CLI output bytes exceed the pinned per-stream bound");
@@ -25,7 +26,9 @@ export type E2EActualApplicationRun = Readonly<{ protocol: "e2e-actual-applicati
   shards: readonly E2EActualApplicationShard[]; applicationCaptures: readonly E2EApplicationCaseCapture[]; supervisorReceiptRefs: readonly E2EApplicationEvidenceRef[];
   declaredMockComponentIds: readonly string[]; selected: number; filtered: number;
   supervisorReadback: E2EApplicationSupervisorReadback | null;
-  cleanupConfirmed: boolean | null; cleanupServerListening: boolean | null; evidenceDirectory: string }>;
+  cleanupConfirmed: boolean | null; cleanupServerListening: boolean | null; evidenceDirectory: string;
+  /** The executor's log head and the screenshots and traces of failed cases, for the operator's evidence. The collector never reads it and no result depends on it. */
+  executorEvidence?: ExecutorOutputEvidence }>;
 
 /** Converts real supervisor readback bytes to the private strict collection wire format. */
 export function collectE2EApplicationRun(input: { actual: E2EActualApplicationRun; compiled: E2ECompiledApplicationSuite;
@@ -33,7 +36,7 @@ export function collectE2EApplicationRun(input: { actual: E2EActualApplicationRu
   usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
   expectedSupervisorReceiptRefs: readonly E2EApplicationEvidenceRef[]; ownedResourceInventoryDigest: string;
   observationBindings: Parameters<typeof collect>[0]["observationBindings"]; assertionAssets: Parameters<typeof collect>[0]["assertionAssets"];
-  governedModelReceipts: Parameters<typeof collect>[0]["governedModelReceipts"]; ownedClosedAt: string | null }): E2EApplicationCollectionResult {
+  governedModelReceipts: Parameters<typeof collect>[0]["governedModelReceipts"]; agentModel?: Parameters<typeof collect>[0]["agentModel"]; roundScope?: Parameters<typeof collect>[0]["roundScope"]; ownedClosedAt: string | null }): E2EApplicationCollectionResult {
   try {
     const binding = E2ERunBindingSchema.parse(input.binding); const round = E2ERoundSchema.parse(input.round);
     const toolchain = ProjectSetupRunnerToolchainSchema.parse(input.actual.runnerToolchain);
@@ -80,7 +83,8 @@ export function collectE2EApplicationRun(input: { actual: E2EActualApplicationRu
     const supervisorReadback = encodeE2EApplicationSupervisorReadback(proof.readback);
     const collection = { protocol: "e2e-application-collection/v1" as const, shards,
       applicationCaptures: proof.captures, supervisorReceiptRefs: input.actual.supervisorReceiptRefs,
-      mockConsumptions: proof.mockConsumptions, declaredMockComponentIds: [...input.actual.declaredMockComponentIds].sort(),
+      mockConsumptions: proof.mockConsumptions, ...(proof.unmockedCalls.length > 0 ? { unmockedCalls: proof.unmockedCalls } : {}),
+      declaredMockComponentIds: [...input.actual.declaredMockComponentIds].sort(),
       supervisorReadback, receivedAt: new Date().toISOString(), cleanup: "confirmed" as const };
     if (Buffer.byteLength(canonicalJson(collection)) > Math.min(26_214_400, e2eApplicationPrivateTransferMaxBytes(Math.max(1, input.actual.applicationCaptures.length), shards.length))) {
       throw new Error("complete application collection and raw supervisor proof exceed the unchanged private transfer ceiling");
@@ -89,8 +93,8 @@ export function collectE2EApplicationRun(input: { actual: E2EActualApplicationRu
     return collect({ actual: collection, compiled: input.compiled, binding, round, environment: input.environment, usage: input.usage, limits: input.limits,
       expectedSupervisorReceiptRefs: input.expectedSupervisorReceiptRefs, ownedResourceInventoryDigest: input.ownedResourceInventoryDigest,
       observationBindings: input.observationBindings, assertionAssets: input.assertionAssets, governedModelReceipts: input.governedModelReceipts,
-      ownedClosedAt: input.ownedClosedAt });
+      ...(input.agentModel == null ? {} : { agentModel: input.agentModel }), ...(input.roundScope === undefined ? {} : { roundScope: input.roundScope }), ownedClosedAt: input.ownedClosedAt });
   } catch (error) {
-    return { collection: null, oracle: null, qualification: null, unavailableReason: error instanceof Error ? error.message : "application readback unavailable" };
+    return { collection: null, oracle: null, qualification: null, unavailableReason: e2eApplicationErrorReason(error, "application readback unavailable") };
   }
 }

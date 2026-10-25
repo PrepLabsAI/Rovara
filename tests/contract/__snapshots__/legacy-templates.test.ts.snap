@@ -1038,6 +1038,46 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     ],
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-e2e-agent-model",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-model-fallback",
+                    ],
+                  ],
+                },
               ],
             },
             {
@@ -5233,6 +5273,46 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     ],
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-e2e-agent-model",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-model-fallback",
+                    ],
+                  ],
+                },
               ],
             },
             {
@@ -7795,10 +7875,22 @@ exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] 
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
       "Type": "AWS::SSM::Parameter::Value<String>",
     },
+    "E2eAgentModelId": {
+      "AllowedPattern": "^(default|[A-Za-z0-9][A-Za-z0-9._:/-]{0,199})$",
+      "Default": "default",
+      "Description": "AI navigation model for browser checks: default (Rovara's recommendation) or an eligible model id",
+      "Type": "String",
+    },
     "ExecutorImageUri": {
       "AllowedPattern": "^(none|.+@sha256:[a-f0-9]{64})$",
       "Default": "none",
       "Description": "Immutable private ECR linux/arm64 browser executor image URI, or none",
+      "Type": "String",
+    },
+    "ModelFallback": {
+      "AllowedPattern": "^(none|[A-Za-z0-9][A-Za-z0-9._:-]{0,79})$",
+      "Default": "none",
+      "Description": "Bedrock model used when a provider key secret is missing: none, or a Bedrock model id",
       "Type": "String",
     },
     "ModelId": {
@@ -7861,6 +7953,17 @@ exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] 
       },
       "Type": "AWS::SSM::Parameter",
     },
+    "WorkerE2eAgentModelParameter3B6AA65C": {
+      "Properties": {
+        "Description": "AgentX worker e2eAgentModel for EC2 workers",
+        "Name": "/agentx/production/worker-e2e-agent-model",
+        "Type": "String",
+        "Value": {
+          "Ref": "E2eAgentModelId",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
     "WorkerExecutorImageParameter4915196F": {
       "Properties": {
         "Description": "AgentX worker executorImage for EC2 workers",
@@ -7879,6 +7982,17 @@ exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] 
         "Type": "String",
         "Value": {
           "Ref": "WorkerImageUri",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "WorkerModelFallbackParameter4DCAF22C": {
+      "Properties": {
+        "Description": "AgentX worker modelFallback for EC2 workers",
+        "Name": "/agentx/production/worker-model-fallback",
+        "Type": "String",
+        "Value": {
+          "Ref": "ModelFallback",
         },
       },
       "Type": "AWS::SSM::Parameter",
@@ -8984,6 +9098,12 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "Default": "amazon-bedrock",
       "Type": "String",
     },
+    "ModelFallback": {
+      "AllowedPattern": "^(none|[A-Za-z0-9][A-Za-z0-9._:-]{0,79})$",
+      "Default": "none",
+      "Description": "Bedrock model used when a provider key secret is missing: none, or a Bedrock model id",
+      "Type": "String",
+    },
     "ModelId": {
       "Default": "us.anthropic.claude-sonnet-4-6",
       "Type": "String",
@@ -9429,6 +9549,12 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
                 "Name": "AGENTX_GATE_CLASSIFIER_MODEL",
                 "Value": {
                   "Ref": "GateClassifierModelId",
+                },
+              },
+              {
+                "Name": "AGENTX_MODEL_FALLBACK",
+                "Value": {
+                  "Ref": "ModelFallback",
                 },
               },
             ],

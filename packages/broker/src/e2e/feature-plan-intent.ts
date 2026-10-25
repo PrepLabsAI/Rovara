@@ -155,7 +155,9 @@ export function deriveE2EFeatureExecutionAdmission(input: {
   now: number;
 }): { runtime: E2EFeatureVerifierRecord; portableApprovalBinding: E2EPortableApprovalBinding; plan: E2EExecutionPlan;
   bundle: E2EScenarioBundle; selectionInput: Parameters<typeof selectE2EExecutionPlan>[0] } {
-  const policy = E2EPolicySchema.parse(input.policy);
+  // A portable round calls no model. The project's pinned AI navigation route (Task 4.2) is for application rounds, and a policy that pins one would make the sandbox unusable
+  // (`model route is not disabled`), so the portable selection and its bindings carry the model-free projection, as the application path's portable child does.
+  const policy = { ...E2EPolicySchema.parse(input.policy), modelRouteRevision: null };
   const runtime = admitE2EFeatureVerifier(input.featureVerifier, { runtimeCatalogId: input.runtimeCatalogId,
     profileId: policy.defaultSandboxProfileId, binding: input.runtimeBinding, scope: E2E_FEATURE_PROCESS_RESPONSE_SCOPE, now: input.now });
   if (!runtime) throw new Error("a current separately qualified portable feature verifier is unavailable");

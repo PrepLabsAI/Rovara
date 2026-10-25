@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   CodeBuildCheckResultSchema,
+  E2EModelDayBudgetRequestSchema,
+  E2EModelDayBudgetResponseSchema,
   WorkflowFeedbackBundleRefSchema,
   WorkflowFeedbackApprovalBindingSchema,
   WorkflowFeedbackTaskChecksSchema,
@@ -9,6 +11,8 @@ import {
   type WorkerInvocation,
   type WorkflowFeedbackApprovalBinding,
   type WorkflowFeedbackTaskChecks,
+  type E2EModelDayBudgetRequest,
+  type E2EModelDayBudgetResponse,
   type E2EWorkflowAdmissionRef,
 } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
@@ -17,6 +21,7 @@ import type { WorkerTerminalResult } from "./server.js";
 import type { CodeBuildSink } from "./codebuild.js";
 import type { CommittedCandidateSourceExport } from "./verification/candidate.js";
 import type { CandidateBuildSourceExport } from "./e2e-build-source-export.js";
+import type { BaselineSourceExport } from "./baseline-source-export.js";
 
 export type TerminalResultSink = (result: WorkerTerminalResult) => Promise<void>;
 
@@ -89,8 +94,12 @@ export function createWorkerCallbackSinks(input: {
   candidateSourceExportSink: (source: CommittedCandidateSourceExport) => Promise<void>;
   /** Reports the build source manifest of the candidate that candidateSourceExportSink just exported, or why there is none. Separate from, and after, that export. */
   candidateBuildSourceSink: (buildSource: CandidateBuildSourceExport) => Promise<void>;
+  /** M1.3 Task 3.7b: reports the unchanged code (the task's base commit) the coding run exported for the baseline round, or why there is none. Separate from, and after, the candidate's. */
+  baselineSourceSink: (source: BaselineSourceExport) => Promise<void>;
   workflowE2EAdmissionReader: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
   workflowE2EEvidenceSink: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
+  /** M1.4 Task 4.3a: one reserve, settle or release of the project's day budget for a model call (the broker keeps the rows). Only a round whose admission has AI navigation steps holds the claim. */
+  workflowE2EModelBudget: (body: E2EModelDayBudgetRequest, signal?: AbortSignal) => Promise<E2EModelDayBudgetResponse>;
   feedbackBundleReader: FeedbackBundleReader;
   authorizeFeedbackApproval: FeedbackApprovalAuthorizer;
   /** #341: the task owner's ChatGPT access token, for a task that runs on their plan (unparsed; see chatgpt-token.ts). */
@@ -170,6 +179,29 @@ export function createWorkerCallbackSinks(input: {
     }
     await postForResult("candidate-build-source", { stage: "finalize", schemaVersion: "workflow-candidate-build-source-finalize/v1", uploadId, sha256 });
   };
+  const baselineSourceSink = async (source: BaselineSourceExport): Promise<void> => {
+    const reason = source.status === "UNAVAILABLE" ? source.reason : source.buildSource.status === "UNAVAILABLE" ? `the build source of the unchanged code is unavailable: ${source.buildSource.reason}` : undefined;
+    if (reason !== undefined || source.status !== "READY" || source.buildSource.status !== "READY") {
+      await postForResult("baseline-source", { stage: "unavailable", schemaVersion: "workflow-baseline-source-unavailable/v1", reason: reason ?? "the unchanged code was not exported" });
+      return;
+    }
+    const bytes = Buffer.from(JSON.stringify({ schemaVersion: "workflow-baseline-source/v1", sourceBase64: Buffer.from(JSON.stringify(source.source), "utf8").toString("base64"),
+      manifestBase64: Buffer.from(JSON.stringify(source.buildSource.manifest), "utf8").toString("base64") }), "utf8");
+    const chunkBytes = 64 * 1024;
+    const chunkCount = Math.ceil(bytes.byteLength / chunkBytes);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const initialized = await postForResult("baseline-source", { stage: "init", schemaVersion: "workflow-baseline-source-upload/v1", totalBytes: bytes.byteLength, chunkCount, sha256 });
+    if (!initialized || typeof initialized !== "object" || typeof (initialized as { uploadId?: unknown }).uploadId !== "string"
+      || (initialized as { chunkBytes?: unknown }).chunkBytes !== chunkBytes || (initialized as { chunkCount?: unknown }).chunkCount !== chunkCount) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "baseline source upload initialization is invalid");
+    }
+    const uploadId = (initialized as { uploadId: string }).uploadId;
+    for (let index = 0; index < chunkCount; index += 1) {
+      const chunk = bytes.subarray(index * chunkBytes, Math.min((index + 1) * chunkBytes, bytes.byteLength));
+      await postForResult("baseline-source", { stage: "chunk", schemaVersion: "workflow-baseline-source-chunk/v1", uploadId, index, bytesBase64: chunk.toString("base64"), sha256: createHash("sha256").update(chunk).digest("hex") });
+    }
+    await postForResult("baseline-source", { stage: "finalize", schemaVersion: "workflow-baseline-source-finalize/v1", uploadId, sha256 });
+  };
   const workflowE2EAdmissionReader = async (reference: E2EWorkflowAdmissionRef, offset: number) => {
     const value = await postForResult("e2e-admission", { stage: "read", offset, sha256: reference.admissionRef.sha256 });
     if (!value || typeof value !== "object" || Array.isArray(value)) throw agentXError("RUNTIME_UNAVAILABLE", "native E2E admission response is invalid");
@@ -205,6 +237,14 @@ export function createWorkerCallbackSinks(input: {
     if (!finalized || typeof finalized !== "object" || typeof (finalized as { key?: unknown }).key !== "string"
       || (finalized as { sha256?: unknown }).sha256 !== sha256) throw agentXError("RUNTIME_UNAVAILABLE", "native E2E evidence finalization is invalid");
     return { key: (finalized as { key: string }).key, sha256 };
+  };
+  const workflowE2EModelBudget = async (body: E2EModelDayBudgetRequest, signal?: AbortSignal): Promise<E2EModelDayBudgetResponse> => {
+    const response = await fetchImplementation(`${prefix}/e2e-model-budget`, { method: "POST", ...(signal === undefined ? {} : { signal }),
+      headers: { "content-type": "application/json", "x-agentx-callback-capability": input.invocation.callbackCapability }, body: JSON.stringify(E2EModelDayBudgetRequestSchema.parse(body)) });
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `worker callback e2e-model-budget failed with HTTP ${response.status}`);
+    // The broker's reply carries its request id beside the answer, as every callback reply does; the answer is the rest.
+    const reply: unknown = await response.json();
+    return E2EModelDayBudgetResponseSchema.parse(typeof reply === "object" && reply !== null ? Object.fromEntries(Object.entries(reply).filter(([key]) => key !== "requestId")) : reply);
   };
   return {
     eventSink: async (events) => post("events", { events }),
@@ -290,7 +330,9 @@ export function createWorkerCallbackSinks(input: {
     },
     candidateSourceExportSink,
     candidateBuildSourceSink,
+    baselineSourceSink,
     workflowE2EAdmissionReader,
     workflowE2EEvidenceSink,
+    workflowE2EModelBudget,
   };
 }

@@ -6,9 +6,9 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationBuildSourceManifestS
   E2EApplicationPreparedGroupFactsSchema, E2EAppArtifactRefSchema, E2EAppBuildManifestSchema,
   E2EApplicationPlanIntentSchema, E2EExecutionPlanSchema, E2ERuntimeCapabilityDescriptorSchema, E2EScenarioBundleSchema,
   E2ERegisteredRuntimeSchema, canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes,
-  e2eAppBuildManifestDigest, e2ePolicyDigest, e2eScenarioBundleDigest, selectE2EApplicationExecutionPlan,
+  e2eAppBuildManifestDigest, e2eEffectiveRoundLimits, e2eEffectiveRoundLimitsBeforeRun1, e2ePolicyDigest, e2eRuntimeBindingKey, e2eRuntimeBindingOf, e2eScenarioBundleDigest, selectE2EApplicationExecutionPlan,
   projectE2EApplicationPortableSelection, validateE2EAppBuildBinding, verifyE2ESourceSnapshot, E2EApplicationPortableProjectionSchema,
-  E2EApplicationExecutionAdmissionSchema, E2EApplicationGroupAdmissionSchema, E2ERoundSchema, E2ERunBindingSchema,
+  E2EApplicationExecutionAdmissionSchema, E2EApplicationGroupAdmissionSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAgentTraceFileSchema, E2E_AGENT_TRACE_FILE_MAX_BYTES,
   type CandidateManifest, type E2EApplicationApprovalBinding, type E2EApplicationBuildSourceManifest,
   type E2EApplicationBuildSourceRef, type E2EApplicationCliHostDescriptor, type E2EApplicationCompilationContext,
   type E2EApplicationLaunchTarget, type E2EApplicationPreparedGroupFacts, type E2EApplicationPlanSelectionInput,
@@ -48,6 +48,8 @@ export type E2ECompiledApplicationSuite = Readonly<{
   protocol: "trusted-e2e-application/v1"; bundle: E2EScenarioBundle;
   group: E2EExecutionPlan["groups"][number] & { mocks: readonly E2EExecutionPlan["mocks"][number][] };
   cliHost: { profileId: string; descriptor: E2EApplicationCliHostDescriptor };
+  /** The one target kind of this group (a group never mixes web and API targets): with the group's runtime profile, it names the runtime row the group runs on (`e2eCompiledRuntime`). */
+  runtimeKind: "web" | "api";
   preparedEnvironmentDigest: string; originByApplicationId: readonly { applicationId: string; origin: string }[];
   files: ReadonlyMap<string, string>; inventory: E2EApplicationCompiledGroupInventory; groupConfigManifestDigest: string;
   shards: readonly E2EApplicationCompiledShard[]; expectedCases: readonly E2EExpectedCase[]; selectionPacketPath: string;
@@ -58,6 +60,11 @@ export type E2ECompiledApplicationSuite = Readonly<{
     bundleDigest: string; compiledInventoryDigest: string; applicationBindingsDigest: string; runtimeBindingsDigest: string;
     launchTargetsDigest: string; assertionBindingsDigest: string }>;
 }>;
+
+/** The runtime row a compiled group runs on: its profile's row of the group's own kind. A web group never finds the API row of the same profile, nor the other way round. */
+export function e2eCompiledRuntime(compiled: Pick<E2ECompiledApplicationSuite, "runtimeBindings" | "runtimeKind"> & { group: Pick<E2ECompiledApplicationSuite["group"], "runtimeProfileId"> }): E2ERegisteredRuntime | undefined {
+  return e2eRuntimeBindingOf(compiled.runtimeBindings, compiled.group.runtimeProfileId, compiled.runtimeKind);
+}
 
 function ordinaryRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError(`${label} must be an ordinary record`);
@@ -159,7 +166,7 @@ function snapshotDigest(snapshot: E2ESourceSnapshot): string {
   return hash.digest("hex");
 }
 function selectedContextCopy(input: unknown): E2EApplicationCompilationContext {
-  const context = ordinaryRecord(input, ["selectionInput", "executionPlan", "bundle", "applicationBindings", "runtimeBindings", "launchTargets", "modelRoute", "cliHostsByProfile", "preparedEnvironmentsByGroup"], "application compilation context");
+  const context = ordinaryRecord(input, ["selectionInput", "executionPlan", "bundle", "applicationBindings", "runtimeBindings", "launchTargets", "modelRoute", "cliHostsByProfile", "preparedEnvironmentsByGroup", "policyLimitsForModelFreeShards", "modelFreeShardRule", "replay"], "application compilation context");
   const selectionRaw = ordinaryRecord(context.selectionInput, ["candidateDigest", "expectedCandidate", "sourceSnapshot", "planDigest", "policy", "scenarios", "selectedTargetIds", "sandboxAvailability", "runtimeAvailability", "portableApprovalBinding", "approvedSemanticApproval", "mockableComponents", "intent", "intentDigest", "setupProposal", "setupApproval", "applicationApprovalBinding", "registeredRuntimes", "runtimeAccountRefs", "now"], "application selection input");
   const selectionInput = { ...selectionRaw, expectedCandidate: bounded(selectionRaw.expectedCandidate, 262_144), sourceSnapshot: snapshotCopy(selectionRaw.sourceSnapshot),
     policy: bounded(selectionRaw.policy), scenarios: bounded(selectionRaw.scenarios), selectedTargetIds: bounded(selectionRaw.selectedTargetIds),
@@ -184,7 +191,23 @@ function selectedContextCopy(input: unknown): E2EApplicationCompilationContext {
   const preparedEnvironmentsByGroup = mapCopy(context.preparedEnvironmentsByGroup, 4, "application prepared environments", (raw) => E2EApplicationPreparedGroupFactsSchema.parse(bounded(raw)));
   const modelRoute = applicationModelRouteSchema.parse(bounded(context.modelRoute));
   return { selectionInput, executionPlan: E2EExecutionPlanSchema.parse(bounded(context.executionPlan)), bundle: E2EScenarioBundleSchema.parse(bounded(context.bundle)),
-    applicationBindings, runtimeBindings, launchTargets, modelRoute, cliHostsByProfile, preparedEnvironmentsByGroup };
+    applicationBindings, runtimeBindings, launchTargets, modelRoute, cliHostsByProfile, preparedEnvironmentsByGroup,
+    ...(context.policyLimitsForModelFreeShards === true ? { policyLimitsForModelFreeShards: true as const } : {}),
+    ...(context.modelFreeShardRule === "before-run-1" ? { modelFreeShardRule: "before-run-1" as const } : {}),
+    ...(context.replay === undefined ? {} : { replay: replayContextCopy(context.replay) }) };
+}
+
+/** The replay marker of a compilation context: the binding of each recording (at most twelve), as plain data. */
+function replayContextCopy(input: unknown): NonNullable<E2EApplicationCompilationContext["replay"]> {
+  const replay = ordinaryRecord(input, ["bindings"], "application replay context");
+  const bindings = ordinaryArray(replay.bindings, 12, "application replay bindings", (raw) => {
+    const item = ordinaryRecord(raw, ["caseId", "stepIndex", "keyHash", "traceSha256", "actionCount"], "application replay binding");
+    if (typeof item.caseId !== "string" || !Number.isSafeInteger(item.stepIndex) || typeof item.keyHash !== "string" || typeof item.traceSha256 !== "string" || !Number.isSafeInteger(item.actionCount)) {
+      throw new TypeError("application replay binding is invalid");
+    }
+    return { caseId: bounded(item.caseId, 256), stepIndex: item.stepIndex as number, keyHash: bounded(item.keyHash, 128), traceSha256: bounded(item.traceSha256, 128), actionCount: item.actionCount as number };
+  });
+  return { bindings };
 }
 
 function identityPlatform(target: E2EExecutionPlan["effectiveTargets"][number]): string {
@@ -199,7 +222,11 @@ export function validateE2EApplicationLaunchTarget(target: E2EExecutionPlan["eff
   if (launch.targetId !== target.targetId || launch.profileId !== target.runtimeProfileId || runtime.profileId !== target.runtimeProfileId
     || launch.factoryManifestDigest !== runtime.manifestDigest) throw new Error("application launch target differs from its source target or installed runtime descriptor");
   const capability = E2ERuntimeCapabilityDescriptorSchema.parse(runtime.capabilities);
-  const expectedArtifacts = [capture.screenshots ? "screenshot" : null, capture.video ? "video" : null].filter((item): item is "screenshot" | "video" => item !== null);
+  // Traces are deferred past M1.3 (Ruling CJ): an admission that approves one is refused.
+  if (capture.traces) throw new Error("trace capture is not supported");
+  // Only a web target can record a screenshot or a video; an API target's engine has no artifact hook (see webApiApplicationLaunchTarget).
+  const expectedArtifacts = target.kind === "api" ? []
+    : [capture.screenshots ? "screenshot" : null, capture.video ? "video" : null].filter((item): item is "screenshot" | "video" => item !== null);
   // An API target runs on Rovara's own HTTP engine, which has no state hook: its `state` assertions are the runtime's approved probes,
   // so the engine's state capability is false whatever assertions the runtime supports.
   const expectedState = target.kind === "api" && launch.engine !== null ? false : capability.supportedAssertions.includes("state");
@@ -271,23 +298,38 @@ function validateBindings(context: E2EApplicationCompilationContext, plan: E2EEx
   const launchTargets = [...context.launchTargets].sort((a, b) => a.targetId.localeCompare(b.targetId));
   if (canonicalJson(launchTargets.map((item) => item.targetId)) !== canonicalJson(runnableTargetIds)) throw new Error("application launch targets must exactly cover runnable targets");
   const runtimeRefs = new Map(context.selectionInput.intent.applicationRuntimeRefs.map((item) => [item.targetId, item]));
+  // The runtime rows the round runs on, one per (profile, kind) of its runnable targets: a profile registers a web row and an API row, and a plan can run both.
+  const kindOf = (targetId: string): "web" | "api" => {
+    const kind = targetById.get(targetId)!.kind;
+    if (kind !== "web" && kind !== "api") throw new Error("runnable application target is neither a web nor an API target");
+    return kind;
+  };
+  const neededRows = [...new Set(runnableTargetIds.map((targetId) => e2eRuntimeBindingKey(targetById.get(targetId)!.runtimeProfileId, kindOf(targetId))))].sort();
+  const neededProfiles = new Set(runnableTargetIds.map((targetId) => targetById.get(targetId)!.runtimeProfileId));
+  // A v2 admission keys its rows `<profile>#<kind>`; one stored before that keyed them by the profile alone, which can name one kind only, so it can serve a profile with one kind of target.
+  const suppliedKeys = [...context.runtimeBindings.keys()].sort();
+  const keyedByKind = canonicalJson(suppliedKeys) === canonicalJson(neededRows);
+  const keyedByProfile = canonicalJson(suppliedKeys) === canonicalJson([...neededProfiles].sort()) && neededRows.length === neededProfiles.size;
+  if (!keyedByKind && !keyedByProfile) throw new Error("runtime binding map contains a missing or foreign profile or kind");
   for (const targetId of runnableTargetIds) {
     const target = targetById.get(targetId)!;
     const ref = runtimeRefs.get(targetId);
-    const runtime = context.runtimeBindings.get(target.runtimeProfileId);
+    const runtime = e2eRuntimeBindingOf(context.runtimeBindings, target.runtimeProfileId, kindOf(targetId));
     const launch = context.launchTargets.find((item) => item.targetId === targetId)!;
     if (!ref || ref.applicationId !== target.applicationId || ref.runtimeProfileId !== target.runtimeProfileId || !runtime) throw new Error("runnable application target has no exact assignment or registered runtime profile");
     validateE2EApplicationLaunchTarget(target, launch, runtime, context.selectionInput.policy.capture);
   }
-  if (context.runtimeBindings.size !== profileIds.length || [...context.runtimeBindings.keys()].some((id) => !profileIds.includes(id))) throw new Error("runtime binding map contains a missing or foreign profile");
-  const selectedRuntimeRows = context.selectionInput.registeredRuntimes.filter((runtime) => profileIds.includes(runtime.profileId));
-  if (new Set(selectedRuntimeRows.map((runtime) => runtime.profileId)).size !== selectedRuntimeRows.length) {
+  const selectedRuntimeRows = context.selectionInput.registeredRuntimes.filter((runtime) => neededProfiles.has(runtime.profileId));
+  const rowKeyOf = (runtime: E2ERegisteredRuntime) => (runtime.capabilities.kind === "web" || runtime.capabilities.kind === "api" ? e2eRuntimeBindingKey(runtime.profileId, runtime.capabilities.kind) : `${runtime.profileId}#${runtime.capabilities.kind}`);
+  if (new Set(selectedRuntimeRows.map(rowKeyOf)).size !== selectedRuntimeRows.length) {
     throw new Error("selection input contains an ambiguous registered runtime profile");
   }
-  const selectedRuntimeByProfile = new Map(selectedRuntimeRows.map((runtime) => [runtime.profileId, runtime]));
-  for (const profileId of profileIds) {
-    const selectedRuntime = selectedRuntimeByProfile.get(profileId);
-    const suppliedRuntime = context.runtimeBindings.get(profileId);
+  if (neededRows.some((key) => !selectedRuntimeRows.some((runtime) => rowKeyOf(runtime) === key))) throw new Error("selection input lacks a registered runtime row of a runnable target");
+  const selectedRuntimeByKey = new Map(selectedRuntimeRows.map((runtime) => [rowKeyOf(runtime), runtime]));
+  for (const key of neededRows) {
+    const separator = key.lastIndexOf("#");
+    const selectedRuntime = selectedRuntimeByKey.get(key);
+    const suppliedRuntime = e2eRuntimeBindingOf(context.runtimeBindings, key.slice(0, separator), key.slice(separator + 1) as "web" | "api");
     if (!selectedRuntime || !suppliedRuntime || canonicalJson(selectedRuntime) !== canonicalJson(suppliedRuntime)) {
       throw new Error("runtime binding differs from the exact selected registered runtime row");
     }
@@ -332,6 +374,8 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
   if (targetIds.length < 1 || targetIds.length > 3 || group.expectedCases.length === 0 || group.expectedCases.length > 64) throw new Error("application group has no cases or exceeds its approved limits");
   const profileId = index.targetById.get(targetIds[0]!)!.runtimeProfileId;
   if (targetIds.some((targetId) => index.targetById.get(targetId)?.runtimeProfileId !== profileId)) throw new Error("application group mixes runtime profiles");
+  const runtimeKind = index.targetById.get(targetIds[0]!)!.kind;
+  if ((runtimeKind !== "web" && runtimeKind !== "api") || targetIds.some((targetId) => index.targetById.get(targetId)?.kind !== runtimeKind)) throw new Error("application group mixes web and API targets");
   const cliDescriptor = index.cliByProfile.get(profileId);
   if (!cliDescriptor) throw new Error("application group has no exact installed CLI host descriptor");
   const cliHost = { profileId, descriptor: E2EApplicationCliHostDescriptorSchema.parse(cliDescriptor) };
@@ -356,13 +400,21 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
     if (expectedCases.length === 0) throw new Error("application target shard has no exact assigned cases");
     const ids = new Set(expectedCases.map((item) => item.caseId));
     const caseScenarios = scenarios.filter((scenario) => expectedCases.some((item) => item.scenarioId === scenario.scenarioId));
-    const timeoutMs = Math.min(...expectedCases.map(() => context.selectionInput.policy.limits.caseTimeoutMs), context.selectionInput.policy.limits.runTimeoutMs);
     const groupUsesModel = caseScenarios.some((scenario) => scenario.steps.some((step) => step.kind === "agent"));
-    const modelRoute = groupUsesModel ? context.modelRoute : null;
-    if (groupUsesModel && (!modelRoute || modelRoute.routeRevision !== context.selectionInput.policy.modelRouteRevision)) throw new Error("agent-bearing application group has no exact approved model route metadata");
+    // A project that pinned an AI navigation route has policy limits sized for agent steps; a shard with no agent step runs under the model-free limits instead (Task 4.3a).
+    // A policy that pinned no route keeps the limits it was approved with, and so does an admission written before this rule (the validator says so in the context).
+    const effectiveLimits = context.modelFreeShardRule === "before-run-1" ? e2eEffectiveRoundLimitsBeforeRun1 : e2eEffectiveRoundLimits;
+    const limits = context.selectionInput.policy.modelRouteRevision === null || context.policyLimitsForModelFreeShards === true ? context.selectionInput.policy.limits : effectiveLimits(context.selectionInput.policy.limits, groupUsesModel);
+    const timeoutMs = Math.min(...expectedCases.map(() => limits.caseTimeoutMs), limits.runTimeoutMs);
+    // Task 4.6b: an audit replay runs the agent steps with no model route at all (its admission names none) and a read-only store of the bound recordings. A shard of it with no agent step
+    // is an ordinary shard. Nothing about a group that is not a replay changes.
+    const replayShard = context.replay !== undefined && groupUsesModel;
+    if (context.replay !== undefined && context.modelRoute !== null) throw new Error("a replay application group names no model route");
+    const modelRoute = replayShard ? null : groupUsesModel ? context.modelRoute : null;
+    if (!replayShard && groupUsesModel && (!modelRoute || modelRoute.routeRevision !== context.selectionInput.policy.modelRouteRevision)) throw new Error("agent-bearing application group has no exact approved model route metadata");
     const tests = renderE2EApplicationGeneratedTest({ cases: expectedCases, scenarios: caseScenarios, timeoutMs, assertionsByCase: assertionBindings });
     const configDigest = expectedE2EApplicationConfigDigest({ projectId: "rovara-application-e2e", tests: [applicationTestPath], target: launchTarget,
-      timeout: timeoutMs, modelRoute });
+      timeout: timeoutMs, modelRoute, ...(replayShard ? { replay: true } : {}) });
     const sourceByCaseId = new Map<string, E2EApplicationSourcePosition>();
     const lines = tests.split("\n");
     expectedCases.forEach((item) => {
@@ -382,7 +434,7 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
       [E2E_APPLICATION_SELECTION_PACKET_PATH, renderE2EApplicationSelectionPacket(packet)],
       [E2E_APPLICATION_DECLARATION_PATH, renderE2EApplicationDeclaration({ target: launchTarget, cliHost,
         preparedEnvironmentDigest: prepared.preparedEnvironmentDigest, originByApplicationId: prepared.originByApplicationId,
-        timeoutMs, modelRoute, expectedConfigDigest: configDigest, cases: expectedCases, assertionsByCase: assertionBindings })],
+        timeoutMs, modelRoute, ...(replayShard ? { replay: true } : {}), expectedConfigDigest: configDigest, cases: expectedCases, assertionsByCase: assertionBindings })],
     ]);
     const inventory = emitInventory(files, configDigest);
     const shard: E2EApplicationCompiledShard = Object.freeze({ shardId: shardId(group.groupId, targetId), targetId, files,
@@ -409,18 +461,37 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
   const assertionDigest = sha256(canonicalJson([...assertionBindings].sort(([a], [b]) => a.localeCompare(b))));
   const contextDigest = sha256(canonicalJson({ selectionInput: { ...context.selectionInput, sourceSnapshot: undefined }, executionPlan: context.executionPlan,
     bundle: context.bundle, applicationBindings: [...context.applicationBindings], runtimeBindings: [...context.runtimeBindings], launchTargets: context.launchTargets,
-    modelRoute: context.modelRoute, cliHostsByProfile: [...context.cliHostsByProfile], preparedEnvironmentsByGroup: [...context.preparedEnvironmentsByGroup] }));
+    modelRoute: context.modelRoute, cliHostsByProfile: [...context.cliHostsByProfile], preparedEnvironmentsByGroup: [...context.preparedEnvironmentsByGroup],
+    policyLimitsForModelFreeShards: context.policyLimitsForModelFreeShards, modelFreeShardRule: context.modelFreeShardRule, replay: context.replay }));
   const snapshot = context.selectionInput.sourceSnapshot;
   const runtimeAdmission = Object.freeze({ schemaVersion: "e2e-application-compiled-admission/v1" as const,
     expectedCandidate: context.selectionInput.expectedCandidate, sourceSnapshot: snapshot, sourceSnapshotDigest: snapshotDigest(snapshot), contextDigest,
     bundleDigest: context.bundle.bundleDigest, compiledInventoryDigest: inventory.digest, applicationBindingsDigest: bindingsDigest,
     runtimeBindingsDigest: runtimeDigest, launchTargetsDigest: launchDigest, assertionBindingsDigest: assertionDigest });
   return Object.freeze({ protocol: "trusted-e2e-application/v1", bundle: context.bundle,
-    group: Object.freeze({ ...group, mocks: Object.freeze(groupMocks) }), cliHost, preparedEnvironmentDigest: prepared.preparedEnvironmentDigest,
+    group: Object.freeze({ ...group, mocks: Object.freeze(groupMocks) }), cliHost, runtimeKind, preparedEnvironmentDigest: prepared.preparedEnvironmentDigest,
     originByApplicationId: Object.freeze([...prepared.originByApplicationId]), files, inventory, groupConfigManifestDigest,
     shards: Object.freeze(shards), expectedCases: Object.freeze(expectedCases), selectionPacketPath: `shards/${shards[0]!.shardId}/${E2E_APPLICATION_SELECTION_PACKET_PATH}`,
     applicationBindings: context.applicationBindings, runtimeBindings: context.runtimeBindings,
     assertionBindings, runtimeAdmissionContext: context, runtimeAdmission });
+}
+
+/**
+ * The `agent` steps of a compiled group, as the model channel names them: for each expected case, every step of its scenario whose kind is `agent`, by the step's index in
+ * the scenario's steps. The worker holds the executor's step markers to exactly these, and a group with none runs with no model channel at all.
+ */
+export function e2eApplicationGroupAgentSteps(compiled: Pick<E2ECompiledApplicationSuite, "bundle" | "expectedCases">): Array<{ caseId: string; stepIndex: number }> {
+  const stepsOf = new Map(compiled.bundle.scenarios.map((scenario) => [scenario.scenarioId, scenario.steps]));
+  return compiled.expectedCases.flatMap((expected) => (stepsOf.get(expected.scenarioId) ?? []).flatMap((step, stepIndex) => (step.kind === "agent" ? [{ caseId: expected.caseId, stepIndex }] : [])));
+}
+
+/**
+ * Whether the group gets a model channel: some case has an `agent` step and the group is not part of an audit replay (Task 4.6b). A replay runs the same steps with no model, no socket
+ * and no mount, so the one question the worker, the Docker host, the services check and the broker's limits all ask is answered `false` for it. A caller that holds only the bundle
+ * and the cases (not a compiled suite) asks about a round that is not a replay.
+ */
+export function e2eApplicationGroupUsesModel(compiled: Pick<E2ECompiledApplicationSuite, "bundle" | "expectedCases"> & Partial<Pick<E2ECompiledApplicationSuite, "runtimeAdmissionContext">>): boolean {
+  return compiled.runtimeAdmissionContext?.replay === undefined && e2eApplicationGroupAgentSteps(compiled).length > 0;
 }
 
 export function compileE2EApplicationScenarios(input: { context: E2EApplicationCompilationContext; groupId: string }): E2ECompiledApplicationSuite {
@@ -467,6 +538,7 @@ export function validateE2ECompiledApplicationAdmission(compiled: E2ECompiledApp
     || canonicalJson(admissionFacts(recompilation)) !== canonicalJson(admissionFacts(compiled))
     || canonicalJson(recompilation.group) !== canonicalJson(compiled.group)
     || canonicalJson(recompilation.cliHost) !== canonicalJson(compiled.cliHost)
+    || recompilation.runtimeKind !== compiled.runtimeKind
     || recompilation.preparedEnvironmentDigest !== compiled.preparedEnvironmentDigest
     || canonicalJson(recompilation.originByApplicationId) !== canonicalJson(compiled.originByApplicationId)
     || recompilation.groupConfigManifestDigest !== compiled.groupConfigManifestDigest
@@ -545,6 +617,32 @@ export function createE2EApplicationPortableChildBindings(input: {
   return { childRound, mappings: Object.freeze(finalizedMappings) };
 }
 
+/**
+ * What an audit replay admission must hold beyond its shape (Task 4.6b): every recording is for a case of the round and an `agent` step of that case's scenario, is a file of the
+ * recording contract whose cache key is the one the admission names and whose trace is the very trace its binding digests, and the source cases are exactly the cases of the round.
+ * A recording that fails any of this makes the admission invalid: nothing is run on a replay that does not bind what it serves.
+ */
+function assertReplayAdmission(replay: NonNullable<E2EApplicationExecutionAdmission["replay"]>, suites: readonly E2ECompiledApplicationSuite[]): void {
+  const cases = new Map(suites.flatMap((suite) => suite.expectedCases.map((expected) => [expected.caseId, { suite, expected }] as const)));
+  if (canonicalJson([...cases.keys()].sort()) !== canonicalJson(replay.sourceCases.map((item) => item.caseId).sort())) throw new Error("a replay admission names the source cases of exactly the round's cases");
+  for (const source of replay.sourceCases) {
+    const scenario = cases.get(source.caseId)!.suite.bundle.scenarios.find((item) => item.scenarioId === cases.get(source.caseId)!.expected.scenarioId);
+    if (scenario === undefined || source.assertionOutcomes.length !== scenario.assertions.length) throw new Error("a replay source case does not name one outcome per assertion of its scenario");
+  }
+  for (const trace of replay.traces) {
+    const found = cases.get(trace.caseId);
+    const scenario = found?.suite.bundle.scenarios.find((item) => item.scenarioId === found.expected.scenarioId);
+    if (scenario?.steps[trace.stepIndex]?.kind !== "agent") throw new Error("a replay recording is not for an AI navigation step of a case of the round");
+    const bytes = Buffer.from(trace.traceBase64, "base64");
+    if (bytes.toString("base64") !== trace.traceBase64 || bytes.byteLength > E2E_AGENT_TRACE_FILE_MAX_BYTES) throw new Error("a replay recording is not canonical base64 within its bound");
+    let file: ReturnType<typeof E2EAgentTraceFileSchema.parse>;
+    try { file = E2EAgentTraceFileSchema.parse(JSON.parse(bytes.toString("utf8"))); } catch { throw new Error("a replay recording is not a recording of the contract"); }
+    if (file.keyHash !== trace.keyHash || sha256(canonicalJson(file.trace)) !== trace.binding.traceSha256 || file.trace.actions.length !== trace.binding.actionCount) {
+      throw new Error("a replay recording is not the one its binding digests");
+    }
+  }
+}
+
 export type ValidatedE2EApplicationAdmission = Readonly<{
   admission: E2EApplicationExecutionAdmission; sourceSnapshot: E2ESourceSnapshot; executionPlan: E2EExecutionPlan;
   applicationSuites: readonly E2ECompiledApplicationSuite[];
@@ -616,8 +714,16 @@ export function validateE2EApplicationExecutionAdmission(admissionInput: unknown
   const launchTargets = admission.launchTargets;
   const cliHostsByProfile = new Map(admission.cliHosts.map(({ profileId, descriptor }) => [profileId, descriptor]));
   const preparedEnvironmentsByGroup = new Map(admission.preparedEnvironments.map(({ groupId, ...facts }) => [groupId, facts]));
+  // Rollout (checklist 3): before Task 4.3a the control plane admitted a route-pinned policy's round with no agent step under the policy's own limits, for the round and for its shards.
+  // Such an admission says so itself: its round carries exactly the policy's limits, where one written now carries the model-free ones. It keeps validating on the shard limits it was
+  // written with. An admission with an agent step never ran before this task, and a round whose limits differ from the policy's gets no allowance.
+  const olderAdmission = admission.policy.modelRouteRevision !== null && canonicalJson(admission.round.limits) === canonicalJson(admission.policy.limits)
+    && !bundle.scenarios.some((scenario) => scenario.steps.some((step) => step.kind === "agent"));
   const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets,
-    modelRoute: admission.modelRoute, cliHostsByProfile, preparedEnvironmentsByGroup } as E2EApplicationCompilationContext;
+    modelRoute: admission.modelRoute, cliHostsByProfile, preparedEnvironmentsByGroup,
+    ...(olderAdmission ? { policyLimitsForModelFreeShards: true as const } : {}),
+    ...(admission.replay === undefined ? {} : { replay: { bindings: admission.replay.traces.map((trace) => ({ caseId: trace.caseId, stepIndex: trace.stepIndex, keyHash: trace.keyHash,
+      traceSha256: trace.binding.traceSha256, actionCount: trace.binding.actionCount })) } }) } as E2EApplicationCompilationContext;
   const runnableApplicationGroups = executionPlan.groups.filter((group) => group.mode === "real-runtime" || group.mode === "hybrid");
   const appAdmissions = admission.groups.filter((group) => group.protocol === "trusted-e2e-application/v1");
   const portableAdmissions = admission.groups.filter((group) => group.protocol === "trusted-e2e/v1");
@@ -625,26 +731,36 @@ export function validateE2EApplicationExecutionAdmission(admissionInput: unknown
     throw new Error("application admission does not exactly cover runnable application groups");
   }
   const applicationSuites = runnableApplicationGroups.map((group) => {
-    const compiled = compileE2EApplicationScenarios({ context, groupId: group.groupId });
-    const admitted = appAdmissions.find((item) => item.outerBinding.groupId === group.groupId)!;
-    const outerBinding = admission.round.groupBindings.find((item) => item.groupId === group.groupId);
-    const cliHost = admission.cliHosts.find((item) => item.profileId === compiled.cliHost.profileId);
-    if (!outerBinding || canonicalJson(admitted.outerBinding) !== canonicalJson(outerBinding)
-      || outerBinding.executionPlanDigest !== executionPlan.digest || outerBinding.executionMode !== group.mode
-      || outerBinding.mockManifestDigest !== group.mockManifestDigest || canonicalJson(outerBinding.expectedCases) !== canonicalJson(group.expectedCases)
-      || outerBinding.appBuildDigest !== sha256(canonicalJson(compiled.inventory))
-      || outerBinding.environmentDigest !== compiled.preparedEnvironmentDigest
-      || outerBinding.runtimeManifestDigest !== runtimeBindings.get(compiled.cliHost.profileId)?.manifestDigest
-      || canonicalJson(admitted.cliHost) !== canonicalJson({ profileId: compiled.cliHost.profileId, descriptor: cliHost?.descriptor })
-      || admitted.preparedEnvironmentDigest !== compiled.preparedEnvironmentDigest
-      || canonicalJson(admitted.originByApplicationId) !== canonicalJson(compiled.originByApplicationId)
-      || admitted.compiledInventoryDigest !== compiled.inventory.digest
-      || canonicalJson(admitted.shards) !== canonicalJson(compiled.inventory.shards.map((shard) => ({ shardId: shard.shardId, targetId: shard.targetId,
-        inventoryDigest: shard.inventoryDigest, configDigest: shard.expectedConfigDigest, expectedCaseIds: [...shard.expectedCaseIds] })))) {
-      throw new Error("application admission group differs from fresh shard compilation, host descriptor, or prepared facts");
+    // The current rule first. A route-pinned policy's admission written before the evaluation fix RUN-1 has shards with no agent step compiled under the 60 s / 10 s model-free
+    // limits, and its round carries the policy's own limits when it had an agent step, so it cannot say which rule it was written under: it is accepted when it matches the earlier
+    // rule exactly (the same fresh compilation, only with the earlier limits). Anything that matches neither is refused with the current rule's reason.
+    const validateGroup = (groupContext: E2EApplicationCompilationContext) => {
+      const compiled = compileE2EApplicationScenarios({ context: groupContext, groupId: group.groupId });
+      const admitted = appAdmissions.find((item) => item.outerBinding.groupId === group.groupId)!;
+      const outerBinding = admission.round.groupBindings.find((item) => item.groupId === group.groupId);
+      const cliHost = admission.cliHosts.find((item) => item.profileId === compiled.cliHost.profileId);
+      if (!outerBinding || canonicalJson(admitted.outerBinding) !== canonicalJson(outerBinding)
+        || outerBinding.executionPlanDigest !== executionPlan.digest || outerBinding.executionMode !== group.mode
+        || outerBinding.mockManifestDigest !== group.mockManifestDigest || canonicalJson(outerBinding.expectedCases) !== canonicalJson(group.expectedCases)
+        || outerBinding.appBuildDigest !== sha256(canonicalJson(compiled.inventory))
+        || outerBinding.environmentDigest !== compiled.preparedEnvironmentDigest
+        || outerBinding.runtimeManifestDigest !== e2eCompiledRuntime(compiled)?.manifestDigest
+        || canonicalJson(admitted.cliHost) !== canonicalJson({ profileId: compiled.cliHost.profileId, descriptor: cliHost?.descriptor })
+        || admitted.preparedEnvironmentDigest !== compiled.preparedEnvironmentDigest
+        || canonicalJson(admitted.originByApplicationId) !== canonicalJson(compiled.originByApplicationId)
+        || admitted.compiledInventoryDigest !== compiled.inventory.digest
+        || canonicalJson(admitted.shards) !== canonicalJson(compiled.inventory.shards.map((shard) => ({ shardId: shard.shardId, targetId: shard.targetId,
+          inventoryDigest: shard.inventoryDigest, configDigest: shard.expectedConfigDigest, expectedCaseIds: [...shard.expectedCaseIds] })))) {
+        throw new Error("application admission group differs from fresh shard compilation, host descriptor, or prepared facts");
+      }
+      return compiled;
+      };
+    try { return validateGroup(context); } catch (error) {
+      if (admission.policy.modelRouteRevision === null || context.policyLimitsForModelFreeShards === true) throw error;
+      try { return validateGroup({ ...context, modelFreeShardRule: "before-run-1" as const }); } catch { throw error; }
     }
-    return compiled;
   });
+  if (admission.replay !== undefined) assertReplayAdmission(admission.replay, applicationSuites);
   const portableProjection = projectE2EApplicationPortableSelection(selectionInput);
   if (canonicalJson(portableProjection ? portableProjectionToWire(portableProjection) : null) !== canonicalJson(admission.portableProjection)) throw new Error("portable child projection differs from fresh model-free selector derivation");
   const portableSuites: ReturnType<typeof compileE2EScenarios>[] = [];

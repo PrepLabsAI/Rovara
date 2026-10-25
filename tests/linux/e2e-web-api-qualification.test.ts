@@ -26,7 +26,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // Only the worker identity and the installed-manifest read are replaced: this CI host is not the EC2 worker and has no installed root.
     // The manifest still hashes the probe assets and the qualification app in this checkout, so a changed file fails against its pinned digest.
     const fake = fakeLinuxEnvironment(now);
-    // A web/API challenge lives an hour, which nine container runs fit inside.
+    // A web/API challenge lives an hour, which fourteen container runs fit inside.
     const challenge = webApiChallenge(now);
     const { runRoot, evidenceRoot } = await linuxProbeScratch();
     const outputRoot = (await linuxProbeScratch()).evidenceRoot;
@@ -51,13 +51,18 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const byId = new Map(proposal.probes.map((probe) => [probe.probeId, probe.observation]));
     expect(byId.get("web-csv-negative-v1")).toMatchObject({ collectorStatus: "FAILED", failedAssertionKinds: ["csv"] });
     expect(byId.get("web-egress-denial-v1")!.blockedHosts).toContain("probe.example.com");
-    expect(byId.get("api-egress-denial-v1")).toMatchObject({ collectorStatus: "FAILED", failedAssertionKinds: ["http-status"] });
+    // The name resolves to the sinkhole, which records the call (UNKNOWN, one call); the IP literal is stopped by the wall, so its assertion fails.
+    expect(byId.get("api-egress-denial-v1")).toMatchObject({ collectorStatus: "UNKNOWN", failedAssertionKinds: ["http-status"], runReason: "unmocked-external-call", unmockedCalls: { sinkhole: 1, mocked: 0 } });
     expect(byId.get("build-imds-denial-v1")).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
     expect(byId.get("build-lateral-denial-v1")).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
     // The app of this probe only starts, so the run only passes, when its connection to the host timed out.
     expect(byId.get("app-host-denial-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null });
     // Chromium ran with its own sandbox on: the retained attestation (re-judged by the registrar below) shows every renderer behind its own filter and namespaces.
     expect(byId.get("chromium-sandbox-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null });
+    // Task 4.5: the scripted model finds the button, a model that does nothing leaves the case UNKNOWN agent-no-download, and the app started behind the guard that found no path to the model.
+    expect(byId.get("web-agent-scripted-v1")).toMatchObject({ collectorStatus: "PASS", agent: { routeId: "rovara-scripted/v1", receipts: 2, okReceipts: 2, verifiedReceipts: 2, downloads: 1, caseReasons: [] } });
+    expect(byId.get("web-agent-wrong-action-v1")).toMatchObject({ collectorStatus: "UNKNOWN", failedAssertionKinds: [], agent: { receipts: 1, downloads: 0, caseReasons: ["agent-no-download"] } });
+    expect(byId.get("web-agent-app-isolation-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null, agent: { receipts: 2, downloads: 1, caseReasons: [] } });
 
     // The registrar re-derives every observation from the embedded bytes and registers both rows.
     const registry = createFakeRuntimeRegistry(Date.now());
@@ -68,6 +73,11 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const key = e2eRegisteredRuntimeKey("configured-feature", "linux-arm64-web-api-v1", kind);
       expect(registry.items.get(`${key.pk}|${key.sk}`)).toBeDefined();
     }
+    // All three agent probes were accepted, so the web row lists AI navigation and the model channel it speaks; the api row never does.
+    const webKey = e2eRegisteredRuntimeKey("configured-feature", "linux-arm64-web-api-v1", "web");
+    const apiKey = e2eRegisteredRuntimeKey("configured-feature", "linux-arm64-web-api-v1", "api");
+    expect((registry.items.get(`${webKey.pk}|${webKey.sk}`) as { capabilities: unknown }).capabilities).toMatchObject({ supportedSteps: ["navigate", "fill", "click", "choose-file", "agent"], modelChannel: "rovara-e2e-model-channel/v1" });
+    expect((registry.items.get(`${apiKey.pk}|${apiKey.sk}`) as { capabilities: { supportedSteps: string[] } }).capabilities.supportedSteps).not.toContain("agent");
 
     // One flipped byte of one embedded report: the digests no longer agree, so nothing is registered.
     const flipped = JSON.parse(bytes.toString("utf8")) as { probes: { probeId: string; evidence: { collection: { shards: { rawReport: { bytesBase64: string } }[] } } }[] };

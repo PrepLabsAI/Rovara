@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { copyBoundedE2EJsonData } from "./e2e-safe-data.js";
-import { E2EAppRecipeSchema, E2ETargetSchema, type E2ETarget } from "./e2e.js";
+import { E2E_ACCOUNTS_FILE_SEED_PROFILE, E2E_FORM_LOGIN_AUTH_PROFILE, E2EAppRecipeSchema, E2EFormLoginSchema, E2ETargetSchema, type E2ETarget } from "./e2e.js";
 import { E2ERuntimeAccountRefSchema, type E2ERuntimeAccountRef } from "./e2e-application.js";
 import { E2EApplicationExternalConnectionRefSchema } from "./e2e-application-services.js";
 import { E2EApplicationServiceContractSchema } from "./e2e-application-services.js";
@@ -10,15 +10,40 @@ import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js
 import { e2ePackageManifests, parseE2EPackageManifest } from "./e2e-package-manifests.js";
 
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
+/**
+ * The reserved account profile of the signed-out visitor (Ruling AZ). Every web and API target with a launch recipe offers it as an implicit variant; a project contract may not declare
+ * it. It is nobody: it has no registry row, no seeded account and no login, and its cases open no session. Its account reference is fixed by the application alone.
+ */
+export const E2E_ANONYMOUS_ACCOUNT_PROFILE_ID = "rovara-anonymous" as const;
+/** The identity digest every session of the anonymous profile reports: the digest of the fixed reference, which names the application and nothing else. */
+export function e2eAnonymousAccountIdDigest(applicationId: string): string {
+  return createHash("sha256").update(`rovara-anonymous/v1\0${applicationId}`, "utf8").digest("hex");
+}
+/** The account reference of the anonymous profile of one application: revision 1, and the digest of the fixed domain string and the application id. No registry holds it. */
+export function e2eAnonymousRuntimeAccountRef(applicationId: string): E2ERuntimeAccountRef {
+  return E2ERuntimeAccountRefSchema.parse({ applicationId, profileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, revision: 1, definitionDigest: e2eAnonymousAccountIdDigest(applicationId) });
+}
+/** The session reference of an anonymous case: the sentinel prefix and a UUID. It stands for no login; a case of any other profile never has one. */
+export const E2E_ANONYMOUS_SESSION_REF_PREFIX = "rovara-anonymous-" as const;
+export function isE2EAnonymousSessionRef(sessionRef: string): boolean {
+  return new RegExp(`^${E2E_ANONYMOUS_SESSION_REF_PREFIX}[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`).test(sessionRef);
+}
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const boundedId = (max = 120) => z.string().trim().min(1).max(max);
 const profileSchema = z.object({ profileId: boundedId(), scope: z.enum(["synthetic-test", "external-test"]), authProfileId: boundedId(),
-  seedProfileId: boundedId(), tenantRef: boundedId(200), roleRef: boundedId(200), identityProbeId: boundedId() }).strict();
+  seedProfileId: boundedId(), tenantRef: boundedId(200), roleRef: boundedId(200), identityProbeId: boundedId(),
+  /** The login form of a `rovara-form-login/v1` account. Part of the account digest, so changing it re-versions the account. */
+  login: E2EFormLoginSchema.optional() }).strict();
 export const E2EApplicationProjectContractSchema = z.object({
   schemaVersion: z.literal("e2e-application-project/v1"), recipe: E2EAppRecipeSchema,
   service: E2EApplicationServiceContractSchema.nullable(),
   accountProfiles: z.array(profileSchema).min(1).max(32), targetAccounts: z.array(z.object({ baseTargetId: boundedId(80), profileId: boundedId() }).strict()).max(12),
 }).strict().superRefine((value, context) => {
+  // The anonymous profile belongs to Rovara (Ruling AZ): every web and API target offers it, so no contract may declare it, list it or vary a target by it.
+  if (value.accountProfiles.some((item) => item.profileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) || value.recipe.accountProfileIds.includes(E2E_ANONYMOUS_ACCOUNT_PROFILE_ID)
+    || value.targetAccounts.some((item) => item.profileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID)) {
+    context.addIssue({ code: "custom", path: ["accountProfiles"], message: `reserved-account-profile: ${E2E_ANONYMOUS_ACCOUNT_PROFILE_ID} is offered by Rovara to every web and API target, and a project contract may not declare it` });
+  }
   const profiles = new Map(value.accountProfiles.map((item) => [item.profileId, item]));
   if (profiles.size !== value.accountProfiles.length) context.addIssue({ code: "custom", path: ["accountProfiles"], message: "application account profiles must be unique" });
   if (new Set(value.targetAccounts.map((item) => `${item.baseTargetId}\0${item.profileId}`)).size !== value.targetAccounts.length) context.addIssue({ code: "custom", path: ["targetAccounts"], message: "application account target variants must be unique" });
@@ -27,6 +52,11 @@ export const E2EApplicationProjectContractSchema = z.object({
     || value.accountProfiles.some((item) => !value.recipe.accountProfileIds.includes(item.profileId))
     || value.recipe.accountProfileIds.some((profileId) => !profiles.has(profileId))) context.addIssue({ code: "custom", path: ["recipe", "accountProfileIds"], message: "recipe and account profile inventory must match exactly" });
   if (value.accountProfiles.some((item) => item.seedProfileId !== value.recipe.seedProfileId)) context.addIssue({ code: "custom", path: ["accountProfiles"], message: "account seed profiles must match the recipe's approved seed profile" });
+  value.accountProfiles.forEach((item, index) => {
+    if ((item.authProfileId === E2E_FORM_LOGIN_AUTH_PROFILE) !== (item.login !== undefined)) context.addIssue({ code: "custom", path: ["accountProfiles", index, "login"], message: `a login form is declared exactly for ${E2E_FORM_LOGIN_AUTH_PROFILE} accounts` });
+  });
+  if (value.recipe.seed !== undefined && value.recipe.seedProfileId !== E2E_ACCOUNTS_FILE_SEED_PROFILE) context.addIssue({ code: "custom", path: ["recipe", "seed"], message: `a seed command belongs to the ${E2E_ACCOUNTS_FILE_SEED_PROFILE} seed profile` });
+  if (value.recipe.dataSizeMiB !== undefined && value.recipe.seedProfileId !== E2E_ACCOUNTS_FILE_SEED_PROFILE) context.addIssue({ code: "custom", path: ["recipe", "dataSizeMiB"], message: `a data volume belongs to the ${E2E_ACCOUNTS_FILE_SEED_PROFILE} seed profile` });
   if (value.service === null && value.recipe.launch.kind === "service") context.addIssue({ code: "custom", path: ["service"], message: "service recipe requires a source service contract" });
   if (value.service !== null && value.recipe.launch.kind !== "service") context.addIssue({ code: "custom", path: ["service"], message: "source service contract requires a service launch recipe" });
   const origins = value.service?.originBindings ?? [];
@@ -137,15 +167,58 @@ export type E2EApplicationAccountDefinition = z.infer<typeof E2EApplicationAccou
 export function e2eApplicationAccountDefinitionDigest(definition: E2EApplicationAccountDefinition): string {
   return sha(E2EApplicationAccountDefinitionSchema.parse(definition));
 }
+/** How long a synthetic account definition written at setup approval stays usable (owner decision D5). */
+export const E2E_SYNTHETIC_ACCOUNT_TTL_DAYS = 90;
+const SYNTHETIC_ACCOUNT_TTL_MS = E2E_SYNTHETIC_ACCOUNT_TTL_DAYS * 86_400_000;
+/** Registering a setup again renews a definition that has this many days or fewer left, so it never has to lapse before an administrator happens to register again. */
+export const E2E_SYNTHETIC_ACCOUNT_RENEWAL_DAYS = 14;
+
+/** The pointer row of the registry: the newest revision of one account and the digest of the definition at that revision. */
+export const E2EApplicationAccountLatestSchema = z.object({
+  revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), definitionDigest: digest,
+}).strict();
+export type E2EApplicationAccountLatest = z.infer<typeof E2EApplicationAccountLatestSchema>;
+
+/**
+ * What a synthetic account definition binds to in the approved contract: the account's own declaration, the launch recipe without its account inventory, and the
+ * service contract. Another profile being added, removed or changed leaves it as it was, so a definition is written again only when its own account (or the launch
+ * recipe it runs under) changed. External-test definitions keep binding to the whole contract.
+ */
+export function e2eSyntheticAccountContractDigest(contractInput: E2EApplicationProjectContract, profileId: string): string {
+  const contract = E2EApplicationProjectContractSchema.parse(contractInput);
+  const profile = contract.accountProfiles.find((item) => item.profileId === profileId);
+  if (!profile) throw new Error("application account profile is not declared by the source contract");
+  const { recipeDigest: _recipeDigest, accountProfileIds: _accountProfileIds, ...recipe } = contract.recipe;
+  void _recipeDigest;
+  void _accountProfileIds;
+  return sha({ schemaVersion: "e2e-synthetic-account-contract/v1", profile, recipe, service: contract.service });
+}
+
+/**
+ * The definition the registry holds for a `synthetic-test` profile of the approved contract, as written at setup approval (owner decision D5): no credential and no
+ * connection, an expiry 90 days after `now`. The subject is derived from the account's identity, not chosen by anyone, so two profiles never share one.
+ */
+export function createE2ESyntheticAccountDefinition(input: { contract: E2EApplicationProjectContract; applicationId: string; profileId: string; revision: number; now: number }): E2EApplicationAccountDefinition {
+  const contract = E2EApplicationProjectContractSchema.parse(input.contract);
+  const profile = contract.accountProfiles.find((item) => item.profileId === input.profileId);
+  if (!profile || profile.scope !== "synthetic-test") throw new Error("only a profile the source contract declares as a synthetic test account has a synthetic definition");
+  return E2EApplicationAccountDefinitionSchema.parse({
+    schemaVersion: "e2e-application-account-definition/v1", applicationId: input.applicationId, profileId: profile.profileId, revision: input.revision,
+    contractDigest: e2eSyntheticAccountContractDigest(contract, profile.profileId), authProfileId: profile.authProfileId, seedProfileId: profile.seedProfileId,
+    subjectIdDigest: createHash("sha256").update(`rovara-synthetic-subject/v1\0${input.applicationId}\0${profile.profileId}`).digest("hex"),
+    tenantIdDigest: sha(profile.tenantRef), roleRef: profile.roleRef, credentialHandleId: null, connectionRef: null,
+    expiresAt: new Date(input.now + SYNTHETIC_ACCOUNT_TTL_MS).toISOString(),
+  });
+}
 export function deriveE2EApplicationRuntimeAccountRef(definitionInput: E2EApplicationAccountDefinition): E2ERuntimeAccountRef {
   const definition = E2EApplicationAccountDefinitionSchema.parse(definitionInput);
   return E2ERuntimeAccountRefSchema.parse({ applicationId: definition.applicationId, profileId: definition.profileId, revision: definition.revision,
     definitionDigest: e2eApplicationAccountDefinitionDigest(definition) });
 }
 /**
- * The account identity of a synthetic application account: one the host generates per run from the project's own recipe (Ruling C), so no
- * registered definition exists to read a revision or digest from. It is derived from the recipe alone, so the planning context can show it to
- * the planner and approval can recompute it; a different value in a plan is a claim about an account that does not exist.
+ * The M1.2 stand-in (Ruling AT): the account identity of a synthetic application account derived from the project's recipe alone, because no registered definition
+ * existed to read a revision or digest from. Owner decision D5 replaced it with the registry (`createE2ESyntheticAccountDefinition`, written when a setup is approved).
+ * It stays only so that a record approved under M1.2 can be read as it was: a new approval never accepts a ref equal to it.
  */
 export function deriveE2ESyntheticRuntimeAccountRef(input: { applicationId: string; accountProfileId: string; recipeDigest: string }): E2ERuntimeAccountRef {
   return E2ERuntimeAccountRefSchema.parse({ applicationId: input.applicationId, profileId: input.accountProfileId, revision: 1,
@@ -157,7 +230,7 @@ export function validateE2EApplicationAccountBinding(input: { contract: E2EAppli
   const definition = E2EApplicationAccountDefinitionSchema.parse(input.definition);
   const reference = E2ERuntimeAccountRefSchema.parse(input.expectedRef);
   const profile = contract.accountProfiles.find((item) => item.profileId === definition.profileId);
-  if (!profile || definition.contractDigest !== sha(contract) || definition.authProfileId !== profile.authProfileId
+  if (!profile || definition.contractDigest !== (profile.scope === "synthetic-test" ? e2eSyntheticAccountContractDigest(contract, profile.profileId) : sha(contract)) || definition.authProfileId !== profile.authProfileId
     || definition.seedProfileId !== profile.seedProfileId || definition.roleRef !== profile.roleRef
     || definition.applicationId.trim() === "" || definition.tenantIdDigest !== sha(profile.tenantRef) || definition.expiresAt <= input.now
     || (profile.scope === "external-test" && (definition.connectionRef === null || definition.credentialHandleId === null))
@@ -168,6 +241,19 @@ export function validateE2EApplicationAccountBinding(input: { contract: E2EAppli
   const derived = deriveE2EApplicationRuntimeAccountRef(definition);
   if (canonicalJson(reference) !== canonicalJson(derived)) throw new Error("application account reference is stale or differs from its protected definition");
   return derived;
+}
+
+/**
+ * The ref of a registered definition: the definition must be the one the account's latest pointer names, and it is held to the current approved contract (its
+ * contract digest, tenant, role and scope) and to its expiry at `now` (milliseconds). Every refusal is a throw; nothing is returned for a definition that is not current.
+ */
+export function resolveE2ELatestAccountRef(input: { contract: E2EApplicationProjectContract; definition: E2EApplicationAccountDefinition; latest: E2EApplicationAccountLatest; now: number }): E2ERuntimeAccountRef {
+  const definition = E2EApplicationAccountDefinitionSchema.parse(input.definition);
+  const latest = E2EApplicationAccountLatestSchema.parse(input.latest);
+  if (latest.revision !== definition.revision || latest.definitionDigest !== e2eApplicationAccountDefinitionDigest(definition)) {
+    throw new Error("application account definition is not the latest registered revision of its account");
+  }
+  return validateE2EApplicationAccountBinding({ contract: input.contract, definition, expectedRef: deriveE2EApplicationRuntimeAccountRef(definition), now: new Date(input.now).toISOString() });
 }
 
 export function bindE2EApplicationAccountTargets(input: { contract: E2EApplicationProjectContract; applicationId: string; baseTargets: readonly E2ETarget[] }): E2ETarget[] {
@@ -183,4 +269,18 @@ export function bindE2EApplicationAccountTargets(input: { contract: E2EApplicati
   }
   if (result.length > 12) throw new Error("application account variants exceed the target inventory limit");
   return result;
+}
+
+/** The target id of the implicit anonymous variant of a base target. It reads as its base, so a base always sorts before its variant. */
+export function e2eAnonymousTargetId(baseTargetId: string): string {
+  return `${baseTargetId}-anonymous`;
+}
+
+/**
+ * The implicit `rovara-anonymous` variant of a base web or API target (Ruling AZ): the base's fields, with the target id and the account profile changed. It is derived whenever
+ * targets are read; it is never stored in a setup proposal or in discovery output, so proposals approved before it existed keep verifying.
+ */
+export function e2eAnonymousVariantOf<T extends E2ETarget>(base: T): T {
+  if ((base.kind !== "web" && base.kind !== "api") || base.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) throw new Error("only a base web or API target has an anonymous variant");
+  return E2ETargetSchema.parse({ ...base, targetId: e2eAnonymousTargetId(base.targetId), accountProfileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID }) as T;
 }

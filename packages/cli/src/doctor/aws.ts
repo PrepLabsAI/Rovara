@@ -21,6 +21,7 @@ import { vendorApi } from "../setup/connectors/vendors.js";
 import { checkDeveloperSignIn } from "../signin/check.js";
 import type { DoctorServices } from "./checks.js";
 import { readChatGptHealth } from "./chatgpt.js";
+import { readRuntimeStatus } from "./runtime.js";
 
 /** DescribeStacks for doctor: env adopt's reader (ruling F9), which also carries the last drift result.
  * Only DescribeStacks is sent; drift detection is never started (question 5). */
@@ -52,6 +53,7 @@ export function realDoctorServices(input: {
     configDir: input.configDir,
     signIn: (current) => checkDeveloperSignIn({ env: current.env, store: input.store, secrets, settings: current, fetch: input.fetch, slackApi }),
     chatgpt: async () => readChatGptHealth(input.fetch, await input.adminSession?.(settings.env)),
+    runtime: async () => readRuntimeStatus(input.fetch, await input.adminSession?.(settings.env), process.env.AWS_PROFILE),
     now: Date.now,
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
   };

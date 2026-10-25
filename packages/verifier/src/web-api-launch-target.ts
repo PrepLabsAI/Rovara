@@ -25,8 +25,12 @@ export const E2E_EXECUTOR_LAUNCH_FACTORY_ID = "executor-host" as const;
 export function webApiApplicationLaunchTarget(input: { target: { targetId: string; kind: "web" | "api"; applicationId: string; runtimeProfileId: string };
   runtime: E2ERegisteredRuntime; capture: E2EPolicy["capture"] }): E2EApplicationLaunchTarget {
   const { target, runtime, capture } = input;
+  // Traces are deferred past M1.3 (Ruling CJ): no declaration is made for a policy that asks for one.
+  if (capture.traces) throw new Error("trace capture is not supported");
   const web = target.kind === "web";
-  const artifactCapabilities = [capture.screenshots ? "screenshot" : null, capture.video ? "video" : null].filter((item) => item !== null);
+  // An API target runs on Rovara's HTTP engine, which has no artifact hook and so reports none, whatever the capture policy asks of web targets (the D3 default
+  // approves screenshots for every project, and an API-only project must still match what its engine reports).
+  const artifactCapabilities = web ? [capture.screenshots ? "screenshot" : null, capture.video ? "video" : null].filter((item) => item !== null) : [];
   // An API target's state assertions are the runtime's approved probes, so its engine has no state hook whatever the runtime supports.
   const stateCapability = web && runtime.capabilities.supportedAssertions.includes("state");
   return E2EApplicationLaunchTargetSchema.parse({ targetId: target.targetId, profileId: target.runtimeProfileId, factoryId: E2E_EXECUTOR_LAUNCH_FACTORY_ID,

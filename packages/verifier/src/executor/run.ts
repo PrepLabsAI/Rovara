@@ -10,12 +10,14 @@ import { normalizeE2EApplicationPublicList } from "../application-result-adapter
 import { parseE2EApplicationReport } from "../application-report-schema.js";
 import { createE2EApplicationRuntimeAssets } from "../application-runtime-assets.js";
 import type { E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
-import { E2E_EXECUTOR_BLOCKED_LOG, E2E_EXECUTOR_CONTEXT_ENV, E2E_EXECUTOR_OUTPUT_DIR, type ExecutorHostContext } from "./host.js";
+import { E2E_EXECUTOR_BLOCKED_LOG, E2E_EXECUTOR_CONTEXT_ENV, E2E_EXECUTOR_LOGIN_FAILED_FILE, E2E_EXECUTOR_OUTPUT_DIR, E2E_EXECUTOR_SESSION_SECRETS_FILE, type ExecutorHostContext } from "./host.js";
 import { verifyExecutorHostRegistration } from "./host-registry.js";
 import { startAppForwarder, type AppForwarder } from "./app-forward.js";
 import { attestWhenSettled, type inspectChromiumSandbox, type InspectChromiumSandboxInput } from "./chromium-sandbox.js";
 import { launchLocalChromium, type LocalChromium } from "./local-browser.js";
+import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, admittedCapturePolicy, finalizeCaptureArtifacts } from "./capture.js";
 import { createCredentialRedactor, type CredentialRedactor } from "./redact.js";
+import { validateFormLogins } from "./accounts.js";
 import { createLaunchContexts, resolveE2EExecutorSuite, type ResolvedExecutorSuite } from "./suite.js";
 
 const MAX_PLAN_BYTES = 20 * 1024 * 1024;
@@ -31,6 +33,8 @@ export type E2EExecutorRunInput = Readonly<{
   localAppUpstream?: string;
   /** Test seam for a Chromium binary other than the pinned Playwright one. */
   chromiumExecutable?: string;
+  /** Test seam, never part of a plan: where the worker's model socket really is on a machine that cannot have `/run/rovara/model.sock` (a developer's laptop). */
+  modelSocketPath?: string;
   /** Test seam for what is read about Chromium's renderer processes; the default reads `/proc`, so a host without it (macOS) cannot run a browser case. */
   inspectChromiumSandbox?: (input: InspectChromiumSandboxInput) => ReturnType<typeof inspectChromiumSandbox>;
   /** How long the sandbox check keeps looking while renderers are still starting. Default 5000; a test that expects a refusal passes 0. */
@@ -110,6 +114,13 @@ async function waitForHealthy(plan: E2EExecutorPlan, upstream: string, deadlineA
   }
 }
 
+/** The strings one JSON-lines file holds (the private files the CLI process leaves for this parent); a missing or damaged file holds none. */
+async function readJsonStrings(path: string): Promise<string[]> {
+  let text: string;
+  try { text = await readFile(path, "utf8"); } catch { return []; }
+  return text.split("\n").filter(Boolean).flatMap((line) => { try { const value = JSON.parse(line) as unknown; return typeof value === "string" ? [value] : []; } catch { return []; } });
+}
+
 const MAX_SCAN_DEPTH = 12;
 const MAX_SCAN_FILES = 50_000;
 /** Every file under root; `complete` is false when the walk hit a bound, and the caller must then treat the tree as unscanned. */
@@ -136,7 +147,9 @@ type ShardOutcome = { shardId: string; launchId: string; targetKind: string; lis
  * registered executor host, which drives the case adapters against the live application.
  */
 async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApplicationCliLaunchContext; workDir: string; planPath: string; outDir: string;
-  browser: LocalChromium | null; redactor: CredentialRedactor; signal: AbortSignal; log: (line: string) => Promise<void> }): Promise<ShardOutcome> {
+  browser: LocalChromium | null; redactor: CredentialRedactor; signal: AbortSignal; log: (line: string) => Promise<void>;
+  /** A plan with a model channel (the capture-only store) or an audit replay (the read-only store of the recordings): the run keeps the replay cache the config sets instead of switching it off. */
+  agentCapture?: boolean; modelSocketPath?: string }): Promise<ShardOutcome> {
   const { resolved, launch } = input;
   const shard = resolved.suite.shards.find((candidate) => candidate.shardId === launch.shardId)!;
   const shardKey = sha(launch.shardId).slice(0, 16);
@@ -154,7 +167,7 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
   const home = join(project, ".home"); const tmp = join(project, ".tmp");
   await mkdir(home, { mode: 0o700 }); await mkdir(tmp, { mode: 0o700 });
   const context: ExecutorHostContext = { schemaVersion: "e2e-executor-host-context/v1", planPath: input.planPath, outDir: input.outDir, projectDir: project,
-    cdpEndpoint: input.browser?.cdpEndpoint ?? null, browserPid: input.browser?.pid ?? null };
+    cdpEndpoint: input.browser?.cdpEndpoint ?? null, browserPid: input.browser?.pid ?? null, ...(input.modelSocketPath === undefined ? {} : { modelSocketPath: input.modelSocketPath }) };
   const contextPath = join(input.workDir, `host-context-${shardKey}.json`);
   await writeExclusive(contextPath, `${JSON.stringify(context)}\n`);
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp, CI: "1",
@@ -186,8 +199,14 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
   }
 
   await input.log(`shard ${shard.shardId}: running ${shard.selection.tuples.length} case(s)`);
+  // `--no-cache` wins over the config, so a group with an agent step must not pass it: its config names the capture-only store (a candidate round never replays, and the store only
+  // keeps what the runner writes after a later check passed), or, in an audit replay, the read-only store of the bound recordings. Every other group's config says `cache: "off"` and
+  // the flag stays, as it always was.
   const run = await runProcess(process.execPath, [cliPath, "run", "--config", configPath, "--reporter", "json", "--output", E2E_EXECUTOR_OUTPUT_DIR,
-    "--no-cache", "--workers", "1", "--retries", "0"], { cwd: project, env, deadlineAt: resolved.deadlineAtMs, signal: input.signal });
+    ...(input.agentCapture === true ? [] : ["--no-cache"]), "--workers", "1", "--retries", "0"], { cwd: project, env, deadlineAt: resolved.deadlineAtMs, signal: input.signal });
+  // What the sessions of this shard's cases hold (cookie values) is scrubbed from every text this parent writes from here on, the raw report included.
+  for (const secret of await readJsonStrings(join(project, E2E_EXECUTOR_SESSION_SECRETS_FILE))) input.redactor.addSessionSecret(secret);
+  const failedLogins = [...new Set(await readJsonStrings(join(project, E2E_EXECUTOR_LOGIN_FAILED_FILE)))].sort();
   await writeText("report.json", run.stdout); await writeText("run.stderr.txt", run.stderr);
   let upstreamRunId: string | null = null;
   try {
@@ -198,6 +217,11 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
   const record = processRecord(run);
   if (!cleanCompletion(run)) {
     return { ...base, list: processRecord(list), run: record, upstreamRunId, reportBytes: null, failed: false, completed: false, reason: run.timedOut ? "deadline-exceeded" : run.aborted ? "cancelled" : "cli-run-interrupted" };
+  }
+  if (failedLogins.length > 0) {
+    // A form login that did not complete leaves its cases without a session: nothing this shard says can be believed, whatever else its report holds.
+    await input.log(`shard ${shard.shardId}: the form login of account profile(s) ${failedLogins.join(", ")} did not complete`);
+    return { ...base, list: processRecord(list), run: record, upstreamRunId, reportBytes: run.stdout, failed: false, completed: false, reason: "login-failed" };
   }
   const parsed = parseE2EApplicationReport(run.stdout);
   if (parsed.kind !== "parsed") {
@@ -258,6 +282,20 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     await writeFile(join(outDir, "blocked-requests.json"), `${JSON.stringify({ schemaVersion: "e2e-executor-blocked-requests/v1",
       runId: resolved?.binding.runId ?? null, groupId: resolved?.suite.group.groupId ?? null,
       shards: shards.map((item) => ({ shardId: item.shardId, upstreamRunId: item.upstreamRunId })), blocked }, null, 2)}\n`);
+    // Screenshots and traces of failed cases are settled against the group's budget and credential scan before the last scan below. This is capture bookkeeping only:
+    // a drop is recorded in artifacts.json, and nothing it does can change the exit code or the reason.
+    if (resolved) {
+      try {
+        const admitted = resolved.suite.runtimeAdmissionContext.selectionInput.policy.capture;
+        await finalizeCaptureArtifacts({ outDir, redactor, policy: admittedCapturePolicy(admitted),
+          caseIds: resolved.suite.expectedCases.map((item) => item.caseId) });
+      } catch (error) {
+        // Nothing unlisted may stay behind: with no trustworthy listing, no capture is kept.
+        await rm(join(outDir, CAPTURE_DIR), { recursive: true, force: true }).catch(() => undefined);
+        await rm(join(outDir, CAPTURE_ARTIFACTS_FILE), { force: true }).catch(() => undefined);
+        await appendFile(logPath, `${new Date().toISOString()} captures were dropped: ${redactor.text(error instanceof Error ? error.message : "unreadable")}\n`).catch(() => undefined);
+      }
+    }
     // Last line of defense: nothing under the out directory may carry an account credential.
     // The scan fails closed: a file it cannot read in full, or a tree it cannot walk in full, leaves no trustworthy result.
     const failScan = async (why: string) => {
@@ -270,9 +308,11 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
       for (const file of listing.files) {
         const info = await lstat(file);
         if (info.size > MAX_SCAN_BYTES) { await rm(file, { force: true }); await failScan("removed an output file too large to scan for credentials"); continue; }
+        // A run credential in any spelling, or a session value a form login made (the cookies and token-like local storage the CLI process told this parent about): a file that
+        // carries one is removed, and the run has no trustworthy result.
         if (redactor.contains(await readFile(file))) {
           await rm(file, { force: true });
-          await appendFile(logPath, `${new Date().toISOString()} removed an output file that carried an account credential\n`);
+          await appendFile(logPath, `${new Date().toISOString()} removed an output file that carried an account credential or a session value: ${file.slice(outDir.length + 1)}\n`);
           if (exitCode !== 2 || reason === null) { exitCode = 2; reason = "credential-leak"; }
         }
       }
@@ -297,6 +337,9 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     redactor = createCredentialRedactor(plan.accounts);
     try { resolved = resolveE2EExecutorSuite(plan); }
     catch (error) { await log(`unavailable: admission-invalid: ${error instanceof Error ? error.message : "unreadable"}`); reason = "admission-invalid"; return; }
+    // A form-login configuration that is not the approved source's (the parent always launches a browser for one, so the browser is there) is refused before anything starts.
+    try { validateFormLogins(plan, true); }
+    catch (error) { await log(`unavailable: plan-invalid: ${error instanceof Error ? error.message : "unreadable"}`); reason = "plan-invalid"; return; }
     if (Date.now() >= resolved.deadlineAtMs) { await log("unavailable: deadline-exceeded before the run started"); reason = "deadline-exceeded"; return; }
     const registration = await verifyExecutorHostRegistration(resolved.suite.cliHost);
     if (!registration.available) { await log(`unavailable: host-unavailable: ${registration.reason}`); reason = "host-unavailable"; return; }
@@ -308,7 +351,8 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
 
     const launches = createLaunchContexts(resolved);
     if (launches.length === 0) { await log("unavailable: no-shards"); reason = "no-shards"; return; }
-    if (launches.some((launch) => launch.selectedTarget.kind === "web")) {
+    // A browser is needed by a web case, and by any account that signs in through a form (an API case of such an account reuses the cookies that browser's context kept).
+    if (launches.some((launch) => launch.selectedTarget.kind === "web") || plan.accounts.some((account) => account.login !== undefined)) {
       browser = await launchLocalChromium({ downloadDir: join(outDir, "downloads"), signal: input.signal, onCleanupDiagnostic: log,
         ...(input.chromiumExecutable === undefined ? {} : { executablePath: input.chromiumExecutable }) });
       await log("chromium is listening on loopback");
@@ -345,7 +389,8 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     workDir = await mkdtemp(join(await realpath(tmpdir()), "rovara-executor-"));
     for (const launch of launches) {
       if (state.forwarderFailure) break;
-      shards.push(await runShard({ resolved, launch, workDir, planPath: input.planPath, outDir, browser, redactor, signal: runSignal, log }));
+      shards.push(await runShard({ resolved, launch, workDir, planPath: input.planPath, outDir, browser, redactor, signal: runSignal, log,
+        ...(plan.modelChannel === undefined && plan.replay === undefined ? {} : { agentCapture: true }), ...(input.modelSocketPath === undefined ? {} : { modelSocketPath: input.modelSocketPath }) }));
     }
     if (state.forwarderFailure) { reason = "forwarder-failed"; await log(`unavailable: forwarder-failed: ${state.forwarderFailure.message}`); return; }
     if (shards.length === 0) { reason = "no-shards"; await log("unavailable: no-shards"); return; }

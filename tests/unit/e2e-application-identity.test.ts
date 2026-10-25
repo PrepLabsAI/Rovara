@@ -45,7 +45,7 @@ describe("application public-list identity", () => {
       const testPath = join(root, APPLICATION_E2E_TEST_PATH);
       await mkdir(join(root, ".agentx", "e2e"), { recursive: true });
       await writeFile(testPath, generated);
-      const script = `import { list } from "e2e/runner"; import { defineEngine } from "e2e/engine"; const input = JSON.parse(process.argv[1]); const { resolveConfig } = await import(input.resolverUrl); const model = { provider: "agentx-e2e", modelId: input.declaration.modelRoute.routeId, specificationVersion: "v4", doGenerate: async () => { throw new Error("model calls are forbidden in list conformance"); } }; const engine = defineEngine({ name: "playwright", version: "1.0.0", spiVersion: 1, platform: "web", observe: async () => { throw new Error("engine effects are forbidden in list conformance"); }, perform: async () => { throw new Error("engine effects are forbidden in list conformance"); }, actions: ["tap"] }); const reporter = { name: "agentx-application-first-party-reporter/v1", onEvent() {} }; const config = { projectId: input.declaration.projectId, tests: [input.declaration.testPath], workers: 1, retries: 0, timeout: input.declaration.timeoutMs, cache: "off", reporters: [reporter], agents: { default: { model } }, targets: [{ name: input.declaration.target.targetId, engine, app: input.declaration.target.app }] }; const resolved = resolveConfig(config, { projectRoot: input.cwd }); const result = await list({ cwd: input.cwd, config, files: [input.declaration.testPath] }); process.stdout.write(JSON.stringify({ ...result, configDigest: resolved.configDigest }));`;
+      const script = `import { list } from "e2e/runner"; import { defineEngine } from "e2e/engine"; const input = JSON.parse(process.argv[1]); const { resolveConfig } = await import(input.resolverUrl); const model = { provider: "agentx-e2e", modelId: input.declaration.modelRoute.routeId, specificationVersion: "v4", doGenerate: async () => { throw new Error("model calls are forbidden in list conformance"); } }; const executor = { name: "rovara-e2e-agent", version: "1", runStep: async () => { throw new Error("agent steps are forbidden in list conformance"); } }; const store = { writable: true, read: async () => ({ status: "miss" }), write: async () => undefined }; const engine = defineEngine({ name: "playwright", version: "1.0.0", spiVersion: 1, platform: "web", observe: async () => { throw new Error("engine effects are forbidden in list conformance"); }, perform: async () => { throw new Error("engine effects are forbidden in list conformance"); }, actions: ["tap"] }); const reporter = { name: "agentx-application-first-party-reporter/v1", onEvent() {} }; const config = { projectId: input.declaration.projectId, tests: [input.declaration.testPath], workers: 1, retries: 0, timeout: input.declaration.timeoutMs, cache: { mode: "read-write", store }, reporters: [reporter], agents: { default: { model, executor, maxInputTokens: 32000 } }, targets: [{ name: input.declaration.target.targetId, engine, app: input.declaration.target.app }] }; const resolved = resolveConfig(config, { projectRoot: input.cwd }); const result = await list({ cwd: input.cwd, config, files: [input.declaration.testPath] }); process.stdout.write(JSON.stringify({ ...result, configDigest: resolved.configDigest }));`;
       const result = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script,
         JSON.stringify({ cwd: root, declaration, resolverUrl: new URL("../../node_modules/e2e/dist/config/resolve.js", import.meta.url).href })],
       { cwd: root, encoding: "utf8" })) as { pairs: Array<{ source: { line: number } }>; configDigest: string };
@@ -112,5 +112,19 @@ describe("application public-list identity", () => {
       expect(listed.targets).toEqual(["api-a"]);
       expect(listed.pairs).toHaveLength(1);
     } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  // Task 4.3b: the digest of a group with an agent step names Rovara's executor, the 32000-token ceiling and the capture-only cache store, and no other group's digest moved. The
+  // model case above is checked against the pinned runner's own digest; this pins the other side to the value the code before this task produced.
+  it("leaves the config digest of a group with no model route exactly as it was, and moves the one of a group with a route", () => {
+    const target = { targetId: "web-fresh", profileId: "web-profile", factoryId: "installed-playwright", factoryManifestDigest: "f".repeat(64),
+      engine: { name: "playwright", version: "1.0.0", spiVersion: 1, platform: "web", capabilities: ["actions", "observation"] },
+      artifactCapabilities: [], stateCapability: false, app: { identity: "shop", environment: "test", url: "https://shop.test" } } as never;
+    const base = { projectId: "rovara-application-e2e", tests: [APPLICATION_E2E_TEST_PATH], target, timeout: 9000 };
+    expect(expectedE2EApplicationConfigDigest({ ...base, modelRoute: null })).toBe("8ebfa0d18f23af840738282afe612b3ae6ea0b2de006dffb7f23bb17fca1c6b2");
+    const route = { routeId: "route-fresh", routeRevision: "route-revision-fresh" };
+    // What the code before Task 4.3b computed for this group: the cache was off and the agents entry held the model alone.
+    expect(expectedE2EApplicationConfigDigest({ ...base, modelRoute: route })).not.toBe("6b1b8e965443c2fb69febffc0538b9fea58562f2fe8bb50ff1812a441fafc03b");
+    expect(expectedE2EApplicationConfigDigest({ ...base, modelRoute: route })).toBe("8fc618de1f334b5d945609579cd9e4256dede4bc9c2942738821aacf1594bccd");
   });
 });

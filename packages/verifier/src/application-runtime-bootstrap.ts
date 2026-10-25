@@ -5,13 +5,13 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { E2EApplicationCliHostDescriptorSchema, E2EApplicationCliLaunchContextSchema, E2EApplicationLaunchTargetSchema, E2EExpectedCaseSchema, APPLICATION_E2E_TEST_PATH, canonicalJson, copyBoundedE2EJsonData } from "@agentx/contracts";
 import type { E2EApplicationCliLaunchContext as SharedE2EApplicationCliLaunchContext } from "@agentx/contracts";
-import type { E2EConfig, ModelInstance, Reporter } from "e2e";
+import type { E2EConfig, ModelInstance, Reporter, StepExecutor } from "e2e";
 import { isEngineHandle, type EngineHandle } from "e2e/engine";
 import { z } from "zod";
 import { E2EApplicationSelectionPacketSchema } from "./application-identity.js";
 import type { E2EApplicationCompiledShard } from "./application-scenarios.js";
-import { E2E_APPLICATION_DECLARATION_PATH, E2E_APPLICATION_GENERATED_CONFIG_PATH, E2E_APPLICATION_SELECTION_PACKET_PATH,
-  expectedE2EApplicationConfigDigest, renderE2EApplicationConfigWrapper } from "./application-templates.js";
+import { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, E2E_AGENT_EXECUTOR_NAME, E2E_AGENT_EXECUTOR_VERSION, E2E_APPLICATION_DECLARATION_PATH, E2E_APPLICATION_GENERATED_CONFIG_PATH,
+  E2E_APPLICATION_SELECTION_PACKET_PATH, E2E_REPLAY_EXECUTOR_NAME, E2E_REPLAY_EXECUTOR_VERSION, expectedE2EApplicationConfigDigest, renderE2EApplicationConfigWrapper } from "./application-templates.js";
 import { expectedE2EApplicationReporterDigest } from "./application-runtime-assets.js";
 import { E2EApplicationSupervisorReadbackSchema, e2eApplicationPrivateTransferMaxBytes, e2eApplicationSupervisorEvidenceEntryMax } from "./application-result-adapter.js";
 import type { E2EApplicationSupervisorReadback } from "./application-result-adapter.js";
@@ -22,11 +22,19 @@ const HOSTS_REGISTRY = "assets/application-runtime-v1/cli-hosts.json";
 const MAX_FILE = 1_048_576;
 
 export type E2EApplicationCliLaunchContext = SharedE2EApplicationCliLaunchContext;
+/**
+ * What a host that runs agent steps adds (Task 4.3b): the model over the worker's channel, Rovara's own step executor, and the capture-only replay store. The three go together: a
+ * declaration that pins a model route gets all of them or the config load fails, and a declaration with none gets none, whatever the host offers.
+ */
+export type E2EApplicationAgentHost = Readonly<{ modelFactory: () => ModelInstance; agentExecutor: StepExecutor;
+  agentCacheStore: { readonly writable: boolean; read(keyHash: string): Promise<unknown>; write(keyHash: string, trace: never): Promise<unknown> } }>;
 export type E2EApplicationCliHost = Readonly<{ profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string };
   launchContext: E2EApplicationCliLaunchContext; installedModule: string; engine?: EngineHandle; modelFactory?: () => ModelInstance;
+  agentExecutor?: StepExecutor; agentCacheStore?: E2EApplicationAgentHost["agentCacheStore"];
   runCase(caseId: string, fixtures: unknown): Promise<void> }>;
 type E2EApplicationCliHostFactoryResult = Readonly<{ profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string };
-  engine?: EngineHandle; modelFactory?: () => ModelInstance; runCase(caseId: string, fixtures: unknown): Promise<void> }>;
+  engine?: EngineHandle; modelFactory?: () => ModelInstance; agentExecutor?: StepExecutor; agentCacheStore?: E2EApplicationAgentHost["agentCacheStore"];
+  runCase(caseId: string, fixtures: unknown): Promise<void> }>;
 
 const launchSchema = E2EApplicationCliLaunchContextSchema;
 
@@ -148,7 +156,7 @@ type Declaration = {
   target: z.infer<typeof E2EApplicationLaunchTargetSchema>;
   cliHost: { profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string } };
   preparedEnvironmentDigest: string; originByApplicationId: Array<{ applicationId: string; origin: string }>;
-  timeoutMs: number; modelRoute: null | { routeId: string; routeRevision: string }; expectedConfigDigest: string;
+  timeoutMs: number; modelRoute: null | { routeId: string; routeRevision: string }; replay?: true; expectedConfigDigest: string;
   cases: Array<{ caseId: string; upstreamTestId: string; targetId: string; assertionBindings: Array<{ index: number; kind: string; digest: string }> }>;
 };
 
@@ -157,7 +165,7 @@ const declarationSchema = z.object({ schemaVersion: z.literal("e2e-application-c
   cliHost: z.object({ profileId: z.string().min(1).max(120), descriptor: E2EApplicationCliHostDescriptorSchema }).strict(),
   preparedEnvironmentDigest: z.string().regex(/^[a-f0-9]{64}$/), originByApplicationId: z.array(z.object({ applicationId: z.string().min(1).max(120),
     origin: z.string().url().max(512) }).strict()).max(12), timeoutMs: z.number().int().positive().max(300_000),
-  modelRoute: z.object({ routeId: z.string().min(1).max(120), routeRevision: z.string().min(1).max(120) }).strict().nullable(),
+  modelRoute: z.object({ routeId: z.string().min(1).max(120), routeRevision: z.string().min(1).max(120) }).strict().nullable(), replay: z.literal(true).optional(),
   expectedConfigDigest: z.string().regex(/^[a-f0-9]{64}$/), cases: z.array(z.object({ caseId: z.string().min(1).max(160),
     upstreamTestId: z.string().min(1).max(2048), targetId: z.string().min(1).max(80), assertionBindings: z.array(z.object({
       index: z.number().int().min(0).max(19), kind: z.string().min(1).max(64), digest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -213,7 +221,7 @@ export async function prepareE2EApplicationCliConfig(input: { configUrl: string 
   if (digest !== launch.compiledInventoryDigest || sha(canonicalJson(body)) !== digest) throw new Error("application compiled shard inventory digest is invalid");
   if (inv.upstream.expectedConfigDigest !== declaration.expectedConfigDigest
     || expectedE2EApplicationConfigDigest({ projectId: declaration.projectId, tests: [declaration.testPath], target: declaration.target,
-      timeout: declaration.timeoutMs, modelRoute: declaration.modelRoute }) !== declaration.expectedConfigDigest) throw new Error("application config digest differs from its exact declaration and runner inventory");
+      timeout: declaration.timeoutMs, modelRoute: declaration.modelRoute, ...(declaration.replay === true ? { replay: true } : {}) }) !== declaration.expectedConfigDigest) throw new Error("application config digest differs from its exact declaration and runner inventory");
   const files = inv.files;
   const fixedPaths: ReadonlySet<string> = new Set([E2E_APPLICATION_GENERATED_CONFIG_PATH, E2E_APPLICATION_DECLARATION_PATH, E2E_APPLICATION_SELECTION_PACKET_PATH]);
   const sourceFiles = new Map<string, string>();
@@ -285,7 +293,41 @@ export async function prepareE2EApplicationCliConfig(input: { configUrl: string 
   const reporterModule = await import(pathToFileURL(reporterPath).href) as { reporter?: Reporter };
   const reporter = reporterModule.reporter;
   if (!reporter || reporter.name !== "agentx-application-first-party-reporter/v1" || typeof reporter.onEvent !== "function") throw new Error("fixed application reporter asset has no valid reporter export");
+  const agentConfig = e2eApplicationAgentConfig({ modelRoute: declaration.modelRoute, replay: declaration.replay === true }, host);
+  return { projectId: declaration.projectId, tests: [declaration.testPath], targets: [target], timeout: declaration.timeoutMs, workers: 1, retries: 0, reporters: [reporter], ...agentConfig };
+}
+
+/**
+ * The cache and agents part of a shard's config, from what its declaration names and what the installed host offers. It refuses, and the config never loads, when they disagree:
+ *
+ *  - a declaration that names no model route is never given a model factory (whatever the host offers), and an audit replay (Task 4.6b) names no route and is given no model either;
+ *  - a route needs the model factory, Rovara's governed step executor (no model, judge or cache preference of its own) and the capture-only store (read-write);
+ *  - a replay needs Rovara's replay executor (the same) and a store that never writes, and gets a read-only cache and an agents entry with no model.
+ *
+ * A group with no route and no replay runs with the cache off and no agent.
+ */
+export function e2eApplicationAgentConfig(declaration: Readonly<{ modelRoute: null | { routeId: string; routeRevision: string }; replay: boolean }>,
+  host: Pick<E2EApplicationCliHost, "modelFactory" | "agentExecutor" | "agentCacheStore">): Pick<E2EConfig, "cache" | "agents"> {
+  // A declaration that names no model route never gets a model, whatever the host offers. This is the first of the ways a replay provably runs with no model.
+  if (declaration.modelRoute === null && host.modelFactory !== undefined) throw new Error("a declaration that names no model route is not given a model factory");
+  if (declaration.replay && (declaration.modelRoute !== null || host.modelFactory !== undefined)) throw new Error("an audit replay is given no model route and no model");
   if (declaration.modelRoute && typeof host.modelFactory !== "function") throw new Error("governed model adapter is unavailable for the declared route");
+  // The step executor and the capture store come with the model or not at all: a group with no model route runs with the cache off and no agent.
+  if (declaration.modelRoute && (host.agentExecutor === undefined || host.agentExecutor.name !== E2E_AGENT_EXECUTOR_NAME || host.agentExecutor.version !== E2E_AGENT_EXECUTOR_VERSION
+    || host.agentExecutor.cache !== undefined || host.agentExecutor.model !== undefined || host.agentExecutor.judge !== undefined)) throw new Error("installed host agent executor is not Rovara's governed step executor");
+  if (declaration.modelRoute && (host.agentCacheStore === undefined || host.agentCacheStore.writable !== true || typeof host.agentCacheStore.read !== "function" || typeof host.agentCacheStore.write !== "function")) {
+    throw new Error("installed host has no capture store for the declared route");
+  }
+  // An audit replay: the model-less replay executor and a store that never writes, or the config does not load. It holds no model, no judge and no cache preference of its own.
+  if (declaration.replay) {
+    const executor = host.agentExecutor;
+    if (executor === undefined || executor.name !== E2E_REPLAY_EXECUTOR_NAME || executor.version !== E2E_REPLAY_EXECUTOR_VERSION
+      || executor.cache !== undefined || executor.model !== undefined || executor.judge !== undefined) throw new Error("installed host agent executor is not Rovara's replay executor");
+    if (host.agentCacheStore === undefined || host.agentCacheStore.writable !== false || typeof host.agentCacheStore.read !== "function" || typeof host.agentCacheStore.write !== "function") {
+      throw new Error("installed host has no read-only store for the replay");
+    }
+    return { cache: { mode: "read-only", store: host.agentCacheStore as never }, agents: { default: { executor } } };
+  }
   let model: ModelInstance | undefined;
   if (declaration.modelRoute) {
     const route = declaration.modelRoute;
@@ -300,10 +342,12 @@ export async function prepareE2EApplicationCliConfig(input: { configUrl: string 
       }
       return resolved;
     };
-    model = Object.freeze({ provider: "agentx-e2e", modelId: route.routeId, specificationVersion: "v4",
+    // `supportedUrls` is read by the AI SDK's model wrapper; with no file parts ever sent, no URL is supported.
+    model = Object.freeze({ provider: "agentx-e2e", modelId: route.routeId, specificationVersion: "v4", supportedUrls: {},
       doGenerate: (...args: never[]) => getModel().doGenerate(...args) });
   }
-  const config: E2EConfig = { projectId: declaration.projectId, tests: [declaration.testPath], targets: [target], timeout: declaration.timeoutMs,
-    workers: 1, retries: 0, cache: "off", reporters: [reporter], ...(model ? { agents: { default: { model } } } : {}) };
-  return config;
+  // A group with an agent step records what its steps did into the capture-only store (the runner writes only after a later deterministic check passed, and a candidate round never
+  // replays); every other group runs with the cache off. The executor's identity, the input ceiling and the cache are what the shard's config digest names for such a group.
+  return { cache: model ? { mode: "read-write", store: host.agentCacheStore as never } : "off",
+    ...(model ? { agents: { default: { model, executor: host.agentExecutor!, maxInputTokens: E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } } } : {}) };
 }

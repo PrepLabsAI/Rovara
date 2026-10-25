@@ -1,4 +1,4 @@
-import type { ModelRef, ProjectModelOptions } from "@agentx/contracts";
+import { modelCheckClassSentence, type ModelRef, type ProjectModelOptions } from "@agentx/contracts";
 import { escapeText } from "./slack-format.js";
 
 export type ModelCommand = { kind: "list" } | { kind: "use"; selector: string };
@@ -37,4 +37,11 @@ export function modelName(model: ModelRef): string {
 
 function modelNames(model: ModelRef): string[] {
   return [model.label, model.modelId, `${model.provider}/${model.modelId}`].filter((value): value is string => value !== undefined);
+}
+
+/** MODEL1: what `@agentx use` adds when the last stored check of the chosen pair failed: the class sentence, never provider text. Empty when the check passed or never ran. */
+export function modelCheckWarning(model: ModelRef): string {
+  const check = model.lastCheck;
+  if (check === undefined || check.status !== "failed" || check.class === undefined) return "";
+  return ` The last check of this model failed: ${escapeText(modelCheckClassSentence({ provider: model.provider, modelId: model.modelId, class: check.class }))} Its next turn may fail; ask a project admin to run agentx doctor.`;
 }

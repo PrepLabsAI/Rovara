@@ -1,7 +1,9 @@
 import {
-  E2EApiMockFixtureSchema, canonicalJson, createE2EOpenApiFixtureDescriptor, e2eApplicationRecipeIsProjectContract, inspectE2EPortableSource,
-  deriveE2ESyntheticRuntimeAccountRef, inspectE2ERepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, redactSecrets, verifyE2ESourceSnapshot, type E2EAppRecipe, type E2EPolicy, type E2ESourceSnapshot,
+  E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2EApiMockFixtureSchema, canonicalJson, e2eAnonymousRuntimeAccountRef, createE2EOpenApiFixtureDescriptor, e2eApplicationRecipeIsProjectContract, inspectE2EPortableSource,
+  inspectE2EApplicationRepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract, redactSecrets, verifyE2ESourceSnapshot, withE2EAnonymousTargets,
+  type E2EAppRecipe, type E2EApplicationProjectContract, type E2EPolicy, type E2ERuntimeAccountRef, type E2ESourceSnapshot,
 } from "@agentx/contracts";
+import { E2EAccountRegistryError, latestAccountRef, type E2EAccountRegistryEntry } from "./application-account-registry.js";
 import type { ReadyE2ERuntime } from "../aws/e2e-runtime-readiness.js";
 import { E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs } from "@agentx/contracts";
 import * as ts from "typescript";
@@ -24,6 +26,8 @@ export type FeatureE2EPlanningContext = {
   runtimeRefs?: Array<{ targetId: string; applicationId: string; recipeDigest: string | null; sourceRefs: Array<{ path: string; sha256: string }>;
     runtimeProfileId: string; accountProfileId: string }>;
   unavailableTargetRefs?: Array<{ targetId: string; applicationId: string; accountProfileId: string; sourceRefs: Array<{ path: string; sha256: string }> }>;
+  /** Base targets whose implicit signed-out (`rovara-anonymous`) variant is not offered because the target inventory (12) is full; absent when every variant fits. */
+  anonymousVariantsOmitted?: Array<{ targetId: string; reason: "target-inventory-full" }>;
   /** Why each unavailable target cannot run application scenarios now; kept apart from the refs, which the proposal copies back strictly. */
   unavailableReasons?: Array<{ targetId: string; reason: FeatureE2EUnavailableReason }>;
   /** The step and assertion kinds a READY runtime executes, once per target kind that has an executable target. */
@@ -33,7 +37,11 @@ export type FeatureE2EPlanningContext = {
   portableOperations: Array<{ operationId: string; applicationId: string; requestedTargetIds: string[]; packageExportSubpath: string;
     moduleSpecifier: string; callableSelectors: Array<{ selector: { kind: "default" } | { kind: "named"; exportName: string }; firstInputParameter?: string }>;
     sourceRefs: Array<{ path: string; sha256: string }> }>;
-  mockFixtures: Array<{ componentId: string; requestedTargetId: string; operationId: string; sourcePath: string; sourceSha256: string;
+  /**
+   * Each source-backed mock once (PLANCTX, Ruling DE), with every target that may use it in `requestedTargetIds`. The plan still names a mock per target it uses (`mockFixtureRefs`
+   * carries one `requestedTargetId` each), so a target the mock lists may copy the reference with its own id.
+   */
+  mockFixtures: Array<{ componentId: string; requestedTargetIds: string[]; operationId: string; sourcePath: string; sourceSha256: string;
     contractPath: string; contractSha256: string; method: string; path: string; inputSelector: { kind: "query"; name: string };
     callableMappings: Array<{ invokeOperationId: string; callableSelector: { kind: "default" } | { kind: "named"; exportName: string }; firstInputParameter: string }>;
     variants: Array<{ id: string; inputValue: string; status: number; response: unknown }> }>;
@@ -41,10 +49,12 @@ export type FeatureE2EPlanningContext = {
 };
 
 /**
- * Why a target is not executable for application scenarios: the placeholder profile, no launch recipe, only an inferred recipe, a runtime that is not READY
- * now, or an application with no source-owned package or native project identity to bind its account and source references to.
+ * Why a target is not executable for application scenarios: the placeholder profile, no launch recipe, only an inferred recipe (for a target that runs as an account: the
+ * anonymous variant of a target runs on an inferred recipe), a runtime that is not READY
+ * now, an application with no source-owned package or native project identity to bind its account and source references to, or an account with no usable registered
+ * definition (`no-account-definition`: none was written when the setup was approved, or the latest has expired or is not what the approved contract says).
  */
-export type FeatureE2EUnavailableReason = "runtime-unavailable" | "no-launch-recipe" | "needs-project-contract" | "runtime-not-ready" | "no-source-identity";
+export type FeatureE2EUnavailableReason = "runtime-unavailable" | "no-launch-recipe" | "needs-project-contract" | "runtime-not-ready" | "no-source-identity" | "no-account-definition";
 
 export type FeatureE2EPlanningContextResult = FeatureE2EPlanningContext | { status: "unknown"; reason: string };
 
@@ -101,6 +111,12 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
   origin?: FeatureE2EPlanningContext["source"]["origin"]; preparedCommitSha?: string | null;
   /** The web/API runtimes READY for the project's runtime binding right now (see readProjectReadyE2ERuntimes); none when omitted. */
   readyRuntimes?: readonly ReadyE2ERuntime[];
+  /** The registered test accounts of the project (the setup approval writes them): the planner is shown each executable target's latest account ref. None when omitted. */
+  accountRegistry?: readonly E2EAccountRegistryEntry[];
+  /** The clock the registered definitions' expiry is judged by (milliseconds); the current time when omitted. */
+  now?: number;
+  /** True when the project's policy pins an AI navigation route that is the installation's latest (Task 4.2). `agent` steps are offered to the planner only then, and only for web targets. */
+  agentRouteApproved?: boolean;
 } = {}): FeatureE2EPlanningContextResult {
   try {
     const sourceOrigin = identity.origin ?? "prepared-commit";
@@ -109,9 +125,15 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       || (preparedCommitSha !== null && preparedCommitSha !== snapshot.commitSha)) {
       return { status: "unknown", reason: "source snapshot identity does not match the prepared commit" };
     }
-    const discovered = inspectE2ERepository(snapshot, snapshot.candidate);
+    const discovered = inspectE2EApplicationRepository(snapshot, snapshot.candidate);
+    // The policy holds the base targets; each base web or API target also offers the signed-out visitor, derived here from the base (Ruling AZ), never stored.
+    // A project whose targets are not approved on the qualified runtime profile reads exactly what it did (Ruling AQ): its targets get no variant in what the planner is shown.
+    const effectiveTargets = withE2EAnonymousTargets(policy.targets, discovered.anonymous)
+      .filter((target) => target.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID || isE2EQualifiedRuntimeProfileId(target.runtimeProfileId));
+    const anonymousVariantsOmitted = discovered.anonymous.omittedBaseTargetIds.filter((id) => policy.targets.some((target) => target.targetId === id && isE2EQualifiedRuntimeProfileId(target.runtimeProfileId)))
+      .map((targetId) => ({ targetId, reason: "target-inventory-full" as const }));
     const sourceByPath = new Map(snapshot.sources.map((source) => [source.path, source]));
-    const targetedApplicationIds = new Set(policy.targets.map((configured) => configured.applicationId));
+    const targetedApplicationIds = new Set(effectiveTargets.map((configured) => configured.applicationId));
     const identitylessApplicationIds = new Set<string>();
     const applicationRefs = discovered.inspection.applications.flatMap((application) => {
       try {
@@ -125,7 +147,7 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
         return [];
       }
     });
-    const targets = policy.targets.flatMap((configured) => {
+    const targets = effectiveTargets.flatMap((configured) => {
       const found = discovered.inspection.proposedTargets.find((target) => target.targetId === configured.targetId
         && target.applicationId === configured.applicationId && target.kind === configured.kind && target.accountProfileId === configured.accountProfileId);
       return found === undefined ? [] : [{ targetId: found.targetId, applicationId: found.applicationId, kind: found.kind, accountProfileId: found.accountProfileId }];
@@ -136,10 +158,28 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     // The runtime profile is the one the project's approved setup assigned (policy targets), not the discovery placeholder; the target is
     // executable for application scenarios only while that profile's runtime is READY for the project now and its recipe is the project's own.
     const readyRuntimes = identity.readyRuntimes ?? [];
-    const configuredTarget = (targetId: string) => policy.targets.find((item) => item.targetId === targetId)!;
+    const configuredTarget = (targetId: string) => effectiveTargets.find((item) => item.targetId === targetId)!;
     const readyRuntimeFor = (target: (typeof targets)[number]): ReadyE2ERuntime | undefined => {
       const profileId = configuredTarget(target.targetId).runtimeProfileId;
       return target.kind === "web" || target.kind === "api" ? readyRuntimes.find((item) => item.kind === target.kind && item.profileId === profileId) : undefined;
+    };
+    // The target's account as the registry holds it now, held to the approved contract: absent when none is registered or the latest cannot be used (Task 3.1).
+    const accountNow = identity.now ?? Date.now();
+    const accountRefCache = new Map<string, E2ERuntimeAccountRef | undefined>();
+    const accountRefFor = (applicationId: string, profileId: string): E2ERuntimeAccountRef | undefined => {
+      const key = `${applicationId}\0${profileId}`;
+      if (accountRefCache.has(key)) return accountRefCache.get(key);
+      // The signed-out visitor is nobody's account: its reference is fixed by the application, and no registry row stands behind it (Ruling AZ).
+      if (profileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID) return e2eAnonymousRuntimeAccountRef(applicationId);
+      let contract: E2EApplicationProjectContract | null;
+      try { contract = readE2EApplicationProjectContract(snapshot, applicationId); } catch { contract = null; }
+      let ref: E2ERuntimeAccountRef | undefined;
+      if (contract !== null) {
+        try { ref = latestAccountRef({ contract, entries: identity.accountRegistry ?? [], applicationId, profileId, now: accountNow }); }
+        catch (error) { if (!(error instanceof E2EAccountRegistryError)) throw error; }
+      }
+      accountRefCache.set(key, ref);
+      return ref;
     };
     const unavailableReason = (target: (typeof targets)[number]): FeatureE2EUnavailableReason | undefined => {
       const profileId = configuredTarget(target.targetId).runtimeProfileId;
@@ -147,8 +187,11 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       if (identitylessApplicationIds.has(target.applicationId) && targetedApplicationIds.has(target.applicationId)) return "no-source-identity";
       if (application === undefined || isE2EPlaceholderRuntimeProfileId(profileId)) return "runtime-unavailable";
       if (application.recipe === null) return "no-launch-recipe";
-      if (isE2EQualifiedRuntimeProfileId(profileId) && !e2eApplicationRecipeIsProjectContract(snapshot, target.applicationId, application.recipe)) return "needs-project-contract";
-      return readyRuntimeFor(target) === undefined ? (isE2EQualifiedRuntimeProfileId(profileId) ? "runtime-not-ready" : "runtime-unavailable") : undefined;
+      // A signed-out visitor needs no registered account, so an inferred launch recipe is enough for it (Ruling AZ); every signed-in target still needs the project contract.
+      if (isE2EQualifiedRuntimeProfileId(profileId) && target.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID
+        && !e2eApplicationRecipeIsProjectContract(snapshot, target.applicationId, application.recipe)) return "needs-project-contract";
+      if (readyRuntimeFor(target) === undefined) return isE2EQualifiedRuntimeProfileId(profileId) ? "runtime-not-ready" : "runtime-unavailable";
+      return isE2EQualifiedRuntimeProfileId(profileId) && accountRefFor(target.applicationId, target.accountProfileId) === undefined ? "no-account-definition" : undefined;
     };
     const runtimeRefs = targets.flatMap((target) => {
       const applicationRef = applicationRefs.find((item) => item.applicationId === target.applicationId);
@@ -167,11 +210,14 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     });
     const executableKinds = (["web", "api"] as const).flatMap((kind) => {
       const ready = targets.filter((target) => target.kind === kind && unavailableReason(target) === undefined).map(readyRuntimeFor)[0];
-      return ready === undefined ? [] : [{ kind, steps: ready.supportedSteps.filter((step) => step !== "agent"), assertions: [...ready.supportedAssertions] }];
+      return ready === undefined ? [] : [{ kind, steps: ready.supportedSteps.filter((step) => step !== "agent" || (identity.agentRouteApproved === true && kind === "web")), assertions: [...ready.supportedAssertions] }];
     });
-    const runtimeAccountRefs = runtimeRefs.flatMap((ref) => unavailableReasons.some((item) => item.targetId === ref.targetId) || ref.recipeDigest === null ? []
-      : [deriveE2ESyntheticRuntimeAccountRef({ applicationId: ref.applicationId, accountProfileId: ref.accountProfileId, recipeDigest: ref.recipeDigest })])
-      .filter((ref, index, refs) => refs.findIndex((item) => item.applicationId === ref.applicationId && item.profileId === ref.profileId) === index);
+    // The refs the plan copies are the registry's latest, one per (application, account profile): an owner and a viewer of one application each get their own.
+    const runtimeAccountRefs = runtimeRefs.flatMap((ref) => {
+      if (unavailableReasons.some((item) => item.targetId === ref.targetId) || ref.recipeDigest === null) return [];
+      const account = accountRefFor(ref.applicationId, ref.accountProfileId);
+      return account === undefined ? [] : [account];
+    }).filter((ref, index, refs) => refs.findIndex((item) => item.applicationId === ref.applicationId && item.profileId === ref.profileId) === index);
     const portableOperations = discovered.portableOperations.flatMap((operation) => {
       const requestedTargetIds = operation.targetIds.filter((targetId) => selectedTargetIds.has(targetId));
       if (requestedTargetIds.length === 0) return [];
@@ -191,6 +237,8 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     }).slice(0, 32);
 
     const mockFixtures: FeatureE2EPlanningContext["mockFixtures"] = [];
+    const mockByIdentity = new Map<string, FeatureE2EPlanningContext["mockFixtures"][number]>();
+    const mockOfTarget = new Set<string>();
     for (const target of targets) {
       for (const edge of discovered.inspection.dependencyEdges.filter((item) => item.fromApplicationId === target.applicationId
         && item.contractRef !== null && /(^|\/)(?:openapi|swagger)\.(?:json|ya?ml)$/i.test(item.contractRef))) {
@@ -215,13 +263,20 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
               && (inputParameter.schema.maxLength === undefined || variant.inputValue.length <= inputParameter.schema.maxLength)
               && (inputParameter.schema.minLength === undefined || variant.inputValue.length >= inputParameter.schema.minLength));
           if (contractOperation === undefined || inputParameter === undefined || !inputMatchesSchema) continue;
-          if (mockFixtures.some((item) => item.requestedTargetId === target.targetId && item.componentId === edge.toComponentId)) continue;
-          mockFixtures.push({ componentId: edge.toComponentId, requestedTargetId: target.targetId, operationId: parsed.data.operationId,
+          // A target takes the first mock that fits a component, as before; a mock that other targets already use is listed once, under every target that uses it.
+          if (mockOfTarget.has(`${target.targetId}\0${edge.toComponentId}`)) continue;
+          mockOfTarget.add(`${target.targetId}\0${edge.toComponentId}`);
+          const identity = [edge.toComponentId, source.path, source.sha256, contractPath, contractSource.sha256].join("\0");
+          const listed = mockByIdentity.get(identity);
+          if (listed !== undefined) { listed.requestedTargetIds.push(target.targetId); continue; }
+          const entry: FeatureE2EPlanningContext["mockFixtures"][number] = { componentId: edge.toComponentId, requestedTargetIds: [target.targetId], operationId: parsed.data.operationId,
             sourcePath: source.path, sourceSha256: source.sha256, contractPath, contractSha256: contractSource.sha256,
             method: parsed.data.method, path: parsed.data.path, inputSelector: { kind: "query", name: parsed.data.inputField },
             callableMappings: [],
             variants: parsed.data.variants.map((variant) => ({ id: variant.id, inputValue: variant.inputValue, status: variant.status,
-              response: redactSecrets(variant.body) })) });
+              response: redactSecrets(variant.body) })) };
+          mockByIdentity.set(identity, entry);
+          mockFixtures.push(entry);
         }
       }
     }
@@ -241,7 +296,7 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       baselineScenarioIds: policy.baselineScenarioIds, targets, applicationRefs, runtimeRefs, unavailableTargetRefs,
       // Ruling AQ: a policy with no target on a qualified profile (every P0 project) keeps the pre-2.2 context and prompt exactly.
       ...(targets.some((target) => isE2EQualifiedRuntimeProfileId(configuredTarget(target.targetId).runtimeProfileId)) || unavailableReasons.some((item) => item.reason === "no-source-identity")
-        ? { unavailableReasons, executableKinds, runtimeAccountRefs } : {}),
+        ? { unavailableReasons, executableKinds, runtimeAccountRefs, ...(anonymousVariantsOmitted.length === 0 ? {} : { anonymousVariantsOmitted }) } : {}),
       portableOperations, mockFixtures: mockFixtures.slice(0, 32), accountContextRefs,
     };
     if (Buffer.byteLength(canonicalJson(context), "utf8") > MAX_PLANNING_CONTEXT_BYTES) {

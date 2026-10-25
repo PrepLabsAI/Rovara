@@ -1,17 +1,24 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, mkdir, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E2E_HARD_LIMITS, WorkerInvocationSchema, type E2EApplicationExecutionAdmission } from "@agentx/contracts";
+import type { E2EReplayTrace } from "@agentx/contracts";
+import { E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, WorkerInvocationSchema, canonicalJson, e2eModelRouteRevision, e2eRuntimeBindingKey, type E2EApplicationExecutionAdmission,
+  type E2EModelDayBudgetRequest } from "@agentx/contracts";
 import { createDockerApplicationHost, DEFAULT_DEADLINE_GRACE_MS, STALE_RUN_SWEEP_AGE_MS, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
 import { DIAGNOSTICS_NOTICE, createEvidenceBudget } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES } from "@agentx/contracts";
 import type { CandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
+import type { E2EAgentModelEvidence } from "../../packages/verifier/src/application-agent-result.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
+import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
+import { createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
+import { FIXED_RUNTIME_DATING, replayPlanOf } from "../support/replay-fixture.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
 
 const TASK_ID = "44444444-4444-4444-8444-444444444444";
@@ -23,10 +30,38 @@ const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("he
 const assembledRun = { protocol: "e2e-actual-application-run/v1", cleanupConfirmed: true, cleanupServerListening: false, supervisorReadback: { marker: "assembled" } };
 const collectionInputs = { marker: "collection-inputs" };
 
-async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: FakeDockerCli; assembled?: object } = {}) {
+/** The same admission as the current broker writes it: schema version 2, each runtime row keyed by its profile and kind (the probe plan writes version 1). */
+function asVersion2(admission: E2EApplicationExecutionAdmission): E2EApplicationExecutionAdmission {
+  const { admissionDigest: _digest, ...body } = admission;
+  void _digest;
+  const edited = { ...body, schemaVersion: E2E_APPLICATION_ADMISSION_SCHEMA_V2,
+    runtimeBindings: admission.runtimeBindings.map(({ value }) => ({ key: e2eRuntimeBindingKey(value.profileId, value.capabilities.kind as "web" | "api"), value })).sort((a, b) => (a.key < b.key ? -1 : 1)) };
+  return { ...edited, admissionDigest: sha(Buffer.from(canonicalJson(edited), "utf8")) };
+}
+
+async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: FakeDockerCli; assembled?: object; version2?: boolean;
+  /** Task 4.3a: pins this route in the policy and the admission; with `agent`, the case also has an AI navigation step. */
+  route?: { routeId: string; routeRevision: string }; agent?: boolean;
+  /** What the invocation's reference says besides the admission it names (agentSteps, purpose, base commit, attempt). */
+  reference?: Record<string, unknown>;
+  /** Marks the admission itself as a baseline round (re-signed), as the broker's baseline admission is. */
+  baseline?: boolean;
+  /** Task 4.6b: plans an audit replay of the case (synthetic bound recordings); the reference then says so unless `reference` overrides it. */
+  replay?: boolean } = {}) {
   const fake = options.fake ?? new FakeDockerCli();
-  const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", taskId: TASK_ID, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }) });
-  const admission: E2EApplicationExecutionAdmission = fixture.plan.admission;
+  const build = (replay: { traces: E2EReplayTrace[] } | undefined) => createOrdersExecutorPlan({ probe: "web-csv-positive-v1", taskId: TASK_ID, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
+    ...(replay === undefined ? {} : { replay, runtimeAt: FIXED_RUNTIME_DATING }), ...(options.replay === true ? { runtimeAt: FIXED_RUNTIME_DATING } : {}),
+    ...(options.route === undefined ? {} : { modelRoute: options.route }),
+    ...(options.agent === true ? { accountScenarios: [{ accountProfileId: "orders-owner", scenario: (targetId: string) => ({ scenarioId: "agent-export", requirementId: "orders-export", requestedTargetIds: [targetId], required: true,
+      accountProfileId: "orders-owner", minimumEvidence: "runtime" as const, requiredRealComponentIds: [], steps: [{ kind: "agent" as const, goal: "Export the orders as a CSV file", maxActions: 4 }],
+      assertions: [{ kind: "csv" as const, downloadName: "orders.csv", columns: ["id", "total"], rows: [["1", "10"]] }] }) }] } : {}) });
+  const fixture = options.replay === true ? replayPlanOf(build) : build(undefined);
+  const written = options.version2 === true ? asVersion2(fixture.plan.admission) : fixture.plan.admission;
+  const signed = options.baseline === true
+    ? (() => { const { admissionDigest: _digest, ...body } = written; void _digest; const withBaseline = { ...body, baseline: { purpose: "baseline" as const, baseCommitSha: written.candidateCommitSha, attempt: 1 } };
+      return { ...withBaseline, admissionDigest: sha(Buffer.from(canonicalJson(withBaseline), "utf8")) } as unknown as E2EApplicationExecutionAdmission; })()
+    : written;
+  const admission: E2EApplicationExecutionAdmission = signed;
   const admissionBytes = Buffer.from(encodeE2EApplicationExecutionAdmission(admission), "utf8");
   const admissionSha = sha(admissionBytes);
   const invocation = WorkerInvocationSchema.parse({
@@ -36,7 +71,9 @@ async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: Fa
       readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 }],
       workflowE2EAdmission: { schemaVersion: 1, kind: "application", taskId: admission.taskId, workflowRevision: admission.workflowRevision, candidateDigest: admission.candidateDigest,
         roundId: admission.round.roundId, groupRunIds: admission.groups.map((group) => group.outerBinding.runId),
-        admissionRef: { key: `workflow-e2e-admissions/sha256/${admissionSha}.json`, sha256: admissionSha, byteLength: admissionBytes.byteLength } } },
+        admissionRef: { key: `workflow-e2e-admissions/sha256/${admissionSha}.json`, sha256: admissionSha, byteLength: admissionBytes.byteLength },
+        ...(options.agent === true && options.replay !== true ? { agentSteps: true } : {}),
+        ...(options.replay === true ? { purpose: "replay", sourceRoundId: admission.replay!.sourceRoundId, attempt: admission.replay!.attempt } : {}), ...options.reference } },
   });
   if (invocation.kind !== "task") throw new Error("fixture invocation must be a task");
   const readAdmission = vi.fn(async (offset: number) => {
@@ -48,7 +85,9 @@ async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: Fa
     saved.push({ bytes: Buffer.from(bytes), groupRunId, maxBytes });
     return { key: `workflow-e2e-${groupRunId === undefined ? "evidence" : "group-evidence"}/sha256/${digest}.json`, sha256: digest };
   });
-  const runRoot = await temp("application-run-root-");
+  // A unix socket path is short (about 100 bytes), so a round with a model channel runs in a short root.
+  const runRoot = options.route === undefined ? await temp("application-run-root-") : await realpath(await mkdtemp(join("/tmp", "rr-")));
+  if (options.route !== undefined) roots.push(runRoot);
   const evidenceRoot = await temp("application-evidence-");
   const repositoryRoot = await temp("candidate-repository-");
   const calls: string[] = [];
@@ -81,10 +120,12 @@ async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: Fa
   const collect = vi.fn<(input: unknown) => Collected>(() => ({ collection: { marker: "wire-collection" }, oracle: {}, unavailableReason: null,
     qualification: { status: "PASS", reason: "all cases passed", runId: null, rawReportSha256: null, result: null } }));
   const application = { runRoot, createHost, git, collect } as unknown as WorkflowE2EApplicationRuntime;
-  const run = (extra: { signal?: AbortSignal; deadlineAt?: number; candidateRepositoryRoot?: (repositoryId: string) => string | undefined; application?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime) } = {}) => executeWorkflowE2EChecks({
+  const run = (extra: { signal?: AbortSignal; deadlineAt?: number; candidateRepositoryRoot?: (repositoryId: string) => string | undefined; application?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime);
+    modelBudget?: Parameters<typeof executeWorkflowE2EChecks>[0]["modelBudget"]; modelChannel?: Parameters<typeof executeWorkflowE2EChecks>[0]["modelChannel"] } = {}) => executeWorkflowE2EChecks({
     invocation, readAdmission, saveEvidence, sourceRoot: "/workspace/runtime", evidenceRoot, candidateRepositoryRoot: extra.candidateRepositoryRoot ?? (() => repositoryRoot),
     application: extra.application ?? application, ...(extra.signal === undefined ? {} : { signal: extra.signal }),
     ...(extra.deadlineAt === undefined ? {} : { deadlineAt: extra.deadlineAt }),
+    ...(extra.modelBudget === undefined ? {} : { modelBudget: extra.modelBudget }), ...(extra.modelChannel === undefined ? {} : { modelChannel: extra.modelChannel }),
   });
   const runId = admission.groups[0]!.outerBinding.runId;
   const groupId = admission.groups[0]!.outerBinding.groupId;
@@ -124,6 +165,17 @@ describe("workflow E2E application rounds", () => {
     expect(aggregate.payload.groupRuns).toEqual([group.groupRun]);
     expect(result).toMatchObject({ roundId: s.admission.round.roundId, candidateDigest: s.admission.candidateDigest, processStatus: "SUCCEEDED" });
     expect(result.evidenceRef.key).toMatch(/^workflow-e2e-evidence\/sha256\//);
+  });
+
+  it("runs a version 2 admission (runtime rows keyed by profile and kind) exactly as a version 1 one: the group is built from the row of its own kind", async () => {
+    const s = await setup({ version2: true });
+    expect(s.admission.schemaVersion).toBe(E2E_APPLICATION_ADMISSION_SCHEMA_V2);
+    expect(s.admission.runtimeBindings.map((item) => item.key)).toEqual([e2eRuntimeBindingKey(s.admission.runtimeBindings[0]!.value.profileId, s.admission.runtimeBindings[0]!.value.capabilities.kind as "web" | "api")]);
+    s.fake.onExecutor = s.okOutput;
+    const result = await s.run();
+    expect(s.calls).toEqual(["allocate", "execute", "close"]);
+    expect(evidenceOf(s.saved, s.runId).groupRun).toMatchObject({ kind: "application", collection: { status: "PASS" } });
+    expect(result).toMatchObject({ roundId: s.admission.round.roundId, processStatus: "SUCCEEDED" });
   });
 
   it("uploads UNKNOWN with the reason 'evidence too large', never the evidence, for a group whose evidence is over the group ceiling, and logs the sizes", async () => {
@@ -404,5 +456,240 @@ describe("workflow E2E application rounds", () => {
     } finally { vi.useRealTimers(); }
     expect(s.treeOf).not.toHaveBeenCalled();
     expect(s.createHost).not.toHaveBeenCalled();
+  });
+});
+
+// Task 4.3a, test case 10 (Rulings DB-1, DB-5, DD): which groups get a model channel, what the reference may say, and a route that is not the worker's.
+describe("workflow E2E application rounds: the model channel", () => {
+  const SCRIPTED = { routeId: "rovara-scripted/v1", routeRevision: e2eModelRouteRevision(scriptedE2ERouteDefinition()) };
+  const STALE = { routeId: "rovara-e2e-default", routeRevision: "r1-0123456789ab" };
+  const scriptedEnvironment = { ROVARA_E2E_SCRIPTED_MODEL: "1" };
+  const budgetEvents = () => { const sent: E2EModelDayBudgetRequest[] = [];
+    const post = vi.fn(async (body: E2EModelDayBudgetRequest) => { sent.push(body); return { schemaVersion: "rovara-e2e-model-budget/v1", reservationId: body.reservationId,
+      status: body.stage === "reserve" ? "reserved" : body.stage === "settle" ? "settled" : "released" }; });
+    return { sent, post }; };
+  const modelDirOf = (s: { runRoot: string; runId: string }) => join(s.runRoot, s.runId, "model");
+
+  it("gives a group with no agent step no channel and no socket, even though the admission names a route and the worker could open one (Ruling DB-1)", async () => {
+    const budget = budgetEvents();
+    const opened = vi.fn();
+    const s = await setup({ route: SCRIPTED });
+    s.fake.onExecutor = s.okOutput;
+    expect(s.admission.modelRoute).toEqual(SCRIPTED);
+    await s.run({ modelBudget: budget.post, modelChannel: { environment: scriptedEnvironment, invoke: async () => { opened(); throw new Error("not called"); } } });
+    expect(s.createHost).toHaveBeenCalledTimes(1);
+    expect(s.createHost.mock.calls[0]![0]).not.toHaveProperty("modelChannel");
+    expect(budget.post).not.toHaveBeenCalled();
+    expect(opened).not.toHaveBeenCalled();
+    expect(s.fake.argsFor("executor").join(" ")).not.toMatch(/model/i);
+  });
+
+  it("the reference's agentSteps must be exactly 'some group has an agent step': an agent admission whose reference omits it, and a plain one whose reference claims it, are refused before anything starts", async () => {
+    const withAgent = await setup({ route: SCRIPTED, agent: true, reference: { agentSteps: undefined } });
+    await expect(withAgent.run({ modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment } })).rejects.toThrow(/agentSteps flag does not match/);
+    expect(withAgent.createHost).not.toHaveBeenCalled();
+    expect(withAgent.fake.calls).toEqual([]);
+    const plain = await setup({ route: SCRIPTED, reference: { agentSteps: true } });
+    await expect(plain.run({ modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment } })).rejects.toThrow(/agentSteps flag does not match/);
+    expect(plain.createHost).not.toHaveBeenCalled();
+    // The positive control: the flag and the admission agree, and the round runs.
+    const agreed = await setup({ route: SCRIPTED, agent: true });
+    agreed.fake.onExecutor = agreed.okOutput;
+    await expect(agreed.run({ modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment, invoke: async () => { throw new Error("not called"); } } })).resolves.toMatchObject({ processStatus: "SUCCEEDED" });
+  });
+
+  it("refuses a baseline round that carries AI navigation steps or says it does (a baseline never runs them)", async () => {
+    const base = { purpose: "baseline", attempt: 1 };
+    const claimed = await setup({ route: SCRIPTED, agent: true, baseline: true, reference: { ...base, baseCommitSha: createOrdersExecutorPlan({ probe: "web-csv-positive-v1" }).plan.admission.candidateCommitSha } });
+    await expect(claimed.run({ modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment } })).rejects.toThrow(/baseline round carries AI navigation steps/);
+    expect(claimed.createHost).not.toHaveBeenCalled();
+    expect(claimed.fake.calls).toEqual([]);
+    // The same baseline without agent steps and without the flag runs (the positive control).
+    const plain = await setup({ baseline: true, reference: { ...base, baseCommitSha: createOrdersExecutorPlan({ probe: "web-csv-positive-v1" }).plan.admission.candidateCommitSha } });
+    plain.fake.onExecutor = plain.okOutput;
+    await expect(plain.run()).resolves.toMatchObject({ processStatus: "SUCCEEDED" });
+  });
+
+  // M1.4 Task 4.6b: an audit replay is run on the Docker host with no model channel at all, and only when its signed reference and its admission say the same thing.
+  describe("an audit replay (Task 4.6b)", () => {
+    it("runs the round's group on the host with no model channel and no model budget, whatever the worker could offer, and uploads its evidence", async () => {
+      const budget = budgetEvents();
+      const s = await setup({ route: SCRIPTED, agent: true, replay: true });
+      expect(s.admission.replay?.purpose).toBe("replay");
+      s.fake.onExecutor = s.okOutput;
+      // The worker offers a model channel and a budget; a replay uses neither (a group with an agent step would have opened both).
+      await expect(s.run({ modelBudget: budget.post, modelChannel: { environment: scriptedEnvironment, invoke: async () => { throw new Error("a replay never calls a model"); } } })).resolves.toMatchObject({ processStatus: "SUCCEEDED" });
+      expect(s.createHost).toHaveBeenCalledTimes(1);
+      expect(s.createHost.mock.calls[0]![0]).not.toHaveProperty("modelChannel");
+      expect(budget.sent).toEqual([]);
+      expect(s.fake.calls.some((args) => args.join(" ").includes("model.sock"))).toBe(false);
+      expect(evidenceOf(s.saved, s.runId).groupRun["kind"]).toBe("application");
+    });
+    it("refuses a reference and an admission that disagree about the replay (kind, round, attempt), before anything starts", async () => {
+      const mismatches: Array<[string, Parameters<typeof setup>[0]]> = [
+        ["a replay admission under a candidate's reference", { route: SCRIPTED, agent: true, replay: true, reference: { purpose: undefined, sourceRoundId: undefined, attempt: undefined } }],
+        ["a replay reference over a candidate's admission", { reference: { purpose: "replay", sourceRoundId: "11111111-1111-4111-8111-111111111111", attempt: 1 } }],
+        ["another source round", { route: SCRIPTED, agent: true, replay: true, reference: { sourceRoundId: "99999999-9999-4999-8999-999999999999" } }],
+        ["another attempt", { route: SCRIPTED, agent: true, replay: true, reference: { attempt: 2 } }],
+      ];
+      for (const [label, options] of mismatches) {
+        const s = await setup(options);
+        await expect(s.run(), label).rejects.toThrow(/replay admission does not match/);
+        expect(s.createHost, label).not.toHaveBeenCalled();
+        expect(s.fake.calls, label).toEqual([]);
+      }
+    });
+    it("refuses a replay reference that claims the model channel (agentSteps): no group of a replay uses one", async () => {
+      const s = await setup({ route: SCRIPTED, agent: true, replay: true, reference: { agentSteps: true } });
+      await expect(s.run()).rejects.toThrow(/agentSteps flag does not match/);
+      expect(s.createHost).not.toHaveBeenCalled();
+    });
+  });
+
+  it("makes a group UNKNOWN model-route-changed-reapprove, and starts no host, socket or container for it, when its route is not the one this worker derives", async () => {
+    const budget = budgetEvents();
+    const s = await setup({ route: STALE, agent: true });
+    s.fake.onExecutor = s.okOutput;
+    const result = await s.run({ modelBudget: budget.post, modelChannel: { environment: { AGENTX_MODEL_PROVIDER: "anthropic", AGENTX_ANTHROPIC_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/key-AbCdEf", AWS_REGION: "us-east-1" } } });
+    expect(result.processStatus).toBe("FAILED");
+    expect(s.createHost).not.toHaveBeenCalled();
+    expect(s.fake.calls).toEqual([]);
+    expect(budget.post).not.toHaveBeenCalled();
+    expect(existsSync(modelDirOf(s))).toBe(false);
+    const group = evidenceOf(s.saved, s.runId);
+    expect(group.groupRun).toMatchObject({ kind: "application", binding: { runId: s.runId }, collection: { status: "UNKNOWN", reason: "model-route-changed-reapprove" },
+      unavailableReason: "model-route-changed-reapprove", actual: null });
+    expect(await readdir(s.runRoot)).toEqual([]);
+  });
+
+  it("makes a group UNKNOWN agent-route-not-approved when the worker has no model channel dependencies or a route it cannot make, and a scripted route outside CI the same", async () => {
+    for (const modelChannel of [undefined, { environment: { AGENTX_MODEL_PROVIDER: "anthropic" } }, { environment: {} }]) {
+      const s = await setup({ route: modelChannel === undefined || "AGENTX_MODEL_PROVIDER" in modelChannel.environment ? STALE : SCRIPTED, agent: true });
+      const result = await s.run(modelChannel === undefined ? {} : { modelBudget: budgetEvents().post, modelChannel });
+      expect(result.processStatus).toBe("FAILED");
+      expect(s.createHost).not.toHaveBeenCalled();
+      expect(evidenceOf(s.saved, s.runId).groupRun).toMatchObject({ collection: { status: "UNKNOWN", reason: "agent-route-not-approved" } });
+    }
+  });
+
+  it("opens the channel for a group with an agent step before its executor starts: the executor sees a listening socket, the day is charged through the broker, and the socket is gone after", async () => {
+    const budget = budgetEvents();
+    const closed: Array<{ groupRunId: string; receipts: number; outcomes: Record<string, number>; valueKey: string }> = [];
+    let planKey = "";
+    const s = await setup({ route: SCRIPTED, agent: true });
+    let seen: { isSocket: boolean; mounted: boolean; answer: unknown } | undefined;
+    s.fake.onExecutor = async (outDir, args) => {
+      planKey = (JSON.parse(readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8")) as { modelChannel: { valueKey: string } }).modelChannel.valueKey;
+      const socketPath = join(s.runRoot, s.runId, "model", "model.sock");
+      const client = createE2EModelChannelClient({ socketPath, runId: s.runId });
+      const caseId = s.fixture.compiled.expectedCases[0]!.caseId;
+      await client.beginStep({ caseId, stepIndex: 0 });
+      const answer = await client.generate({ caseId, stepIndex: 0, callIndex: 0, call: { prompt: [{ role: "system", content: "You drive a web application." }, { role: "user", content: [{ type: "text", text: "Goal: Export the orders as a CSV file\n#n1 button \"Download orders\"" }] }],
+        tools: [{ type: "function", name: "complete_step", inputSchema: { type: "object", properties: { status: { type: "string" }, summary: { type: "string" } } } }] } });
+      await client.endStep({ caseId, stepIndex: 0 });
+      seen = { isSocket: statSync(socketPath).isSocket(), mounted: args.includes(`${socketPath}:/run/rovara/model.sock`), answer };
+      s.okOutput(outDir);
+    };
+    await s.run({ modelBudget: budget.post, modelChannel: { environment: scriptedEnvironment, policyScope: "standard", onClosed: (summary) => closed.push(summary),
+      invoke: async () => ({ servedModelId: "rovara-scripted-v1", content: [{ type: "tool-call", toolCallId: "t1", toolName: "complete_step", input: JSON.stringify({ status: "passed", summary: "ok" }) }],
+        finishReason: { unified: "tool-calls", raw: "scripted" }, usage: { inputTokens: 300, outputTokens: 20 } }) } });
+    expect(seen).toMatchObject({ isSocket: true, mounted: true });
+    expect((seen!.answer as { result: { status: string; code?: string; message?: string } }).result, JSON.stringify(seen!.answer)).toMatchObject({ status: "ok" });
+    expect(budget.sent.map((body) => body.stage)).toEqual(["reserve", "settle"]);
+    expect(budget.sent[0]).toMatchObject({ stage: "reserve", groupRunId: s.runId });
+    expect(budget.sent[1]).toMatchObject({ stage: "settle", reservationId: budget.sent[0]!.reservationId, actualInputTokens: 300 });
+    // The key the worker keeps for Task 4.4 is the one in the executor's plan (Ruling DB-6).
+    expect(planKey).toMatch(/^[a-f0-9]{64}$/);
+    expect(closed).toEqual([{ groupRunId: s.runId, receipts: 1, outcomes: { ok: 1 }, valueKey: planKey }]);
+    expect(existsSync(join(s.runRoot, s.runId))).toBe(false);
+  });
+
+  it("hands the model evidence the host read to the collector and uploads it with the group's verdict inputs (receipts, route, the run's key, digests), and logs none of it (Task 4.4a)", async () => {
+    const lines: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    let planKey = "";
+    try {
+      const s = await setup({ route: SCRIPTED, agent: true });
+      s.fake.onExecutor = async (outDir) => {
+        planKey = (JSON.parse(readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8")) as { modelChannel: { valueKey: string } }).modelChannel.valueKey;
+        const client = createE2EModelChannelClient({ socketPath: join(s.runRoot, s.runId, "model", "model.sock"), runId: s.runId });
+        const caseId = s.fixture.compiled.expectedCases[0]!.caseId;
+        await client.beginStep({ caseId, stepIndex: 0 });
+        await client.generate({ caseId, stepIndex: 0, callIndex: 0, call: { prompt: [{ role: "system", content: "You drive a web application." }, { role: "user", content: [{ type: "text", text: "Goal: Export the orders as a CSV file\n#n1 button \"Download orders\"" }] }],
+          tools: [{ type: "function", name: "complete_step", inputSchema: { type: "object", properties: { status: { type: "string" }, summary: { type: "string" } } } }] } });
+        await client.endStep({ caseId, stepIndex: 0 });
+        s.okOutput(outDir);
+      };
+      await s.run({ modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment, policyScope: "standard",
+        invoke: async () => ({ servedModelId: "rovara-scripted-v1", content: [{ type: "tool-call", toolCallId: "t1", toolName: "complete_step", input: JSON.stringify({ status: "passed", summary: "ok" }) }],
+          finishReason: { unified: "tool-calls", raw: "scripted" }, usage: { inputTokens: 300, outputTokens: 20 } }) } });
+      const collected = s.collect.mock.calls[0]![0] as { agentModel: E2EAgentModelEvidence; governedModelReceipts: unknown[] };
+      expect(collected.governedModelReceipts ?? []).toEqual([]);
+      expect(collected.agentModel).toMatchObject({ schemaVersion: "rovara-agent-model-evidence/v1", valueKey: planKey, route: scriptedE2ERouteDefinition(),
+        channel: { droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 0 }, ledgers: [] });
+      expect(collected.agentModel.receipts).toHaveLength(1);
+      expect(collected.agentModel.receipts[0]).toMatchObject({ runId: s.runId, outcome: "ok", routeId: SCRIPTED.routeId, routeRevision: SCRIPTED.routeRevision });
+      expect(collected.agentModel.transcriptDigests).toEqual([{ receiptId: collected.agentModel.receipts[0]!.receiptId, promptSha256: collected.agentModel.receipts[0]!.promptSha256,
+        responseSha256: collected.agentModel.receipts[0]!.responseSha256, omitted: null }]);
+      // It is uploaded as part of the verdict inputs, exactly as the collector saw it.
+      const uploaded = evidenceOf(s.saved, s.runId).groupRun as { actual: { collectionInputs: { agentModel: unknown } } };
+      expect(uploaded.actual.collectionInputs.agentModel).toEqual(JSON.parse(JSON.stringify(collected.agentModel)));
+      // No worker log line carries the key, a receipt id or a word of the prompt.
+      for (const line of lines) {
+        expect(line).not.toContain(planKey);
+        expect(line).not.toContain(collected.agentModel.receipts[0]!.receiptId);
+        expect(line).not.toContain("Download orders");
+      }
+      expect(lines.some((line) => line.includes("workflow.e2e_model_channel_closed"))).toBe(true);
+    } finally { log.mockRestore(); }
+    expect(planKey).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("logs which fixed outcome the checks gave an AI-navigated group's cases, as codes only, and logs nothing for a group without an agent step (Task 4.4a)", async () => {
+    const verdictLines = async (agent: boolean) => {
+      const lines: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+      try {
+        const s = await setup(agent ? { route: SCRIPTED, agent: true } : {});
+        s.collect.mockImplementation((() => ({ collection: { marker: "wire-collection" }, oracle: {}, unavailableReason: "x",
+          qualification: { status: "UNKNOWN", reason: "x", runId: null, rawReportSha256: null,
+            // AGENTCODES: a case that matched two codes, one that matched a text that is not a code (never logged), and one with none.
+            agentCodes: [{ caseId: "c1", codes: ["model-prompt-credential-match", "agent-timeout"] }, { caseId: "c2", codes: ["the model said: hello (free text)"] }],
+            result: { cases: [{ reason: "model-unavailable" }, { reason: "structural-application-observations-complete" }, { reason: "the model said: hello (free text)" }] } } })) as never);
+        s.fake.onExecutor = s.okOutput;
+        await s.run(agent ? { modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment, invoke: async () => { throw new Error("not called"); } } } : {});
+      } finally { log.mockRestore(); }
+      return lines.filter((line) => line.includes("workflow.e2e_agent_verdict"));
+    };
+    const [line] = await verdictLines(true);
+    expect(JSON.parse(line!)).toMatchObject({ component: "worker", event: "workflow.e2e_agent_verdict", status: "UNKNOWN", codes: ["model-unavailable"],
+      matched: [["model-prompt-credential-match", "agent-timeout"]] });
+    expect(line).not.toContain("hello");
+    expect(await verdictLines(false)).toEqual([]);
+  });
+
+  it("closes the channel when the executor throws, and the socket is gone", async () => {
+    const closed: unknown[] = [];
+    const s = await setup({ route: SCRIPTED, agent: true });
+    s.fake.onExecutor = () => { throw new Error("the executor blew up"); };
+    const result = await s.run({ modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment, onClosed: (summary) => closed.push(summary), invoke: async () => { throw new Error("not called"); } } });
+    expect(result.processStatus).toBe("FAILED");
+    expect(closed).toHaveLength(1);
+    expect(existsSync(join(s.runRoot, s.runId))).toBe(false);
+  });
+
+  it("the worker logs only counts when a channel closes: never a prompt, an answer or a credential", async () => {
+    const lines: string[] = [];
+    let groupRunId: string | undefined;
+    const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      const s = await setup({ route: SCRIPTED, agent: true });
+      groupRunId = s.runId;
+      s.fake.onExecutor = s.okOutput;
+      await s.run({ modelBudget: budgetEvents().post, modelChannel: { environment: scriptedEnvironment, invoke: async () => { throw new Error("not called"); } } });
+    } finally { log.mockRestore(); }
+    const closedLine = lines.find((line) => line.includes("workflow.e2e_model_channel_closed"));
+    expect(JSON.parse(closedLine!)).toEqual({ component: "worker", event: "workflow.e2e_model_channel_closed", groupRunId, receipts: 0, outcomes: {},
+      droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 0 });
   });
 });

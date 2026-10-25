@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
-  E2EApplicationPlanIntentSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
-  deriveE2ESyntheticRuntimeAccountRef, e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup,
+  E2EApplicationPlanIntentSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
+  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, inspectE2EApplicationRepository, withE2EAnonymousTargets, e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
+import { ordersManifestWith, registryFor } from "./e2e-account-registry-fixtures.js";
+import type { E2EAccountRegistryEntry } from "../../packages/broker/src/e2e/application-account-registry.js";
 
 /** Fixtures shared by the application planning, approval, admission and dispatch tests: the orders contract app, its approved setup, a v2 intent, and READY catalog rows. */
 export const PROFILE = WEB_API_RUNTIME_PROFILE_ID;
@@ -57,6 +59,17 @@ export const csvScenario: E2EScenario = { scenarioId: "export-csv", requirementI
   steps: [{ kind: "navigate", path: "/orders" }, { kind: "click", testId: "export-csv" }],
   assertions: [{ kind: "csv", downloadName: "orders.csv", columns: ["id", "total"], rows: [["1", "10"]] }] };
 
+/** The id of the implicit `rovara-anonymous` variant of the snapshot's first web or API target (Ruling AZ); every web/API target with a launch recipe offers one. */
+export function anonymousTargetOf(snapshot: E2ESourceSnapshot, kind: "web" | "api" = "web"): string {
+  const found = inspectE2EApplicationRepository(snapshot, snapshot.candidate).inspection.proposedTargets.find((item) => item.kind === kind && item.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID);
+  if (found === undefined) throw new Error(`the snapshot proposes no anonymous ${kind} target`);
+  return found.targetId;
+}
+/** A signed-out visitor's scenario: the page's welcome marker is visible and the owner-only export button is not. */
+export const anonymousScenario = (targetId: string): E2EScenario => ({ scenarioId: "signed-out-visitor", requirementId: "signed-out-access", requestedTargetIds: [targetId], required: true,
+  accountProfileId: E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, minimumEvidence: "runtime", requiredRealComponentIds: [],
+  steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "welcome", equals: true }] });
+
 export type Ready = ReadonlyArray<{ kind: "web" | "api"; profileId: string }>;
 /** Approved setup proposal and the project policy derived from it, exactly as the setup-proposals route builds them. */
 export function approvedSetup(snapshot: E2ESourceSnapshot, readyProfiles: Ready, onlyTargetIds?: readonly string[]) {
@@ -70,7 +83,7 @@ export function approvedSetup(snapshot: E2ESourceSnapshot, readyProfiles: Ready,
   return { inspection, proposal, policy, setupApproval: { artifactId: "setup", digest: shaCanonical(proposal) } };
 }
 
-export type PlanInput = { snapshot?: E2ESourceSnapshot; scenario?: E2EScenario; targetId?: string; setupReady?: Ready; planRuntimeProfileId?: string; executable?: boolean;
+export type PlanInput = { snapshot?: E2ESourceSnapshot; scenario?: E2EScenario; /** More scenarios on the same target, planned beside the first. */ extraScenarios?: E2EScenario[]; targetId?: string; setupReady?: Ready; planRuntimeProfileId?: string; executable?: boolean;
   registeredRuntimes?: ReturnType<typeof webApiRow>[]; modelRouteRevision?: string; accountRef?: { revision?: number; definitionDigest?: string }; sourceSha?: string };
 
 /** The approved setup, policy and v2 intent for one scenario on one target, as the selection facade and the approval evaluation both take them. */
@@ -78,21 +91,27 @@ export function planFixture(input: PlanInput) {
   const snapshot = input.snapshot ?? contractSnapshot;
   const scenario = input.scenario ?? csvScenario;
   const setup = approvedSetup(snapshot, input.setupReady ?? [{ kind: "web", profileId: PROFILE }]);
-  const target = setup.proposal.targets.find((item) => item.targetId === (input.targetId ?? "web-1"))!;
+  // The stored proposal and policy hold the base targets; the signed-out variants are derived from them, as every reader derives them.
+  const target = withE2EAnonymousTargets(setup.proposal.targets, inspectE2EApplicationRepository(snapshot, snapshot.candidate).anonymous).find((item) => item.targetId === (input.targetId ?? "web-1"))!;
   const application = setup.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
   const refs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths)
     .map((ref) => (input.sourceSha === undefined ? ref : { ...ref, sha256: input.sourceSha }));
   const executable = input.executable ?? true;
-  const accountRef = { ...(application.recipe === null ? { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "2".repeat(64) }
-    : deriveE2ESyntheticRuntimeAccountRef({ applicationId: application.applicationId, accountProfileId: target.accountProfileId, recipeDigest: application.recipe.recipeDigest })), ...input.accountRef };
+  // The account is the registry's: the revision-1 definition a setup approval of this source would have written (a source with no project contract has none).
+  const registry: E2EAccountRegistryEntry[] = registryFor(snapshot, NOW);
+  const registered = registry.find((entry) => entry.definition.applicationId === application.applicationId && entry.definition.profileId === target.accountProfileId);
+  const accountRef = { ...(target.accountProfileId === E2E_ANONYMOUS_ACCOUNT_PROFILE_ID ? e2eAnonymousRuntimeAccountRef(application.applicationId)
+    : registered !== undefined ? deriveE2EApplicationRuntimeAccountRef(registered.definition)
+    : application.recipe === null ? { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "2".repeat(64) }
+      : deriveE2ESyntheticRuntimeAccountRef({ applicationId: application.applicationId, accountProfileId: target.accountProfileId, recipeDigest: application.recipe.recipeDigest })), ...input.accountRef };
   const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [], mockFixtureRefs: [],
     accountContextRefs: [{ applicationId: application.applicationId, profileId: target.accountProfileId, sourcePath: "package.json", sourceSha256: refs.find((ref) => ref.path === "package.json")!.sha256 }],
-    scenarios: [scenario], semanticExportDeltas: [],
+    scenarios: [scenario, ...(input.extraScenarios ?? [])], semanticExportDeltas: [],
     applicationRuntimeRefs: executable ? [{ targetId: target.targetId, applicationId: application.applicationId, recipeDigest: application.recipe!.recipeDigest,
       sourceRefs: refs, runtimeProfileId: input.planRuntimeProfileId ?? target.runtimeProfileId, accountProfileId: target.accountProfileId }] : [],
     runtimeAccountRefs: executable ? [accountRef] : [],
     unavailableTargetRefs: executable ? [] : [{ targetId: target.targetId, applicationId: application.applicationId, accountProfileId: target.accountProfileId, sourceRefs: refs }] });
-  return { snapshot, scenario, setup, target, application, intent, accountRef, executable,
+  return { snapshot, scenario, setup, target, application, intent, accountRef, registry, executable,
     policy: { ...setup.policy, baselineScenarioIds: [scenario.scenarioId], modelRouteRevision: input.modelRouteRevision ?? null } };
 }
 
@@ -106,6 +125,7 @@ export function webAndApiFixture() {
   const snapshot = snapshotOf({ "package.json": ordersContractManifest,
     "api/package.json": JSON.stringify({ ...manifest, name: "@acme/orders-api", dependencies: { express: "4.0.0" }, agentx: { e2e: { ...manifest.agentx.e2e, targetAccounts: [] } } }) });
   const setup = approvedSetup(snapshot, [{ kind: "web", profileId: PROFILE }, { kind: "api", profileId: PROFILE }]);
+  const registry: E2EAccountRegistryEntry[] = registryFor(snapshot, NOW);
   const web = setup.proposal.targets.find((item) => item.targetId === "web-1")!;
   const api = setup.proposal.targets.find((item) => item.kind === "api")!;
   const ref = (target: typeof web) => {
@@ -113,7 +133,7 @@ export function webAndApiFixture() {
     const sourceRefs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths);
     return { application, sourceRefs, runtime: { targetId: target.targetId, applicationId: application.applicationId, recipeDigest: application.recipe!.recipeDigest, sourceRefs,
       runtimeProfileId: target.runtimeProfileId, accountProfileId: target.accountProfileId },
-    account: deriveE2ESyntheticRuntimeAccountRef({ applicationId: application.applicationId, accountProfileId: target.accountProfileId, recipeDigest: application.recipe!.recipeDigest }) };
+    account: deriveE2EApplicationRuntimeAccountRef(registry.find((entry) => entry.definition.applicationId === application.applicationId && entry.definition.profileId === target.accountProfileId)!.definition) };
   };
   const policy = { ...setup.policy, baselineScenarioIds: [csvScenario.scenarioId, apiScenario.scenarioId] };
   const scenarios = [{ ...csvScenario, requestedTargetIds: [web.targetId], accountProfileId: web.accountProfileId }, { ...apiScenario, requestedTargetIds: [api.targetId], accountProfileId: api.accountProfileId }];
@@ -128,6 +148,38 @@ export function webAndApiFixture() {
       unavailableTargetRefs: (["web", "api"] as const).filter((kind) => !executable[kind]).map((kind) => ({ targetId: (kind === "web" ? web : api).targetId,
         applicationId: refs[kind].application.applicationId, accountProfileId: (kind === "web" ? web : api).accountProfileId, sourceRefs: refs[kind].sourceRefs })) });
   };
-  return { snapshot, setup, policy, build, web, api, scenarios };
+  return { snapshot, setup, policy, build, web, api, scenarios, registry };
 }
 
+
+/**
+ * One application that serves both its page and its API (Task 3.4): its project contract names `api-1` beside `web-1` in `targetAccounts`, so discovery proposes a web and an API
+ * target for the one package, each with the owner account's variant. Two scenarios, one per kind: the owner's page and the owner's API request, both approved on the qualified profile.
+ */
+export function oneAppWebAndApiFixture() {
+  const manifest = ordersManifestWith((e2e) => { e2e.targetAccounts.push({ baseTargetId: "api-1", profileId: "orders-owner" }); });
+  const snapshot = snapshotOf({ "package.json": manifest });
+  const setup = approvedSetup(snapshot, [{ kind: "web", profileId: PROFILE }, { kind: "api", profileId: PROFILE }]);
+  const registry: E2EAccountRegistryEntry[] = registryFor(snapshot, NOW);
+  const ownerOf = (kind: "web" | "api") => setup.proposal.targets.find((item) => item.kind === kind && item.accountProfileId === "orders-owner")!;
+  const web = ownerOf("web");
+  const api = ownerOf("api");
+  const application = setup.inspection.applications.find((item) => item.applicationId === web.applicationId)!;
+  const sourceRefs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths);
+  const account = deriveE2EApplicationRuntimeAccountRef(registry.find((entry) => entry.definition.applicationId === application.applicationId && entry.definition.profileId === "orders-owner")!.definition);
+  const webScenario: E2EScenario = { ...csvScenario, scenarioId: "owner-export-page", requestedTargetIds: [web.targetId], accountProfileId: "orders-owner" };
+  const apiScenarioOnOwner: E2EScenario = { ...apiScenario, scenarioId: "owner-api-health", requestedTargetIds: [api.targetId], accountProfileId: "orders-owner" };
+  const policy = { ...setup.policy, baselineScenarioIds: [webScenario.scenarioId, apiScenarioOnOwner.scenarioId] };
+  const runtimeRef = (target: typeof web) => ({ targetId: target.targetId, applicationId: application.applicationId, recipeDigest: application.recipe!.recipeDigest, sourceRefs,
+    runtimeProfileId: target.runtimeProfileId, accountProfileId: target.accountProfileId });
+  /** The plan's intent: which kinds are executable (the other is listed as unavailable), and optionally a replacement for a scenario. */
+  const build = (executable: { web: boolean; api: boolean }, scenarios: readonly E2EScenario[] = [webScenario, apiScenarioOnOwner]) => E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2,
+    requestedTargetIds: [web.targetId, api.targetId], portableOperationRefs: [], mockFixtureRefs: [],
+    accountContextRefs: [{ applicationId: application.applicationId, profileId: "orders-owner", sourcePath: sourceRefs[0]!.path, sourceSha256: sourceRefs[0]!.sha256 }],
+    scenarios, semanticExportDeltas: [],
+    applicationRuntimeRefs: (["web", "api"] as const).filter((kind) => executable[kind]).map((kind) => runtimeRef(kind === "web" ? web : api)),
+    runtimeAccountRefs: [account],
+    unavailableTargetRefs: (["web", "api"] as const).filter((kind) => !executable[kind]).map((kind) => ({ targetId: (kind === "web" ? web : api).targetId,
+      applicationId: application.applicationId, accountProfileId: "orders-owner", sourceRefs })) });
+  return { manifest, snapshot, setup, policy, build, web, api, application, webScenario, apiScenario: apiScenarioOnOwner, registry };
+}

@@ -35,7 +35,7 @@ describe("web/API probe run binding", () => {
   });
 
   it("requires the network wall probes, and a network policy digest that differs from the one runners had before the walls", () => {
-    expect(WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId).slice(-4, -1)).toEqual(["build-imds-denial-v1", "build-lateral-denial-v1", "app-host-denial-v1"]);
+    expect(WEB_API_REQUIRED_PROBES.slice(0, 11).map((probe) => probe.probeId).slice(-4, -1)).toEqual(["build-imds-denial-v1", "build-lateral-denial-v1", "app-host-denial-v1"]);
     expect(WEB_API_NETWORK_POLICY).toMatchObject({ schemaVersion: "e2e-web-api-network-policy/v2", hostAccess: "denied", privateRanges: "denied", buildNetwork: "per-run-internet-only" });
     // The v1 policy (internal network, no egress, no metadata) as it was hashed before the walls: a runner registered with it must not match.
     const v1 = { schemaVersion: "e2e-web-api-network-policy/v1", appNetwork: "per-run-internal", outsideEgress: "denied", instanceMetadata: "unreachable" };
@@ -43,7 +43,7 @@ describe("web/API probe run binding", () => {
     expect(WEB_API_NETWORK_POLICY_DIGEST).toBe(createHash("sha256").update(canonicalJson(WEB_API_NETWORK_POLICY)).digest("hex"));
   });
 
-  it("gives a web/API challenge an hour, long enough for nine container runs", () => {
+  it("gives a web/API challenge an hour, long enough for fourteen container runs", () => {
     expect(WEB_API_CHALLENGE_LIFETIME_MS).toBe(60 * 60_000);
   });
 

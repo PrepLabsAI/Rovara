@@ -111,6 +111,16 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/developer/plan-evidence-jobs.ts",
       // Retired and quarantined recovery rows only; active retries remove the due/lease fields without TTL.
       "packages/broker/src/aws/workflow-merge-recovery.ts",
+      // The AI navigation day-budget rows (M1.4 Task 4.2) expire on it: one tiny row per project per UTC day.
+      "packages/broker/src/e2e/model-route-registry.ts",
+      // The model check rows (M1.4 Task 4.10C: a requested check and the pointer to the latest one) expire on it after one day.
+      "packages/broker/src/e2e/model-checks.ts",
+      // The worker's callback for those day-budget rows (M1.4 Task 4.3a) writes the day's row and one reservation row per model call; both expire on it at the end of their UTC day.
+      "packages/broker/src/e2e/model-budget-endpoint.ts",
+      // The baseline round's record (M1.3 Task 3.7b, owner decision D4): it expires 30 days after it was last written.
+      "packages/broker/src/aws/workflow-e2e-baseline.ts",
+      // The audit replay's record (M1.4 Task 4.6b) has the baseline record's expiry: 30 days after it was last written.
+      "packages/broker/src/aws/workflow-e2e-replay.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
@@ -155,6 +165,19 @@ describe("the health route's grants (A13)", () => {
       'ExpressionAttributeNames: { "#expires": INDEX_EXPIRY_ATTRIBUTE },',
       '":expires": noticeExpiry(deps)[INDEX_EXPIRY_ATTRIBUTE] },',
     ]);
+  });
+
+  it("sets the TTL attribute on the baseline round's record alone, in its own module, and refreshes it with every write of that record (Task 3.7b, D4)", () => {
+    const baseline = readFileSync("packages/broker/src/aws/workflow-e2e-baseline.ts", "utf8");
+    const named = baseline.split("\n").filter((line) => /indexExpiresAt|INDEX_EXPIRY_ATTRIBUTE/.test(line)).map((line) => line.trim());
+    expect(named[0]).toMatch(/^import \{ .*INDEX_EXPIRY_ATTRIBUTE.*indexExpiresAt.* \} from "@agentx\/contracts";$|^import \{ .*indexExpiresAt.*INDEX_EXPIRY_ATTRIBUTE.* \} from "@agentx\/contracts";$/);
+    expect(baseline).toContain('entityType: "WORKFLOW_E2E_BASELINE"');
+    // Every write of the record carries a fresh expiry, and the module writes no other kind of item.
+    const writes = baseline.split("\n").filter((line) => /new (Put|Update)Command|Update: \{/.test(line));
+    expect(writes.length).toBeGreaterThanOrEqual(4);
+    const expiryWrites = baseline.split("\n").filter((line) => /\[INDEX_EXPIRY_ATTRIBUTE\]|#expires|":expires"/.test(line));
+    expect(expiryWrites.length).toBeGreaterThanOrEqual(4);
+    expect(baseline.match(/entityType: "[A-Z0-9_]+"/g)?.every((match) => match === 'entityType: "WORKFLOW_E2E_BASELINE"')).toBe(true);
   });
 
   it("expires only retired or quarantined recovery rows, while active retries stay due without TTL", () => {

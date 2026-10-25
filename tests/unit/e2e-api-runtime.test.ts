@@ -155,6 +155,13 @@ describe("API application runtime", () => {
     const ports = createE2EApplicationRuntimePorts({ compiled: compiledWithPrepared, runInput, prepared,
       admissionDigest, runnerToolchain: runtime.runnerToolchain, accountSessionRefs: [], modelProxyRef: null, supervisor,
       readActualRun: async () => { order.push("readback"); return { protocol: "actual" } as never; } });
+    // Ruling DB-1 (Task 4.3a): a project whose policy pinned an AI navigation route gives every group a route in its context, but the model proxy belongs to the group that has an
+    // agent step. This group has none, so it composes with no proxy, and is refused one.
+    const routed = { ...compiledWithPrepared, runtimeAdmissionContext: { ...compiledWithPrepared.runtimeAdmissionContext, modelRoute: { routeId: "rovara-e2e-default", routeRevision: "r1-0123456789ab" } } };
+    const composeRouted = (modelProxyRef: string | null) => createE2EApplicationRuntimePorts({ compiled: routed, runInput, prepared, admissionDigest, runnerToolchain: runtime.runnerToolchain,
+      accountSessionRefs: [], modelProxyRef, supervisor, readActualRun: async () => ({}) as never });
+    expect(() => composeRouted(null)).not.toThrow();
+    expect(() => composeRouted("model-proxy-ref")).toThrow(/model-proxy/);
     const lease = await ports.allocate(runInput, new AbortController().signal);
     const collection = await lease.execute(new AbortController().signal);
     await lease.close(new AbortController().signal);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { E2EExecutorPlanSchema } from "@agentx/contracts";
+import { E2EExecutorPlanSchema, e2eExecutorAdmissionDigest } from "@agentx/contracts";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 
 const fixture = createOrdersExecutorPlan({ probe: "api-state-positive-v1" });
@@ -27,5 +27,36 @@ describe("executor plan", () => {
     expect(() => E2EExecutorPlanSchema.parse({ ...plan, accounts: [account, account] })).toThrow(/unique/);
     expect(() => E2EExecutorPlanSchema.parse({ ...plan, accounts: [{ ...account, password: "short" }] })).toThrow();
     expect(() => E2EExecutorPlanSchema.parse({ ...plan, extra: true })).toThrow();
+  });
+  describe("modelChannel (Task 4.3a)", () => {
+    const route = { routeId: "rovara-e2e-default", routeRevision: "r1-0123456789ab" };
+    const channel = { protocol: "rovara-e2e-model-channel/v1", socketPath: "/run/rovara/model.sock", ...route, valueKey: "ab".repeat(32) };
+    const routed = (modelRoute: typeof route | null) => {
+      const admission = { ...plan.admission, modelRoute };
+      return { ...plan, admission: { ...admission, admissionDigest: e2eExecutorAdmissionDigest(admission) }, admissionDigest: e2eExecutorAdmissionDigest(admission) };
+    };
+
+    it("is optional: the plan the host writes for a group with no agent step has none", () => {
+      expect(E2EExecutorPlanSchema.parse(plan).modelChannel).toBeUndefined();
+    });
+    it("accepts a channel that names the route its admission pins", () => {
+      expect(E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: channel }).modelChannel).toEqual(channel);
+    });
+    it("refuses a channel for another route or revision, for an admission that pins none, and any other socket path or protocol", () => {
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, routeRevision: "r2-0123456789ab" } })).toThrow(/pins/);
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, routeId: "other-route" } })).toThrow(/pins/);
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(null), modelChannel: channel })).toThrow(/pins/);
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, socketPath: "/tmp/model.sock" } })).toThrow();
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, protocol: "rovara-e2e-model-channel/v2" } })).toThrow();
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, extra: true } })).toThrow();
+    });
+    it("requires the run's value key (Task 4.3b): 32 bytes of hex, never missing, short or in capitals", () => {
+      const { valueKey: _omitted, ...withoutKey } = channel;
+      void _omitted;
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: withoutKey })).toThrow();
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, valueKey: "x" } })).toThrow();
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, valueKey: "AB".repeat(32) } })).toThrow();
+      expect(() => E2EExecutorPlanSchema.parse({ ...routed(route), modelChannel: { ...channel, valueKey: "ab".repeat(31) } })).toThrow();
+    });
   });
 });

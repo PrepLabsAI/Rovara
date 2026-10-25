@@ -4,6 +4,8 @@ export const nativeP0Files = [
   "tests/e2e/p0-native-journey-5b.test.ts",
   "tests/e2e/runtime-installation-qualification.native.test.ts",
   "tests/e2e/m1-web-journey.test.ts",
+  "tests/e2e/m1-3-journeys.test.ts",
+  "tests/e2e/m1-4-journeys.test.ts",
 ];
 
 export const sharedVitestSettings = {

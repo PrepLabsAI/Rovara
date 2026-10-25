@@ -1,4 +1,4 @@
-import { WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson, type E2EApplicationSelectionRecord } from "@agentx/contracts";
+import { WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson, type E2EApplicationSelectionRecord } from "@agentx/contracts";
 
 /**
  * A dispatch of an approved application round that must not happen, with the plain reason the owner sees. It is terminal for that dispatch: the
@@ -8,6 +8,16 @@ import { WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, WORKFLOW_APPLICATION_R
  */
 export class ApplicationDispatchRefusal extends Error {}
 
+/**
+ * A baseline round (the approved scenarios on the unchanged code, for information only) that has nothing left to run, because every scenario of the plan has an AI navigation
+ * step and a baseline never runs those (Ruling DD). It is not a refusal of the plan and gates nothing: the baseline is only recorded as one that was skipped, with this reason.
+ */
+export const BASELINE_AGENT_STEPS_ONLY_REASON = "agent-steps-only" as const;
+export class ApplicationBaselineSkipped extends Error {
+  readonly reason = BASELINE_AGENT_STEPS_ONLY_REASON;
+  constructor() { super("every scenario of the plan has an AI navigation step, which a baseline round never runs, so there is nothing to run on the unchanged code"); this.name = "ApplicationBaselineSkipped"; }
+}
+
 const ROUND_REFUSAL_REASON_MAX_CHARS = 380;
 const shortLine = (reason: string, max: number) => {
   const line = reason.replace(/\p{Cc}+/gu, " ").replace(/\s+/gu, " ").trim();
@@ -15,7 +25,7 @@ const shortLine = (reason: string, max: number) => {
 };
 
 /**
- * The plan itself can no longer be run as written (portable criteria, web and API targets together, a target with no source-owned identity), which only a corrected plan
+ * The plan itself can no longer be run as written (portable criteria, a target with no source-owned identity), which only a corrected plan
  * fixes. Dispatch sends the task back to plan review (Request changes is the owner's way on) instead of blocking it where nothing the owner can press would help.
  */
 export class ApplicationPlanDefect extends ApplicationDispatchRefusal {
@@ -28,6 +38,13 @@ export class ApplicationPlanDefect extends ApplicationDispatchRefusal {
  */
 export function applicationRuntimeRefusal(reason: string): ApplicationDispatchRefusal {
   return new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}${shortLine(reason, 250)}`);
+}
+/**
+ * A test account the plan was approved with is not the registered one any more (a newer revision, an expired definition, a definition the approved contract no longer stands
+ * behind). Like a requalified runtime, it is fixed by approving the plan again, which one retry does: the block text begins with `WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX`.
+ */
+export function applicationAccountsRefusal(reason: string): ApplicationDispatchRefusal {
+  return new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX}${shortLine(reason, 330)}`);
 }
 /**
  * A refusal to dispatch an application round whose inputs are not usable (the candidate's build source, its manifest, the runtime inputs or the plan itself). The

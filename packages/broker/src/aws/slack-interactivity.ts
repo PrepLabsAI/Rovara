@@ -25,6 +25,7 @@ import {
   workflowResolveFindingsOffered,
   workflowSelectedChecks,
   workflowSendBackOffered,
+  workflowReadmitsApplicationRound,
   answeredConfirmationBlocks,
   confirmationClickEventId,
   confirmationKey,
@@ -265,7 +266,7 @@ function reviewOnlySentence(noneReason: string | undefined): string {
  * and choosing none of anything is review only, which the form says. A verification retry (`retry`) starts with the
  * optional checks chosen before, and must run at least one check.
  */
-export function workflowCheckControls(policy: WorkflowCheckPolicy | undefined, options: { codingPlan: boolean; retry?: boolean }): Array<Record<string, unknown>> {
+export function workflowCheckControls(policy: WorkflowCheckPolicy | undefined, options: { codingPlan: boolean; retry?: boolean; applicationRound?: boolean }): Array<Record<string, unknown>> {
   const required = policy?.required ?? [];
   const optional = policy?.optional ?? [];
   // A task stored before proposals has no `proposed`.
@@ -275,6 +276,8 @@ export function workflowCheckControls(policy: WorkflowCheckPolicy | undefined, o
     return [requiredSection ?? { type: "section", text: { type: "mrkdwn", text: "Checks are chosen when you approve the coding plan." } }];
   }
   const blocks: Array<Record<string, unknown>> = [];
+  // A retry of a browser and API round re-admits the approved round; it needs no project check chosen, and the form says what it will do.
+  if (options.retry === true && options.applicationRound === true) blocks.push({ type: "section", text: { type: "mrkdwn", text: "The approved browser and API checks will run again on the same code." } });
   if (requiredSection !== undefined) blocks.push(requiredSection);
   if (proposed.length > 0 && options.retry === true) {
     // A retry may drop a proposed check (one the worker can't run, say), never add one: those still kept start ticked.
@@ -293,7 +296,7 @@ export function workflowCheckControls(policy: WorkflowCheckPolicy | undefined, o
   }
   const choices = optional.map((check) => ({ text: { type: "plain_text", text: optionText(check.label) }, value: check.id }));
   // A retry must still run a check: with nothing else to run, one must be chosen.
-  const mustChoose = options.retry === true && locked === 0;
+  const mustChoose = options.retry === true && locked === 0 && options.applicationRound !== true;
   const chosenBefore = options.retry === true ? choices.filter((choice) => policy?.selectedOptionalIds.includes(choice.value)) : [];
   const initial = chosenBefore.length > 0 ? { initial_options: chosenBefore } : {};
   blocks.push({ type: "input", block_id: "workflow_checks", optional: !mustChoose,
@@ -1410,7 +1413,7 @@ export function workflowSlackHandlers(deps: {
           throw new WorkflowInteractionRefusal("This verification retry must be opened from the task's AgentX workspace.");
         }
         const { workflow } = await currentVerificationRetry(taskId, Number(retry.revision), action.userId, action.thread);
-        const modalBlocks = workflowCheckControls(workflow.checkPolicy, { codingPlan: true, retry: true });
+        const modalBlocks = workflowCheckControls(workflow.checkPolicy, { codingPlan: true, retry: true, applicationRound: workflowReadmitsApplicationRound(workflow) });
         await deps.openView(action.triggerId, {
           type: "modal", callback_id: "agentx_workflow_checks_retry_submission",
           private_metadata: JSON.stringify({ taskId, revision: workflow.revision, requestId: randomUUID(), thread: action.thread }),
@@ -1765,7 +1768,7 @@ export function workflowSlackHandlers(deps: {
         // A retry runs the project's checks, the proposed ones kept here and the optional ones chosen here.
         const remaining = workflow.checkPolicy === undefined ? 0 : workflowSelectedChecks({ ...workflow.checkPolicy, selectedOptionalIds: selectedOptionalCheckIds,
           ...(selectedProposedCheckIds === undefined ? {} : { selectedProposedIds: selectedProposedCheckIds }) }).length;
-        if (remaining === 0) {
+        if (remaining === 0 && !workflowReadmitsApplicationRound(workflow)) {
           throw new WorkflowCheckSelectionRequired(proposed.length > 0 ? "Keep at least one check, or close the task." : "Choose at least one check before retrying verification.");
         }
         if (deps.retryChecks === undefined) throw new Error("verification retry is not configured");

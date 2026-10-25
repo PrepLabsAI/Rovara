@@ -31,6 +31,7 @@ import {
   type WorkflowReviewBase,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import { isHeartbeat, modelCallView } from "./model-call-view.js";
 import type { ShareDecision } from "./share.js";
 
 /** Whether a block reason is one of the two that send a task back to plan review for a corrected E2E plan: a source reference that does not match the candidate, or an application plan that can no longer run as written. */
@@ -319,6 +320,10 @@ export function taskEvent(event: StoredEvent): DeveloperTaskEvent | undefined {
       return { at, kind: "tool", text: text(`${verb} ${tool}`) };
     }
     case "progress": {
+      // PLANINC-1: a model failure, retry or wait reads as a fixed sentence; the provider's own text is never shown. null: a sanitized payload with nothing to show.
+      const modelCall = modelCallView(payload);
+      if (modelCall === null) return undefined;
+      if (modelCall !== undefined) return { at, kind: modelCall.kind, text: text(modelCall.text) };
       const message = field(payload, "message");
       if (typeof message === "string") return { at, kind: "progress", text: text(message) };
       // F7: reuse lastAssistantResponse (Task 2) instead of a second copy of its block-extraction logic.
@@ -330,11 +335,16 @@ export function taskEvent(event: StoredEvent): DeveloperTaskEvent | undefined {
   }
 }
 
-/** The newest `count` readable events, returned oldest first. */
+/** The newest `count` readable events, returned oldest first. A heartbeat (one a minute) is kept only when it is the newest, so a long wait never pushes a failure or a retry out of the list. */
 export function recentTaskEvents(newestFirst: readonly StoredEvent[], count: number): DeveloperTaskEvent[] {
   const picked: DeveloperTaskEvent[] = [];
+  let heartbeatKept = false;
   for (const event of newestFirst) {
     if (picked.length >= count) break;
+    if (event.type === "progress" && isHeartbeat(event.payload)) {
+      if (heartbeatKept) continue;
+      heartbeatKept = true;
+    }
     const readable = taskEvent(event);
     if (readable !== undefined) picked.push(readable);
   }

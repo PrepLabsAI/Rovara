@@ -312,9 +312,10 @@ describe("orchestrator event shapes, as pinned on Pi 0.85.1", () => {
       "mode", "model", "modelRegistry", "scopedModels", "sessionManager", "shutdown", "signal", "thinkingLevel", "ui"]);
     expect(signalAtToolCall).toBeInstanceOf(AbortSignal);
     expect(keys(toolResult)).toEqual(["content", "details", "input", "isError", "toolCallId", "toolName", "type", "usage"]);
-    expect(keys(end)).toEqual(["isError", "result", "toolCallId", "toolName", "type"]);
+    // Ruling F (Pi 1.1+, additive): tool_execution_end carries the recorded execution time.
+    expect(keys(end)).toEqual(["durationMs", "isError", "result", "toolCallId", "toolName", "type"]);
     const connectorText = "{\"requestId\":\"33333333-3333-4333-8333-333333333333\",\"status\":\"SUCCEEDED\",\"text\":\"[]\",\"truncated\":false,\"replayed\":false}";
-    expect(end).toEqual({ type: "tool_execution_end", toolCallId: "call-list-1", toolName: "tracker__list_items", isError: false,
+    expect(end).toEqual({ type: "tool_execution_end", toolCallId: "call-list-1", toolName: "tracker__list_items", isError: false, durationMs: expect.any(Number) as number,
       result: { content: [{ type: "text", text: connectorText }], details: {} } });
     expect(keys(end.result)).toEqual(["content", "details"]);
 
@@ -327,7 +328,7 @@ describe("orchestrator event shapes, as pinned on Pi 0.85.1", () => {
       ["content", "role", "sections", "timestamp", "toolsAdded"],
       ["content", "role", "timestamp"],
       ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
-      ["content", "details", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
+      ["content", "details", "durationMs", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
       ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
     ]);
     const turnEnds = seen.filter((entry) => entry.type === "turn_end").map((entry) => entry.event);
@@ -344,7 +345,7 @@ describe("orchestrator event shapes, as pinned on Pi 0.85.1", () => {
       ["content", "role", "sections", "timestamp", "toolsAdded"],
       ["content", "role", "timestamp"],
       ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
-      ["content", "details", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
+      ["content", "details", "durationMs", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
       ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
     ]);
     // Ruling D (Pi 0.86+): the leading system message, then the conversation as before.

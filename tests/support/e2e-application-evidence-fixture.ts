@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import process from "node:process";
-import { canonicalJson, type E2EApplicationExecutionAdmission, type E2ERound, type E2ERunBinding } from "@agentx/contracts";
+import { canonicalJson, e2eRuntimeBindingOf, type E2EApplicationExecutionAdmission, type E2ERound, type E2ERunBinding } from "@agentx/contracts";
 import { collectE2EApplicationRun } from "../../packages/verifier/src/application-collection.js";
 import { dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest } from "../../packages/verifier/src/host/executor-readback.js";
 import { E2EApplicationCaseCaptureSchema, E2EApplicationObservationBindingSchema, e2eApplicationAggregateRunUsage, type E2EApplicationCollectionResult } from "../../packages/verifier/src/application-result-adapter.js";
@@ -86,7 +86,8 @@ export async function collectApplicationGroupEvidence(options: ApplicationGroupE
   if (observedList.length !== shardCount) throw new Error("one observed outcome is needed per shard");
 
   const selection = compiled.runtimeAdmissionContext.selectionInput;
-  const runtimeOf = (profileId: string) => compiled.runtimeBindings.get(profileId)!;
+  // The group's own kind: a profile's web row and API row are two entries of an admission (`<profile>#<kind>`), and a v1 admission holds one under the profile alone.
+  const runtimeOf = (profileId: string) => e2eRuntimeBindingOf(compiled.runtimeBindings, profileId, compiled.runtimeKind)!;
   const firstApp = selection.intent.applicationRuntimeRefs.find((ref) => ref.targetId === compiled.shards[0]!.targetId)!;
   const ENVIRONMENT = (options.environment ?? runtimeOf(firstApp.runtimeProfileId).runnerEnvironment) as { ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string };
   const LIMITS = options.limits ?? RUNNER_LIMITS;
@@ -211,13 +212,13 @@ export async function collectApplicationGroupEvidence(options: ApplicationGroupE
       listProcess: processRecord(0, listStarted, listFinished, listBytes), runProcess: processRecord(assertionPassed ? 0 : 1, processStarted, processFinished, reportBytes) });
     observationBindings.push(E2EApplicationObservationBindingSchema.parse({ caseId: expected.caseId, subject, caseProducer: producer,
       assertionProducers: [{ assertionIndex: 0, producer }], accountRef, sessionRef, accountIdDigest: sha("account"),
-      identityReceiptRef: identityReceipt.ref, subjectIdentityReceiptRef: subjectIdentityReceipt.ref, selectedArtifact: applicationBinding.artifacts[0]!, connection: null }));
+      identityReceiptRef: identityReceipt.ref, subjectIdentityReceiptRef: subjectIdentityReceipt.ref, selectedArtifact: applicationBinding.artifacts.find((artifact) => artifact.platform === compiled.runtimeKind) ?? applicationBinding.artifacts[0]!, connection: null }));
   }
 
   // As the host does after close: the owned-cleanup receipt is the one supervisor receipt it attests, and the cleanup frame names it.
-  const cleanupReceipt = dockerOwnedCleanupReceipt(binding.runId, closedAt);
+  const cleanupReceipt = dockerOwnedCleanupReceipt(binding.runId, closedAt, []);
   const cleanupFrame = frame("owned-cleanup", { schemaVersion: "e2e-application-owned-cleanup/v1", context, phase: "after-owned-close", cleanup: "confirmed", confirmed: true,
-    serverListening: false, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId), ownedCleanupReceiptRefs: [cleanupReceipt.ref] });
+    serverListening: false, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId, []), ownedCleanupReceiptRefs: [cleanupReceipt.ref] });
   const expectedSupervisorRefs = [cleanupReceipt.ref];
   const byShard = (left: unknown, right: unknown) => (left as { shardId: string }).shardId.localeCompare((right as { shardId: string }).shardId);
   const receipt = frame("supervisor-top-receipt", { schemaVersion: "e2e-application-supervisor-receipt/v1", context, launches: [...launches].sort(byShard),
@@ -230,7 +231,7 @@ export async function collectApplicationGroupEvidence(options: ApplicationGroupE
   // Exactly what the Docker host reads back after close (assembleDockerCollectionInputs): nothing here decides pass or fail.
   const usage = e2eApplicationAggregateRunUsage(reports.map((report) => report.run.usage as Readonly<Record<string, number>>))!;
   const collectionInputs = { environment: ENVIRONMENT, usage: usage as Record<string, number>, limits: reports[0]!.run.limits,
-    expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId),
+    expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId, []),
     observationBindings, assertionAssets, governedModelReceipts: [] as never[], ownedClosedAt: closedAt };
   const collected = collectE2EApplicationRun({ actual, compiled, binding, round, ...collectionInputs } as never);
   if (collected.collection === null || collected.qualification === null) throw new Error(`the fixture run could not be collected: ${collected.unavailableReason}`);

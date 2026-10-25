@@ -11,6 +11,7 @@ import { CandidateManifestSchema } from "./task-workflow.js";
 import { isSafeE2ESourcePath } from "./e2e-source.js";
 import { E2ERegisteredRuntimeSchema, type E2ERegisteredRuntime } from "./e2e-runtime-registration.js";
 import { E2EPortableApprovalBindingSchema } from "./e2e-portable.js";
+import { E2EApplicationReplaySchema } from "./e2e-replay.js";
 import { E2ERuntimeAccountRefSchema } from "./e2e-application.js";
 import type { E2EApplicationPlanSelectionInput } from "./e2e-application-execution-plan.js";
 
@@ -194,7 +195,34 @@ export const E2ECreatorAuthoritySchema = z.discriminatedUnion("kind", [
     bindings: z.array(z.object({ channelId: id(64), updatedAt: id(40) }).strict()).min(1).max(64) }).strict(),
 ]);
 export type E2ECreatorAuthority = z.infer<typeof E2ECreatorAuthoritySchema>;
-export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: z.literal("workflow-e2e-application-admission/v1"),
+
+/**
+ * The application admission's schema versions. M1.3 Task 3.4 raised it to v2: its runtime bindings are keyed by `<runtimeProfileId>#<kind>` (a profile registers a web row and an API row, and
+ * one plan can run both), where v1 keyed them by the profile alone. The broker builds only v2; v1 still decodes, so an admission stored before the change is read and verified as it was.
+ */
+export const E2E_APPLICATION_ADMISSION_SCHEMA_V1 = "workflow-e2e-application-admission/v1" as const;
+export const E2E_APPLICATION_ADMISSION_SCHEMA_V2 = "workflow-e2e-application-admission/v2" as const;
+export const E2E_APPLICATION_ADMISSION_SCHEMAS = [E2E_APPLICATION_ADMISSION_SCHEMA_V1, E2E_APPLICATION_ADMISSION_SCHEMA_V2] as const;
+/** Whether a stored object's `schemaVersion` names an application admission (any version); anything else, a non-string included, is not one. */
+export function isE2EApplicationAdmissionSchemaVersion(value: unknown): value is (typeof E2E_APPLICATION_ADMISSION_SCHEMAS)[number] {
+  return typeof value === "string" && (E2E_APPLICATION_ADMISSION_SCHEMAS as readonly string[]).includes(value);
+}
+export type E2ERuntimeBindingKind = "web" | "api";
+/** The key of a v2 runtime binding: the runtime profile and the target kind it serves, the same suffix as the catalog row's sort key (`linux-arm64-web-api-v1#web`). */
+export function e2eRuntimeBindingKey(runtimeProfileId: string, kind: E2ERuntimeBindingKind): string {
+  return `${runtimeProfileId}#${kind}`;
+}
+/**
+ * The runtime row a compiled group runs on, from a bindings map keyed as the admission keyed it: `<profile>#<kind>` (v2) or the profile alone (v1, which could hold one kind only).
+ * A row of another kind than asked for is never returned, so a map that holds the wrong kind under a key finds nothing.
+ */
+export function e2eRuntimeBindingOf(bindings: ReadonlyMap<string, E2ERegisteredRuntime>, runtimeProfileId: string, kind: E2ERuntimeBindingKind): E2ERegisteredRuntime | undefined {
+  const keyed = bindings.get(e2eRuntimeBindingKey(runtimeProfileId, kind));
+  if (keyed !== undefined) return keyed.capabilities.kind === kind ? keyed : undefined;
+  const legacy = bindings.get(runtimeProfileId);
+  return legacy !== undefined && legacy.capabilities.kind === kind ? legacy : undefined;
+}
+export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: z.enum(E2E_APPLICATION_ADMISSION_SCHEMAS),
   taskId: id(120), operationId: id(120), operationFence: z.number().int().positive(), workflowRevision: z.number().int().positive(), candidateDigest: sha256,
   /** The exact commit and tree the worker builds from (staged from that commit's tree with `git ls-tree` and `git cat-file`); the tree is checked against the repository before any build. */
   candidateCommitSha: sha1, candidateTreeSha: sha1,
@@ -207,6 +235,16 @@ export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: 
   policy: E2EPolicySchema, bundle: E2EScenarioBundleSchema, executionPlan: E2EExecutionPlanSchema,
   /** The creator's access when the round was admitted (the broker's own proof); absent only from admissions the broker did not build. Verification requires it. */
   creatorAuthority: E2ECreatorAuthoritySchema.optional(),
+  /**
+   * M1.3 Task 3.7b: signed into a baseline round (the approved scenarios on the unchanged code, for information only) and absent from every candidate round. The commit it names is
+   * the commit the round builds from, so a baseline admission can only be about the base.
+   */
+  baseline: z.object({ purpose: z.literal("baseline"), baseCommitSha: sha1, attempt: z.number().int().positive() }).strict().optional(),
+  /**
+   * M1.4 Task 4.6b: signed into an audit replay of a verified AI-navigated round (the same candidate run again with no model, for an operator's check) and absent from every other
+   * round. It names the round it replays, what that round showed and the recordings it serves, each bound by digest; the admission names no model route.
+   */
+  replay: E2EApplicationReplaySchema.optional(),
   portableProjection: E2EApplicationPortableProjectionSchema.nullable(), round: E2ERoundSchema,
   groups: z.array(E2EApplicationGroupAdmissionSchema).max(4), admissionDigest: sha256,
 }).strict().superRefine((admission, context) => {
@@ -216,6 +254,12 @@ export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: 
   if (admission.candidateCommitSha !== admission.sourceSnapshot.commitSha || admission.candidateTreeSha !== admission.sourceSnapshot.treeSha
     || admission.candidateCommitSha !== admission.selectionInput.sourceSnapshot.commitSha || admission.candidateTreeSha !== admission.selectionInput.sourceSnapshot.treeSha) {
     context.addIssue({ code: "custom", path: ["candidateCommitSha"], message: "candidate commit and tree must be the exact commit and tree of the admitted source snapshot" });
+  }
+  if (admission.baseline !== undefined && admission.baseline.baseCommitSha !== admission.candidateCommitSha) {
+    context.addIssue({ code: "custom", path: ["baseline", "baseCommitSha"], message: "a baseline round builds from its base commit and nothing else" });
+  }
+  if (admission.replay !== undefined && (admission.modelRoute !== null || admission.baseline !== undefined)) {
+    context.addIssue({ code: "custom", path: ["replay"], message: "a replay round names no model route and is not a baseline" });
   }
   const portableSelection = admission.portableProjection?.selectionInput as { sourceSnapshot?: z.infer<typeof sourceSnapshotWireSchema> } | undefined;
   const wireSources = [admission.sourceSnapshot, admission.selectionInput.sourceSnapshot,
@@ -234,6 +278,13 @@ export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: 
   if (!orderedUniqueKeys(admission.applicationBindings.map((item) => item.key)) || !orderedUniqueKeys(admission.runtimeBindings.map((item) => item.key))
     || !orderedUniqueKeys(admission.cliHosts.map((item) => item.profileId)) || !orderedUniqueKeys(admission.preparedEnvironments.map((item) => item.groupId))) {
     context.addIssue({ code: "custom", path: [], message: "admission maps and prepared environment rows must be sorted by unique key" });
+  }
+  // v2 keys name the profile and the kind of the row they hold (`<profile>#<kind>`); a v1 key is the profile alone and never has a `#`. A key that says one thing about its row and holds another is refused.
+  const keyedBy = (item: { key: string; value: E2ERegisteredRuntime }) => (item.value.capabilities.kind === "web" || item.value.capabilities.kind === "api"
+    ? e2eRuntimeBindingKey(item.value.profileId, item.value.capabilities.kind) : undefined);
+  if (admission.schemaVersion === E2E_APPLICATION_ADMISSION_SCHEMA_V2 ? admission.runtimeBindings.some((item) => item.key !== keyedBy(item))
+    : admission.runtimeBindings.some((item) => item.key.includes("#"))) {
+    context.addIssue({ code: "custom", path: ["runtimeBindings"], message: "runtime binding keys must be <profile>#<kind> of their row in a version 2 admission, and the profile alone in version 1" });
   }
   if (new Set(admission.launchTargets.map((item) => item.targetId)).size !== admission.launchTargets.length
     || new Set(admission.groups.map((item) => item.outerBinding.groupId)).size !== admission.groups.length) {
@@ -255,4 +306,19 @@ export type E2EApplicationCompilationContext = Readonly<{
   modelRoute: null | { routeId: string; routeRevision: string };
   cliHostsByProfile: ReadonlyMap<string, E2EApplicationCliHostDescriptor>;
   preparedEnvironmentsByGroup: ReadonlyMap<string, E2EApplicationPreparedGroupFacts>;
+  /**
+   * Set only by the worker's validator, for an admission the control plane wrote before Task 4.3a: a route-pinned policy's round with no agent step was admitted with the policy's own
+   * limits for its shards, not the model-free ones. The compiler then keeps those limits, so the shard digests the admission was written with still match.
+   */
+  policyLimitsForModelFreeShards?: true;
+  /**
+   * Set only by the worker's validator (and by the built-in qualification probes, whose plans are pinned): the shards with no agent step are compiled under the model-free limits as they
+   * were before the evaluation fix RUN-1 (60 s run, 10 s case) instead of the normal ones. An admission written by an earlier control plane says so by only matching that way.
+   */
+  modelFreeShardRule?: "before-run-1";
+  /**
+   * Set only for an audit replay (Task 4.6b): the group runs with no model route and a read-only store of the bound recordings, whatever agent steps its scenarios have. It carries the
+   * binding of each recording (what the verified round showed for the step), never the recording itself, so the compiled files do not depend on the recordings' bytes.
+   */
+  replay?: Readonly<{ bindings: ReadonlyArray<Readonly<{ caseId: string; stepIndex: number; keyHash: string; traceSha256: string; actionCount: number }>> }>;
 }>;

@@ -102,7 +102,8 @@ export function deriveProjectSetupSourceSmoke(input: {
   const selectedTargetIds = input.policy.targets.map((target) => target.targetId);
   const selectionInput = {
     candidateDigest: input.snapshot.candidate.digest, expectedCandidate: input.snapshot.candidate, sourceSnapshot: input.snapshot,
-    planDigest, policy: input.policy, scenarios, selectedTargetIds,
+    // The smoke calls no model: a policy that pins an AI navigation route (Task 4.2) is projected to the model-free one, or the sandbox would be unusable.
+    planDigest, policy: { ...input.policy, modelRouteRevision: null }, scenarios, selectedTargetIds,
     sandboxAvailability: input.sandboxAvailability, runtimeAvailability: input.runtimeAvailability,
     portableApprovalBinding, approvedSemanticApproval: semanticApproval,
   };

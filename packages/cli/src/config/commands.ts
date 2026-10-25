@@ -14,10 +14,13 @@ import { checkAlertWebhook, storeAlertWebhook, webhookDisplay } from "../init/an
 import type { InitSecrets } from "../init/context.js";
 import { readInstallAnswers, writeInstallAnswers } from "../init/install-state.js";
 import { modelCheckProblem, type PrerequisiteChecks } from "../init/prerequisites.js";
+import { runModelCheck } from "../init/run-model-check.js";
 import { secretFromSource, type Prompter, type SecretSource } from "../init/prompts.js";
 import { alertsTopicArn, ensureSubscribed, type AlertsApi } from "../setup/alerts.js";
 import { CLI_VERSION } from "../version.js";
+import type { DeployPart } from "../deploy/parameters.js";
 import { CONFIG_KEYS, configKey, whereText, type ConfigKey, type ModelRole } from "./keys.js";
+import { KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, eligibleE2EAgentModel, isKeyedModelProvider, type ModelProvider } from "@agentx/contracts";
 
 export interface ConfigServices {
   store: ParameterStore;
@@ -26,7 +29,7 @@ export interface ConfigServices {
   stacks: StackReader;
   identity: CallerIdentity;
   /** Built for the environment's own region, once its settings are read (the model test call runs there). */
-  checks: (region: string) => Pick<PrerequisiteChecks, "converse" | "openRouter" | "directProvider">;
+  checks: (region: string) => Pick<PrerequisiteChecks, "converse" | "openRouter" | "directProvider" | "quotas">;
   alerts: AlertsApi;
   prompter: Prompter;
   processEnv: NodeJS.ProcessEnv;
@@ -80,7 +83,17 @@ async function currentValue(services: ConfigServices, env: string, settings: Env
   const name = target.kind === "stack-parameter" ? target.parameter : target.installDefault.parameter;
   const stack = await services.stacks.describe(environmentStackName(env, part));
   const value = stack?.parameters[name] ?? entry.defaultValue ?? "unknown";
+  if (target.kind === "stack-parameter" && target.also !== undefined) {
+    // One value on several stacks: when they differ, say so (a set finishes the stacks that are behind).
+    const others = await Promise.all(target.also.map(async (each) => (await services.stacks.describe(environmentStackName(env, each.part)))?.parameters[each.parameter] ?? entry.defaultValue ?? "unknown"));
+    if (others.some((other) => other !== value)) return `${[value, ...others].map((each, index) => `${each} (${[target, ...target.also!][index]!.part})`).join(", ")}; agentx config set ${entry.key} makes them the same`;
+  }
   return target.kind === "stack-parameter" ? value : `${value} (install-time default; the control plane may hold a newer setting)`;
+}
+
+/** One stack parameter as the stack reports it now, or the key's default when the stack reports none. */
+async function stackParameterValue(services: ConfigServices, env: string, where: { part: DeployPart; parameter: string }, fallback: string | undefined): Promise<string> {
+  return (await services.stacks.describe(environmentStackName(env, where.part)))?.parameters[where.parameter] ?? fallback ?? "unknown";
 }
 
 export async function runConfigList(services: ConfigServices, env: string): Promise<ConfigRow[]> {
@@ -98,29 +111,43 @@ export async function runConfigGet(services: ConfigServices, env: string, key: s
   return { key: entry.key, value: await currentValue(services, env, settings, entry), where: whereText(entry.target, env), description: entry.description };
 }
 
+/**
+ * models.e2eAgent: `default` is always fine; a model id must be one the table of eligible AI navigation models lists for the environment's worker provider and region. There is no test
+ * call here: the driving test on the qualified runner is the gate (Task 4.10C), and the broker shows the choice at setup approval.
+ */
+function checkE2eAgentChoice(env: string, settings: EnvironmentSettings, value: string): void {
+  if (value === "default") return;
+  const provider: ModelProvider = settings.models.providers?.worker ?? "amazon-bedrock";
+  if (eligibleE2EAgentModel(provider, value, settings.region) !== null) return;
+  const label = isKeyedModelProvider(provider) ? KEYED_MODEL_PROVIDERS[provider].label : "Amazon Bedrock";
+  throw agentXError("CONFIG_INVALID", `models.e2eAgent must be default or a model Rovara can use with ${label} in ${settings.region}; agentx --env ${env} config set models.e2eAgent default puts the recommendation back; nothing changed`);
+}
+
 /** FR-049: a model key passes the same one-token test call init makes, with the environment's provider. */
 async function checkModel(services: ConfigServices, env: string, settings: EnvironmentSettings, role: ModelRole, modelId: string): Promise<void> {
   const checks = services.checks(settings.region);
-  try {
-    const provider = settings.models.providers?.[role];
-    if (provider === "openrouter") {
-      if (checks.openRouter === undefined) throw new Error("this agentx cannot check OpenRouter models");
-      await checks.openRouter(modelId, settings.models.openRouter ?? {});
-    } else if (provider === "anthropic" || provider === "openai") {
-      if (checks.directProvider === undefined) throw new Error(`this agentx cannot check ${provider} models`);
-      await checks.directProvider(provider, modelId, settings.models[provider] ?? {});
-    } else {
-      await checks.converse(modelId);
-    }
-  } catch (error) {
-    // Live check L3: init's wording names its --<role>-model flag, which config set does not take.
-    const wording = {
-      changeModel: `agentx --env ${env} config set models.${role} <another model id>`,
-      rerun: `run agentx --env ${env} config set models.${role} again`,
-      region: "check this computer's network access to AWS (an environment cannot move regions), then try again",
-    };
-    throw agentXError("CONFIG_INVALID", `${modelCheckProblem({ modelId, role, region: settings.region, error, wording })}; nothing changed`);
-  }
+  const provider = settings.models.providers?.[role] ?? "amazon-bedrock";
+  const outcome = await runModelCheck({ provider, modelId, region: settings.region, checks, config: settings.models, sleep: services.sleep });
+  if (outcome.ok) return;
+  // Live check L3: init's wording names its --<role>-model flag, which config set does not take.
+  const wording = {
+    changeModel: `agentx --env ${env} config set models.${role} <another model id>`,
+    rerun: `run agentx --env ${env} config set models.${role} again`,
+    region: "check this computer's network access to AWS (an environment cannot move regions), then try again",
+  };
+  throw agentXError("CONFIG_INVALID", `${modelCheckProblem({ modelId, role, region: settings.region, error: outcome.error, ...(outcome.quota === undefined ? {} : { quota: outcome.quota }), wording })}; nothing changed`);
+}
+
+/** models.fallback: the model must answer the same one-token test call the coding roles pass, with Amazon Bedrock in the environment's own region, before anything changes. */
+async function checkFallbackModel(services: ConfigServices, env: string, settings: EnvironmentSettings, key: string, modelId: string): Promise<void> {
+  const outcome = await runModelCheck({ provider: "amazon-bedrock", modelId, region: settings.region, checks: services.checks(settings.region), config: settings.models, sleep: services.sleep });
+  if (outcome.ok) return;
+  const wording = {
+    changeModel: `agentx --env ${env} config set ${key} <another model id>`,
+    rerun: `run agentx --env ${env} config set ${key} again`,
+    region: "check this computer's network access to AWS (an environment cannot move regions), then try again",
+  };
+  throw agentXError("CONFIG_INVALID", `${modelCheckProblem({ modelId, role: "worker", region: settings.region, error: outcome.error, ...(outcome.quota === undefined ? {} : { quota: outcome.quota }), wording })}; nothing changed`);
 }
 
 /** Records a model in the settings, then the install answers. `agentx upgrade` reads the models from
@@ -273,7 +300,10 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
   const value = entry.parse(input.value);
   const settings = await installed(services, env);
   const role = entry.model;
-  if ((await currentValue(services, env, settings, entry)) === value) {
+  if (entry.e2eAgentModel === true) checkE2eAgentChoice(env, settings, value);
+  const targets = [{ part: target.part, parameter: target.parameter }, ...(target.also ?? [])];
+  const currents = await Promise.all(targets.map((where) => stackParameterValue(services, env, where, entry.defaultValue)));
+  if (currents.every((current) => current === value)) {
     if (role === undefined || await modelRecorded(services, env, settings, role, value)) {
       services.write(`${entry.key} is already ${value}; nothing to change`);
       return { changed: false };
@@ -288,45 +318,61 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
   }
   const session = await recordingSession(services, env, entry, STACK_SIGN_IN_MS, input.yes);
   if (role !== undefined) await checkModel(services, env, settings, role, value);
+  if (entry.fallbackModel === true && value !== MODEL_FALLBACK_NONE) await checkFallbackModel(services, env, settings, entry.key, value);
   const roleArn = settings.access?.cloudFormationRoleArn;
   if (roleArn === undefined) throw agentXError("CONFIG_INVALID", `environment ${env}'s settings name no CloudFormation role; run agentx env use --env ${env}, or agentx init --resume`);
   const holder = (await services.identity.get()).arn;
   return withEnvironmentLock({ store: services.store, env, holder, command: `config set ${entry.key}`, now: services.now }, async () => {
-    const stackName = environmentStackName(env, target.part);
-    // Issue #205: recorded after the yes, before the change set runs; a failed record runs nothing.
+    // Issue #205: recorded after the yes, before the first change set runs; a failed record runs nothing.
     let recording: Recording | undefined;
     let unrecorded: Error | undefined;
-    let result: { changed: boolean };
-    try {
-      result = await updateStackParameters({
-        cloudFormation: services.cloudFormation, stackName, roleArn, changes: { [target.parameter]: value }, label: "config",
-        confirm: async ({ parameters, changes }) => {
-          for (const change of parameters) services.write(`${entry.key}: ${change.name} ${change.from} -> ${change.to} on ${stackName}`);
-          for (const change of changes) services.write(`  ${change.action} ${change.logicalId} (${change.type})${change.replacement === "True" ? " [replacement]" : ""}`);
-          const requestedAt = input.yes ? undefined : iso(services.now());
-          if (!(input.yes || await services.prompter.confirm(`Apply this change to ${stackName}?`, { defaultValue: false }))) return false;
-          const parameter = parameters.find((change) => change.name === target.parameter);
-          try {
-            recording = await startRecording(services, env, session, entry, STACK_SIGN_IN_MS, { before: parameter?.from ?? "", after: parameter?.to ?? value }, requestedAt);
-          } catch (error) {
-            unrecorded = error instanceof Error ? error : agentXError("RUNTIME_UNAVAILABLE", `${entry.key} was not changed; nothing changed, try again`);
-            return false;
-          }
-          return true;
-        },
-        write: services.write, now: services.now, sleep: services.sleep, ...(services.pollMs === undefined ? {} : { pollMs: services.pollMs }),
-      });
-    } catch (error) {
-      if (unrecorded !== undefined) throw unrecorded;
-      // Only a stack that ended (rolled back, or gone) is a failure for certain. A deadline, a
-      // throttled poll or a lost answer may still be applying: the record is left applying.
-      if (error instanceof AgentXError && error.code === "CONFIG_INVALID") await finishRecording(services, entry, recording, failureOf(entry, error));
-      else if (recording !== undefined) services.write(`Warning: the ${entry.key} change may still be applying, so agentx admin changes shows change ${recording.changeId} as applying; check ${stackName} in the CloudFormation console.`);
-      throw error;
+    let confirmed = false;
+    let changed = false;
+    const done: string[] = [];
+    for (const [index, where] of targets.entries()) {
+      // A stack that already has the value (an earlier run finished the other one) is left alone.
+      if (currents[index] === value) continue;
+      const stackName = environmentStackName(env, where.part);
+      let result: { changed: boolean };
+      try {
+        result = await updateStackParameters({
+          cloudFormation: services.cloudFormation, stackName, roleArn, changes: { [where.parameter]: value }, label: "config",
+          confirm: async ({ parameters, changes }) => {
+            for (const change of parameters) services.write(`${entry.key}: ${change.name} ${change.from} -> ${change.to} on ${stackName}`);
+            for (const change of changes) services.write(`  ${change.action} ${change.logicalId} (${change.type})${change.replacement === "True" ? " [replacement]" : ""}`);
+            // One yes covers every stack the key sets.
+            const requestedAt = input.yes || confirmed ? undefined : iso(services.now());
+            if (!(input.yes || confirmed || await services.prompter.confirm(`Apply this change to ${stackName}?`, { defaultValue: false }))) return false;
+            confirmed = true;
+            if (recording === undefined) {
+              const parameter = parameters.find((change) => change.name === where.parameter);
+              try {
+                recording = await startRecording(services, env, session, entry, STACK_SIGN_IN_MS, { before: parameter?.from ?? "", after: parameter?.to ?? value }, requestedAt);
+              } catch (error) {
+                unrecorded = error instanceof Error ? error : agentXError("RUNTIME_UNAVAILABLE", `${entry.key} was not changed; nothing changed, try again`);
+                return false;
+              }
+            }
+            return true;
+          },
+          write: services.write, now: services.now, sleep: services.sleep, ...(services.pollMs === undefined ? {} : { pollMs: services.pollMs }),
+        });
+      } catch (error) {
+        if (unrecorded !== undefined) throw unrecorded;
+        // Only a stack that ended (rolled back, or gone) is a failure for certain. A deadline, a
+        // throttled poll or a lost answer may still be applying: the record is left applying.
+        if (error instanceof AgentXError && error.code === "CONFIG_INVALID") await finishRecording(services, entry, recording, failureOf(entry, error));
+        else if (recording !== undefined) services.write(`Warning: the ${entry.key} change may still be applying, so agentx admin changes shows change ${recording.changeId} as applying; check ${stackName} in the CloudFormation console.`);
+        if (done.length > 0) services.write(`Warning: ${entry.key} is now ${value} on ${done.join(" and ")}, but not on ${stackName}; run the same agentx config set again to finish it.`);
+        throw error;
+      }
+      done.push(stackName);
+      changed ||= result.changed;
     }
     // After a yes, updateStackParameters either changed the stack or threw.
-    if (result.changed) await finishRecording(services, entry, recording, { outcome: "applied" });
-    if (result.changed && role !== undefined) {
+    if (changed) await finishRecording(services, entry, recording, { outcome: "applied" });
+    if (changed && role !== undefined) {
+      const stackName = environmentStackName(env, target.part);
       try {
         await recordModel(services, env, role, value);
       } catch (error) {
@@ -337,7 +383,7 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
         );
       }
     }
-    return { changed: result.changed };
+    return { changed };
   });
 }
 

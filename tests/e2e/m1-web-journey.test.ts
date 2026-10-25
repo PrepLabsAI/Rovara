@@ -12,6 +12,7 @@ import {
   type E2EScenario, type E2ESourceSnapshot, type WorkerInvocation,
 } from "@agentx/contracts";
 import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
+import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator } from "../../packages/broker/src/aws/dispatcher.js";
@@ -19,7 +20,7 @@ import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js
 import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
 import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
-import { createDockerApplicationHost, createProcessDockerCli } from "@agentx/verifier";
+import { createDockerApplicationHost, createProcessDockerCli, type DockerCli } from "@agentx/verifier";
 import { OperationJournal } from "../../packages/worker/src/journal.js";
 import { createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/server.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
@@ -29,6 +30,7 @@ import { postWorkerTerminalResult } from "../../packages/worker/src/terminal-cal
 import { workflowE2EApplicationHostDeps, type WorkflowE2EApplicationRuntimeConfig } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/docker-application-host.js";
+import { ciImage } from "../support/ci-images.js";
 import { call } from "../support/slack-broker.js";
 import { collectOnThisHost } from "../support/linux-web-api-probes.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
@@ -52,6 +54,11 @@ const FIXTURE_ROOT = join(import.meta.dirname, "../fixtures/e2e-web-api-app");
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8",
   env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test" } }).trim();
 const docker = (...args: string[]) => execFileSync("docker", args, { encoding: "utf8" }).trim();
+/** The process Docker CLI, noting the run label of every command it is given. */
+const observedDocker = (cli: DockerCli, seenRuns: Set<string>): DockerCli => ({ run: (args, opts) => {
+  for (const value of args) if (value.startsWith("rovara.run=")) seenRuns.add(value.slice("rovara.run=".length));
+  return cli.run(args, opts);
+} });
 
 /**
  * The worker's collector holds the toolchain the executor reported (a Linux Node in the executor image) against the process reading the result, which is the worker
@@ -141,7 +148,10 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     expect(approval.status, JSON.stringify(approval.body)).toBe(200);
     const definition = projectRow().definition as Record<string, unknown> & { revision: number };
     const registration = await call(harness.handler, { method: "POST", path: "/v1/admin/projects", user: admin,
-      body: { definition: { ...definition, revision: definition.revision + 1, e2e: proposalResponse.body.policy }, runtimeBinding: projectRow().runtimeBinding, setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
+      // The baseline round (M1.3 Task 3.7b) is on by default and runs right after the coding run, as the first CHECKS operation. This journey's base commit holds the project contract only
+      // (the app arrives with the candidate), so a baseline here would run on a repository with no app and be this journey's "round 1". Its round accounting is explicit: no baseline.
+      body: { definition: { ...definition, revision: definition.revision + 1, e2e: proposalResponse.body.policy,
+        developerTasks: { ...((definition as { developerTasks?: object }).developerTasks ?? {}), e2eBaselineRound: false } }, runtimeBinding: projectRow().runtimeBinding, setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
     expect(registration.status, JSON.stringify(registration.body)).toBe(201);
     const policy = E2EPolicySchema.parse(proposalResponse.body.policy);
 
@@ -157,7 +167,8 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     const planning = operationRows((row) => row.workflowMode === "PLAN")[0]!;
     const readyWeb = { kind: "web" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedSteps,
       supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions };
-    const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [readyWeb] });
+    const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [readyWeb],
+      accountRegistry: accountRegistryEntriesFromRows("payments", harness.db.find((row) => row.pk === "PROJECT#payments")) });
     if (context.status !== "available") throw new Error(context.reason);
     const targetOf = (profileId: string) => context.targets.find((item) => item.kind === "web" && item.accountProfileId === profileId);
     const target = targetOf("orders-owner");
@@ -210,9 +221,11 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     const { modelRuntime, faux } = await fauxModelRuntime();
     // The production Docker application runtime of the worker, on this machine's Docker: the hardened host, the executor image, and the same collector (it only
     // compares the node path the executor reports with this process's, which differ on a CI runner and a Mac, exactly as the Linux runtime tests handle it).
+    /** The runs this journey started, by the labels its host put on their resources: another session's runs on the same Docker are none of this journey's business. */
+    const seenRuns = new Set<string>();
     const applicationRuntime: WorkflowE2EApplicationRuntime = { runRoot, collect: collectLikeTheWorker,
-      createHost: (input) => createDockerApplicationHost(workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: WEB_API_BUILD_IMAGE, runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
-        createProcessDockerCli(), () => Date.now(), input)) };
+      createHost: (input) => createDockerApplicationHost(workflowE2EApplicationHostDeps({ executorImage: EXECUTOR_IMAGE, buildImage: ciImage("node-build", WEB_API_BUILD_IMAGE), runRoot } satisfies WorkflowE2EApplicationRuntimeConfig,
+        observedDocker(createProcessDockerCli(), seenRuns), () => Date.now(), input)) };
     const workerState = createWorkerServerState(journal, {
       execute: async (invocation) => {
         const sinks = sinksFor(invocation);
@@ -299,10 +312,11 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
       await harness.handler({ source: "agentx.workflow-dispatch-recovery" });
     }
 
-    /** Nothing of any round is left behind: no container, network or volume still carries the run label, and the run directory is empty. */
+    /** Nothing of any round is left behind: no container, network or volume still carries the label of a run this journey started, and the run directory is empty. */
     const nothingLeftBehind = async () => {
-      const labelled = (kind: "ps" | "network" | "volume") => docker(...(kind === "ps" ? ["ps", "-a", "--filter", "label=rovara.run", "--format", "{{.Names}}"]
-        : [kind, "ls", "--filter", "label=rovara.run", "--format", "{{.Name}}"]));
+      expect(seenRuns.size, "the journey's host started at least one run").toBeGreaterThan(0);
+      const labelled = (kind: "ps" | "network" | "volume") => [...seenRuns].map((runId) => docker(...(kind === "ps" ? ["ps", "-a", "--filter", `label=rovara.run=${runId}`, "--format", "{{.Names}}"]
+        : [kind, "ls", "--filter", `label=rovara.run=${runId}`, "--format", "{{.Name}}"]))).filter((names) => names !== "").join("\n");
       expect({ containers: labelled("ps"), networks: labelled("network"), volumes: labelled("volume") }).toEqual({ containers: "", networks: "", volumes: "" });
       expect(await readdir(runRoot)).toEqual([]);
     };

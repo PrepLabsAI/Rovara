@@ -27,19 +27,24 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CloudFormationClient, DescribeStackResourcesCommand, DescribeStacksCommand } from "@aws-sdk/client-cloudformation";
 import { AttachVolumeCommand, CreateVolumeCommand, DescribeInstancesCommand, DescribeLaunchTemplateVersionsCommand, DescribeVolumesCommand, EC2Client, RunInstancesCommand, type RunInstancesCommandInput } from "@aws-sdk/client-ec2";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { e2eModelCheckRunnerKey } from "../packages/broker/src/e2e/model-route-registry.js";
 import { ec2Binding } from "../packages/cli/src/setup/project-add.js";
 import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
 import {
   E2E_QUALIFICATION_PROFILE_ID,
   Ec2RuntimeBindingSchema,
   WORKER_SETTING_PARAMETERS,
+  chunkParameterNames,
   E2E_QUALIFICATION_ROLE_ID_PATTERN,
   e2eQualificationPrefix,
   ec2WorkerUserData,
   type Ec2RuntimeBinding,
 } from "../packages/contracts/src/session.js";
+import { WEB_API_RUNTIME_PROFILE_ID } from "../packages/contracts/src/e2e-web-api-qualification.js";
 import { Runner, type ReleaseOptions } from "./release-common.js";
 import { loadAllowlist, parseOptions } from "./test-deploy.js";
 
@@ -114,6 +119,7 @@ export type QualificationStep =
   | { id: string; kind: "poll-status"; object: string; timeoutMs: number; intervalMs: number }
   | { id: string; kind: "download-proposal"; object: string }
   | { id: string; kind: "register" }
+  | { id: string; kind: "record-model-check-runner"; transportCorrelationId: string }
   | { id: string; kind: "delete-challenge"; object: string }
   | { id: string; kind: "print-registered-rows" };
 
@@ -146,6 +152,8 @@ export function planTestQualification(input: QualificationInput, allowlist: read
     { id: "poll-status", kind: "poll-status", object: "status.json", timeoutMs: QUALIFICATION_POLL_TIMEOUT_MS, intervalMs: POLL_INTERVAL_MS },
     { id: "download-proposal", kind: "download-proposal", object: "proposal.json" },
     { id: "register", kind: "register" },
+    // Task 4.10C: where the control plane puts model checks: this runner, bound to the registration just made.
+    { id: "record-model-check-runner", kind: "record-model-check-runner", transportCorrelationId: input.workspaceId },
     { id: "delete-challenge", kind: "delete-challenge", object: "challenge.json" },
     { id: "print-registered-rows", kind: "print-registered-rows" },
   ];
@@ -182,6 +190,7 @@ export function formatQualificationPlan(steps: readonly QualificationStep[], inp
       case "poll-status": return `poll ${PLAN_PREFIX}${step.object} every ${step.intervalMs / 1000}s for up to ${step.timeoutMs / 60_000} minutes (the challenge's lifetime)`;
       case "download-proposal": return `only if the status is SUCCEEDED: download ${PLAN_PREFIX}${step.object}`;
       case "register": return "register the proposal (agentx admin runtime-installation register --proposal-file)";
+      case "record-model-check-runner": return `record this runner for model checks (E2E_MODEL_ROUTES / E2E_MODEL_CHECK_RUNNER#${WEB_API_RUNTIME_PROFILE_ID}: its role ID, instance ID and transport correlation ${step.transportCorrelationId})`;
       case "delete-challenge": return `after a successful registration, delete the one-use ${PLAN_PREFIX}${step.object} from the bucket (a failure only warns and prints the command)`;
       case "print-registered-rows": return "print the registered catalog rows";
     }
@@ -274,20 +283,33 @@ export interface QualificationEffects {
   deleteObject(key: string): Promise<void>;
   saveProposal(bytes: Buffer): string;
   register(proposalFile: string): Promise<string>;
+  /** Records the runner that serves model checks (`E2E_MODEL_CHECK_RUNNER#<profile>`), with the registration's transport correlation, so a check is only ever sent to the runner that was qualified. */
+  recordModelCheckRunner(runner: { roleId: string; instanceId: string; transportCorrelationId: string }): Promise<void>;
   now(): number;
   sleep(ms: number): Promise<void>;
   print(line: string): void;
 }
 
 /** The status.json the hook uploads; anything else, or SUCCEEDED without a reason and time, is not a success. */
-function parseStatus(bytes: Buffer): { state: "SUCCEEDED" | "FAILED"; reason: string } {
+function parseStatus(bytes: Buffer): { state: "SUCCEEDED" | "FAILED"; reason: string; failure: readonly string[] } {
   let value: unknown;
   try { value = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("the qualification status is not valid JSON; refusing to register"); }
-  const status = value as { state?: unknown; reason?: unknown; finishedAt?: unknown } | null;
+  const status = value as { state?: unknown; reason?: unknown; finishedAt?: unknown; failure?: unknown } | null;
   if (status === null || typeof status !== "object" || (status.state !== "SUCCEEDED" && status.state !== "FAILED") || typeof status.reason !== "string" || typeof status.finishedAt !== "string") {
     throw new Error("the qualification status is not a SUCCEEDED or FAILED status with a reason and time; refusing to register");
   }
-  return { state: status.state, reason: status.reason };
+  return { state: status.state, reason: status.reason, failure: failureCodes(status.failure) };
+}
+
+/** The hook's own filter, applied again here: what the status object holds is read from S3, so only strings of the code grammar (16 at most) are ever printed from it. */
+export function failureCodes(failure: unknown): string[] {
+  const codes = failure !== null && typeof failure === "object" ? (failure as { codes?: unknown }).codes : undefined;
+  if (!Array.isArray(codes)) return [];
+  return codes.filter((code): code is string => typeof code === "string" && code.length <= 97 && /^[a-z0-9-]+(:[a-z0-9-]+)?$/.test(code)).slice(0, 16);
+}
+/** `qualification-failed-exit-1 (failure: qualification-rejected, probe-wrong-cause:api-egress-denial-v1)`: the reason, with the codes behind it when the hook reported any. */
+export function describeStatusFailure(reason: string, failure: readonly string[]): string {
+  return failure.length === 0 ? reason : `${reason} (failure: ${failure.join(", ")})`;
 }
 
 /** The registration answer's rows: the feature catalog, the profile's two kinds, and the revision each reached. */
@@ -404,6 +426,9 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
           break;
         }
         case "register": state.registered = await effects.register(need(state.proposalFile, "the proposal file")); break;
+        case "record-model-check-runner":
+          await effects.recordModelCheckRunner({ roleId: need(state.facts, "the stack facts").workerRoleId, instanceId: need(state.instanceId, "the instance"), transportCorrelationId: step.transportCorrelationId });
+          break;
         case "delete-challenge": {
           const key = `${need(state.prefix, "the instance's key prefix")}${step.object}`;
           try {
@@ -456,7 +481,7 @@ async function waitReady(step: Extract<QualificationStep, { kind: "wait-ready" }
     const status = await effects.getObject(`${prefix}${step.statusObject}`);
     if (status !== undefined) {
       const parsed = parseStatus(status);
-      if (parsed.state === "FAILED") throw new Error(`the worker reported FAILED before it was ready: ${parsed.reason}`);
+      if (parsed.state === "FAILED") throw new Error(`the worker reported FAILED before it was ready: ${describeStatusFailure(parsed.reason, parsed.failure)}`);
     }
     if (effects.now() >= deadline) throw new Error(`the worker was not ready after ${step.timeoutMs / 60_000} minutes; no challenge was issued`);
     await effects.sleep(step.intervalMs);
@@ -470,7 +495,7 @@ async function pollStatus(step: Extract<QualificationStep, { kind: "poll-status"
     if (bytes !== undefined) {
       const status = parseStatus(bytes);
       if (status.state === "SUCCEEDED") return;
-      throw new Error(`the worker reported FAILED: ${status.reason}`);
+      throw new Error(`the worker reported FAILED: ${describeStatusFailure(status.reason, status.failure)}`);
     }
     if (effects.now() >= deadline) throw new Error(`no qualification status after ${step.timeoutMs / 60_000} minutes (the challenge has expired); nothing was registered`);
     await effects.sleep(step.intervalMs);
@@ -546,6 +571,7 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
   const ec2 = new EC2Client(config);
   const ssm = new SSMClient(config);
   const kms = new KMSClient(config);
+  const documents = DynamoDBDocumentClient.from(new DynamoDBClient(config));
   const scratch = mkdtempSync(join(tmpdir(), "test-qualify-runtime-"));
   let bucket = "";
   const cli = (commandArgs: string[]): { status: number; stdout: string; stderr: string } => {
@@ -582,7 +608,10 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
 
       const prefix = environmentSettingsPrefix(args.env);
       const names = Object.fromEntries(Object.entries(WORKER_SETTING_PARAMETERS).map(([key, name]) => [key, `${prefix}${name}`]));
-      const found = new Map(((await ssm.send(new GetParametersCommand({ Names: Object.values(names) }))).Parameters ?? []).map((parameter) => [parameter.Name, parameter.Value]));
+      const found = new Map<string | undefined, string | undefined>();
+      for (const chunk of chunkParameterNames(Object.values(names))) {
+        for (const parameter of (await ssm.send(new GetParametersCommand({ Names: chunk }))).Parameters ?? []) found.set(parameter.Name, parameter.Value);
+      }
       const value = (key: keyof typeof WORKER_SETTING_PARAMETERS) => found.get(names[key] ?? "");
       const required = (key: keyof typeof WORKER_SETTING_PARAMETERS) => {
         const setting = value(key);
@@ -739,6 +768,12 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
       const result = cli(["admin", "runtime-installation", "register", "--proposal-file", proposalFile]);
       if (result.status !== 0) throw new Error(`registration failed: ${result.stderr.trim().slice(0, 500)}`);
       return result.stdout;
+    },
+
+    async recordModelCheckRunner(runner) {
+      const table = requireOutput(outputsOf(await stack(environmentStackName(args.env, "control-plane"))), "StateTableName", environmentStackName(args.env, "control-plane"));
+      await documents.send(new PutCommand({ TableName: table, Item: { ...e2eModelCheckRunnerKey(WEB_API_RUNTIME_PROFILE_ID), entityType: "E2E_MODEL_CHECK_RUNNER", roleId: runner.roleId, instanceId: runner.instanceId,
+        transportCorrelationId: runner.transportCorrelationId, recordedAt: new Date().toISOString() } }));
     },
 
     now: () => Date.now(),

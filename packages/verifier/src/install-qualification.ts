@@ -17,6 +17,9 @@ import { parseE2EReport } from "./result-adapter.js";
 import { CONTAINED_IMAGE, CONTAINED_RUNTIME_PROFILE, inspectContainedRuntimeReadinessForHost } from "./contained-candidate.js";
 import { observeInstalledRuntimeManifestForHost, type InstalledRuntimeManifest } from "./installed-runtime-manifest.js";
 import type { E2ESelectionPacket } from "./selection.js";
+import { WebApiQualificationRejected, qualificationStage, summarizeProbeObservation } from "./install-qualification-failure.js";
+
+export { WebApiQualificationRejected };
 
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 type ProbeOracle = {
@@ -214,11 +217,6 @@ const realWebApiEnvironment = (): WebApiQualificationEnvironment => ({
   observeManifest: () => observeInstalledRuntimeManifestForHost(process.platform, process.arch),
 });
 
-/** Qualification failed closed; `reasons` are the stable per-probe codes, for example `negative-probe-passed:web-csv-negative-v1`. */
-export class WebApiQualificationRejected extends Error {
-  constructor(readonly reasons: readonly string[]) { super(`web/API runtime qualification rejected: ${reasons.join(", ")}`); this.name = "WebApiQualificationRejected"; }
-}
-
 /**
  * Qualifies the web/API application runtime. Each required probe runs through the supplied runner (the real Docker host and the
  * real collector in production), which returns the facts it observed together with the retained evidence they were derived from. The facts are
@@ -233,15 +231,21 @@ export async function qualifyInstalledWebApiRuntime(input: Readonly<{
   const challenge = RuntimeInstallChallengeSchema.parse(input.challenge);
   const environment = { ...realWebApiEnvironment(), ...input.environment };
   if (challenge.profileId !== WEB_API_RUNTIME_PROFILE_ID) throw new Error("runtime installation challenge profile is not the web/API runtime profile");
-  if (environment.platform !== "linux" || environment.arch !== "arm64") throw new Error("runtime installation challenge profile does not match this actual host");
-  if (environment.nodeVersion !== "v22.23.2") throw new Error("runtime qualification requires the exact installed Node v22.23.2 toolchain");
-  environment.assertHostIdentity(challenge);
-  const evidenceRoot = await realpath(resolve(input.evidenceRoot));
-  const rootStat = await lstat(evidenceRoot);
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || rootStat.uid !== process.getuid?.() || (rootStat.mode & 0o077) !== 0) throw new Error("qualification evidence root must be a pre-created private owned directory");
-  const evidenceDirectory = await mkdtemp(join(evidenceRoot, "web-api-qualification-"));
-  await chmod(evidenceDirectory, 0o700);
-  const manifest = await environment.observeManifest();
+  // Each step below that can fail with free text is a named stage: a failure report carries the stage, never the message.
+  await qualificationStage("host-mismatch", () => {
+    if (environment.platform !== "linux" || environment.arch !== "arm64") throw new Error("runtime installation challenge profile does not match this actual host");
+    if (environment.nodeVersion !== "v22.23.2") throw new Error("runtime qualification requires the exact installed Node v22.23.2 toolchain");
+  });
+  await qualificationStage("host-identity-mismatch", () => environment.assertHostIdentity(challenge));
+  const evidenceDirectory = await qualificationStage("evidence-root-invalid", async () => {
+    const evidenceRoot = await realpath(resolve(input.evidenceRoot));
+    const rootStat = await lstat(evidenceRoot);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || rootStat.uid !== process.getuid?.() || (rootStat.mode & 0o077) !== 0) throw new Error("qualification evidence root must be a pre-created private owned directory");
+    const directory = await mkdtemp(join(evidenceRoot, "web-api-qualification-"));
+    await chmod(directory, 0o700);
+    return directory;
+  });
+  const manifest = await qualificationStage("manifest-unavailable", () => environment.observeManifest());
   // The installed manifest hashes the real asset files, so it proves the installed probes are the pinned ones.
   const installedAssets = new Map(manifest.entries.map((entry) => [entry.path, entry.sha256]));
   // So does the qualification app every probe runs against: a tree that is not the pinned one qualifies nothing.
@@ -250,6 +254,7 @@ export async function qualifyInstalledWebApiRuntime(input: Readonly<{
   if (installedApp.length === 0 || webApiQualificationAppTreeDigest(installedApp) !== WEB_API_QUALIFICATION_APP_TREE_DIGEST) throw new WebApiQualificationRejected(["qualification-app-not-installed-as-pinned"]);
   const probes: WebApiRuntimeInstallProposal["probes"] = [];
   const reasons: string[] = [];
+  const summary: string[] = [];
   for (const required of WEB_API_REQUIRED_PROBES) {
     if (installedAssets.get(webApiProbeAssetManifestPath(required.probeId)) !== required.assetDigest) { reasons.push(`probe-asset-not-installed-as-pinned:${required.probeId}`); continue; }
     let observation: WebApiProbeObservation; let evidence: WebApiProbeRun["evidence"];
@@ -260,13 +265,13 @@ export async function qualifyInstalledWebApiRuntime(input: Readonly<{
     } catch { reasons.push(`probe-run-failed:${required.probeId}`); continue; }
     await writeFile(join(evidenceDirectory, `${required.probeId}.json`), `${canonicalJson(observation)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
     const verdict = evaluateWebApiProbeObservation(required.probeId, observation);
-    if (!verdict.ok) { reasons.push(verdict.reason); continue; }
+    if (!verdict.ok) { reasons.push(verdict.reason); summary.push(...summarizeProbeObservation(required.probeId, observation)); continue; }
     probes.push({ probeId: required.probeId, kind: required.kind, expectedOutcome: required.expectedOutcome, observedOutcome: required.expectedOutcome,
       assetDigest: required.assetDigest, observation, evidence });
   }
-  if (reasons.length > 0) throw new WebApiQualificationRejected(reasons);
+  if (reasons.length > 0) throw new WebApiQualificationRejected(reasons, summary);
   const toolchain = { execPath: environment.nodeExecPath, version: environment.nodeVersion as "v22.23.2", platform: environment.platform, arch: environment.arch };
   const runnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: `${environment.platform} ${environment.osRelease}`, arch: environment.arch, runtime: `node ${environment.nodeVersion}` };
-  return WebApiRuntimeInstallProposalSchema.parse({ schemaVersion: "runtime-installation-proposal/v2", state: "READY", profileId: WEB_API_RUNTIME_PROFILE_ID,
-    scope: WEB_API_RUNTIME_SCOPE, challenge, createdAt: new Date(environment.now()).toISOString(), manifest, runnerEnvironment, runnerToolchain: toolchain, probes });
+  return qualificationStage("proposal-invalid", () => WebApiRuntimeInstallProposalSchema.parse({ schemaVersion: "runtime-installation-proposal/v2", state: "READY", profileId: WEB_API_RUNTIME_PROFILE_ID,
+    scope: WEB_API_RUNTIME_SCOPE, challenge, createdAt: new Date(environment.now()).toISOString(), manifest, runnerEnvironment, runnerToolchain: toolchain, probes }));
 }

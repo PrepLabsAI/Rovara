@@ -5,7 +5,7 @@ import { createModelRequestRouter, type RequestRouter } from "@agentx/orchestrat
 import { TURN_GATE_REASON_LIMIT, redactAndCap } from "@agentx/contracts";
 import type { ServiceLog, TurnInput } from "./processor.js";
 
-export interface HostedRuntimeOptions extends Pick<OrchestratorOptions, "stateDirectory" | "api" | "model" | "sessionFile" | "onConnectorUnavailable" | "onExtensionError" | "modelRuntime"> {
+export interface HostedRuntimeOptions extends Pick<OrchestratorOptions, "stateDirectory" | "api" | "model" | "sessionFile" | "onConnectorUnavailable" | "onExtensionError" | "onModelFallback" | "modelRuntime"> {
   /** Absent, every change no rule settles asks. */
   classifier?: ActionClassifier;
   /** The gate's deadline for one classifier check; the same setting as the classifier's own timeout. */

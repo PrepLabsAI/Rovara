@@ -92,10 +92,14 @@ async function blockFailedWorkflowRun(documentClient: Pick<DynamoDBDocumentClien
   try {
     const read = async (key: { pk: string; sk: string }) => (await documentClient.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))).Item;
     const operation = await read({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` }) as {
-      workflowMode?: string; workflowFeedbackReview?: { taskId?: string; workflowRevision?: number; candidateDigest?: string };
+      workflowMode?: string; workflowFeedbackReview?: { taskId?: string; workflowRevision?: number; candidateDigest?: string }; workflowE2EAdmission?: { purpose?: string };
     } | undefined;
     const mode = operation?.workflowMode;
     if (mode === undefined) return;
+    // M1.3 Task 3.7b: a baseline round (the unchanged code, for information only) that is lost never blocks the workflow; its record says it could not be checked.
+    if (operation?.workflowE2EAdmission?.purpose === "baseline") return;
+    // M1.4 Task 4.6b: nor does a lost audit replay; its record says it could not be run.
+    if (operation?.workflowE2EAdmission?.purpose === "replay") return;
     const pointer = await read(taskPointerKey(workspaceId)) as { taskId?: string } | undefined;
     if (typeof pointer?.taskId !== "string") return;
     const task = await read(taskKey(pointer.taskId)) as { closedAt?: string; workflow?: unknown } | undefined;

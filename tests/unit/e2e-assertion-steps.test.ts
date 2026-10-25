@@ -15,7 +15,7 @@ describe("approved assertions as report steps", () => {
       const record = { index: steps.length, status: "passed" as "passed" | "failed" };
       steps.push(record);
       try { await body(); } catch (error) { record.status = "failed"; throw wrap ? new Error("step failed", { cause: error }) : error; }
-    } } };
+    }, async confirm() { steps.push({ index: steps.length, status: "passed" }); } } };
   }
 
   it.each([[false], [true]])("fails exactly the step of the first assertion that did not hold, at its own index (wrapped errors: %s)", async (wrap) => {
@@ -39,6 +39,14 @@ describe("approved assertions as report steps", () => {
     const chain = await runInsideAssertionSteps(fixture, 3, async () => { throw navigationError; });
     expect(chain).toEqual({ outcome: null, error: navigationError });
     expect(steps.map((step) => step.status)).toEqual(["passed", "passed", "passed"]);
+  });
+
+  it("the seal step is a later passed step than every approved assertion, and the fixture refuses to be used without it (Task 4.6a)", async () => {
+    const { steps, fixture } = recorder();
+    const chain = await runInsideAssertionSteps(fixture, 2, async () => { await fixture.confirm(); return { failedIndex: -1, unavailableIndex: -1 }; });
+    expect(chain.error).toBeUndefined();
+    expect(steps).toEqual([{ index: 0, status: "passed" }, { index: 1, status: "passed" }, { index: 2, status: "passed" }]);
+    expect(() => assertionStepsOf({ agentxAssertions: { step: (index: number, body: () => Promise<void>) => fixture.step(index, body) } })).toThrow(/assertion-step fixture/);
   });
 
   it("refuses fixtures that do not carry the assertion-step fixture", () => {

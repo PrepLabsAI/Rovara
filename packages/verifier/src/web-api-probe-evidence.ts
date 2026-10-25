@@ -1,14 +1,19 @@
 import { createHash } from "node:crypto";
-import { ChromiumSandboxAttestationSchema, E2EScenarioBundleSchema, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, evaluateChromiumSandbox, webApiProbeRunId,
+import { ChromiumSandboxAttestationSchema, E2EScenarioBundleSchema, WEB_API_AGENT_PROBE_ROUTE, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, e2eModelRouteRevision, evaluateChromiumSandbox, webApiProbeRunId,
   type RuntimeInstallChallenge, type WebApiProbeEvidence, type WebApiProbeObservation } from "@agentx/contracts";
 import { parseE2EApplicationReport } from "./application-report-schema.js";
-import { E2EApplicationCollectionOracleSchema, E2EApplicationCollectionSchema, qualifyE2EApplicationCollection } from "./application-result-adapter.js";
+import { E2EApplicationCollectionOracleSchema, E2EApplicationCollectionSchema, qualifyE2EApplicationCollection, type E2EApplicationCollectionOracle } from "./application-result-adapter.js";
 
 type RequiredProbe = (typeof WEB_API_REQUIRED_PROBES)[number];
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 
 export type WebApiProbeDerivation = Readonly<{ ok: true; observation: WebApiProbeObservation } | { ok: false; reason: string }>;
 const mismatch = (probeId: string): WebApiProbeDerivation => ({ ok: false, reason: `probe-evidence-mismatch:${probeId}` });
+
+/** A schema's safeParse that cannot throw: a check inside the oracle's schema (the served route's revision) parses its own input again, and bytes edited into a malformed route must be a mismatch, not an exception. */
+function safelyParsed<T>(schema: { safeParse(value: unknown): { success: true; data: T } | { success: false } }, value: unknown): { success: true; data: T } | { success: false } {
+  try { return schema.safeParse(value); } catch { return { success: false }; }
+}
 
 /** The hosts the executor recorded as blocked, read from its blocked-requests file once the file is shown to belong to this run's shards. */
 function blockedHostsOf(base64: string | null, expected: { runId: string; groupId: string; upstreamRunIds: readonly string[] }): string[] | null {
@@ -65,9 +70,9 @@ export function deriveWebApiProbeObservation(input: Readonly<{ challenge: Runtim
   }
 
   if (required.scenarioDigest === null) return mismatch(required.probeId);
-  const bundle = E2EScenarioBundleSchema.safeParse(evidence.scenarioBundle);
-  const oracle = E2EApplicationCollectionOracleSchema.safeParse(evidence.oracle);
-  const collection = E2EApplicationCollectionSchema.safeParse(evidence.collection);
+  const bundle = safelyParsed(E2EScenarioBundleSchema, evidence.scenarioBundle);
+  const oracle = safelyParsed(E2EApplicationCollectionOracleSchema, evidence.oracle);
+  const collection = safelyParsed(E2EApplicationCollectionSchema, evidence.collection);
   if (!bundle.success || !oracle.success || !collection.success) return mismatch(required.probeId);
   const scenario = bundle.data.scenarios[0];
   if (bundle.data.scenarios.length !== 1 || !scenario || sha(canonicalJson(scenario)) !== required.scenarioDigest
@@ -78,7 +83,9 @@ export function deriveWebApiProbeObservation(input: Readonly<{ challenge: Runtim
   if (required.chromiumSandbox === true ? !sandboxedAttestation(evidence.chromiumSandboxBase64, { runId: evidence.runId, groupId: oracle.data.groupId })
     : evidence.chromiumSandboxBase64 !== undefined) return mismatch(required.probeId);
 
-  const qualification = qualifyE2EApplicationCollection(oracle.data, collection.data);
+  // This is the qualification's own verifier: its rounds are qualification rounds, whatever scope the retained oracle carries (Task FU2: the scope is the verifier's input, not the evidence's;
+  // evidence retained before the oracle had a scope verifies as it did).
+  const qualification = qualifyE2EApplicationCollection({ ...oracle.data, roundScope: "qualification" }, collection.data);
   const hosts = blockedHostsOf(evidence.blockedRequestsBase64, { runId: evidence.runId, groupId: oracle.data.groupId,
     upstreamRunIds: collection.data.shards.map((shard) => shard.runStart.runId) });
   if (hosts === null) return mismatch(required.probeId);
@@ -86,9 +93,34 @@ export function deriveWebApiProbeObservation(input: Readonly<{ challenge: Runtim
     .filter((receipt) => receipt.status === "failed").map((receipt) => scenario.assertions[receipt.assertionIndex]?.kind ?? "unknown"));
   const reports = collection.data.shards.map((shard) => parseE2EApplicationReport(Buffer.from(shard.rawReport.bytesBase64, "base64")));
   const parsedReports = reports.flatMap((report) => (report.kind === "parsed" ? [report.report.run] : []));
-  return { ok: true, observation: WebApiProbeObservationSchema.parse({ collectorStatus: qualification.status, runUnavailableReason: null, failedAssertionKinds, blockedHosts: hosts, buildExitCode: null,
+  // What the verified mock evidence shows, for the probes that pin it: how often each variant was served and what no mock matched. The adapter derives it from the retained bytes alone.
+  const mockFacts = required.mock === true ? { mockConsumptions: qualification.mockSummary?.consumptions ?? { success: 0, refusal: 0, invalidData: 0 },
+    unmockedCalls: qualification.mockSummary?.unmockedCalls ?? { sinkhole: 0, mocked: 0 }, runReason: qualification.result?.reason ?? qualification.reason } : {};
+  const agentFacts = required.agent === undefined ? {} : { agent: webApiAgentFacts(oracle.data, qualification, scenario) };
+  return { ok: true, observation: WebApiProbeObservationSchema.parse({ collectorStatus: qualification.status, runUnavailableReason: null, failedAssertionKinds, blockedHosts: hosts, buildExitCode: null, ...mockFacts, ...agentFacts,
     attempts: Math.max(1, ...parsedReports.flatMap((run) => run.results.map((result) => result.attempts.length))),
     skipped: parsedReports.reduce((total, run) => total + run.summary.skipped, 0), flaky: parsedReports.reduce((total, run) => total + run.summary.flaky, 0), evidenceDigest }) };
+}
+
+/**
+ * What the verified evidence shows of the AI navigation, for the probes that pin `agent` (Task 4.5): the route is reported only when the admitted route, the route the worker served
+ * and the pinned revision are one; the receipts are the worker's, and which of them the report accounts for is the collector's verdict (`modelReceiptIds` holds the receipts of the
+ * cases whose agent part was clean). A download counts when a csv assertion saw one, which the collector decides from the bytes the assertion observed.
+ */
+export function webApiAgentFacts(oracle: E2EApplicationCollectionOracle, qualification: ReturnType<typeof qualifyE2EApplicationCollection>,
+  scenario: { assertions: readonly { kind: string }[] }): NonNullable<WebApiProbeObservation["agent"]> {
+  const agentModel = oracle.agentModel ?? null;
+  const admitted = oracle.modelRoute;
+  const served = agentModel?.route ?? null;
+  const pinned = WEB_API_AGENT_PROBE_ROUTE;
+  const routeIsPinned = admitted !== null && admitted.routeId === pinned.routeId && admitted.routeRevision === pinned.routeRevision
+    && served !== null && served.routeId === pinned.routeId && e2eModelRouteRevision(served) === pinned.routeRevision;
+  const cases = qualification.result?.cases ?? [];
+  return { routeId: routeIsPinned ? pinned.routeId : null, receipts: agentModel?.receipts.length ?? 0, okReceipts: agentModel?.receipts.filter((receipt) => receipt.outcome === "ok").length ?? 0,
+    verifiedReceipts: qualification.result?.modelReceiptIds.length ?? 0,
+    downloads: cases.reduce((total, verdict) => total + verdict.assertionReceipts.filter((receipt) => scenario.assertions[receipt.assertionIndex]?.kind === "csv" && receipt.status !== "unavailable").length, 0),
+    caseReasons: cases.filter((verdict) => verdict.status !== "passed").map((verdict) => verdict.reason.slice(0, 200)).slice(0, 16),
+    unmockedCalls: qualification.mockSummary?.unmockedCalls ?? { sinkhole: 0, mocked: 0 } };
 }
 
 /** The registrar's check for one probe record: its evidence derives, and derives to exactly the observation the record claims. */

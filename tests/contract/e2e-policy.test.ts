@@ -86,11 +86,12 @@ describe("E2E contracts", () => {
     expect(projectE2EVerification(successfulResult({ cases: [] }) as never).results[0]?.status).toBe("UNKNOWN");
   });
 
-  it("permits a null model route only for bundles without agent steps", () => {
+  it("leaves a bundle's agent steps with no model route to the execution plan (agent-route-not-approved)", () => {
     const scenario = { scenarioId: "agent", requirementId: "r", requestedTargetIds: ["web-main"], required: true, accountProfileId: "synthetic-tenant", minimumEvidence: "source", requiredRealComponentIds: [], steps: [{ kind: "agent", goal: "do work", maxActions: 1 }], assertions: [{ kind: "visible", testId: "done", equals: true }] };
     const bundle = { schemaVersion: 1, planDigest: "a".repeat(64), bundleDigest: "a5a5fb82d39eafe8bc7f4649b7f52ef1c1c7c07d8353cad27593506d4a24fb02", templateVersion: "trusted-v1", scenarios: [scenario] };
     expect(E2EScenarioBundleSchema.safeParse(bundle).success).toBe(true);
-    expect(() => validateE2EScenarioBundleForPolicy(bundle, policy())).toThrow(/model route/);
+    // Whether a route is approved is the execution plan's to judge (the scenario is unavailable with agent-route-not-approved), so the bundle itself is valid.
+    expect(() => validateE2EScenarioBundleForPolicy(bundle, policy())).not.toThrow();
   });
 
   it("retains requested and effective target identities in criteria and group cases", () => {

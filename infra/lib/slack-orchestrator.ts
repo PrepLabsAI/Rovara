@@ -80,6 +80,13 @@ export class SlackOrchestratorStack extends Stack {
       default: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
       description: "Small model the action gate asks whether a member asked for a change",
     });
+    // MODEL3: the model the orchestrator, gate classifier and router run on when their provider's key secret is missing. `none` (the default) means no fallback: the call fails by name.
+    const modelFallback = new CfnParameter(this, "ModelFallback", {
+      type: "String",
+      default: "none",
+      allowedPattern: "^(none|[A-Za-z0-9][A-Za-z0-9._:-]{0,79})$",
+      description: "Bedrock model used when a provider key secret is missing: none, or a Bedrock model id",
+    });
 
     const securityGroup = new ec2.CfnSecurityGroup(this, "SecurityGroup", {
       groupDescription: "AgentX Slack orchestrator: no ingress and HTTPS-only egress",
@@ -366,6 +373,7 @@ export class SlackOrchestratorStack extends Stack {
           { name: "AGENTX_OPENROUTER_PROVIDERS", value: openRouterProviders.valueAsString },
           { name: "AGENTX_GATE_CLASSIFIER_PROVIDER", value: classifierProvider.valueAsString },
           { name: "AGENTX_GATE_CLASSIFIER_MODEL", value: gateClassifierModelId.valueAsString },
+          { name: "AGENTX_MODEL_FALLBACK", value: modelFallback.valueAsString },
         ],
         logConfiguration: {
           logDriver: "awslogs",

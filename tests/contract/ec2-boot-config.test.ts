@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,9 @@ import { SECRET_ARN_MAX_LENGTH } from "../../packages/contracts/src/model-provid
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const qualificationScript = /cat >\/usr\/local\/libexec\/agentx-e2e-qualification <<'QUALIFICATION'\n([\s\S]*?)\nQUALIFICATION/.exec(bootScript)?.[1] ?? "";
 const workerLauncher = /cat >\/usr\/local\/libexec\/agentx-worker-start <<'LAUNCHER'\n([\s\S]*?)\nLAUNCHER/.exec(bootScript)?.[1] ?? "";
+
+/** The worst-case size varies by a byte or two with the random workspace ID; the check keeps this much clear of the limit so it never flips on a rerun. */
+const HEADROOM_MARGIN_BYTES = 32;
 
 const config: Ec2WorkerBootConfig = {
   workspaceId: randomUUID(),
@@ -53,6 +56,13 @@ describe("EC2 worker user data", () => {
       expect(() => ec2WorkerBootScript({ ...config, [field]: "sk-ant-api03-key" }, bootScript)).toThrow();
       expect(() => ec2WorkerBootScript({ ...config, [field]: `${secretArn}';touch /tmp/bad` }, bootScript)).toThrow();
     });
+  it("passes the chosen fallback model to the container as AGENTX_MODEL_FALLBACK, never as none, and rejects anything outside its alphabet (MODEL3)", () => {
+    const rendered = ec2WorkerBootScript({ ...config, modelFallback: "us.anthropic.claude-sonnet-4-6" }, bootScript);
+    expect(rendered).toContain("export AGENTX_MODEL_FALLBACK='us.anthropic.claude-sonnet-4-6'");
+    expect(rendered).toContain("AGENTX_MODEL_FALLBACK=${AGENTX_MODEL_FALLBACK:-}");
+    expect(ec2WorkerBootScript(config, bootScript)).not.toContain("export AGENTX_MODEL_FALLBACK=");
+    for (const bad of ["none", "us.anthropic.claude';touch /tmp/bad", "x".repeat(81), "has space", ""]) expect(() => ec2WorkerBootScript({ ...config, modelFallback: bad }, bootScript), bad).toThrow();
+  });
   it("prepends every boot value to the script as a quoted export", () => {
     const userData = ec2WorkerBootScript(config, bootScript);
     expect(userData.startsWith("#!/bin/bash\n")).toBe(true);
@@ -76,10 +86,17 @@ describe("EC2 worker user data", () => {
   });
 
   it("leaves real headroom under EC2's 16 KB user data limit with every value at its maximum (#223, #229)", () => {
-    // Random letters and digits barely compress, so this is the largest user data the schema admits.
+    // Letters and digits that barely compress, so this is the largest user data the schema admits. They come from a fixed hash stream, not
+    // from randomness: the size below must be the same on every run, so the margin it is checked against is a number and not a probability.
+    let counter = 0;
+    const stream = (length: number) => {
+      const bytes: number[] = [];
+      while (bytes.length < length) bytes.push(...createHash("sha256").update(`headroom-${counter++}`).digest());
+      return bytes.slice(0, length);
+    };
     const noise = (length: number) => {
       const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-      return [...randomBytes(length)].map((byte) => alphabet[byte % alphabet.length]).join("");
+      return stream(length).map((byte) => alphabet[byte % alphabet.length]).join("");
     };
     const lower = (length: number) => noise(length).toLowerCase();
     const secretPrefix = "arn:aws:secretsmanager:us-east-1:123456789012:secret:";
@@ -96,7 +113,10 @@ describe("EC2 worker user data", () => {
       openaiSecretArn: `${secretPrefix}${noise(SECRET_ARN_MAX_LENGTH - secretPrefix.length)}`,
       logGroupName: `/${noise(511)}`,
       executorImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/${lower(120)}@sha256:${"e".repeat(64)}`,
+      // Test 43 (MODEL3): the new variable at its longest, with every other value at its maximum too.
+      modelFallback: noise(80),
     });
+    expect(worstCase.modelFallback).toHaveLength(80);
     expect(worstCase.controlPlaneUrl).toHaveLength(512);
     expect(worstCase.openRouterProviders).toHaveLength(512);
     expect(worstCase.anthropicSecretArn).toHaveLength(SECRET_ARN_MAX_LENGTH);
@@ -105,7 +125,7 @@ describe("EC2 worker user data", () => {
     // TEST qualification hook (about 1.5 KB compressed) and the executor image setting were added, then 2 KB until the container firewall
     // rules (about 330 bytes compressed) landed: this worst case sets every value at its maximum at once, which no real worker's
     // configuration does.
-    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 1_536);
+    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 1_536 - HEADROOM_MARGIN_BYTES);
   });
 
   it("measures the limit on the compressed user data, not the script (#229)", () => {
@@ -183,6 +203,46 @@ describe("EC2 worker user data", () => {
     expect(bootScript).toContain("pull_executor_image || true");
     expect(bootScript.indexOf('pull_worker_image "$region"')).toBeLessThan(bootScript.indexOf("pull_executor_image || true"));
     expect(bootScript.indexOf("pull_executor_image || true")).toBeLessThan(bootScript.indexOf('write_worker_unit "$region"'));
+  });
+
+  describe("the kernel stays the one the runtime was qualified on (HARDEN-C I-4, KERNELPIN)", () => {
+    // One line, because the user data is within a few dozen bytes of its ceiling; the test runs that very line against a copy of dnf.conf.
+    const pinLine = bootScript.split("\n").find((line) => line.includes("exclude=kernel*")) ?? "";
+    const run = (dnfConf: string | undefined) => {
+      const root = mkdtempSync(join(tmpdir(), "boot-kernel-pin-"));
+      const conf = join(root, "dnf.conf");
+      if (dnfConf !== undefined) writeFileSync(conf, dnfConf);
+      const script = `set -euo pipefail\n${pinLine.split("/etc/dnf/dnf.conf").join(conf)}\n${pinLine.split("/etc/dnf/dnf.conf").join(conf)}\necho still-running\n`;
+      const result = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+      return { result, text: existsSync(conf) ? readFileSync(conf, "utf8") : undefined };
+    };
+
+    it("pins in ensure_docker, before dnf installs anything", () => {
+      expect(pinLine).not.toBe("");
+      const ensureDocker = /^ensure_docker\(\) \{\n([\s\S]*?)\n\}\n/m.exec(bootScript)?.[1] ?? "";
+      expect(ensureDocker.indexOf("exclude=kernel*")).toBeGreaterThanOrEqual(0);
+      expect(ensureDocker.indexOf("exclude=kernel*")).toBeLessThan(ensureDocker.indexOf("install_docker_package"));
+    });
+
+    it("excludes kernel packages from dnf in its [main] section, once however often the boot runs", () => {
+      const { result, text } = run("[main]\ngpgcheck=1\ninstallonly_limit=3\n");
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("still-running");
+      expect(text).toBe("[main]\ngpgcheck=1\ninstallonly_limit=3\nexclude=kernel*\n");
+    });
+
+    it("leaves a file that already has an exclude line alone, instead of writing a second one", () => {
+      const { result, text } = run("[main]\nexclude=foo*\ngpgcheck=1\n");
+      expect(result.status, result.stderr).toBe(0);
+      expect(text).toBe("[main]\nexclude=foo*\ngpgcheck=1\n");
+    });
+
+    it("never invents a configuration and never stops the boot: a host with no dnf.conf is left alone", () => {
+      const { result, text } = run(undefined);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("still-running");
+      expect(text).toBeUndefined();
+    });
   });
 
   it("renders a script bash accepts", () => {
@@ -334,7 +394,7 @@ describe("the opt-in TEST qualification hook", () => {
 
   /** Runs the hook script against fake aws, docker, curl, chown and timeout commands that record every call. */
   const hookArgs = ["us-east-1", qualification.bucket, qualification.roleId, instanceId, qualification.profile, executorImage];
-  type HookOptions = { args?: string[]; challenge?: "present" | "missing"; qualifier?: number; proposalBytes?: number; ping?: "up" | "down"; wait?: number; executor?: "present" | "missing" | "pullable" };
+  type HookOptions = { args?: string[]; challenge?: "present" | "missing"; qualifier?: number; failureFile?: string; padBytes?: number; staleFailure?: string; link?: boolean; proposalBytes?: number; ping?: "up" | "down"; pingBody?: string; wait?: number; executor?: "present" | "missing" | "pullable" };
   function runHook(options: HookOptions = {}) {
     const dir = mkdtempSync(join(tmpdir(), "boot-hook-run-"));
     const bin = join(dir, "bin");
@@ -363,21 +423,44 @@ case "$1" in
   login) cat >/dev/null; exit 0 ;;
   pull) [[ "$FAKE_EXECUTOR" == pullable ]] && touch "${dir}/pulled"; exit 0 ;;
 esac
-out=; while (($#)); do [[ "$1" == --out ]] && out=$2; shift; done
-[[ "$FAKE_QUALIFIER" != 0 ]] && exit "$FAKE_QUALIFIER"
-head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename "$out")"`);
-    fake("curl", `[[ "$FAKE_PING" == down ]] && exit 22; echo '{"status":"Healthy"}'`);
+if [[ "$*" == *e2e-model-canary-cli.js* ]]; then
+  # The model check server's fixed lines go to stderr, as the real one's do.
+  [[ "$FAKE_QUALIFIER" == 0 ]] && printf '%s\n' "model-check: request not readable (SlowDown)" >&2
+  exit 0
+fi
+out=; failure=; while (($#)); do [[ "$1" == --out ]] && out=$2; [[ "$1" == --failure-out ]] && failure=$2; shift; done
+if [[ "$FAKE_QUALIFIER" != 0 ]]; then
+  if [[ -n "$failure" && -n "\${FAKE_FAILURE_FILE:-}" ]]; then
+    # A large file is built here, not passed in: Linux refuses a single environment string of 128 KiB or more (E2BIG), which macOS does not.
+    body=$FAKE_FAILURE_FILE; [[ -n "\${FAKE_FAILURE_PAD:-}" ]] && body=\${body/__PAD__/$(head -c "$FAKE_FAILURE_PAD" /dev/zero | tr '\\0' 'y')}
+    if [[ "\${FAKE_LINK:-}" == 1 ]]; then printf '%s' "$body" >"${evidence}/target"; ln -s target "${evidence}/$(basename "$failure")"
+    else printf '%s' "$body" >"${evidence}/$(basename "$failure")"; fi
+  fi
+  exit "$FAKE_QUALIFIER"
+fi
+if [[ "\${FAKE_LINK:-}" == 1 ]]; then head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/target"; ln -s target "${evidence}/$(basename "$out")"
+else head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename "$out")"; fi`);
+    // macOS dd has no iflag=nofollow: the shim refuses a symlink the way GNU dd does, and runs the plain copy otherwise.
+    // GNU dd (Linux, as on the runner) is used as it is, so the real iflag=nofollow is what the test exercises there.
+    fake("dd", `if /bin/dd iflag=nofollow if=/dev/null of=/dev/null count=0 2>/dev/null; then exec /bin/dd "$@"; fi
+a=(); link=; for x in "$@"; do if [[ "$x" == iflag=nofollow ]]; then nf=1; continue; fi; [[ "$x" == if=* && -L "\${x#if=}" ]] && link=1; a+=("$x"); done
+[[ -n "$nf" ]] || { echo "dd without iflag=nofollow" >&2; exit 9; }
+[[ -z "$link" ]] || exit 1
+exec /bin/dd "\${a[@]}"`);
+    fake("curl", `[[ "$FAKE_PING" == down ]] && exit 22; if [[ -n "\${FAKE_PING_BODY:-}" ]]; then printf '%s\\n' "$FAKE_PING_BODY"; else echo '{"status":"Healthy","activeOperations":0,"invocationFeatures":["task.readiness","task.workflowChecks"]}'; fi`);
     fake("chown", `printf 'chown %s\\n' "$*" >>"${calls}"`);
     // macOS mv has no -T: the shim keeps the test honest about the flag being passed and runs the plain move.
     fake("mv", `printf 'mv %s\\n' "$*" >>"${calls}"; a=(); for x in "$@"; do [[ "$x" == -fT ]] && x=-f; a+=("$x"); done; exec /bin/mv "\${a[@]}"`);
     fake("timeout", `while [[ "$1" == -* ]]; do shift; done; shift; exec "$@"`);
+    if (options.staleFailure !== undefined) writeFileSync(join(evidence, "runtime-install-failure.json"), options.staleFailure);
     const result = spawnSync("bash", ["-c", qualificationScript, "bash", ...(options.args ?? hookArgs)], {
       encoding: "utf8",
       env: {
+        ...(options.failureFile === undefined ? {} : { FAKE_FAILURE_FILE: options.failureFile }), ...(options.padBytes === undefined ? {} : { FAKE_FAILURE_PAD: String(options.padBytes) }),
         PATH: `${bin}:${process.env.PATH ?? ""}`, AGENTX_HOST_ROOT: hostRoot, TMPDIR: dir,
         AGENTX_E2E_QUALIFICATION_POLL_SECONDS: "0", AGENTX_E2E_QUALIFICATION_HEALTHY_WAIT_SECONDS: String(options.wait ?? 1), AGENTX_E2E_QUALIFICATION_CHALLENGE_WAIT_SECONDS: String(options.wait ?? 1),
-        FAKE_CHALLENGE: options.challenge ?? "present", FAKE_QUALIFIER: String(options.qualifier ?? 0), FAKE_PROPOSAL_BYTES: String(options.proposalBytes ?? 64), FAKE_PING: options.ping ?? "up",
-        FAKE_EXECUTOR: options.executor ?? "present", AGENTX_E2E_QUALIFICATION_PULL_SECONDS: "5",
+        FAKE_CHALLENGE: options.challenge ?? "present", FAKE_QUALIFIER: String(options.qualifier ?? 0), FAKE_PROPOSAL_BYTES: String(options.proposalBytes ?? 64), FAKE_PING: options.ping ?? "up", FAKE_PING_BODY: options.pingBody ?? "",
+        FAKE_EXECUTOR: options.executor ?? "present", ...(options.link ? { FAKE_LINK: "1" } : {}), AGENTX_E2E_QUALIFICATION_PULL_SECONDS: "5",
       },
     });
     const called = existsSync(calls) ? readFileSync(calls, "utf8").split("\n").filter(Boolean) : [];
@@ -389,7 +472,7 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
     const { result, called, object } = runHook();
     expect(result.status, result.stderr).toBe(0);
     const step = (call: string) => (call.startsWith("aws s3api get-object") ? "fetch" : call.startsWith("docker exec") ? "exec" : call.startsWith("docker image inspect") ? "inspect" : call.startsWith("aws s3api put-object") ? (call.includes("proposal.json") ? "upload-proposal" : call.includes("ready.json") ? "upload-ready" : "upload-status") : call.split(" ")[0]);
-    expect(called.map(step).filter((name) => name !== "chown" && name !== "mv")).toEqual(["inspect", "upload-ready", "fetch", "exec", "upload-proposal", "upload-status"]);
+    expect(called.map(step).filter((name) => name !== "chown" && name !== "mv")).toEqual(["inspect", "upload-ready", "fetch", "exec", "upload-proposal", "upload-status", "exec"]);
     // The ready marker comes once the worker answers, before the challenge is looked for, so boot time never eats the challenge's lifetime.
     expect(object("ready.json")).toContain('"state":"READY"');
     // Moves into the uid-1000 evidence directory are of a file onto that exact name, never into a directory of that name.
@@ -407,6 +490,41 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
     expect(status).toMatchObject({ state: "SUCCEEDED", reason: "qualified" });
     expect(status.finishedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
     expect(called.join("\n")).not.toMatch(/secret|token/i);
+  });
+
+  it("records the executor image and the features /ping reports in ready.json and status.json, for test-deploy --check to read", () => {
+    const { result, object } = runHook();
+    expect(result.status, result.stderr).toBe(0);
+    for (const name of ["ready.json", "status.json"]) {
+      expect(JSON.parse(object(name) ?? "{}"), name).toMatchObject({ executorImage, invocationFeatures: ["task.readiness", "task.workflowChecks"] });
+    }
+    // A failure after the worker answered still says what it was running.
+    const failed = runHook({ challenge: "missing" });
+    expect(JSON.parse(failed.object("status.json") ?? "{}")).toMatchObject({ state: "FAILED", reason: "challenge-unavailable", executorImage, invocationFeatures: ["task.readiness", "task.workflowChecks"] });
+    // A worker that never answered has no features to report, but the image it was given is known.
+    const down = runHook({ ping: "down" });
+    const downStatus = JSON.parse(down.object("status.json") ?? "{}") as Record<string, unknown>;
+    expect(downStatus).toMatchObject({ state: "FAILED", reason: "worker-not-healthy", executorImage });
+    expect(downStatus).not.toHaveProperty("invocationFeatures");
+  });
+
+  it("keeps status.json well formed, and omits the features, when /ping answers with anything but a plain feature list", () => {
+    for (const pingBody of ['{"invocationFeatures":["a\\"b"]}', '{"invocationFeatures":"x"}', '{"invocationFeatures":[1]}', "not json", '{"invocationFeatures":["a\\u0020b"]}']) {
+      const { result, object } = runHook({ pingBody });
+      expect(result.status, pingBody).toBe(0);
+      const status = JSON.parse(object("status.json") ?? "{}") as Record<string, unknown>;
+      expect(status, pingBody).toMatchObject({ state: "SUCCEEDED", executorImage });
+      expect(status, pingBody).not.toHaveProperty("invocationFeatures");
+    }
+  });
+
+  it("reads a pretty-printed /ping and records the first features field once", () => {
+    const pretty = '{\n  "status": "Healthy",\n  "invocationFeatures": [\n    "task.readiness",\n    "task.workflowChecks"\n  ]\n}';
+    const first = runHook({ pingBody: pretty });
+    expect(first.result.status, first.result.stderr).toBe(0);
+    expect(JSON.parse(first.object("status.json") ?? "{}")).toMatchObject({ state: "SUCCEEDED", invocationFeatures: ["task.readiness", "task.workflowChecks"] });
+    const twice = runHook({ pingBody: '{"invocationFeatures":["a.b"],"x":{"invocationFeatures":["c.d"]}}' });
+    expect(JSON.parse(twice.object("status.json") ?? "{}")).toMatchObject({ state: "SUCCEEDED", invocationFeatures: ["a.b"] });
   });
 
   it("is refused, touching nothing, for a malformed role ID, instance ID, profile, bucket, region or executor image", () => {
@@ -446,6 +564,39 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
     const keys = called.flatMap((call) => [...call.matchAll(/--key (\S+)/g)].map((match) => match[1]));
     expect(keys.length).toBeGreaterThan(0);
     for (const key of keys) expect(key?.startsWith(qualificationPrefix), key).toBe(true);
+  });
+
+  describe("the model canary (M1.4 Task 4.9)", () => {
+    it("after a qualification that succeeded, hands the worker its own prefix to wait for the operator's canary request, bounded by timeout", () => {
+      const { result, called, object } = runHook();
+      expect(result.status, result.stderr).toBe(0);
+      const execs = called.filter((call) => call.startsWith("docker exec"));
+      expect(execs).toHaveLength(2);
+      expect(execs[1]).toBe(`docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/worker/dist/e2e-model-canary-cli.js --bucket ${qualification.bucket} --prefix ${qualificationPrefix}`);
+      expect(qualificationScript).toMatch(/timeout [^\n]*e2e-model-canary-cli\.js/);
+      // The canary comes after the qualification's own status, which it never changes.
+      expect(JSON.parse(object("status.json") ?? "{}")).toMatchObject({ state: "SUCCEEDED", reason: "qualified" });
+      expect(called.findIndex((call) => call.includes("status.json"))).toBeLessThan(called.lastIndexOf(execs[1]!));
+    });
+
+    // Task 4.10C, test 33 (CANARYLOG): the model check server's output reaches the journal instead of /dev/null.
+    it("writes the server's fixed lines to the journal, and its hook has no redirect to /dev/null", () => {
+      const { result } = runHook();
+      expect(result.status, result.stderr).toBe(0);
+      const lines = result.stderr.split("\n").filter((line) => line.includes("model-check:"));
+      expect(lines).toEqual(["agentx-e2e-qualification: model-check: request not readable (SlowDown)"]);
+      const hook = qualificationScript.split("\n").find((line) => line.includes("e2e-model-canary-cli.js"))!;
+      expect(hook).not.toMatch(/\/dev\/null/);
+      expect(hook).toMatch(/2>&1 \| while read l; do log "\$l"; done/);
+      // It serves for the registration's seven days, with a little margin.
+      expect(hook).toMatch(/timeout --foreground --kill-after=10s 7d /);
+    });
+
+    it("never runs after a failed qualification", () => {
+      const { called } = runHook({ qualifier: 3 });
+      expect(called.filter((call) => call.startsWith("docker exec"))).toHaveLength(1);
+      expect(called.some((call) => call.includes("e2e-model-canary-cli.js"))).toBe(false);
+    });
   });
 
   describe("the executor image", () => {
@@ -508,5 +659,78 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
     expect(new Set(called.map((call) => call.split(" ")[0]))).toEqual(new Set(tools));
     // Whatever failed, the worker is untouched: the hook never stops, restarts or removes anything.
     expect(called.join("\n")).not.toMatch(/docker (stop|rm|kill|restart)|systemctl/);
+  });
+
+  describe("the failure codes in status.json", () => {
+    type Failure = { codes: string[] };
+    const failureOf = (options: HookOptions) => {
+      const { result, called, object } = runHook({ qualifier: 1, ...options });
+      expect(result.status).toBe(1);
+      const status = JSON.parse(object("status.json") ?? "{}") as { state?: string; reason?: string; failure?: Failure; executorImage?: string };
+      expect(status).toMatchObject({ state: "FAILED", reason: "qualification-failed-exit-1", executorImage });
+      return { status, called, object, result };
+    };
+    /** The qualifier's failure file: the stage first, as the qualifier writes it. */
+    const file = (value: { stage: string; reasons: unknown; summary: unknown } & Record<string, unknown>) => JSON.stringify({ schemaVersion: "runtime-install-failure/v1", ...value });
+    const code = /^[a-z0-9-]+(:[a-z0-9-]+)?$/;
+
+    it("asks the qualifier for a failure file, and shows the stage and the failing probe's codes next to the exit code", () => {
+      const { status, called } = failureOf({ failureFile: file({ stage: "qualification-rejected", reasons: ["probe-wrong-cause:api-egress-denial-v1"],
+        summary: ["api-egress-denial-v1:collector-failed", "api-egress-denial-v1:sinkhole-0"] }) });
+      expect(called.find((call) => call.startsWith("docker exec"))).toContain("--failure-out /mnt/agentx-runtime/evidence/runtime-install-failure.json");
+      expect(status.failure).toEqual({ codes: ["qualification-rejected", "probe-wrong-cause:api-egress-denial-v1", "api-egress-denial-v1:collector-failed", "api-egress-denial-v1:sinkhole-0"] });
+    });
+
+    it("has no failure object when the qualifier left no failure file, even if an earlier run left one", () => {
+      expect(failureOf({}).status).not.toHaveProperty("failure");
+      expect(failureOf({ staleFailure: file({ stage: "qualification-rejected", reasons: ["probe-wrong-cause:stale"], summary: [] }) }).status).not.toHaveProperty("failure");
+    });
+
+    it("opens the qualifier's files without following a symlink, so a link swapped in after a check cannot make the hook read or upload another file", () => {
+      expect(qualificationScript).toContain('dd if="$f" iflag=nofollow bs=16384 count=1');
+      expect(qualificationScript).toContain('dd if="$EVIDENCE_HOST/$PROPOSAL_NAME" iflag=nofollow of="$proposal"');
+      // A failure file that is a symlink yields no codes, however good its target looks.
+      const linked = failureOf({ link: true, failureFile: file({ stage: "qualification-rejected", reasons: ["probe-wrong-cause:from-a-link"], summary: [] }) });
+      expect(linked.status.failure).toEqual({ codes: [] });
+      // A proposal that is a symlink is not uploaded: the hook reports it missing.
+      const proposal = runHook({ link: true });
+      expect(proposal.result.status).toBe(1);
+      expect(JSON.parse(proposal.object("status.json") ?? "{}")).toMatchObject({ state: "FAILED", reason: "proposal-missing" });
+      expect(proposal.object("proposal.json")).toBeUndefined();
+    });
+
+    it("never lets free text through: anything that is not a code is dropped, and the qualifier's log is never uploaded", () => {
+      const secret = "AKIAIOSFODNN7EXAMPLE";
+      const { status, object, called } = failureOf({ failureFile: file({ stage: "qualification-rejected", message: `Error: ${secret} at /home/node/x.js:1`,
+        reasons: ["probe-wrong-cause:web-csv-negative-v1", "Error: token leaked", "has space", "UPPER-case", "a:b:c", "/etc/passwd", `${secret}`, "x".repeat(49), "positive-probe-failed:app-host-denial-v1"],
+        summary: ["web-csv-negative-v1:collector-pass", "not a code", "ok:fine"] }) });
+      expect(status.failure).toEqual({ codes: ["qualification-rejected", "probe-wrong-cause:web-csv-negative-v1", "positive-probe-failed:app-host-denial-v1", "web-csv-negative-v1:collector-pass", "ok:fine"] });
+      expect(JSON.stringify(status)).not.toMatch(/AKIA|token|passwd|home\/node|Error/);
+      expect(called.filter((call) => call.startsWith("aws s3api put-object")).every((call) => !/qualifier\.log|failure\.json/.test(call))).toBe(true);
+      expect(object("qualifier.log")).toBeUndefined();
+      expect(object("runtime-install-failure.json")).toBeUndefined();
+    });
+
+    it("keeps status.json well formed, with no codes, when the file holds none", () => {
+      expect(failureOf({ failureFile: file({ stage: "Free Text: oops", reasons: "Probe Wrong Cause", summary: null }) }).status.failure).toEqual({ codes: [] });
+      expect(failureOf({ failureFile: "not json at all \"quoted free text\"" }).status.failure).toEqual({ codes: [] });
+    });
+
+    it("keeps at most 16 codes and 2 KB, whatever the file holds, and reads only the head of a large file", () => {
+      const reasons = Array.from({ length: 40 }, (_, index) => `probe-wrong-cause:probe-${index}`);
+      const { status } = failureOf({ failureFile: file({ stage: "qualification-rejected", reasons, summary: ["x:one"] }) });
+      expect(status.failure!.codes).toEqual(["qualification-rejected", ...reasons.slice(0, 15)]);
+      // Codes of the longest length the hook accepts (48 characters either side of the colon): 16 of them are still under 2 KB.
+      const longest = Array.from({ length: 40 }, (_, index) => `${String(index).padStart(2, "0")}${"a".repeat(46)}:${"b".repeat(48)}`);
+      const longStatus = failureOf({ failureFile: file({ stage: "s".repeat(48), reasons: longest, summary: [] }) }).status.failure!;
+      expect(longStatus.codes).toEqual(["s".repeat(48), ...longest.slice(0, 15)]);
+      expect(Buffer.byteLength(JSON.stringify(longStatus.codes))).toBeLessThanOrEqual(2_048);
+      for (const entry of longStatus.codes) expect(entry).toMatch(code);
+      // A code with a part longer than 48 characters is not a code the hook keeps.
+      expect(failureOf({ failureFile: file({ stage: "qualification-rejected", reasons: [`${"a".repeat(49)}:b`, "ok:fine"], summary: [] }) }).status.failure!.codes).toEqual(["qualification-rejected", "ok:fine"]);
+      // Only the first 16 KB of the file is read.
+      const huge = failureOf({ padBytes: 200_000, failureFile: `{"pad":"__PAD__","reasons":["probe-wrong-cause:late"],"stage":"qualification-rejected"}` }).status.failure!;
+      expect(huge).toEqual({ codes: [] });
+    });
   });
 });

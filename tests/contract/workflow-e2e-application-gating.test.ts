@@ -1,10 +1,16 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { combineE2EVerdicts, type E2EVerdict } from "../../packages/broker/src/e2e/verdict.js";
 import { applicationEvidenceLimits, expectedApplicationAssertionAssets, verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/broker/src/e2e/application-evidence.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope, type ApplicationEvidenceFixture } from "../support/e2e-application-evidence-fixture.js";
 import { canonicalJson } from "@agentx/contracts";
+import { applicationIntentWithAccountRefs, applicationRoundIntent } from "../../packages/broker/src/e2e/application-plan-approval.js";
+import { planFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { shaCanonicalOf } from "../support/e2e-account-registry-fixtures.js";
+import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
+import { builtWebAndApiAdmission } from "../support/e2e-web-and-api-admission.js";
+import { collectApplicationGroupEvidence, type ObservedApiOutcome } from "../support/e2e-application-evidence-fixture.js";
 import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStateProbeAsset } from "../../packages/verifier/src/application-state-probes.js";
 import { createPortableApplicationChildFixture } from "../support/e2e-application-fixture.js";
 import { e2eApplicationPrivateTransferMaxBytes } from "@agentx/verifier";
@@ -13,7 +19,7 @@ import { e2eApplicationPrivateTransferMaxBytes } from "@agentx/verifier";
 // raw evidence. Every group here is genuinely collected by the real collector from a real probe admission.
 
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const PASSING = { probe: "api-egress-denial-v1", observed: { kind: "http-status", status: 200 } } as const;
+const PASSING = { probe: "api-status-mismatch-v1", observed: { kind: "http-status", status: 503 } } as const;
 const FAILING = { probe: "api-status-mismatch-v1", observed: { kind: "http-status", status: 200 } } as const;
 
 type Round = Awaited<ReturnType<typeof roundOf>>;
@@ -267,7 +273,8 @@ describe("the oracle's expectations are the broker's, never the worker's (Ruling
     expect(other.fixture.collected.qualification?.status, "the worker's own collection accepts its self-consistent environment").toBe("PASS");
     const result = verifyApplicationE2EEvidence(other.input());
     expect(result.verdict).toBe("UNKNOWN");
-    expect(reasonOfGroup(result)).toMatch(/not the admitted runtime's environment/u);
+    // HARDEN-C I-4: the reason is the fixed code alone, so the owner reads the sentence for it (an older worker, which ran the round anyway, ends here).
+    expect(reasonOfGroup(result)).toBe("runtime-environment-drifted");
   });
 
   it("is UNKNOWN when the runner honestly reports other limits than the configured ones", async () => {
@@ -441,4 +448,118 @@ describe("combining the verdicts of the parts of a round (Ruling BA)", () => {
     [["FAILED", "PASS"], "FAILED"], [["PASS", "FAILED"], "FAILED"], [["FAILED", "UNKNOWN"], "FAILED"], [["UNKNOWN", "FAILED", "PASS"], "FAILED"], [[], "UNKNOWN"],
   ];
   it.each(cases)("%j is %s", (verdicts, expected) => { expect(combineE2EVerdicts(verdicts)).toBe(expected); });
+});
+
+describe("holding an approved plan to its admission when approval pinned the test accounts (Task 3.1)", () => {
+  it("compares parsed intents: a stored plan without the schema's defaulted keys is the admitted intent, with the pinned account ref in place of the plan's own", () => {
+    const fx = planFixture({});
+    const { portableOperationRefs: _portable, mockFixtureRefs: _mocks, unavailableTargetRefs: _unavailable, ...stored } = fx.intent;
+    void _portable; void _mocks; void _unavailable;
+    const pinned = [{ ...fx.accountRef, revision: 2, definitionDigest: "7".repeat(64) }];
+    const admitted = applicationRoundIntent(applicationIntentWithAccountRefs(stored, pinned));
+    expect(admitted.runtimeAccountRefs).toEqual(pinned);
+    // The planner's stored form read back with its keys in another order (a table keeps none) is the same admitted intent: both sides go through the schema.
+    const reread = Object.fromEntries(Object.entries(stored).reverse());
+    expect(canonicalJson(applicationRoundIntent(applicationIntentWithAccountRefs(reread as never, pinned)))).toBe(canonicalJson(admitted));
+    // And the members the schema defaults are written out as empty lists on the admitted side, never compared as the stored JSON spells them.
+    expect(admitted.portableOperationRefs).toEqual([]);
+    // Without a pin (an M1.2 record) the plan's own ref is what runs.
+    expect(applicationRoundIntent(applicationIntentWithAccountRefs(stored, [])).runtimeAccountRefs).toEqual([fx.accountRef]);
+    // A pin for another account of the application leaves this account's ref alone: the lookup is by application and profile.
+    const other = [{ ...pinned[0]!, profileId: "orders-viewer" }];
+    expect(applicationIntentWithAccountRefs(fx.intent, other).runtimeAccountRefs).toEqual([fx.accountRef]);
+  });
+});
+
+describe("a round whose web and API groups come from one admission (Task 3.4)", () => {
+  afterEach(disposeRealCandidates);
+  /**
+   * The admission the broker builds for an app's web and API scenarios, with the API group genuinely collected from raw evidence and the web group's run the way a worker uploads one it could
+   * not collect (the collector the fixture drives is the API runtime's, so a collected web group is the Linux journey's to show).
+   */
+  async function webAndApiRound(observed: ObservedApiOutcome, options: { baseline?: boolean } = {}) {
+    const built = await builtWebAndApiAdmission({}, { web: true, api: true }, options);
+    const apiGroupId = built.groupOf("api")!;
+    const webGroupId = built.groupOf("web")!;
+    const api = await collectApplicationGroupEvidence({ admission: built.admission, validated: built.validated, groupId: apiGroupId, observed });
+    const webBinding = built.admission.groups.find((group) => group.outerBinding.groupId === webGroupId)!.outerBinding;
+    const webReason = "the browser group produced no result";
+    const web = { kind: "application", group: built.validated.executionPlan.groups.find((group) => group.groupId === webGroupId), binding: webBinding,
+      collection: { status: "UNKNOWN", reason: webReason }, unavailableReason: webReason, lifecycle: { cleanup: "confirmed", process: { exitCode: 1, timedOut: false, aborted: false } },
+      actual: null, diagnostics: null, operatorEvidence: null } as Record<string, unknown>;
+    const admissionBytes = Buffer.from(built.built.bytes);
+    const admissionSha256 = sha(admissionBytes);
+    const { admission } = built;
+    const subject = { taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
+      candidateDigest: admission.candidateDigest, roundId: admission.round.roundId, groupRunIds: admission.groups.map((group) => group.outerBinding.runId), admissionSha256 };
+    const runs = [api.groupRun, web];
+    const input: ApplicationEvidenceInput = { admissionBytes, subject,
+      aggregate: aggregateEvidenceEnvelope({ admission, admissionSha256, groupRuns: runs }),
+      groupEvidence: new Map(runs.map((run) => [(run.binding as { runId: string }).runId, groupEvidenceEnvelope({ admission, admissionSha256, groupRun: run })])),
+      receivedAt: new Map([[api.runId, actualOf(api.groupRun).collection.receivedAt], [webBinding.runId, new Date().toISOString()]]), terminalStatus: "SUCCEEDED",
+      ...(options.baseline === true ? { purpose: "baseline" as const } : {}) };
+    return { built, api, apiGroupId, webGroupId, input, webReason };
+  }
+
+  it("fails the round when the API group fails, whatever the browser group did, and attributes each group's verdict to its own kind", async () => {
+    const round = await webAndApiRound({ kind: "http-status", status: 503 });
+    const result = verifyApplicationE2EEvidence(round.input);
+    expect(result.verdict).toBe("FAILED");
+    expect(result.groups.map((group) => [group.groupId, group.verdict]).sort()).toEqual([[round.apiGroupId, "FAILED"], [round.webGroupId, "UNKNOWN"]].sort());
+    // The one result there is belongs to the API group's own case: it is not credited to the browser group.
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]).toMatchObject({ status: "failed", binding: { groupId: round.apiGroupId } });
+    expect(result.reason).toContain(round.apiGroupId);
+  });
+
+  it("is never PASS while the browser group has no result, even when the API group passes", async () => {
+    const round = await webAndApiRound({ kind: "http-status", status: 200 });
+    const result = verifyApplicationE2EEvidence(round.input);
+    expect(result.groups.find((group) => group.groupId === round.apiGroupId)?.verdict).toBe("PASS");
+    expect(result.groups.find((group) => group.groupId === round.webGroupId)?.verdict).toBe("UNKNOWN");
+    expect(result.verdict).toBe("UNKNOWN");
+    expect(result.reason).toContain(round.webGroupId);
+  });
+
+  it("reads the baseline round of a web and API plan group by group: one signed purpose for both groups, each judged on its own, a row for every approved scenario, and never as a candidate round", async () => {
+    const round = await webAndApiRound({ kind: "http-status", status: 503 }, { baseline: true });
+    expect(round.built.admission.baseline).toMatchObject({ purpose: "baseline", baseCommitSha: round.built.admission.candidateCommitSha, attempt: 1 });
+    expect(round.built.admission.groups).toHaveLength(2);
+    const result = verifyApplicationE2EEvidence(round.input);
+    expect(result.groups.map((group) => [group.groupId, group.verdict]).sort()).toEqual([[round.apiGroupId, "FAILED"], [round.webGroupId, "UNKNOWN"]].sort());
+    expect(result.display?.scenarios.map((row) => [row.scenarioId, row.kind]).sort()).toEqual([["owner-api-health", "api"], ["owner-export-page", "web"]]);
+    expect(result.display?.scenarios.find((row) => row.scenarioId === "owner-api-health")).toMatchObject({ status: "FAILED", kind: "api" });
+    // The same evidence asked for as a candidate's round is refused: a baseline is never a candidate's verdict, however many groups it has.
+    const asCandidate = verifyApplicationE2EEvidence({ ...round.input, purpose: "candidate" });
+    expect(asCandidate.verdict).toBe("UNKNOWN");
+    expect(asCandidate.reason).toMatch(/baseline/i);
+  });
+
+  it("requalifies a group against the runtime row of its own kind: a profile whose API row reports another environment than its web row is judged by the API row for the API group", async () => {
+    const apiEnvironment = { ci: true as const, trustNoticeShown: false as const, os: "linux 6.9.9", arch: "arm64", runtime: "node v22.23.2" };
+    const rows = [webApiRow("web"), webApiRow("api", { runnerEnvironment: apiEnvironment, runnerEnvironmentDigest: shaCanonicalOf(apiEnvironment) })];
+    const built = await builtWebAndApiAdmission({ registeredRuntimes: rows });
+    const apiGroupId = built.groupOf("api")!;
+    // The fixture's runner reports the environment of the admitted API row, as a real executor on that runtime does...
+    const api = await collectApplicationGroupEvidence({ admission: built.admission, validated: built.validated, groupId: apiGroupId, observed: { kind: "http-status", status: 200 } });
+    expect(api.collectionInputs.environment).toEqual(apiEnvironment);
+    expect(api.compiled.runtimeKind).toBe("api");
+    const admissionBytes = Buffer.from(built.built.bytes);
+    const admissionSha256 = sha(admissionBytes);
+    const { admission } = built;
+    const webGroup = admission.groups.find((group) => group.outerBinding.groupId !== apiGroupId)!.outerBinding;
+    const web = { kind: "application", group: built.validated.executionPlan.groups.find((group) => group.groupId === webGroup.groupId), binding: webGroup,
+      collection: { status: "UNKNOWN", reason: "no result" }, unavailableReason: "no result", lifecycle: { cleanup: "confirmed", process: { exitCode: 1, timedOut: false, aborted: false } },
+      actual: null, diagnostics: null, operatorEvidence: null } as Record<string, unknown>;
+    const subject = { taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
+      candidateDigest: admission.candidateDigest, roundId: admission.round.roundId, groupRunIds: admission.groups.map((group) => group.outerBinding.runId), admissionSha256 };
+    const verify = (runs: Array<Record<string, unknown>>) => verifyApplicationE2EEvidence({ admissionBytes, subject, aggregate: aggregateEvidenceEnvelope({ admission, admissionSha256, groupRuns: runs }),
+      groupEvidence: new Map(runs.map((run) => [(run.binding as { runId: string }).runId, groupEvidenceEnvelope({ admission, admissionSha256, groupRun: run })])),
+      receivedAt: new Map([[api.runId, actualOf(api.groupRun).collection.receivedAt], [webGroup.runId, new Date().toISOString()]]), terminalStatus: "SUCCEEDED" });
+    // ...so the broker's recollection, which looks the row up by profile and kind, finds that environment: the API group is PASS. Judged by the web row's environment it would be UNKNOWN.
+    expect(verify([api.groupRun, web]).groups.find((group) => group.groupId === apiGroupId)).toMatchObject({ verdict: "PASS" });
+    const claimingWebRowEnvironment = clone(api.groupRun);
+    (actualOf(claimingWebRowEnvironment).collectionInputs as { environment: unknown }).environment = { ...apiEnvironment, os: "linux 6.8.0" };
+    expect(verify([claimingWebRowEnvironment, web]).groups.find((group) => group.groupId === apiGroupId)?.verdict).toBe("UNKNOWN");
+  });
 });

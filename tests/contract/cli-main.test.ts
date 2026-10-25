@@ -16,14 +16,15 @@ describe("AgentX executable command surface", () => {
     expect(admin?.commands.find((command) => command.name() === "eval")?.commands.find((command) => command.name() === "batch")?.commands.map((command) => command.name())).toEqual(["start", "show", "stop", "results"]);
     expect(subcommands(admin, "credential")).toEqual(["register", "authorize", "list"]);
     expect(subcommands(admin, "turns")).toEqual(["export"]);
-    expect(subcommands(admin, "task")).toEqual(["share-mode"]);
+    expect(subcommands(admin, "task")).toEqual(["share-mode", "e2e-replay"]);
     expect(subcommands(admin, "runtime-installation")).toEqual(["challenge", "register"]);
 
     expect(subcommands(program, "signin")).toEqual(["show", "enable", "disable", "check"]);
     expect(subcommands(program, "loop")).toEqual(["init", "add", "enroll", "remove", "start", "stop", "status", "run", "do", "quick", "full", "review", "contribute", "check", "mcp"]);
     expect(subcommands(program, "chatgpt")).toEqual(["connect", "status", "disconnect"]);
     expect(subcommands(program, "mcp")).toEqual(["install"]);
-    expect(subcommands(program, "project")).toEqual(["add"]);
+    expect(subcommands(program, "project")).toEqual(["add", "setup-approve", "model-check"]);
+    expect(program.commands.find((command) => command.name() === "project")?.commands.find((command) => command.name() === "model-check")?.commands.map((command) => command.name())).toEqual(["discover", "test", "drive"]);
     expect(subcommands(program, "channel")).toEqual(["add"]);
     expect(subcommands(program, "connector")).toEqual(["add"]);
     expect(subcommands(program, "alerts")).toEqual(["test"]);

@@ -105,9 +105,11 @@ import {
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
   WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
+  WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
   workflowApplicationRetryOffered,
   e2eApplicationSelectionFingerprint,
+  e2eApplicationAccountChanges,
   type E2EApplicationReapproval,
   WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
   canonicalPlanJson,
@@ -133,12 +135,14 @@ import {
   returnWorkflowToImplementation,
   sendBackProblems,
   workflowSendBackOffered,
+  workflowReadmitsApplicationRound,
   WORKFLOW_REGRESSION_INSTRUCTION,
   type WorkflowSendBackProblem,
   type WorkflowDependencyInvocation,
   type WorkflowFeatureE2EIntent,
   type E2EApplicationPlanIntent,
   type E2EApplicationSelectionRecord,
+  type E2EScenarioResults,
   type E2EWorkflowAdmissionRef,
   workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
@@ -184,6 +188,7 @@ import {
   type TurnParty,
   type WorkspaceCharge,
 } from "../developer/task-records.js";
+import { recoverStrandedPlanning, stoppedStepReason, strandedPlanningRun } from "./workflow-cancel-reconcile.js";
 import { GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, WORKFLOW_DISPATCH_PK, hashJson, isConditional, planDocumentKindName, previousPlanDocumentBlock, workflowDispatchItem, type WorkflowDispatchRecord } from "./broker-shared.js";
 import { planEvidencePointerKey, type PlanEvidencePointer } from "../developer/plan-evidence-jobs.js";
 import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown, type LoadedDocument } from "../developer/plan-artifacts.js";
@@ -206,6 +211,7 @@ import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskP
 import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeopleProposal as readPeopleProposal, getTaskPeopleProposalMetadata as readPeopleProposalMetadata, proposeTaskOwnership, proposeTaskPeopleRole,
   submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
+import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import {
   commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
   currentStepDocument, queueCommentAnswer, setSuggestion, suggestionsFor, type PageActor, type SlackRequestQueue,
@@ -261,13 +267,19 @@ export interface DeveloperTaskRouteDependencies {
   workflowE2EPresentation?(input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }): Promise<DeveloperTaskView["e2ePresentation"] | undefined>;
   /** Atomic conditions for current managed-E2E authority, attached to publication admission. */
   workflowE2EPublicationChecks?(input: { task: DeveloperTaskRecord; operations: readonly unknown[] }): Promise<TransactItems | undefined>;
+  /** M1.3 Task 3.7: the per-scenario rows of the task's current browser and API round, for the task page; the screenshot behind a row, by digest; the baseline round asked for at APPROVE. */
+  workflowE2EScenarioResults?(input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }): Promise<E2EScenarioResults | undefined>;
+  workflowE2EArtifact?(input: { task: DeveloperTaskRecord; sha256: string }): Promise<{ contentType: "image/jpeg"; bytes: Uint8Array } | undefined>;
+  startWorkflowE2EBaseline?(input: { task: DeveloperTaskRecord }): Promise<unknown>;
   /**
    * Evaluates a plan's schema-v2 application intent for approval against the task's pinned project, the approved setup snapshot and the runtime rows
    * READY now: the selection to record and the conditions that keep those rows as read until the approval commits. It throws when the plan cannot be
    * approved (CONFIG_INVALID) or cannot be evaluated (RUNTIME_UNAVAILABLE); without it a v2 plan is never approved.
    */
-  validateWorkflowE2EApplicationPlan?(input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string } }):
-    Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems }>;
+  validateWorkflowE2EApplicationPlan?(input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string };
+    /** The owner's retry approving the same, already approved plan again: the latest registered test accounts are pinned, not compared with the plan's refs. */
+    reapproval?: boolean }):
+    Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems; baselineWanted?: boolean }>;
   /** Resolves only a URL loaded from the task's immutable registered project revision. */
   registeredRepositoryIdentity?(url: string): Promise<{ repositoryId: number; fullName: string } | undefined>;
 }
@@ -1268,6 +1280,12 @@ export async function taskView(
     void _internalOperationId;
     workflow = { ...publicWorkflow, decisions: task.workflow.decisions.map(({ answerOverrides, commentsIncluded, via, ...decision }) => { void answerOverrides; void commentsIncluded; void via; return decision; }) };
   }
+  // PLANINC-2: planning that shows RUNNING although its run ended and the workspace is free (a stop recorded before the cancel fix)
+  // reads as blocked, so the owner is offered Retry; the stored row is blocked by that retry, never by a read.
+  if (workflow !== undefined && task.workflow !== undefined) {
+    const stopped = strandedPlanningRun(task, workspace, operations);
+    if (stopped !== undefined) workflow = { ...workflow, state: "BLOCKED", blockReason: stoppedStepReason("PLAN", stopped.status) };
+  }
   if (options.details && workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
     const activeArtifactType = workflow.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
       : workflow.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
@@ -1941,6 +1959,8 @@ export async function decideTaskWorkflow(
   // The digests below identify the approved intent and its policy/bundle; candidate-specific execution-plan identity is
   // bound later by the server-created CHECKS admission and round.
   let applicationConditions: TransactItems = [];
+  /** M1.3 Task 3.7b: whether the project wants the baseline round, so the coding run is asked to export the unchanged code. */
+  let baselineSource = false;
   if (request.decision === "APPROVE" && documentType === "plan" && loaded?.format === "structured" && loaded.plan.e2e !== undefined) {
     const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
     if (pinnedProject?.definition.e2e === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the approved feature E2E intent has no pinned project policy");
@@ -1956,6 +1976,7 @@ export async function decideTaskWorkflow(
       const validated = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: decided!.id, sha256: decided!.sha256 } });
       applicationSelection = validated.selection;
       applicationConditions = validated.conditions;
+      baselineSource = validated.baselineWanted === true;
     }
     const bundleBody = { schemaVersion: 1 as const, planDigest: decided!.sha256, templateVersion: "trusted-e2e/v1", scenarios: intent.scenarios, bundleDigest: "0".repeat(64) };
     const bundleDigest = e2eScenarioBundleDigest(bundleBody);
@@ -2064,7 +2085,9 @@ export async function decideTaskWorkflow(
           ...applicationConditions,
           accessFence(deps, access),
         ];
-      }, { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}), ...(workflowDependencies === undefined ? {} : { workflowDependencies }) });
+      }, { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}), ...(workflowDependencies === undefined ? {} : { workflowDependencies }),
+        // M1.3 Task 3.7b (owner decision D2): the coding run also exports the unchanged code, for the approved application plan's baseline round.
+        ...(mode === "IMPLEMENT" && baselineSource ? { workflowE2EBaselineSource: true as const } : {}) });
     });
   } catch (error) {
     // Another decision got there first: the same request (a double press) is that decision; any other is refused with
@@ -2081,6 +2104,9 @@ export async function decideTaskWorkflow(
     return busyOrClosing(deps, task, error);
   }
   const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
+  // M1.3 Task 3.7 (owner decision D2): the approved application plan asks for its informational baseline round. Best effort and after the approval is committed: whatever
+  // happens to the baseline, the approval and the checks stand exactly as they are.
+  if (request.decision === "APPROVE" && mode === "IMPLEMENT") await deps.startWorkflowE2EBaseline?.({ task: fresh }).catch((error: unknown) => log(deps, { event: "developer.e2e_baseline_not_started", taskId, errorName: error instanceof Error ? error.name : "unknown" }));
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
   return { task: view };
@@ -2154,7 +2180,8 @@ function keptProposedIds(policy: WorkflowCheckPolicy | undefined): string[] {
   return policy?.selectedProposedIds === undefined ? proposed : proposed.filter((id) => policy.selectedProposedIds!.includes(id));
 }
 
-async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
+/** `afterRecovery`: this call is the one retryTaskWorkflow makes itself once it has blocked a stranded planning step; it never recovers twice. */
+async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown, afterRecovery = false): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-retry");
   const access = await authorizeTaskAction(deps, caller, taskId, "retry");
   const { task } = access;
@@ -2230,7 +2257,7 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
     }
     const selected = workflowSelectedChecks({ ...policy, selectedOptionalIds, selectedProposedIds });
     // An application round's retry re-admits the approved browser and API checks; it runs no project check, so a task that has none can still retry it.
-    const readmitsApplicationRound = workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined;
+    const readmitsApplicationRound = workflowReadmitsApplicationRound(workflow);
     if (selected.length === 0 && !readmitsApplicationRound) throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.retryNeedsOneCheck);
     await actionableWorkspace(deps, task);
     const receivedAt = iso(deps);
@@ -2280,9 +2307,11 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
         if (deps.validateWorkflowE2EApplicationPlan === undefined) {
           throw agentXError("RUNTIME_UNAVAILABLE", "the plan cannot be approved again here: the check against the approved setup and the ready runtimes is not installed");
         }
-        reapproved = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: planArtifact.id, sha256: planArtifact.sha256 } });
+        reapproved = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: planArtifact.id, sha256: planArtifact.sha256 }, reapproval: true });
+        const accountChanges = e2eApplicationAccountChanges(workflow.e2e.applicationSelection, reapproved.selection);
         reapproval = { requestId: request.requestId, actorId: access.actorId, reason: request.instructions.slice(0, 500), at: receivedAt,
-          previous: e2eApplicationSelectionFingerprint(workflow.e2e.applicationSelection), current: e2eApplicationSelectionFingerprint(reapproved.selection) };
+          previous: e2eApplicationSelectionFingerprint(workflow.e2e.applicationSelection), current: e2eApplicationSelectionFingerprint(reapproved.selection),
+          ...(accountChanges.length === 0 ? {} : { accounts: accountChanges }) };
       }
       const next = WorkflowSnapshotSchema.parse({
         ...retryBase,
@@ -2364,6 +2393,26 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
     : (await deps.actions.operations(task.workspaceId)).find((operation) => operation.requestId === request.requestId
       && (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "PLAN"));
   if (replayed !== undefined) return { task: await taskView(deps, task, { events: 0, details: false }) };
+  // PLANINC-2: planning still RUNNING although its run ended and nothing holds the workspace (a stop recorded before the cancel
+  // fix, or a release that never reached the workflow) is blocked first, in one transaction conditional on the same row,
+  // workspace and run, so the ordinary Retry planning below applies to it. Nothing else changes: no approval, no dispatch.
+  if (!afterRecovery && task.workflow !== undefined && task.workflow.stage === "PLAN" && task.workflow.state === "RUNNING") {
+    const [workspace, runs] = await Promise.all([deps.actions.workspace(task.workspaceId), deps.actions.operations(task.workspaceId)]);
+    const stopped = strandedPlanningRun(task, workspace, runs);
+    if (stopped !== undefined) {
+      if (request.expectedRevision !== undefined && request.expectedRevision !== task.workflow.revision) {
+        throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
+      }
+      // False means something moved first (another retry won, the workspace was taken, the run changed): the re-read below decides.
+      await recoverStrandedPlanning(deps.documentClient, deps.tableName, { taskId, workflow: task.workflow }, workspace, stopped, iso(deps));
+      const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
+      if (fresh.workflow?.stage !== "PLAN" || fresh.workflow.state !== "BLOCKED") {
+        throw agentXError("IDEMPOTENCY_CONFLICT", "this task changed while the retry was starting; refresh the task and try again");
+      }
+      // The owner saw the revision the stranded step had; the block moved it on by one.
+      return retryTaskWorkflow(deps, caller, taskId, request.expectedRevision === undefined ? value : { ...(value as Record<string, unknown>), expectedRevision: fresh.workflow.revision }, true);
+    }
+  }
   if (task.workflow?.stage === "IMPLEMENT" && task.workflow.state === "BLOCKED") return retryWorkflowImplementation(deps, caller, access, request);
   if (task.workflow === undefined || task.workflow.state !== "BLOCKED" || task.workflow.stage !== "PLAN") {
     throw agentXError("CONFIG_INVALID", "this action can retry blocked planning or coding, or run selected checks for blocked verification or a change ready to publish");
@@ -2691,7 +2740,7 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
     resumeProgress: [],
   };
   // The problems are reviewer and check output, marked untrusted; the owner's note stays outside, as the instruction.
-  const problems = sendBackProblemsPromptSection(sendBackProblems(workflow), promptTagId(task, request.requestId));
+  const problems = sendBackProblemsPromptSection(sendBackProblems(workflow, E2E_OWNER_SENTENCES.groupSentence), promptTagId(task, request.requestId));
   const prompt = (notes: string) => `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nOwner note (the owner's own instructions for this step): ${request.instructions}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
   const next: WorkflowSnapshot = { ...returned, revision: returned.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next,
@@ -3090,6 +3139,103 @@ export async function startTaskWorkflowE2EChecksFromSystem(
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
 
+/**
+ * M1.3 Task 3.7b: starts the baseline round (the approved scenarios on the unchanged code, for information only) as a separate server-admitted CHECKS operation from
+ * VERIFY/WAITING. Unlike the candidate's CHECKS it changes nothing about the workflow: no revision, no state, no round. The workflow is only held to be where the dispatch saw it
+ * (a condition check), so a round never starts for a task that has moved on. `extra` is the baseline record's own start (REQUESTED to STARTED), written in the same transaction
+ * as the operation, so there is at most one baseline round per plan and never an operation without its record.
+ */
+export async function startTaskWorkflowE2EBaselineFromSystem(
+  deps: DeveloperTaskRouteDependencies,
+  taskId: string,
+  expected: { workflowRevision: number; candidateDigest: string },
+  admission: E2EWorkflowAdmissionRef,
+  operationId: string,
+  extra: TransactItems,
+  actor?: DeveloperCaller,
+): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined
+    || workflow.revision !== expected.workflowRevision || workflow.stage !== "VERIFY" || workflow.state !== "WAITING"
+    || workflow.e2e?.required !== true || workflow.candidate?.digest !== expected.candidateDigest
+    || admission.purpose !== "baseline" || admission.baseCommitSha === undefined || admission.attempt === undefined || admission.taskId !== taskId
+    || admission.workflowRevision !== workflow.revision || admission.roundId.length === 0
+    || admission.groupRunIds.length === 0 || new Set(admission.groupRunIds).size !== admission.groupRunIds.length) return "STALE";
+  const dispatchAccess = await systemTaskAccess(deps, task);
+  const workspace = await deps.actions.workspace(task.workspaceId);
+  if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
+  const receivedAt = iso(deps);
+  const requestId = workflowRequestId("agentx-baseline-e2e-checks", taskId, workflow.revision, admission.baseCommitSha, admission.attempt);
+  const accepted = await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, {
+    requestId, conversationId: task.conversationId,
+    prompt: "Run the broker-admitted baseline E2E verification groups on the unchanged code. Do not edit files or expand the admitted scenarios.",
+  }, (operation) => [
+    { ConditionCheck: {
+      TableName: deps.tableName, Key: taskKey(taskId),
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate AND workflow.e2e.required = :required AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+      ExpressionAttributeValues: { ":revision": workflow.revision, ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": expected.candidateDigest, ":required": true },
+    } },
+    putNew(turnTable(deps), aiToolTurn({
+      party: actor === undefined ? partyOfTask(task) : partyOfTaskActor(task, actor), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+      receivedAt, finishedAt: iso(deps), request: "Run baseline E2E verification", response: `Broker-admitted baseline E2E CHECKS on the unchanged code started as operation ${operation.id}.`, operationId: operation.id,
+    })),
+    ...extra,
+    ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+  ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission, readiness: [] });
+  return accepted.duplicate ? "DUPLICATE" : "STARTED";
+}
+
+/**
+ * M1.4 Task 4.6b: starts an audit replay of the task's qualified round as a separate server-admitted CHECKS operation. Like the baseline's start it changes nothing about the workflow (no
+ * revision, no state, no round, no qualification): the task is only held to be where the operator saw it, open and still carrying the qualified round of that candidate (a condition
+ * check), so a replay never starts for a task that has moved on or closed. `extra` is the replay record's own start (REQUESTED to STARTED), written in the same transaction as the
+ * operation, so there is at most one replay per round and attempt and never an operation without its record. The request id is derived from the round and the attempt, so a repeated
+ * request is the broker's duplicate of the first.
+ */
+export async function startTaskWorkflowE2EReplayFromSystem(
+  deps: DeveloperTaskRouteDependencies,
+  taskId: string,
+  expected: { sourceRoundId: string; candidateDigest: string },
+  admission: E2EWorkflowAdmissionRef,
+  operationId: string,
+  extra: TransactItems,
+  requestedBy: ShareAdmin,
+): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.e2e?.required !== true
+    || workflow.e2e.qualifiedRound?.roundId !== expected.sourceRoundId || workflow.e2e.qualifiedRound.candidateDigest !== expected.candidateDigest
+    || workflow.candidate?.digest !== expected.candidateDigest
+    || admission.purpose !== "replay" || admission.sourceRoundId !== expected.sourceRoundId || admission.attempt === undefined || admission.taskId !== taskId
+    || admission.candidateDigest !== expected.candidateDigest || admission.workflowRevision !== workflow.revision || admission.roundId.length === 0
+    || admission.groupRunIds.length === 0 || new Set(admission.groupRunIds).size !== admission.groupRunIds.length) return "STALE";
+  const dispatchAccess = await systemTaskAccess(deps, task);
+  const workspace = await deps.actions.workspace(task.workspaceId);
+  if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
+  const receivedAt = iso(deps);
+  const requestId = workflowRequestId("agentx-replay-e2e-checks", taskId, workflow.revision, expected.sourceRoundId, admission.attempt);
+  const accepted = await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, {
+    requestId, conversationId: task.conversationId,
+    prompt: "Run the broker-admitted audit replay of the verified AI-navigated round, with no model. Do not edit files or expand the admitted scenarios.",
+  }, (operation) => [
+    { ConditionCheck: {
+      TableName: deps.tableName, Key: taskKey(taskId),
+      ConditionExpression: "workflow.revision = :revision AND workflow.candidate.digest = :candidate AND workflow.e2e.required = :required AND workflow.e2e.qualifiedRound.roundId = :round AND attribute_not_exists(closedAt)",
+      ExpressionAttributeValues: { ":revision": workflow.revision, ":candidate": expected.candidateDigest, ":required": true, ":round": expected.sourceRoundId },
+    } },
+    putNew(turnTable(deps), aiToolTurn({
+      // The task's developer stays the task's owner field of the turn; the administrator who asked for the replay is the turn's `admin`, as for any administrator's action on the task.
+      party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", admin: requestedBy,
+      receivedAt, finishedAt: iso(deps), request: "Run audit replay of a verified round", response: `Broker-admitted audit replay (no model) started as operation ${operation.id}.`, operationId: operation.id,
+    })),
+    ...extra,
+    ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+  ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission, readiness: [] });
+  return accepted.duplicate ? "DUPLICATE" : "STARTED";
+}
+
 /** The task's page, which the draft pull request's description links to. */
 export function taskPageUrl(issuer: string, taskId: string): string {
   return new URL(`/review/${encodeURIComponent(taskId)}/task`, new URL(issuer).origin).href;
@@ -3131,6 +3277,9 @@ export function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: bo
       // A block of a browser and API round names its own way on: new code does not fix a runtime that needs qualifying or a selection that needs approving again.
       if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true) {
         return { status: "The browser and API checks can't run on the runtime as it is now", nextStep: `An administrator must qualify the runtime again; then retry the checks, or close the task ${inSlack}.` };
+      }
+      if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) === true) {
+        return { status: "The approved browser and API checks no longer match the test accounts", nextStep: `The test accounts changed; approve the checks again by retrying them, or close the task ${inSlack}.` };
       }
       if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true) {
         return { status: "The approved browser and API checks no longer match the runtime", nextStep: `Retry the checks to approve the plan again against what is ready now, or close the task ${inSlack}.` };
@@ -3654,8 +3803,15 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
       visibleWorkflowDependenciesProgress = [...visibleBySequence.values()].sort((left, right) => left.sequence - right.sequence);
     }
   }
+  // M1.3 Task 3.7: the rows of the task's browser and API round, from the broker's own verification of its stored evidence. A round that cannot be read never hides the page.
+  let e2eResults: E2EScenarioResults | undefined;
+  if (task.workflow?.e2e?.required === true && deps.workflowE2EScenarioResults !== undefined) {
+    try { e2eResults = await deps.workflowE2EScenarioResults({ task, operations: (await workspaceReads(deps, task)).operations, actor: owner ? "owner" : "viewer" }); }
+    catch (error) { log(deps, { event: "developer.task_e2e_results_unavailable", taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
+  }
   return {
     taskId, now: deps.now(), title: task.title, ...taskPageStage(workflow, task.closedAt !== undefined, owner, await publicationAttempts(deps, task)),
+    ...(e2eResults === undefined ? {} : { e2eResults }),
     path: workflow?.path ?? "QUICK", revision: workflow?.revision ?? 0, stage: taskPageStep(workflow, task.closedAt !== undefined), role: owner ? "owner" : "reader",
     documents, ...(unverified.length === 0 ? {} : { unverified }), checks, checksRan: results.length > 0, ...(checksNote === undefined ? {} : { checksNote }), findings,
     ...(acceptedFindings.length === 0 ? {} : { acceptedFindings }),

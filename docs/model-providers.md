@@ -103,7 +103,7 @@ Add approved pairs to the project's `approvedModels`, as for any provider:
 
 `@agentx use Opus 5 (Anthropic)` switches the project's coding model, and the next turn calls Anthropic
 directly. SWE-bench and SEC-bench runs take the same labels (`… model Opus 5 (Anthropic)`). A model must be
-in the Pi catalog that Rovara pins (Pi 1.0.0 includes `claude-opus-5-5`); a model newer than that
+in the Pi catalog that Rovara pins (Pi 1.3.0 includes `claude-opus-5-5`); a model newer than that
 catalog needs a Rovara release with a newer Pi. An unknown model is refused when it is first used, with "not in the
 installed Pi catalog".
 
@@ -137,12 +137,20 @@ exposure. See [OpenRouter model access](openrouter.md#workspace-credential-expos
 
 ## Missing key
 
-The rule is the same as OpenRouter's. When the ARN is empty, the secret does not exist, or its value is
-empty, the role runs on its default Bedrock model. The worker uses the deployment's Bedrock worker model if
-it has one, or Claude Sonnet 4.6. The classifier uses Claude Haiku 4.5. The logs record `model_fallback` with the
-reason `anthropic_secret_missing` or `openai_secret_missing`. Access denied, a malformed key, rate limits and
-inference errors fail the request instead. An installation without Bedrock model access sees the Bedrock
-error, not a silent change of provider.
+When the ARN is empty, the secret does not exist, or its value is empty, the role does not run on a model
+nobody chose. Without a chosen fallback (the default, `none`) the call fails with a named error: "The OpenAI
+key secret is missing, and no fallback model was chosen. Add or restore the key, or choose a fallback with
+`agentx --env <env> config set models.fallback <bedrock model id>`". `agentx init` refuses a role whose key is missing for
+the same reason, and `agentx doctor` reports it as an error naming the role.
+
+To run on Amazon Bedrock instead while the key is missing, choose the model:
+`agentx --env <env> config set models.fallback us.anthropic.claude-sonnet-4-6`. The model must be a Bedrock
+model of Rovara's model catalog, and it is tested with one call before it is set. A work request that runs on it
+says so: the task page and the Slack thread read "ran on Amazon Bedrock `<model>` because the OpenAI key
+secret is missing", and the logs record `model_fallback` with the reason `anthropic_secret_missing` or
+`openai_secret_missing`. Access denied, a malformed key, rate limits and inference errors fail the request
+instead. **Upgrade note:** an installation that relied on the old silent fallback now fails visibly at the
+missing key until it restores the key or chooses a fallback.
 
 ## Usage and cost
 

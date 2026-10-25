@@ -6,14 +6,18 @@ import { E2EApplicationRuntimeRefSchema } from "../../packages/contracts/src/e2e
 import type { E2ESourceSnapshot } from "../../packages/contracts/src/e2e-source.js";
 import { createCandidateManifest } from "../../packages/contracts/src/task-workflow.js";
 import type { z } from "zod";
-import { inspectE2ERepository } from "../../packages/contracts/src/e2e-catalog.js";
+import { e2eApplicationRecipeOrigin, inspectE2EApplicationRepository, inspectE2ERepository, withE2EAnonymousTargets } from "../../packages/contracts/src/e2e-catalog.js";
 import {
   E2EApplicationAccountDefinitionSchema,
   E2EApplicationProjectContractSchema,
   deriveE2EApplicationRuntimeAccountRef,
   bindE2EApplicationAccountTargets,
+  e2eAnonymousVariantOf,
+  E2E_ANONYMOUS_ACCOUNT_PROFILE_ID,
+  e2eAnonymousRuntimeAccountRef,
   e2eApplicationAccountDefinitionDigest,
   e2eApplicationAccountTargetId,
+  e2eSyntheticAccountContractDigest,
   readE2EApplicationProjectContract,
   validateE2EApplicationAccountBinding,
 } from "../../packages/contracts/src/e2e-application-accounts.js";
@@ -96,7 +100,8 @@ describe("source-owned application account contracts", () => {
     const contract = sourceProject(sourceSnapshot().snapshot.sources[0]!.bytes).agentx.e2e;
     const definition = E2EApplicationAccountDefinitionSchema.parse({
       schemaVersion: "e2e-application-account-definition/v1", applicationId: "orders-app", profileId: "orders-owner", revision: 4,
-      contractDigest: sha(canonicalJson(contract)), authProfileId: "orders-auth/v1", seedProfileId: "orders-seed/v1",
+      // A synthetic account binds to its own slice of the contract (Task 3.1), so another profile changing does not move it; an external-test one to the whole contract.
+      contractDigest: e2eSyntheticAccountContractDigest(E2EApplicationProjectContractSchema.parse(contract), "orders-owner"), authProfileId: "orders-auth/v1", seedProfileId: "orders-seed/v1",
       subjectIdDigest: sha("orders-owner"), tenantIdDigest: sha(canonicalJson("tenant-a")), roleRef: "owner", credentialHandleId: "credential/orders-owner",
       connectionRef: null, expiresAt: "2027-01-01T00:00:00.000Z",
     });
@@ -106,6 +111,8 @@ describe("source-owned application account contracts", () => {
     expect(validateE2EApplicationAccountBinding({ contract, definition, expectedRef, now: "2026-10-17T12:00:00.000Z" })).toEqual(expectedRef);
     expect(() => validateE2EApplicationAccountBinding({ contract, definition: { ...definition, revision: 5 }, expectedRef, now: "2026-10-17T12:00:00.000Z" })).toThrow();
     expect(() => validateE2EApplicationAccountBinding({ contract, definition, expectedRef, now: "2027-01-01T00:00:00.000Z" })).toThrow();
+    const wholeContract = { ...definition, contractDigest: sha(canonicalJson(contract)) };
+    expect(() => validateE2EApplicationAccountBinding({ contract, definition: wholeContract, expectedRef: deriveE2EApplicationRuntimeAccountRef(wholeContract), now: "2026-10-17T12:00:00.000Z" })).toThrow();
     expect(() => E2EApplicationAccountDefinitionSchema.parse({ ...definition, password: "must-never-be-stored" })).toThrow();
   });
 
@@ -202,5 +209,104 @@ describe("source-owned application account contracts", () => {
       expect(inspection.applications[0]?.recipe).toBeNull();
       expect(inspection.missingInputs.some((input) => input.inputId.startsWith("application-project-contract-"))).toBe(false);
     });
+  });
+});
+
+describe("the reserved anonymous account profile (Ruling AZ)", () => {
+  const application = "orders-app";
+  const projectWith = (edit: (project: ProjectSource["agentx"]["e2e"]) => void) => {
+    const project = structuredClone(sourceProject(sourceSnapshot().snapshot.sources[0]!.bytes).agentx.e2e);
+    edit(project);
+    return project;
+  };
+
+  it("has the fixed account reference of the plan: revision 1 and a digest of the domain string and the application id, with no registry row behind it", () => {
+    expect(E2E_ANONYMOUS_ACCOUNT_PROFILE_ID).toBe("rovara-anonymous");
+    const ref = e2eAnonymousRuntimeAccountRef(application);
+    expect(ref).toEqual({ applicationId: application, profileId: "rovara-anonymous", revision: 1, definitionDigest: sha(`rovara-anonymous/v1\0${application}`) });
+    expect(e2eAnonymousRuntimeAccountRef("another-app").definitionDigest).not.toBe(ref.definitionDigest);
+  });
+
+  it("is refused when a contract declares it, in the account inventory, the recipe's list or a target variant, with the reserved-account-profile reason", () => {
+    const declared = projectWith((project) => {
+      project.accountProfiles.push({ ...project.accountProfiles[0]!, profileId: "rovara-anonymous" });
+      project.recipe = { ...project.recipe, accountProfileIds: [...project.recipe.accountProfileIds, "rovara-anonymous"] };
+    });
+    expect(() => E2EApplicationProjectContractSchema.parse(declared)).toThrow(/reserved-account-profile/);
+    const variant = projectWith((project) => { project.targetAccounts.push({ baseTargetId: "target-orders-web", profileId: "rovara-anonymous" }); });
+    expect(() => E2EApplicationProjectContractSchema.parse(variant)).toThrow(/reserved-account-profile/);
+    const listed = projectWith((project) => { project.recipe = { ...project.recipe, accountProfileIds: [...project.recipe.accountProfileIds, "rovara-anonymous"] }; });
+    expect(() => E2EApplicationProjectContractSchema.parse(listed)).toThrow(/reserved-account-profile/);
+    expect(() => E2EApplicationProjectContractSchema.parse(projectWith(() => undefined))).not.toThrow();
+  });
+
+  const baseWeb = { targetId: "web-1", applicationId: application, runtimeProfileId: "linux-arm64-web-api-v1", accountProfileId: "synthetic", kind: "web" as const, browser: "chromium" as const, viewport: { width: 1280, height: 720 } };
+  const baseApi = { targetId: "api-2", applicationId: application, runtimeProfileId: "linux-arm64-web-api-v1", accountProfileId: "synthetic", kind: "api" as const, protocol: "http" as const, originRef: "app-origin" };
+  const inferredSnapshot = (scripts: Record<string, string>, withLock = true) => {
+    const manifest = Buffer.from(JSON.stringify({ name: "shop-web", scripts }));
+    const commitSha = "c".repeat(40); const treeSha = "d".repeat(40);
+    const candidate = createCandidateManifest([{ repositoryId: "repo", commitSha, treeSha }]);
+    const sources = [{ path: "package.json", sha256: sha(manifest.toString("utf8")), bytes: manifest, kind: "blob" as const },
+      ...(withLock ? [{ path: "package-lock.json", sha256: sha("{}"), bytes: Buffer.from("{}"), kind: "blob" as const }] : [])];
+    return { candidate, snapshot: { candidate, commitSha, treeSha, treeComplete: true, treePaths: sources.map((item) => item.path).sort(), sources } as E2ESourceSnapshot };
+  };
+
+  it("derives the implicit variant of a base web or API target, copied from the base, and of nothing else", () => {
+    expect(e2eAnonymousVariantOf(baseWeb)).toEqual({ ...baseWeb, targetId: "web-1-anonymous", accountProfileId: "rovara-anonymous" });
+    expect(e2eAnonymousVariantOf(baseApi)).toEqual({ ...baseApi, targetId: "api-2-anonymous", accountProfileId: "rovara-anonymous" });
+    const desktop = { targetId: "desktop-3", applicationId: application, runtimeProfileId: "electron-phase-unavailable", accountProfileId: "synthetic", kind: "desktop" as const, os: "linux" as const, driver: "electron" as const, appId: application };
+    expect(() => e2eAnonymousVariantOf(desktop)).toThrow();
+    expect(() => e2eAnonymousVariantOf(e2eAnonymousVariantOf(baseWeb))).toThrow();
+  });
+
+  it("keeps the variants out of discovery and out of a setup proposal, and derives them on the application path from the base targets (F1)", () => {
+    const { snapshot, candidate } = inferredSnapshot({ start: "node server.js" });
+    // Discovery as the setup reads it is what it always was: the base target alone.
+    expect(inspectE2ERepository(snapshot, candidate).inspection.proposedTargets.map((target) => [target.targetId, target.accountProfileId])).toEqual([["web-1", "synthetic"]]);
+    const read = inspectE2EApplicationRepository(snapshot, candidate);
+    expect(read.inspection.proposedTargets.map((target) => [target.targetId, target.accountProfileId])).toEqual([["web-1", "synthetic"], ["web-1-anonymous", "rovara-anonymous"]]);
+    expect(read.anonymous).toEqual({ variants: [{ baseTargetId: "web-1", targetId: "web-1-anonymous" }], omittedBaseTargetIds: [] });
+    // A policy or proposal that holds the base gets the variant, on the base's own runtime profile; one that has it already, or holds no such base, gets nothing added.
+    const stored = [{ ...baseWeb, applicationId: read.inspection.applications[0]!.applicationId }];
+    const derived = withE2EAnonymousTargets(stored, read.anonymous);
+    expect(derived).toEqual([stored[0], { ...stored[0], targetId: "web-1-anonymous", accountProfileId: "rovara-anonymous" }]);
+    expect(withE2EAnonymousTargets(derived, read.anonymous)).toEqual(derived);
+    expect(withE2EAnonymousTargets([], read.anonymous)).toEqual([]);
+  });
+
+  it("offers the variant to an app with a project contract and to one with the inferred recipe, and not to one with only the start-script fallback or with no recipe (F2)", () => {
+    const inferred = inferredSnapshot({ start: "node server.js" });
+    expect(inspectE2EApplicationRepository(inferred.snapshot, inferred.candidate).anonymous.variants).toHaveLength(1);
+    // The same package without a lockfile has no `npm ci` to infer: it falls back to `npm run start`, which builds nothing.
+    const fallback = inferredSnapshot({ start: "node server.js" }, false);
+    expect(inspectE2ERepository(fallback.snapshot, fallback.candidate).inspection.applications[0]?.recipe).not.toBeNull();
+    expect(inspectE2EApplicationRepository(fallback.snapshot, fallback.candidate).anonymous).toEqual({ variants: [], omittedBaseTargetIds: [] });
+    expect(inspectE2EApplicationRepository(fallback.snapshot, fallback.candidate).inspection.proposedTargets.map((target) => target.accountProfileId)).toEqual(["synthetic"]);
+    // The Docker host runs a contract-less app only on the inferred recipe, and asks where a recipe came from.
+    const appId = inspectE2ERepository(inferred.snapshot, inferred.candidate).inspection.applications[0]!.applicationId;
+    expect(e2eApplicationRecipeOrigin(inferred.snapshot, appId)).toBe("inferred-node");
+    expect(e2eApplicationRecipeOrigin(fallback.snapshot, appId)).toBe("start-script");
+    expect(e2eApplicationRecipeOrigin(inferred.snapshot, "another-app")).toBeNull();
+    const bare = sourceSnapshot(null);
+    expect(inspectE2EApplicationRepository(bare.snapshot, bare.candidate).anonymous.variants).toEqual([]);
+    const declared = sourceProject(sourceSnapshot().snapshot.sources[0]!.bytes).agentx.e2e;
+    const contract = sourceSnapshot({ ...declared, targetAccounts: [{ baseTargetId: "web-1", profileId: "orders-owner" }] });
+    const found = inspectE2EApplicationRepository(contract.snapshot, contract.candidate);
+    // The base target and its owner variant, plus the visitor of the base alone (an account variant has none of its own).
+    expect(found.anonymous.variants.map((item) => item.baseTargetId)).toEqual(["web-1"]);
+    expect(found.inspection.proposedTargets.map((target) => target.accountProfileId).sort()).toEqual(["orders-owner", "rovara-anonymous", "synthetic"]);
+  });
+
+  it("drops the variants the 12-target inventory has no room for, and says which (F7)", () => {
+    // One base target and eleven account variants of a contract fill the inventory.
+    const base = sourceProject(sourceSnapshot().snapshot.sources[0]!.bytes).agentx.e2e;
+    const extra = Array.from({ length: 11 }, (_, index) => `account-${index + 1}`);
+    const profile = base.accountProfiles[0]!;
+    const full = { ...base, recipe: (() => { const body = { ...recipeBody(), accountProfileIds: extra }; return E2EAppRecipeSchema.parse({ ...body, recipeDigest: sha(canonicalJson(body)) }); })(),
+      accountProfiles: extra.map((profileId) => ({ ...profile, profileId })), targetAccounts: extra.map((profileId) => ({ baseTargetId: "web-1", profileId })) };
+    const { snapshot, candidate } = sourceSnapshot(full);
+    expect(inspectE2ERepository(snapshot, candidate).inspection.proposedTargets).toHaveLength(12);
+    expect(inspectE2EApplicationRepository(snapshot, candidate).anonymous).toEqual({ variants: [], omittedBaseTargetIds: ["web-1"] });
+    expect(inspectE2EApplicationRepository(snapshot, candidate).inspection.proposedTargets).toHaveLength(12);
   });
 });

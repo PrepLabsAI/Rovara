@@ -66,6 +66,13 @@ describe("a CHECKS run with no project check", () => {
     expect(outcome.result).toMatchObject({ workflowMode: "CHECKS", checks: { status: "not_verified", source: "none" }, workflowE2EEvidenceRef: { key: "workflow-e2e-evidence/sha256/x.json" } });
   });
 
+  it("runs an application-only round whose admission is version 2 (web and API groups in one plan), exactly as a version 1 one", async () => {
+    const outcome = await run({ admissionSchema: "workflow-e2e-application-admission/v2" });
+    expect(outcome.failure).toBeUndefined();
+    expect(outcome.execute).toHaveBeenCalledTimes(1);
+    expect(outcome.result).toMatchObject({ workflowMode: "CHECKS", checks: { status: "not_verified", source: "none" } });
+  });
+
   it("still refuses a portable round, before it runs anything", async () => {
     const outcome = await run({ admissionSchema: "workflow-e2e-admission/v1" });
     expect(String(outcome.failure)).toMatch(/verification retry requires at least one selected project check/);

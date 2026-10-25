@@ -19,6 +19,17 @@ export async function openRegularFile(path: string): Promise<{ handle: FileHandl
   }
 }
 
+/** The first `maxBytes` of a regular file, read from the handle; throws like `openRegularFile` for anything else. */
+export async function readRegularFileHead(path: string, maxBytes: number): Promise<Buffer> {
+  const { handle, size } = await openRegularFile(path);
+  try {
+    const length = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally { await handle.close(); }
+}
+
 /** The last `maxBytes` of a regular file, read from the handle; throws like `openRegularFile` for anything else. */
 export async function readRegularFileTail(path: string, maxBytes: number): Promise<Buffer> {
   const { handle, size } = await openRegularFile(path);

@@ -34,11 +34,21 @@ describe("application actual CLI and lifecycle", () => {
     expect(process.version).toBe("v22.23.2");
     const repoRoot = process.cwd();
     const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
-    const factorySource = `let factoryCalls = 0; let generationCalls = 0; let runCaseCalls = 0;
+    // A route-pinning declaration needs the host's governed step executor and capture store with the model (Task 4.3b). The fixture host takes both from the installed package itself,
+    // so the fresh parent and its fork load Rovara's real executor by the installed path, and the bootstrap's identity check is the one production runs.
+    const factorySource = `import { createRovaraE2EAgentExecutor } from "../../../dist/executor/agent-executor.js";
+import { createE2EAgentCaptureStore } from "../../../dist/executor/agent-capture-store.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+let factoryCalls = 0; let generationCalls = 0; let runCaseCalls = 0;
 export function getCounts() { return { factoryCalls, generationCalls, runCaseCalls }; }
 export function createE2EApplicationCliHost({ launchContext }) {
+  // A declaration that names no model route is never given a model factory (Task 4.6b: the bootstrap refuses it), so the host offers the model, its step executor and its store only
+  // to a shard whose declaration (read from the project the process runs in) pins a route, exactly as the production host does.
+  const routed = JSON.parse(readFileSync(join(process.cwd(), ".agentx/e2e/application-cli-declaration.json"), "utf8")).modelRoute !== null;
   return { profileId: launchContext.cliHost.profileId, descriptor: launchContext.cliHost.descriptor,
-    modelFactory() { factoryCalls += 1; return { provider: "agentx-e2e", modelId: "fixture-route", specificationVersion: "v4", async doGenerate() { generationCalls += 1; return { installedAdapter: true }; } }; },
+    ...(routed ? { agentExecutor: createRovaraE2EAgentExecutor({ position: () => null, ledger: () => null, origin: () => "http://127.0.0.1" }), agentCacheStore: createE2EAgentCaptureStore() } : {}),
+    ...(routed ? { modelFactory() { factoryCalls += 1; return { provider: "agentx-e2e", modelId: "fixture-route", specificationVersion: "v4", async doGenerate() { generationCalls += 1; return { installedAdapter: true }; } }; } } : {}),
     async runCase() { runCaseCalls += 1; } };
 }`;
     const factoryBytes = Buffer.from(factorySource);

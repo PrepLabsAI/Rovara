@@ -1,0 +1,8 @@
+{
+  "orders": [
+    { "id": "a1", "tenantId": "tenant-a", "customer": "Ada", "total": 12.5, "state": "ready", "placedOn": "2026-09-01" },
+    { "id": "a2", "tenantId": "tenant-a", "customer": "Grace", "total": 23, "state": "ready", "placedOn": "2026-09-02" },
+    { "id": "b1", "tenantId": "tenant-b", "customer": "Lin", "total": 99, "state": "ready", "placedOn": "2026-09-03" }
+  ],
+  "state": { "orders": "ready", "version": 1 }
+}

@@ -273,8 +273,11 @@ async function runTurn(input: TurnInput): Promise<string> {
     if (sessionFile !== undefined && saved !== undefined) await writeFile(sessionFile, saved, { mode: 0o600 });
     const userName = await slackUserName(input.message.userId);
     const signedFetch = createSignedServiceFetch({ region, credentials, thread: input.message.thread, userId: input.message.userId, ...(userName === undefined ? {} : { userName }) });
+    // MODEL3: the model that ran in place of a missing-key one is said under the reply.
+    let fallbackNote: string | undefined;
     const runtime = await createHostedSlackRuntime(input, {
       stateDirectory: directory,
+      onModelFallback: (notice) => { fallbackNote = notice.text; },
       api: new ControlPlaneApi(controlPlaneUrl, "slack-service", input.workspaceId, signedFetch),
       model,
       ...(sessionFile === undefined ? {} : { sessionFile }),
@@ -305,7 +308,7 @@ async function runTurn(input: TurnInput): Promise<string> {
           ServerSideEncryption: "AES256",
         }));
       }
-      return response;
+      return fallbackNote === undefined ? response : `${response}\n_I ${fallbackNote}._`;
     } finally {
       await runtime.dispose();
     }

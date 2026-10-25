@@ -95,12 +95,16 @@ export interface FakeControlPlane {
   captureSetupSource?: (repositoryUrl: string, ref: string) => Promise<RepositorySnapshot>;
   setupProposals: Map<string, { proposal: unknown; policy: unknown; ownerKey: string; repositoryUrl: string; candidateDigest: string; registeredRepositoryId: string }>;
   setupDecisions: Map<string, { proposalRef: string; ownerKey: string; projectName: string; decision: "approve" | "decline" }>;
+  /** Revisions already in the registry that this machine never registered (another machine or person did), by project name. A registration at or below one is refused as immutable. */
+  registryHeads: Map<string, { revision: number; repositories?: Array<{ name: string; url: string }>; connectors?: Array<{ name: string; type: string }> }>;
+  /** Answer GET /v1/admin/projects with this status instead of the listing (an older or failing control plane). */
+  projectsListStatus?: number;
 }
 
 /** Serves the admin routes the setup modules call, in memory. */
 export function fakeControlPlane(): FakeControlPlane {
   const plane: FakeControlPlane = {
-    requests: [], forbidden: new Set(), registered: [], preflight: {}, bindings: [], turns: [], setupProposals: new Map(), setupDecisions: new Map(),
+    requests: [], forbidden: new Set(), registered: [], preflight: {}, bindings: [], turns: [], setupProposals: new Map(), setupDecisions: new Map(), registryHeads: new Map(),
     credentials: [{ ref: "github-agentx-sdlc", type: "github-app", secretName: "agentx/staging/github-app", builtIn: true, tokenCached: false }],
     fetch: async (url, init) => {
       const parsed = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url);
@@ -152,6 +156,18 @@ export function fakeControlPlane(): FakeControlPlane {
       }
       if (parsed.pathname === "/v1/admin/credentials" && method === "GET") return json(200, { credentials: plane.credentials });
       if (parsed.pathname === "/v1/admin/credentials" && method === "POST") { plane.credentials.push(body as Record<string, unknown>); return json(200, { registered: true }); }
+      if (parsed.pathname === "/v1/admin/projects" && method === "GET") {
+        if (plane.projectsListStatus !== undefined) return json(plane.projectsListStatus, { error: { code: "RUNTIME_UNAVAILABLE", message: "projects are unavailable" } });
+        const heads = new Map<string, { name: string; latestRevision: number; repositories: Array<{ name: string; url: string }>; connectors: Array<{ name: string; type: string }> }>();
+        const consider = (name: string, revision: number, repositories: Array<{ name: string; url: string }>, connectors: Array<{ name: string; type: string }>) => {
+          if (revision > (heads.get(name)?.latestRevision ?? 0)) heads.set(name, { name, latestRevision: revision, repositories, connectors });
+        };
+        for (const entry of plane.registered as Array<{ definition: { name: string; revision: number; repositories?: Array<{ name: string; url: string }>; integrations?: { connectors?: Array<{ name: string; type: string }> } } }>) {
+          consider(entry.definition.name, entry.definition.revision, (entry.definition.repositories ?? []).map(({ name, url }) => ({ name, url })), (entry.definition.integrations?.connectors ?? []).map(({ name, type }) => ({ name, type })));
+        }
+        for (const [name, head] of plane.registryHeads) consider(name, head.revision, head.repositories ?? heads.get(name)?.repositories ?? [], head.connectors ?? heads.get(name)?.connectors ?? []);
+        return json(200, { projects: [...heads.values()].map((head) => ({ ...head, registeredAt: "2026-10-20T00:00:00.000Z", runtimeMode: "ec2-ebs", developerTasks: {} })) });
+      }
       if (parsed.pathname === "/v1/admin/projects" && method === "POST") {
         const registration = body as { definition: { name: string; revision: number; e2e?: unknown; repositories?: Array<{ name: string; url: string }>; integrations?: { connectors?: Array<{ name: string }> } }; setupApproval?: { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" } };
         const definition = registration.definition;
@@ -166,6 +182,11 @@ export function fakeControlPlane(): FakeControlPlane {
             || (setupApproval.decision === "decline" && definition.e2e !== undefined)) {
             return json(403, { error: { code: "FORBIDDEN", message: "registration does not match its stored source proposal decision" } });
           }
+        }
+        // Registered revisions are immutable (broker PROJECT_REVISION_MISMATCH): a revision at or below one another machine registered, or a different body under a revision already registered here, is refused.
+        const sameRevision = (plane.registered as Array<{ definition: { name: string; revision: number } }>).find((entry) => entry.definition.name === definition.name && entry.definition.revision === definition.revision);
+        if (definition.revision <= (plane.registryHeads.get(definition.name)?.revision ?? 0) || (sameRevision !== undefined && canonicalJson(sameRevision) !== canonicalJson(body))) {
+          return json(409, { error: { code: "PROJECT_REVISION_MISMATCH", message: "registered project revisions and runtime bindings are immutable" } });
         }
         plane.registered.push(body);
         const connectors = (definition.integrations?.connectors ?? []).map((connector) => ({ name: connector.name, offered: [], skipped: [], ...(plane.preflight[connector.name] ?? { status: "connected" }) }));

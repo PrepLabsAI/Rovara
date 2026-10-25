@@ -15,6 +15,9 @@ export const DEFAULT_DIRECT_MODELS = {
   openai: { worker: "gpt-5.4", orchestrator: "gpt-5.4", classifier: "gpt-5.4-mini" },
 } as const satisfies Record<Exclude<KeyedModelProvider, "openrouter">, Record<ModelRole, string>>;
 
+// The small model the AI browser-test agent uses on each provider lives with the route derivation (it is read without pi-ai there).
+export { DEFAULT_E2E_AGENT_MODELS } from "./e2e-route-derive.js";
+
 /** A keyed provider's secret is not configured, does not exist, or is empty: the one case that falls back to Bedrock. */
 export class MissingProviderSecret extends Error {
   constructor(readonly provider: KeyedModelProvider) {
@@ -93,7 +96,7 @@ export function openRouterRouting(environment: NodeJS.ProcessEnv): Record<string
 
 /** Use the pinned catalog's limits/reasoning metadata; never guess limits for an unknown ID. */
 export function requireKeyedModel(provider: KeyedModelProvider, modelId: string) {
-  if (provider === "openrouter" && modelId.startsWith("openrouter/")) {
+  if (provider === "openrouter" && (modelId.startsWith("openrouter/") || modelId.startsWith("~"))) {
     throw agentXError("CONFIG_INVALID", "automatic OpenRouter routers are not supported; approve a specific model ID");
   }
   const model = catalogModel({ provider, modelId });

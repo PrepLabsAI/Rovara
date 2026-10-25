@@ -4,7 +4,7 @@ import {
   E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ERepositoryInspection, type E2ESetupProposal, type E2ETarget,
 } from "./e2e.js";
 import { canonicalJson } from "./canonical-json.js";
-import { bindE2EApplicationAccountTargets, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
+import { bindE2EApplicationAccountTargets, e2eAnonymousVariantOf, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
 import { WEB_API_RUNTIME_PROFILE_ID } from "./e2e-web-api-qualification.js";
 import { e2ePackageManifests, e2eRunnerUnsafePath, parseE2EPackageManifest } from "./e2e-package-manifests.js";
@@ -302,8 +302,11 @@ export function proposeE2ESetup(input: { inspection: E2ERepositoryInspection; sn
   const parsed = E2ERepositoryInspectionSchema.parse(input.inspection);
   const sourceBytes = verifySnapshot(input.snapshot, input.expectedCandidate);
   if (parsed.candidateDigest !== input.snapshot.candidate.digest) throw new Error("inspection candidate does not match the immutable source snapshot");
+  // An inspection stored before a web app's project contract could name its API target (Task 3.4) was derived without it; both derivations are accepted, so stored inspections and proposals keep verifying.
   const derived = inspectE2ERepository(input.snapshot, input.expectedCandidate).inspection;
-  if (canonicalJson(parsed) !== canonicalJson(derived)) throw new Error("inspection does not match source-derived applications, targets, recipes, graph and input catalog");
+  if (canonicalJson(parsed) !== canonicalJson(derived) && canonicalJson(parsed) !== canonicalJson(inspectE2ERepositoryBeforeContractApiTargets(input.snapshot, input.expectedCandidate).inspection)) {
+    throw new Error("inspection does not match source-derived applications, targets, recipes, graph and input catalog");
+  }
   if (parsed.proposedScenarios.length !== 0) throw new Error("feature scenarios require a separate approved feature plan");
   const snapshotRefs = new Map([...sourceBytes].map(([path, source]) => [path, source.sha256]));
   for (const ref of parsed.sources) if (snapshotRefs.get(ref.path) !== ref.sha256) throw new Error("inspection source hash does not match the immutable snapshot");
@@ -389,17 +392,76 @@ export function inferNodeWebRecipe(snapshot: E2ESourceSnapshot): E2EAppRecipe | 
   return root !== undefined && recipeOrigins.get(root.applicationId) !== "start-script" ? root.recipe : null;
 }
 
+/**
+ * Discovery as it was before a web app's project contract could declare its API target (Task 3.4). A stored inspection, setup proposal or admission derived then is verified against this as well
+ * as against the current derivation (see `proposeE2ESetup`); nothing new is derived with it.
+ */
+export function inspectE2ERepositoryBeforeContractApiTargets(snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: CandidateManifest): { inspection: E2ERepositoryInspection; portableOperations: PortableOperation[] } {
+  const { inspection, portableOperations } = discoverE2ERepository(snapshot, expectedCandidate, { contractApiTargets: false });
+  return { inspection, portableOperations };
+}
+
 /** Discover a bounded app graph from an immutable source snapshot. Discovery parses data only; it never imports or executes candidate code. */
 export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: CandidateManifest): { inspection: E2ERepositoryInspection; portableOperations: PortableOperation[] } {
   const { inspection, portableOperations } = discoverE2ERepository(snapshot, expectedCandidate);
   return { inspection, portableOperations };
 }
 
+/** The implicit signed-out variants of a repository's base web and API targets (Ruling AZ): which were derived, and which base targets could not be offered one. */
+export type E2EAnonymousTargets = Readonly<{
+  variants: ReadonlyArray<Readonly<{ baseTargetId: string; targetId: string }>>;
+  /** Base targets whose signed-out variant does not fit: the target inventory (12) is full. */
+  omittedBaseTargetIds: readonly string[];
+}>;
+const MAX_E2E_TARGETS = 12;
+const TARGET_KIND_ORDER: Record<string, number> = { web: 0, api: 1, mobile: 2, desktop: 3 };
+
+/**
+ * Discovery as the application path reads it: the same inspection, plus the implicit `rovara-anonymous` variant of each base web and API target whose application launches from
+ * its project contract or from the recipe inferred from its package (not from the generic start-script fallback). The variants are derived on every read from the base
+ * targets, and are neither stored in a setup proposal nor part of `inspectE2ERepository`, so a proposal stored before they existed still verifies.
+ */
+export function inspectE2EApplicationRepository(snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: CandidateManifest):
+  { inspection: E2ERepositoryInspection; portableOperations: PortableOperation[]; anonymous: E2EAnonymousTargets } {
+  const found = discoverE2ERepository(snapshot, expectedCandidate);
+  const targets = [...found.inspection.proposedTargets];
+  const variants: Array<{ baseTargetId: string; targetId: string }> = [];
+  const omitted: string[] = [];
+  for (const baseTargetId of found.anonymousBaseTargetIds) {
+    const base = found.inspection.proposedTargets.find((target) => target.targetId === baseTargetId);
+    if (base === undefined) continue;
+    if (targets.length >= MAX_E2E_TARGETS) { omitted.push(baseTargetId); continue; }
+    const variant = e2eAnonymousVariantOf(base);
+    targets.push(variant);
+    variants.push({ baseTargetId, targetId: variant.targetId });
+  }
+  targets.sort((a, b) => TARGET_KIND_ORDER[a.kind]! - TARGET_KIND_ORDER[b.kind]! || a.targetId.localeCompare(b.targetId));
+  return { inspection: { ...found.inspection, proposedTargets: targets }, portableOperations: found.portableOperations, anonymous: { variants, omittedBaseTargetIds: omitted } };
+}
+
+/** The targets of a policy or a setup proposal with the derived anonymous variants of the base targets they hold (each copies its base, runtime profile included); none already there is added twice. */
+export function withE2EAnonymousTargets<T extends E2ETarget>(targets: readonly T[], anonymous: E2EAnonymousTargets): T[] {
+  const result = [...targets];
+  for (const variant of anonymous.variants) {
+    const base = targets.find((target) => target.targetId === variant.baseTargetId);
+    if (base === undefined || (base.kind !== "web" && base.kind !== "api") || result.some((target) => target.targetId === variant.targetId) || result.length >= MAX_E2E_TARGETS) continue;
+    result.push(e2eAnonymousVariantOf(base));
+  }
+  return result;
+}
+
+/** Where the launch recipe of an application of the snapshot came from, or null when it has none: its project contract, the recipe inferred from its package, or the generic start-script fallback. */
+export function e2eApplicationRecipeOrigin(snapshot: VerifiedE2ESourceSnapshot, applicationId: string): "project-contract" | "inferred-node" | "start-script" | null {
+  return discoverE2ERepository(snapshot, snapshot.candidate).recipeOrigins.get(applicationId) ?? null;
+}
+
 /** Where an application's discovered recipe came from; only the generic `npm run <script>` fallback is not a source-declared or lockfile-backed launch contract. */
 type RecipeOrigin = "project-contract" | "inferred-node" | "start-script";
 
-function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: CandidateManifest): { inspection: E2ERepositoryInspection; portableOperations: PortableOperation[]; recipeOrigins: ReadonlyMap<string, RecipeOrigin> } {
+function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: CandidateManifest, options: { contractApiTargets?: boolean } = {}): { inspection: E2ERepositoryInspection; portableOperations: PortableOperation[]; recipeOrigins: ReadonlyMap<string, RecipeOrigin>; anonymousBaseTargetIds: string[] } {
   const recipeOrigins = new Map<string, RecipeOrigin>();
+  /** The base web and API targets whose application launches from its project contract or from the recipe inferred from its package (not the generic start-script fallback). */
+  const anonymousBaseTargetIds: string[] = [];
   const sources = verifySnapshot(snapshot, expectedCandidate);
   const refs = [...sources.values()].filter((source) => !runnerUnsafe.test(source.path)).map(({ path, sha256 }) => ({ path, sha256 })).sort((a, b) => a.path.localeCompare(b.path));
   const applications: E2ERepositoryInspection["applications"] = [];
@@ -533,6 +595,15 @@ function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCand
       }
     }
     let appTargets = target ? [target, ...additionalTargets] : [];
+    // A web app that serves its API from the same process declares the API target in its project contract (`targetAccounts` naming this app's `api-N` base target). The package alone shows
+    // one web target, so the contract is what adds the API one; without it the account variants of the API target could not bind (Task 3.4, Ruling DA).
+    if (options.contractApiTargets !== false && kind === "web" && target !== undefined && projectContract !== null) {
+      const apiTargetId = "api-" + (applications.length + 1);
+      if (projectContract.targetAccounts.some((item) => item.baseTargetId === apiTargetId)) {
+        appTargets.push({ targetId: apiTargetId, applicationId: appId, runtimeProfileId: "api-phase-unavailable", accountProfileId: "synthetic", kind: "api", protocol: "http", originRef: "app-origin" });
+      }
+    }
+    const baseTargetIds = appTargets.map((item) => item.targetId);
     if (projectContract !== null) {
       try { appTargets = bindE2EApplicationAccountTargets({ contract: projectContract, applicationId: appId, baseTargets: appTargets }); }
       catch {
@@ -547,6 +618,7 @@ function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCand
     }
     if (recipe !== null) recipeOrigins.set(appId, projectContract !== null ? "project-contract" : recipeFromInference ? "inferred-node" : "start-script");
     addApplication(appId, kind, sourcePaths, appTargets, recipe);
+    if ((kind === "web" || kind === "api") && recipe !== null && recipeOrigins.get(appId) !== "start-script") anonymousBaseTargetIds.push(...baseTargetIds);
     for (const dependency of packageDependencies) {
       const candidates = manifestsByName.get(dependency) ?? [];
       const spec = deps[dependency];
@@ -809,5 +881,5 @@ function discoverE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCand
   missingInputs.sort((a, b) => a.inputId.localeCompare(b.inputId));
   portableOperations.sort((a, b) => a.applicationId.localeCompare(b.applicationId) || a.exportName.localeCompare(b.exportName));
   const inspection = E2ERepositoryInspectionSchema.parse({ candidateDigest: snapshot.candidate.digest, sources: refs, applications, proposedTargets, dependencyEdges, proposedScenarios: [], missingInputs });
-  return { inspection, portableOperations, recipeOrigins };
+  return { inspection, portableOperations, recipeOrigins, anonymousBaseTargetIds: anonymousBaseTargetIds.sort() };
 }

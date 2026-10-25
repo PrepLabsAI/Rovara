@@ -64,3 +64,13 @@ export function isKeyedModelProvider(provider: string | undefined): provider is 
 export function keyedProviderSecretName(env: string, provider: KeyedModelProvider): string {
   return `agentx/${env}/${KEYED_MODEL_PROVIDERS[provider].secretName}`;
 }
+
+/**
+ * The model a coding role runs on when its provider's key secret is missing (Task 4.10D, MODEL3). It is a choice and never a default: `none` (or an unset setting) means no fallback, and
+ * the call fails by name. Otherwise it is the id of a Bedrock model of the pinned catalog, at most 80 characters of a shell-safe alphabet, so it can travel as a boot variable.
+ */
+export const MODEL_FALLBACK_NONE = "none";
+export const MODEL_FALLBACK_MAX_LENGTH = 80;
+export const MODEL_FALLBACK_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
+/** The setting's shape: `none` or an id of that alphabet. Whether the id is in the catalog is for the code that has the catalog to say. */
+export const MODEL_FALLBACK_SETTING_PATTERN = /^(?:none|[A-Za-z0-9][A-Za-z0-9._:-]{0,79})$/;

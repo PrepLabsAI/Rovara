@@ -211,6 +211,70 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
     expect(t.items.get(`${webKey.pk}|${webKey.sk}`)!.qualificationEvidenceRef).toEqual({ key: evidenceKey, sha256: result.proposalSha256, byteLength: t.objects.get(evidenceKey)!.byteLength });
   });
 
+  describe("the agent capability (M1.4 Task 4.5)", () => {
+    type Row = { capabilities: { supportedSteps: string[]; modelChannel?: string }; capabilityDigest: string };
+    const rowsOf = (t: Awaited<ReturnType<typeof setup>>) => {
+      const row = (kind: "web" | "api") => { const key = e2eRegisteredRuntimeKey("configured-feature", "linux-arm64-web-api-v1", kind); return t.items.get(`${key.pk}|${key.sk}`)! as unknown as Row; };
+      return { web: row("web"), api: row("api") };
+    };
+
+    it("lists agent and the model channel on the web row only, for a qualification that holds all three agent probes accepted", async () => {
+      const t = await setup();
+      expect(t.proposal.probes).toHaveLength(14);
+      await registerRuntimeInstallation(t.deps, admin, t.request());
+      const { web, api } = rowsOf(t);
+      expect(web.capabilities.supportedSteps).toEqual(["navigate", "fill", "click", "choose-file", "agent"]);
+      expect(web.capabilities.modelChannel).toBe("rovara-e2e-model-channel/v1");
+      expect(api.capabilities.supportedSteps).toEqual(["request"]);
+      expect(api.capabilities.modelChannel).toBeUndefined();
+      // The broker admits the web row with its agent capability (the digest it pins is the one written).
+      const key = e2eRegisteredRuntimeKey("configured-feature", "linux-arm64-web-api-v1", "web");
+      const row = t.items.get(`${key.pk}|${key.sk}`)!;
+      expect(admitE2ERegisteredRuntime(row, { runtimeCatalogId: "configured-feature", profileId: "linux-arm64-web-api-v1", binding: t.challenge.binding, capabilityDigest: String(row.capabilityDigest), now: at + 1000, kind: "web" }))
+        .toMatchObject({ capabilities: { supportedSteps: ["navigate", "fill", "click", "choose-file", "agent"] } });
+    });
+
+    it("registers a qualification from before the agent probes (eleven probes, as Task 4.4 and earlier wrote it) exactly as before: no agent, no model channel", async () => {
+      const t = await setup();
+      const legacy = { ...t.proposal, probes: t.proposal.probes.slice(0, 11) };
+      await expect(registerRuntimeInstallation(t.deps, admin, { proposal: legacy, proposalSha256: webApiRuntimeInstallProposalSha256(legacy) })).resolves.toMatchObject({ featureRevisions: { web: 1, api: 1 } });
+      for (const [kind, row] of Object.entries(rowsOf(t)) as Array<["web" | "api", Row]>) {
+        expect(row.capabilities.supportedSteps, kind).not.toContain("agent");
+        expect(Object.keys(row.capabilities), kind).not.toContain("modelChannel");
+        expect(row.capabilityDigest, kind).toBe(e2eRuntimeCapabilityDigest(webApiRuntimeCapabilities(kind, legacy.manifest.sha256)));
+      }
+    });
+
+    it.each([12, 13])("refuses a record that holds %i probes, some but not all of the agent probes, and registers nothing", async (count) => {
+      const t = await setup();
+      const partial = { ...t.proposal, probes: t.proposal.probes.slice(0, count) };
+      await expect(registerRuntimeInstallation(t.deps, admin, { proposal: partial, proposalSha256: "a".repeat(64) })).rejects.toThrow(/never part of the agent probes/);
+      expect(t.transactions).toHaveLength(0);
+    });
+
+    it("refuses an agent probe whose recorded observation the evidence does not show, even when the observation is the one the oracle wants", async () => {
+      const t = await setup();
+      const forged = structuredClone(t.proposal);
+      const index = WEB_API_REQUIRED_PROBES.findIndex((probe) => probe.probeId === "web-agent-wrong-action-v1");
+      // The honest evidence of a run that did nothing; the claim is that it was a pass with a download.
+      forged.probes[index]!.observation = { ...forged.probes[index]!.observation, collectorStatus: "PASS", agent: { ...forged.probes[index]!.observation.agent!, caseReasons: [], verifiedReceipts: 1, downloads: 1 } };
+      await expect(registerRuntimeInstallation(t.deps, admin, { proposal: forged, proposalSha256: "a".repeat(64) })).rejects.toThrow(/negative-probe-passed:web-agent-wrong-action-v1/);
+      expect(t.transactions).toHaveLength(0);
+      expect(t.objects.size).toBe(0);
+    });
+
+    it("refuses the isolation probe when its receipts are withdrawn from the retained oracle, even with every digest made to agree", async () => {
+      const t = await setup();
+      const forged = structuredClone(t.proposal);
+      const index = WEB_API_REQUIRED_PROBES.findIndex((probe) => probe.probeId === "web-agent-app-isolation-v1");
+      const probe = forged.probes[index]! as unknown as { observation: { evidenceDigest: string }; evidence: { oracle: { agentModel: { receipts: unknown[] } } } };
+      probe.evidence.oracle.agentModel.receipts = [];
+      probe.observation.evidenceDigest = createHash("sha256").update(canonicalJson(probe.evidence)).digest("hex");
+      await expect(registerRuntimeInstallation(t.deps, admin, { proposal: forged, proposalSha256: "a".repeat(64) })).rejects.toThrow(/web-agent-app-isolation-v1/);
+      expect(t.transactions).toHaveLength(0);
+    });
+  });
+
   it("describes what each runtime implements, matching the real engines, without over-claiming", () => {
     const web = webApiRuntimeCapabilities("web", "a".repeat(64));
     const api = webApiRuntimeCapabilities("api", "a".repeat(64));
@@ -279,7 +343,7 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
   it("registers nothing for a tampered probe asset digest", async () => {
     const t = await setup();
     const tampered = structuredClone(t.proposal);
-    tampered.probes[5]!.assetDigest = "f".repeat(64);
+    tampered.probes[WEB_API_REQUIRED_PROBES.findIndex((probe) => probe.probeId === "build-imds-denial-v1")]!.assetDigest = "f".repeat(64);
     await expect(registerRuntimeInstallation(t.deps, admin, { proposal: tampered, proposalSha256: "a".repeat(64) })).rejects.toThrow(/probe-asset-digest-mismatch:build-imds-denial-v1/);
     expect(t.transactions).toHaveLength(0);
   });
@@ -339,7 +403,8 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
 
     it("registers the untampered proposal the production runner's evidence produces", async () => {
       const t = await setup();
-      expect(t.proposal.probes.map((probe) => probe.evidence.kind)).toEqual(["collected", "collected", "collected", "collected", "collected", "unavailable", "unavailable", "collected", "collected"]);
+      expect(t.proposal.probes.map((probe) => probe.evidence.kind)).toEqual(["collected", "collected", "collected", "collected", "collected", "collected", "collected", "unavailable", "unavailable", "collected", "collected",
+        "collected", "collected", "collected"]);
       await expect(registerRuntimeInstallation(t.deps, admin, t.request())).resolves.toMatchObject({ featureRevisions: { web: 1, api: 1 } });
     });
 

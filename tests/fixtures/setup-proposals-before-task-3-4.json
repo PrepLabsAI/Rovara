@@ -1,0 +1,582 @@
+{
+  "orders-web-m13-app": {
+    "files": [
+      "package.json",
+      "inventory/openapi.json",
+      "e2e/mocks/inventory-v1.json"
+    ],
+    "inspection": {
+      "candidateDigest": "6e82d5ac5a19e551180c8e480efa87080f85f852042907fb9c7017bbf4572150",
+      "sources": [
+        {
+          "path": "e2e/mocks/inventory-v1.json",
+          "sha256": "3d25764dbfa867a710c80755fe5d39ea3ec02c352d5bc166a7216e0af309c742"
+        },
+        {
+          "path": "inventory/openapi.json",
+          "sha256": "457c2ded6e90eaf6e6ccc248f2829e4343754a0aca17e3a8f0cd1a9bc8a88d0c"
+        },
+        {
+          "path": "package.json",
+          "sha256": "6b7014f784ec46974e9809d726dc9267f52b8ba68976bf05d3638f0634a1d2bd"
+        }
+      ],
+      "applications": [
+        {
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "kind": "web",
+          "sourcePaths": [
+            "package.json",
+            "inventory/openapi.json"
+          ],
+          "recipe": null
+        }
+      ],
+      "proposedTargets": [
+        {
+          "targetId": "web-1",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "web-phase-unavailable",
+          "accountProfileId": "synthetic",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        }
+      ],
+      "dependencyEdges": [
+        {
+          "fromApplicationId": "@agentx/orders-web-api-fixture",
+          "toComponentId": "api-schema-32019fe5de1d",
+          "contractRef": "inventory/openapi.json",
+          "sourcePaths": [
+            "package.json",
+            "inventory/openapi.json"
+          ]
+        }
+      ],
+      "proposedScenarios": [],
+      "missingInputs": [
+        {
+          "inputId": "application-account-targets-7ae45ad102ea",
+          "targetIds": [
+            "web-1"
+          ],
+          "kind": "target-selection",
+          "disposition": "blocking",
+          "reason": "Source account variants do not bind exact compatible base targets within the target inventory limit",
+          "sourcePaths": [
+            "package.json"
+          ]
+        }
+      ]
+    },
+    "proposal": {
+      "candidateDigest": "6e82d5ac5a19e551180c8e480efa87080f85f852042907fb9c7017bbf4572150",
+      "applications": [
+        {
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "kind": "web",
+          "sourcePaths": [
+            "package.json",
+            "inventory/openapi.json"
+          ],
+          "recipe": null
+        }
+      ],
+      "targets": [
+        {
+          "targetId": "web-1",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "synthetic",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        }
+      ],
+      "dependencyEdges": [
+        {
+          "fromApplicationId": "@agentx/orders-web-api-fixture",
+          "toComponentId": "api-schema-32019fe5de1d",
+          "contractRef": "inventory/openapi.json",
+          "sourcePaths": [
+            "package.json",
+            "inventory/openapi.json"
+          ]
+        }
+      ],
+      "scenarios": [],
+      "sources": [
+        {
+          "path": "e2e/mocks/inventory-v1.json",
+          "sha256": "3d25764dbfa867a710c80755fe5d39ea3ec02c352d5bc166a7216e0af309c742"
+        },
+        {
+          "path": "inventory/openapi.json",
+          "sha256": "457c2ded6e90eaf6e6ccc248f2829e4343754a0aca17e3a8f0cd1a9bc8a88d0c"
+        },
+        {
+          "path": "package.json",
+          "sha256": "6b7014f784ec46974e9809d726dc9267f52b8ba68976bf05d3638f0634a1d2bd"
+        }
+      ],
+      "missingInputs": [
+        {
+          "inputId": "application-account-targets-7ae45ad102ea",
+          "targetIds": [
+            "web-1"
+          ],
+          "kind": "target-selection",
+          "disposition": "blocking",
+          "reason": "Source account variants do not bind exact compatible base targets within the target inventory limit",
+          "sourcePaths": [
+            "package.json"
+          ]
+        }
+      ],
+      "state": "needs-input"
+    },
+    "setupApproval": {
+      "artifactId": "setup",
+      "digest": "734f4f224975fe164d94938366cf3e9b66761b415fb0b54e709322bda72acc71"
+    }
+  },
+  "orders-contract-app": {
+    "files": [
+      "package.json"
+    ],
+    "inspection": {
+      "candidateDigest": "6e82d5ac5a19e551180c8e480efa87080f85f852042907fb9c7017bbf4572150",
+      "sources": [
+        {
+          "path": "package.json",
+          "sha256": "aa3ef8e70854b0ce69504dcadc3e20fa978d3f8114026623aeb477e934069e1d"
+        }
+      ],
+      "applications": [
+        {
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "kind": "web",
+          "sourcePaths": [
+            "package.json"
+          ],
+          "recipe": {
+            "schemaVersion": 1,
+            "recipeDigest": "22fe496a0adedb28849e2fce400eea3a84ee0d6c884ec3337a9b8819a7c038cb",
+            "build": [],
+            "launch": {
+              "kind": "service",
+              "start": {
+                "program": "node",
+                "args": [
+                  "server.mjs"
+                ],
+                "cwd": ".",
+                "timeoutMs": 60000,
+                "env": {}
+              },
+              "health": {
+                "path": "/health",
+                "expectedStatus": 200
+              }
+            },
+            "serviceProfileIds": [
+              "node-http/v1"
+            ],
+            "seedProfileId": "orders-seed/v1",
+            "accountProfileIds": [
+              "synthetic",
+              "orders-owner",
+              "orders-viewer"
+            ],
+            "allowedOrigins": [
+              "orders-api",
+              "inventory-v1"
+            ]
+          }
+        }
+      ],
+      "proposedTargets": [
+        {
+          "targetId": "account-target-7dc6348785daa3646ac5d7512108805be2999520b2feae05b668205fca951a31",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "web-phase-unavailable",
+          "accountProfileId": "orders-owner",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "account-target-e828813cd9893dc26005fe799f6fbd2b405833299150c7e4604e60fe81315151",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "web-phase-unavailable",
+          "accountProfileId": "orders-viewer",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "web-1",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "web-phase-unavailable",
+          "accountProfileId": "synthetic",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        }
+      ],
+      "dependencyEdges": [],
+      "proposedScenarios": [],
+      "missingInputs": []
+    },
+    "proposal": {
+      "candidateDigest": "6e82d5ac5a19e551180c8e480efa87080f85f852042907fb9c7017bbf4572150",
+      "applications": [
+        {
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "kind": "web",
+          "sourcePaths": [
+            "package.json"
+          ],
+          "recipe": {
+            "schemaVersion": 1,
+            "recipeDigest": "22fe496a0adedb28849e2fce400eea3a84ee0d6c884ec3337a9b8819a7c038cb",
+            "build": [],
+            "launch": {
+              "kind": "service",
+              "start": {
+                "program": "node",
+                "args": [
+                  "server.mjs"
+                ],
+                "cwd": ".",
+                "timeoutMs": 60000,
+                "env": {}
+              },
+              "health": {
+                "path": "/health",
+                "expectedStatus": 200
+              }
+            },
+            "serviceProfileIds": [
+              "node-http/v1"
+            ],
+            "seedProfileId": "orders-seed/v1",
+            "accountProfileIds": [
+              "synthetic",
+              "orders-owner",
+              "orders-viewer"
+            ],
+            "allowedOrigins": [
+              "orders-api",
+              "inventory-v1"
+            ]
+          }
+        }
+      ],
+      "targets": [
+        {
+          "targetId": "account-target-7dc6348785daa3646ac5d7512108805be2999520b2feae05b668205fca951a31",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "orders-owner",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "account-target-e828813cd9893dc26005fe799f6fbd2b405833299150c7e4604e60fe81315151",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "orders-viewer",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "web-1",
+          "applicationId": "@agentx/orders-web-api-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "synthetic",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        }
+      ],
+      "dependencyEdges": [],
+      "scenarios": [],
+      "sources": [
+        {
+          "path": "package.json",
+          "sha256": "aa3ef8e70854b0ce69504dcadc3e20fa978d3f8114026623aeb477e934069e1d"
+        }
+      ],
+      "missingInputs": [],
+      "state": "proposed"
+    },
+    "setupApproval": {
+      "artifactId": "setup",
+      "digest": "bfbd5b71840fa180ae3926decdca4c7fba39752be7129ec8e189c2c165731acc"
+    }
+  },
+  "accounts-app": {
+    "files": [
+      "package.json"
+    ],
+    "inspection": {
+      "candidateDigest": "6e82d5ac5a19e551180c8e480efa87080f85f852042907fb9c7017bbf4572150",
+      "sources": [
+        {
+          "path": "package.json",
+          "sha256": "94c27e6fc41897c74f170d7a8491e6b58ece882768f82f16c2e63de5671fc71a"
+        }
+      ],
+      "applications": [
+        {
+          "applicationId": "@agentx/accounts-web-fixture",
+          "kind": "web",
+          "sourcePaths": [
+            "package.json"
+          ],
+          "recipe": {
+            "schemaVersion": 1,
+            "recipeDigest": "17fd98a69f7e60cba236bd576ebceddf7d5b48ec5dd1ca1d1067aeaa8ccf2d52",
+            "build": [],
+            "launch": {
+              "kind": "service",
+              "start": {
+                "program": "node",
+                "args": [
+                  "server.mjs"
+                ],
+                "cwd": ".",
+                "timeoutMs": 60000,
+                "env": {}
+              },
+              "health": {
+                "path": "/health",
+                "expectedStatus": 200
+              }
+            },
+            "serviceProfileIds": [
+              "node-http/v1"
+            ],
+            "seedProfileId": "rovara-accounts-file/v1",
+            "accountProfileIds": [
+              "orders-viewer",
+              "orders-owner",
+              "orders-owner-b"
+            ],
+            "allowedOrigins": [
+              "orders-api"
+            ],
+            "seed": {
+              "program": "node",
+              "args": [
+                "seed.mjs"
+              ],
+              "cwd": ".",
+              "timeoutMs": 30000,
+              "env": {}
+            }
+          }
+        }
+      ],
+      "proposedTargets": [
+        {
+          "targetId": "account-target-3865d55999b9ba83089eccc3b4e560552c66ff80d10fd06c8254152ee9f7e783",
+          "applicationId": "@agentx/accounts-web-fixture",
+          "runtimeProfileId": "web-phase-unavailable",
+          "accountProfileId": "orders-owner-b",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "account-target-7dc6348785daa3646ac5d7512108805be2999520b2feae05b668205fca951a31",
+          "applicationId": "@agentx/accounts-web-fixture",
+          "runtimeProfileId": "web-phase-unavailable",
+          "accountProfileId": "orders-owner",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "account-target-e828813cd9893dc26005fe799f6fbd2b405833299150c7e4604e60fe81315151",
+          "applicationId": "@agentx/accounts-web-fixture",
+          "runtimeProfileId": "web-phase-unavailable",
+          "accountProfileId": "orders-viewer",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "web-1",
+          "applicationId": "@agentx/accounts-web-fixture",
+          "runtimeProfileId": "web-phase-unavailable",
+          "accountProfileId": "synthetic",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        }
+      ],
+      "dependencyEdges": [],
+      "proposedScenarios": [],
+      "missingInputs": []
+    },
+    "proposal": {
+      "candidateDigest": "6e82d5ac5a19e551180c8e480efa87080f85f852042907fb9c7017bbf4572150",
+      "applications": [
+        {
+          "applicationId": "@agentx/accounts-web-fixture",
+          "kind": "web",
+          "sourcePaths": [
+            "package.json"
+          ],
+          "recipe": {
+            "schemaVersion": 1,
+            "recipeDigest": "17fd98a69f7e60cba236bd576ebceddf7d5b48ec5dd1ca1d1067aeaa8ccf2d52",
+            "build": [],
+            "launch": {
+              "kind": "service",
+              "start": {
+                "program": "node",
+                "args": [
+                  "server.mjs"
+                ],
+                "cwd": ".",
+                "timeoutMs": 60000,
+                "env": {}
+              },
+              "health": {
+                "path": "/health",
+                "expectedStatus": 200
+              }
+            },
+            "serviceProfileIds": [
+              "node-http/v1"
+            ],
+            "seedProfileId": "rovara-accounts-file/v1",
+            "accountProfileIds": [
+              "orders-viewer",
+              "orders-owner",
+              "orders-owner-b"
+            ],
+            "allowedOrigins": [
+              "orders-api"
+            ],
+            "seed": {
+              "program": "node",
+              "args": [
+                "seed.mjs"
+              ],
+              "cwd": ".",
+              "timeoutMs": 30000,
+              "env": {}
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "targetId": "account-target-3865d55999b9ba83089eccc3b4e560552c66ff80d10fd06c8254152ee9f7e783",
+          "applicationId": "@agentx/accounts-web-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "orders-owner-b",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "account-target-7dc6348785daa3646ac5d7512108805be2999520b2feae05b668205fca951a31",
+          "applicationId": "@agentx/accounts-web-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "orders-owner",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "account-target-e828813cd9893dc26005fe799f6fbd2b405833299150c7e4604e60fe81315151",
+          "applicationId": "@agentx/accounts-web-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "orders-viewer",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        },
+        {
+          "targetId": "web-1",
+          "applicationId": "@agentx/accounts-web-fixture",
+          "runtimeProfileId": "linux-arm64-web-api-v1",
+          "accountProfileId": "synthetic",
+          "kind": "web",
+          "browser": "chromium",
+          "viewport": {
+            "width": 1280,
+            "height": 720
+          }
+        }
+      ],
+      "dependencyEdges": [],
+      "scenarios": [],
+      "sources": [
+        {
+          "path": "package.json",
+          "sha256": "94c27e6fc41897c74f170d7a8491e6b58ece882768f82f16c2e63de5671fc71a"
+        }
+      ],
+      "missingInputs": [],
+      "state": "proposed"
+    },
+    "setupApproval": {
+      "artifactId": "setup",
+      "digest": "e67e6f54fc79ba432cf14f560f0ed52252d021e152e947b4d11a73dbc5fe5381"
+    }
+  }
+}

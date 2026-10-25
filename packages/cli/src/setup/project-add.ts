@@ -10,7 +10,7 @@ import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
 import { verifyE2ESetupProposal } from "@agentx/broker/e2e/discovery";
 import {
-  AgentXError, AgentXErrorCodeSchema, ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, canonicalJson, environmentStackName,
+  AdminProjectsResponseSchema, AgentXError, AgentXErrorCodeSchema, ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, canonicalJson, environmentStackName,
   type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition, type E2EPolicy, type E2ESetupProposal,
 } from "@agentx/contracts";
 import { listCredentials } from "../admin/credential.js";
@@ -23,6 +23,7 @@ import type { Prompter } from "../init/prompts.js";
 import {
   agentxRepositoryName, commandLine, parseCommandLine, proposeCommands, BUILD_FILES, SETUP_TIMEOUT, TEST_TIMEOUT, type RepositoryInfo, type RepositorySnapshot,
 } from "./project-files.js";
+import { checkProjectModels } from "./project-model-check.js";
 import type { AdminSession, SetupServices } from "./services.js";
 
 export const DEFAULT_INSTRUCTIONS = "Delegate every repository read, edit, build, and test to the remote AgentX worker.";
@@ -123,17 +124,28 @@ export async function writeProjectFile(configDir: string, definition: ProjectDef
   return path;
 }
 
-export async function registerRevision(input: {
+/** The control plane accepted the revision, but this machine could not save its file or stored decision. Never reported as a failed registration. */
+export class LocalSaveAfterRegistrationError extends AgentXError {
+  constructor(readonly projectName: string, readonly revision: number, file: string, cause: string) {
+    super("CONFIG_INVALID", `revision ${revision} of ${projectName} IS registered with the control plane; only the local file ${file} (or the stored setup decision beside it) could not be updated (${cause}); do not register again. Fix the problem (permissions or disk space), then bring that file up to date: copy the registered settings into it and set its revision to ${revision}, before the next project command`, 400);
+  }
+}
+
+export async function registerRevision(request: {
   env: string; session: AdminSession; definition: ProjectDefinition;
-  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome">;
+  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome" | "modelCheck" | "now" | "acceptUncheckedModel">;
   setupApproval?: StoredSetupDecision;
   setupPolicy?: E2EPolicy;
 }): Promise<{ revision: number; preflight: ConnectorPreflight[]; warnings: string[]; file: string }> {
+  // MODEL1: the project's models are checked before anything is registered; a failing default refuses here.
+  const modelChecked = await checkProjectModels({ definition: request.definition, check: request.services.modelCheck, now: request.services.now,
+    ...(request.services.acceptUncheckedModel === undefined ? {} : { acceptUnchecked: { reason: request.services.acceptUncheckedModel } }) });
+  const input = { ...request, definition: modelChecked.definition };
   const foundation = environmentStackName(input.env, "foundation");
   const runtimeBinding = ec2Binding(await input.services.stackOutputs(foundation), foundation);
   const result = (await registerProject({ controlPlaneUrl: input.session.controlPlaneUrl, accessToken: input.session.accessToken, definition: input.definition, runtimeBinding, ...(input.setupApproval === undefined ? {} : { setupApproval: input.setupApproval }) }, input.services.fetch)) as Record<string, unknown>;
   const preflight = RegistrationPreflightSchema.safeParse(result.preflight);
-  const warnings = Array.isArray(result.warnings) ? result.warnings.filter((entry): entry is string => typeof entry === "string") : [];
+  const warnings = [...modelChecked.warnings, ...(Array.isArray(result.warnings) ? result.warnings.filter((entry): entry is string => typeof entry === "string") : [])];
   if (input.setupApproval?.decision === "approve" && input.definition.e2e !== undefined) {
     if (result.setupRuntime === "QUEUED") warnings.push("E2E testing setup was queued; project registration is complete, but testing is not ready.");
     else if (result.setupRuntime === "UNAVAILABLE") warnings.push("E2E testing setup is unavailable; project registration is complete, but testing is not ready.");
@@ -149,11 +161,19 @@ export async function registerRevision(input: {
   }
   // Written only after the control plane accepted the revision, so the file never names a revision
   // that is not registered.
-  const file = await writeProjectFile(input.services.configDir, input.definition, { env: input.env, binding: runtimeBinding });
-  if (input.setupApproval !== undefined) {
-    const policy = input.setupPolicy ?? input.definition.e2e;
-    if (policy === undefined) throw agentXError("CONFIG_INVALID", "a stored setup decision cannot be saved without its source-backed E2E policy");
-    await writeStoredSetupDecision({ configDir: input.services.configDir, env: input.env, session: input.session, definition: input.definition, policy, decision: input.setupApproval });
+  // From here the revision IS registered, so a local write that fails must not read as a failed registration (I-B1).
+  let file: string;
+  try {
+    file = await writeProjectFile(input.services.configDir, input.definition, { env: input.env, binding: runtimeBinding });
+    if (input.setupApproval !== undefined) {
+      const policy = input.setupPolicy ?? input.definition.e2e;
+      if (policy === undefined) throw agentXError("CONFIG_INVALID", "a stored setup decision cannot be saved without its source-backed E2E policy");
+      await writeStoredSetupDecision({ configDir: input.services.configDir, env: input.env, session: input.session, definition: input.definition, policy, decision: input.setupApproval });
+    }
+  } catch (error) {
+    const raw = typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : error instanceof Error ? error.name : "";
+    const cause = /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(raw) ? raw : "unknown error";
+    throw new LocalSaveAfterRegistrationError(input.definition.name, input.definition.revision, projectFilePath(input.services.configDir, input.definition.name), cause);
   }
   return { revision: input.definition.revision, preflight: preflight.success ? preflight.data.connectors : [], warnings, file };
 }
@@ -304,7 +324,7 @@ async function setupRequest(session: AdminSession, fetchImplementation: typeof f
   return result as Record<string, unknown>;
 }
 
-function validateSetupProposalResponse(value: Record<string, unknown>): { proposal: E2ESetupProposal; policy: E2EPolicy; proposalRef: string; proposalSha256: string } {
+function validateSetupProposalResponse(value: Record<string, unknown>): { proposal: E2ESetupProposal; policy: E2EPolicy; proposalRef: string; proposalSha256: string; aiNavigation: string | null; aiNavigationUntested: { sentence: string; modelId: string } | null } {
   const proposal = E2ESetupProposalSchema.parse(value.proposal);
   const policy = E2EPolicySchema.parse(value.policy);
   if (typeof value.proposalRef !== "string" || !/^project-setup-proposals\/[a-f0-9]{64}\/[a-f0-9]{64}\.json$/.test(value.proposalRef)
@@ -314,7 +334,16 @@ function validateSetupProposalResponse(value: Record<string, unknown>): { propos
     || proposal.targets.some((target) => !policy.targets.some((configured) => JSON.stringify(configured) === JSON.stringify(target)))) {
     throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an unbound source-backed setup proposal");
   }
-  return { proposal, policy, proposalRef: value.proposalRef, proposalSha256: value.proposalSha256 };
+  // D5: approving a setup that pins an AI navigation route is the administrator's consent to that provider and model, so the response must say what the route is. A policy that
+  // pins one without the sentence is not shown for approval at all (it is treated as malformed), and a sentence is shown only for a policy that pins a route.
+  const sentence = typeof value.aiNavigation === "string" ? value.aiNavigation.replace(/[\p{Cc}\p{Cf}]+/gu, " ").trim().slice(0, 400) : "";
+  if (policy.modelRouteRevision !== null && sentence === "") throw agentXError("RUNTIME_UNAVAILABLE", "control plane pinned an AI navigation route without saying which");
+  // Task 4.10C: a route that exists but has no passed driving test is not pinned; the control plane says which model must be tested. Only a well-formed note is shown, as plain text.
+  const untested = typeof value.aiNavigationUntested === "object" && value.aiNavigationUntested !== null ? value.aiNavigationUntested as { modelId?: unknown; sentence?: unknown } : undefined;
+  const untestedNote = untested !== undefined && typeof untested.modelId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(untested.modelId) && typeof untested.sentence === "string"
+    ? { modelId: untested.modelId, sentence: untested.sentence.replace(/[\p{Cc}\p{Cf}]+/gu, " ").trim().slice(0, 600) } : null;
+  return { proposal, policy, proposalRef: value.proposalRef, proposalSha256: value.proposalSha256, aiNavigation: policy.modelRouteRevision === null || sentence === "" ? null : sentence,
+    aiNavigationUntested: policy.modelRouteRevision === null ? untestedNote : null };
 }
 
 /** What this rerun asks for that the existing project does not have. Only the answers given are
@@ -327,6 +356,121 @@ function differences(existing: ProjectDefinition, wanted: { repositoryUrl?: stri
   if (wanted.setupCommand !== undefined && !isDeepStrictEqual(typed(wanted.setupCommand, SETUP_TIMEOUT), existing.setup)) found.push("setup command");
   if (wanted.testCommand !== undefined && !isDeepStrictEqual(typed(wanted.testCommand, TEST_TIMEOUT), existing.readiness)) found.push("test command");
   return found;
+}
+
+/** What the administrator is shown and asked about a source-backed setup plan: one confirmation that names the targets, the commands and the AI navigation route (D5). */
+async function confirmSetupPlan(input: { prompter: Prompter; write: (line: string) => void; proposal: E2ESetupProposal; aiNavigation: string | null; env?: string; aiNavigationUntested?: { sentence: string; modelId: string } | null; setup: ProjectDefinition["setup"]; readiness: ProjectDefinition["readiness"] }): Promise<boolean> {
+  const { proposal } = input;
+  const targetSummary = proposal.targets.map((target) => target.kind + ":" + target.targetId).join(", ") || "no targets detected";
+  const mockSummary = proposal.missingInputs.filter((item) => item.disposition === "mock-substitutable").map((item) => item.kind).join(", ") || "none detected";
+  const blockerSummary = proposal.missingInputs.filter((item) => item.disposition === "blocking").map((item) => item.reason).join("; ") || "none";
+  input.write(proposal.missingInputs.length === 0 ? "Detected source-backed E2E setup." : "Detected source-backed E2E setup with unresolved inputs: " + blockerSummary);
+  // An untested route says which model to test and the exact command (Task 4.10C); with no route at all the older sentence stands.
+  const untestedSummary = input.aiNavigationUntested === undefined || input.aiNavigationUntested === null ? undefined
+    : `${input.aiNavigationUntested.sentence}. Run \`agentx${input.env === undefined ? "" : ` --env ${input.env}`} project model-check test --model ${input.aiNavigationUntested.modelId}\``;
+  const aiNavigationSummary = input.aiNavigation ?? untestedSummary ?? "AI navigation steps will not run: this installation has no usable model route for them (it needs a configured model provider with its key), so only deterministic checks run";
+  input.write(aiNavigationSummary);
+  const commandSummary = "setup: " + input.setup.map(commandLine).join("; ") + "; readiness: " + input.readiness.map(commandLine).join("; ");
+  return input.prompter.confirm("Use this project setup plan? (" + commandSummary + "; targets: " + targetSummary + "; mock substitutions: " + mockSummary + "; unresolved inputs: " + blockerSummary + "; " + aiNavigationSummary + ")", { defaultValue: true });
+}
+
+/** What the administrator is told after declining the setup plan: the checks that are off, and the commands the project keeps (RUN-5). */
+function declinedPlanNotice(name: string, setup: ProjectDefinition["setup"], readiness: ProjectDefinition["readiness"]): string {
+  const setupText = setup.map(commandLine).join("; ");
+  const testText = readiness.map(commandLine).join("; ");
+  const kept = setup.length > 0 && readiness.length > 0 ? `its setup command (${setupText}) and test command (${testText}) are kept`
+    : setup.length > 0 ? `its setup command (${setupText}) is kept; it has no test command`
+    : readiness.length > 0 ? `its test command (${testText}) is kept; it has no setup command`
+    : "it has no setup or test command";
+  return `Browser and API checks are off for ${name}; ${kept}.`;
+}
+
+/** Records the administrator's decision on the proposal and holds the control plane's answer to exactly that decision. */
+async function recordSetupDecision(input: { session: AdminSession; fetch: typeof fetch; projectName: string; trusted: { proposalRef: string; proposalSha256: string }; decision: "approve" | "decline" }): Promise<StoredSetupDecision> {
+  const { trusted, decision } = input;
+  const approval = await setupRequest(input.session, input.fetch, "/v1/admin/projects/setup-approvals", {
+    projectName: input.projectName, proposalRef: trusted.proposalRef, proposalSha256: trusted.proposalSha256, decision,
+  });
+  if (approval.proposalRef !== trusted.proposalRef || approval.proposalSha256 !== trusted.proposalSha256 || approval.decision !== decision) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned a mismatched immutable setup decision");
+  }
+  return { proposalRef: trusted.proposalRef, proposalSha256: trusted.proposalSha256, decision };
+}
+
+/** The head of the registry for one project: the revision the control plane holds. (The listing carries no settings to compare, so the revision number alone decides.) */
+interface RegisteredHead { revision: number }
+
+/**
+ * I-2: the next revision is built on what the control plane has registered, not on the local file, which is only a copy that another machine or person can leave behind. Anything
+ * unclear (the listing unreadable, the project not listed) refuses before any approval is recorded: an approval no registered revision carries pins nothing.
+ */
+async function registeredHead(input: { session: AdminSession; fetch: typeof fetch; name: string }): Promise<RegisteredHead> {
+  const unreadable = (reason: string) => agentXError("RUNTIME_UNAVAILABLE", `could not read the registered revision of ${input.name}; nothing was approved or registered${reason}. Run the command again when the control plane answers`);
+  let listing: ReturnType<typeof AdminProjectsResponseSchema.safeParse>;
+  try {
+    const response = await input.fetch(`${input.session.controlPlaneUrl.replace(/\/$/, "")}/v1/admin/projects`, { headers: { authorization: `Bearer ${input.session.accessToken}` }, signal: AbortSignal.timeout(30_000) });
+    const { ok, status, body } = await readJsonResponse(response);
+    if (!ok) throw unreadable(` (HTTP ${status})`);
+    listing = AdminProjectsResponseSchema.safeParse(body);
+  } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw unreadable("");
+  }
+  if (!listing.success) throw unreadable(" (the answer was not a project list)");
+  const found = listing.data.projects.find((project) => project.name === input.name);
+  if (found === undefined) throw agentXError("CONFIG_INVALID", `${input.name} is not registered with this control plane (check --env), so there is no revision to build on; nothing was approved or registered. Register it with agentx project add first`);
+  return { revision: found.latestRevision };
+}
+
+/**
+ * `agentx project setup-approve` (M1.4 Task 4.9): proposes the setup of a project already registered from this machine again, from its registered repository and default
+ * branch, and asks the administrator the same one question `project add` asks (with the AI navigation sentence, D5). An approval is recorded with the control plane, through the
+ * same `/v1/admin/projects/setup-approvals` route, and registers the next revision with the approved policy, so the project pins the route the approval wrote. A decline is
+ * recorded and registers nothing. `project add` never does this: for a registered project it changes nothing and asks nothing.
+ */
+export async function reapproveProjectSetup(input: {
+  env: string; session: AdminSession; prompter: Prompter; write: (line: string) => void;
+  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome" | "modelCheck" | "now" | "acceptUncheckedModel">;
+  projectName: string;
+}): Promise<{ name: string; revision: number; file: string; decision: "approve" | "decline"; modelRouteRevision: string | null }> {
+  const name = input.projectName;
+  if (!/^[a-z][a-z0-9-]{0,62}$/.test(name)) throw agentXError("CONFIG_INVALID", `--project-name ${JSON.stringify(name)} is not valid; a project name is 1 to 63 lowercase letters, digits and hyphens, starting with a letter`);
+  const configDir = input.services.configDir;
+  const existing = await existingProject(configDir, name);
+  const file = projectFilePath(configDir, name);
+  if (existing === undefined) throw agentXError("CONFIG_INVALID", `project ${name} is not registered from this machine (no ${file}); register it with agentx project add first`);
+  const repository = existing.repositories[0];
+  if (repository === undefined) throw agentXError("CONFIG_INVALID", `project ${name} has no repository to propose its setup from`);
+  // I-2: read the registry's head before anything is proposed or recorded.
+  const head = await registeredHead({ session: input.session, fetch: input.services.fetch, name });
+  // The new revision carries the local file's setup, readiness, connectors and policies, so a file that is not at the registered head would overwrite newer registered settings the CLI cannot see.
+  if (head.revision !== existing.revision) {
+    throw agentXError("CONFIG_INVALID", `revision ${head.revision} is registered for ${name}, but the local file ${file} says revision ${existing.revision}, so it may not hold the registered settings; nothing was approved or registered. There is no command that fetches a registered revision: copy the registered settings into that file and set its revision to ${head.revision} (the operator who registered revision ${head.revision} has them), then run this again`);
+  }
+  // No quarantine here, unlike project add: without a trusted proposal there is nothing to approve.
+  const trusted = validateSetupProposalResponse(await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-proposals", {
+    repositoryUrl: repository.url, ref: repository.defaultBranch,
+  }, 65_000));
+  const accepted = await confirmSetupPlan({ prompter: input.prompter, write: input.write, proposal: trusted.proposal, aiNavigation: trusted.aiNavigation, env: input.env, aiNavigationUntested: trusted.aiNavigationUntested, setup: existing.setup, readiness: existing.readiness });
+  const setupApproval = await recordSetupDecision({ session: input.session, fetch: input.services.fetch, projectName: name, trusted, decision: accepted ? "approve" : "decline" });
+  if (!accepted) {
+    input.write(`Declined the setup of ${name}; the decision is recorded and revision ${head.revision} stays as it is.`);
+    return { name, revision: head.revision, file, decision: "decline", modelRouteRevision: null };
+  }
+  const definition = ProjectDefinitionSchema.parse({ ...existing, revision: head.revision + 1, e2e: trusted.policy });
+  let registered: Awaited<ReturnType<typeof registerRevision>>;
+  try {
+    registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services, setupApproval, setupPolicy: trusted.policy });
+  } catch (error) {
+    if (error instanceof LocalSaveAfterRegistrationError) throw error;
+    // The control plane needs the recorded decision before it accepts the revision, so a failure here leaves an approval that no revision carries. Say so, and what to run.
+    const code = error instanceof AgentXError ? error.code : "RUNTIME_UNAVAILABLE";
+    const cause = error instanceof AgentXError ? error.message : "an unexpected error";
+    throw agentXError(code, `your approval of the setup proposal is recorded, but revision ${definition.revision} of ${name} was NOT registered, so no revision carries it and tasks keep running on revision ${head.revision} (${cause}). Run agentx --env ${input.env} project setup-approve --project-name ${name} again; it proposes and asks again, and registers the revision`);
+  }
+  input.write(`Approved the setup of ${name} and registered revision ${definition.revision}${trusted.policy.modelRouteRevision === null ? "" : `, pinning AI navigation route revision ${trusted.policy.modelRouteRevision}`}. Its file is ${registered.file}.`);
+  for (const warning of registered.warnings) input.write(`Warning: ${warning}`);
+  return { name, revision: definition.revision, file: registered.file, decision: "approve", modelRouteRevision: trusted.policy.modelRouteRevision };
 }
 
 export async function addProject(input: {
@@ -437,25 +581,15 @@ export async function addProject(input: {
   const typed = (line: string, timeout: number) => (line.trim() === "" ? [] : [parseCommandLine(line, cwd, timeout)]);
   // Explicit command flags remain the user's selected ordinary project commands. They do not
   // replace or suppress the source-backed E2E proposal; the separate confirmation below still
-  // records the owner's approve/decline decision for that proposal.
+  // records the owner's approve/decline decision for that proposal, and a decline keeps them.
   if (flags.setupCommand !== undefined) setup = typed(flags.setupCommand, SETUP_TIMEOUT);
   if (flags.testCommand !== undefined) readiness = typed(flags.testCommand, TEST_TIMEOUT);
   if (setupProposal !== undefined && e2ePolicy !== undefined && trustedSetup !== undefined) {
-    const targetSummary = setupProposal.targets.map((target) => target.kind + ":" + target.targetId).join(", ") || "no targets detected";
-    const mockSummary = setupProposal.missingInputs.filter((item) => item.disposition === "mock-substitutable").map((item) => item.kind).join(", ") || "none detected";
-    const blockerSummary = setupProposal.missingInputs.filter((item) => item.disposition === "blocking").map((item) => item.reason).join("; ") || "none";
-    input.write(setupProposal.missingInputs.length === 0 ? "Detected source-backed E2E setup." : "Detected source-backed E2E setup with unresolved inputs: " + blockerSummary);
-    const commandSummary = "setup: " + setup.map(commandLine).join("; ") + "; readiness: " + readiness.map(commandLine).join("; ");
-    e2eAccepted = await prompter.confirm("Use this project setup plan? (" + commandSummary + "; targets: " + targetSummary + "; mock substitutions: " + mockSummary + "; unresolved inputs: " + blockerSummary + ")", { defaultValue: true });
-    if (!e2eAccepted) { setup = []; readiness = []; }
-    const decision = e2eAccepted ? "approve" : "decline";
-    const approval = await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-approvals", {
-      projectName: name, proposalRef: trustedSetup.proposalRef, proposalSha256: trustedSetup.proposalSha256, decision,
-    });
-    if (approval.proposalRef !== trustedSetup.proposalRef || approval.proposalSha256 !== trustedSetup.proposalSha256 || approval.decision !== decision) {
-      throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned a mismatched immutable setup decision");
-    }
-    setupApproval = { proposalRef: trustedSetup.proposalRef, proposalSha256: trustedSetup.proposalSha256, decision };
+    e2eAccepted = await confirmSetupPlan({ prompter, write: input.write, proposal: setupProposal, aiNavigation: trustedSetup.aiNavigation, env: input.env, aiNavigationUntested: trustedSetup.aiNavigationUntested, setup, readiness });
+    setupApproval = await recordSetupDecision({ session: input.session, fetch: input.services.fetch, projectName: name, trusted: trustedSetup, decision: e2eAccepted ? "approve" : "decline" });
+    // RUN-5: declining the plan turns off only the browser and API checks (no `e2e` policy is registered). The project's own setup and test commands, the proposed ones and the ones given
+    // as flags, stay; they used to be erased, and every later task then ran with no setup and no test check.
+    if (!e2eAccepted) input.write(declinedPlanNotice(name, setup, readiness));
   } else {
     input.write(proposed.basis.length === 0
       ? `No build file AgentX knows in ${repository.fullName}. AgentX will propose checks for each task; you can add project checks later.`

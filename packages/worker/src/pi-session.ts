@@ -21,7 +21,7 @@ import {
   type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
-import { createModelRuntimeWithFallback, type ChatGptFallback, type ChatGptFallbackReason } from "@agentx/model-runtime";
+import { createModelRuntimeWithFallback, type ChatGptFallback, type ChatGptFallbackReason, type ModelFallbackNotice } from "@agentx/model-runtime";
 import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
@@ -174,8 +174,8 @@ export type PiModelRuntimeResolver = (
 ) => Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }>;
 
 /** The worker's Pi session adapter. Without `modelRuntime` it resolves the configured model as the worker always has. */
-export function createDefaultPiSessionAdapter(options: { modelRuntime?: PiModelRuntimeResolver } = {}): PiSessionAdapter {
-  const resolveModelRuntime = options.modelRuntime ?? workerModelRuntime;
+export function createDefaultPiSessionAdapter(options: { modelRuntime?: PiModelRuntimeResolver; onModelFallback?: WorkerModelFallbackReporter } = {}): PiSessionAdapter {
+  const resolveModelRuntime = options.modelRuntime ?? ((model: WorkspaceModelConfiguration) => workerModelRuntime(model, undefined, undefined, options.onModelFallback));
   return {
     async create(input) {
       return createDefaultSession(
@@ -231,12 +231,19 @@ export function createChatGptPiSessionAdapter(
   return createDefaultPiSessionAdapter({ modelRuntime: (model) => workerModelRuntime(model, apiKey, chatgptFallback) });
 }
 
-async function workerModelRuntime(
+/** MODEL3: told when a missing provider secret sent the worker to the installation's chosen fallback model. */
+export type WorkerModelFallbackReporter = (notice: ModelFallbackNotice) => void;
+
+export async function workerModelRuntime(
   configured: WorkspaceModelConfiguration,
   apiKey?: () => Promise<string>,
   chatgptFallback?: ChatGptFallback,
+  onModelFallback?: WorkerModelFallbackReporter,
 ): Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }> {
-  const resolved = await createModelRuntimeWithFallback(configured, "worker", apiKey === undefined ? {} : { apiKey, ...(chatgptFallback === undefined ? {} : { chatgptFallback }) });
+  const resolved = await createModelRuntimeWithFallback(configured, "worker", {
+    ...(apiKey === undefined ? {} : { apiKey, ...(chatgptFallback === undefined ? {} : { chatgptFallback }) }),
+    ...(onModelFallback === undefined ? {} : { onFallback: onModelFallback }),
+  });
   const modelRuntime = resolved.runtime;
   if (resolved.model.provider === "amazon-bedrock") {
     modelRuntime.registerNativeProvider(executionRoleBedrockProvider());
@@ -403,7 +410,22 @@ export async function createWorkerResources(
     appendSystemPrompt: [AGENTX_PREAMBLE],
   });
   await resourceLoader.reload({ resolveProjectTrust: async () => false });
+  // Last, after every write and reload: each of them merges the stored settings files again, which drops an in-memory override.
+  applyWorkerRetryBudget(settingsManager);
   return { resourceLoader, settingsManager };
+}
+
+/**
+ * The retry budget for a model call that fails with a transient error (PLANINC-3b). Pi retries such a call on its own: its default is 3 retries
+ * (4 calls) with 2, 4 and 8 s waits. AgentX sets its own, smaller budget so a failing model call ends in a bounded time: `maxRetries` retries after the
+ * first call (so `maxRetries + 1` calls at most), each after `baseDelayMs` doubled per retry, and never a wait longer than `maxAgentDelayMs`.
+ * Change the numbers here; the planning deadline and the stall limit (model-call-monitor.ts) bound the calls themselves.
+ */
+export const WORKER_MODEL_RETRY = { enabled: true, maxRetries: 2, baseDelayMs: 2_000, maxAgentDelayMs: 10_000 } as const;
+
+/** Applies WORKER_MODEL_RETRY on top of Pi's settings. It runs after the settings are loaded, so a settings file in the agent directory cannot widen the budget or turn retries off. */
+export function applyWorkerRetryBudget(settingsManager: SettingsManager): void {
+  settingsManager.applyOverrides({ retry: { ...WORKER_MODEL_RETRY } });
 }
 
 export function agentShellTool(cwd: string, operations?: BashOperations): ToolDefinition {

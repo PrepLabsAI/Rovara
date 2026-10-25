@@ -5,6 +5,10 @@ import { join } from "node:path";
 import process from "node:process";
 import { canonicalJson } from "@agentx/contracts";
 import { createCompiledApiApplicationFixture, createCompiledTwoShardApiApplicationFixture } from "../support/e2e-application-fixture.js";
+import { e2eAgentValueKeyId, e2eModelRouteRevision } from "@agentx/contracts";
+import { scriptedE2ERouteDefinition } from "../../packages/model-runtime/src/e2e-route-derive.js";
+import { agentCaseDirectoryName } from "../../packages/verifier/src/executor/evidence-paths.js";
+import { E2E_AGENT_CONFIG_MAX_INPUT_TOKENS } from "../../packages/verifier/src/application-templates.js";
 import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
 
 const sha = "a".repeat(64);
@@ -162,7 +166,7 @@ describe("application collection contracts", () => {
     const context = { bindingDigest: sha, compiledInventoryDigest: "b".repeat(64), preparedEnvironmentDigest: "c".repeat(64),
       candidateDigest: "d".repeat(64), roundId: uuidB, runId: capture.runId, groupId: "group-a", lifecycleId: capture.lifecycleId,
       observedAt: at, producer };
-    const captureWithMockCoverage = { ...capture, coverage: { ...capture.coverage, mockedComponentIds: ["mock-a"] } };
+    const captureWithMockCoverage = { ...capture, coverage: { ...capture.coverage, mockedComponentIds: ["mock-a"], observedMockedComponentIds: ["mock-a"] } };
     const frame = (artifactId: string, value: unknown) => {
       const body = Buffer.from(canonicalJson(value));
       return { ref: { artifactId, sha256: createHash("sha256").update(body).digest("hex"), byteLength: body.byteLength, mediaType: "application/json" }, bytes: body };
@@ -785,7 +789,7 @@ describe("application collection contracts", () => {
           steps: [{ id: "assertion-step", index: 0, kind: "assertion", api: "assert.http-status", label: "health status", source: tuple.source,
             status: "failed", startedAt: reportStarted, durationMs: 1, events: [], artifacts: [] }] }] }], errors: [],
       summary: { discovered: 1, selected: 1, executed: 1, passed: 0, failed: 1, interrupted: 0, flaky: 0, skipped: 0 },
-      limits: { maxAgentContextBytes: 1024, maxLedgerBytes: 1024, maxObservationBytes: 1024, maxEventsPerStep: 1000, maxModelTokensPerCall: 1024 },
+      limits: { maxAgentContextBytes: 1024, maxLedgerBytes: 1024, maxObservationBytes: 1024, maxEventsPerStep: 1000, maxModelTokensPerCall: E2E_AGENT_CONFIG_MAX_INPUT_TOKENS },
       usage: { discoveredResults: 1, maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0,
         modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 } } };
     const reportBytes = Buffer.from(JSON.stringify(failedReport));
@@ -805,12 +809,26 @@ describe("application collection contracts", () => {
       assertionProducers: [{ assertionIndex: 0, producer: context.producer }], accountRef: compiled.runtimeAdmissionContext.selectionInput.runtimeAccountRefs[0],
       sessionRef: "future-agent-session", accountIdDigest: sha, identityReceiptRef: identity.ref, subjectIdentityReceiptRef: subjectIdentity.ref,
       selectedArtifact: applicationBinding.artifacts[0], connection: null });
+    // The group has an agent step, so its worker hands over its model evidence; the agent step was never reached, so there are no receipts and no ledger (Task 4.4a).
+    const noModelUse = { schemaVersion: "rovara-agent-model-evidence/v1" as const, route: null, valueKey: "ab".repeat(32), receipts: [],
+      channel: { droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 0 }, ledgers: [], transcriptDigests: [] };
     const options = { actual, compiled, binding, round, environment: failedReport.run.environment, usage: failedReport.run.usage, limits: failedReport.run.limits,
       expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: sha, observationBindings: [observationBinding],
-      assertionAssets: [], governedModelReceipts: [] as const, ownedClosedAt: processFinished };
+      assertionAssets: [], governedModelReceipts: [] as const, agentModel: noModelUse, ownedClosedAt: processFinished };
     const result = collectE2EApplicationRun(options as never);
     expect(result.qualification?.status).toBe("FAILED");
     expect(result.unavailableReason).toBeNull();
+    // A receipt of the model for a case that never reached its agent step cannot be: the group is UNKNOWN.
+    const phantom = { receiptId: "phantom-1", runId: binding.runId, caseId: expected.caseId, stepIndex: 1, callIndex: 0, routeId: "future-agent-route", routeRevision: "r1-aaaaaaaaaaaa",
+      provider: "anthropic", modelId: "claude-haiku-5-5", startedAt: processStarted, inputTokens: 5, outputTokens: 1, latencyMs: 2, servedModelId: null, servedUpstream: null,
+      promptSha256: sha, responseSha256: null, outcome: "provider-error" };
+    const unreached = collectE2EApplicationRun({ ...options, agentModel: { ...noModelUse, receipts: [phantom], transcriptDigests: [] } } as never);
+    expect(unreached.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+    expect(unreached.unavailableReason).toMatch(/^model-receipts-mismatch: a model receipt is attributed to a case that never reached its AI navigation step/u);
+    // Without the worker's model evidence the same run is UNKNOWN, with the code for it: a group with an agent step always carries some.
+    const withoutEvidence = collectE2EApplicationRun({ ...options, agentModel: undefined } as never);
+    expect(withoutEvidence.qualification?.status).toBe("UNKNOWN");
+    expect(withoutEvidence.unavailableReason).toMatch(/^model-receipts-mismatch:/u);
 
     const futureSdkUse = structuredClone(failedReport);
     futureSdkUse.run.results[0]!.attempts[0]!.steps.push({ id: "unexecuted-agent", index: 1, kind: "agent", api: "agent.run", label: "future agent",
@@ -825,7 +843,7 @@ describe("application collection contracts", () => {
       runProcess: proc(1, processStarted, processFinished, alteredBytes) }] };
     const futureUseResult = collectE2EApplicationRun({ ...options, actual: alteredActual } as never);
     expect(futureUseResult.qualification?.status).toBe("UNKNOWN");
-    expect(futureUseResult.unavailableReason).toMatch(/model counters differ|model receipt rows differ/u);
+    expect(futureUseResult.unavailableReason).toMatch(/model counters differ/u);
   });
 
   it("qualifies heterogeneous model use across raw admitted shards and rejects whole-group overspend", async () => {
@@ -833,7 +851,9 @@ describe("application collection contracts", () => {
     const { E2EApplicationCaseCaptureSchema, E2EApplicationObservationBindingSchema } =
       await import("../../packages/verifier/src/application-result-adapter.js");
     const { expectedE2EApplicationReporterDigest } = await import("../../packages/verifier/src/application-runtime-assets.js");
-    const fixture = createCompiledTwoShardApiApplicationFixture({ modelRoute: { routeId: "two-shard-route", routeRevision: "two-shard-r1" } });
+    const scriptedRoute = scriptedE2ERouteDefinition();
+    const routeRevision = e2eModelRouteRevision(scriptedRoute);
+    const fixture = createCompiledTwoShardApiApplicationFixture({ modelRoute: { routeId: scriptedRoute.routeId, routeRevision } });
     const { compiled, binding, round } = fixture;
     const hashBytes = (value: Uint8Array) => createHash("sha256").update(value).digest("hex");
     const frame = (artifactId: string, value: unknown) => {
@@ -842,18 +862,37 @@ describe("application collection contracts", () => {
     };
     const timeAt = (offset: number) => new Date(Date.parse(round.admittedAt) + offset).toISOString();
     const reportEnvironment = { ci: true, trustNoticeShown: false, os: "linux 6.8.0", arch: "x64", runtime: "node v22.23.2" };
-    const reportLimits = { maxAgentContextBytes: 1024, maxLedgerBytes: 1024, maxObservationBytes: 1024, maxEventsPerStep: 1000, maxModelTokensPerCall: 1024 };
+    const reportLimits = { maxAgentContextBytes: 1024, maxLedgerBytes: 1024, maxObservationBytes: 1024, maxEventsPerStep: 1000, maxModelTokensPerCall: E2E_AGENT_CONFIG_MAX_INPUT_TOKENS };
     const aggregateUsage = { discoveredResults: 2, maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0,
       artifactBytes: 0, downloads: 0, events: 0, modelTokens: 1, maxModelCallsInStep: 1, maxActionStepsInStep: 0 };
-    const modelRoute = compiled.runtimeAdmissionContext.modelRoute!;
+    // What the worker hands over about the group's agent steps (Task 4.4a): `callsByShard[i]` ok receipts for shard i's case, and the ledger of each case's concluded step.
+    const valueKey = "ab".repeat(32);
+    const agentEvidence = (callsByShard: readonly [number, number]) => {
+      const receipts: Array<Record<string, unknown>> = []; const ledgers: Array<Record<string, unknown>> = [];
+      compiled.shards.forEach((shard, index) => {
+        const expected = compiled.expectedCases.find((item) => item.targetId === shard.targetId)!;
+        const step = compiled.bundle.scenarios.find((item) => item.scenarioId === expected.scenarioId)!.steps[0] as { kind: "agent"; goal: string };
+        const own = Array.from({ length: callsByShard[index]! }, (_, call) => ({ receiptId: `two-shard-receipt-${index + 1}-${call}`, runId: binding.runId, caseId: expected.caseId,
+          stepIndex: 0, callIndex: call, routeId: scriptedRoute.routeId, routeRevision, provider: scriptedRoute.provider, modelId: scriptedRoute.modelId, startedAt: timeAt(250 + index * 100 + call),
+          inputTokens: 1, outputTokens: 0, latencyMs: 1, servedModelId: null, servedUpstream: null, promptSha256: hashBytes(Buffer.from(`prompt-${index}-${call}`)),
+          responseSha256: hashBytes(Buffer.from(`response-${index}-${call}`)), outcome: "ok" }));
+        receipts.push(...own);
+        const ledger = { schemaVersion: "rovara-agent-actions/v1", runId: binding.runId, caseId: expected.caseId, valueKeyId: e2eAgentValueKeyId(valueKey),
+          steps: [{ stepIndex: 0, goalDigest: hashBytes(Buffer.from(step.goal)), verdict: "concluded", actions: [], stopCode: null, receiptIds: own.map((item) => item.receiptId) }] };
+        const bytes = Buffer.from(JSON.stringify(ledger));
+        ledgers.push({ caseDirectory: agentCaseDirectoryName(expected.caseId), bytesBase64: bytes.toString("base64"), sha256: hashBytes(bytes) });
+      });
+      return { schemaVersion: "rovara-agent-model-evidence/v1" as const, route: scriptedRoute, valueKey, receipts, channel: { droppedRequests: 0, unscopedRequests: 0, overrun: false, evidenceErrors: 0 },
+        ledgers, transcriptDigests: receipts.map((item) => ({ receiptId: item.receiptId, promptSha256: item.promptSha256, responseSha256: item.responseSha256, omitted: null })) };
+    };
 
-    const buildActual = (callsByShard: readonly [number, number]) => {
+    const buildActual = (callsByShard: readonly [number, number], legacyRows = false) => {
+      const protectedModelRows: Array<Record<string, unknown>> = [];
       const shardRows: Array<Record<string, unknown>> = [];
       const captures: Array<Record<string, unknown>> = [];
       const evidence: Array<{ ref: { artifactId: string; sha256: string; byteLength: number; mediaType: string }; bytes: Buffer }> = [];
       const expectedRefs: Array<{ artifactId: string; sha256: string; byteLength: number; mediaType: string }> = [];
       const bindings: Array<Record<string, unknown>> = [];
-      const protectedModelRows: Array<Record<string, unknown>> = [];
       const launches: Array<{ shardId: string; launchId: string; upstreamRunId: string }> = [];
       const captureEntries: Array<{ caseId: string; shardId: string; ref: ReturnType<typeof frame>["ref"] }> = [];
       const groupLifecycleId = "two-shard-group-lifecycle";
@@ -885,15 +924,14 @@ describe("application collection contracts", () => {
           requestId: `health-${index + 1}`, responseId: `two-shard-response-${index + 1}`, method: "GET", path: "/health", origin: subject.origin,
           status: 200, bodyRef: responseBody.ref, connectionRef: null });
 
+        // The M1-era design (retired for agent steps by Task 4.4a): a projection row per model call in the capture, with its frame in the raw closure.
         let modelReceipt: Record<string, unknown> | null = null;
-        if (callsByShard[index] === 1) {
-          const row = { caseId: expected.caseId, declaredStepIndex: 0, requestId: `two-shard-model-request-${index + 1}`,
-            receiptId: `two-shard-model-receipt-${index + 1}` };
+        if (legacyRows && callsByShard[index] === 1) {
+          const row = { caseId: expected.caseId, declaredStepIndex: 0, requestId: `two-shard-model-request-${index + 1}`, receiptId: `two-shard-model-receipt-${index + 1}` };
           const sourceFrame = frame(`two-shard-model-source-${index + 1}`, { schemaVersion: "offline-model-source/v1", shard: index + 1 });
           const projectionFrame = frame(`two-shard-model-projection-${index + 1}`, { schemaVersion: "e2e-application-governed-model-receipt/v1", ...row,
-            bindingDigest: context.bindingDigest, routeId: modelRoute.routeId, routeRevision: modelRoute.routeRevision,
-            requestDigest: "1".repeat(64), generationDigest: "2".repeat(64), authoritySnapshotDigest: "3".repeat(64),
-            sourceReceiptRef: sourceFrame.ref, recordedAt: reportStarted });
+            bindingDigest: context.bindingDigest, routeId: scriptedRoute.routeId, routeRevision, requestDigest: "1".repeat(64), generationDigest: "2".repeat(64),
+            authoritySnapshotDigest: "3".repeat(64), sourceReceiptRef: sourceFrame.ref, recordedAt: reportStarted });
           modelReceipt = { ...row, receiptRef: projectionFrame.ref };
           protectedModelRows.push(modelReceipt);
           evidence.push(sourceFrame, projectionFrame);
@@ -910,7 +948,7 @@ describe("application collection contracts", () => {
           assertions: [{ index: 0, digest: expected.assertionDigests[0], observedAt: reportStarted, observationId: `two-shard-http-${index + 1}`,
             value: 200, evidenceRef: observation.ref, outcome: "passed", reason: "observed HTTP 200", producer }],
           terminal: { kind: "completed", lastDeclaredStepIndex: scenario.steps.length - 1, failedAssertionIndex: null, at: reportFinished, reason: "complete" },
-          modelReceipts: modelReceipt ? [modelReceipt] : [], artifacts: [], coverage: { observedScope: "runtime", subject: "candidate",
+          modelReceipts: modelReceipt === null ? [] : [modelReceipt], artifacts: [], coverage: { observedScope: "runtime", subject: "candidate",
             executedCandidateParts: [runtimeRef.applicationId], realComponentIds: [], mockedComponentIds: [], observedMockedComponentIds: [], unexercisedBehaviors: [] },
           cleanup: "confirmed" });
         const captureFrame = frame(`two-shard-capture-${index + 1}`, captureValue);
@@ -987,7 +1025,7 @@ describe("application collection contracts", () => {
       const supervisorReadback = { schemaVersion: "e2e-application-supervisor-readback/v1" as const, receipt,
         evidence: evidence.sort((left, right) => left.ref.artifactId.localeCompare(right.ref.artifactId)) };
       return { shardRows, captures, evidence, launches, expectedRefs: [...expectedRefs].sort((left, right) => left.artifactId.localeCompare(right.artifactId)),
-        bindings, protectedModelRows, supervisorReadback, receipt };
+        bindings, supervisorReadback, receipt, protectedModelRows };
     };
 
     // Complete the per-case supervisor inventory in a single parent receipt, retaining both original shard launches.
@@ -1002,12 +1040,13 @@ describe("application collection contracts", () => {
       evidenceDirectory: "/offline-two-shard-fixture" };
     const options = { actual, compiled, binding, round, environment: reportEnvironment, usage: aggregateUsage,
       limits: reportLimits, expectedSupervisorReceiptRefs: positive.expectedRefs, ownedResourceInventoryDigest: sha,
-      observationBindings: positive.bindings, assertionAssets: [], governedModelReceipts: positive.protectedModelRows, ownedClosedAt: timeAt(900) };
+      observationBindings: positive.bindings, assertionAssets: [], governedModelReceipts: [], agentModel: agentEvidence([1, 0]), roundScope: "qualification" as const, ownedClosedAt: timeAt(900) };
     const qualified = collectE2EApplicationRun(options as never);
     expect(qualified.collection).not.toBeNull();
     expect(qualified.oracle?.usage).toEqual(aggregateUsage);
-    expect(qualified.qualification?.status).toBe("UNKNOWN");
-    expect(qualified.unavailableReason).toMatch(/structural application observations remain exploratory/u);
+    // One shard made a call and the other none: the receipts are the report's, shard by shard, and the group passes.
+    expect(qualified.qualification?.status, qualified.unavailableReason ?? "").toBe("PASS");
+    expect(qualified.qualification?.result?.modelReceiptIds).toEqual(["two-shard-receipt-1-0"]);
 
     const overspent = buildActual([1, 1]);
     const overspentUsage = { ...aggregateUsage, modelTokens: 2, maxModelCallsInStep: 1 };
@@ -1015,9 +1054,24 @@ describe("application collection contracts", () => {
       supervisorReceiptRefs: [overspent.receipt.ref, ...overspent.expectedRefs].sort((left, right) => left.artifactId.localeCompare(right.artifactId)),
       supervisorReadback: overspent.supervisorReadback };
     const overspentResult = collectE2EApplicationRun({ ...options, actual: overspentActual, usage: overspentUsage,
-      expectedSupervisorReceiptRefs: overspent.expectedRefs, observationBindings: overspent.bindings,
-      governedModelReceipts: overspent.protectedModelRows } as never);
+      expectedSupervisorReceiptRefs: overspent.expectedRefs, observationBindings: overspent.bindings, agentModel: agentEvidence([1, 1]) } as never);
     expect(overspentResult.qualification?.status).toBe("UNKNOWN");
-    expect(overspentResult.unavailableReason).toMatch(/protected model receipt projection inventory .* exceeds its original budget/u);
+    expect(overspentResult.unavailableReason).toMatch(/^model-receipts-mismatch: group model SDK calls or token use differ .* exceed original round limits/u);
+    // The receipts must also be the report's: one receipt too few for the calls the shards report is a mismatch, not an underspend.
+    const missing = collectE2EApplicationRun({ ...options, agentModel: agentEvidence([0, 0]) } as never);
+    expect(missing.qualification?.status).toBe("UNKNOWN");
+    expect(missing.unavailableReason).toMatch(/^model-receipts-mismatch:/u);
+
+    // The M1-era design is retired for agent steps: the same run written with a projection row per call (in the capture, and as the protected rows) is refused, never read.
+    const legacy = buildActual([1, 0], true);
+    const legacyActual = { ...actual, shards: legacy.shardRows, applicationCaptures: legacy.captures,
+      supervisorReceiptRefs: [legacy.receipt.ref, ...legacy.expectedRefs].sort((left, right) => left.artifactId.localeCompare(right.artifactId)), supervisorReadback: legacy.supervisorReadback };
+    const legacyOptions = { ...options, actual: legacyActual, expectedSupervisorReceiptRefs: legacy.expectedRefs, observationBindings: legacy.bindings };
+    const inCapture = collectE2EApplicationRun(legacyOptions as never);
+    expect(inCapture.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+    expect(inCapture.unavailableReason).toMatch(/^model-receipts-mismatch: an AI navigation step differs from the e2e report's account of it or carries M1-era operation frames/u);
+    const asProtected = collectE2EApplicationRun({ ...legacyOptions, governedModelReceipts: legacy.protectedModelRows } as never);
+    expect(asProtected.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+    expect(asProtected.unavailableReason).toMatch(/^model-receipts-mismatch: governed model receipt projections are not how AI navigation steps are read/u);
   });
 });

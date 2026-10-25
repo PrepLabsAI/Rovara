@@ -44,7 +44,9 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(firewall).toContain("sudo bash");
     expect(firewall).not.toContain("iptables -I");
     expect(run.indexOf("<<'FIREWALL'")).toBeGreaterThanOrEqual(0);
-    expect(run.indexOf("<<'FIREWALL'")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci ."));
+    expect(run.indexOf("<<'FIREWALL'")).toBeLessThan(run.indexOf('docker build -f "$RUNNER_TEMP/e2e-executor.Dockerfile" -t rovara-e2e-executor:ci .'));
+    // The Dockerfile it builds is the e2e-executor one with its FROM lines pointed at the pulled copy of the same digest (tests/contract/ci-images.test.ts).
+    expect(run).toContain('node scripts/ci-images.ts dockerfile environments/e2e-executor/Dockerfile "$RUNNER_TEMP/e2e-executor.Dockerfile"');
     // The smoke check is the shared definition in scripts/executor-smoke.ts (the one the release path and test-deploy use), never a copy of its flags: it runs after
     // `npm ci` and `npm run build`, which the script needs, and before the Linux tests.
     const smoke = run.split("\n").find((line) => line.includes("executor-smoke.ts"))!;
@@ -55,6 +57,45 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(run.indexOf("executor-smoke.ts")).toBeLessThan(run.indexOf("npx vitest run tests/linux"));
     expect(run).not.toMatch(/seccomp=unconfined|--privileged|--cap-add|--no-sandbox/);
     expect(run).toContain("npx vitest run tests/linux");
+  });
+
+  it("runs the Docker 25 DNS regression test once, in its own step under the same gate as the other Linux tests, and keeps it out of the generic step", async () => {
+    const job = (await workflow()).jobs["linux-runtime"] as Job & { steps: { name?: string; run?: string; env?: Record<string, string> }[] };
+    const generic = job.steps.find((step) => (step.run ?? "").startsWith("npx vitest run tests/linux"))!;
+    expect(generic.run).toContain("--exclude tests/linux/e2e-docker25-dns.test.ts");
+    // Task 4.3a: the model channel test has a step of its own too (it builds a derived executor image), so the generic step does not run it a second time.
+    expect(generic.run).toContain("--exclude tests/linux/e2e-model-channel.test.ts");
+    // Task 4.3b: the agent step tests (twenty real runs of one case among them) have a step of their own, so the generic step does not run them a second time.
+    expect(generic.run).toContain("--exclude tests/linux/e2e-agent.test.ts");
+    // Task 4.5: the three agent qualification probes (real runs of the scripted model behind the production probe runner) have a step of their own as well.
+    expect(generic.run).toContain("--exclude tests/linux/e2e-agent-probes.test.ts");
+    const agentProbes = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/e2e-agent-probes.test.ts") && candidate !== generic)!;
+    expect(agentProbes.run).toBe("npx vitest run tests/linux/e2e-agent-probes.test.ts");
+    expect(agentProbes.name).toMatch(/Agent qualification probes/);
+    expect(agentProbes.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
+    const agent = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/e2e-agent.test.ts") && candidate !== generic)!;
+    expect(agent.run).toBe("npx vitest run tests/linux/e2e-agent.test.ts");
+    expect(agent.name).toMatch(/Agent steps/);
+    expect(agent.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
+    const journeys = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/e2e/m1-4-journeys.test.ts"))!;
+    expect(journeys.run).toBe("npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-4-journeys.test.ts");
+    expect(journeys.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
+    const model = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/e2e-model-channel.test.ts") && candidate !== generic)!;
+    expect(model.run).toBe("npx vitest run tests/linux/e2e-model-channel.test.ts");
+    expect(model.name).toMatch(/Model channel/);
+    expect(model.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
+    const order = job.steps.map((candidate) => candidate.run ?? "");
+    expect(order.indexOf(model.run!)).toBeGreaterThan(order.indexOf(generic.run!));
+    const step = job.steps.find((candidate) => (candidate.run ?? "").includes("tests/linux/e2e-docker25-dns.test.ts") && candidate !== generic)!;
+    expect(step.run).toBe("npx vitest run tests/linux/e2e-docker25-dns.test.ts");
+    expect(step.name).toMatch(/Docker 25/);
+    expect(step.env).toEqual({ ROVARA_DOCKER: "1", ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:ci" });
+    const steps = job.steps.map((candidate) => candidate.run ?? "");
+    expect(steps.indexOf(step.run!)).toBeGreaterThan(steps.indexOf(generic.run!));
+    // It starts its own Docker 25 (Docker in Docker); the runner's daemon, iptables and sysctls are what the other steps set up and are not touched by it.
+    const test = readFileSync("tests/linux/e2e-docker25-dns.test.ts", "utf8");
+    expect(readFileSync("tests/support/linux-dind.ts", "utf8")).toMatch(/"public\.ecr\.aws\/docker\/library\/docker:25\.0\.5-dind@sha256:[0-9a-f]{64}"/);
+    expect(test).toContain('describe.runIf(process.env.ROVARA_DOCKER === "1")');
   });
 
   it("smoke-tests the executor image from CI and from the release path through one definition, with the production sandbox flags", async () => {
@@ -81,7 +122,7 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(step.run).toContain("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0");
     expect(step.run).toContain("Amazon Linux 2023");
     const run = job.steps.map((candidate) => candidate.run ?? "").join("\n");
-    expect(run.indexOf("apparmor_restrict_unprivileged_userns")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile"));
+    expect(run.indexOf("apparmor_restrict_unprivileged_userns")).toBeLessThan(run.indexOf("docker build -f"));
   });
 
   it("gives every job but the manual live-AWS one a time limit, so a hung runner fails in minutes and not after six hours", async () => {

@@ -1,5 +1,6 @@
 import type { ModelSelection } from "@agentx/contracts";
-import type { ChatGptFallbackReason } from "@agentx/model-runtime";
+import type { ChatGptFallbackReason, ModelFallbackNotice } from "@agentx/model-runtime";
+import type { EventBatchSink } from "./events.js";
 import { createChatGptPiSessionAdapter, type PiSessionAdapter, type WorkspaceModelConfiguration } from "./pi-session.js";
 import { effectiveCacheRetention } from "./usage.js";
 
@@ -52,4 +53,16 @@ export async function resolveTaskSessionModel(
     });
   };
   return { model: resolveTaskModel(payload.chatgpt.model, environment), piAdapter: createChatGptPiSessionAdapter(chatGptToken, fallbackModel, report) };
+}
+
+/** MODEL3: the task-page note for a missing-key fallback, as one progress event; a failed post never fails the task. */
+export function modelFallbackReporter(sink: EventBatchSink): (notice: ModelFallbackNotice) => void {
+  let told = false;
+  return (notice) => {
+    if (told) return;
+    told = true;
+    void sink([{ type: "progress", payload: { message: `AgentX ${notice.text}.` }, timestamp: new Date().toISOString() }]).catch((error: unknown) => {
+      console.info(JSON.stringify({ event: "model_fallback_unreported", errorName: error instanceof Error ? error.name : "unknown" }));
+    });
+  };
 }

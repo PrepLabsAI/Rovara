@@ -60,7 +60,7 @@ function memoryAlertSecrets() {
 describe("init questions", () => {
   it("collects mixed providers and only a secret reference, and protects resumed answers", async () => {
     const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf";
-    const flags = { ...everyFlag, workerProvider: "openrouter", workerModel: "anthropic/claude-sonnet-4", openrouterSecretArn: secretArn, openrouterProviders: "anthropic" };
+    const flags = { ...everyFlag, workerProvider: "openrouter", workerModel: "anthropic/claude-sonnet-4.5", openrouterSecretArn: secretArn, openrouterProviders: "anthropic" };
     const { answers } = await collectWithFlags({ ...base, flags });
     expect(answers.models.providers).toEqual({ orchestrator: "amazon-bedrock", classifier: "amazon-bedrock", worker: "openrouter" });
     expect(answers.models.openRouter).toEqual({ secretArn, providers: ["anthropic"] });
@@ -256,7 +256,7 @@ describe("OpenRouter from init", () => {
   // The settings with OpenRouter as the provider, then the three OpenRouter model ids, the key, and the owner's type.
   const OPENROUTER_RUN = [
     ...settingsScript({ owner: "acme", advanced: { modelProvider: "openrouter", alertEmail: "ops@example.com" } }),
-    "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4", OPENROUTER_KEY, "",
+    "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4.5", OPENROUTER_KEY, "",
   ];
 
   it("choosing OpenRouter asks the three model ids and the key (hidden), and stores the raw key as agentx/<env>/openrouter with only its ARN in the answers", async () => {
@@ -270,7 +270,7 @@ describe("OpenRouter from init", () => {
     ]);
     expect(hidden).toEqual(["OpenRouter API key"]);
     expect(collected.answers.models).toEqual({
-      orchestrator: "qwen/qwen3-coder", classifier: "qwen/qwen3-coder", worker: "anthropic/claude-sonnet-4",
+      orchestrator: "qwen/qwen3-coder", classifier: "qwen/qwen3-coder", worker: "anthropic/claude-sonnet-4.5",
       providers: { orchestrator: "openrouter", classifier: "openrouter", worker: "openrouter" },
     });
     expect(JSON.stringify(collected.answers)).not.toContain(OPENROUTER_KEY);

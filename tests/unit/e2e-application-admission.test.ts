@@ -1,13 +1,22 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson } from "@agentx/contracts";
-import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
+import { type E2EScenario, E2EApplicationPlanIntentSchema, E2E_APPLICATION_ADMISSION_SCHEMA_V1, E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, E2E_MODEL_FREE_LIMITS, E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
+  WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson,
+  deriveE2EApplicationRuntimeAccountRef, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, e2eApplicationAccountDefinitionDigest, e2eRuntimeBindingKey, E2ESetupProposalSchema, createCandidateManifest, inspectE2ERepository, proposeE2ESetup, verifyE2ESetupProposal } from "@agentx/contracts";
+import { registryFor } from "../support/e2e-account-registry-fixtures.js";
+import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, e2eCompiledRuntime,
+  validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
 import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/broker/src/e2e/application-admission.js";
-import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
-import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
+import { ApplicationBaselineSkipped, ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
+import { baselineStartFailureReason } from "../../packages/broker/src/aws/workflow-e2e-baseline.js";
+import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
+import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
-import { binding, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { builtWebAndApiAdmission } from "../support/e2e-web-and-api-admission.js";
+import { PROFILE, anonymousScenario, anonymousTargetOf, binding, csvScenario, inferredSnapshot, oneAppWebAndApiFixture, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
+import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionNeedsModelFreeLimitsReader } from "../../packages/broker/src/aws/workflow-e2e-admission-schema.js";
 
 afterEach(disposeRealCandidates);
 const candidateOf = createRealCandidate;
@@ -15,9 +24,10 @@ const candidateOf = createRealCandidate;
 const ordersTree = { "package.json": ordersContractManifest, "src/orders.js": "export const orders = [];\n" };
 
 /** The selection the Owner approved: derived against the approved setup snapshot, as plan APPROVE records it. */
-function approvedSelection(fx: ReturnType<typeof planFixture>, rows = [webApiRow("web")], snapshot = fx.snapshot, intent = fx.intent) {
+function approvedSelection(fx: ReturnType<typeof planFixture>, rows = [webApiRow("web")], snapshot = fx.snapshot, intent = fx.intent, registry = fx.registry) {
   const result = evaluateApplicationPlanApproval({ intent, taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot,
-    setupProposal: fx.setup.proposal, setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now() });
+    setupProposal: fx.setup.proposal, setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now(),
+    accounts: { entries: registry, mode: "approve", pinned: [] } });
   if (!result.ok) throw new Error(result.reason);
   return result.selection;
 }
@@ -25,7 +35,8 @@ function approvedSelection(fx: ReturnType<typeof planFixture>, rows = [webApiRow
 function webAndApiSelection(fixture: ReturnType<typeof webAndApiFixture>) {
   const result = evaluateApplicationPlanApproval({ intent: fixture.build({ web: false, api: true }), taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) },
     snapshot: fixture.snapshot, setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy,
-    registeredRuntimes: [webApiRow("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now() });
+    registeredRuntimes: [webApiRow("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now(),
+    accounts: { entries: fixture.registry, mode: "approve", pinned: [] } });
   if (!result.ok) throw new Error(result.reason);
   return result.selection;
 }
@@ -36,7 +47,7 @@ async function inputs(overrides: Partial<ApplicationAdmissionInput> = {}, tree: 
   const base: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
     runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
     setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: binding,
-    buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), recordedSelection: approvedSelection(fx) };
+    buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection(fx) };
   return { fx, candidate, input: { ...base, ...overrides } };
 }
 const refusalOf = (build: () => unknown): string => {
@@ -71,6 +82,32 @@ describe("the application admission built for a single-kind round", () => {
     expect(decoded.round.groupBindings.every((item) => item.candidateDigest === candidate.source.candidate.digest && item.planDigest === input.planDigest)).toBe(true);
   });
 
+  it("admits the signed-out scenarios of an app with no project contract (Ruling AZ): the worker's decoder reads them back, bound to the fixed anonymous reference, with the lockfile in the build identity", async () => {
+    const target = anonymousTargetOf(inferredSnapshot);
+    const fx = planFixture({ snapshot: inferredSnapshot, targetId: target, scenario: anonymousScenario(target) });
+    // The candidate holds the very manifest and lockfile the setup was approved on, and the app itself.
+    const candidate = await candidateOf({ "package.json": inferredSnapshot.sources[0]!.bytes.toString(), "package-lock.json": "{}", "server.js": "// the app\n" });
+    const recorded = approvedSelection(fx, [webApiRow("web")], fx.snapshot, fx.intent, []);
+    const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+      runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: binding,
+      buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: [], recordedSelection: recorded };
+    const built = buildApplicationExecutionAdmission(input);
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    const validated = validateE2EApplicationExecutionAdmission(decoded);
+    expect(validated.applicationSuites).toHaveLength(1);
+    const application = fx.application.applicationId;
+    expect(recorded.accountRefs).toEqual([e2eAnonymousRuntimeAccountRef(application)]);
+    expect(validated.applicationSuites[0]!.expectedCases.map((item) => item.accountProfileId)).toEqual(["rovara-anonymous"]);
+    expect(validated.applicationSuites[0]!.expectedCases[0]!.targetId).toBe(target);
+    expect(decoded.selectionInput.runtimeAccountRefs).toEqual([e2eAnonymousRuntimeAccountRef(application)]);
+    // The inferred recipe carries `npm ci`, and the build identity names the lockfile it installs from.
+    const { approval, build } = decoded.applicationBindings[0]!.value;
+    expect(approval.applications[0]!.recipe.build.map((command) => [command.program, ...command.args])).toEqual([["npm", "ci"]]);
+    expect(build.lockfileRefs.map((ref) => ref.path)).toEqual(["package-lock.json"]);
+    expect(built.kinds).toEqual(["web"]);
+  });
+
   it("returns the per-group run ids and the admission digest that verification of the round needs", async () => {
     const { input } = await inputs();
     const built = buildApplicationExecutionAdmission(input);
@@ -81,7 +118,7 @@ describe("the application admission built for a single-kind round", () => {
     expect(built.groupRunIds.length).toBeGreaterThan(0);
     expect(new Set(built.groupRunIds).size).toBe(built.groupRunIds.length);
     expect(built.admissionDigest).toBe(decoded.admissionDigest);
-    expect(built.kind).toBe("web");
+    expect(built.kinds).toEqual(["web"]);
   });
 
   it("carries the exported build source reference and manifest, bound to the exported commit and tree", async () => {
@@ -132,7 +169,17 @@ describe("the application admission built for a single-kind round", () => {
     expect(decoded.modelRoute).toBeNull();
   });
 
-  it("passes the verifier only the READY row of the kind in use (Ruling BF), so a profile's web and api rows are never ambiguous", async () => {
+  it("carries the route the project's policy pinned (Task 4.2), identical in the run binding, and the worker's own validator accepts it", async () => {
+    const fx = planFixture({});
+    const { input } = await inputs({ policy: { ...fx.policy, modelRouteRevision: "r1-0123456789ab" } });
+    const built = buildApplicationExecutionAdmission(input);
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    expect(decoded.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: "r1-0123456789ab" });
+    expect(decoded.groups.every((group) => group.outerBinding.modelRouteRevision === "r1-0123456789ab")).toBe(true);
+    expect(() => validateE2EApplicationExecutionAdmission(decoded)).not.toThrow();
+  });
+
+  it("passes the verifier only the READY rows of the kinds in use, so a web-only plan carries no api row of its profile", async () => {
     const { input } = await inputs({ registeredRuntimes: [webApiRow("web"), webApiRow("api")] });
     const decoded = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission(input).bytes);
     expect(decoded.selectionInput.registeredRuntimes).toHaveLength(1);
@@ -147,9 +194,9 @@ describe("the application admission built for a single-kind round", () => {
     const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
       runId: randomUUID, intent: fixture.build({ web: false, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
       setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
-      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), recordedSelection: webAndApiSelection(fixture) };
+      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), accountEntries: fixture.registry, recordedSelection: webAndApiSelection(fixture) };
     const built = buildApplicationExecutionAdmission(input);
-    expect(built.kind).toBe("api");
+    expect(built.kinds).toEqual(["api"]);
     const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
     expect(decoded.launchTargets[0]).toMatchObject({ targetId: fixture.api.targetId, app: null });
     expect(decoded.selectionInput.registeredRuntimes.map((item) => item.capabilities.kind)).toEqual(["api"]);
@@ -169,16 +216,6 @@ describe("the application admission built for a single-kind round", () => {
 });
 
 describe("the builder refuses with a specific reason, never a portable fallback", () => {
-  it("refuses an intent whose executable targets span web and api (Ruling BF, defense in depth after approval)", async () => {
-    const fixture = webAndApiFixture();
-    const candidate = await candidateOf({ "package.json": ordersContractManifest, "api/package.json": Buffer.from(fixture.snapshot.sources.find((item) => item.path === "api/package.json")!.bytes).toString("utf8") });
-    const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
-      runId: randomUUID, intent: fixture.build({ web: true, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
-      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
-      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), recordedSelection: webAndApiSelection(fixture) };
-    expect(refusalOf(() => buildApplicationExecutionAdmission(input))).toContain("one runtime kind per plan in M1.2");
-  });
-
   it("refuses a manifest exported for another tree", async () => {
     const { input } = await inputs();
     const other = await candidateOf({ ...ordersTree, "src/extra.js": "export const extra = 1;\n" });
@@ -243,6 +280,77 @@ describe("the builder refuses with a specific reason, never a portable fallback"
     }
   });
 
+  describe("runs with the account refs the Owner approved, and refuses when the registry no longer holds exactly them (Task 3.1)", () => {
+    it("pins the approved ref into the admitted intent and the selection input", async () => {
+      const { input, fx } = await inputs();
+      const built = buildApplicationExecutionAdmission(input);
+      const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+      expect(input.recordedSelection.accountRefs).toEqual([fx.accountRef]);
+      expect(decoded.selectionInput.runtimeAccountRefs).toEqual([fx.accountRef]);
+      expect(decoded.intent.runtimeAccountRefs).toEqual([fx.accountRef]);
+    });
+
+    it("refuses with the accounts-changed text when the account has a newer revision, whatever the plan still carries", async () => {
+      const { input, fx } = await inputs();
+      const bumped = fx.registry.map((entry) => {
+        const definition = { ...entry.definition, revision: 2 };
+        return { definition, latest: { revision: 2, definitionDigest: e2eApplicationAccountDefinitionDigest(definition) } };
+      });
+      const message = refusalOf(() => buildApplicationExecutionAdmission({ ...input, accountEntries: bumped }));
+      expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+      expect(message).toContain("accounts-changed-reapprove");
+      expect(message).not.toMatch(/send the task back/i);
+    });
+
+    it("refuses when the registry holds nothing for an account that was approved from it", async () => {
+      const { input } = await inputs();
+      expect(refusalOf(() => buildApplicationExecutionAdmission({ ...input, accountEntries: [] }))).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+    });
+
+    it("refuses a registered definition that has expired by the time of dispatch", async () => {
+      const { input } = await inputs();
+      const message = refusalOf(() => buildApplicationExecutionAdmission({ ...input, now: Date.now() + 91 * 86_400_000 }));
+      expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+      expect(message).toMatch(/expired/);
+    });
+
+    it("refuses a definition whose tenant digest is not the contract's, although it is the latest and the one the Owner approved (registry tampering at dispatch)", async () => {
+      const fx = planFixture({});
+      const tampered = fx.registry.map((entry) => {
+        const definition = { ...entry.definition, tenantIdDigest: "f".repeat(64) };
+        return { definition, latest: { revision: definition.revision, definitionDigest: e2eApplicationAccountDefinitionDigest(definition) } };
+      });
+      const ref = deriveE2EApplicationRuntimeAccountRef(tampered[0]!.definition);
+      const { input } = await inputs({ accountEntries: tampered, recordedSelection: { ...approvedSelection(fx), accountRefs: [ref] } });
+      const message = refusalOf(() => buildApplicationExecutionAdmission(input));
+      expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+      expect(message).toContain("accounts-changed-reapprove");
+    });
+
+    it("refuses an account that expires before the round could end, as it does a runtime row, and builds once it outlives the round", async () => {
+      const soon = Date.now() - 90 * 86_400_000 + 30_000;
+      const short = registryFor(planFixture({}).snapshot, soon);
+      const ref = deriveE2EApplicationRuntimeAccountRef(short[0]!.definition);
+      const fx = planFixture({ accountRef: { definitionDigest: ref.definitionDigest } });
+      const { input } = await inputs({ intent: fx.intent, accountEntries: short, recordedSelection: approvedSelection(fx, [webApiRow("web")], fx.snapshot, fx.intent, short) });
+      const message = refusalOf(() => buildApplicationExecutionAdmission(input));
+      expect(message).toContain(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX);
+      expect(message).toMatch(/expires at .* before this round could end at .*register the project's setup again to renew it/);
+      const later = registryFor(planFixture({}).snapshot, Date.now() - 86_400_000);
+      const fxLater = planFixture({ accountRef: { definitionDigest: deriveE2EApplicationRuntimeAccountRef(later[0]!.definition).definitionDigest } });
+      const { input: ok } = await inputs({ intent: fxLater.intent, accountEntries: later, recordedSelection: approvedSelection(fxLater, [webApiRow("web")], fxLater.snapshot, fxLater.intent, later) });
+      expect(() => buildApplicationExecutionAdmission(ok)).not.toThrow();
+    });
+
+    it("reads an M1.2 record as it is: the recipe-derived ref in the plan, nothing pinned, nothing registered", async () => {
+      const fx = planFixture({ accountRef: deriveE2ESyntheticRuntimeAccountRef({ applicationId: planFixture({}).application.applicationId, accountProfileId: "synthetic",
+        recipeDigest: planFixture({}).application.recipe!.recipeDigest }) });
+      const { input } = await inputs({ intent: fx.intent, accountEntries: [], recordedSelection: { ...approvedSelection(planFixture({})), accountRefs: [], intentDigest: applicationIntentDigest(fx.intent) } });
+      const built = buildApplicationExecutionAdmission(input);
+      expect(decodeE2EApplicationExecutionAdmission(built.bytes).selectionInput.runtimeAccountRefs).toEqual([fx.accountRef]);
+    });
+  });
+
   it("states the right remedy for each refusal: the runtime's state asks for an administrator and retry, the candidate's problems for sending it back", async () => {
     const soon = webApiRow("web", { expiresAt: new Date(Date.now() + 30_000).toISOString() });
     const { input: expiringInput } = await inputs({ registeredRuntimes: [soon], recordedSelection: approvedSelection(planFixture({}), [soon]) });
@@ -277,5 +385,556 @@ describe("the builder refuses with a specific reason, never a portable fallback"
     const built = buildApplicationExecutionAdmission(input);
     const { admissionDigest, ...body } = built.admission;
     expect(admissionDigest).toBe(shaCanonical(body));
+  });
+});
+
+// Ruling CY (review F1): a setup proposal stored before the signed-out variants existed (`tests/fixtures/setup-proposals-before-task-3-3.json`, written by the code at ccee79e1 over
+// the fixture apps) keeps verifying and keeps dispatching. The variants are derived from the base targets whenever targets are read; none is stored.
+describe("setup proposals stored before Task 3.3", () => {
+  type Stored = { files: string[]; proposal: unknown; setupApproval: { artifactId: string; digest: string } };
+  const stored = JSON.parse(readFileSync(new URL("../fixtures/setup-proposals-before-task-3-3.json", import.meta.url), "utf8")) as Record<"inferred-web-app" | "orders-contract-app", Stored>;
+  const rootOf = { "inferred-web-app": "../fixtures/e2e-inferred-web-app/", "orders-contract-app": "../fixtures/e2e-web-api-app/" } as const;
+  const snapshotFor = (name: keyof typeof stored) => {
+    const candidate = createCandidateManifest([{ repositoryId: "example/demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
+    const sources = stored[name].files.map((path) => { const bytes = readFileSync(new URL(`${rootOf[name]}${path}`, import.meta.url)); return { path, bytes, sha256: createHash("sha256").update(bytes).digest("hex"), kind: "blob" as const }; });
+    return { candidate, commitSha: "a".repeat(40), treeSha: "b".repeat(40), treeComplete: true as const, treePaths: sources.map((item) => item.path).sort(), sources };
+  };
+
+  it.each(["inferred-web-app", "orders-contract-app"] as const)("verifies unchanged for the %s fixture, and the proposal made now is the stored one, byte for byte", (name) => {
+    const snapshot = snapshotFor(name);
+    const proposal = E2ESetupProposalSchema.parse(stored[name].proposal);
+    expect(verifyE2ESetupProposal(proposal, snapshot, snapshot.candidate)).toEqual(proposal);
+    expect(stored[name].setupApproval.digest).toBe(createHash("sha256").update(canonicalJson(proposal)).digest("hex"));
+    // The proposal made now holds the base targets alone and the recipe it always had.
+    const made = proposeE2ESetup({ inspection: inspectE2ERepository(snapshot, snapshot.candidate).inspection, snapshot, expectedCandidate: snapshot.candidate, readyProfiles: [{ kind: "web", profileId: PROFILE }] });
+    expect(canonicalJson(made)).toBe(canonicalJson(proposal));
+    expect(proposal.targets.map((target) => target.accountProfileId)).not.toContain("rovara-anonymous");
+  });
+
+  it("keeps an already-approved plan approvable and dispatchable on the stored proposal and the policy built from it", async () => {
+    const proposal = E2ESetupProposalSchema.parse(stored["orders-contract-app"].proposal);
+    const fx = planFixture({});
+    const policy = { ...fx.policy, targets: proposal.targets };
+    const setupApproval = stored["orders-contract-app"].setupApproval;
+    const approved = evaluateApplicationPlanApproval({ intent: fx.intent, taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: fx.snapshot,
+      setupProposal: proposal, setupApproval, policy, registeredRuntimes: [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now(),
+      accounts: { entries: fx.registry, mode: "approve", pinned: [] } });
+    if (!approved.ok) throw new Error(approved.reason);
+    const { input } = await inputs({ setupProposal: proposal, setupApproval, policy, recordedSelection: approved.selection });
+    const decoded = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission(input).bytes);
+    expect(validateE2EApplicationExecutionAdmission(decoded).applicationSuites).toHaveLength(1);
+    // The stored policy has no variant; the admission's carries the one derived from the base, on the base's runtime profile.
+    expect(policy.targets.map((target) => target.accountProfileId)).not.toContain("rovara-anonymous");
+    const admitted = decoded.selectionInput.policy.targets;
+    expect(admitted.map((target) => target.targetId)).toEqual([...policy.targets.map((target) => target.targetId), "web-1-anonymous"]);
+    expect(admitted.find((target) => target.targetId === "web-1-anonymous")).toMatchObject({ accountProfileId: "rovara-anonymous", runtimeProfileId: PROFILE });
+  });
+});
+
+// Ruling CX (the M1.3 -> M1.4 merge): a baseline round never runs agent steps and carries no model route, even where the project's policy pins one; a candidate round keeps it.
+// Ruling DD (Task 4.3a): a baseline of a plan that has AI navigation scenarios runs the rest of the plan under the model-free limits; a plan that is only such scenarios has none.
+describe("a baseline round's admission on a project whose policy pins a model route", () => {
+  const ROUTE = "r1-0123456789ab";
+  const ROUTE_LIMITS = e2eAgentRoutePolicyLimits(E2E_MODEL_ROUTE_DEFAULT_BUDGETS);
+  // RUN-1: what a round with no agent step runs under on a route-pinned policy: the normal limits, except that the policy's own startup and preparation limits (10 s, which nothing reads)
+  // stay, because a round never gets more than its policy allows. It used to be the 60 s run and 10 s case limits.
+  const ROUTE_NO_AGENT_LIMITS = { ...E2E_MODEL_FREE_LIMITS, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000 };
+  const agentScenario: E2EScenario = { ...csvScenario, scenarioId: "agent-orders", steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }],
+    assertions: [{ kind: "visible", testId: "orders", equals: true }] };
+  const agentRow = () => webApiRow("web", {}, (value) => ({ ...value, supportedSteps: [...value.supportedSteps, "agent" as const] }));
+  /** `plan`: "plain" (the csv scenario only), "mixed" (the csv scenario and an agent scenario), "agent-only" (the agent scenario alone). */
+  async function routed(options: { baseline: boolean; plan?: "plain" | "mixed" | "agent-only" }) {
+    const plan = options.plan ?? "plain";
+    const fx = planFixture({ modelRouteRevision: ROUTE, ...(plan === "mixed" ? { extraScenarios: [agentScenario] } : plan === "agent-only" ? { scenario: agentScenario } : {}) });
+    const candidate = await candidateOf(ordersTree);
+    const rows = [agentRow()];
+    // The policy of a project that pinned a route carries limits sized for agent steps.
+    const policy = { ...fx.policy, limits: ROUTE_LIMITS };
+    const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+      runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding,
+      buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection({ ...fx, policy }, rows),
+      ...(options.baseline ? { baseline: { baseCommitSha: candidate.snapshot.commitSha, attempt: 1 } } : {}) };
+    return () => buildApplicationExecutionAdmission(input);
+  }
+  const agentStepsOf = (built: ReturnType<typeof buildApplicationExecutionAdmission>) => createWorkflowE2EAdmissionAgentStepsReader({
+    s3: { send: async () => ({ Body: { transformToString: async () => built.bytes.toString("utf8") } }) }, bucket: "b" })({ schemaVersion: 1, kind: "application",
+    taskId: "11111111-1111-4111-8111-111111111111", workflowRevision: 7, candidateDigest: built.admission.candidateDigest, roundId: built.roundId, groupRunIds: built.groupRunIds,
+    admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } });
+  const agentScenarioIds = (decoded: ReturnType<typeof decodeE2EApplicationExecutionAdmission>) => decoded.bundle.scenarios.filter((scenario) => scenario.steps.some((step) => step.kind === "agent")).map((scenario) => scenario.scenarioId);
+
+  it("the candidate round carries the pinned route, and with an agent step its reference must say agentSteps (the positive controls)", async () => {
+    const decoded = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false }))().bytes);
+    expect(decoded.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: ROUTE });
+    expect(decoded.round.groupBindings.every((item) => item.modelRouteRevision === ROUTE)).toBe(true);
+    const withAgent = (await routed({ baseline: false, plan: "mixed" }))();
+    expect(decodeE2EApplicationExecutionAdmission(withAgent.bytes).executionPlan.unavailableCriteria).toEqual([]);
+    await expect(agentStepsOf(withAgent)).resolves.toBe(true);
+  });
+
+  it("names the agent steps of a compiled group by case and step index, and a group with none uses no model (the helpers the model channel is decided by)", async () => {
+    const plain = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "plain" }))().bytes)).applicationSuites[0]!;
+    expect(e2eApplicationGroupAgentSteps(plain)).toEqual([]);
+    expect(e2eApplicationGroupUsesModel(plain)).toBe(false);
+    const mixed = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "mixed" }))().bytes)).applicationSuites[0]!;
+    const agentCase = mixed.expectedCases.find((item) => item.scenarioId === "agent-orders")!;
+    expect(e2eApplicationGroupAgentSteps(mixed)).toEqual([{ caseId: agentCase.caseId, stepIndex: 0 }]);
+    expect(e2eApplicationGroupUsesModel(mixed)).toBe(true);
+  });
+
+  // Checklist 3: an admission the control plane wrote before Task 4.3a (tests/fixtures/admission-before-task-4-3a.json, written by the code at the commit before step 8 of Task 4.3a: a
+  // route-pinned policy with agent-sized limits, a round with no agent step) was admitted with the policy's limits for its round and its shards. The new worker still validates it.
+  describe("an admission written before Task 4.3a", () => {
+    const stored = () => readFileSync(new URL("../fixtures/admission-before-task-4-3a.json", import.meta.url));
+
+    it("is a route-pinned no-agent round under the policy's own (agent-sized) limits, and the worker's validator still accepts it", () => {
+      const decoded = decodeE2EApplicationExecutionAdmission(stored());
+      expect(decoded.policy.modelRouteRevision).toBe(ROUTE);
+      expect(decoded.round.limits).toEqual(ROUTE_LIMITS);
+      expect(decoded.round.limits).not.toEqual(E2E_MODEL_FREE_LIMITS);
+      expect(agentScenarioIds(decoded)).toEqual([]);
+      const validated = validateE2EApplicationExecutionAdmission(decoded);
+      expect(validated.applicationSuites).toHaveLength(1);
+    });
+
+    // tests/fixtures/admission-before-task-4-3a-web-and-api.json: written by the real builder at ed7fc431 (M1.4 with Task 3.4, before Task 4.3a) for one app's web and API
+    // scenarios on a route-pinned policy with agent-sized limits. Version 2, rows keyed by profile and kind, one group per kind, neither with an agent step.
+    it("a version 2 admission of a web and API plan (Task 3.4) written before Task 4.3a still validates, for both of its groups", () => {
+      const decoded = decodeE2EApplicationExecutionAdmission(readFileSync(new URL("../fixtures/admission-before-task-4-3a-web-and-api.json", import.meta.url)));
+      expect(decoded.schemaVersion).toBe(E2E_APPLICATION_ADMISSION_SCHEMA_V2);
+      expect(decoded.runtimeBindings.map((item) => item.key)).toEqual([e2eRuntimeBindingKey(PROFILE, "api"), e2eRuntimeBindingKey(PROFILE, "web")]);
+      expect(decoded.policy.modelRouteRevision).toBe(ROUTE);
+      expect(decoded.round.limits).toEqual(ROUTE_LIMITS);
+      expect(agentScenarioIds(decoded)).toEqual([]);
+      const validated = validateE2EApplicationExecutionAdmission(decoded);
+      expect(validated.applicationSuites.map((suite) => suite.runtimeKind).sort()).toEqual(["api", "web"]);
+      expect(validated.applicationSuites.every((suite) => !e2eApplicationGroupUsesModel(suite))).toBe(true);
+    });
+
+    it("is refused when its round no longer says it ran under the policy's limits (the allowance is for admissions that did, not a way around the model-free limits)", () => {
+      const { admissionDigest: _digest, ...body } = JSON.parse(stored().toString("utf8")) as { round: { limits: { caseTimeoutMs: number } }; admissionDigest: string };
+      void _digest;
+      // A round that ran under narrower limits than its policy (still within it) is not the older shape: its shards are compiled under the current rule and no longer match.
+      body.round.limits = { ...body.round.limits, caseTimeoutMs: body.round.limits.caseTimeoutMs - 1 };
+      // Sealed again, so the refusal is the shard comparison and not the digest.
+      const resealed = { ...body, admissionDigest: createHash("sha256").update(canonicalJson(body)).digest("hex") };
+      expect(() => validateE2EApplicationExecutionAdmission(resealed)).toThrow(/differs from fresh shard compilation/);
+    });
+
+    it("is not what the current control plane writes: a candidate round of the same plan carries the model-free limits and validates too (the positive control)", async () => {
+      const built = (await routed({ baseline: false, plan: "plain" }))();
+      expect(built.admission.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
+      expect(() => validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(built.bytes))).not.toThrow();
+    });
+  });
+
+  // Fix round 1 (Ruling DV): the dispatcher reads the admission to decide whether the worker must list task.workflowE2EModelFreeLimits.v1: only a route-pinned policy's round with a scenario that
+  // has no agent step relies on the normal limits for it.
+  describe("whether an admission relies on the normal no-model limits (the dispatcher's read)", () => {
+    const reliesOn = (built: ReturnType<typeof buildApplicationExecutionAdmission>) => createWorkflowE2EAdmissionNeedsModelFreeLimitsReader({
+      s3: { send: async () => ({ Body: { transformToString: async () => built.bytes.toString("utf8") } }) }, bucket: "b" })({ schemaVersion: 1, kind: "application",
+      taskId: "11111111-1111-4111-8111-111111111111", workflowRevision: 7, candidateDigest: built.admission.candidateDigest, roundId: built.roundId, groupRunIds: built.groupRunIds,
+      admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } });
+
+    it("is true for a route-pinned round with a scenario that has no agent step, and false when every scenario has one", async () => {
+      await expect(reliesOn((await routed({ baseline: false, plan: "plain" }))())).resolves.toBe(true);
+      await expect(reliesOn((await routed({ baseline: false, plan: "mixed" }))())).resolves.toBe(true);
+      await expect(reliesOn((await routed({ baseline: false, plan: "agent-only" }))())).resolves.toBe(false);
+    });
+
+    it("is false for a baseline round (its policy pins no route) and for a policy that pins none", async () => {
+      await expect(reliesOn((await routed({ baseline: true, plan: "plain" }))())).resolves.toBe(false);
+      const fx = planFixture({});
+      const candidate = await candidateOf(ordersTree);
+      const rows = [webApiRow("web")];
+      const built = buildApplicationExecutionAdmission({ taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+        runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+        setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource,
+        planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection(fx, rows) });
+      await expect(reliesOn(built)).resolves.toBe(false);
+    });
+
+    it("answers undefined when the object is not the admission the reference names", async () => {
+      const built = (await routed({ baseline: false, plan: "plain" }))();
+      const reader = createWorkflowE2EAdmissionNeedsModelFreeLimitsReader({ s3: { send: async () => ({ Body: { transformToString: async () => "{}" } }) }, bucket: "b" });
+      await expect(reader({ schemaVersion: 1, kind: "application", taskId: "11111111-1111-4111-8111-111111111111", workflowRevision: 7, candidateDigest: built.admission.candidateDigest,
+        roundId: built.roundId, groupRunIds: built.groupRunIds, admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } })).resolves.toBeUndefined();
+    });
+  });
+
+  // Evaluation fix RUN-1 (checklist 3): the control plane before it admitted a route-pinned round with no agent step under the 60 s run and 10 s case limits, and compiled each shard with no
+  // agent step under the same cap. The fixtures are admissions written by the real builder at 38b55645 (before RUN-1): a plain plan, and a web plan with an AI navigation scenario plus an
+  // API plan (the round keeps the policy's agent-sized limits, while the API shard, which has no agent step, was compiled under the 10 s case limit).
+  describe("an admission written before the evaluation fix RUN-1", () => {
+    const stored = (name: string) => readFileSync(new URL(`../fixtures/${name}`, import.meta.url));
+    const rules = (validated: ReturnType<typeof validateE2EApplicationExecutionAdmission>) => Object.fromEntries(validated.applicationSuites
+      .map((suite) => [suite.runtimeKind, suite.runtimeAdmissionContext.modelFreeShardRule ?? "current"]));
+
+    it("a route-pinned round with no agent step, written under the 60 s / 10 s limits, still validates, on the earlier rule", () => {
+      const decoded = decodeE2EApplicationExecutionAdmission(stored("admission-before-run-1-route-pinned-plain.json"));
+      expect(decoded.policy.modelRouteRevision).toBe(ROUTE);
+      expect(decoded.round.limits).toEqual(E2E_MODEL_FREE_LIMITS_BEFORE_RUN_1);
+      expect(decoded.round.limits).not.toEqual(ROUTE_NO_AGENT_LIMITS);
+      expect(agentScenarioIds(decoded)).toEqual([]);
+      expect(rules(validateE2EApplicationExecutionAdmission(decoded))).toEqual({ web: "before-run-1" });
+    });
+
+    it("a web plan with an AI navigation scenario and an API plan validates: the web shard on the current rule, the API shard (no agent step) on the earlier one", () => {
+      const decoded = decodeE2EApplicationExecutionAdmission(stored("admission-before-run-1-web-agent-and-api.json"));
+      expect(decoded.round.limits).toEqual(ROUTE_LIMITS);
+      expect(agentScenarioIds(decoded)).toEqual(["owner-agent-page"]);
+      expect(rules(validateE2EApplicationExecutionAdmission(decoded))).toEqual({ web: "current", api: "before-run-1" });
+    });
+
+    it("is not accepted on any other terms: a shard digest that matches neither rule is refused with the current rule's reason", () => {
+      const { admissionDigest: _digest, ...body } = JSON.parse(stored("admission-before-run-1-route-pinned-plain.json").toString("utf8")) as { groups: Array<{ shards: Array<{ configDigest: string }> }>; admissionDigest: string };
+      void _digest;
+      const original = body.groups[0]!.shards[0]!.configDigest;
+      body.groups[0]!.shards[0]!.configDigest = `${original[0] === "a" ? "b" : "a"}${original.slice(1)}`;
+      const resealed = { ...body, admissionDigest: createHash("sha256").update(canonicalJson(body)).digest("hex") };
+      expect(() => validateE2EApplicationExecutionAdmission(resealed)).toThrow(/differs from fresh shard compilation/);
+    });
+
+    it("is not what the current control plane writes: a candidate round of the same plan gets the normal limits and a 600 s deadline, and validates on the current rule (the positive control)", async () => {
+      const built = (await routed({ baseline: false, plan: "plain" }))();
+      expect(built.admission.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
+      expect(Date.parse(built.admission.round.deadlineAt) - Date.parse(built.admission.round.admittedAt)).toBe(600_000);
+      expect(rules(validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(built.bytes)))).toEqual({ web: "current" });
+    });
+  });
+
+  it("the baseline round carries modelRoute null and group bindings with modelRouteRevision null, the worker's validator accepts it, it has no agent scenario, and its round limits are the model-free limits (case 13)", async () => {
+    for (const plan of ["plain", "mixed"] as const) {
+      const built = (await routed({ baseline: true, plan }))();
+      const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+      expect(decoded.baseline).toMatchObject({ purpose: "baseline" });
+      expect(decoded.modelRoute).toBeNull();
+      expect(decoded.policy.modelRouteRevision).toBeNull();
+      expect(decoded.round.groupBindings.length).toBeGreaterThan(0);
+      expect(decoded.round.groupBindings.every((item) => item.modelRouteRevision === null)).toBe(true);
+      expect(agentScenarioIds(decoded), plan).toEqual([]);
+      expect(decoded.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
+      expect(decoded.policy.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
+      expect(() => validateE2EApplicationExecutionAdmission(decoded)).not.toThrow();
+      await expect(agentStepsOf(built)).resolves.toBe(false);
+    }
+  });
+
+  it("a baseline of a plan with an AI navigation scenario drops that scenario and runs the rest, instead of being refused whole (Ruling DD)", async () => {
+    const built = (await routed({ baseline: true, plan: "mixed" }))();
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    expect(decoded.bundle.scenarios.map((scenario) => scenario.scenarioId)).toEqual(["export-csv"]);
+    expect(decoded.intent.scenarios.map((scenario) => scenario.scenarioId)).toEqual(["export-csv"]);
+    expect(decoded.executionPlan.groups.flatMap((group) => group.expectedCases.map((item) => item.scenarioId))).toEqual(["export-csv"]);
+    // The candidate round of the same plan keeps both scenarios, under the agent-sized limits (the positive control).
+    const candidate = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "mixed" }))().bytes);
+    expect(candidate.bundle.scenarios.map((scenario) => scenario.scenarioId).sort()).toEqual(["agent-orders", "export-csv"]);
+    expect(candidate.round.limits).toEqual(ROUTE_LIMITS);
+  });
+
+  it("a baseline names the AI navigation scenarios it leaves out, by id and title; a candidate round and a plan with none leave out nothing (Task 4.4c)", async () => {
+    expect((await routed({ baseline: true, plan: "mixed" }))().skippedAiScenarios).toEqual([{ scenarioId: "agent-orders", title: "Agent orders" }]);
+    expect((await routed({ baseline: false, plan: "mixed" }))().skippedAiScenarios).toEqual([]);
+    expect((await routed({ baseline: true, plan: "plain" }))().skippedAiScenarios).toEqual([]);
+    expect((await routed({ baseline: false, plan: "agent-only" }))().skippedAiScenarios).toEqual([]);
+  });
+
+  it("a baseline of a plan that is only AI navigation scenarios has nothing to run: it is skipped with its own reason, which is not a refusal of the plan", async () => {
+    const build = await routed({ baseline: true, plan: "agent-only" });
+    let failure: unknown;
+    try { build(); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(ApplicationBaselineSkipped);
+    expect(failure).not.toBeInstanceOf(ApplicationDispatchRefusal);
+    expect((failure as ApplicationBaselineSkipped).reason).toBe("agent-steps-only");
+    expect(baselineStartFailureReason(failure)).toBe("agent-steps-only");
+    expect(baselineStartFailureReason(new ApplicationDispatchRefusal("refused"))).toBe("refused");
+    expect(baselineStartFailureReason(new Error("boom"))).toBe("start-failed");
+    // The candidate round of the same plan is admitted: the baseline is the only thing that is skipped.
+    expect(decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "agent-only" }))().bytes).bundle.scenarios.map((scenario) => scenario.scenarioId)).toEqual(["agent-orders"]);
+  });
+
+  it("a candidate round of a route-pinned project with no AI navigation step runs under the model-free limits, and with one keeps the agent-sized limits", async () => {
+    const plain = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "plain" }))().bytes);
+    expect(plain.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
+    expect(plain.policy.limits).toEqual(ROUTE_LIMITS);
+    const mixed = decodeE2EApplicationExecutionAdmission((await routed({ baseline: false, plan: "mixed" }))().bytes);
+    expect(mixed.round.limits).toEqual(ROUTE_LIMITS);
+  });
+
+  it("a project that pinned no route keeps the limits it was approved with, whatever they are", async () => {
+    const fx = planFixture({});
+    const candidate = await candidateOf(ordersTree);
+    const rows = [webApiRow("web")];
+    const limits = { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 180_000, caseTimeoutMs: 90_000, maxActionsPerCase: 30, maxModelRequests: 60, maxInputTokens: 200_000, maxOutputTokens: 20_000, maxSpendUsd: null };
+    const policy = { ...fx.policy, limits };
+    const built = buildApplicationExecutionAdmission({ taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+      runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource,
+      planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection({ ...fx, policy }, rows) });
+    expect(decodeE2EApplicationExecutionAdmission(built.bytes).round.limits).toEqual(limits);
+  });
+
+  // Task 3.4 x 4.3a: a web and API plan has one group per kind, and the model channel is the web group's alone. A baseline drops the web group's AI navigation scenario and keeps
+  // the rest of both groups, with no route; a candidate round pins the route for the web group only.
+  it("a web and API plan with an AI navigation scenario on its web target: the decisions are per group, and its baseline drops only that scenario (Rulings CX and DD)", async () => {
+    const fx = oneAppWebAndApiFixture();
+    const agentWeb: E2EScenario = { ...fx.webScenario, scenarioId: "owner-agent-page", steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }],
+      assertions: [{ kind: "visible", testId: "orders", equals: true }] };
+    const intent = fx.build({ web: true, api: true }, [fx.webScenario, agentWeb, fx.apiScenario]);
+    const policy = { ...fx.policy, modelRouteRevision: ROUTE, limits: ROUTE_LIMITS };
+    const rows = () => [agentRow(), webApiRow("api")];
+    const artifact = { id: "feature-plan", sha256: "1".repeat(64) };
+    const approved = evaluateApplicationPlanApproval({ intent, taskId: "11111111-1111-4111-8111-111111111111", artifact, snapshot: fx.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy, registeredRuntimes: rows(), runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now(),
+      accounts: { entries: fx.registry, mode: "approve", pinned: [] } });
+    if (!approved.ok) throw new Error(approved.reason);
+    const candidate = await candidateOf({ "package.json": fx.manifest });
+    const build = (baseline: boolean) => decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission({ taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(),
+      operationFence: 3, workflowRevision: 7, roundId: randomUUID(), runId: randomUUID, intent, artifact, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy, registeredRuntimes: rows(), runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource,
+      planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approved.selection,
+      ...(baseline ? { baseline: { baseCommitSha: candidate.snapshot.commitSha, attempt: 1 } } : {}) }).bytes);
+    const usesModelByKind = (decoded: ReturnType<typeof decodeE2EApplicationExecutionAdmission>) => Object.fromEntries(validateE2EApplicationExecutionAdmission(decoded).applicationSuites
+      .map((suite) => [suite.runtimeKind, e2eApplicationGroupUsesModel(suite)]));
+
+    const roundOf = build(false);
+    expect(roundOf.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: ROUTE });
+    expect(roundOf.round.limits).toEqual(ROUTE_LIMITS);
+    expect(usesModelByKind(roundOf)).toEqual({ web: true, api: false });
+    // Written now, no group needs the earlier model-free rule (RUN-1).
+    expect(validateE2EApplicationExecutionAdmission(roundOf).applicationSuites.every((suite) => suite.runtimeAdmissionContext.modelFreeShardRule === undefined)).toBe(true);
+
+    const baselineOf = build(true);
+    expect(baselineOf.modelRoute).toBeNull();
+    expect(baselineOf.round.groupBindings).toHaveLength(2);
+    expect(baselineOf.round.groupBindings.every((item) => item.modelRouteRevision === null)).toBe(true);
+    expect(baselineOf.round.limits).toEqual(ROUTE_NO_AGENT_LIMITS);
+    expect(agentScenarioIds(baselineOf)).toEqual([]);
+    expect(baselineOf.bundle.scenarios.map((scenario) => scenario.scenarioId).sort()).toEqual([fx.apiScenario.scenarioId, fx.webScenario.scenarioId].sort());
+    expect(usesModelByKind(baselineOf)).toEqual({ web: false, api: false });
+  });
+});
+
+// M1.4 Task 4.6b: an audit replay's admission. The same candidate, plan and accounts, with no model route, the policy as it was pinned (so the AI navigation steps compile and keep the limits
+// sized for them), and the recordings and the source round's facts signed in.
+describe("an audit replay's admission on a project whose policy pins a model route (Task 4.6b)", () => {
+  const ROUTE = "r1-0123456789ab";
+  const ROUTE_LIMITS = e2eAgentRoutePolicyLimits(E2E_MODEL_ROUTE_DEFAULT_BUDGETS);
+  const agentScenario: E2EScenario = { ...csvScenario, scenarioId: "agent-orders", steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] };
+  const agentRow = () => webApiRow("web", {}, (value) => ({ ...value, supportedSteps: [...value.supportedSteps, "agent" as const] }));
+  const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+  const recording = (caseId: string, stepIndex: number, hidden = false) => {
+    const trace = { actions: [{ name: "tap", summary: "The tap action.", target: { role: "button", name: "Orders", testId: "orders" } }], summary: "The recorded AI navigation concluded.",
+      executor: { name: "rovara-e2e-agent", version: "1" }, startPath: "/", endPath: "/", ...(hidden ? { endAnchors: [{ role: "textbox", name: "q", value: `hmac-sha256:${sha("v")}` }] } : {}) };
+    const keyHash = sha(`${caseId}:${stepIndex}`);
+    return { caseId, stepIndex, keyHash, traceBase64: Buffer.from(JSON.stringify({ schemaVersion: "rovara-agent-trace-file/v1", keyHash, trace })).toString("base64"),
+      binding: { schemaVersion: "rovara-agent-trace/v1" as const, runId: randomUUID(), caseId, stepIndex, traceSha256: sha(canonicalJson(trace)), ledgerSha256: sha("ledger"), actionCount: 1 } };
+  };
+  async function setup() {
+    const fx = planFixture({ modelRouteRevision: ROUTE, extraScenarios: [agentScenario] });
+    const candidate = await candidateOf(ordersTree);
+    const rows = [agentRow()];
+    const policy = { ...fx.policy, limits: ROUTE_LIMITS };
+    const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
+      runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
+      setupApproval: fx.setup.setupApproval, policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding,
+      buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), accountEntries: fx.registry, recordedSelection: approvedSelection({ ...fx, policy }, rows) };
+    const candidateRound = buildApplicationExecutionAdmission(input);
+    const cases = candidateRound.admission.round.groupBindings.flatMap((group) => group.expectedCases);
+    const agentCase = cases.find((item) => item.scenarioId === "agent-orders")!;
+    const replayOf = (overrides: Record<string, unknown> = {}) => ({ sourceRoundId: randomUUID(), sourceAdmissionSha256: sha("source admission"), sourceEvidenceSha256: sha("source evidence"), attempt: 1,
+      sourceCases: cases.map((item) => ({ caseId: item.caseId, assertionOutcomes: item.assertionDigests.map(() => "passed" as const), csvSha256: null })),
+      traces: [recording(agentCase.caseId, 0)], ...overrides });
+    return { input, candidateRound, cases, agentCase, replayOf, replayRound: (overrides: Record<string, unknown> = {}) => buildApplicationExecutionAdmission({ ...input, replay: replayOf(overrides) }) };
+  }
+
+  it("names no model route, keeps the policy's route revision in the run bindings and its agent-sized limits, and signs the recordings and the source round's facts", async () => {
+    const s = await setup();
+    const replay = s.replayRound();
+    const decoded = decodeE2EApplicationExecutionAdmission(replay.bytes);
+    expect(decoded.modelRoute).toBeNull();
+    expect(decoded.replay?.purpose).toBe("replay");
+    expect(decoded.replay?.traces).toHaveLength(1);
+    expect(decoded.policy.modelRouteRevision).toBe(ROUTE);
+    expect(decoded.round.groupBindings.every((item) => item.modelRouteRevision === ROUTE)).toBe(true);
+    expect(decoded.round.limits).toEqual(ROUTE_LIMITS);
+    // Control: the same plan as a candidate round pins the route, and signs no replay.
+    expect(s.candidateRound.admission.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: ROUTE });
+    expect(s.candidateRound.admission.replay).toBeUndefined();
+    expect(replay.admissionDigest).not.toBe(s.candidateRound.admissionDigest);
+  });
+
+  it("is accepted by the worker's own decoder and validator, and its agent group uses no model channel (the candidate's does), with its own config digest", async () => {
+    const s = await setup();
+    const replay = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(s.replayRound().bytes)).applicationSuites[0]!;
+    const candidate = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(s.candidateRound.bytes)).applicationSuites[0]!;
+    expect(e2eApplicationGroupAgentSteps(replay)).toEqual(e2eApplicationGroupAgentSteps(candidate));
+    expect(e2eApplicationGroupUsesModel(replay)).toBe(false);
+    expect(e2eApplicationGroupUsesModel(candidate)).toBe(true);
+    expect(replay.runtimeAdmissionContext.modelRoute).toBeNull();
+    expect(replay.shards[0]!.expectedConfigDigest).not.toBe(candidate.shards[0]!.expectedConfigDigest);
+    // Every case id is the candidate round's: a case id does not depend on the kind of round.
+    expect(replay.expectedCases.map((item) => item.caseId)).toEqual(candidate.expectedCases.map((item) => item.caseId));
+  });
+
+  it("is not a model round to the dispatcher: the reader that holds a reference's agentSteps flag to its admission answers no for a replay and yes for the candidate round", async () => {
+    const s = await setup();
+    const reader = (built: { bytes: Buffer; sha256: string }) => createWorkflowE2EAdmissionAgentStepsReader({ s3: { send: async () => ({ Body: { transformToString: async () => built.bytes.toString("utf8") } }) }, bucket: "b" })({
+      schemaVersion: 1, kind: "application", taskId: "11111111-1111-4111-8111-111111111111", workflowRevision: 7, candidateDigest: "a".repeat(64), roundId: randomUUID(), groupRunIds: [randomUUID()],
+      admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } });
+    await expect(reader(s.replayRound())).resolves.toBe(false);
+    await expect(reader(s.candidateRound)).resolves.toBe(true);
+  });
+
+  it("refuses, before anything is stored, a recording for a case this candidate would not run, source facts for other cases, and a round that is both a baseline and a replay", async () => {
+    const s = await setup();
+    expect(refusalOf(() => s.replayRound({ traces: [recording("case-that-does-not-exist", 0)] }))).toMatch(/replay-source-unavailable/);
+    expect(refusalOf(() => s.replayRound({ sourceCases: [{ caseId: "other", assertionOutcomes: ["passed"], csvSha256: null }] }))).toMatch(/replay-source-unavailable/);
+    expect(refusalOf(() => buildApplicationExecutionAdmission({ ...s.input, replay: s.replayOf(), baseline: { baseCommitSha: s.input.snapshot.commitSha, attempt: 1 } }))).toMatch(/baseline or a replay/);
+  });
+
+  it("refuses a recording that is not the one its binding digests, or that is not for an AI navigation step, when the worker's validator reads the admission", async () => {
+    const s = await setup();
+    const good = recording(s.agentCase.caseId, 0);
+    const other = recording(s.agentCase.caseId, 0, true);
+    // The file of one recording under the binding of another: the trace's digest is not the binding's.
+    expect(() => s.replayRound({ traces: [{ ...good, traceBase64: other.traceBase64 }] })).toThrow(/did not validate|binding digests|key/);
+    // A step that is not an agent step of the case.
+    expect(() => s.replayRound({ traces: [recording(s.agentCase.caseId, 1)] })).toThrow(/did not validate|AI navigation step/);
+    // A recording of the contract with a binding that counts other actions than the file holds.
+    expect(() => s.replayRound({ traces: [{ ...good, binding: { ...good.binding, actionCount: 2 } }] })).toThrow(/did not validate|binding digests/);
+  });
+
+  it("does not move a candidate round: the same input without `replay` builds exactly the admission it built before (no replay key, the pinned route, the model channel for the agent group)", async () => {
+    const s = await setup();
+    const decoded = decodeE2EApplicationExecutionAdmission(s.candidateRound.bytes);
+    expect("replay" in decoded).toBe(false);
+    expect(decoded.modelRoute).toEqual({ routeId: "rovara-e2e-default", routeRevision: ROUTE });
+    expect(validateE2EApplicationExecutionAdmission(decoded).applicationSuites.some((suite) => e2eApplicationGroupUsesModel(suite))).toBe(true);
+  });
+});
+
+describe("an admission for a plan that runs web and API checks together (Task 3.4)", () => {
+  const BOTH_ROWS = () => [webApiRow("web"), webApiRow("api")];
+  const sha256Of = (value: string) => createHash("sha256").update(value).digest("hex");
+  /** The approval of a plan on one app's web and API targets, and the admission dispatch builds for it from the candidate. */
+  async function oneApp() {
+    const { fx, intent, approved, candidate, input } = await builtWebAndApiAdmission();
+    return { fx, intent, approved, candidate, input };
+  }
+  /** The same admission re-signed with an edit, as the broker's own writer would have written it (the digest is over everything else); the bytes are not checked by the schema on the way out. */
+  function resigned(admission: ReturnType<typeof decodeE2EApplicationExecutionAdmission>, edit: (body: Record<string, unknown>) => void): Buffer {
+    const { admissionDigest: _digest, ...body } = admission;
+    void _digest;
+    const edited = JSON.parse(JSON.stringify(body)) as Record<string, unknown>;
+    edit(edited);
+    return Buffer.from(canonicalJson({ ...edited, admissionDigest: sha256Of(canonicalJson(edited)) }), "utf8");
+  }
+  /** What the previous code wrote for a plan of one kind: schema version 1, and each runtime row keyed by its profile alone. */
+  const asWrittenByVersion1 = (admission: ReturnType<typeof decodeE2EApplicationExecutionAdmission>) => resigned(admission, (body) => {
+    body.schemaVersion = E2E_APPLICATION_ADMISSION_SCHEMA_V1;
+    body.runtimeBindings = admission.runtimeBindings.map((item) => ({ key: item.value.profileId, value: item.value }));
+  });
+
+  it("builds one admission for an app with a web and an API target: schema version 2, a runtime row per kind, and a group for each kind", async () => {
+    const { input, intent, approved } = await oneApp();
+    const built = buildApplicationExecutionAdmission(input);
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    expect(decoded.schemaVersion).toBe(E2E_APPLICATION_ADMISSION_SCHEMA_V2);
+    expect(built.kinds).toEqual(["api", "web"]);
+    expect(decoded.runtimeBindings.map((item) => item.key)).toEqual([e2eRuntimeBindingKey(PROFILE, "api"), e2eRuntimeBindingKey(PROFILE, "web")]);
+    expect(decoded.runtimeBindings.map((item) => item.value.capabilities.kind)).toEqual(["api", "web"]);
+    expect(decoded.selectionInput.registeredRuntimes.map((item) => item.capabilities.kind).sort()).toEqual(["api", "web"]);
+    // One application, built once for both kinds.
+    expect(decoded.applicationBindings).toHaveLength(1);
+    expect(decoded.applicationBindings[0]!.value.build.outputs.map((output) => output.platform).sort()).toEqual(["api", "web"]);
+    // Two groups (a group never mixes kinds), each compiled against the row of its own kind, and the worker's own validator accepts the whole.
+    const validated = validateE2EApplicationExecutionAdmission(decoded);
+    expect(validated.applicationSuites).toHaveLength(2);
+    expect(decoded.groups).toHaveLength(2);
+    expect(built.groupRunIds).toHaveLength(2);
+    expect(validated.applicationSuites.map((suite) => suite.runtimeKind).sort()).toEqual(["api", "web"]);
+    for (const suite of validated.applicationSuites) {
+      expect(e2eCompiledRuntime(suite)?.capabilities.kind, suite.group.groupId).toBe(suite.runtimeKind);
+      const kindsOfTargets = new Set(suite.group.targetIds.map((targetId) => validated.executionPlan.effectiveTargets.find((target) => target.targetId === targetId)!.kind));
+      expect([...kindsOfTargets]).toEqual([suite.runtimeKind]);
+    }
+    expect(decoded.launchTargets.map((target) => target.app === null)).toContain(true);
+    expect(decoded.launchTargets.map((target) => target.app === null)).toContain(false);
+    // The FX3 lesson: the parsed approved intent is the admission's intent (with the approval's pinned account refs), and the digest the approval recorded is the plan's.
+    expect(canonicalJson(decoded.intent)).toBe(canonicalJson(applicationIntentWithAccountRefs(applicationRoundIntent(E2EApplicationPlanIntentSchema.parse(JSON.parse(JSON.stringify(intent)))), approved.accountRefs)));
+    expect(decoded.intentDigest).toBe(sha256Of(canonicalJson(decoded.intent)));
+    expect(applicationIntentDigest(intent)).toBe(approved.selection.intentDigest);
+  });
+
+  it("builds one admission for a web app and an API app, each with its own row", async () => {
+    const fixture = webAndApiFixture();
+    const candidate = await candidateOf({ "package.json": ordersContractManifest, "api/package.json": Buffer.from(fixture.snapshot.sources.find((item) => item.path === "api/package.json")!.bytes).toString("utf8") });
+    const intent = fixture.build({ web: true, api: true });
+    const approved = evaluateApplicationPlanApproval({ intent, taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: fixture.snapshot,
+      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: BOTH_ROWS(), runtimeCatalogId: "catalog", runtimeBinding: binding,
+      now: Date.now(), accounts: { entries: fixture.registry, mode: "approve", pinned: [] } });
+    if (!approved.ok) throw new Error(approved.reason);
+    const built = buildApplicationExecutionAdmission({ taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
+      runId: randomUUID, intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval,
+      policy: fixture.policy, registeredRuntimes: BOTH_ROWS(), runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(),
+      accountEntries: fixture.registry, recordedSelection: approved.selection });
+    const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
+    expect(built.kinds).toEqual(["api", "web"]);
+    expect(decoded.applicationBindings).toHaveLength(2);
+    expect(decoded.runtimeBindings.map((item) => item.key)).toEqual([e2eRuntimeBindingKey(PROFILE, "api"), e2eRuntimeBindingKey(PROFILE, "web")]);
+    expect(validateE2EApplicationExecutionAdmission(decoded).applicationSuites.map((suite) => suite.runtimeKind).sort()).toEqual(["api", "web"]);
+  });
+
+  it("refuses a web group handed the API row of its profile: the key says one kind and the row is the other", async () => {
+    const { input } = await oneApp();
+    const decoded = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission(input).bytes);
+    const apiRow = decoded.runtimeBindings.find((item) => item.value.capabilities.kind === "api")!.value;
+    const swapped = (key: string) => resigned(decoded, (body) => {
+      body.runtimeBindings = decoded.runtimeBindings.map((item) => item.key === key ? { key, value: apiRow } : item);
+    });
+    // The schema reads the key against the row it holds, so the swap does not even decode...
+    expect(() => decodeE2EApplicationExecutionAdmission(swapped(e2eRuntimeBindingKey(PROFILE, "web")))).toThrow(/runtime binding keys/);
+    // ...and a row that is not the one the selection approved, under an honest key, is refused by the verifier's exact comparison.
+    const requalified = resigned(decoded, (body) => {
+      body.runtimeBindings = decoded.runtimeBindings.map((item) => item.value.capabilities.kind === "web" ? { key: item.key, value: { ...item.value, generation: item.value.generation + 1 } } : item);
+    });
+    expect(() => validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(requalified))).toThrow(/runtime binding differs from the exact selected registered runtime row/);
+  });
+
+  it("reads an admission the previous code wrote (version 1, rows keyed by the profile), for a web round and for an API round", async () => {
+    const web = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission((await inputs()).input).bytes);
+    const asV1 = decodeE2EApplicationExecutionAdmission(asWrittenByVersion1(web));
+    expect(asV1.schemaVersion).toBe(E2E_APPLICATION_ADMISSION_SCHEMA_V1);
+    expect(asV1.runtimeBindings.map((item) => item.key)).toEqual([PROFILE]);
+    const validated = validateE2EApplicationExecutionAdmission(asV1);
+    expect(validated.applicationSuites).toHaveLength(1);
+    expect(e2eCompiledRuntime(validated.applicationSuites[0]!)?.capabilities.kind).toBe("web");
+    // The binding the stored round carries is the same digest the row of its own kind gives.
+    expect(validated.admission.round.groupBindings[0]!.runtimeManifestDigest).toBe(e2eCompiledRuntime(validated.applicationSuites[0]!)!.manifestDigest);
+
+    const fixture = webAndApiFixture();
+    const candidate = await candidateOf({ "package.json": ordersContractManifest, "api/package.json": Buffer.from(fixture.snapshot.sources.find((item) => item.path === "api/package.json")!.bytes).toString("utf8") });
+    const apiAdmission = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission({ taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4,
+      roundId: randomUUID(), runId: randomUUID, intent: fixture.build({ web: false, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
+      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: BOTH_ROWS(), runtimeCatalogId: "catalog", runtimeBinding: binding,
+      buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), accountEntries: fixture.registry, recordedSelection: webAndApiSelection(fixture) }).bytes);
+    const apiV1 = validateE2EApplicationExecutionAdmission(decodeE2EApplicationExecutionAdmission(asWrittenByVersion1(apiAdmission)));
+    expect(apiV1.applicationSuites.map((suite) => suite.runtimeKind)).toEqual(["api"]);
+    expect(e2eCompiledRuntime(apiV1.applicationSuites[0]!)?.capabilities.kind).toBe("api");
+  });
+
+  it("refuses runtime keys that do not fit the admission's version: a v2 key without its kind, a v1 key with one, and two kinds of one profile under the profile alone", async () => {
+    const { input } = await oneApp();
+    const both = decodeE2EApplicationExecutionAdmission(buildApplicationExecutionAdmission(input).bytes);
+    const profileAlone = resigned(both, (body) => { body.runtimeBindings = both.runtimeBindings.map((item) => ({ key: item.value.profileId, value: item.value })); });
+    expect(() => decodeE2EApplicationExecutionAdmission(profileAlone)).toThrow(/runtime binding keys/);
+    const v1WithKinds = resigned(both, (body) => { body.schemaVersion = E2E_APPLICATION_ADMISSION_SCHEMA_V1; });
+    expect(() => decodeE2EApplicationExecutionAdmission(v1WithKinds)).toThrow(/runtime binding keys/);
+    const v1BothUnderProfile = resigned(both, (body) => {
+      body.schemaVersion = E2E_APPLICATION_ADMISSION_SCHEMA_V1;
+      body.runtimeBindings = both.runtimeBindings.map((item) => ({ key: item.value.profileId, value: item.value }));
+    });
+    expect(() => decodeE2EApplicationExecutionAdmission(v1BothUnderProfile)).toThrow();
   });
 });

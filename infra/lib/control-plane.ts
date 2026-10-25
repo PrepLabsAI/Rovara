@@ -31,7 +31,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
@@ -145,6 +145,10 @@ export class ControlPlaneStack extends Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
+      // M1.3 Task 3.7b, owner decision D4: a browser or API round's screenshots expire 30 days after they are written. A lifecycle filter matches the start of a key, and a screenshot's
+      // key starts like every other private object's, so the rule matches the tag the broker puts on a screenshot and on nothing else. The bucket is not versioned: expiry deletes.
+      // Named environments only: the legacy production template stays as it is.
+      ...(naming.env === undefined ? {} : { lifecycleRules: [{ id: "ExpireE2EScreenshots", expiration: Duration.days(E2E_ARTIFACT_RETENTION_DAYS), tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: E2E_ARTIFACT_RETENTION_TAG_VALUE } }] }),
       // Retained: the broker's operation artifacts must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
@@ -198,11 +202,21 @@ export class ControlPlaneStack extends Stack {
     // and the worker model per request, and starts the eval state machine by its fixed name; both
     // exist only once the eval stack is deployed, and until then a run is refused as not installed.
     broker.addEnvironment("SWEBENCH_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
+    // M1.4 Task 4.10 (PREFIXGAP): the broker derives the AI navigation route from the installation's worker settings only when it knows where they are. Nothing ever set this, so setup
+    // approval said "AI navigation steps will not run" and dispatch offered none. Named environments only: the legacy production template stays as it is. The read grant below covers it.
+    if (naming.env !== undefined) broker.addEnvironment("AGENTX_E2E_AGENT_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
     const swebenchParameterArns = [
       swebenchNames(naming).settingsParameterName,
       swebenchNames(naming).runnerImageParameterName,
       swebenchNames(naming).runnerFeaturesParameterName,
       ...Object.values(WORKER_SETTING_PARAMETERS).map((name) => `${naming.ec2.workerSettingsPrefix}${name}`),
+    ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`);
+    // The eval batch tick reads the SWE-bench settings and the worker settings the deployment reads for an eval run, but never the AI navigation model setting (Task 4.10A review M-2) or the missing-key fallback model (Task 4.10D): it boots no worker and runs no model of its own.
+    const evalSettingArns = [
+      swebenchNames(naming).settingsParameterName,
+      swebenchNames(naming).runnerImageParameterName,
+      swebenchNames(naming).runnerFeaturesParameterName,
+      ...Object.entries(WORKER_SETTING_PARAMETERS).filter(([key]) => key !== "e2eAgentModel" && key !== "modelFallback").map(([, name]) => `${naming.ec2.workerSettingsPrefix}${name}`),
     ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`);
     const swebenchStateMachineArn = this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
@@ -989,6 +1003,37 @@ export class ControlPlaneStack extends Stack {
           ],
         },
       });
+      // M1.4 Task 4.9: the model canary's request and result, exact keys under the same prefix. A policy of its own, so the guarded add-only change set of the
+      // qualification-transport deploy unit adds it beside the deployed grant without modifying that grant.
+      new iam.CfnPolicy(this, "E2eQualificationTransportCanary", {
+        policyName: "E2eQualificationTransportCanary",
+        roles: [sessions.instanceRoleName],
+        policyDocument: {
+          Version: "2012-10-17",
+          Statement: [
+            { Sid: "ReadModelCanaryRequest", Effect: "Allow", Action: "s3:GetObject", Resource: artifacts.arnForObjects(`${ownPrefix}/canary-request.json`) },
+            { Sid: "WriteModelCanaryResult", Effect: "Allow", Action: "s3:PutObject", Resource: artifacts.arnForObjects(`${ownPrefix}/canary-result.json`) },
+          ],
+        },
+      });
+      // M1.4 Task 4.10C, read-only model discovery for the runner's worker (what the model check lists: Bedrock models and profiles, availability, and the tokens-per-minute quotas).
+      // No invoke grant is added: the driving test uses BedrockModelInvocation, which already covers the foundation models and this account's inference profiles (global. included).
+      // `bedrock:GetFoundationModelAvailability` is `*` because the action has no resource type in the Service Authorization Reference. The broker needs no grant of its own for the check keys: its role already reads and writes the artifact bucket. Named like the transport policies so the
+      // qualification-transport unit adds it (prefix E2eQualificationTransport); its policy name is E2eModelDiscovery.
+      new iam.CfnPolicy(this, "E2eQualificationTransportDiscovery", {
+        policyName: "E2eModelDiscovery",
+        roles: [sessions.instanceRoleName],
+        policyDocument: {
+          Version: "2012-10-17",
+          Statement: [
+            { Sid: "ListBedrockModels", Effect: "Allow", Action: ["bedrock:ListFoundationModels", "bedrock:ListInferenceProfiles"], Resource: "*" },
+            { Sid: "ReadBedrockModelAvailability", Effect: "Allow", Action: "bedrock:GetFoundationModelAvailability", Resource: "*" },
+            { Sid: "ReadBedrockInferenceProfiles", Effect: "Allow", Action: "bedrock:GetInferenceProfile", Resource: `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:inference-profile/*` },
+            { Sid: "ListBedrockQuotas", Effect: "Allow", Action: "servicequotas:ListServiceQuotas", Resource: "*" },
+            { Sid: "ReadBedrockQuota", Effect: "Allow", Action: "servicequotas:GetServiceQuota", Resource: `arn:${Aws.PARTITION}:servicequotas:${Aws.REGION}:${Aws.ACCOUNT_ID}:bedrock/*` },
+          ],
+        },
+      });
     }
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);
@@ -1011,7 +1056,7 @@ export class ControlPlaneStack extends Stack {
     state.grantReadWriteData(evalBatchTick);
     // A run's launch.json (evals/<runId>/) and a batch's results (evals/batches/<id>/); it reads nothing there.
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvalObjects", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("evals/*")] }));
-    evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadEvalSettings", actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
+    evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadEvalSettings", actions: ["ssm:GetParameters"], resources: evalSettingArns }));
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "StartEvalRuns", actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
     // Ruling 16: a dead run's instance, ended before the run is charged; this environment's eval instances only.
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({
