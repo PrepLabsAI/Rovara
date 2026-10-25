@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EModelDayBudgetRequest, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, groundingScenarioIds, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EModelDayBudgetRequest, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -239,6 +239,8 @@ export async function runTaskInvocation(
         ? "AgentX is running the approved browser and API checks once on the code as the task started, for information only. It has no code-editing tools and decides nothing about the change."
         : invocation.payload.workflowE2EAdmission?.purpose === "replay"
         ? "AgentX is replaying a verified AI-navigated check from its recording, with no model, for an operator's audit. It has no code-editing tools and decides nothing about the change."
+        : invocation.payload.workflowE2EAdmission?.purpose === "grounding"
+        ? "AgentX is checking the plan's unchanged-behaviour checks against the current app. It has no code-editing tools and decides nothing about the change."
         : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
       const runners = dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
@@ -857,9 +859,18 @@ export async function runTaskInvocation(
             if (dryRun !== undefined) await emit("progress", { message: "AgentX tried the proposed checks on the code as the task started.", planDryRun: dryRun });
           }
         }
+        // T7a PLANGROUNDING: when the broker asked, the unchanged code is exported for the plan's must-not-change scenarios, to be run on the current app before the owner is asked. Only a plan with
+        // such a scenario exports anything. It never decides the plan: a base that cannot be exported is reported with its reason, and only the operation's own cancellation throws.
+        let planGroundingSource: BaselineSourceExport | undefined;
+        if (invocation.payload.workflowE2EGroundingSource === true && planDocumentKind(invocation.payload.workflowPhase) === "plan") {
+          const read = parsePlanDocument(plan, { kind: "plan" });
+          if (read.ok && groundingScenarioIds(read.plan).length > 0) {
+            planGroundingSource = await exportBaselineSource({ signal: verificationStop.signal, repositories: candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase) });
+          }
+        }
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN" });
-        taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN" };
+        taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN", ...(planGroundingSource === undefined ? {} : { workflowBaselineSource: planGroundingSource }) };
       } else if (reviewing) {
         const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
         const beforeReview = createCandidateManifest(await readCandidateRepositories(repositories));

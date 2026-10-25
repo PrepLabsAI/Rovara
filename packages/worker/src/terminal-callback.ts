@@ -49,8 +49,17 @@ export async function postWorkerTerminalResult(
   }
   // Whatever else it carries, the unchanged code's export never travels on the model-visible result.
   if (reported?.workflowBaselineSource !== undefined) {
-    const { workflowBaselineSource: _baselineSource, ...terminalResult } = reported;
-    void _baselineSource;
+    const { workflowBaselineSource: baselineSource, ...terminalResult } = reported;
+    // T7a: a planning run that was asked for the unchanged code (to ground the plan's must-not-change scenarios) delivers it on the same request as a coding run's, with the same
+    // rule: it only informs a round that never gates, so no failure to deliver it may fail the terminal result.
+    if (invocation.kind === "task" && invocation.payload.workflowMode === "PLAN" && invocation.payload.workflowE2EGroundingSource === true && callbacks.baselineSourceSink !== undefined) {
+      try { await callbacks.baselineSourceSink(baselineSource as Parameters<NonNullable<CallbackSinks["baselineSourceSink"]>>[0]); }
+      catch (error) {
+        const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+        // Only the fixed code: the text of a failure is not logged for a planning run.
+        log({ component: "worker", level: "warn", event: "grounding-source.delivery_failed", operationId: result.operationId, errorCode: typeof code === "string" ? code : "UNKNOWN" });
+      }
+    }
     await callbacks.terminalSink({ ...result, result: terminalResult });
     return;
   }
