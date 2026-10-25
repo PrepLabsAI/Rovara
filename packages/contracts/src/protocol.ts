@@ -29,9 +29,10 @@ export const PLAN_DRY_RUN_FEATURE = "task.workflowPlanDryRun.v1" as const;
 export const PLAN_DRY_RUN_TOTAL_BUDGET_MS = 120_000;
 /**
  * A check's result on the unchanged code. `passed`: exit 0. `failed`: it ran and said no. `broken`: it could not say anything (program missing or not executable, a
- * grep or shell usage error, a syntax error, killed by a signal, out of time or memory). `not-run`: AgentX did not run it (budget, cancel, or the sandbox could not start).
+ * grep or shell usage error, a syntax error, killed by a signal, out of time or memory). `not-run`: AgentX did not run it (budget, cancel, or the sandbox could not start). `not-checked`: its result would depend on installed dependencies or tools the
+ * sandbox does not have (only built-in file checks and plain grep or test are tried), so AgentX did not try it and nothing is concluded from it.
  */
-export const PLAN_DRY_RUN_CLASSES = ["passed", "failed", "broken", "not-run"] as const;
+export const PLAN_DRY_RUN_CLASSES = ["passed", "failed", "broken", "not-run", "not-checked"] as const;
 export type PlanDryRunClass = (typeof PLAN_DRY_RUN_CLASSES)[number];
 /** Why the worker did not try the checks at all; fixed codes, never text from a command or an error. */
 export const PLAN_DRY_RUN_UNAVAILABLE_REASONS = ["sandbox-not-configured", "sandbox-unavailable", "source-unavailable", "cancelled", "internal-error"] as const;

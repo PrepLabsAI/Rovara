@@ -30,6 +30,9 @@ const SAFE_PATH = /^[A-Za-z0-9._/+-]+$/;
 const GREP_LIKE = new Set(["grep", "egrep", "fgrep", "rg"]);
 const SHELLS = new Set(["sh", "bash", "dash", "zsh"]);
 const TEST_LIKE = new Set(["test", "["]);
+/** The programs, besides AgentX's own built-in file checks, whose result on the base export does not depend on installed dependencies or tools: plain grep and test, run directly (no shell). */
+const TRIED_PROGRAMS = new Set(["grep", "egrep", "fgrep", "test"]);
+const PREFLIGHT_TIMEOUT_MS = 15_000;
 /** Blank in the container whatever the image sets, so an ambient proxy or Node option cannot change what a check does. */
 const BLANKED_ENV = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "NODE_OPTIONS"].flatMap((name) => ["-e", `${name}=`]);
 
@@ -40,6 +43,14 @@ export function proposedChecksOfPlan(planText: string, repositoryPaths: readonly
   const read = parsePlanDocument(planText, { kind: "plan", checks: { repositoryPaths: [...repositoryPaths], required: [] } });
   if (!read.ok) return [];
   return (read.plan.checks?.proposed ?? []).map((check) => ({ command: { cwd: check.command.cwd, executable: check.command.executable, args: [...check.command.args], timeoutSeconds: check.command.timeoutSeconds } }));
+}
+
+/**
+ * Whether a proposed check is tried at all. The export has no installed dependencies and the sandbox image has few tools, so `npm test`, `rg`, `git`, `pytest` and the like would
+ * read as broken or failed on code they work fine on. Those are "not-checked": no container, no finding.
+ */
+export function dryRunTries(command: { executable: string; args: readonly string[] }): boolean {
+  return builtinFileCheckOf(command) !== undefined || TRIED_PROGRAMS.has(command.executable);
 }
 
 /** What an exit code says about a check, from the program and the code alone (the output is never looked at). */
@@ -96,9 +107,15 @@ export async function runPlanDryRun(input: PlanDryRunInput): Promise<PlanDryRunR
 async function tryChecks(input: PlanDryRunInput, planSha256: string): Promise<PlanDryRunReport> {
   if (input.signal.aborted) throw cancelled(input.signal);
   if (input.checks.length === 0) return unavailable(planSha256, "internal-error");
+  const tried = input.checks.map((check) => dryRunTries(check.command));
   const now = input.now ?? Date.now;
   const startedAt = now();
   const budgetMs = input.totalBudgetMs ?? PLAN_DRY_RUN_TOTAL_BUDGET_MS;
+  // Nothing to try (every check needs dependencies or tools the sandbox lacks): say so without needing a sandbox at all.
+  if (!tried.some(Boolean)) {
+    return { schemaVersion: PLAN_DRY_RUN_SCHEMA_VERSION, status: "COMPLETE", planSha256, totalMs: 0,
+      checks: input.checks.map((check) => ({ commandSha256: planDryRunCommandSha256(check.command), class: "not-checked" as const, durationMs: 0 })) };
+  }
   let config: { executorImage: string; runRoot: string };
   try {
     config = input.config ?? workflowE2EApplicationRuntimeConfig(input.environment ?? process.env, input.platform, input.arch);
@@ -109,6 +126,15 @@ async function tryChecks(input: PlanDryRunInput, planSha256: string): Promise<Pl
     return unavailable(planSha256, "source-unavailable");
   }
   const docker = input.docker ?? createProcessDockerCli();
+  // One look at the sandbox before anything runs: a missing Docker binary reads as exit 127 and a missing image as 125, which must never be taken for the checks being broken.
+  try {
+    const inspected = await docker.run(["image", "inspect", config.executorImage], { signal: input.signal, timeoutMs: PREFLIGHT_TIMEOUT_MS });
+    if (input.signal.aborted) throw cancelled(input.signal);
+    if (inspected.code !== 0) return unavailable(planSha256, "sandbox-unavailable");
+  } catch {
+    if (input.signal.aborted) throw cancelled(input.signal);
+    return unavailable(planSha256, "sandbox-unavailable");
+  }
   const runId = input.runId?.() ?? `pdr-${randomUUID()}`;
   // A sibling of the application runs' folder: the worker and the Docker host share it at the same path.
   const runDirectory = join(dirname(config.runRoot), "plan-dry-runs", runId);
@@ -132,6 +158,7 @@ async function tryChecks(input: PlanDryRunInput, planSha256: string): Promise<Pl
       const commandSha256 = planDryRunCommandSha256(check.command);
       const result = (cls: PlanDryRunClass, durationMs = 0) => { checks.push({ commandSha256, class: cls, durationMs: Math.max(0, Math.round(durationMs)) }); };
       if (input.signal.aborted) throw cancelled(input.signal);
+      if (!tried[index]) { result("not-checked"); continue; }
       const remaining = budgetMs - (now() - startedAt);
       if (sandboxFailed || remaining < 1_000) { result("not-run"); continue; }
       const ownMs = Math.min(check.command.timeoutSeconds, MAX_CHECK_SECONDS) * 1_000;
@@ -151,6 +178,20 @@ async function tryChecks(input: PlanDryRunInput, planSha256: string): Promise<Pl
   }
 }
 
+/**
+ * The `docker run` of one check: no network, no capabilities, no new privileges, a read-only root, a small memory-backed /tmp, the base export mounted read-only, resource
+ * limits, an unprivileged user, the image never pulled, and none of the worker's environment. Exported so the Linux runtime test can run the very arguments with real Docker.
+ */
+export function planDryRunSandboxArgs(input: { name: string; runId: string; createdAt: number; image: string; source: string; repositoryPath: string; cwd: string; executable: string; args: readonly string[] }): string[] {
+  return ["run", "--rm", "--name", input.name, "--pull=never",
+    "--label", `${ROVARA_RUN_LABEL}=${input.runId}`, "--label", `${ROVARA_CREATED_LABEL}=${input.createdAt}`,
+    "--network", "none", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",
+    "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "256", "--cpus", "1", "--user", "1000:1000",
+    "-v", `${input.source}:/work/${input.repositoryPath}:ro`, "-w", `/work/${input.cwd}`,
+    ...BLANKED_ENV, "-e", "HOME=/tmp", "-e", "CI=true",
+    "--entrypoint", input.executable, input.image, ...input.args];
+}
+
 /** One check in a throwaway container. Everything the command prints is dropped here. */
 async function runOne(input: { docker: DockerCli; config: { executorImage: string }; runId: string; index: number; source: string; repositoryPath: string; check: ProposedCheckToTry;
   timeoutMs: number; signal: AbortSignal; now: () => number }): Promise<PlanDryRunClass | "timeout" | "sandbox-failed"> {
@@ -161,13 +202,7 @@ async function runOne(input: { docker: DockerCli; config: { executorImage: strin
   const info = await stat(inside === "" ? input.source : join(input.source, inside)).catch(() => undefined);
   if (info === undefined || !info.isDirectory()) return "failed";
   const name = `rovara-plan-dry-${input.runId}-${input.index}`;
-  const dockerArgs = ["run", "--rm", "--name", name, "--pull=never",
-    "--label", `${ROVARA_RUN_LABEL}=${input.runId}`, "--label", `${ROVARA_CREATED_LABEL}=${input.now()}`,
-    "--network", "none", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m",
-    "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "256", "--cpus", "1", "--user", "1000:1000",
-    "-v", `${input.source}:/work/${input.repositoryPath}:ro`, "-w", `/work/${cwd}`,
-    ...BLANKED_ENV, "-e", "HOME=/tmp", "-e", "CI=true",
-    "--entrypoint", executable, input.config.executorImage, ...args];
+  const dockerArgs = planDryRunSandboxArgs({ name, runId: input.runId, createdAt: input.now(), image: input.config.executorImage, source: input.source, repositoryPath: input.repositoryPath, cwd, executable, args });
   let result: { code: number };
   try {
     result = await input.docker.run(dockerArgs, { signal: input.signal, timeoutMs: input.timeoutMs });
