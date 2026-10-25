@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { WORKFLOW_PLAN_MAX_BYTES, WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, WorkflowFeedbackApprovalBindingSchema, WorkflowReviewBaseSchema } from "./task-workflow.js";
 import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
@@ -16,8 +17,50 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.workflowPlanDryRun.v1"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
+/**
+ * The worker tries a coding plan's proposed checks on the unchanged code while it plans, and reports only a fixed class per check (see PlanDryRunReportSchema).
+ * Nothing in an invocation asks for it: a worker that lists this feature does it for every structured coding plan that proposes checks. The planner is asked for
+ * `expectOnBase` only from a worker that lists it.
+ */
+export const PLAN_DRY_RUN_FEATURE = "task.workflowPlanDryRun.v1" as const;
+/** The whole dry run, all checks together, may take this long; a check the budget cannot start is "not-run". */
+export const PLAN_DRY_RUN_TOTAL_BUDGET_MS = 120_000;
+/**
+ * A check's result on the unchanged code. `passed`: exit 0. `failed`: it ran and said no. `broken`: it could not say anything (program missing or not executable, a
+ * grep or shell usage error, a syntax error, killed by a signal, out of time or memory). `not-run`: AgentX did not run it (budget, cancel, or the sandbox could not start).
+ */
+export const PLAN_DRY_RUN_CLASSES = ["passed", "failed", "broken", "not-run"] as const;
+export type PlanDryRunClass = (typeof PLAN_DRY_RUN_CLASSES)[number];
+/** Why the worker did not try the checks at all; fixed codes, never text from a command or an error. */
+export const PLAN_DRY_RUN_UNAVAILABLE_REASONS = ["sandbox-not-configured", "sandbox-unavailable", "source-unavailable", "cancelled", "internal-error"] as const;
+export type PlanDryRunUnavailableReason = (typeof PLAN_DRY_RUN_UNAVAILABLE_REASONS)[number];
+export const PLAN_DRY_RUN_SCHEMA_VERSION = "workflow-plan-dry-run/v1" as const;
+const Sha256Hex = z.string().regex(/^[a-f0-9]{64}$/);
+/**
+ * What a planning run reports (as a progress event's `planDryRun` member) about the proposed checks: per check the digest of the command that ran, a class and a
+ * duration, and nothing else. No output, no exit code and no message leaves the worker. `planSha256` is the digest of the exact plan text the worker uploaded, so
+ * the control plane accepts the report only for that plan; each check is attributed by `commandSha256` (the digest of its folder, program and arguments), so the
+ * control plane matches it to its own proposed check whatever the numbering.
+ */
+export const PlanDryRunReportSchema = z.discriminatedUnion("status", [
+  z.object({
+    schemaVersion: z.literal(PLAN_DRY_RUN_SCHEMA_VERSION), status: z.literal("COMPLETE"), planSha256: Sha256Hex,
+    checks: z.array(z.object({
+      commandSha256: Sha256Hex, class: z.enum(PLAN_DRY_RUN_CLASSES), durationMs: z.number().int().min(0).max(PLAN_DRY_RUN_TOTAL_BUDGET_MS + 60_000),
+    }).strict()).min(1).max(WORKFLOW_PROPOSED_CHECKS_MAX),
+    totalMs: z.number().int().min(0).max(PLAN_DRY_RUN_TOTAL_BUDGET_MS + 60_000),
+  }).strict(),
+  z.object({ schemaVersion: z.literal(PLAN_DRY_RUN_SCHEMA_VERSION), status: z.literal("UNAVAILABLE"), planSha256: Sha256Hex, reason: z.enum(PLAN_DRY_RUN_UNAVAILABLE_REASONS) }).strict(),
+]);
+export type PlanDryRunReport = z.infer<typeof PlanDryRunReportSchema>;
+
+/** The digest a dry-run report names a check by: its folder, program and arguments (the label and the timeout do not change what runs). */
+export function planDryRunCommandSha256(command: { cwd: string; executable: string; args: readonly string[] }): string {
+  return createHash("sha256").update(JSON.stringify(["workflow-plan-dry-run-command/v1", command.cwd, command.executable, [...command.args]])).digest("hex");
+}
+
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
 
