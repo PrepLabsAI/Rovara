@@ -139,6 +139,37 @@ export function withoutApplicationPlanText(prompt: string): string {
 /** Whether a planning prompt asks for a version 2 application intent. */
 export const asksForApplicationPlan = (prompt: string): boolean => prompt.includes(APPLICATION_PLAN_OPEN);
 
+const PLAN_QUALITY_OPEN = "Plan quality guidance:";
+const PLAN_QUALITY_CLOSE = "End of plan quality guidance.";
+/**
+ * Asked only of a worker that lists the plan-quality feature (it also parses the members named here), for every coding plan, Quick and Full alike:
+ * AgentX runs the same checks on a Quick plan as on a Full one and sends the plan back to the planner once when they find a problem.
+ */
+const PLAN_QUALITY_GUIDANCE = [
+  PLAN_QUALITY_OPEN,
+  "AgentX checks every coding plan before the owner sees it, and sends it back once if a check finds a problem. A quick plan is held to the same standard as a full one. Before you answer, go through this list.",
+  "- Mocks: when the pinned E2E context lists a mock fixture usable on a target (`requestedTargetIds`), give `mockFixtureRefs` one entry for every requested target whose scenarios run the app, and never list that component in `requiredRealComponentIds` on a target where you mock it.",
+  "- Every claim is proved: each level 1 claim and each Not changing item needs a check that runs the app or its code, not only one that reads files (`grep`, `cat`, `test`). Name what each E2E scenario proves in a top-level `scenarioProves` member of the plan (outside `e2e`): `{ \"<scenarioId>\": [\"<claim ID or ncN>\"] }`.",
+  "- Expected values (a CSV row, a label, a status text, a count) come from the current code, which you read, not from memory.",
+  "- A claim that says something is hidden needs a scenario that asserts it is not visible, as the account that must not see it.",
+  "- An AI navigation step (`agent`) takes no more actions than the request allows, and never more than 8.",
+  "- Each proposed check may predict what it does on the unchanged code with `expectOnBase`: \"pass\" when it already holds today, \"fail\" when it tests new behaviour. AgentX tries the commands on the unchanged code and compares.",
+  "- To test that a file holds, or lacks, some text, write the check as `{ label, kind: \"file-contains\" | \"file-not-contains\", cwd, path, text, proves }` (add `expectOnBase` if you like) instead of a `grep` command. Commands that print counts (`grep -c`), use `grep -L` or `-v`, or match quote marks give the wrong answer.",
+  PLAN_QUALITY_CLOSE,
+].join("\n");
+
+/** A planning prompt as a worker that does not list the plan-quality feature gets it: with no mention of the new plan members. */
+export function withoutPlanQualityText(prompt: string): string {
+  const start = prompt.indexOf(PLAN_QUALITY_OPEN);
+  const end = start < 0 ? -1 : prompt.indexOf(PLAN_QUALITY_CLOSE, start);
+  if (start < 0 || end < 0) return prompt;
+  const rest = prompt.slice(end + PLAN_QUALITY_CLOSE.length).replace(/^\n\n/u, "");
+  return `${prompt.slice(0, start).replace(/\n\n$/u, "")}${rest === "" ? "" : `\n\n${rest}`}`;
+}
+
+/** Whether a planning prompt asks for the plan-quality members. */
+export const asksForPlanQuality = (prompt: string): boolean => prompt.includes(PLAN_QUALITY_OPEN);
+
 const CHECKS_MEMBER = "checks?: { checks: { label: string; cwd: string; executable: string; args: string[]; timeoutSeconds?: number; proves: string[] }[]; none_reason: string | null }; // the checks to run, described below; proves lists the claim IDs each check proves";
 
 const KIND_NAMES: Record<PlanDocumentKind, string> = { requirements: "requirements", design: "design", plan: "coding plan" };
@@ -219,6 +250,8 @@ export function planDocumentInstructions(input: {
    * a worker that cannot read a version 2 intent is sent instead (see withoutApplicationPlanText).
    */
   applicationPlans?: boolean;
+  /** Add the plan quality guidance to a coding plan's instructions (the delivery drops it for a worker that cannot read the members it names). */
+  planQuality?: boolean;
 }): string {
   const checks = input.kind === "plan";
   const featureE2E = input.kind === "plan" && input.e2ePlanningContext !== undefined;
@@ -249,6 +282,7 @@ export function planDocumentInstructions(input: {
     "IDs: keep a claim's ID from the previous version of this document when the claim still exists. Give new claims new IDs. Never reuse the ID of a claim that was removed.",
     ...(retiredIds.length === 0 ? [] : [`These claim IDs were removed earlier and must not be used again: ${retiredIds.join(", ")}.`]),
     ...(checks ? ["`checks` goes in the coding plan only. Each check lists in `proves` the IDs of the claims it proves. Checks may prove Not changing items: use `nc1`, `nc2` and so on, counting the `notChanging` entries from 1."] : []),
+    ...(checks && input.planQuality === true ? [PLAN_QUALITY_GUIDANCE] : []),
     ...(e2eContext === undefined ? [] : [
       "E2EFeaturePlanIntent has exactly these members: { schemaVersion: 1, requestedTargetIds: string[], portableOperationRefs?: { operationId, applicationId, requestedTargetIds, packageExportSubpath, moduleSpecifier, callableSelector: { kind: \"default\" } | { kind: \"named\", exportName } }[], mockFixtureRefs?: { componentId, requestedTargetId, operationId, sourcePath, sourceSha256 }[], accountContextRefs: { applicationId, profileId, sourcePath, sourceSha256 }[], scenarios: { scenarioId, requirementId, requestedTargetIds, required, accountProfileId, minimumEvidence: \"source\" | \"mock-contract\" | \"runtime\" | \"external-live\", requiredRealComponentIds: string[], steps: E2EStep[], assertions: E2EAssertion[] }[], semanticExportDeltas: { applicationId, operationId, requestedTargetIds, expectedExportNames: string[], reason }[] }. Each scenario needs at least one assertion; `invoke-contract` steps must use a listed operation and a target listed on that operation.",
       e2eContext.status === "available"
@@ -333,8 +367,11 @@ export interface WorkflowDispatchRecord {
   taskId: string;
   workflowRevision: number;
   /** UPDATE: an approved fix's checks and reviews passed, and it is pushed to the pull requests already open. */
-  kind: "CHECKS" | "REVIEW" | "PUBLISH" | "UPDATE";
+  kind: "CHECKS" | "REVIEW" | "PUBLISH" | "UPDATE" | "REPLAN";
+  /** For REPLAN, the digest of `planPrompt`: there is no candidate yet. */
   candidateDigest: string;
+  /** REPLAN: what the planner is told on the automatic second run of a plan (the findings, or what was unreadable). */
+  planPrompt?: string;
   /** A single internal resume operation warms EC2 before a required E2E round is immutably admitted. */
   readinessOperationId?: string;
   createdAt: string;
@@ -361,11 +398,11 @@ export interface WorkflowE2EReadinessMarker {
 export const WORKFLOW_DISPATCH_PK = "WORKFLOW_DISPATCH";
 const WORKFLOW_DISPATCH_RETENTION_SECONDS = 7 * 86_400;
 
-export function workflowDispatchItem(tableName: string, taskId: string, workflowRevision: number, kind: WorkflowDispatchRecord["kind"], candidateDigest: string, now: string): TransactItems[number] {
+export function workflowDispatchItem(tableName: string, taskId: string, workflowRevision: number, kind: WorkflowDispatchRecord["kind"], candidateDigest: string, now: string, planPrompt?: string): TransactItems[number] {
   const sk = `${taskId}#${workflowRevision}`;
   const item: WorkflowDispatchRecord = {
     pk: WORKFLOW_DISPATCH_PK, sk, entityType: "WORKFLOW_DISPATCH",
-    taskId, workflowRevision, kind, candidateDigest, createdAt: now,
+    taskId, workflowRevision, kind, candidateDigest, ...(planPrompt === undefined ? {} : { planPrompt }), createdAt: now,
     attempts: 0, nextAttemptAt: now, dispatchDuePk: WORKFLOW_DISPATCH_PK, dispatchDueSk: `${now}#${sk}`,
     [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + WORKFLOW_DISPATCH_RETENTION_SECONDS,
   };

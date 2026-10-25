@@ -18,7 +18,8 @@ import {
   type Ec2RuntimeBinding,
   type WorkerInvocation,
 } from "@agentx/contracts";
-import { asksForApplicationPlan, asksForCodeAnchors, withoutApplicationPlanText, withoutCodeAnchorText } from "./broker-shared.js";
+import { asksForApplicationPlan, asksForCodeAnchors, asksForPlanQuality, withoutApplicationPlanText, withoutCodeAnchorText, withoutPlanQualityText } from "./broker-shared.js";
+import { PLAN_QUALITY_WORKER_FEATURE } from "../developer/plan-self-check.js";
 import type { Ec2OutboxRecord } from "./lambda.js";
 import type { SessionManager } from "./sessions.js";
 
@@ -291,6 +292,7 @@ async function forWorkerFeatures(
   const carriesWorkflowBase = invocation.kind === "task" && invocation.payload.workflowBase !== undefined;
   const carriesStructuredPlans = invocation.kind === "task" && (invocation.payload.workflowPhase !== undefined || invocation.payload.planFormat !== undefined);
   const carriesCodeAnchors = invocation.kind === "task" && asksForCodeAnchors(invocation.payload.prompt);
+  const carriesPlanQuality = invocation.kind === "task" && asksForPlanQuality(invocation.payload.prompt);
   const carriesApplicationPlans = invocation.kind === "task" && (invocation.payload.workflowE2EPlanVersion !== undefined || asksForApplicationPlan(invocation.payload.prompt)
     || invocation.payload.workflowReviewPlan?.e2eIntent?.schemaVersion === 2);
   const carriesApplicationAdmission = invocation.kind === "task" && invocation.payload.workflowE2EAdmission?.kind === "application";
@@ -303,7 +305,7 @@ async function forWorkerFeatures(
   const carriesPullRequestUpdate = invocation.kind === "maintain" && invocation.payload.workflowCandidateTreeSha !== undefined;
   const carriesChatGpt = invocation.kind === "task" && invocation.payload.chatgpt !== undefined;
   const carriesProjectSetupSmoke = invocation.kind === "project-setup-smoke";
-  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesApplicationPlans && !carriesApplicationAdmission && !carriesAgentSteps && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
+  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesPlanQuality && !carriesApplicationPlans && !carriesApplicationAdmission && !carriesAgentSteps && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -507,10 +509,20 @@ async function forWorkerFeatures(
       workspaceId: invocation.workspaceId,
     }));
   }
+  const qualified = withoutPlanQuality(planned, features);
+  if (qualified !== planned) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.plan_quality_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
   // M1.3 Task 3.7b: the request to export the unchanged code is only for a worker that can; an older one runs the coding without it (a baseline never stops the coding), and the
   // baseline then says it could not be checked.
-  const sent = withoutBaselineSource(planned, features);
-  if (sent !== planned) {
+  const sent = withoutBaselineSource(qualified, features);
+  if (sent !== qualified) {
     console.log(JSON.stringify({
       component: "dispatcher",
       event: "dispatch.baseline_source_omitted",
@@ -534,6 +546,12 @@ function withoutBaselineSource(invocation: WorkerInvocation, features: readonly 
 function withoutCodeAnchors(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
   if (invocation.kind !== "task" || !asksForCodeAnchors(invocation.payload.prompt) || features.includes("task.codeAnchors")) return invocation;
   return { ...invocation, payload: { ...invocation.payload, prompt: withoutCodeAnchorText(invocation.payload.prompt) } };
+}
+
+/** A planning prompt without the plan quality guidance, for a worker that does not list the plan-quality feature: it would reject a plan that carried the members the guidance names. */
+function withoutPlanQuality(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || !asksForPlanQuality(invocation.payload.prompt) || features.includes(PLAN_QUALITY_WORKER_FEATURE)) return invocation;
+  return { ...invocation, payload: { ...invocation.payload, prompt: withoutPlanQualityText(invocation.payload.prompt) } };
 }
 
 /**

@@ -20,6 +20,7 @@ import { hashJson, isConditional } from "./broker-shared.js";
 import type { WorkflowE2EReadinessMarker } from "./broker-shared.js";
 import type { ExtraItems } from "./developer-task-actions.js";
 import type { DurableOutboxRecord, RuntimeBinding } from "./lambda.js";
+import type { PlanQualityContext } from "../developer/plan-quality.js";
 
 /** The State table, as the broker and the reconciler reach it. */
 export interface StateTable {
@@ -60,6 +61,8 @@ export interface OperationRecord extends Operation {
   feedbackNotesScoped?: true;
   /** A planning run that was asked for the schema-v2 application plan (absent: it was not, so a v2 plan from it is refused). */
   workflowE2EPlanVersion?: 2;
+  /** A planning run: the part of the planning context its planner was given that the plan self-check reads (absent: it was given none). */
+  planQualityContext?: PlanQualityContext;
   publication?: {
     repository: string;
     repositoryUrl: string;
