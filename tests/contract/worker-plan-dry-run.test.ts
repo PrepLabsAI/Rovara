@@ -82,6 +82,19 @@ function localDocker(repo: { source: () => string | undefined }, observed: Obser
 }
 
 const builtin = (kind: "file-contains" | "file-not-contains", path: string, text: string, cwd = REPO_PATH, timeoutSeconds = 30): ProposedCheckToTry => ({ command: { ...builtinFileCheckCommand({ kind, cwd, path, text }), timeoutSeconds } });
+/** A Docker whose containers run until their timeout or the abort, as a slow check would. */
+const hangingDocker = (observed: Observed): DockerCli => ({
+  async run(args, opts) {
+    observed.calls.push(args);
+    if (args[0] !== "run") return { code: 0, stdout: "", stderr: "" };
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ code: 124, stdout: "", stderr: "" }), opts.timeoutMs);
+      opts.signal.addEventListener("abort", () => { clearTimeout(timer); resolve({ code: 130, stdout: "", stderr: "" }); }, { once: true });
+    });
+  },
+});
+/** A check that passes on the base (keep.txt is in it), and one that fails there. */
+function OK(): ProposedCheckToTry { return program("test", ["-f", "keep.txt"]); }
 const program = (executable: string, args: string[], timeoutSeconds = 30, cwd = REPO_PATH): ProposedCheckToTry => ({ command: { cwd, executable, args, timeoutSeconds } });
 
 async function dryRun(checks: ProposedCheckToTry[], options: { signal?: AbortSignal; docker?: (observed: Observed) => DockerCli; totalBudgetMs?: number; config?: boolean; materialize?: Parameters<typeof runPlanDryRun>[0]["materialize"] } = {}) {
@@ -129,7 +142,7 @@ describe("a dry run on the unchanged code", () => {
   });
 
   it("attributes each result to its own check by the digest of its command, in plan order", async () => {
-    const checks = [builtin("file-contains", "src/app.js", "BASE-TOKEN"), builtin("file-not-contains", "src/app.js", "BASE-TOKEN"), program("sh", ["-c", "exit 127"])];
+    const checks = [builtin("file-contains", "src/app.js", "BASE-TOKEN"), builtin("file-not-contains", "src/app.js", "BASE-TOKEN"), program("grep", ["-q", "x", "no-such-file.txt"])];
     const { report } = await dryRun(checks);
     expect(report.status).toBe("COMPLETE");
     if (report.status !== "COMPLETE") return;
@@ -138,23 +151,20 @@ describe("a dry run on the unchanged code", () => {
     expect(PlanDryRunReportSchema.parse(report)).toEqual(report);
   });
 
-  it("calls a command that cannot run broken, not failed: a missing program, exit 127, a grep or shell usage error, a syntax error", async () => {
-    const { report } = await dryRun([
-      program("definitely-not-a-program-xyz", []), program("sh", ["-c", "exit 127"]), program("grep", ["-q", "x", "no-such-file.txt"]),
-      program("sh", ["-c", "if then fi ((("]), program("grep", ["-q", "-E", "(", "keep.txt"]),
-    ]);
-    expect(classes(report)).toEqual(["broken", "broken", "broken", "broken", "broken"]);
+  it("calls a command that cannot run broken, not failed: a grep or test usage error", async () => {
+    const { report } = await dryRun([program("grep", ["-q", "x", "no-such-file.txt"]), program("grep", ["-q", "-E", "(", "keep.txt"]), program("test", ["1", "-eq", "x"])]);
+    expect(classes(report)).toEqual(["broken", "broken", "broken"]);
   });
 
   it("a folder that is not on the unchanged code is a failed check without starting anything", async () => {
-    const { report, observed } = await dryRun([program("sh", ["-c", "exit 0"], 30, `${REPO_PATH}/new-folder`), program("sh", ["-c", "exit 0"])]);
+    const { report, observed } = await dryRun([program("test", ["-e", "x"], 30, `${REPO_PATH}/new-folder`), OK()]);
     expect(classes(report)).toEqual(["failed", "passed"]);
     expect(observed.calls.filter((call) => call[0] === "run")).toHaveLength(1);
   });
 
   it("a check that outlives its own timeout is broken within its timeout, and the container is removed by name", async () => {
     const started = Date.now();
-    const { report, observed } = await dryRun([program("sleep", ["30"], 1)]);
+    const { report, observed } = await dryRun([program("grep", ["-q", "x", "keep.txt"], 1)], { docker: hangingDocker });
     expect(Date.now() - started).toBeLessThan(10_000);
     expect(classes(report)).toEqual(["broken"]);
     const run = observed.calls.find((call) => call[0] === "run")!;
@@ -164,15 +174,17 @@ describe("a dry run on the unchanged code", () => {
 
   it("holds the whole dry run to its total budget: the check the budget stops and every later one is not-run", async () => {
     const started = Date.now();
-    const { report } = await dryRun([program("sleep", ["30"], 600), builtin("file-contains", "src/app.js", "BASE-TOKEN")], { totalBudgetMs: 2_000 });
+    const { report } = await dryRun([program("grep", ["-q", "x", "keep.txt"], 600), builtin("file-contains", "src/app.js", "BASE-TOKEN")], { totalBudgetMs: 2_000, docker: hangingDocker });
     expect(Date.now() - started).toBeLessThan(10_000);
     expect(classes(report)).toEqual(["not-run", "not-run"]);
   });
 
   it("never lets what a command prints reach the report (the command did print it)", async () => {
-    const { report, observed } = await dryRun([program("sh", ["-c", `echo ${PASSWORD}; echo ${PASSWORD} >&2; exit 1`])]);
+    const handedBack: string[] = [];
+    const chatty: DockerCli = { async run(args) { if (args[0] !== "run") return { code: 0, stdout: "", stderr: "" }; handedBack.push(PASSWORD); return { code: 1, stdout: PASSWORD, stderr: PASSWORD }; } };
+    const { report } = await dryRun([program("grep", ["-q", "x", "keep.txt"])], { docker: () => chatty });
     // Positive control: Docker did hand the output back to the worker.
-    expect(observed.outputs.join("")).toContain(PASSWORD);
+    expect(handedBack).toEqual([PASSWORD]);
     expect(classes(report)).toEqual(["failed"]);
     expect(JSON.stringify(report)).not.toContain(PASSWORD);
     expect(JSON.stringify(report)).not.toContain(Buffer.from(PASSWORD).toString("base64"));
@@ -183,7 +195,7 @@ describe("a dry run on the unchanged code", () => {
     process.env.AWS_SECRET_ACCESS_KEY = PASSWORD;
     process.env.AGENTX_CALLBACK_TOKEN = PASSWORD;
     try {
-      const { report, observed } = await dryRun([program("sh", ["-c", "exit 0"])]);
+      const { report, observed } = await dryRun([OK()]);
       expect(classes(report)).toEqual(["passed"]);
       const run = observed.calls.find((call) => call[0] === "run")!;
       const flat = run.join("\n");
@@ -206,18 +218,67 @@ describe("a dry run on the unchanged code", () => {
   });
 
   it("removes its folder when it is done", async () => {
-    const { observed } = await dryRun([program("sh", ["-c", "exit 0"])]);
+    const { observed } = await dryRun([OK()]);
     expect(observed.sourceDuringRun).toHaveLength(1);
     expect(existsSync(observed.sourceDuringRun[0]!)).toBe(false);
   });
 
   it("reports fixed reasons when it cannot try the checks at all", async () => {
-    expect((await dryRun([program("sh", ["-c", "exit 0"])], { config: false })).report).toMatchObject({ status: "UNAVAILABLE", reason: "sandbox-not-configured" });
-    expect((await dryRun([program("sh", ["-c", "exit 0"])], { materialize: async () => ({ status: "UNAVAILABLE" }) })).report).toMatchObject({ status: "UNAVAILABLE", reason: "source-unavailable" });
+    expect((await dryRun([OK()], { config: false })).report).toMatchObject({ status: "UNAVAILABLE", reason: "sandbox-not-configured" });
+    expect((await dryRun([OK()], { materialize: async () => ({ status: "UNAVAILABLE" }) })).report).toMatchObject({ status: "UNAVAILABLE", reason: "source-unavailable" });
     const broken: DockerCli = { run: async () => ({ code: 125, stdout: `docker: ${PASSWORD}`, stderr: "" }) };
-    const { report } = await dryRun([program("sh", ["-c", "exit 0"]), program("sh", ["-c", "exit 0"])], { docker: () => broken });
+    const { report } = await dryRun([OK(), OK()], { docker: () => broken });
     expect(report).toMatchObject({ status: "UNAVAILABLE", reason: "sandbox-unavailable" });
     expect(JSON.stringify(report)).not.toContain(PASSWORD);
+  });
+
+  it("a missing docker binary (exit 127 from the CLI) is an unavailable sandbox, not broken checks and not a finding", async () => {
+    const calls: string[][] = [];
+    const noDocker: DockerCli = { async run(args) { calls.push(args); return { code: 127, stdout: "", stderr: "could not run docker" }; } };
+    const { report } = await dryRun([OK(), builtin("file-contains", "src/app.js", "BASE-TOKEN")], { docker: () => noDocker });
+    expect(report).toMatchObject({ status: "UNAVAILABLE", reason: "sandbox-unavailable" });
+    // The image is looked at once, before any check starts.
+    expect(calls).toEqual([["image", "inspect", "executor:test"]]);
+    expect(planDryRunFindings({ outcome: readPlanDryRunOutcome({ events: [{ type: "progress", payload: { planDryRun: report } }], planText: "x", proposed: [] }) })).toEqual([]);
+  });
+
+  it("an executor image the host does not hold is an unavailable sandbox too", async () => {
+    const missing: DockerCli = { async run() { return { code: 1, stdout: "", stderr: "no such image" }; } };
+    expect((await dryRun([OK()], { docker: () => missing })).report).toMatchObject({ status: "UNAVAILABLE", reason: "sandbox-unavailable" });
+  });
+
+  it("tries only built-in file checks and plain grep or test: anything else is not-checked, with no container started and no finding", async () => {
+    const others = [
+      program("npm", ["test"]), program("npm", ["run", "lint"]), program("rg", ["x", "."]), program("git", ["diff", "--exit-code"]), program("npx", ["vitest", "run"]),
+      program("sh", ["-c", "exit 0"]), program("node", ["-e", "process.exit(0)"]), program("./grep", ["x"]),
+    ];
+    const { report, observed } = await dryRun(others);
+    expect(classes(report)).toEqual(others.map(() => "not-checked"));
+    expect(observed.calls).toEqual([]);
+    // No sandbox is needed to say so: it holds without any configured runtime too.
+    expect(classes((await dryRun(others, { config: false })).report)).toEqual(others.map(() => "not-checked"));
+  });
+
+  it("a mix tries the eligible checks and leaves the rest not-checked, in plan order, each attributed to its own command", async () => {
+    const checks = [program("npm", ["test"]), builtin("file-contains", "src/app.js", "BASE-TOKEN"), program("grep", ["-q", "nope", "keep.txt"]), program("rg", ["x"])];
+    const { report, observed } = await dryRun(checks);
+    expect(classes(report)).toEqual(["not-checked", "passed", "failed", "not-checked"]);
+    if (report.status !== "COMPLETE") throw new Error("expected complete");
+    expect(report.checks.map((entry) => entry.commandSha256)).toEqual(checks.map((check) => planDryRunCommandSha256(check.command)));
+    expect(observed.calls.filter((call) => call[0] === "run")).toHaveLength(2);
+  });
+
+  it("npm test in a repository with a package.json and no node_modules is not-checked, and the broker raises nothing for it", async () => {
+    const ws = workspace();
+    writeFileSync(join(ws.repo, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+    const check = program("npm", ["test"]);
+    const { report, planText } = await dryRun([check]);
+    expect(classes(report)).toEqual(["not-checked"]);
+    const proposed = [{ id: "proposed-1", command: check.command }];
+    const outcome = readPlanDryRunOutcome({ events: [{ type: "progress", payload: { planDryRun: { ...report, planSha256: sha256(planText) } } }], planText, proposed, workerFeatures: [PLAN_DRY_RUN_FEATURE] });
+    expect(outcome.status).toBe("TRIED");
+    expect(planDryRunFindings({ outcome, expectOnBase: { "proposed-1": "pass" } })).toEqual([]);
+    expect(planDryRunOriginalResults(outcome)).toEqual({});
   });
 
   it("is cancelled with the operation: it throws, removes the container it started, and leaves nothing behind", async () => {
@@ -230,7 +291,7 @@ describe("a dry run on the unchanged code", () => {
       await new Promise<void>((resolve) => opts.signal.addEventListener("abort", () => resolve(), { once: true }));
       return { code: 130, stdout: "", stderr: "" };
     } };
-    await expect(dryRun([program("sleep", ["30"])], { signal: controller.signal, docker: () => docker })).rejects.toBeInstanceOf(WorkerOperationCancelledError);
+    await expect(dryRun([program("grep", ["-q", "x", "keep.txt"])], { signal: controller.signal, docker: () => docker })).rejects.toBeInstanceOf(WorkerOperationCancelledError);
     expect(calls.some((call) => call[0] === "rm" && call[1] === "-f")).toBe(true);
   });
 });
@@ -325,7 +386,7 @@ describe("a planning run reports the dry run and is never failed by it", () => {
     // The report survives the event path byte for byte (its digests are not mistaken for secrets) and is what the broker reads.
     const outcome = readPlanDryRunOutcome({ events: sent, planText: plan.content, workerFeatures: [PLAN_DRY_RUN_FEATURE],
       proposed: proposedChecksOfPlan(plan.content, [FOLDER]).map((check, index) => ({ id: `proposed-${index + 1}`, command: check.command })) });
-    expect(outcome).toEqual({ status: "TRIED", results: [{ checkId: "proposed-1", class: "passed", durationMs: 5 }] });
+    expect(outcome).toEqual({ status: "TRIED", results: [{ checkId: "proposed-1", class: "passed" }] });
   });
 
   it("does not fail or delay the plan when the dry run throws, and sends no report", async () => {
@@ -378,13 +439,31 @@ describe("the control plane reads the report", () => {
   const withTimeout = (check: { id: string; command: { cwd: string; executable: string; args: string[] } }) => ({ ...check, command: { ...check.command, timeoutSeconds: 60 } });
   const proposed = [checkA, checkB, checkC].map(withTimeout);
   const PLAN = "the exact plan text";
-  const report = (checks: Array<{ command: typeof proposed[number]["command"]; class: "passed" | "failed" | "broken" | "not-run" }>, planText = PLAN): PlanDryRunReport => ({
+  const report = (checks: Array<{ command: typeof proposed[number]["command"]; class: "passed" | "failed" | "broken" | "not-run" | "not-checked" }>, planText = PLAN): PlanDryRunReport => ({
     schemaVersion: "workflow-plan-dry-run/v1", status: "COMPLETE", planSha256: sha256(planText), totalMs: 10,
     checks: checks.map((entry) => ({ commandSha256: planDryRunCommandSha256(entry.command), class: entry.class, durationMs: 3 })),
   });
   const eventsOf = (payload: unknown) => [{ type: "progress", payload: { message: "x" } }, { type: "progress", payload: { message: "y", planDryRun: payload } }];
   const read = (payload: unknown, extra: Partial<Parameters<typeof readPlanDryRunOutcome>[0]> = {}) =>
     readPlanDryRunOutcome({ events: eventsOf(payload), planText: PLAN, proposed, workerFeatures: [PLAN_DRY_RUN_FEATURE], ...extra });
+
+  it("keeps the duration out of what the control plane hands on (it is a free-form number the code under test can steer)", () => {
+    const outcome = read(report([{ command: proposed[0]!.command, class: "passed" }]));
+    expect(JSON.stringify(outcome)).not.toContain("durationMs");
+    expect(JSON.stringify([planDryRunFindings({ outcome }), planDryRunWarnings(outcome), planDryRunOriginalResults(outcome)])).not.toMatch(/duration|\b3\b/);
+  });
+
+  it("not-checked and not-run raise no finding and leave the original-code result unknown", () => {
+    const outcome = read(report([{ command: proposed[0]!.command, class: "not-checked" }, { command: proposed[1]!.command, class: "not-run" }, { command: proposed[2]!.command, class: "passed" }]));
+    expect(planDryRunFindings({ outcome, expectOnBase: { "proposed-1": "pass", "proposed-2": "fail" } })).toEqual([]);
+    expect(planDryRunOriginalResults(outcome)).toEqual({ "proposed-3": "passed" });
+    expect(planDryRunWarnings(outcome)).toEqual(["Some proposed checks were not tried on the current code."]);
+  });
+
+  it("a check that was only not-checked still says so in one fixed warning", () => {
+    const outcome = read(report([{ command: proposed[0]!.command, class: "passed" }, { command: proposed[1]!.command, class: "passed" }, { command: proposed[2]!.command, class: "not-checked" }]));
+    expect(planDryRunWarnings(outcome)).toEqual(["Some proposed checks were not tried on the current code."]);
+  });
 
   it("gives broken and mismatch findings with fixed sentences, from classes and expectations alone", () => {
     const outcome = read(report([{ command: proposed[0]!.command, class: "failed" }, { command: proposed[1]!.command, class: "passed" }, { command: proposed[2]!.command, class: "broken" }]));

@@ -19,7 +19,7 @@ export type PlanDryRunNotTriedReason = "no-proposed-checks" | "worker-cannot" | 
 
 export type PlanDryRunOutcome =
   | { status: "NOT_TRIED"; reason: PlanDryRunNotTriedReason; workerReason?: PlanDryRunUnavailableReason }
-  | { status: "TRIED"; results: ReadonlyArray<{ checkId: string; class: PlanDryRunClass; durationMs: number }> };
+  | { status: "TRIED"; results: ReadonlyArray<{ checkId: string; class: PlanDryRunClass }> };
 
 const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 
@@ -59,9 +59,10 @@ export function readPlanDryRunOutcome(input: {
     const digest = planDryRunCommandSha256(check.command);
     const at = pool.findIndex((entry) => entry.commandSha256 === digest);
     // A check the report has no entry for was not tried: never read as a pass.
-    if (at < 0) return { checkId: check.id, class: "not-run" as const, durationMs: 0 };
+    if (at < 0) return { checkId: check.id, class: "not-run" as const };
     const [entry] = pool.splice(at, 1);
-    return { checkId: check.id, class: entry!.class, durationMs: entry!.durationMs };
+    // The report's durations stay with the worker's logs: a free-form number the code under test can steer never reaches a prompt, a card or a page.
+    return { checkId: check.id, class: entry!.class };
   });
   return { status: "TRIED", results };
 }
@@ -86,7 +87,7 @@ export function planDryRunFindings(input: { outcome: PlanDryRunOutcome; expectOn
 /** The warnings the approval card and page show when checks were not (all) tried: fixed sentences, no detail from the worker. */
 export function planDryRunWarnings(outcome: PlanDryRunOutcome): string[] {
   if (outcome.status === "NOT_TRIED") return outcome.reason === "no-proposed-checks" ? [] : ["Proposed checks were not tried on the current code."];
-  return outcome.results.some((result) => result.class === "not-run") ? ["Some proposed checks were not tried on the current code."] : [];
+  return outcome.results.some((result) => result.class === "not-run" || result.class === "not-checked") ? ["Some proposed checks were not tried on the current code."] : [];
 }
 
 /**
@@ -96,6 +97,6 @@ export function planDryRunWarnings(outcome: PlanDryRunOutcome): string[] {
 export function planDryRunOriginalResults(outcome: PlanDryRunOutcome): Record<string, OriginalCodeResult> {
   if (outcome.status !== "TRIED") return {};
   // A check that was not tried is left out: its result is unknown, which is not the same as "cannot run".
-  return Object.fromEntries(outcome.results.filter((result) => result.class !== "not-run")
+  return Object.fromEntries(outcome.results.filter((result) => result.class !== "not-run" && result.class !== "not-checked")
     .map((result) => [result.checkId, result.class === "passed" ? "passed" as const : result.class === "failed" ? "failed" as const : "cannot-run" as const]));
 }
