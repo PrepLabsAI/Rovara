@@ -93,10 +93,10 @@ const AGENT_SENTENCES = Object.freeze({
 
 /**
  * Every reason a whole group can end with that is put into words (RUN-2). `DockerApplicationUnavailableReason` is the app host's own list: a code added there is a compile error until
- * it is worded below, exactly as `E2EAgentUnknownCode` is for `AGENT_SENTENCES`. The rest are the worker's `evidence too large`, the broker's own `runtime-expired`, the model
+ * it is worded below, exactly as `E2EAgentUnknownCode` is for `AGENT_SENTENCES`. The rest are the worker's `evidence too large`, the broker's own `runtime-expired`, the runner's `runtime-environment-drifted`, the model
  * channel's `model-environment-unsafe` and the three route codes.
  */
-export type E2EGroupReasonCode = DockerApplicationUnavailableReason | "evidence too large" | "runtime-expired" | "model-environment-unsafe"
+export type E2EGroupReasonCode = DockerApplicationUnavailableReason | "evidence too large" | "runtime-expired" | "runtime-environment-drifted" | "model-environment-unsafe"
   | "model-route-changed-reapprove" | "agent-route-not-approved" | "model-route-not-tested";
 
 /** What the owner is told to do when it is Rovara's side that stopped the checks: retry, and say which code if it keeps happening. */
@@ -119,6 +119,9 @@ const GROUP_SENTENCES = Object.freeze({
   cancelled: "The checks were stopped before they finished. Retry the checks.",
   "evidence too large": `The checks produced more evidence than Rovara can keep, so they could not be decided. ${RETRY_THEN_SUPPORT("evidence too large")}`,
   "runtime-expired": "The browser and API runtime's qualification expired. An administrator must qualify it again, then retry the checks.",
+  // The runner's kernel (or architecture) is no longer the one the runtime was qualified on (HARDEN-C I-4): the worker refuses at the start, and the broker gives the same code to a round an older worker ran anyway.
+  // Infrastructure: it is not in the send-back codes, and only a requalification fixes it.
+  "runtime-environment-drifted": "The test machine changed since it was qualified. An administrator must qualify it again, then retry the checks.",
   "model-environment-unsafe": "This runner's setup could let AI model calls be redirected, so AI navigation was not run. Tell Rovara support (code model-environment-unsafe).",
   "model-route-changed-reapprove": "The AI navigation settings changed after setup was approved. Approve setup again to run these checks.",
   "agent-route-not-approved": "AI navigation isn't approved for this project yet. Approve setup to run the AI-navigated checks.",
@@ -151,7 +154,7 @@ export const E2E_OWNER_SENTENCES = Object.freeze({
   sendBackCodes: SEND_BACK_CODES,
 
   /** Group codes that are also noted for the operator by code only: the owner reads a plain sentence, the operator's log says which code it was. */
-  groupCodeOperatorOnly: Object.freeze(["model-environment-unsafe"] as readonly string[]),
+  groupCodeOperatorOnly: Object.freeze(["model-environment-unsafe", "runtime-environment-drifted"] as readonly string[]),
 
   /**
    * The badge on an AI-navigated row. `acted` are the page elements the model acted on, in order, each with the kind of action (an action with no recorded kind reads as a click); at most two

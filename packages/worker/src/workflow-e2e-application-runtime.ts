@@ -3,6 +3,7 @@ import { E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE } from "@agentx/cont
 import { assertE2EEnvironmentCannotRedirect, assertE2ESharedAwsConfigCannotRedirect, deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment } from "@agentx/model-runtime";
 import { WEB_API_BUILD_IMAGE, containedRuntimeProfileForHost, createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHostDeps, type DockerCli } from "@agentx/verifier";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
+import { runnerHostEnvironment } from "./e2e-runtime-environment.js";
 
 /** What the worker's own configuration gives the Docker application host; nothing here comes from an invocation. */
 export type WorkflowE2EApplicationRuntimeConfig = Readonly<{ executorImage: string; buildImage: string; runRoot: string }>;
@@ -34,11 +35,13 @@ export function workflowE2EApplicationHostDeps(config: WorkflowE2EApplicationRun
 
 /** The production Docker application runtime: one Docker application host per group, on the real Docker CLI. */
 export function createWorkflowE2EApplicationRuntime(environment: NodeJS.ProcessEnv = process.env,
-  options: { platform?: string; arch?: string; docker?: DockerCli; now?: () => number } = {}): WorkflowE2EApplicationRuntime {
+  options: { platform?: string; arch?: string; docker?: DockerCli; now?: () => number; release?: () => string } = {}): WorkflowE2EApplicationRuntime {
   const config = workflowE2EApplicationRuntimeConfig(environment, options.platform, options.arch);
   const docker = options.docker ?? createProcessDockerCli();
   const now = options.now ?? (() => Date.now());
   return Object.freeze({ runRoot: config.runRoot,
+    // Always set in production: a round whose admitted runtime was qualified on another kernel or architecture is refused at its start (HARDEN-C I-4).
+    hostEnvironment: () => runnerHostEnvironment(options.platform, options.arch, options.release),
     createHost: (input) => createDockerApplicationHost(workflowE2EApplicationHostDeps(config, docker, now, input)) });
 }
 

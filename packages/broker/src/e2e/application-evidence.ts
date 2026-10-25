@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_DISPLAY_ASSERTION_KINDS, canonicalJson, e2eModelRouteRevision, e2ePlanHasCompleteRequiredCriteria,
+import { E2E_AGENT_TRACE_FILE_MAX_BYTES, E2E_RUNTIME_ENVIRONMENT_DRIFTED_CODE, E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_DISPLAY_ASSERTION_KINDS, canonicalJson, e2eModelRouteRevision, e2ePlanHasCompleteRequiredCriteria,
   type E2EAgentTraceBinding, type E2EApplicationExecutionAdmission, type E2EDisplayAgentNavigation, type E2EDisplayScenario, type E2EExecutionPlan, type E2EModelRouteDefinition, type E2ERound, type E2ERoundScope, type E2EQualifiedResult } from "@agentx/contracts";
 import { E2EAgentModelEvidenceSchema, E2E_AGENT_TRACE_BASE64_MAX, createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
   E2E_AGENT_CONFIG_MAX_INPUT_TOKENS, e2eApplicationAggregateRunUsage, e2eApplicationGroupUsesModel, e2eCompiledRuntime, e2eApplicationHostedMockOrigins, e2eApplicationPrivateTransferMaxBytes, e2eApplicationSchemaReason, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
@@ -426,7 +426,9 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     const inventoryDigest = dockerOwnedResourceInventoryDigest(binding.runId, mockOrigins);
     if (inputs.ownedResourceInventoryDigest !== inventoryDigest) return unknown("the group's owned-resource inventory is not the one its run id derives");
     const runtime = e2eCompiledRuntime(suite);
-    if (runtime === undefined || !same(inputs.environment, runtime.runnerEnvironment)) return unknown("the runner's environment is not the admitted runtime's environment");
+    if (runtime === undefined) return unknown("the admitted runtime is not part of the group's admission");
+    // The fixed code alone (not `code: detail`), so the block reason's `group: code` entry reads as a code and the owner is told what to do (HARDEN-C I-4): the runner's kernel or architecture is not the admitted runtime's.
+    if (!same(inputs.environment, runtime.runnerEnvironment)) return unknown(E2E_RUNTIME_ENVIRONMENT_DRIFTED_CODE);
     const runnerLimits = runnerLimitsFor(suite);
     if (!same(inputs.limits, runnerLimits)) return unknown("the runner's limits are not the configured limits");
     if (!Array.isArray(inputs.governedModelReceipts) || inputs.governedModelReceipts.length !== 0) return unknown("model-receipts-mismatch: M1-era model receipt rows are not how an AI navigation step is read");

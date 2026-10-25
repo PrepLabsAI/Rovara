@@ -54,6 +54,12 @@ export const WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX = "The approved browse
  */
 export const E2E_RUNTIME_EXPIRED_CODE = "runtime-expired" as const;
 /**
+ * The code of a group that did not run (or could not be trusted) because the runner's environment (its kernel release or architecture) is no longer the one the runtime was qualified on
+ * (HARDEN-C I-4). The worker ends the group with exactly this code before it builds a host; the broker opens the reason of a group an older worker ran anyway with it. Infrastructure
+ * only: send-back to coding is never offered, and an administrator qualifies the runtime again.
+ */
+export const E2E_RUNTIME_ENVIRONMENT_DRIFTED_CODE = "runtime-environment-drifted" as const;
+/**
  * How the block reason of a CHECKS round begins when the broker could not confirm every admitted group (`admitted E2E evidence is incomplete or unknown (<group>: <reason>; ...)`).
  * For a group the app host or the worker ended with one of its fixed codes, the reason after the group's id is exactly that code.
  */

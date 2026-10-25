@@ -273,7 +273,8 @@ describe("the oracle's expectations are the broker's, never the worker's (Ruling
     expect(other.fixture.collected.qualification?.status, "the worker's own collection accepts its self-consistent environment").toBe("PASS");
     const result = verifyApplicationE2EEvidence(other.input());
     expect(result.verdict).toBe("UNKNOWN");
-    expect(reasonOfGroup(result)).toMatch(/not the admitted runtime's environment/u);
+    // HARDEN-C I-4: the reason is the fixed code alone, so the owner reads the sentence for it (an older worker, which ran the round anyway, ends here).
+    expect(reasonOfGroup(result)).toBe("runtime-environment-drifted");
   });
 
   it("is UNKNOWN when the runner honestly reports other limits than the configured ones", async () => {
