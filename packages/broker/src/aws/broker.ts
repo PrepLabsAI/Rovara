@@ -10766,7 +10766,7 @@ async function requireApplicationSelectionStillCurrent(dependencies: AwsBrokerDe
 }
 
 /** Whether an operation's signed reference is for a round that is not the candidate's: the baseline (the unchanged code) or an audit replay (Task 4.6b). Neither can ever be a verdict on the candidate. */
-const isNonCandidateRound = (reference: { purpose?: "baseline" | "replay" | undefined } | undefined): boolean => reference?.purpose === "baseline" || reference?.purpose === "replay";
+const isNonCandidateRound = (reference: { purpose?: "baseline" | "replay" | "grounding" | undefined } | undefined): boolean => reference?.purpose === "baseline" || reference?.purpose === "grounding" || reference?.purpose === "replay";
 
 const NO_COMMITTED_EXPORT_REASON = "the candidate has no committed source export, so there is no source to build and run";
 const NO_BUILD_SOURCE_REASON = "no build source manifest was exported for this candidate";

@@ -17,13 +17,15 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.workflowPlanDryRun.v1"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /**
  * The worker tries a coding plan's proposed checks on the unchanged code while it plans, and reports only a fixed class per check (see PlanDryRunReportSchema).
  * Nothing in an invocation asks for it: a worker that lists this feature does it for every structured coding plan that proposes checks. The planner is asked for
  * `expectOnBase` only from a worker that lists it.
  */
+/** T7a: the feature a worker lists when it can export a plan's base source and run a grounding round (see E2EWorkflowAdmissionRefSchema `purpose: "grounding"`). */
+export const GROUNDING_CHECKS_FEATURE = "task.workflowE2EGroundingChecks.v1" as const;
 export const PLAN_DRY_RUN_FEATURE = "task.workflowPlanDryRun.v1" as const;
 /** The whole dry run, all checks together, may take this long; a check the budget cannot start is "not-run". */
 export const PLAN_DRY_RUN_TOTAL_BUDGET_MS = 120_000;
@@ -187,6 +189,11 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * Sent only to a worker whose /ping lists "task.workflowE2EBaselineSource" (which, unlike the baseline CHECKS feature, needs no executor image: the export reads the repository alone); an older one is sent the run without it, and the baseline then says it could not be checked.
          */
         workflowE2EBaselineSource: z.literal(true).optional(),
+        /**
+         * T7a: a coding plan run is asked to export the unchanged code (the signed workflow base) after planning, so the plan's must-not-change checks can be tried on the current app before the owner is asked.
+         * Sent only to a worker whose /ping lists "task.workflowE2EGroundingChecks.v1" and only to a structured planning run that negotiated the application plan; absent means the run is as before.
+         */
+        workflowE2EGroundingSource: z.literal(true).optional(),
         /** One approved same-repository dependency graph, sent only to workers advertising task.workflowDependencies. */
         workflowDependencies: WorkflowDependencyInvocationSchema.optional(),
         /**
@@ -240,6 +247,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (payload.workflowE2EPlanVersion !== undefined && (payload.workflowMode !== "PLAN" || payload.planFormat !== "structured")) {
           context.addIssue({ code: "custom", path: ["workflowE2EPlanVersion"], message: "the application E2E plan version requires a structured planning run" });
+        }
+        if (payload.workflowE2EGroundingSource !== undefined && (payload.workflowMode !== "PLAN" || payload.planFormat !== "structured" || payload.workflowE2EPlanVersion !== 2)) {
+          context.addIssue({ code: "custom", path: ["workflowE2EGroundingSource"], message: "the grounding source export requires a structured planning run with the application plan version" });
         }
         if (payload.workflowReviewChecks !== undefined && payload.workflowMode !== "REVIEW") {
           context.addIssue({ code: "custom", path: ["workflowReviewChecks"], message: "the checks reviewers are told about require review mode" });
