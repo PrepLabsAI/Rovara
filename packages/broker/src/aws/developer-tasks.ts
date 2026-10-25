@@ -4093,7 +4093,8 @@ async function workflowPublicationAuthority(
   if (approvedPlan === undefined) return undefined;
   const ownerDecision = workflow.decisions.filter((decision) => decision.decision === "APPROVE"
     && decision.artifactDigest === approvedPlan.artifact.sha256).at(-1);
-  if (ownerDecision === undefined || ownerDecision.artifactDigest === undefined) return undefined;
+  // The broker's own automatic decisions (AGENTX) are never an approval; the workflow schema already forbids an AGENTX approval, and this keeps it out of the publication authority too.
+  if (ownerDecision === undefined || ownerDecision.artifactDigest === undefined || ownerDecision.actorRole === "AGENTX") return undefined;
   if (task.startingRevision === undefined) return undefined;
   const [pinned, latest] = await Promise.all([
     deps.actions.projectRevision(task.project, task.startingRevision),

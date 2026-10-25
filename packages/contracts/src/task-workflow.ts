@@ -706,19 +706,41 @@ const PlanDecisionIdSchema = z.string().regex(/^d[1-9][0-9]?$/);
 const PlanOptionIdSchema = z.string().regex(/^[a-z][a-z0-9-]{0,30}$/);
 const WorkflowAnswerSchema = z.object({ decisionId: PlanDecisionIdSchema, optionId: PlanOptionIdSchema }).strict();
 
+/**
+ * The broker's own actor for automatic fixing (AUTOFIX): a fixed identity that is nobody's account. Decisions it records carry `actorRole: "AGENTX"`; such a decision can only be
+ * REQUEST_CHANGES with source AUTO_FIX or AUTO_RETRY (see `WorkflowDecisionSchema`), so it can never be an approval, a skip, a rejection or a publication.
+ */
+export const WORKFLOW_AGENTX_ACTOR_ID = createHash("sha256").update("agentx:automatic-fix:v1", "utf8").digest("hex");
+/** The stages an automatic action can be recorded for (the same stages the owner's Retry and Send back buttons belong to). */
+export const WORKFLOW_AUTO_STAGES = ["PLAN", "IMPLEMENT", "VERIFY", "REVIEW"] as const;
+/** At most this many automatic send backs to coding per approved plan version (decisions since the plan's last APPROVE). */
+export const WORKFLOW_AUTO_SEND_BACK_LIMIT = 2;
+/** At most this many automatic retries of one stage for one candidate. */
+export const WORKFLOW_AUTO_RETRY_LIMIT = 1;
+/** At most this many automatic actions (send backs and retries together) in one task, however many plan versions it has. */
+export const WORKFLOW_AUTO_ACTION_LIMIT = 6;
+/** What an automatic decision was for: the stage it acted on and, when there was one, the candidate that stage had produced. */
+const WorkflowAutoActionSchema = z.object({ stage: z.enum(WORKFLOW_AUTO_STAGES), candidateDigest: DigestSchema.optional() }).strict();
+
 export const WorkflowDecisionSchema = z.object({
   requestId: z.string().uuid(),
   workflowRevision: z.number().int().positive(),
   decision: z.enum(["APPROVE", "REQUEST_CHANGES", "REJECT", "SKIP"]),
   actorId: ActorIdSchema,
-  actorRole: z.enum(["TASK_OWNER", "PROJECT_ADMIN"]),
+  /** `AGENTX` is the broker acting by itself (automatic fixing); only with source AUTO_FIX or AUTO_RETRY, and never for an approval. */
+  actorRole: z.enum(["TASK_OWNER", "PROJECT_ADMIN", "AGENTX"]),
   reason: z.string().trim().min(1).max(500),
   artifactDigest: DigestSchema.optional(),
   /** The exact dependency graph covered by this whole-plan approval. */
   workBreakdownDigest: DigestSchema.optional(),
   selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
-  /** Where the decision was made: an approval gate (the default), the owner sending blocked work back to coding, or the owner resolving review findings. */
-  source: z.enum(["GATE", "SEND_BACK", "FINDINGS"]).optional(),
+  /**
+   * Where the decision was made: an approval gate (the default), the owner sending blocked work back to coding, or the owner resolving review findings; or the broker by itself
+   * sending blocked work back to coding (AUTO_FIX) or retrying a stage (AUTO_RETRY).
+   */
+  source: z.enum(["GATE", "SEND_BACK", "FINDINGS", "AUTO_FIX", "AUTO_RETRY"]).optional(),
+  /** Automatic decisions only: the stage (and candidate) the automatic action was for. The automatic limits are counted from these. */
+  auto: WorkflowAutoActionSchema.optional(),
   /** Plan decisions: the owner's answers that differ from AgentX's recommended ones, in the plan's decision order. */
   answerOverrides: z.array(WorkflowAnswerSchema).min(1).max(WORKFLOW_DECISION_ANSWERS_MAX).optional(),
   /** How many page comments the decision sent along (their IDs are in the decision's detail item). */
@@ -726,7 +748,26 @@ export const WorkflowDecisionSchema = z.object({
   /** Made on the task page; absent for Slack, MCP and older decisions. */
   via: z.literal("PAGE").optional(),
   at: z.string().datetime(),
-}).strict();
+}).strict().superRefine((decision, context) => {
+  const automatic = decision.source === "AUTO_FIX" || decision.source === "AUTO_RETRY";
+  if (automatic !== (decision.actorRole === "AGENTX")) {
+    context.addIssue({ code: "custom", path: ["actorRole"], message: "the AGENTX actor makes automatic decisions, and only it does" });
+  }
+  if (decision.actorRole === "AGENTX" && decision.actorId !== WORKFLOW_AGENTX_ACTOR_ID) {
+    context.addIssue({ code: "custom", path: ["actorId"], message: "an automatic decision is made by the AgentX actor" });
+  }
+  if (automatic) {
+    // An automatic decision can only ask for a change: it carries no approval, no document, no choice of checks and no owner answers.
+    if (decision.decision !== "REQUEST_CHANGES") context.addIssue({ code: "custom", path: ["decision"], message: "an automatic decision can only be REQUEST_CHANGES" });
+    if (decision.auto === undefined) context.addIssue({ code: "custom", path: ["auto"], message: "an automatic decision names its stage" });
+    if (decision.artifactDigest !== undefined || decision.workBreakdownDigest !== undefined || decision.selectedOptionalCheckIds !== undefined
+      || decision.answerOverrides !== undefined || decision.commentsIncluded !== undefined || decision.via !== undefined) {
+      context.addIssue({ code: "custom", message: "an automatic decision carries nothing an approval carries" });
+    }
+  } else if (decision.auto !== undefined) {
+    context.addIssue({ code: "custom", path: ["auto"], message: "only an automatic decision names an automatic stage" });
+  }
+});
 export type WorkflowDecision = z.infer<typeof WorkflowDecisionSchema>;
 
 export const WorkflowCheckSchema = z.object({
@@ -1901,6 +1942,114 @@ export function returnWorkflowToImplementation(
   return WorkflowSnapshotSchema.parse({
     ...unblocked, revision: current.revision + 1, stage: "IMPLEMENT", state: "READY",
     decisions: [...current.decisions, decision], updatedAt: input.now,
+  });
+}
+
+/**
+ * The request ID of one automatic action on one workflow revision. It depends only on the task, the revision the action was decided on and the kind of action, so a repeated trigger
+ * (a recovered dispatch, the reconciler running again) reaches the idempotency check with the same key, and only one of two writers on the same revision can win.
+ */
+export function workflowAutoActionRequestId(taskId: string, revision: number, action: "AUTO_FIX" | "AUTO_RETRY"): string {
+  return workflowRequestId("autofix", taskId, revision, action);
+}
+
+/** How many automatic actions a workflow's decisions already hold, for the automatic limits. Derived from the decisions only: nothing else is stored. */
+export interface WorkflowAutoFixCounts {
+  /** Automatic send backs recorded since the plan's last approval. */
+  sendBacksSincePlanApproval: number;
+  /** Automatic send backs and retries in the whole task. */
+  actions: number;
+  /** Automatic retries recorded for this stage and this candidate (undefined: a stage with no candidate yet). */
+  retriesFor: (stage: (typeof WORKFLOW_AUTO_STAGES)[number], candidateDigest: string | undefined) => number;
+}
+
+export function workflowAutoFixCounts(decisions: readonly WorkflowDecision[]): WorkflowAutoFixCounts {
+  let lastApproval = -1;
+  decisions.forEach((decision, index) => { if (decision.decision === "APPROVE" && (decision.source ?? "GATE") === "GATE") lastApproval = index; });
+  const automatic = decisions.map((decision, index) => ({ decision, index })).filter(({ decision }) => decision.source === "AUTO_FIX" || decision.source === "AUTO_RETRY");
+  return {
+    sendBacksSincePlanApproval: automatic.filter(({ decision, index }) => decision.source === "AUTO_FIX" && index > lastApproval).length,
+    actions: automatic.length,
+    retriesFor: (stage, candidateDigest) => automatic.filter(({ decision }) => decision.source === "AUTO_RETRY" && decision.auto?.stage === stage
+      && decision.auto.candidateDigest === candidateDigest).length,
+  };
+}
+
+/** Block reasons only a person can resolve: sending the work back to coding never helps, so the broker never does it on its own. */
+function personOnlyBlock(blockReason: string | undefined): boolean {
+  return blockReason === WORKFLOW_HISTORY_REWRITTEN_MESSAGE
+    || [WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX]
+      .some((prefix) => blockReason?.startsWith(prefix) === true);
+}
+
+/**
+ * The broker, by itself, sends blocked checks or reviews back to coding (automatic fixing). It records a REQUEST_CHANGES decision by the AGENTX actor with source AUTO_FIX and is
+ * otherwise the same move as the owner's Send back. It is a different function on purpose: it can only make this one move, from a blocked VERIFY or REVIEW, and never approves, skips,
+ * rejects, publishes or acts in a plan review or a pull request. It holds the limits itself (2 per approved plan version, 6 automatic actions in all), so the policy cannot be bypassed,
+ * and it refuses a stale revision. The request ID is derived (`workflowAutoActionRequestId`): the same call again, on the same revision, returns the workflow as it already is.
+ * Whether to call it is the policy's decision (`autoFixDecision`); the owner pressing Send back first makes this one fail with an out-of-date revision.
+ */
+export function returnWorkflowToImplementationAutomatically(
+  currentInput: unknown,
+  input: { expectedRevision: number; reason: string; now: string },
+): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const requestId = workflowAutoActionRequestId(current.taskId, input.expectedRevision, "AUTO_FIX");
+  const prior = current.decisions.find((decision) => decision.requestId === requestId);
+  if (prior !== undefined) {
+    if (prior.source === "AUTO_FIX" && prior.workflowRevision === input.expectedRevision) return current;
+    throw new WorkflowTransitionError("request ID was already used for a different workflow decision");
+  }
+  if (current.revision !== input.expectedRevision) throw new WorkflowTransitionError("the workflow changed since this was decided; it is out of date");
+  if (current.state !== "BLOCKED" || (current.stage !== "VERIFY" && current.stage !== "REVIEW")) {
+    throw new WorkflowTransitionError("only blocked checks or reviews are sent back to coding automatically");
+  }
+  if ((current.pullRequests?.length ?? 0) > 0) throw new WorkflowTransitionError("a pull request is already open for part of this change; a person decides what happens next");
+  if (personOnlyBlock(current.blockReason)) throw new WorkflowTransitionError("this block needs a person; new code does not fix it");
+  if (current.decisions.length >= 100) throw new WorkflowTransitionError("workflow decision history is full");
+  const counts = workflowAutoFixCounts(current.decisions);
+  if (counts.sendBacksSincePlanApproval >= WORKFLOW_AUTO_SEND_BACK_LIMIT) throw new WorkflowTransitionError("the automatic send back limit for this plan is reached");
+  if (counts.actions >= WORKFLOW_AUTO_ACTION_LIMIT) throw new WorkflowTransitionError("the automatic action limit for this task is reached");
+  const decision = WorkflowDecisionSchema.parse({
+    requestId, workflowRevision: current.revision, decision: "REQUEST_CHANGES", actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX",
+    reason: input.reason.trim().slice(0, 500), source: "AUTO_FIX",
+    auto: { stage: current.stage, ...(current.candidate === undefined ? {} : { candidateDigest: current.candidate.digest }) }, at: input.now,
+  });
+  const { blockReason: _blockReason, ...unblocked } = current;
+  void _blockReason;
+  return WorkflowSnapshotSchema.parse({
+    ...unblocked, revision: current.revision + 1, stage: "IMPLEMENT", state: "READY",
+    decisions: [...current.decisions, decision], updatedAt: input.now,
+  });
+}
+
+/**
+ * The decision that records one automatic retry of a blocked stage (AUTO_RETRY), for the broker to append in the same write that runs the retry (the existing Retry route for that
+ * stage). Refuses a stale revision, a stage that is not the blocked one, and a second automatic retry of the same stage for the same candidate, and holds the 6-action limit. The same
+ * call again on the same revision returns the decision already recorded (`current.decisions` holds it): the caller must not append it twice.
+ */
+export function workflowAutomaticRetryDecision(
+  currentInput: unknown,
+  input: { expectedRevision: number; stage: (typeof WORKFLOW_AUTO_STAGES)[number]; reason: string; now: string },
+): WorkflowDecision {
+  const current = validSnapshot(currentInput);
+  const requestId = workflowAutoActionRequestId(current.taskId, input.expectedRevision, "AUTO_RETRY");
+  const prior = current.decisions.find((decision) => decision.requestId === requestId);
+  if (prior !== undefined) {
+    if (prior.source === "AUTO_RETRY" && prior.workflowRevision === input.expectedRevision && prior.auto?.stage === input.stage) return prior;
+    throw new WorkflowTransitionError("request ID was already used for a different workflow decision");
+  }
+  if (current.revision !== input.expectedRevision) throw new WorkflowTransitionError("the workflow changed since this was decided; it is out of date");
+  if (current.state !== "BLOCKED" || current.stage !== input.stage) throw new WorkflowTransitionError("only the blocked stage is retried automatically");
+  if (personOnlyBlock(current.blockReason)) throw new WorkflowTransitionError("this block needs a person; a retry does not fix it");
+  if (current.decisions.length >= 100) throw new WorkflowTransitionError("workflow decision history is full");
+  const counts = workflowAutoFixCounts(current.decisions);
+  if (counts.retriesFor(input.stage, current.candidate?.digest) >= WORKFLOW_AUTO_RETRY_LIMIT) throw new WorkflowTransitionError("this stage was already retried automatically for this code");
+  if (counts.actions >= WORKFLOW_AUTO_ACTION_LIMIT) throw new WorkflowTransitionError("the automatic action limit for this task is reached");
+  return WorkflowDecisionSchema.parse({
+    requestId, workflowRevision: current.revision, decision: "REQUEST_CHANGES", actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX",
+    reason: input.reason.trim().slice(0, 500), source: "AUTO_RETRY",
+    auto: { stage: input.stage, ...(current.candidate === undefined ? {} : { candidateDigest: current.candidate.digest }) }, at: input.now,
   });
 }
 
