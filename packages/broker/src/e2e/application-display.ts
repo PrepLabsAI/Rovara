@@ -190,6 +190,7 @@ export type BuildScenarioRowsInput = Readonly<{
 const PLAIN_REASONS: ReadonlyMap<string, string> = new Map([
   ["unmocked-external-call", "called a service that has no approved mock"],
   ["application-evidence-floor-unmet", "the evidence was not enough to decide"],
+  ["undeclared-mock-consumption", E2E_OWNER_SENTENCES.undeclaredMockConsumption],
   ["application-lifecycle-unconfirmed", "the run did not end cleanly"],
   ["application-round-not-complete", "the checks have not finished"],
 ]);
