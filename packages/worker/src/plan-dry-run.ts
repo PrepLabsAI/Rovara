@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rm, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { lstat, mkdir, rm, stat } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   PLAN_DRY_RUN_SCHEMA_VERSION, PLAN_DRY_RUN_TOTAL_BUDGET_MS, PlanDryRunReportSchema, builtinFileCheckOf, parsePlanDocument, planDryRunCommandSha256,
   type PlanDryRunClass, type PlanDryRunReport, type PlanDryRunUnavailableReason,
@@ -51,6 +51,45 @@ export function proposedChecksOfPlan(planText: string, repositoryPaths: readonly
  */
 export function dryRunTries(command: { executable: string; args: readonly string[] }): boolean {
   return builtinFileCheckOf(command) !== undefined || TRIED_PROGRAMS.has(command.executable);
+}
+
+const GREP_PROGRAMS = new Set(["grep", "egrep", "fgrep"]);
+/** grep options that take a value in the next argument (or fused to the option); `-e` and `-f` also supply the pattern. */
+const GREP_SHORT_WITH_VALUE = new Set(["e", "f", "m", "A", "B", "C", "d", "D"]);
+const GREP_LONG_WITH_VALUE = new Set(["regexp", "file", "max-count", "after-context", "before-context", "context", "directories", "devices", "include", "exclude", "exclude-from", "exclude-dir", "label", "binary-files", "color", "colour"]);
+
+/**
+ * The file operands of a grep command line (not the pattern, not an option's value, not stdin `-`). A file operand that is not on the unchanged code means the check cannot pass
+ * there: grep would exit 2, which is "could not run", but a missing file is the ordinary state of a file the change will create, so it is a failed check, not a broken one.
+ */
+export function grepFileOperands(args: readonly string[]): string[] {
+  const operands: string[] = [];
+  let patternGivenByOption = false;
+  let optionsEnded = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (!optionsEnded && arg === "--") { optionsEnded = true; continue; }
+    if (!optionsEnded && arg.startsWith("--")) {
+      const name = arg.slice(2).split("=")[0]!;
+      if (name === "regexp" || name === "file") patternGivenByOption = true;
+      if (!arg.includes("=") && GREP_LONG_WITH_VALUE.has(name)) index += 1;
+      continue;
+    }
+    if (!optionsEnded && arg.startsWith("-") && arg !== "-") {
+      // A cluster such as -qe: a value option ends it, and its value is the rest of the cluster or, when nothing follows, the next argument.
+      for (let at = 1; at < arg.length; at += 1) {
+        const flag = arg[at]!;
+        if (!GREP_SHORT_WITH_VALUE.has(flag)) continue;
+        if (flag === "e" || flag === "f") patternGivenByOption = true;
+        if (at === arg.length - 1) index += 1;
+        break;
+      }
+      continue;
+    }
+    operands.push(arg);
+  }
+  const files = patternGivenByOption ? operands : operands.slice(1);
+  return files.filter((file) => file !== "-");
 }
 
 /** What an exit code says about a check, from the program and the code alone (the output is never looked at). */
@@ -201,6 +240,16 @@ async function runOne(input: { docker: DockerCli; config: { executorImage: strin
   // A folder that does not exist on the unchanged code is a check that cannot pass there; no container is needed to know that.
   const info = await stat(inside === "" ? input.source : join(input.source, inside)).catch(() => undefined);
   if (info === undefined || !info.isDirectory()) return "failed";
+  // A grep on a file the change will create: the file is not on the unchanged code, so the check fails there (grep itself would exit 2, which reads as broken).
+  if (GREP_PROGRAMS.has(executable)) {
+    const base = inside === "" ? input.source : join(input.source, inside);
+    for (const file of grepFileOperands(args)) {
+      if (file.startsWith("/") || file.includes("\0")) continue;
+      const target = resolve(base, file);
+      if (target !== input.source && !target.startsWith(`${input.source}${sep}`)) continue;
+      if (await lstat(target).then(() => false, () => true)) return "failed";
+    }
+  }
   const name = `rovara-plan-dry-${input.runId}-${input.index}`;
   const dockerArgs = planDryRunSandboxArgs({ name, runId: input.runId, createdAt: input.now(), image: input.config.executorImage, source: input.source, repositoryPath: input.repositoryPath, cwd, executable, args });
   let result: { code: number };

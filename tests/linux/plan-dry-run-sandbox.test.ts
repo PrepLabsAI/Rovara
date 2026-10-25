@@ -128,11 +128,11 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       planText: "plan", repositoryPath: REPO, repositories: [{ repositoryId: REPO, directory: repo, baseCommitSha }], signal: AbortSignal.timeout(110_000),
       config: { executorImage: IMAGE, runRoot },
       checks: [builtin("file-contains", "src/app.js", "BASE-TOKEN"), builtin("file-not-contains", "src/app.js", "BASE-TOKEN"), builtin("file-contains", "src/new.js", "x"),
-        check("grep", ["-q", "BASE-TOKEN", "src/app.js"]), check("grep", ["-q", "x", "src/missing.js"]), check("npm", ["test"])],
+        check("grep", ["-q", "BASE-TOKEN", "src/app.js"]), check("grep", ["-q", "x", "src/missing.js"]), check("grep", ["-q", "-E", "(", "src/app.js"]), check("npm", ["test"])],
     });
     expect(report.status).toBe("COMPLETE");
     if (report.status !== "COMPLETE") return;
-    expect(report.checks.map((entry) => entry.class)).toEqual(["passed", "failed", "failed", "passed", "broken", "not-checked"]);
+    expect(report.checks.map((entry) => entry.class)).toEqual(["passed", "failed", "failed", "passed", "failed", "broken", "not-checked"]);
     const leftovers = await docker("ps", "-a", "--filter", "name=rovara-plan-dry-pdr-", "--format", "{{.Names}}");
     expect(leftovers.stdout.trim()).toBe("");
     expect(existsSync(join(root, "candidates", "plan-dry-runs")) ? execFileSync("ls", [join(root, "candidates", "plan-dry-runs")], { encoding: "utf8" }).trim() : "").toBe("");
