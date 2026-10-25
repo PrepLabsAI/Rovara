@@ -11,7 +11,7 @@ import {
 } from "../../packages/mcp/src/index.js";
 import { toolError as parseToolError } from "../support/mcp-tool-error.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
-import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
+import { createSingleAnswerPlanBroker, MAYA } from "../support/developer-task-broker.js";
 
 const TASK = "44444444-4444-4444-8444-444444444444";
 const PLANTED = "xoxb-3333333333-planted-secret";
@@ -145,7 +145,7 @@ describe("ordered work approval digest (Spec059)", () => {
   });
 
   it("carries the canonical digest from the actual broker task view into agentx_get_task", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getCommitTree: async () => "a".repeat(40) } } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: { getCommitTree: async () => "a".repeat(40) } } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
       requestId: randomUUID(), project: "payments", instructions: "Implement the ordered change", client: "test-client", workflow: true, workflowPath: "QUICK",
     });

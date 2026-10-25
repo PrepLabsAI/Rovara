@@ -37,6 +37,7 @@ function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}, without: Rea
   const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{\"accepted\":true}" }));
   const progress = vi.fn<Ec2DeliveryDependencies["progress"]>(async () => undefined);
   const applicationPlanNotNegotiated = vi.fn<NonNullable<Ec2DeliveryDependencies["applicationPlanNotNegotiated"]>>(async () => undefined);
+  const planQualityNotNegotiated = vi.fn<NonNullable<Ec2DeliveryDependencies["planQualityNotNegotiated"]>>(async () => undefined);
   const dependencies: Ec2DeliveryDependencies = {
     sessions: { ensureSession: async () => ({ ready: true, generation: 3, privateIp: "10.42.128.10" }) },
     binding: async () => binding,
@@ -44,12 +45,13 @@ function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}, without: Rea
     post,
     progress,
     applicationPlanNotNegotiated,
+    planQualityNotNegotiated,
     now: () => NOW,
     ...overrides,
   };
   for (const key of without) delete dependencies[key];
   const deliver = createEc2Delivery(dependencies);
-  return { deliver, post, progress, applicationPlanNotNegotiated };
+  return { deliver, post, progress, applicationPlanNotNegotiated, planQualityNotNegotiated };
 }
 
 function readinessFixture() {
@@ -922,9 +924,12 @@ describe("ec2-ebs delivery", () => {
       const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowPlanDryRun.v1"] });
       expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
       expect(postedPayload(capable.post).prompt).toContain("scenarioProves");
+      expect(capable.planQualityNotNegotiated).not.toHaveBeenCalled();
       const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
       expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
       expect(postedPayload(older.post).prompt).toBe(`Planning phase only.\n\n${plain}\n\nRequest:\nadd it`);
+      // The operation record is told, so the broker never sends that planner a revision naming the members.
+      expect(older.planQualityNotNegotiated).toHaveBeenCalledWith(record);
       expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
         event: "dispatch.plan_quality_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
       }));

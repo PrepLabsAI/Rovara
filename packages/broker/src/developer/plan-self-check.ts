@@ -40,9 +40,20 @@ const NOTE_SENTENCES: Record<(typeof PLAN_SELF_CHECK_NOTE_CODES)[number], string
 const PlanSelfCheckNoteSchema = z.object({ code: z.enum(PLAN_SELF_CHECK_NOTE_CODES), ownerSentence: z.string().min(1).max(300) }).strict();
 export type PlanSelfCheckNote = z.infer<typeof PlanSelfCheckNoteSchema>;
 
-/** What is stored beside a plan document (never inside it, so the digest the owner's approval binds does not move). */
+/** Why a document was stored without its checks having run: shown to the owner as "not checked", never as "no problems". */
+export const PLAN_SELF_CHECK_SKIP_REASONS = ["disabled", "not-a-coding-plan", "checks-not-read", "rules-failed"] as const;
+export type PlanSelfCheckSkipReason = (typeof PLAN_SELF_CHECK_SKIP_REASONS)[number];
+
+/**
+ * What is stored beside every document the planner's answer became (never inside it, so the digest the owner's approval binds does not move).
+ * Object key: `planSelfCheckKey(prefix)`, i.e. the document's own object key with `.json` replaced by `.quality.json`.
+ * `status: "checked"`: the rules ran; `findings` (possibly empty) and `notes` are the result. `status: "not-checked"`: they did not (`reason` says why);
+ * `findings` and `notes` are empty and mean nothing. A document with no such object at all (stored before this existed, or the write failed) is also "not checked".
+ */
 export const PlanSelfCheckRecordSchema = z.object({
   schemaVersion: z.literal(1),
+  status: z.enum(["checked", "not-checked"]),
+  reason: z.enum(PLAN_SELF_CHECK_SKIP_REASONS).optional(),
   artifactId: z.string().min(1).max(200),
   artifactSha256: z.string().regex(/^[0-9a-f]{64}$/u),
   checkedAt: z.string().min(1).max(40),
@@ -83,16 +94,15 @@ export function selfCheckNotes(plan: PlanDocument, input: { dryRun: PlanDryRunRe
 }
 
 /** Findings that only a planner told about the new plan members (`scenarioProves`, `expectOnBase`) can fix. */
-const NEEDS_NEW_MEMBERS = new Set<PlanQualityFinding["code"]>(["claim-not-covered", "claim-static-only", "check-base-mismatch", "scenario-base-mismatch"]);
+const NEEDS_NEW_MEMBERS = new Set<PlanQualityFinding["code"]>(["claim-not-covered", "claim-static-only", "check-command-lint", "check-base-mismatch", "scenario-base-mismatch"]);
 
 /**
- * The findings an automatic revision may be spent on. A finding whose fix needs the new plan members counts only when the
- * plan shows its planner knew them (it used one) or the plan has no scenario to name them for; an older worker that was never
- * asked for them would only be sent a request it cannot answer. Everything else revisable counts.
+ * The findings an automatic revision may be spent on. A finding whose fix names the new plan members (`scenarioProves`, `expectOnBase`,
+ * built-in file checks) counts only for a run whose planner was asked for them (`planQualityAsked`, which delivery clears for an older
+ * worker): its strict parser would reject a plan that followed the advice. Everything else revisable counts.
  */
-export function autoRevisableFindings(plan: PlanDocument, findings: readonly PlanQualityFinding[]): PlanQualityFinding[] {
-  const aware = plan.scenarioProves !== undefined || plan.checks?.expectOnBase !== undefined || (plan.e2e?.scenarios.length ?? 0) === 0;
-  return findings.filter((finding) => finding.revisable && (aware || !NEEDS_NEW_MEMBERS.has(finding.code)));
+export function autoRevisableFindings(findings: readonly PlanQualityFinding[], planQualityAsked: boolean): PlanQualityFinding[] {
+  return findings.filter((finding) => finding.revisable && (planQualityAsked || !NEEDS_NEW_MEMBERS.has(finding.code)));
 }
 
 /** The most findings named in a revision prompt. */

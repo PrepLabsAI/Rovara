@@ -321,7 +321,7 @@ import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./develope
 import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { planQualityFindings } from "../developer/plan-quality.js";
-import { PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, dryRunFindings, planRevisionPrompt, planRevisionsUsed, planSelfCheckKey, planUnreadableCategory, planQualityContextOf, recordedPlanQualityContext, selfCheckNotes, type PlanDryRunResults, type PlanSelfCheckState } from "../developer/plan-self-check.js";
+import { PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, dryRunFindings, planRevisionPrompt, planRevisionsUsed, planSelfCheckKey, planUnreadableCategory, planQualityContextOf, recordedPlanQualityContext, selfCheckNotes, type PlanDryRunResults, type PlanSelfCheckSkipReason, type PlanSelfCheckState } from "../developer/plan-self-check.js";
 import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, candidateBuildSourceAdmissionReference, type StoredCandidateBuildSource } from "./candidate-build-source.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
@@ -769,7 +769,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
       const result = await cancelRunningTask(dependencies, workspace, requesterOf(identity), extra);
       return result.outcome === "CANCEL_REQUESTED"
         ? { outcome: "CANCEL_REQUESTED", targetOperationId: result.targetOperationId, cancelOperationId: result.cancelOperationId }
-        : { outcome: "NOTHING_RUNNING" };
+        : { outcome: "NOTHING_RUNNING", ...(result.stopped === undefined ? {} : { stopped: result.stopped }) };
     },
     startClose: (identity, workspace, requestId, extra, discardUnpublished) => startTaskClose(dependencies, identity, workspace, requestId, extra, discardUnpublished),
     deleteCompute: (workspace) => deleteWorkspaceCompute(dependencies, workspace),
@@ -4250,6 +4250,8 @@ async function taskOperationParts(
   // The part of the context the plan self-check reads is kept on the run, so the check at its result sees exactly what the planner was told.
   const qualityContext = planQualityContextOf(e2ePlanningContext);
   if (input.workflowMode === "PLAN" && codingPlan && qualityContext !== undefined) operation.planQualityContext = qualityContext;
+  // The prompt below carries the plan quality guidance; delivery clears this for a worker that cannot read the members it names (see createPlanQualityNegotiationRecorder).
+  if (input.workflowMode === "PLAN" && codingPlan) operation.planQualityAsked = true;
   const documentInstructions = planDocumentInstructions({ kind: planKind, path: input.workflowPhase === undefined ? "QUICK" : "FULL", anchors: true, planQuality: true,
     ...(workBreakdownContext === undefined ? {} : { workBreakdownContext }),
     ...(e2ePlanningContext === undefined ? {} : { e2ePlanningContext }),
@@ -5275,7 +5277,8 @@ const CANCELLABLE_KINDS: ReadonlySet<string> = new Set(["task"]);
 type TaskCancellation =
   | { outcome: "CANCEL_REQUESTED"; workspaceId: string; targetOperationId: string; cancelOperationId: string }
   // Issue 196: finishedStatus names the final status when the running task had already finished.
-  | { outcome: "NOTHING_RUNNING"; workspaceId?: string; finishedStatus?: OperationStatus };
+  // `stopped`: no run was live, but the planner's automatic second run was waiting to start; the cancel stopped it.
+  | { outcome: "NOTHING_RUNNING"; workspaceId?: string; finishedStatus?: OperationStatus; stopped?: "PLAN_REVISION" };
 
 /** Cancels the workspace's running task, if it has one (#126). */
 async function cancelRunningTask(
@@ -5287,6 +5290,7 @@ async function cancelRunningTask(
   const targetOperationId = workspace.activeOperationId;
   if (!targetOperationId) {
     await stopQueuedWorkflowE2EReadiness(dependencies, workspace, extra);
+    if (await stopQueuedPlanRevision(dependencies, workspace)) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id, stopped: "PLAN_REVISION" };
     return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
   }
   const target = await requireOperation(dependencies, workspace.id, targetOperationId);
@@ -5303,6 +5307,41 @@ async function cancelRunningTask(
   // A duplicate here means the task finished before the cancel was recorded.
   if (result.duplicate) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id, finishedStatus: result.operation.status };
   return { outcome: "CANCEL_REQUESTED", workspaceId: workspace.id, targetOperationId, cancelOperationId: result.operation.id };
+}
+
+/**
+ * Plan self-check: between a sent-back planning answer and the start of the planner's automatic second run, planning is RUNNING with no live
+ * run (a REPLAN dispatch row waits, longer when the workspace is busy). A cancel then stops that run: the row is deleted and planning is blocked
+ * (Retry planning is offered), in one transaction conditional on the same workflow revision, so the run never starts and never spends.
+ * True when it stopped one.
+ */
+async function stopQueuedPlanRevision(dependencies: AwsBrokerDependencies, workspace: WorkspaceInstance): Promise<boolean> {
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id));
+  if (pointer === undefined) return false;
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.stage !== "PLAN" || workflow.state !== "RUNNING") return false;
+  const rowKey = { pk: WORKFLOW_DISPATCH_PK, sk: `${task.taskId}#${workflow.revision}` };
+  const row = await getItem<WorkflowDispatchRecord>(dependencies, rowKey);
+  if (row === undefined || row.kind !== "REPLAN" || row.taskId !== task.taskId || row.workflowRevision !== workflow.revision) return false;
+  const now = new Date().toISOString();
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Delete: { TableName: dependencies.tableName, Key: rowKey, ConditionExpression: "#kind = :replan AND workflowRevision = :revision",
+        ExpressionAttributeNames: { "#kind": "kind" }, ExpressionAttributeValues: { ":replan": "REPLAN", ":revision": workflow.revision } } },
+      { Update: { TableName: dependencies.tableName, Key: taskKey(task.taskId),
+        UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+        ConditionExpression: "attribute_not_exists(closedAt) AND workflow.revision = :revision AND workflow.#stage = :plan AND workflow.#state = :running",
+        ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+        ExpressionAttributeValues: { ":workflow": blockWorkflow(workflow, workflowRunEndedReason("PLAN", "CANCELLED"), now), ":now": now,
+          ":revision": workflow.revision, ":plan": "PLAN", ":running": "RUNNING" } } },
+    ] }));
+    return true;
+  } catch (error) {
+    // The run started (or the task moved) first: the ordinary cancel of a live run is the caller's next answer.
+    if (isConditional(error)) return false;
+    throw error;
+  }
 }
 
 /** Stops a verified warm-up in the brief idle interval before recovery can admit its feature round. */
@@ -12145,7 +12184,7 @@ async function storePlanAnswer(
   /** Whether this planning run was asked for (and its worker parses) the schema-v2 application plan. */
   applicationPlanNegotiated: boolean,
   /** The planning run: what its planner was told of the project (`planQualityContext`), for the plan self-check. */
-  operation: Pick<OperationRecord, "planQualityContext">,
+  operation: Pick<OperationRecord, "planQualityContext" | "planQualityAsked">,
 ): Promise<{ next: WorkflowSnapshot; planUnreadable: NonNullable<DeveloperTaskRecord["planUnreadable"]> | null | undefined; evidenceJob?: { artifactId: string; artifactSha256: string }; inlineEvidence?: Omit<InlineEvidence, "taskId">; plannerReplies?: PlannerReplies;
   /** Plan self-check: the answer was not stored; the planner is asked again with `revision.prompt`, and `selfCheck` records the budget this spent. */
   selfCheck?: PlanSelfCheckState; revision?: { prompt: string } }> {
@@ -12217,8 +12256,10 @@ async function storePlanAnswer(
   // with the plan as findings. The check is advisory: a failure in it never blocks the plan.
   let findings: PlanQualityFinding[] = [];
   let notes: ReturnType<typeof selfCheckNotes> = [];
+  // Why the rules did not run, when they did not: kept in the record as "not checked".
+  let skipped: PlanSelfCheckSkipReason | undefined = !selfCheckOn ? "disabled" : artifactType !== "plan" ? "not-a-coding-plan" : plan.checks === undefined ? "checks-not-read" : undefined;
   // A plan whose `checks` member was not read (a task with no check policy) cannot be judged: every claim would look unproved.
-  if (selfCheckOn && artifactType === "plan" && plan.checks !== undefined) {
+  if (skipped === undefined) {
     try {
       // The planning worker's dry run of the proposed checks on the unchanged code reports here when it ships (a fixed class per check, never output); until then the checks are "not tried".
       const dryRun: PlanDryRunResults | undefined = undefined;
@@ -12226,9 +12267,11 @@ async function storePlanAnswer(
       notes = selfCheckNotes(plan, { dryRun });
     } catch (error) {
       findings = [];
+      notes = [];
+      skipped = "rules-failed";
       console.log(JSON.stringify({ component: "broker", event: "plan_self_check.failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
     }
-    const revisable = autoRevisableFindings(plan, findings);
+    const revisable = autoRevisableFindings(findings, operation.planQualityAsked === true);
     if (revisable.length > 0 && revisionLeft) return askAgain(planRevisionPrompt(revisable));
   }
 
@@ -12238,10 +12281,10 @@ async function storePlanAnswer(
   const prefix = `private/${task.ownerKey}/${task.workspaceId}/plan-documents/${artifactId}`;
   const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
   await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: `${prefix}.json`, Body: canonical, ContentType: "application/json" }));
-  if (selfCheckOn && artifactType === "plan" && plan.checks !== undefined) {
+  {
     // Beside the document, never inside it: the digest the owner's approval binds does not move. A plan with no record was not checked.
     try {
-      const record = PlanSelfCheckRecordSchema.parse({ schemaVersion: 1, artifactId, artifactSha256: sha(canonical), checkedAt: now, findings, notes, autoRevisions: revisionsUsed });
+      const record = PlanSelfCheckRecordSchema.parse({ schemaVersion: 1, status: skipped === undefined ? "checked" : "not-checked", ...(skipped === undefined ? {} : { reason: skipped }), artifactId, artifactSha256: sha(canonical), checkedAt: now, findings, notes, autoRevisions: revisionsUsed });
       await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: planSelfCheckKey(prefix), Body: JSON.stringify(record), ContentType: "application/json" }));
     } catch (error) {
       console.log(JSON.stringify({ component: "broker", event: "plan_self_check.record_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));

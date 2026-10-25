@@ -9,7 +9,7 @@ import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
 import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { noticesOf, type Notice } from "../../packages/broker/src/developer/notifications.js";
-import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
+import { MAYA, createSingleAnswerPlanBroker, recordStream } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
@@ -159,7 +159,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   reviewUrlBase?: string;
   workflowE2EBlocks?: NotifierDependencies["workflowE2EBlocks"];
 } = {}) {
-  const harness = await createDeveloperTaskBroker();
+  const harness = await createSingleAnswerPlanBroker();
   const postOverride = options.post;
   // Gap 12: every thread post stays brief (1,200 visible characters, blocks included).
   const strict = new StrictSlackWeb({ briefLimit: 1_200 });

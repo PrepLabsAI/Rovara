@@ -25,7 +25,7 @@ import { decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecution
 import { E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, isE2EPlanCorrectionBlockReason } from "../../packages/broker/src/developer/task-records.js";
 import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/application-account-registry.js";
 import { ordersManifestWith, registryFor } from "../support/e2e-account-registry-fixtures.js";
-import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
+import { createSingleAnswerPlanBroker, MAYA } from "../support/developer-task-broker.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { call, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
@@ -604,14 +604,14 @@ describe("planning context for a qualified web target", () => {
 // The ordinary feature PLAN, end to end through the broker: an approved setup whose web target was proposed against the READY profile,
 // planned against the project's current runtime catalog rows (Ruling AL: web and api rows, matched to the project's runtime binding).
 describe("ordinary feature PLAN with an approved qualified web target", () => {
-  type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
+  type Harness = Awaited<ReturnType<typeof createSingleAnswerPlanBroker>>;
   type Rows = Record<"web" | "api", Record<string, unknown> | undefined>;
   const SLACK_THREAD = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000099" };
   /** Registers the project against its approved setup and the catalog rows, then starts a task and runs its preparation, up to the planning invocation. */
   async function startPlanning(rows: Rows, afterApproval?: (harness: Harness) => void, viaSlack = false, brokerExtra: Record<string, unknown> = {}) {
     const snapshot = contractSnapshot;
     const capture = vi.fn(async () => snapshot);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...brokerExtra } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...brokerExtra } });
     const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     const projectBinding = projectRow().runtimeBinding as typeof binding;
     for (const kind of ["web", "api"] as const) {
@@ -2173,7 +2173,7 @@ describe("anonymous scenarios and inferred-recipe apps (Ruling AZ)", () => {
 describe("the setup decision of a project with a web app (nothing stored changed with the signed-out variants)", () => {
   it("proposes the base targets alone, approves, and answers an approval retried with duplicate: true; the policy it registers holds no variant", async () => {
     const capture = vi.fn(async () => contractSnapshot);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
     const admin = { subject: "admin-subject", admin: true };
     const proposal = await call(harness.handler, { method: "POST", path: "/v1/admin/projects/setup-proposals", user: admin, body: { repositoryUrl: "https://github.com/example/demo.git", ref: "main" } });
     expect(proposal.status, JSON.stringify(proposal.body)).toBe(200);

@@ -14,7 +14,7 @@ export interface StoredArtifact { id: string; operationId: string; name: string;
 export interface StoredPullRequest { repository: string; number: number; url: string; state: "open" | "closed" | "merged" }
 export type TaskCancellationResult =
   | { outcome: "CANCEL_REQUESTED"; targetOperationId: string; cancelOperationId: string }
-  | { outcome: "NOTHING_RUNNING" };
+  | { outcome: "NOTHING_RUNNING"; stopped?: "PLAN_REVISION" };
 
 /**
  * The broker actions a developer task route may call. The handlers that take an identity check

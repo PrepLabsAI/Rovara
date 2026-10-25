@@ -49,6 +49,18 @@ export function createApplicationPlanNegotiationRecorder(input: { documentClient
   };
 }
 
+/** Clears the planning operation's record that its planner was asked for the plan quality members, when delivery dropped that guidance for an older worker. Idempotent. */
+export function createPlanQualityNegotiationRecorder(input: { documentClient: DynamoDBDocumentClient; tableName?: string }) {
+  return async (record: Ec2OutboxRecord): Promise<void> => {
+    await input.documentClient.send(new UpdateCommand({
+      TableName: input.tableName ?? requiredEnvironment("STATE_TABLE_NAME"),
+      Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` },
+      UpdateExpression: "REMOVE planQualityAsked",
+      ConditionExpression: "attribute_exists(pk)",
+    }));
+  };
+}
+
 export function createWorkflowE2EReadinessValidator(input: { documentClient: DynamoDBDocumentClient; tableName?: string }) {
   return async (record: Ec2OutboxRecord, invocation: WorkerInvocation): Promise<"ORDINARY" | "READINESS" | "PARKED"> => {
     if (invocation.kind !== "resume") return "ORDINARY";
@@ -600,6 +612,7 @@ const deliverEc2 = createEc2Delivery({
   }),
   guardTaskDispatch: taskDispatchGuard,
   applicationPlanNotNegotiated: createApplicationPlanNegotiationRecorder({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
+  planQualityNotNegotiated: createPlanQualityNegotiationRecorder({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
   validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
   guardProjectSetupDispatch,
   async progress(record, message) {
