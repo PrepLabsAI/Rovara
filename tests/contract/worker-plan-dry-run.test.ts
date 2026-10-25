@@ -11,7 +11,7 @@ import {
   type PlanDryRunReport,
 } from "@agentx/contracts";
 import type { DockerCli } from "@agentx/verifier";
-import { classifyDryRunExit, proposedChecksOfPlan, runPlanDryRun, type ProposedCheckToTry } from "../../packages/worker/src/plan-dry-run.js";
+import { classifyDryRunExit, grepFileOperands, proposedChecksOfPlan, runPlanDryRun, type ProposedCheckToTry } from "../../packages/worker/src/plan-dry-run.js";
 import { materializeBaseSource } from "../../packages/worker/src/baseline-source-export.js";
 import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
@@ -142,7 +142,7 @@ describe("a dry run on the unchanged code", () => {
   });
 
   it("attributes each result to its own check by the digest of its command, in plan order", async () => {
-    const checks = [builtin("file-contains", "src/app.js", "BASE-TOKEN"), builtin("file-not-contains", "src/app.js", "BASE-TOKEN"), program("grep", ["-q", "x", "no-such-file.txt"])];
+    const checks = [builtin("file-contains", "src/app.js", "BASE-TOKEN"), builtin("file-not-contains", "src/app.js", "BASE-TOKEN"), program("grep", ["-q", "-E", "(", "keep.txt"])];
     const { report } = await dryRun(checks);
     expect(report.status).toBe("COMPLETE");
     if (report.status !== "COMPLETE") return;
@@ -152,8 +152,34 @@ describe("a dry run on the unchanged code", () => {
   });
 
   it("calls a command that cannot run broken, not failed: a grep or test usage error", async () => {
-    const { report } = await dryRun([program("grep", ["-q", "x", "no-such-file.txt"]), program("grep", ["-q", "-E", "(", "keep.txt"]), program("test", ["1", "-eq", "x"])]);
+    const { report } = await dryRun([program("grep", ["-q", "-E", "(", "keep.txt"]), program("grep", ["-q", "-E", "[", "src/app.js"]), program("test", ["1", "-eq", "x"])]);
     expect(classes(report)).toEqual(["broken", "broken", "broken"]);
+  });
+
+  it("a grep on a file the change will create fails on the base (the file is not there yet), without a container; a real usage error on an existing file is still broken", async () => {
+    const { report, observed } = await dryRun([
+      program("grep", ["-q", "newSymbol", "src/new-file.js"]), program("grep", ["-rq", "-e", "x", "--", "src/app.js", "src/other-new.js"]), program("fgrep", ["-q", "x", "keep.txt", "also-missing.txt"]),
+      program("grep", ["-q", "-E", "(", "keep.txt"]), program("grep", ["-q", "BASE-TOKEN", "src/app.js"]),
+    ]);
+    expect(classes(report)).toEqual(["failed", "failed", "failed", "broken", "passed"]);
+    // Only the last two reached a container.
+    expect(observed.calls.filter((call) => call[0] === "run")).toHaveLength(2);
+    // The built-in file checks say the same for a file that is not there yet: failed, not broken.
+    expect(classes((await dryRun([builtin("file-contains", "src/new-file.js", "x"), builtin("file-not-contains", "src/new-file.js", "x")])).report)).toEqual(["failed", "failed"]);
+  });
+
+  it("reads a grep's file operands: not the pattern, not the values of options, not stdin", () => {
+    expect(grepFileOperands(["-q", "pat", "a.js", "b.js"])).toEqual(["a.js", "b.js"]);
+    expect(grepFileOperands(["-e", "pat", "a.js"])).toEqual(["a.js"]);
+    expect(grepFileOperands(["-qe", "pat", "a.js"])).toEqual(["a.js"]);
+    expect(grepFileOperands(["--regexp=pat", "a.js"])).toEqual(["a.js"]);
+    expect(grepFileOperands(["--regexp", "pat", "a.js"])).toEqual(["a.js"]);
+    expect(grepFileOperands(["-m", "3", "-A", "2", "pat", "a.js"])).toEqual(["a.js"]);
+    expect(grepFileOperands(["-m3", "pat", "a.js"])).toEqual(["a.js"]);
+    expect(grepFileOperands(["-q", "--", "-pat", "a.js"])).toEqual(["a.js"]);
+    expect(grepFileOperands(["-q", "pat", "-", "a.js"])).toEqual(["a.js"]);
+    expect(grepFileOperands(["-q", "pat"])).toEqual([]);
+    expect(grepFileOperands(["--include", "*.js", "-r", "pat", "src"])).toEqual(["src"]);
   });
 
   it("a folder that is not on the unchanged code is a failed check without starting anything", async () => {
