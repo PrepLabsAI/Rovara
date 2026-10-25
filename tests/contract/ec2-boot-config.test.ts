@@ -205,6 +205,46 @@ describe("EC2 worker user data", () => {
     expect(bootScript.indexOf("pull_executor_image || true")).toBeLessThan(bootScript.indexOf('write_worker_unit "$region"'));
   });
 
+  describe("the kernel stays the one the runtime was qualified on (HARDEN-C I-4, KERNELPIN)", () => {
+    // One line, because the user data is within a few dozen bytes of its ceiling; the test runs that very line against a copy of dnf.conf.
+    const pinLine = bootScript.split("\n").find((line) => line.includes("exclude=kernel*")) ?? "";
+    const run = (dnfConf: string | undefined) => {
+      const root = mkdtempSync(join(tmpdir(), "boot-kernel-pin-"));
+      const conf = join(root, "dnf.conf");
+      if (dnfConf !== undefined) writeFileSync(conf, dnfConf);
+      const script = `set -euo pipefail\n${pinLine.split("/etc/dnf/dnf.conf").join(conf)}\n${pinLine.split("/etc/dnf/dnf.conf").join(conf)}\necho still-running\n`;
+      const result = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+      return { result, text: existsSync(conf) ? readFileSync(conf, "utf8") : undefined };
+    };
+
+    it("pins in ensure_docker, before dnf installs anything", () => {
+      expect(pinLine).not.toBe("");
+      const ensureDocker = /^ensure_docker\(\) \{\n([\s\S]*?)\n\}\n/m.exec(bootScript)?.[1] ?? "";
+      expect(ensureDocker.indexOf("exclude=kernel*")).toBeGreaterThanOrEqual(0);
+      expect(ensureDocker.indexOf("exclude=kernel*")).toBeLessThan(ensureDocker.indexOf("install_docker_package"));
+    });
+
+    it("excludes kernel packages from dnf in its [main] section, once however often the boot runs", () => {
+      const { result, text } = run("[main]\ngpgcheck=1\ninstallonly_limit=3\n");
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("still-running");
+      expect(text).toBe("[main]\ngpgcheck=1\ninstallonly_limit=3\nexclude=kernel*\n");
+    });
+
+    it("leaves a file that already has an exclude line alone, instead of writing a second one", () => {
+      const { result, text } = run("[main]\nexclude=foo*\ngpgcheck=1\n");
+      expect(result.status, result.stderr).toBe(0);
+      expect(text).toBe("[main]\nexclude=foo*\ngpgcheck=1\n");
+    });
+
+    it("never invents a configuration and never stops the boot: a host with no dnf.conf is left alone", () => {
+      const { result, text } = run(undefined);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("still-running");
+      expect(text).toBeUndefined();
+    });
+  });
+
   it("renders a script bash accepts", () => {
     const checked = spawnSync("bash", ["-n"], { input: ec2WorkerBootScript(config, bootScript), encoding: "utf8" });
     expect(checked.status, checked.stderr).toBe(0);

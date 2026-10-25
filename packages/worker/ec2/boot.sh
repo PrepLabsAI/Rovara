@@ -234,6 +234,7 @@ install_docker_package() {
 }
 
 ensure_docker() {
+  [ -f /etc/dnf/dnf.conf ] && { grep -q ^exclude= /etc/dnf/dnf.conf || echo 'exclude=kernel*' >>/etc/dnf/dnf.conf; }
   command -v docker >/dev/null || retry "could not install Docker: package download failed" install_docker_package
   install -d -m 0755 /etc/docker
   printf '{"data-root": "%s"}\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json
@@ -428,7 +429,7 @@ WantedBy=multi-user.target
 EOF
 }
 
-# Opt-in TEST web/API qualification (AGENTX_E2E_QUALIFICATION_*): its own unit, so it cannot fail the boot; reports under e2e-runtime/.
+# Opt-in TEST qualification (AGENTX_E2E_QUALIFICATION_*): its own unit, so it cannot fail the boot.
 write_e2e_qualification_script() {
   install -d -o root -g root -m 0755 /usr/local/libexec
   cat >/usr/local/libexec/agentx-e2e-qualification <<'QUALIFICATION'
