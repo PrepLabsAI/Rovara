@@ -361,7 +361,9 @@ describe("Suite 7: PR feedback loop", () => {
     const page = (await e2e.taskPage()).body;
     expect(page).toContain(NEW_CHECK.label);
     // (The old label is part of the new one's words: every time it shows, it is inside the new label.)
-    expect(page.split(OLD_CHECK.label).length).toBe(page.split(NEW_CHECK.label).length);
+    // (Counted in the Checks table only: the plan's own "Checks this plan adds" section still names the check the plan first proposed.)
+    const table = page.slice(page.indexOf('class="checks"')).split("</section>")[0]!;
+    expect(table.split(OLD_CHECK.label).length).toBe(table.split(NEW_CHECK.label).length);
     expect(e2e.workflow().verification).toMatchObject({ candidateDigest: e2e.workflow().candidate!.digest });
   }, 120_000);
 
