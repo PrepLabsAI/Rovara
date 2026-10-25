@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AUTO_FIX_PERSON_GROUP_CODES, AUTO_FIX_TRANSIENT_GROUP_CODES, E2E_APPLICATION_SEND_BACK_CODES, WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE,
-  WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WorkflowDecisionSchema, WorkflowSnapshotSchema, WorkflowTransitionError, autoFixDecision, createCandidateManifest,
+  WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WorkflowDecisionRecordSchema, WorkflowSnapshotSchema, WorkflowTransitionError, autoFixDecision, createCandidateManifest,
   createWorkflowSnapshot, decideWorkflow, workflowFindingFingerprint, returnWorkflowToImplementation, returnWorkflowToImplementationAutomatically, submitWorkflowArtifact, workflowAutoActionRequestId,
   workflowAutoFixCounts, workflowAutomaticRetryDecision,
   type AutoFixBudget, type AutoFixFacts, type WorkflowDecision, type WorkflowSnapshot,
@@ -23,13 +23,13 @@ const incomplete = (...entries: string[]): string => `${WORKFLOW_APPLICATION_EVI
 
 const budget = (over: Partial<AutoFixBudget> = {}): AutoFixBudget => ({ enabled: true, spentUsd: 2, roundEstimateUsd: 2, capUsd: 15, dayBudgetHasRoom: true, baselineRequests: 0, ...over });
 
-const approval = (n: number, at = NOW): WorkflowDecision => WorkflowDecisionSchema.parse({
+const approval = (n: number, at = NOW): WorkflowDecision => WorkflowDecisionRecordSchema.parse({
   requestId: uuid(n), workflowRevision: 2, decision: "APPROVE", actorId: ownerId, actorRole: "TASK_OWNER", reason: "approved", artifactDigest: hex("b"), at,
 });
-const ownerSendBack = (n: number): WorkflowDecision => WorkflowDecisionSchema.parse({
+const ownerSendBack = (n: number): WorkflowDecision => WorkflowDecisionRecordSchema.parse({
   requestId: uuid(n), workflowRevision: 5, decision: "REQUEST_CHANGES", actorId: ownerId, actorRole: "TASK_OWNER", reason: "fix it", source: "SEND_BACK", at: NOW,
 });
-const automatic = (n: number, source: "AUTO_FIX" | "AUTO_RETRY", stage: "VERIFY" | "REVIEW" = "VERIFY", candidateDigest: string | undefined = candidate.digest): WorkflowDecision => WorkflowDecisionSchema.parse({
+const automatic = (n: number, source: "AUTO_FIX" | "AUTO_RETRY", stage: "VERIFY" | "REVIEW" = "VERIFY", candidateDigest: string | undefined = candidate.digest): WorkflowDecision => WorkflowDecisionRecordSchema.parse({
   requestId: uuid(n), workflowRevision: 5, decision: "REQUEST_CHANGES", actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX", reason: "automatic", source, at: NOW,
   auto: { stage, ...(candidateDigest === undefined ? {} : { candidateDigest }) },
 });
@@ -345,21 +345,21 @@ describe("AUTOFIX: the AGENTX actor", () => {
 
   it("can never approve, skip, reject, publish or carry an approval's fields", () => {
     const automaticFields = { requestId: uuid(700), workflowRevision: 3, actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX", reason: "r", source: "AUTO_FIX", auto: { stage: "VERIFY" }, at: NOW };
-    expect(WorkflowDecisionSchema.safeParse({ ...automaticFields, decision: "REQUEST_CHANGES" }).success).toBe(true);
-    for (const decision of ["APPROVE", "SKIP", "REJECT"]) expect(WorkflowDecisionSchema.safeParse({ ...automaticFields, decision }).success).toBe(false);
+    expect(WorkflowDecisionRecordSchema.safeParse({ ...automaticFields, decision: "REQUEST_CHANGES" }).success).toBe(true);
+    for (const decision of ["APPROVE", "SKIP", "REJECT"]) expect(WorkflowDecisionRecordSchema.safeParse({ ...automaticFields, decision }).success).toBe(false);
     const request = { ...automaticFields, decision: "REQUEST_CHANGES" };
     for (const extra of [{ artifactDigest: hex("b") }, { workBreakdownDigest: hex("b") }, { selectedOptionalCheckIds: ["a"] }, { commentsIncluded: 1 }, { via: "PAGE" }, { answerOverrides: [{ decisionId: "d1", optionId: "x" }] }]) {
-      expect(WorkflowDecisionSchema.safeParse({ ...request, ...extra }).success).toBe(false);
+      expect(WorkflowDecisionRecordSchema.safeParse({ ...request, ...extra }).success).toBe(false);
     }
     // The AGENTX role is for the AGENTX identity and automatic sources only, and an automatic source is for the AGENTX role only.
-    expect(WorkflowDecisionSchema.safeParse({ ...request, actorId: ownerId }).success).toBe(false);
-    expect(WorkflowDecisionSchema.safeParse({ ...request, actorRole: "TASK_OWNER" }).success).toBe(false);
-    expect(WorkflowDecisionSchema.safeParse({ ...request, actorId: ownerId, actorRole: "PROJECT_ADMIN" }).success).toBe(false);
-    expect(WorkflowDecisionSchema.safeParse({ ...request, source: "SEND_BACK" }).success).toBe(false);
-    expect(WorkflowDecisionSchema.safeParse({ ...request, auto: undefined }).success).toBe(false);
-    expect(WorkflowDecisionSchema.safeParse({ ...request, actorRole: "TASK_OWNER", actorId: ownerId, source: "SEND_BACK" }).success).toBe(false);
+    expect(WorkflowDecisionRecordSchema.safeParse({ ...request, actorId: ownerId }).success).toBe(false);
+    expect(WorkflowDecisionRecordSchema.safeParse({ ...request, actorRole: "TASK_OWNER" }).success).toBe(false);
+    expect(WorkflowDecisionRecordSchema.safeParse({ ...request, actorId: ownerId, actorRole: "PROJECT_ADMIN" }).success).toBe(false);
+    expect(WorkflowDecisionRecordSchema.safeParse({ ...request, source: "SEND_BACK" }).success).toBe(false);
+    expect(WorkflowDecisionRecordSchema.safeParse({ ...request, auto: undefined }).success).toBe(false);
+    expect(WorkflowDecisionRecordSchema.safeParse({ ...request, actorRole: "TASK_OWNER", actorId: ownerId, source: "SEND_BACK" }).success).toBe(false);
     // `auto` belongs to automatic decisions only.
-    expect(WorkflowDecisionSchema.safeParse({ ...request, actorRole: "TASK_OWNER", actorId: ownerId, source: "SEND_BACK", auto: { stage: "VERIFY" } }).success).toBe(false);
+    expect(WorkflowDecisionRecordSchema.safeParse({ ...request, actorRole: "TASK_OWNER", actorId: ownerId, source: "SEND_BACK", auto: { stage: "VERIFY" } }).success).toBe(false);
   });
 
   it("is not an owner: it cannot approve a plan through the owner's gate", () => {
@@ -380,7 +380,7 @@ describe("AUTOFIX: the AGENTX actor", () => {
       { requestId: uuid(901), workflowRevision: 5, decision: "REQUEST_CHANGES", actorId: ownerId, actorRole: "PROJECT_ADMIN", reason: "back", source: "SEND_BACK", at: NOW },
       { requestId: uuid(902), workflowRevision: 5, decision: "REQUEST_CHANGES", actorId: ownerId, actorRole: "TASK_OWNER", reason: "findings", source: "FINDINGS", at: NOW },
       { requestId: uuid(903), workflowRevision: 2, decision: "SKIP", actorId: ownerId, actorRole: "TASK_OWNER", reason: "skip", at: NOW },
-    ]) expect(WorkflowDecisionSchema.parse(stored)).toEqual(stored);
+    ]) expect(WorkflowDecisionRecordSchema.parse(stored)).toEqual(stored);
     const workflow = blocked("VERIFY", incomplete("g1: build-failed"), { decisions: [approval(1), ownerSendBack(2)], e2e: e2eProgress() });
     expect(decide(workflow)).toMatchObject({ action: "SEND_BACK" });
     expect(workflowAutoFixCounts(workflow.decisions)).toMatchObject({ sendBacksSincePlanApproval: 0, actions: 0 });
