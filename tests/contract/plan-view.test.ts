@@ -360,7 +360,7 @@ describe("what the card and page show of tonight's plan mistakes (fix round 1)",
     expect(first.at(-1)).toBe("And 5 more on the task page.");
     const withDecision = structuredExtraLines(structured, 340);
     expect(withDecision.some((line) => line.startsWith("• As "))).toBe(true);
-    expect(planCheckSummary(ordersPlan({ checks: undefined, e2e: undefined, scenarioProves: undefined })).lines).toEqual([]);
+    expect(planCheckSummary(planDocument()).lines).toEqual([]);
     expect(structuredExtraLines({ ...structured, decisions: [], checkLines: [] }, 100)).toEqual([]);
   });
 });
