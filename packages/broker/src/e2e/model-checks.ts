@@ -246,7 +246,8 @@ const NOT_USABLE_WORDS: Record<"limit-zero" | "needs-access" | "not-in-region", 
 };
 
 export interface TierRow { modelId: string; label: string; scope: "geographic" | "global" | null; inputUsdPerMTok: number; outputUsdPerMTok: number; testedAt?: string; payloadShape?: "standard" | "minimal"; worstCaseUsd: number;
-  /** Not usable only: a fixed sentence. */ reason?: string }
+  /** Not usable only: a fixed sentence. */ reason?: string;
+  /** Can be tested only: the account's quota for the model is not known, so it is not recommended untested (I-3). */ quotaUnreadable?: true }
 export interface ModelTiers {
   discovery: { status: "listed" | "unverified" | "none"; unverifiedReason?: string; checkedAt?: string };
   why: RankedModels["why"];
@@ -263,7 +264,7 @@ const MAX_CAN_BE_TESTED = 12;
 
 function describeTiers(ranked: RankedModels, report: ModelDiscoveryReport | null, provider: ModelProvider, quotaText: (modelId: string) => string, currentRow: Tiered | undefined): ModelTiers {
   const row = (item: Tiered): TierRow => ({ modelId: item.modelId, label: item.label, scope: item.scope, inputUsdPerMTok: item.inputUsdPerMTok, outputUsdPerMTok: item.outputUsdPerMTok,
-    ...(item.testedAt === undefined ? {} : { testedAt: item.testedAt }), ...(item.payloadShape === undefined ? {} : { payloadShape: item.payloadShape }), worstCaseUsd: drivingTestWorstCaseUsd(item) });
+    ...(item.testedAt === undefined ? {} : { testedAt: item.testedAt }), ...(item.payloadShape === undefined ? {} : { payloadShape: item.payloadShape }), ...(item.quotaUnreadable === true ? { quotaUnreadable: true as const } : {}), worstCaseUsd: drivingTestWorstCaseUsd(item) });
   const reasonOf = (item: Tiered & { reason: NotUsableReason }): string => (item.reason.code === "test-failed" ? failureClassSentence(item.reason.failureClass, { provider, modelId: item.modelId })
     : `${NOT_USABLE_WORDS[item.reason.code]}${item.reason.code === "limit-zero" ? quotaText(item.modelId) : ""}`);
   return {

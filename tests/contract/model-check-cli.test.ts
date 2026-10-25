@@ -57,6 +57,18 @@ describe("discover", () => {
     expect(p.lines.join("\n")).toContain("Recommended:");
   });
 
+  it("says when no model is recommended because the account's quotas could not be read, and marks the models it could not check (I-3)", () => {
+    const unreadable = { ...tiers, why: "quota-unreadable", recommended: null, worksOnAccount: [], notUsable: [], canBeTestedMore: 0,
+      canBeTested: [{ modelId: "us.anthropic.claude-haiku-5-5", label: "x", scope: "geographic", worstCaseUsd: 0.0056, quotaUnreadable: true }] };
+    const text = formatTiers(unreadable, "e").join("\n");
+    expect(text).toContain("Recommended: none yet: Rovara could not read this account's quota for Rovara's default model or any other, so no model is known to be usable. Test one to find out.");
+    expect(text).toContain("`us.anthropic.claude-haiku-5-5`  $0.0056 (could not read this account's quota)");
+    expect(text).not.toContain("To choose it:");
+    // A recommendation next to an unreadable default says so.
+    const other = formatTiers({ ...tiers, why: "quota-unreadable" }, "e").join("\n");
+    expect(other).toContain("(could not read this account's quota for Rovara's default model)");
+  });
+
   it("shows an unverified discovery as the sentence the driving test will confirm, and no control characters from the control plane", async () => {
     const unverified = { ...tiers, discovery: { status: "unverified", unverifiedReason: "access-denied" }, why: "discovery-unverified", notUsable: [], canBeTested: [], worksOnAccount: [] };
     const text = formatTiers({ ...unverified, recommended: { ...tiers.recommended, modelId: "us.model\u001b[31m" } }, "e").join("\n");

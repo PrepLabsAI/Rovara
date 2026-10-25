@@ -15,7 +15,7 @@ const idOf = (started: Record<string, unknown>): string => (typeof started["chec
 const clean = (text: unknown, max = 300): string => (typeof text === "string" ? text.replace(/[\p{Cc}\p{Cf}]+/gu, " ").trim().slice(0, max) : "");
 const usd = (value: number): string => `$${value.toFixed(4)}`;
 
-interface TierRow { modelId: string; label: string; scope: string | null; testedAt?: string; payloadShape?: string; worstCaseUsd?: number; reason?: string }
+interface TierRow { modelId: string; label: string; scope: string | null; testedAt?: string; payloadShape?: string; worstCaseUsd?: number; reason?: string; quotaUnreadable?: boolean }
 interface Tiers {
   discovery: { status: string; unverifiedReason?: string; checkedAt?: string };
   why: string;
@@ -56,9 +56,11 @@ export function formatTiers(tiers: Tiers, env: string): string[] {
   lines.push(tiers.discovery.status === "listed" ? `Models this account can see (checked ${clean(tiers.discovery.checkedAt, 40)}):`
     : tiers.discovery.status === "unverified" ? `Rovara could not list your models (${clean(tiers.discovery.unverifiedReason, 40)}); the driving test will confirm a model.` : "No discovery on record yet; run discover.");
   if (tiers.recommended !== null) {
-    const note = tiers.why === "default-not-usable" ? " (Rovara's own default is not usable on this account)" : "";
+    const note = tiers.why === "default-not-usable" ? " (Rovara's own default is not usable on this account)"
+      : tiers.why === "quota-unreadable" ? " (could not read this account's quota for Rovara's default model)" : "";
     lines.push(`Recommended: ${idOf(tiers.recommended)} (${clean(tiers.recommended.label, 80)})${tiers.recommended.testedAt === undefined ? `, not tested yet${tiers.recommended.worstCaseUsd === undefined ? "" : ` (worst case of one driving test ${usd(tiers.recommended.worstCaseUsd)})`}` : `, tested ${tiers.recommended.testedAt.slice(0, 10)}`}${note}`);
-  } else lines.push("Recommended: none of the models Rovara can use is available on this account.");
+  } else if (tiers.why === "quota-unreadable") lines.push("Recommended: none yet: Rovara could not read this account's quota for Rovara's default model or any other, so no model is known to be usable. Test one to find out.");
+  else lines.push("Recommended: none of the models Rovara can use is available on this account.");
   if (tiers.worksOnAccount.length > 0) {
     lines.push("Works on your account:");
     for (const row of tiers.worksOnAccount) lines.push(`  ${idOf(row)}, driving test passed ${clean(row.testedAt, 40).slice(0, 10)}${row.payloadShape === "minimal" ? ", with the minimal request shape" : ""}`);
@@ -69,7 +71,7 @@ export function formatTiers(tiers: Tiers, env: string): string[] {
   }
   if (tiers.canBeTested.length > 0) {
     lines.push("Can be tested (visible to this account, not driven yet; worst-case cost of one driving test):");
-    for (const row of tiers.canBeTested) lines.push(`  ${idOf(row)}  ${row.worstCaseUsd === undefined ? "" : usd(row.worstCaseUsd)}`);
+    for (const row of tiers.canBeTested) lines.push(`  ${idOf(row)}  ${row.worstCaseUsd === undefined ? "" : usd(row.worstCaseUsd)}${row.quotaUnreadable === true ? " (could not read this account's quota)" : ""}`);
     if (tiers.canBeTestedMore > 0) lines.push(`  and ${tiers.canBeTestedMore} more`);
   }
   const pick = tiers.recommended;

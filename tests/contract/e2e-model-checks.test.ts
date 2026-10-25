@@ -314,6 +314,21 @@ describe("GET: reading a check", () => {
     expect(tiers.discovery).toMatchObject({ status: "listed" });
   });
 
+  it("a discovery whose quotas could not be read recommends nothing, lists the models as testable, and says so (I-3)", async () => {
+    const h = harness();
+    const checkId = await started(h, "discover");
+    const unread = [{ scope: "geographic", code: "L-47520EB7", tokensPerMinute: null }, { scope: "global", code: "L-F26CA8D1", tokensPerMinute: null }];
+    answer(h, { schemaVersion: E2E_MODEL_CHECK_RESULT_SCHEMA, status: "discovered", checkId, discovery: { schemaVersion: "rovara-model-discovery/v1", provider: "amazon-bedrock", checkedAt: "2026-10-23T09:59:00.000Z", status: "listed",
+      models: [
+        { modelId: "us.anthropic.claude-haiku-5-5", visible: true, state: "available", quotas: unread, signals: ["quota-lookup-access-denied"] },
+        { modelId: MODEL, visible: true, state: "available", quotas: unread, signals: ["quota-lookup-access-denied"] }] } });
+    const view = await readModelCheck(h.deps, checkId);
+    expect(view.tiers?.recommended).toBeNull();
+    expect(view.tiers?.why).toBe("quota-unreadable");
+    expect(view.tiers?.canBeTested.map((row) => [row.modelId, row.quotaUnreadable])).toEqual(expect.arrayContaining([["us.anthropic.claude-haiku-5-5", true], [MODEL, true]]));
+    expect(view.tiers?.notUsable).toEqual([]);
+  });
+
   it("an unreadable discovery says the driving test will confirm, and recommends the overlay default", async () => {
     const h = harness();
     const checkId = await started(h, "discover");
