@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { E2EPolicySchema, type E2EPolicy } from "@agentx/contracts";
-import { readFile } from "node:fs/promises";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import YAML from "yaml";
 import { addProject, projectFilePath, reapproveProjectSetup } from "../../packages/cli/src/setup/project-add.js";
 import { scriptedPrompter } from "../support/init-fakes.js";
@@ -149,29 +149,76 @@ describe("agentx project setup-approve (re-approval of an already registered pro
   // Only the approvals recorded after `registered()` (which records its own, at project add).
   const approvals = (context: ReturnType<typeof setup>) => context.plane.requests.filter((request) => request.path === "/v1/admin/projects/setup-approvals").slice(1);
 
-  it("builds the next revision from the registered head when the local file is stale, and updates the local file (live case: file revision 1, registry revision 2)", async () => {
+  const setLocalRevision = async (revision: number) => {
+    const path = projectFilePath(configDir, "payments-api");
+    await writeFile(path, (await readFile(path, "utf8")).replace(/^revision: \d+$/m, `revision: ${revision}`));
+  };
+  const planeRequests = (context: ReturnType<typeof setup>) => context.plane.requests.map((request) => request.path);
+
+  it("refuses a stale local file (live case: file revision 1, registry revision 2) before proposing or recording anything, and names both revisions and the fix", async () => {
     const context = setup();
     await registered(context);
     context.pinNow();
     context.plane.registryHeads.set("payments-api", { revision: 2 });
-    const lines: string[] = [];
-    const result = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: context.services, projectName: "payments-api" });
-    expect(result).toMatchObject({ revision: 3, decision: "approve" });
-    expect((context.plane.registered.at(-1) as { definition: { revision: number } }).definition.revision).toBe(3);
-    expect(await localRevision()).toBe(3);
-    expect(lines.join("\n")).toContain("local file said revision 1");
-  });
-
-  it("refuses before recording any approval when the registry head holds repositories or connectors the local file lacks", async () => {
-    const context = setup();
-    await registered(context);
-    context.pinNow();
-    context.plane.registryHeads.set("payments-api", { revision: 2, connectors: [{ name: "linear", type: "linear" }] });
-    await expect(reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: context.services, projectName: "payments-api" }))
-      .rejects.toThrow(/registered revision 2 .* differs from the local file/);
+    const before = context.plane.requests.length;
+    const failure = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: context.services, projectName: "payments-api" }).then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toContain("revision 2 is registered for payments-api, but the local file");
+    expect(failure?.message).toContain("says revision 1");
+    expect(failure?.message).toContain("copy the registered settings into that file and set its revision to 2");
+    expect(planeRequests(context).slice(before)).toEqual(["/v1/admin/projects"]);
     expect(approvals(context)).toEqual([]);
     expect(context.plane.registered).toHaveLength(1);
     expect(await localRevision()).toBe(1);
+  });
+
+  it("refuses when the registered head differs from the file only in settings the listing does not carry: the revision number alone decides, so nothing newer is overwritten", async () => {
+    const context = setup();
+    await registered(context);
+    context.pinNow();
+    // Same repositories and connectors as the file; the registered revision 2 could differ in setup, readiness or developerTasks, which the CLI cannot see.
+    context.plane.registryHeads.set("payments-api", { revision: 2, repositories: (context.plane.registered[0] as { definition: { repositories: Array<{ name: string; url: string }> } }).definition.repositories, connectors: [] });
+    await expect(reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: context.services, projectName: "payments-api" })).rejects.toThrow(/revision 2 is registered for payments-api/);
+    expect(approvals(context)).toEqual([]);
+    expect(context.plane.registered).toHaveLength(1);
+  });
+
+  it("refuses when the registry head is behind the local file (the file is from another environment)", async () => {
+    const context = setup();
+    await registered(context);
+    context.pinNow();
+    await setLocalRevision(4);
+    await expect(reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: context.services, projectName: "payments-api" })).rejects.toThrow(/revision 1 is registered for payments-api, but the local file .* says revision 4/);
+    expect(approvals(context)).toEqual([]);
+    expect(await localRevision()).toBe(4);
+  });
+
+  it("registers the next revision on the head once the file has been brought up to date as the refusal says, and updates the file", async () => {
+    const context = setup();
+    await registered(context);
+    context.pinNow();
+    context.plane.registryHeads.set("payments-api", { revision: 2 });
+    await setLocalRevision(2);
+    const result = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: context.services, projectName: "payments-api" });
+    expect(result).toMatchObject({ revision: 3, decision: "approve" });
+    expect((context.plane.registered.at(-1) as { definition: { revision: number } }).definition.revision).toBe(3);
+    expect(await localRevision()).toBe(3);
+  });
+
+  it("says the revision IS registered, and that only the local file could not be updated, when the write fails after a successful registration", async () => {
+    const context = setup();
+    await registered(context);
+    context.pinNow();
+    const lockFile = { ...context.services, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await context.services.fetch(url, init);
+      if (new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname === "/v1/admin/projects" && init?.method === "POST" && response.ok) await chmod(projectFilePath(configDir, "payments-api"), 0o400);
+      return response;
+    }) as typeof globalThis.fetch };
+    const failure = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: lockFile, projectName: "payments-api" }).then(() => undefined, (error: unknown) => error as Error);
+    expect(context.plane.registered).toHaveLength(2);
+    expect(failure?.message).toContain("revision 2 of payments-api IS registered");
+    expect(failure?.message).toContain("only the local file");
+    expect(failure?.message).not.toContain("NOT registered");
+    expect(failure?.message).toContain("do not register again");
   });
 
   it("refuses before recording any approval when the registry cannot be read", async () => {
@@ -210,6 +257,7 @@ describe("agentx project setup-approve (re-approval of an already registered pro
     const failure = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: flaky, projectName: "payments-api" }).then(() => undefined, (error: unknown) => error as Error);
     expect(failure?.message).toContain("approval of the setup proposal is recorded, but revision 2 of payments-api was NOT registered");
     expect(failure?.message).toContain("agentx --env staging project setup-approve --project-name payments-api");
+    expect(failure?.message).toContain("proposes and asks again");
     expect(approvals(context)).toHaveLength(1);
     expect(context.plane.registered).toHaveLength(1);
     expect(await localRevision()).toBe(1);
@@ -224,6 +272,7 @@ describe("agentx project setup-approve (re-approval of an already registered pro
     await registered(context);
     context.pinNow();
     context.plane.registryHeads.set("payments-api", { revision: 2 });
+    await setLocalRevision(2);
     const lines: string[] = [];
     const result = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([false]), write: (line) => lines.push(line), services: context.services, projectName: "payments-api" });
     expect(result).toMatchObject({ revision: 2, decision: "decline" });
