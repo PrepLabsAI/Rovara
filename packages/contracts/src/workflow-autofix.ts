@@ -281,5 +281,6 @@ export function autoFixDecision(workflow: WorkflowSnapshot, facts: AutoFixFacts,
   if (groups.some((result) => result === "skipped")) return ask("unclear-fault");
   if (groups.some((result) => result === "pending")) return { action: "WAIT_FOR_BASELINE", codes };
   if (groups.some((result) => result === "not-run")) return requestOrAsk();
-  return sendBack();
+  // Fail closed: send back only when every UNKNOWN group positively passed on the original code; any other or unrecognised value asks.
+  return groups.every((result) => result === "passed") ? sendBack() : ask("unclear-fault");
 }
