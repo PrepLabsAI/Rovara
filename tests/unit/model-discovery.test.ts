@@ -202,7 +202,7 @@ describe("bounds (test 28)", () => {
     expect(report).toMatchObject({ status: "unverified", unverifiedReason: "unreachable" });
   });
 
-  it("the page caps hold: 5 profile pages, 10 quota pages, 20 availability checks", async () => {
+  it("the page caps hold: 5 profile pages, 20 quota pages, 20 availability checks", async () => {
     let profilePages = 0; let quotaPages = 0; let checks = 0;
     const many = Array.from({ length: 30 }, (_unused, index) => `us.vendor.model-${index}`);
     const client: BedrockDiscoveryClient = {
@@ -213,7 +213,7 @@ describe("bounds (test 28)", () => {
     const quotas: QuotaClient = { list: async () => { quotaPages += 1; return { quotas: [], nextToken: "more" }; } };
     const report = await discoverModels({ provider: "amazon-bedrock", region: "us-east-1", candidates: many }, deps({ bedrock: client, quotas }));
     expect(report.status).toBe("listed");
-    expect([profilePages, quotaPages, checks]).toEqual([5, 10, 20]);
+    expect([profilePages, quotaPages, checks]).toEqual([5, 20, 20]);
     // The ones past the 20 checks are listed, not claimed available.
     expect(report.models.filter((row) => row.state === "available")).toHaveLength(20);
     expect(report.models.filter((row) => row.state === "listed")).toHaveLength(10);
@@ -258,5 +258,74 @@ describe("rankModels (test 29)", () => {
     const ranked = rankModels({ report: report({ [HAIKU_45_US]: "available" }), eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
     expect(ranked.canBeTested.map((row) => row.modelId)).toEqual([]);
     expect(ranked.recommended?.modelId).toBe(HAIKU_45_US);
+  });
+});
+
+// I-3 DISCOVERQUOTA: the live run recommended us.anthropic.claude-haiku-5-5 although both of its account quotas (L-47520EB7, L-F26CA8D1) are 0. Whatever made the quota unreadable
+// (the account's quota list is long, the lookup was denied or slow), a model whose quota is not known must not be recommended as usable.
+describe("a quota that is zero or unknown is never recommended (I-3)", () => {
+  const filler = (page: number): QuotaRow[] => Array.from({ length: 100 }, (_unused, index) => ({ code: `L-FILL-${page}-${index}`, name: `Unrelated quota ${page}-${index}`, value: 1 }));
+  /** An account whose quota list is `pages` pages long; `target` rows come on page `targetPage` (1-based). */
+  const longList = (pages: number, targetPage: number, target: readonly QuotaRow[] = quotaRows): QuotaClient => ({
+    list: async (page) => { const index = page.nextToken === undefined ? 1 : Number(page.nextToken); return { quotas: index === targetPage ? [...filler(index), ...target] : filler(index), ...(index < pages ? { nextToken: String(index + 1) } : {}) }; },
+  });
+  const denied: QuotaClient = { list: async () => { throw Object.assign(new Error("denied"), { name: "AccessDeniedException" }); } };
+  const discover = (quotas: QuotaClient) => discoverModels({ provider: "amazon-bedrock", region: "us-east-1", candidates }, deps({ bedrock: bedrockFake(), quotas }));
+
+  it("finds the Haiku 5.5 quotas when they come after the tenth page of the account's list: both routes are limit-zero, not recommended", async () => {
+    const report = await discover(longList(15, 13));
+    const by = new Map(report.models.map((row) => [row.modelId, row] as const));
+    expect(by.get(HAIKU_55_US)).toMatchObject({ state: "limit-zero" });
+    expect(by.get(HAIKU_55_GLOBAL)).toMatchObject({ state: "limit-zero" });
+    const ranked = rankModels({ report, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
+    expect(ranked.notUsable.map((row) => [row.modelId, row.reason.code])).toEqual([[HAIKU_55_US, "limit-zero"], [HAIKU_55_GLOBAL, "limit-zero"]]);
+    expect(ranked.recommended?.modelId).not.toBe(HAIKU_55_US);
+  });
+
+  it("a quota list that is longer than the page cap leaves the quota unknown: nothing is recommended, and the report says why", async () => {
+    const report = await discover(longList(40, 38));
+    const row = report.models.find((item) => item.modelId === HAIKU_55_US)!;
+    expect(row.quotas.map((entry) => entry.tokensPerMinute)).toEqual([null, null]);
+    expect(row.signals).toContain("quota-lookup-incomplete");
+    const ranked = rankModels({ report, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
+    expect(ranked.recommended).toBeNull();
+    expect(ranked.why).toBe("quota-unreadable");
+    expect(ranked.canBeTested.every((entry) => entry.quotaUnreadable === true)).toBe(true);
+    expect(ranked.canBeTested.map((entry) => entry.modelId)).toContain(HAIKU_55_US);
+  });
+
+  it("a denied quota lookup is not recommended as usable: the models stay visible as testable, with the denial as a fixed code", async () => {
+    const report = await discover(denied);
+    expect(report.models.find((item) => item.modelId === HAIKU_55_US)!.signals).toContain("quota-lookup-access-denied");
+    const ranked = rankModels({ report, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
+    expect(ranked.recommended).toBeNull();
+    expect(ranked.why).toBe("quota-unreadable");
+    expect(ranked.notUsable).toEqual([]);
+    expect(ranked.canBeTested).toHaveLength(4);
+  });
+
+  it("a report stored before this change (available, both quotas null) is read the same way", () => {
+    const stored: ModelDiscoveryReport = { schemaVersion: "rovara-model-discovery/v1", provider: "amazon-bedrock", checkedAt: new Date(NOW).toISOString(), status: "listed", models: [
+      { modelId: HAIKU_55_US, visible: true, state: "available", quotas: [{ scope: "geographic", code: "L-47520EB7", tokensPerMinute: null }, { scope: "global", code: "L-F26CA8D1", tokensPerMinute: null }], signals: [] },
+      { modelId: HAIKU_45_US, visible: true, state: "available", quotas: [{ scope: "geographic", code: "L-HAIKU45GEO", tokensPerMinute: 5_000_000 }, { scope: "global", code: "L-HAIKU45GLO", tokensPerMinute: 10_000_000 }], signals: [] },
+    ] };
+    const ranked = rankModels({ report: stored, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
+    expect(ranked.recommended?.modelId).toBe(HAIKU_45_US);
+    expect(ranked.why).toBe("quota-unreadable");
+    expect(ranked.canBeTested.find((entry) => entry.modelId === HAIKU_55_US)).toMatchObject({ quotaUnreadable: true });
+  });
+
+  it("a driving test that passed still puts the model in Works, whatever the quota lookup said", async () => {
+    const report = await discover(denied);
+    const ranked = rankModels({ report, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [{ modelId: HAIKU_55_US, outcome: "passed", testedAt: "2026-10-23T10:00:00Z" }] });
+    expect(ranked.worksOnAccount.map((row) => row.modelId)).toEqual([HAIKU_55_US]);
+    expect(ranked.recommended?.modelId).toBe(HAIKU_55_US);
+  });
+
+  it("a readable quota above zero is recommended as before", async () => {
+    const report = await discover(quotaFake(quotaRows.map((row) => ({ ...row, value: 4_000_000 }))));
+    const ranked = rankModels({ report, eligible: ELIGIBLE, recommended: HAIKU_55_US, tests: [] });
+    expect(ranked.recommended?.modelId).toBe(HAIKU_55_US);
+    expect(ranked.why).toBe("default");
   });
 });

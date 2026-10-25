@@ -7,7 +7,8 @@ import { E2E_AGENT_BEDROCK_QUOTA_CODES, bedrockProfileGeography, type E2EModelFa
  * and the follow-up DISCOVERROLES reuse it. It is read-only and keeps only ids, statuses and counts: no key, no message text, no account detail.
  *
  * Discovery never blocks. Any list error, a 401 or 403, a network error or a deadline gives `status: "unverified"` with a fixed reason, and the driving test decides instead. A partial
- * answer (models listed, quotas denied) stays `listed`, without quota hints.
+ * answer (models listed, quotas denied) stays `listed`, without quota hints. Without a quota the ranking does not recommend the model (I-3): a limit of zero is `limit-zero`, and a
+ * quota that could not be read is "unknown", which is not "usable".
  */
 
 export const MODEL_DISCOVERY_SCHEMA = "rovara-model-discovery/v1" as const;
@@ -15,7 +16,8 @@ export const MODEL_DISCOVERY_SCHEMA = "rovara-model-discovery/v1" as const;
 export const MODEL_DISCOVERY_CALL_TIMEOUT_MS = 10_000;
 export const MODEL_DISCOVERY_TOTAL_TIMEOUT_MS = 60_000;
 const MAX_PROFILE_PAGES = 5;
-const MAX_QUOTA_PAGES = 10;
+/** The account's quota list for Bedrock is long (a hundred a page); a list that goes on past this many pages is read as incomplete (`quota-lookup-incomplete`), never as complete. */
+const MAX_QUOTA_PAGES = 20;
 const MAX_AVAILABILITY_CHECKS = 20;
 const MAX_ANTHROPIC_PAGES = 3;
 const MAX_OPENROUTER_CANDIDATES = 10;
@@ -122,7 +124,8 @@ export interface QuotaHintInput {
   knownCodes?: Readonly<Record<string, { geographic: string | null; global: string | null }>>;
 }
 
-async function readAllQuotas(quotas: QuotaClient, call: <T>(operation: () => Promise<T>) => Promise<T>): Promise<QuotaRow[]> {
+/** The rows read, and whether the account's list ended (`complete`) or the page cap stopped the read with more to come. */
+async function readAllQuotas(quotas: QuotaClient, call: <T>(operation: () => Promise<T>) => Promise<T>): Promise<{ rows: QuotaRow[]; complete: boolean }> {
   const rows: QuotaRow[] = [];
   let nextToken: string | undefined;
   for (let page = 0; page < MAX_QUOTA_PAGES; page += 1) {
@@ -131,7 +134,7 @@ async function readAllQuotas(quotas: QuotaClient, call: <T>(operation: () => Pro
     nextToken = response.nextToken;
     if (nextToken === undefined) break;
   }
-  return rows;
+  return { rows, complete: nextToken === undefined };
 }
 
 function hintFrom(rows: readonly QuotaRow[], input: QuotaHintInput): QuotaEntry[] {
@@ -157,7 +160,7 @@ export async function quotaHint(input: QuotaHintInput, deps: Pick<DiscoveryDepen
   const empty = hintFrom([], input);
   if (deps.quotas === undefined) return empty;
   try {
-    const rows = await readAllQuotas(deps.quotas, createBounded(deps));
+    const { rows } = await readAllQuotas(deps.quotas, createBounded(deps));
     return hintFrom(rows, input);
   } catch { return empty; }
 }
@@ -184,8 +187,13 @@ async function discoverBedrock(input: DiscoverInput, deps: DiscoveryDependencies
   }
   let names = new Map<string, FoundationModelRow>();
   try { names = new Map((await call(() => bedrock.listFoundationModels())).map((row) => [row.modelId, row])); } catch { /* names only help the quota match */ }
+  // How the quota lookup went, as a fixed code: `ok`, `incomplete` (the page cap stopped it), `unavailable` (no client), or why it failed. It reaches the report as a signal on every
+  // model whose quota stays unknown, so a run that cannot read quotas says so instead of looking like one that found none.
   let quotaRows: QuotaRow[] | undefined;
-  if (deps.quotas !== undefined) { try { quotaRows = await readAllQuotas(deps.quotas, call); } catch { quotaRows = undefined; } }
+  let quotaStatus: "ok" | "incomplete" | "unavailable" | UnverifiedReason = "unavailable";
+  if (deps.quotas !== undefined) {
+    try { const read = await readAllQuotas(deps.quotas, call); quotaRows = read.rows; quotaStatus = read.complete ? "ok" : "incomplete"; } catch (error) { quotaRows = undefined; quotaStatus = classifyError(error); }
+  }
 
   const availabilityByFoundation = new Map<string, AvailabilityRow | null>();
   let availabilityChecks = 0;
@@ -222,7 +230,9 @@ async function discoverBedrock(input: DiscoverInput, deps: DiscoveryDependencies
       : hintFrom(quotaRows, { modelId, region: input.region ?? "", ...(named === undefined ? {} : { modelName: `${named.providerName} ${named.modelName}` }) });
     // The quota that applies to the route's own scope decides a zero.
     const scope = bedrockProfileGeography(modelId) === "global" ? "global" : "geographic";
-    if (state !== "needs-access" && quotas.find((entry) => entry.scope === scope)?.tokensPerMinute === 0) state = "limit-zero";
+    const routeQuota = quotas.find((entry) => entry.scope === scope)?.tokensPerMinute ?? null;
+    if (state !== "needs-access" && routeQuota === 0) state = "limit-zero";
+    if (routeQuota === null) signals.push(quotaStatus === "ok" ? "quota-not-found" : `quota-lookup-${quotaStatus}`);
     models.push({ modelId, visible: true, state, quotas, signals });
   }
   return listed(input, deps, models);
@@ -339,11 +349,12 @@ export interface ModelTestRecord {
 export type NotUsableReason =
   | { code: "limit-zero" | "needs-access" | "not-in-region" }
   | { code: "test-failed"; failureClass: E2EModelFailureClass };
-export interface Tiered extends EligibleModel { testedAt?: string; payloadShape?: "standard" | "minimal"; state?: DiscoveryState }
+/** `quotaUnreadable`: a Bedrock model seen on the account whose quota for its own route is not known (the lookup was denied, incomplete or found nothing). It can be tested, never recommended untested. */
+export interface Tiered extends EligibleModel { testedAt?: string; payloadShape?: "standard" | "minimal"; state?: DiscoveryState; quotaUnreadable?: boolean }
 export interface RankedModels {
   recommended: Tiered | null;
-  /** Why the recommendation is not the Rovara default, or that discovery could not check. */
-  why: "default" | "default-not-usable" | "discovery-unverified" | "none";
+  /** Why the recommendation is not the Rovara default, or that discovery could not check. `quota-unreadable`: the default's quota on this account is not known, so it is not recommended. */
+  why: "default" | "default-not-usable" | "quota-unreadable" | "discovery-unverified" | "none";
   worksOnAccount: Tiered[];
   notUsable: Array<Tiered & { reason: NotUsableReason }>;
   canBeTested: Tiered[];
@@ -384,7 +395,9 @@ export function rankModels(input: { report: ModelDiscoveryReport | null; eligibl
     if (verified) {
       if (seen === undefined || !seen.visible) { if (row.modelId === input.recommended) notUsable.push({ ...row, state: "not-in-region", reason: { code: "not-in-region" } }); continue; }
       if (seen.state === "limit-zero" || seen.state === "needs-access") { notUsable.push({ ...row, state: seen.state, reason: { code: seen.state } }); continue; }
-      canBeTested.push({ ...row, state: seen.state });
+      // I-3: on Bedrock a model is "usable" only with a quota that is known, and above zero (zero is limit-zero above). Reports stored by earlier versions carry the same null entries.
+      const quotaUnreadable = input.report!.provider === "amazon-bedrock" && row.scope !== null && seen.quotas.length > 0 && (seen.quotas.find((entry) => entry.scope === row.scope)?.tokensPerMinute ?? null) === null;
+      canBeTested.push({ ...row, state: seen.state, ...(quotaUnreadable ? { quotaUnreadable: true } : {}) });
     } else if (row.modelId === input.recommended || row.modelId === input.current) canBeTested.push(row);
   }
   works.sort((left, right) => (right.testedAt ?? "").localeCompare(left.testedAt ?? "") || order(left, right));
@@ -393,14 +406,16 @@ export function rankModels(input: { report: ModelDiscoveryReport | null; eligibl
 
   const defaultRow = byId.get(input.recommended);
   const defaultUnusable = notUsable.some((row) => row.modelId === input.recommended);
+  const defaultQuotaUnreadable = canBeTested.some((row) => row.modelId === input.recommended && row.quotaUnreadable === true);
   let recommended: Tiered | null = null;
   let why: RankedModels["why"];
-  if (defaultRow !== undefined && !defaultUnusable) {
+  if (defaultRow !== undefined && !defaultUnusable && !defaultQuotaUnreadable) {
     recommended = works.find((row) => row.modelId === input.recommended) ?? canBeTested.find((row) => row.modelId === input.recommended) ?? defaultRow;
     why = verified ? "default" : "discovery-unverified";
   } else {
-    recommended = works[0] ?? canBeTested[0] ?? null;
-    why = recommended === null ? "none" : "default-not-usable";
+    // Recommend only what is known usable: a model that passed its test, or one seen with a quota that is known.
+    recommended = works[0] ?? canBeTested.find((row) => row.quotaUnreadable !== true) ?? null;
+    why = defaultQuotaUnreadable ? "quota-unreadable" : recommended === null ? "none" : "default-not-usable";
   }
   return { recommended, why, worksOnAccount: works, notUsable, canBeTested: canBeTested.filter((row) => row.modelId !== recommended?.modelId) };
 }
