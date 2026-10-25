@@ -216,6 +216,13 @@ describe("AUTOFIX policy: unclear faults are settled by each group's own origina
     expect(decide(unknown(), groups({ "g-ai": "skipped", "g-web": "pending" }))).toMatchObject({ action: "ASK", reason: "unclear-fault" });
   });
 
+  it("fails closed: an unexpected or garbage result for any group asks, and only an explicit passed sends back", () => {
+    for (const garbage of ["PASS", "ok", "", "unknown", null, undefined, 1, true, {}]) {
+      expect(decide(unknown(), groups({ g1: garbage as never }))).toEqual({ action: "ASK", reason: "unclear-fault", codes: ["e2e-evidence-unknown"] });
+      expect(decide(unknown(), groups({ g1: "passed", g2: garbage as never }))).toEqual({ action: "ASK", reason: "unclear-fault", codes: ["e2e-evidence-unknown"] });
+    }
+  });
+
   it("does not let the E2E baseline settle a check, and an infrastructure fault retries before the baseline is asked", () => {
     const check = blocked("VERIFY", undefined, verification([{ checkId: "c", status: "FAILED" }]));
     expect(decide(check, groups({ g1: "passed" }))).toMatchObject({ action: "ASK", reason: "unclear-fault" });
