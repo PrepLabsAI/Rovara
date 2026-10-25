@@ -14,7 +14,8 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactW
 import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_BLOCK_REASONS, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, taskGraphDigest, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
-import { planCheckSummary, planUnreadableCategory } from "../developer/plan-check-summary.js";
+import { PLAN_UNREADABLE_CATEGORIES, planCheckSummary, planUnreadableCategory } from "../developer/plan-check-summary.js";
+import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, type PlanSelfCheckView } from "../developer/plan-self-check.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
@@ -638,17 +639,17 @@ const CANVAS_UNAVAILABLE = new Set([
 const TINY_PLAN_CLAIMS = 3;
 
 /** What a structured document's card shows: the top claims (all of them, children indented, for a tiny plan) and the counts. */
-function structuredCardClaims(plan: PlanDocument): NonNullable<WorkflowMessageContext["structured"]> {
+function structuredCardClaims(plan: PlanDocument, selfCheck: PlanSelfCheckView): NonNullable<WorkflowMessageContext["structured"]> {
   const claimCount = planClaimCount(plan);
   const tiny = claimCount <= TINY_PLAN_CLAIMS && plan.decisions.length === 0;
   const everyClaim = (claims: PlanClaim[], depth: number): string[] => {
     const lines = planSummaryLines({ ...plan, claims }, claims.length);
     return claims.flatMap((claim, index) => [`${"  ".repeat(depth)}${lines[index]!}`, ...everyClaim(claim.children ?? [], depth + 1)]);
   };
-  // PLANVIEW: the answers an Approve here uses and the checks the plan adds, in plain words.
-  const summary = planCheckSummary(plan);
+  // PLANVIEW: the answers an Approve here uses, the checks the plan adds and what AgentX's plan check stored of it, in plain words.
+  const summary = planCheckSummary(plan, { selfCheck });
   return { claims: tiny ? everyClaim(plan.claims, 0) : planSummaryLines(plan), claimCount, decisionCount: plan.decisions.length, tiny,
-    decisions: summary.decisions, checkLines: summary.lines };
+    decisions: summary.decisions, checkLines: summary.lines, selfCheckLines: summary.selfCheckLines };
 }
 
 /**
@@ -675,7 +676,9 @@ async function prepareDocumentLink(deps: NotifierDependencies, task: DeveloperTa
   // the page at this document and version.
   if (loaded.format === "structured") {
     if (fallback === undefined) unavailable("task_page_unconfigured");
-    return { structured: structuredCardClaims(loaded.plan), ...(loaded.plan.workBreakdown === undefined ? {} : { workBreakdownDigest: taskGraphDigest(loaded.plan.workBreakdown) }),
+    // What the plan self-check stored beside this document; a document it cannot be read for is "not checked", never "no problems". Only a coding plan was ever checked.
+    const selfCheck = plan.type === "plan" ? await loadPlanSelfCheck(async (key) => read(key), plan) : SELF_CHECK_NOT_APPLICABLE;
+    return { structured: structuredCardClaims(loaded.plan, selfCheck), ...(loaded.plan.workBreakdown === undefined ? {} : { workBreakdownDigest: taskGraphDigest(loaded.plan.workBreakdown) }),
       ...(fallback === undefined ? {} : { url: planReviewLink(fallback, workflow, plan.version) }) };
   }
   const markdown = loaded.markdown;
@@ -841,7 +844,10 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
     context.newReplies = await newThreadReplies(deps, task);
     // PLANREADMSG: why the plan could not be read, as a fixed category (the stored problems quote the model and are never shown).
     if (workflow.stage === "PLAN" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable && task.planUnreadable?.workflowRevision === workflow.revision) {
-      context.planUnreadableCategory = planUnreadableCategory(task.planUnreadable.errors);
+      // The category the broker stored (a fixed set); a record from before it was stored is read from the problems.
+      const stored = task.planUnreadable.category;
+      context.planUnreadableCategory = stored !== undefined && PLAN_UNREADABLE_CATEGORIES.includes(stored) ? stored : planUnreadableCategory(task.planUnreadable.errors);
+      if (task.planUnreadable.autoRetried === true) context.planUnreadableAutoRetried = true;
     }
   }
   const message = workflowMessage(context);

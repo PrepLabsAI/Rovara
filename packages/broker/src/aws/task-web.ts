@@ -10,6 +10,7 @@ import type { TaskPeopleView } from "../developer/task-people.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { checksAnchor, renderPlanDocument, type PlanAnchor } from "./plan-page/render-plan.js";
+import type { PlanSelfCheckView } from "../developer/plan-self-check.js";
 import { renderThreads, type PageCommentView, type PageSuggestionView } from "./plan-page/comments.js";
 import { TASK_PAGE_DECIDING_SCRIPT, TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "./task-page-assets.js";
 import { TASK_PAGE_API_PREFIX } from "./task-web-api.js";
@@ -24,6 +25,7 @@ export type TaskDocumentKind = "requirements" | "design" | "coding plan";
 export type TaskDocumentEntry =
   | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "markdown"; markdown: string }
   | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "structured"; plan: PlanDocument; evidence?: PlanEvidenceBundle; /** When the document was stored. */ createdAt?: string;
+    /** For a coding plan: what AgentX's plan check stored beside it (or that it was not checked). */ selfCheck?: PlanSelfCheckView;
     /** For a plan stored before quotes named comments by ID: the comment each ref a quote's author names ("comment c1") stood for, from the decision that sent the comments to this document. */ commentRefs?: Record<string, string> };
 
 export interface TaskDocumentView {
@@ -261,6 +263,7 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
         anchor: entry.anchor, kind: entry.planKind, version: document.version, approved: document.approved, current: document === currentDocument,
         currentVersion: currentDocument.version, plan: document.plan, ...(document.evidence === undefined ? {} : { evidence: document.evidence }),
         ...(document.createdAt === undefined ? {} : { createdAt: document.createdAt }), ...(view.now === undefined ? {} : { now: view.now }),
+        ...(document.selfCheck === undefined ? {} : { selfCheck: document.selfCheck }),
         ...(before?.format === "structured" ? { previous: { version: before.version, plan: before.plan } } : {}),
         ...(approvedEarlier === undefined ? {} : { approvedEarlier: approvedEarlier.plan, approvedEarlierDepth: approvedEarlier.depth }),
         ...(approvedPlan === undefined ? {} : { approvedSame: approvedPlan }),

@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId } from "@agentx/contracts";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId, planQualityFinding } from "@agentx/contracts";
 import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/src/developer/task-records.js";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
 import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
@@ -652,6 +652,16 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await set({ revision: 9, stage: "PLAN", state: "BLOCKED", blockReason: "the plan couldn't be read" }, { workflowRevision: 8, errors: ["the plan: e2e scenarios 1 steps 2 maxActions is missing"] });
     await h.pump();
     expect(h.posts.at(-1)!.text).toBe("AgentX couldn't read the coding plan it wrote.");
+    // After the automatic second try: the category the broker stored (not recomputed from the problems) and that AgentX already tried again.
+    await set({ revision: 10, stage: "PLAN", state: "BLOCKED", blockReason: "the plan couldn't be read" },
+      { workflowRevision: 10, errors: ["something unrecognisable"], category: "checks-shape", autoRetried: true });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("AgentX couldn't read the coding plan it wrote: the checks it proposed did not match the required format. AgentX tried once more by itself and got the same problem. Choose Retry planning (it gets the problems found), or Close.");
+    // A category that is not in the fixed set is not trusted: it is read from the problems.
+    await set({ revision: 11, stage: "PLAN", state: "BLOCKED", blockReason: "the plan couldn't be read" },
+      { workflowRevision: 11, errors: ["claim 1: text is empty"], category: "<!channel>", autoRetried: true });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("AgentX couldn't read the coding plan it wrote: the claims or decisions did not match the required format. AgentX tried once more by itself and got the same problem. Choose Retry planning (it gets the problems found), or Close.");
   });
 
   it("posts one message per workflow step and never repeats a blocked review for a stale notice", async () => {
@@ -1034,6 +1044,59 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(text).toContain("• d1: How many times should a payment be retried? Answer: Five times");
     expect(text).toContain("• As viewer on api-viewer: expects GET /api/orders.csv answers 403; proves claim 2; no stand-ins; steps: sends GET /api/orders.csv");
     expect(visibleSlackText(text).length).toBeLessThanOrEqual(1_200);
+  });
+
+  describe("what AgentX's plan check stored beside the plan (T5's record)", () => {
+    const finding = planQualityFinding({ code: "claim-not-covered", claimIds: ["2"] });
+    const shaOf = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+    /** Plans the harness's broker stored, read through a notifier whose reader answers the record beside each document as `record` says. */
+    async function planCard(record: (document: string) => string | Error | undefined) {
+      const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+        readArtifact: async (key) => {
+          if (key.endsWith(".quality.json")) {
+            const answer = record(String(h.s3.objects.get(key.replace(/\.quality\.json$/u, ".json"))));
+            if (answer instanceof Error) throw answer;
+            if (answer === undefined) throw Object.assign(new Error("missing"), { name: "NoSuchKey" });
+            return answer;
+          }
+          return String(h.s3.objects.get(key));
+        }, reviewUrlBase: "https://agentx.example.test",
+      });
+      await h.pump();
+      await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+      await h.pump();
+      const planning = h.active();
+      await h.artifact(h.workspaceId, planning, "plan.md", planAnswer(planDocument({ decisions: [] })));
+      await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+      await h.pump();
+      return visibleSlackText(h.posts.at(-1)!.text);
+    }
+    const checkedRecord = (extra: Record<string, unknown>) => (document: string) => JSON.stringify({ schemaVersion: 1, status: "checked", artifactId: "plan", artifactSha256: shaOf(document), checkedAt: "2026-10-25T10:00:00.000Z",
+      findings: [], notes: [], autoRevisions: 0, ...extra });
+
+    it("shows a finding that survived the automatic revision on the approval card", async () => {
+      const text = await planCard(checkedRecord({ findings: [finding] }));
+      expect(text).toContain(`• ${finding.ownerSentence}`);
+      expect(text).not.toContain("Not checked");
+      expect(text.length).toBeLessThanOrEqual(1_200);
+    });
+
+    it("says 'Not checked by AgentX's plan check.' when there is no record, an unreadable one, one for another document, or a not-checked one", async () => {
+      for (const [name, record] of [
+        ["no record", () => undefined], ["unreadable", () => "{nope"], ["read fails", () => new Error("boom")],
+        ["another document", checkedRecord({ artifactSha256: "b".repeat(64), findings: [finding] })],
+        ["not checked", checkedRecord({ status: "not-checked", reason: "disabled" })],
+      ] as const) {
+        const text = await planCard(record);
+        expect(text, name).toContain("• Not checked by AgentX's plan check.");
+        expect(text, name).not.toContain(finding.ownerSentence);
+      }
+    });
+
+    it("says nothing about the plan check when it ran and found nothing", async () => {
+      const text = await planCard(checkedRecord({}));
+      expect(text).not.toContain("plan check");
+    });
   });
 
   it("lists every claim of a tiny structured plan, and keeps a plan of fifty long claims and twenty decisions within the brief limit", async () => {

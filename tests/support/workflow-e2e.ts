@@ -614,7 +614,7 @@ export async function createWorkflowE2E(options: {
       retrySleep: async () => undefined,
     }, { publicKey: workerKeys.publicKey, workspaceId: invocation.workspaceId, generation: 1 });
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true as const, generation: 1, privateIp: "127.0.0.1" }) },
       binding: async () => ({ deploymentMode: "ec2-ebs" }) as never,
       sign: async (message) => cryptoSign("sha256", message, workerKeys.privateKey),
@@ -939,7 +939,7 @@ export async function createWorkflowE2E(options: {
       },
       log: () => undefined,
       deliverEc2: createEc2Delivery({
-        applicationPlanNotNegotiated: async () => undefined,
+        applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
         sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "10.0.0.9" }) },
         binding: async () => ({ deploymentMode: "ec2-ebs" }) as never,
         sign: async () => new Uint8Array(64),

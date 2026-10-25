@@ -303,7 +303,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       try { return await guardTaskDispatch({ documentClient: harness.db, tableName: "state", admission }, record); } finally { admission.close(); }
     };
     const delivery = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true as const, generation: 1, privateIp: "127.0.0.1" }) },
       binding: async () => runtimeBinding,
       sign: async (message) => cryptoSign("sha256", message, workerKeys.privateKey),

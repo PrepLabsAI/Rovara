@@ -1,6 +1,7 @@
 import { agentXError, redactText, type PlanDocument, type WorkflowArtifact } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { planCheckSummary, type PlanCheckSummary } from "../developer/plan-check-summary.js";
+import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck } from "../developer/plan-self-check.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 
 /** PLANFULLDOC: the answer of `GET /v1/dev/tasks/:id/plan`. */
@@ -21,6 +22,8 @@ export interface TaskPlanDocumentView {
   summary: PlanCheckSummary;
 }
 
+/** The most of a self-check record that is read (a real one is a few kilobytes). */
+const SELF_CHECK_READ_BYTES = 70_000;
 const DOCUMENTS = ["requirements", "design", "plan"] as const;
 
 /**
@@ -45,12 +48,14 @@ export async function readTaskPlanDocument(
   const loaded = await loadWorkflowDocument(read, artifact, {}).catch(() => undefined);
   if (loaded === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `the ${kind} document v${artifact.version} could not be verified`);
   if (loaded.format !== "structured") throw agentXError("NOT_FOUND", `the ${kind} document v${artifact.version} was written before structured plans and has no canonical form`);
+  // What the plan self-check stored beside this document (only a coding plan is judged); no usable record is "not checked".
+  const selfCheck = kind === "plan" ? await loadPlanSelfCheck(async (key) => read(key, SELF_CHECK_READ_BYTES), artifact) : SELF_CHECK_NOT_APPLICABLE;
   const approved = (task.workflow?.decisions ?? []).some((decision) => decision.decision === "APPROVE" && decision.artifactDigest === artifact.sha256);
   return {
     taskId: task.taskId, document: kind, version: artifact.version, sha256: artifact.sha256, approved, current: artifact === latest,
     versions: versions.map((candidate) => candidate.version),
     content: redactedPlan(loaded.plan),
-    summary: planCheckSummary(loaded.plan, { detail: "page" }),
+    summary: planCheckSummary(loaded.plan, { detail: "page", selfCheck }),
   };
 }
 

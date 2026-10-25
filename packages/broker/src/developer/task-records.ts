@@ -33,7 +33,8 @@ import {
 import type { AuthenticatedIdentity } from "../auth.js";
 import { isHeartbeat, modelCallView } from "./model-call-view.js";
 import type { ShareDecision } from "./share.js";
-import type { PlanSelfCheckState, PlanUnreadableCategory } from "./plan-self-check.js";
+import type { PlanSelfCheckState } from "./plan-self-check.js";
+import type { PlanUnreadableCategory } from "./plan-check-summary.js";
 
 /** Whether a block reason is one of the two that send a task back to plan review for a corrected E2E plan: a source reference that does not match the candidate, or an application plan that can no longer run as written. */
 export function isE2EPlanCorrectionBlockReason(blockReason: string | undefined): boolean {

@@ -73,7 +73,7 @@ describe("planCheckSummary", () => {
   it("says a built-in file check in words, never as the sh -c script", () => {
     const summary = planCheckSummary(ordersPlan());
     expect(summary.checks[0]).toMatchObject({ builtin: true, proves: ["claim 1", "Not changing 1"] });
-    expect(summary.lines[4]).toBe('Check "Server no longer defaults the port" checks that server.mjs does not contain "|| 3000"; proves claim 1 and Not changing 1');
+    expect(summary.lines[4]).toBe('Check "Server no longer defaults the port" checks that server.mjs does not contain "|| 3000"; proves claim 1 and Not changing 1; should fail now and pass after the change');
     expect(summary.lines[5]).toBe('Check "Unit tests" runs npx vitest run; proves claim 2');
     expect(summary.lines.join("\n")).not.toMatch(/sh -c|grep|test ! -L/);
   });
@@ -127,6 +127,14 @@ describe("planUnreadableCategory", () => {
     expect(planUnreadableCategory(errorsOf(withBlock((plan) => { plan["workBreakdown"] = { schemaVersion: 1, items: "x" }; })))).toBe("work-breakdown");
     expect(planUnreadableCategory(["the answer is too long"])).toBe("too-long");
     expect(planUnreadableCategory(['check Unit tests: arguments may not contain line breaks or control characters'])).toBe("checks-shape");
+  });
+
+  it("reads the problems the broker itself raises after a plan parses (the same function the stored category and the card use)", () => {
+    expect(planUnreadableCategory(["the plan is too long once saved"])).toBe("too-long");
+    expect(planUnreadableCategory(["the plan: e2e schemaVersion 2 was not offered for this planning step; use the schemaVersion 1 portable intent, or leave e2e out"])).toBe("wrong-e2e-version");
+    expect(planUnreadableCategory(["ordered work is available only for a task pinned to one registered repository"])).toBe("work-breakdown");
+    expect(planUnreadableCategory(["graph.items.repository: does not match the task's pinned repository"])).toBe("work-breakdown");
+    expect(planUnreadableCategory(["graph.taskId: does not match the current task"])).toBe("work-breakdown");
   });
 
   it("the most telling category wins, and nothing is read from the model's words", () => {

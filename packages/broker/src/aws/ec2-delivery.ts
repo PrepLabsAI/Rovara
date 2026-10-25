@@ -4,6 +4,7 @@ import {
   E2E_AGENT_UNAVAILABLE_REASONS,
   E2E_MODEL_FREE_LIMITS_FEATURE,
   E2E_REPLAY_CHECKS_FEATURE,
+  PLAN_DRY_RUN_FEATURE,
   E2E_APPLICATION_ADMISSION_SCHEMA_V2,
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
   WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED,
@@ -19,7 +20,6 @@ import {
   type WorkerInvocation,
 } from "@agentx/contracts";
 import { asksForApplicationPlan, asksForCodeAnchors, asksForPlanQuality, withoutApplicationPlanText, withoutCodeAnchorText, withoutPlanQualityText } from "./broker-shared.js";
-import { PLAN_QUALITY_WORKER_FEATURE } from "../developer/plan-self-check.js";
 import type { Ec2OutboxRecord } from "./lambda.js";
 import type { SessionManager } from "./sessions.js";
 
@@ -63,7 +63,7 @@ export interface Ec2DeliveryDependencies {
    * Called, before the invocation is posted, when a planning run's plan quality guidance was dropped for a worker that does not list the plan-quality feature:
    * the operation record then stops saying the planner was asked for the new plan members, so the broker never sends that planner a revision that names them.
    */
-  planQualityNotNegotiated?: (record: Ec2OutboxRecord) => Promise<void>;
+  planQualityNotNegotiated: (record: Ec2OutboxRecord) => Promise<void>;
   /**
    * The schemaVersion of the admission a CHECKS invocation's reference names, read from the stored object and held to the reference's content address; undefined when it
    * cannot be read. With it, the dispatcher does not trust the reference's `kind` alone: a reference whose kind disagrees with its admission is refused before delivery.
@@ -175,7 +175,12 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     }
     if (invocation.kind === "task" && asksForPlanQuality(invocation.payload.prompt)
       && !(sent.kind === "task" && asksForPlanQuality(sent.payload.prompt))) {
-      await dependencies.planQualityNotNegotiated?.(record);
+      // Without the recorder the operation would keep saying the planner was asked for the new plan members while this worker was sent a prompt without them, and a revision prompt
+      // would then name members its strict parser rejects: a missing recorder is a wiring error, and the run does not go out (the same as the application plan above).
+      if (dependencies.planQualityNotNegotiated === undefined) {
+        throw agentXError("CONFIG_INVALID", "the plan quality guidance was dropped for this worker but no planQualityNotNegotiated recorder is configured");
+      }
+      await dependencies.planQualityNotNegotiated(record);
     }
     if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const payload = workerInvokeTokenPayload({
@@ -559,7 +564,7 @@ function withoutCodeAnchors(invocation: WorkerInvocation, features: readonly str
 
 /** A planning prompt without the plan quality guidance, for a worker that does not list the plan-quality feature: it would reject a plan that carried the members the guidance names. */
 function withoutPlanQuality(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
-  if (invocation.kind !== "task" || !asksForPlanQuality(invocation.payload.prompt) || features.includes(PLAN_QUALITY_WORKER_FEATURE)) return invocation;
+  if (invocation.kind !== "task" || !asksForPlanQuality(invocation.payload.prompt) || features.includes(PLAN_DRY_RUN_FEATURE)) return invocation;
   return { ...invocation, payload: { ...invocation.payload, prompt: withoutPlanQualityText(invocation.payload.prompt) } };
 }
 

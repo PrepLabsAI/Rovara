@@ -31,9 +31,13 @@ export interface WorkflowMessageContext {
     decisions?: ReadonlyArray<{ id: string; question: string; answer: string }> | undefined;
     /** PLANVIEW: one plain line per browser or API scenario and proposed check the plan adds (`planCheckSummary(plan).lines`). */
     checkLines?: readonly string[] | undefined;
+    /** What AgentX's plan check says of the plan (`planCheckSummary(plan).selfCheckLines`): its findings' sentences, or "Not checked by AgentX's plan check."; empty when it ran and found nothing. */
+    selfCheckLines?: readonly string[] | undefined;
   } | undefined;
   /** PLANREADMSG: why the plan could not be read, as a fixed category; absent when not known (the card then says only that it could not be read). */
   planUnreadableCategory?: PlanUnreadableCategory | undefined;
+  /** PLANREADMSG: AgentX already asked the planner a second time by itself and the answer could not be read either. */
+  planUnreadableAutoRetried?: boolean | undefined;
   findingsUrl?: string | undefined;
   /** The task page, where every thread reply can be read. */
   taskPageUrl?: string | undefined;
@@ -144,8 +148,9 @@ export function plainBlockReason(blockReason: string | undefined): string {
 function planUnreadableText(context: WorkflowMessageContext): string {
   const name = workflowDocumentName(context.workflow);
   const category = context.planUnreadableCategory;
-  if (category === undefined) return `AgentX couldn't read the ${name} it wrote.`;
-  return `AgentX couldn't read the ${name} it wrote: ${PLAN_UNREADABLE_SENTENCES[category]}. Choose Retry planning (it gets the problems found), or Close.`;
+  const again = context.planUnreadableAutoRetried === true ? " AgentX tried once more by itself and got the same problem." : "";
+  if (category === undefined) return `AgentX couldn't read the ${name} it wrote.${again}`;
+  return `AgentX couldn't read the ${name} it wrote: ${PLAN_UNREADABLE_SENTENCES[category]}.${again} Choose Retry planning (it gets the problems found), or Close.`;
 }
 
 /** A review-only task's blocked verification, without advice to rerun checks it does not have. */
@@ -369,11 +374,16 @@ const CARD_CHECK_LINE_MAX = 280;
 const CARD_DECISION_QUESTION_MAX = 50;
 const CARD_DECISION_ANSWER_MAX = 40;
 
+/** The most plan-check lines a card spells out; the rest read "And N more" and are on the task page. */
+const CARD_SELF_CHECK_SHOWN = 3;
+const CARD_SELF_CHECK_LINE_MAX = 240;
+
 /**
  * The lines an Approve in Slack must show, in what is left of the brief limit once the fixed lines and a claim's worth of
- * room are kept: the answer each decision gets (the owner sees them before approving), then up to 8 lines for the checks
- * the plan adds, each with "And N more ..." when some are left out. Every value is the plan's own text: `cleanLine`
- * redacts, cuts and escapes it. A line that does not fit is left out, never cut mid-sentence.
+ * room are kept: the answer each decision gets (the owner sees them before approving), what AgentX's plan check says of the
+ * plan (its findings, or that it was not checked), then up to 8 lines for the checks the plan adds, each with "And N more ..."
+ * when some are left out. Every value is the plan's own text: `cleanLine` redacts, cuts and escapes it. A line that does not
+ * fit is left out, never cut mid-sentence; the plan check and the checks are never both silent (a short notice stands in).
  */
 export function structuredExtraLines(structured: NonNullable<WorkflowMessageContext["structured"]>, room: number): string[] {
   const out: string[] = [];
@@ -390,14 +400,24 @@ export function structuredExtraLines(structured: NonNullable<WorkflowMessageCont
   const checkMore = (taken: number) => (checks.length > taken ? [`And ${checks.length - taken} more on the task page.`] : []);
   // Never silent: when no check line fits, one line still says the plan adds checks and where they read.
   const notice = checks.length === 0 ? [] : [`This plan adds ${plural(checks.length, "check")}; read ${checks.length === 1 ? "it" : "them"} on the task page.`];
-  // The decisions go first, but leave room for the first check line (with its "And N more"), or at least for the notice.
+  const selfCheck = structured.selfCheckLines ?? [];
+  const selfCheckLines = selfCheck.slice(0, CARD_SELF_CHECK_SHOWN).map((line) => `• ${cleanLine(line, CARD_SELF_CHECK_LINE_MAX)}`);
+  const selfCheckMore = (taken: number) => (selfCheck.length > taken ? [`And ${plural(selfCheck.length - taken, "more plan check note")} on the task page.`] : []);
+  const selfCheckNotice = selfCheck.length === 0 ? [] : ["AgentX's plan check: read its result on the task page."];
+  // The decisions go first, but leave room for the first plan-check line (or its notice) and the first check line (or the notice).
+  const firstSelfCheck = selfCheck.length === 0 ? 0 : cost([selfCheckLines[0]!, ...selfCheckMore(1)]);
+  const reserveSelfCheck = selfCheck.length === 0 ? 0 : firstSelfCheck <= room ? firstSelfCheck : cost(selfCheckNotice);
   const firstCheck = checks.length === 0 ? 0 : cost([checkLines[0]!, ...checkMore(1)]);
-  const reserve = checks.length === 0 ? 0 : firstCheck <= room ? firstCheck : cost(notice);
+  const reserveChecks = checks.length === 0 ? 0 : firstCheck <= room - reserveSelfCheck ? firstCheck : cost(notice);
   const decisions = structured.decisions ?? [];
   const shown = decisions.slice(0, checks.length === 0 ? CARD_DECISIONS_SHOWN : CARD_DECISIONS_WITH_CHECKS)
     .map((decision) => `• ${cleanLine(decision.id, 12)}: ${cleanLine(decision.question, CARD_DECISION_QUESTION_MAX)} Answer: ${cleanLine(decision.answer, CARD_DECISION_ANSWER_MAX)}`);
-  const used = takeUpTo(shown, (taken) => (decisions.length > taken ? [`And ${decisions.length - taken} more decisions on the task page.`] : []), room - reserve);
-  const checksRoom = room - used;
+  const usedByDecisions = takeUpTo(shown, (taken) => (decisions.length > taken ? [`And ${plural(decisions.length - taken, "more decision")} on the task page.`] : []), room - reserveSelfCheck - reserveChecks);
+  const usedBySelfCheck = takeUpTo(selfCheckLines, selfCheckMore, room - usedByDecisions - reserveChecks);
+  // Never silent either: when no plan-check line fits, the notice stands in (the claims' reserve is what makes room for it).
+  const usedNotice = usedBySelfCheck === 0 && selfCheck.length > 0 ? cost(selfCheckNotice) : 0;
+  if (usedNotice > 0) out.push(...selfCheckNotice);
+  const checksRoom = room - usedByDecisions - usedBySelfCheck - usedNotice;
   if (takeUpTo(checkLines, checkMore, checksRoom) === 0 && checks.length > 0) out.push(...notice);
   return out;
 }

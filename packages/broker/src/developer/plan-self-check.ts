@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { PlanQualityFindingSchema, planQualityFinding, type PlanDocument, type PlanQualityFinding } from "@agentx/contracts";
+import { PLAN_DRY_RUN_CLASSES, PlanQualityFindingSchema, type PlanDryRunClass, type PlanQualityFinding } from "@agentx/contracts";
+import type { PlanDryRunOutcome } from "./plan-dry-run-results.js";
+import { planDryRunWarnings } from "./plan-dry-run-results.js";
 import type { PlanQualityContext } from "./plan-quality.js";
 
 /**
@@ -11,9 +13,6 @@ import type { PlanQualityContext } from "./plan-quality.js";
 
 /** The most automatic revisions of one document version: unreadable-answer retries and finding revisions share it (owner decision Q1). */
 export const PLAN_AUTO_REVISIONS_MAX = 1;
-
-/** The worker feature whose image parses and answers the new plan members (`scenarioProves`, `expectOnBase`, built-in file checks); the planner is asked for them only from such a worker. */
-export const PLAN_QUALITY_WORKER_FEATURE = "task.workflowPlanDryRun.v1";
 
 const ARTIFACT_TYPES = ["requirements", "design", "plan"] as const;
 export type PlanSelfCheckArtifactType = (typeof ARTIFACT_TYPES)[number];
@@ -34,9 +33,6 @@ export function planRevisionsUsed(state: unknown, artifactType: PlanSelfCheckArt
 }
 
 export const PLAN_SELF_CHECK_NOTE_CODES = ["checks-not-tried"] as const;
-const NOTE_SENTENCES: Record<(typeof PLAN_SELF_CHECK_NOTE_CODES)[number], string> = {
-  "checks-not-tried": "Proposed checks were not tried on the current code.",
-};
 const PlanSelfCheckNoteSchema = z.object({ code: z.enum(PLAN_SELF_CHECK_NOTE_CODES), ownerSentence: z.string().min(1).max(300) }).strict();
 export type PlanSelfCheckNote = z.infer<typeof PlanSelfCheckNoteSchema>;
 
@@ -61,36 +57,68 @@ export const PlanSelfCheckRecordSchema = z.object({
   notes: z.array(PlanSelfCheckNoteSchema).max(8),
   /** Automatic revisions spent on this document version before this plan was shown. */
   autoRevisions: z.number().int().min(0).max(PLAN_AUTO_REVISIONS_MAX),
+  /** What the worker's dry run found for each proposed check on the unchanged code (a fixed class, never output or a duration); absent when nothing was tried. */
+  tried: z.array(z.object({ checkId: z.string().min(1).max(64), class: z.enum(PLAN_DRY_RUN_CLASSES) }).strict()).max(16).optional(),
 }).strict();
 export type PlanSelfCheckRecord = z.infer<typeof PlanSelfCheckRecordSchema>;
+
+/** What a reader says when a document has no usable record: never "no problems". */
+export const NOT_CHECKED_SENTENCE = "Not checked by AgentX's plan check.";
+
+/** What the owner sees of a stored record: whether the rules ran, the fixed sentences to show (most serious first), and what the dry run found per check. */
+export interface PlanSelfCheckView {
+  checked: boolean;
+  sentences: string[];
+  /** Only the classes that say something about the check on the unchanged code; `not-run` and `not-checked` are left out. */
+  tried: Readonly<Record<string, Extract<PlanDryRunClass, "passed" | "failed" | "broken">>>;
+}
+
+/** For a document the plan check never judges (requirements, a design): nothing to say, and not "not checked". */
+export const SELF_CHECK_NOT_APPLICABLE: PlanSelfCheckView = Object.freeze({ checked: true, sentences: [], tried: Object.freeze({}) });
+
+const NOT_CHECKED_VIEW = (): PlanSelfCheckView => ({ checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {} });
+/** The most a record may be: well over any real one (64 findings of a few hundred characters). */
+const SELF_CHECK_RECORD_MAX_CHARS = 64 * 1024;
+
+/**
+ * T4's reader rules for T5's record. No text, unparsable text, a record that is not this document's (its digest differs from the workflow artifact's) and a
+ * `not-checked` record all read as "not checked". A checked record gives each finding's and note's fixed sentence, the ones only a person can settle first.
+ */
+export function readPlanSelfCheck(raw: string | undefined, artifactSha256: string): PlanSelfCheckView {
+  if (raw === undefined || raw.length === 0 || raw.length > SELF_CHECK_RECORD_MAX_CHARS) return NOT_CHECKED_VIEW();
+  let parsed: ReturnType<typeof PlanSelfCheckRecordSchema.safeParse>;
+  try { parsed = PlanSelfCheckRecordSchema.safeParse(JSON.parse(raw)); } catch { return NOT_CHECKED_VIEW(); }
+  if (!parsed.success || parsed.data.artifactSha256 !== artifactSha256 || parsed.data.status !== "checked") return NOT_CHECKED_VIEW();
+  const { findings, notes, tried } = parsed.data;
+  const sentences = [...findings.filter((finding) => !finding.revisable), ...findings.filter((finding) => finding.revisable)].map((finding) => finding.ownerSentence)
+    .concat(notes.map((note) => note.ownerSentence));
+  return {
+    checked: true, sentences: [...new Set(sentences)],
+    tried: Object.fromEntries((tried ?? []).flatMap((entry) => (entry.class === "passed" || entry.class === "failed" || entry.class === "broken" ? [[entry.checkId, entry.class] as const] : []))),
+  };
+}
+
+/** The record's own object key, from the document's: `.json` becomes `.quality.json`. Undefined for a document that is not stored as `.json`. */
+export function planSelfCheckKeyOf(objectKey: string): string | undefined {
+  return objectKey.endsWith(".json") && !objectKey.endsWith(".quality.json") ? planSelfCheckKey(objectKey.slice(0, -".json".length)) : undefined;
+}
+
+/** Reads the record beside a stored document; a record that cannot be found, read or trusted is "not checked". */
+export async function loadPlanSelfCheck(read: (objectKey: string) => Promise<string | undefined>, artifact: { objectKey: string; sha256: string }): Promise<PlanSelfCheckView> {
+  const key = planSelfCheckKeyOf(artifact.objectKey);
+  if (key === undefined) return NOT_CHECKED_VIEW();
+  try { return readPlanSelfCheck(await read(key), artifact.sha256); } catch { return NOT_CHECKED_VIEW(); }
+}
 
 /** The object key of a plan document's self-check record, given the document's own key prefix. */
 export const planSelfCheckKey = (documentPrefix: string): string => `${documentPrefix}.quality.json`;
 
-/** What the dry run found out about a proposed check on the unchanged code (a fixed class, never output). */
-export type PlanDryRunClass = "passed" | "failed" | "broken";
-export type PlanDryRunResults = Readonly<Record<string, PlanDryRunClass>>;
-
-/** Findings from the dry run: a check that could not run, or that did the opposite of its `expectOnBase` prediction. */
-export function dryRunFindings(plan: PlanDocument, results: PlanDryRunResults | undefined): PlanQualityFinding[] {
-  if (results === undefined) return [];
-  const proposed = plan.checks?.proposed ?? [];
-  const broken = proposed.filter((check) => results[check.id] === "broken").map((check) => check.id);
-  const mismatched = proposed.filter((check) => {
-    const predicted = plan.checks?.expectOnBase?.[check.id];
-    const found = results[check.id];
-    return predicted !== undefined && ((predicted === "pass" && found === "failed") || (predicted === "fail" && found === "passed"));
-  }).map((check) => check.id);
-  return [
-    ...(broken.length === 0 ? [] : [planQualityFinding({ code: "check-broken-on-base", checkIds: broken })]),
-    ...(mismatched.length === 0 ? [] : [planQualityFinding({ code: "check-base-mismatch", checkIds: mismatched })]),
-  ];
-}
-
-/** Notes for what the self-check could not do: today, trying the proposed checks on the unchanged code when no dry run reported. */
-export function selfCheckNotes(plan: PlanDocument, input: { dryRun: PlanDryRunResults | undefined }): PlanSelfCheckNote[] {
-  return input.dryRun === undefined && (plan.checks?.proposed.length ?? 0) > 0
-    ? [{ code: "checks-not-tried", ownerSentence: NOTE_SENTENCES["checks-not-tried"] }] : [];
+/**
+ * The notes for what the self-check could not do, from the dry run's outcome (`readPlanDryRunOutcome`): the proposed checks were not tried on the unchanged code, or some of
+ * them were not. The sentences are T6's fixed ones; nothing the worker or a command said is kept.
+ */
+export function selfCheckNotes(outcome: PlanDryRunOutcome): PlanSelfCheckNote[] {
+  return planDryRunWarnings(outcome).map((ownerSentence) => ({ code: "checks-not-tried" as const, ownerSentence }));
 }
 
 /** Findings that only a planner told about the new plan members (`scenarioProves`, `expectOnBase`) can fix. */
@@ -117,22 +145,6 @@ export function planRevisionPrompt(findings: readonly PlanQualityFinding[]): str
     ...lines, ...more,
     "Fix each problem and return the complete coding plan again, ending with the same fenced block as before. Do not edit files.",
   ].join("\n");
-}
-
-/** The categories an unreadable plan is put in for the owner (a fixed set; the validator's own words stay planner-only). */
-export const PLAN_UNREADABLE_CATEGORIES = ["e2e-shape", "checks-shape", "claims-shape", "too-long", "wrong-e2e-version", "work-breakdown", "other"] as const;
-export type PlanUnreadableCategory = (typeof PLAN_UNREADABLE_CATEGORIES)[number];
-
-/** The category of an unreadable answer, from the validator's problems. The result is one of the fixed set; no problem text is kept. */
-export function planUnreadableCategory(errors: readonly string[]): PlanUnreadableCategory {
-  const text = errors.join("\n").toLowerCase();
-  if (/too long/u.test(text)) return "too-long";
-  if (/schemaversion|was not offered for this planning step/u.test(text)) return "wrong-e2e-version";
-  if (/work breakdown|ordered work|workbreakdown/u.test(text)) return "work-breakdown";
-  if (/\be2e\b|scenario|assertion|\bsteps?\b|target/u.test(text)) return "e2e-shape";
-  if (/\bchecks?\b/u.test(text)) return "checks-shape";
-  if (/claim|decision|evidence|\bwhy\b/u.test(text)) return "claims-shape";
-  return "other";
 }
 
 /** The part of the planning context the rules read, as the broker keeps it on the planning operation. */

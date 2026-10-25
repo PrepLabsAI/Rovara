@@ -228,6 +228,8 @@ import {
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
   E2E_MODEL_FREE_LIMITS,
+  PLAN_DRY_RUN_FEATURE,
+  type PlanDryRunClass,
   WorkerInvocationSchema,
   workflowPublicationContext,
   workflowPublicationContextDigest,
@@ -321,7 +323,9 @@ import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./develope
 import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { planQualityFindings } from "../developer/plan-quality.js";
-import { PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, dryRunFindings, planRevisionPrompt, planRevisionsUsed, planSelfCheckKey, planUnreadableCategory, planQualityContextOf, recordedPlanQualityContext, selfCheckNotes, type PlanDryRunResults, type PlanSelfCheckSkipReason, type PlanSelfCheckState } from "../developer/plan-self-check.js";
+import { planDryRunFindings, readPlanDryRunOutcome } from "../developer/plan-dry-run-results.js";
+import { planUnreadableCategory } from "../developer/plan-check-summary.js";
+import { PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, planRevisionPrompt, planRevisionsUsed, planSelfCheckKey, planQualityContextOf, recordedPlanQualityContext, selfCheckNotes, type PlanSelfCheckSkipReason, type PlanSelfCheckState } from "../developer/plan-self-check.js";
 import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, candidateBuildSourceAdmissionReference, type StoredCandidateBuildSource } from "./candidate-build-source.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
@@ -12184,7 +12188,7 @@ async function storePlanAnswer(
   /** Whether this planning run was asked for (and its worker parses) the schema-v2 application plan. */
   applicationPlanNegotiated: boolean,
   /** The planning run: what its planner was told of the project (`planQualityContext`), for the plan self-check. */
-  operation: Pick<OperationRecord, "planQualityContext" | "planQualityAsked">,
+  operation: Pick<OperationRecord, "id" | "planQualityContext" | "planQualityAsked">,
 ): Promise<{ next: WorkflowSnapshot; planUnreadable: NonNullable<DeveloperTaskRecord["planUnreadable"]> | null | undefined; evidenceJob?: { artifactId: string; artifactSha256: string }; inlineEvidence?: Omit<InlineEvidence, "taskId">; plannerReplies?: PlannerReplies;
   /** Plan self-check: the answer was not stored; the planner is asked again with `revision.prompt`, and `selfCheck` records the budget this spent. */
   selfCheck?: PlanSelfCheckState; revision?: { prompt: string } }> {
@@ -12256,18 +12260,27 @@ async function storePlanAnswer(
   // with the plan as findings. The check is advisory: a failure in it never blocks the plan.
   let findings: PlanQualityFinding[] = [];
   let notes: ReturnType<typeof selfCheckNotes> = [];
+  /** What the dry run found for each proposed check (a fixed class), kept in the record so the card and page can say it. */
+  let tried: Array<{ checkId: string; class: PlanDryRunClass }> | undefined;
   // Why the rules did not run, when they did not: kept in the record as "not checked".
   let skipped: PlanSelfCheckSkipReason | undefined = !selfCheckOn ? "disabled" : artifactType !== "plan" ? "not-a-coding-plan" : plan.checks === undefined ? "checks-not-read" : undefined;
   // A plan whose `checks` member was not read (a task with no check policy) cannot be judged: every claim would look unproved.
   if (skipped === undefined) {
     try {
-      // The planning worker's dry run of the proposed checks on the unchanged code reports here when it ships (a fixed class per check, never output); until then the checks are "not tried".
-      const dryRun: PlanDryRunResults | undefined = undefined;
-      findings = [...planQualityFindings(plan, { kind: "plan", context: recordedPlanQualityContext(operation.planQualityContext) }), ...dryRunFindings(plan, dryRun)];
-      notes = selfCheckNotes(plan, { dryRun });
+      // The planning worker's dry run of the proposed checks on the unchanged code (a fixed class per check, never output): its report is read against the exact text the planner
+      // saved (`content`, not the canonical form) and each result is attributed to a proposed check by its command. A worker the planner was not asked through (an older one) has no report to read.
+      const proposed = (plan.checks?.proposed ?? []).map((check) => ({ id: check.id, command: check.command }));
+      const outcome = readPlanDryRunOutcome({
+        events: proposed.length === 0 ? [] : (await operationEventsNewestFirst(dependencies, operation.id, 500)).reverse(),
+        planText: content, proposed, workerFeatures: operation.planQualityAsked === true ? [PLAN_DRY_RUN_FEATURE] : [],
+      });
+      findings = [...planQualityFindings(plan, { kind: "plan", context: recordedPlanQualityContext(operation.planQualityContext) }), ...planDryRunFindings({ outcome, expectOnBase: plan.checks?.expectOnBase })];
+      notes = selfCheckNotes(outcome);
+      tried = outcome.status === "TRIED" ? outcome.results.map((result) => ({ checkId: result.checkId, class: result.class })) : undefined;
     } catch (error) {
       findings = [];
       notes = [];
+      tried = undefined;
       skipped = "rules-failed";
       console.log(JSON.stringify({ component: "broker", event: "plan_self_check.failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
     }
@@ -12284,7 +12297,7 @@ async function storePlanAnswer(
   {
     // Beside the document, never inside it: the digest the owner's approval binds does not move. A plan with no record was not checked.
     try {
-      const record = PlanSelfCheckRecordSchema.parse({ schemaVersion: 1, status: skipped === undefined ? "checked" : "not-checked", ...(skipped === undefined ? {} : { reason: skipped }), artifactId, artifactSha256: sha(canonical), checkedAt: now, findings, notes, autoRevisions: revisionsUsed });
+      const record = PlanSelfCheckRecordSchema.parse({ schemaVersion: 1, status: skipped === undefined ? "checked" : "not-checked", ...(skipped === undefined ? {} : { reason: skipped }), artifactId, artifactSha256: sha(canonical), checkedAt: now, findings, notes, autoRevisions: revisionsUsed, ...(tried === undefined || tried.length === 0 ? {} : { tried }) });
       await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: planSelfCheckKey(prefix), Body: JSON.stringify(record), ContentType: "application/json" }));
     } catch (error) {
       console.log(JSON.stringify({ component: "broker", event: "plan_self_check.record_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));

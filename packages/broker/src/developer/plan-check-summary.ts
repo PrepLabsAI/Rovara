@@ -1,4 +1,5 @@
 import { builtinFileCheckOf, canonicalJson, notChangingReference, redactText, type PlanDocument, type PlanQualityFinding } from "@agentx/contracts";
+import { NOT_CHECKED_SENTENCE, type PlanSelfCheckView } from "./plan-self-check.js";
 
 /**
  * PLANVIEW: what a coding plan's checks say, in plain words, from structured fields only. Pure: the Slack card, the task
@@ -113,6 +114,10 @@ export interface PlanCheckItemSummary {
   does: string;
   builtin: boolean;
   proves: string[];
+  /** What the planner expects of this check on the unchanged code (its `expectOnBase`), when it said. */
+  expectedOnBase?: "pass" | "fail";
+  /** The expectation in words: which result is right before the change, so a check written backwards can be seen. */
+  direction?: string;
   /** What a try on the unchanged code gave, when one is known. */
   tried?: string;
   line: string;
@@ -131,6 +136,11 @@ export interface PlanCheckSummary {
   lines: string[];
   /** The self-check findings' sentences for the owner, when findings are given. */
   findingSentences: string[];
+  /**
+   * What AgentX's plan check says of this plan, to show the owner: the fixed sentences of its findings and notes (the ones a person must settle first), or the one
+   * line "Not checked by AgentX's plan check." when there is no usable record. Empty only when the check ran and found nothing to say.
+   */
+  selfCheckLines: string[];
 }
 
 export interface PlanCheckSummaryInput {
@@ -139,7 +149,12 @@ export interface PlanCheckSummaryInput {
   /** What a try of each proposed check on the unchanged code gave; absent for a check that was not tried. */
   triedOnCurrentCode?: Readonly<Record<string, "passed" | "failed" | "broken">> | undefined;
   findings?: readonly PlanQualityFinding[] | undefined;
+  /** What the plan self-check stored for this document (`loadPlanSelfCheck`); absent reads as "not checked". */
+  selfCheck?: PlanSelfCheckView | undefined;
 }
+
+/** Which result is right for a check before the change, in the words a card and the page use. */
+const DIRECTION_WORDS = { fail: "should fail now and pass after the change", pass: "should pass now and after the change" } as const;
 
 function triedText(outcome: "passed" | "failed" | "broken", expected: "pass" | "fail" | undefined): string {
   if (outcome === "broken") return "tried on current code: could not run";
@@ -202,12 +217,15 @@ function checkSummary(plan: PlanDocument, input: PlanCheckSummaryInput, limits: 
     ? `runs ${plain([check.command.executable, ...check.command.args].join(" "), 100)}`
     : `checks that ${plain(builtin.path, limits.value)} ${builtin.kind === "file-contains" ? "contains" : "does not contain"} ${quoted(builtin.text, limits.value)}`;
   const proves = (plan.checks?.proves[check.id] ?? []).map(provedName);
-  const outcome = input.triedOnCurrentCode?.[check.id];
-  const tried = outcome === undefined ? undefined : triedText(outcome, plan.checks?.expectOnBase?.[check.id]);
+  const outcome = input.triedOnCurrentCode?.[check.id] ?? input.selfCheck?.tried[check.id];
+  const expectedOnBase = plan.checks?.expectOnBase?.[check.id];
+  const tried = outcome === undefined ? undefined : triedText(outcome, expectedOnBase);
+  const direction = expectedOnBase === undefined ? undefined : DIRECTION_WORDS[expectedOnBase];
   const label = plain(check.label, 80);
   return {
-    checkId: check.id, label, does, builtin: builtin !== undefined, proves, ...(tried === undefined ? {} : { tried }),
-    line: `Check "${label}" ${does}${proves.length === 0 ? "" : `; proves ${joinWords(proves)}`}${tried === undefined ? "" : `; ${tried}`}`,
+    checkId: check.id, label, does, builtin: builtin !== undefined, proves, ...(expectedOnBase === undefined ? {} : { expectedOnBase }),
+    ...(direction === undefined ? {} : { direction }), ...(tried === undefined ? {} : { tried }),
+    line: `Check "${label}" ${does}${proves.length === 0 ? "" : `; proves ${joinWords(proves)}`}${direction === undefined ? "" : `; ${direction}`}${tried === undefined ? "" : `; ${tried}`}`,
   };
 }
 
@@ -225,6 +243,7 @@ export function planCheckSummary(plan: PlanDocument, input: PlanCheckSummaryInpu
     ...(plan.checks?.noneReason === undefined ? {} : { noneReason: plain(plan.checks.noneReason, 300) }),
     lines: [...scenarios.map((scenario) => scenario.line), ...checks.map((check) => check.line)],
     findingSentences: (input.findings ?? []).map((finding) => finding.ownerSentence),
+    selfCheckLines: input.selfCheck === undefined || !input.selfCheck.checked ? [NOT_CHECKED_SENTENCE] : [...input.selfCheck.sentences],
   };
 }
 
@@ -244,7 +263,7 @@ export const PLAN_UNREADABLE_SENTENCES: Readonly<Record<PlanUnreadableCategory, 
 
 /**
  * The category of an unreadable plan, from the fixed field words the validator puts at the start of each problem (its
- * `<subject>: <field> <problem>` form), never from the model's own text. Several categories: the most telling one wins.
+ * `<subject>: <field> <problem>` form) and from the broker's own fixed sentences (too long, version not offered, ordered work, the task graph's checks), never from the model's own text. Several categories: the most telling one wins.
  */
 export function planUnreadableCategory(errors: readonly string[]): PlanUnreadableCategory {
   const found = new Set<PlanUnreadableCategory>();
@@ -252,8 +271,9 @@ export function planUnreadableCategory(errors: readonly string[]): PlanUnreadabl
     const whole = error.trim();
     const colon = whole.indexOf(": ");
     const rest = colon < 0 ? whole : whole.slice(colon + 2);
-    if (/^e2e schemaVersion must be\b/u.test(rest)) found.add("wrong-e2e-version");
-    else if (whole === "the answer is too long") found.add("too-long");
+    if (/^e2e schemaVersion (?:must be|\d+ was not offered)\b/u.test(rest)) found.add("wrong-e2e-version");
+    else if (whole === "the answer is too long" || whole === "the plan is too long once saved") found.add("too-long");
+    else if (/^ordered work is available only\b/u.test(whole) || /^graph(?:\.|:)/u.test(whole)) found.add("work-breakdown");
     else if (/^(?:e2e\b|E2E intent\b|scenarioProves\b)/u.test(rest) || /^scenarioProves\b/u.test(whole)) found.add("e2e-shape");
     else if (/^checks?\b/u.test(rest) || /^check\s/u.test(whole)) found.add("checks-shape");
     else if (/^work(?:Breakdown|\s+breakdown)\b/u.test(rest)) found.add("work-breakdown");

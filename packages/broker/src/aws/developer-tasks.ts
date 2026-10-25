@@ -205,6 +205,7 @@ import type { TaskDocumentKind, TaskDocumentView, TaskFreshness } from "./task-w
 import type { PageCommentInput, PageDecisionInput, PageRetryInput, PageSuggestionInput, TaskPageState } from "./task-web-api.js";
 import { readTaskPlanDocument, type TaskPlanDocumentView } from "./task-plan-document.js";
 import { pageCommentViews, type CommentViewContext, type PageCommentView } from "./plan-page/comments.js";
+import { loadPlanSelfCheck } from "../developer/plan-self-check.js";
 import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { getTaskPeoplePresentation, resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
@@ -3690,7 +3691,9 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
       if (artifact === latest && recorded !== undefined && !recorded.objectKey.startsWith(privatePrefix)) evidenceUnverified("prefix");
       const evidence = artifact === latest && recorded?.objectKey.startsWith(privatePrefix) === true ? await loadPlanEvidence(read, { ...artifact, evidence: recorded }, evidenceUnverified) : undefined;
       // Still loading only while nothing is recorded: a recorded bundle that cannot be used is a failure, not a wait.
-      loaded.push({ ...entry, format: "structured", plan: document.plan, ...(recorded === undefined ? { createdAt: artifact.createdAt } : {}), ...(evidence === undefined ? {} : { evidence }) });
+      // What the plan self-check stored beside a coding plan (a fixed "not checked" when there is no usable record); the other documents are not judged.
+      const selfCheck = kind === "coding plan" ? await loadPlanSelfCheck(async (key) => read(key, 70_000), artifact) : undefined;
+      loaded.push({ ...entry, format: "structured", plan: document.plan, ...(recorded === undefined ? { createdAt: artifact.createdAt } : {}), ...(evidence === undefined ? {} : { evidence }), ...(selfCheck === undefined ? {} : { selfCheck }) });
     }
     if (currentFailed) unverified.push(kind);
     else documents.push(...loaded);

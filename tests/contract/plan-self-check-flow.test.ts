@@ -2,10 +2,10 @@
 // problem it can fix (or when the answer was unreadable), keeps the findings beside the plan, and never moves the digest the owner approves.
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_BLOCK_REASONS, planQualityFinding, type WorkflowSnapshot } from "@agentx/contracts";
+import { PLAN_DRY_RUN_FEATURE, WORKFLOW_BLOCK_REASONS, planDryRunCommandSha256, planQualityFinding, type PlanDryRunClass, type WorkflowSnapshot } from "@agentx/contracts";
 import { planDocumentInstructions, withoutPlanQualityText, asksForPlanQuality } from "../../packages/broker/src/aws/broker-shared.js";
 import {
-  PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, dryRunFindings, planRevisionPrompt, planRevisionsUsed, planUnreadableCategory, selfCheckNotes,
+  PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, planRevisionPrompt, planRevisionsUsed,
 } from "../../packages/broker/src/developer/plan-self-check.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { createPlanQualityNegotiationRecorder } from "../../packages/broker/src/aws/dispatcher.js";
@@ -318,11 +318,146 @@ describe("an unreadable answer is asked again once by itself, then blocked with 
   });
 });
 
+
+/**
+ * A plan with a check that runs code (so no rule sends it back; the worker does not try it) and one dependency-free check the worker's dry run does try (`test -f`).
+ * The dry run's report names each check by the digest of its command.
+ */
+const RUNS_CODE = { cwd: "repo/demo", executable: "npx", args: ["vitest"] };
+const FILE_THERE = { cwd: "repo/demo", executable: "test", args: ["-f", "src/pay.ts"] };
+const triedPlan = (extra: { expectOnBase?: "pass" | "fail" } = {}) => planAnswer(planDocument(), { checks: { checks: [
+  { label: "Unit tests", ...RUNS_CODE, proves: ["1.1", "2", "nc1"] }, { label: "Pay file exists", ...FILE_THERE, proves: [], ...extra },
+], none_reason: null } });
+/** What the planning worker reports about `planText`: a class for each of the two checks, each bound to the command it ran. */
+const dryRunReport = (planText: string, tried: PlanDryRunClass, overrides: Record<string, unknown> = {}) => ({
+  schemaVersion: "workflow-plan-dry-run/v1", status: "COMPLETE", planSha256: sha(planText),
+  checks: [{ commandSha256: planDryRunCommandSha256(RUNS_CODE), class: "not-checked", durationMs: 0 }, { commandSha256: planDryRunCommandSha256(FILE_THERE), class: tried, durationMs: 1234 }], totalMs: 1300, ...overrides,
+});
+/** The planning step in flight reports `report` and ends with `answer`. */
+async function finishPlanningWithDryRun(harness: Harness, workspaceId: string, answer: string, report: unknown) {
+  const active = activePlanning(harness, workspaceId);
+  if (report !== undefined) await harness.events(workspaceId, String(active.id), [{ type: "progress", payload: { message: "AgentX tried the proposed checks on the code as the task started.", planDryRun: report } }]);
+  await harness.artifact(workspaceId, String(active.id), "plan.md", answer);
+  await harness.finish(workspaceId, String(active.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+}
+const NOT_TRIED = "Proposed checks were not tried on the current code.";
+const SOME_NOT_TRIED = "Some proposed checks were not tried on the current code.";
+
+describe("the worker's dry run of the proposed checks reaches the self-check (T6 into T5)", () => {
+  it("sends a plan back once when the dry run says a check cannot run on the unchanged code, with the finding line and nothing else of the report in the prompt", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+    const { taskId, workspaceId } = await startTask(harness);
+    const answer = triedPlan();
+    await finishPlanningWithDryRun(harness, workspaceId, answer, dryRunReport(answer, "broken"));
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN", state: "RUNNING" });
+    expect(workflowOf(harness, taskId).artifacts).toHaveLength(0);
+    expect(planRuns(harness, workspaceId)).toHaveLength(2);
+    const prompt = promptOf(harness, activePlanning(harness, workspaceId).id);
+    expect(prompt).toContain(`- ${planQualityFinding({ code: "check-broken-on-base", checkIds: ["proposed-2"] }).plannerLine}`);
+    // The report's numbers never reach the planner.
+    expect(prompt).not.toContain("1234");
+    expect(prompt).not.toContain("1300");
+  });
+
+  it("keeps the finding with the plan when the automatic run is already spent, as a finding with its fixed sentence", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+    const { taskId, workspaceId } = await startTask(harness);
+    const first = triedPlan();
+    await finishPlanningWithDryRun(harness, workspaceId, first, dryRunReport(first, "broken"));
+    const second = triedPlan({ expectOnBase: "fail" });
+    await finishPlanningWithDryRun(harness, workspaceId, second, dryRunReport(second, "broken"));
+    expect(planRuns(harness, workspaceId)).toHaveLength(2);
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(storedQuality(harness, taskId)).toMatchObject({ status: "checked", autoRevisions: 1, findings: [{ code: "check-broken-on-base", checkIds: ["proposed-2"], revisable: true }], notes: [{ code: "checks-not-tried", ownerSentence: SOME_NOT_TRIED }] });
+  });
+
+  it("sends a plan back for a check that did the opposite of what the planner predicted for the unchanged code", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+    const { taskId, workspaceId } = await startTask(harness);
+    // The planner said the check passes today; it failed.
+    const answer = triedPlan({ expectOnBase: "pass" });
+    await finishPlanningWithDryRun(harness, workspaceId, answer, dryRunReport(answer, "failed"));
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN", state: "RUNNING" });
+    expect(promptOf(harness, activePlanning(harness, workspaceId).id)).toContain(planQualityFinding({ code: "check-base-mismatch", checkIds: ["proposed-2"] }).plannerLine);
+  });
+
+  it("shows a plan whose tried check behaved as predicted with no finding (the check that runs code is not tried, and the note says so)", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+    const { taskId, workspaceId } = await startTask(harness);
+    const answer = triedPlan({ expectOnBase: "fail" });
+    await finishPlanningWithDryRun(harness, workspaceId, answer, dryRunReport(answer, "failed"));
+    expect(planRuns(harness, workspaceId)).toHaveLength(1);
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(storedQuality(harness, taskId)).toMatchObject({ status: "checked", findings: [], notes: [{ code: "checks-not-tried", ownerSentence: SOME_NOT_TRIED }], autoRevisions: 0,
+      // The fixed class of each check is kept (no duration), so the card and page can say what the try found.
+      tried: [{ checkId: "proposed-1", class: "not-checked" }, { checkId: "proposed-2", class: "failed" }] });
+    expect(JSON.stringify(storedQuality(harness, taskId))).not.toContain("1234");
+  });
+
+  it("notes a check the worker did not try ('not-checked'), without a finding", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+    const { taskId, workspaceId } = await startTask(harness);
+    const answer = triedPlan({ expectOnBase: "pass" });
+    await finishPlanningWithDryRun(harness, workspaceId, answer, dryRunReport(answer, "not-checked"));
+    expect(planRuns(harness, workspaceId)).toHaveLength(1);
+    expect(storedQuality(harness, taskId)).toMatchObject({ findings: [], notes: [{ code: "checks-not-tried", ownerSentence: SOME_NOT_TRIED }] });
+  });
+
+  it("treats a report for another plan, an unreadable report and no report as 'not tried', never as a result", async () => {
+    for (const [name, build] of [
+      ["another plan", (answer: string) => dryRunReport(answer, "broken", { planSha256: sha("another plan") })],
+      ["unreadable", (answer: string) => ({ ...dryRunReport(answer, "broken"), extra: true })],
+      ["no report", () => undefined],
+      ["worker unavailable", (answer: string) => ({ schemaVersion: "workflow-plan-dry-run/v1", status: "UNAVAILABLE", planSha256: sha(answer), reason: "sandbox-unavailable" })],
+    ] as const) {
+      const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+      const { taskId, workspaceId } = await startTask(harness);
+      const answer = triedPlan({ expectOnBase: "pass" });
+      await finishPlanningWithDryRun(harness, workspaceId, answer, build(answer));
+      expect(planRuns(harness, workspaceId), name).toHaveLength(1);
+      expect(storedQuality(harness, taskId), name).toMatchObject({ status: "checked", findings: [], notes: [{ code: "checks-not-tried", ownerSentence: NOT_TRIED }] });
+    }
+  });
+
+  it("ignores a report from a run whose worker was not asked (an older worker), and says the checks were not tried", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: SELF_CHECK_ON });
+    const { taskId, workspaceId } = await startTask(harness);
+    const planning = activePlanning(harness, workspaceId);
+    const outbox = harness.db.find((row) => row.entityType === "OUTBOX" && row.operationId === planning.id)[0]!;
+    const input = harness.brokerInput as unknown as { documentClient: never; tableName: string };
+    await createPlanQualityNegotiationRecorder({ documentClient: input.documentClient, tableName: input.tableName })(outbox as never);
+    const answer = triedPlan();
+    await finishPlanningWithDryRun(harness, workspaceId, answer, dryRunReport(answer, "broken"));
+    expect(planRuns(harness, workspaceId)).toHaveLength(1);
+    expect(storedQuality(harness, taskId)).toMatchObject({ findings: [], notes: [{ ownerSentence: NOT_TRIED }] });
+  });
+
+  it("reads the report the same way for the one source of the feature string", () => {
+    expect(PLAN_DRY_RUN_FEATURE).toBe("task.workflowPlanDryRun.v1");
+  });
+
+  it("stores a plan the self-check does not revise byte-for-byte as the planner's canonical plan, the same as with the check off, and binds the report to the planner's text", async () => {
+    const stored: Array<{ bytes: string; sha256: string }> = [];
+    for (const brokerExtra of [SELF_CHECK_ON, { planSelfCheck: false }]) {
+      const harness = await createDeveloperTaskBroker({ brokerExtra });
+      const { taskId, workspaceId } = await startTask(harness);
+      const answer = covered();
+      await finishPlanning(harness, workspaceId, answer);
+      expect(planRuns(harness, workspaceId)).toHaveLength(1);
+      const artifact = workflowOf(harness, taskId).artifacts.at(-1)!;
+      stored.push({ bytes: harness.s3.objects.get(String(artifact.objectKey))!, sha256: String(artifact.sha256) });
+    }
+    // Same request, same planner text: the stored bytes and their digest are identical whatever the self-check did (its record is a separate object).
+    expect(stored[0]).toEqual(stored[1]);
+    expect(stored[0]!.sha256).toBe(sha(stored[0]!.bytes));
+  });
+});
+
 describe("the pure parts", () => {
   const coverageFinding = planQualityFinding({ code: "claim-not-covered", claimIds: ["1", "nc1"] });
   const mockFinding = planQualityFinding({ code: "mock-missing-for-target", targetIds: ["viewer-api"], fixtureIds: ["inventory-v1"] });
 
-  it("revises for a finding that needs the new plan members only when the plan shows its planner knew them", () => {
+  it("revises for a finding that needs the new plan members only for a run whose planner was asked for them", () => {
     const lint = planQualityFinding({ code: "check-command-lint", checkIds: ["proposed-1"], lint: "grep-count" });
     const findings = [coverageFinding, mockFinding, lint];
     // A run whose planner was never asked for the new members (older worker): only the finding that does not name them is worth a run.
@@ -347,30 +482,6 @@ describe("the pure parts", () => {
     expect(planRevisionsUsed({ artifactType: "design", version: 2, used: 1 }, "plan", 2)).toBe(0);
     expect(planRevisionsUsed(undefined, "plan", 1)).toBe(0);
     expect(planRevisionsUsed({ nonsense: true }, "plan", 1)).toBe(0);
-  });
-
-  it("puts an unreadable answer in a fixed category", () => {
-    expect(planUnreadableCategory(["the answer is too long"])).toBe("too-long");
-    expect(planUnreadableCategory(["the plan: e2e schemaVersion 2 was not offered for this planning step; use the schemaVersion 1 portable intent"])).toBe("wrong-e2e-version");
-    expect(planUnreadableCategory(["scenario s1: steps needs at least 1 items"])).toBe("e2e-shape");
-    expect(planUnreadableCategory(["check Unit tests: arguments may not contain line breaks"])).toBe("checks-shape");
-    expect(planUnreadableCategory(["claim 2: text is empty"])).toBe("claims-shape");
-    expect(planUnreadableCategory(["ordered work is available only for a task pinned to one registered repository"])).toBe("work-breakdown");
-    expect(planUnreadableCategory(["Your answer has no agentx-plan block."])).toBe("other");
-  });
-
-  it("turns the dry run's fixed classes into findings, and says so when no dry run reported", () => {
-    const plan = planDocument({ checks: {
-      proposed: ["a", "b", "c", "d"].map((id) => ({ id: `proposed-${id}`, label: id, command: { cwd: "repo", executable: "npx", args: [id], timeoutSeconds: 60 } })),
-      proves: {}, expectOnBase: { "proposed-a": "pass", "proposed-b": "fail", "proposed-c": "pass" },
-    } });
-    expect(dryRunFindings(plan, undefined)).toEqual([]);
-    expect(dryRunFindings(plan, { "proposed-a": "failed", "proposed-b": "passed", "proposed-c": "broken", "proposed-d": "passed" }).map((finding) => [finding.code, finding.checkIds])).toEqual([
-      ["check-broken-on-base", ["proposed-c"]], ["check-base-mismatch", ["proposed-a", "proposed-b"]],
-    ]);
-    expect(selfCheckNotes(plan, { dryRun: undefined })).toMatchObject([{ code: "checks-not-tried" }]);
-    expect(selfCheckNotes(plan, { dryRun: {} })).toEqual([]);
-    expect(selfCheckNotes(planDocument({ checks: { proposed: [], proves: {} } }), { dryRun: undefined })).toEqual([]);
   });
 });
 

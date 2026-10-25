@@ -5,6 +5,7 @@
 import { commentIdInAuthor, commentRefInAuthor, creditsPageComment, diffPlanDocuments, redactText, taskGraphDigest, taskGraphOrder, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput, type WorkItemProgressV1 } from "@agentx/contracts";
 import { escapeHtml } from "../web-session.js";
 import { planCheckSummary } from "../../developer/plan-check-summary.js";
+import { NOT_CHECKED_SENTENCE, type PlanSelfCheckView } from "../../developer/plan-self-check.js";
 import { renderDiagram } from "./diagrams.js";
 import { commentCountBadge, renderThreads, suggestionLines, targetKey, type PageCommentView, type PageSuggestionView } from "./comments.js";
 
@@ -49,6 +50,8 @@ export interface RenderPlanInput {
    */
   quoteComments?: Record<string, { name: string; you: boolean; text: string }>;
   commentRefs?: Record<string, string>;
+  /** A coding plan: what AgentX's plan check stored beside it. Absent reads as "not checked". */
+  selfCheck?: PlanSelfCheckView;
 }
 
 /** How many claims, per level, and how many decisions in all, show before the rest fold away. */
@@ -381,9 +384,22 @@ function checksHtml(context: Context): string {
  */
 const joinTargets = (targets: string[]): string => (targets.length <= 1 ? targets.join("") : `${targets.slice(0, -1).join(", ")} and ${targets.at(-1)!}`);
 
+/**
+ * "AgentX's plan check": what the broker's own check of a coding plan stored beside it (T5's record), in its fixed sentences. A plan with no usable record says it was
+ * not checked, never that nothing was found. Requirements and designs are not judged and show nothing.
+ */
+function planSelfCheckHtml(context: Context): string {
+  if (context.input.kind !== "plan") return "";
+  const view = context.input.selfCheck;
+  const body = view === undefined || !view.checked ? `<p class="plan-check-not-checked">${t(NOT_CHECKED_SENTENCE)}</p>`
+    : view.sentences.length === 0 ? `<p class="plan-check-clear">AgentX's plan check found no problems.</p>`
+    : `<ul class="plan-check-findings">${view.sentences.map((sentence) => `<li>${t(sentence)}</li>`).join("")}</ul>`;
+  return `<section id="${escapeHtml(`${context.input.anchor}-v${context.input.version}-plan-check`)}" class="plan-check"><h3>AgentX's plan check</h3>${body}</section>`;
+}
+
 function planChecksAddedHtml(context: Context): string {
   const { plan, version } = context.input;
-  const summary = planCheckSummary(plan, { detail: "page" });
+  const summary = planCheckSummary(plan, { detail: "page", ...(context.input.selfCheck === undefined ? {} : { selfCheck: context.input.selfCheck }) });
   if (summary.scenarios.length === 0 && summary.checks.length === 0) return "";
   const proofs = (ids: string[] | undefined): string => (ids === undefined || ids.length === 0 ? "" : ` <span class="proves">Proves: ${ids.map((id) => provesLink(context, id)).join(", ")}</span>`);
   const scenarios = summary.scenarios.map((scenario, index) => {
@@ -400,7 +416,7 @@ function planChecksAddedHtml(context: Context): string {
   }).join("");
   const checks = summary.checks.map((check) => {
     const ids = plan.checks?.proves[check.checkId];
-    return `<li class="plan-added-check"><strong>${t(check.label)}</strong> ${t(check.does)}.${proofs(ids)}${check.tried === undefined ? "" : ` ${t(check.tried)}.`}</li>`;
+    return `<li class="plan-added-check"><strong>${t(check.label)}</strong> ${t(check.does)}.${proofs(ids)}${check.direction === undefined ? "" : ` <span class="check-direction">This check ${t(check.direction)}.</span>`}${check.tried === undefined ? "" : ` ${t(check.tried)}.`}</li>`;
   }).join("");
   return `<section id="${escapeHtml(`${context.input.anchor}-v${version}-added-checks`)}" class="plan-checks"><h3>Checks this plan adds <span class="as-proposed">(as proposed in this version)</span></h3>`
     + (scenarios === "" ? "" : `<h4>Browser and API scenarios</h4><ol class="plan-scenarios">${scenarios}</ol>`)
@@ -498,6 +514,7 @@ export async function renderPlanDocument(input: RenderPlanInput): Promise<string
     whatChangedHtml(context),
     whyHtml(plan),
     `<div class="claims">${await claimList(context, plan.claims, 1)}${decisionsBlock}</div>`,
+    planSelfCheckHtml(context),
     planChecksAddedHtml(context),
     notChangingHtml(context, plan.notChanging),
     list("Risks", "risks", plan.risks),

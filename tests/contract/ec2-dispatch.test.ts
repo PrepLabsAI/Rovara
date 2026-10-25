@@ -214,7 +214,7 @@ describe("ec2-ebs delivery", () => {
     const complete = createWorkflowE2EReadinessCompleter({ documentClient: documentClient as never, tableName: "state" });
     const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation, privateIp: "10.42.128.10" }) },
       binding: async () => binding, sign: kmsSign, post, progress: async () => undefined, now: () => NOW,
       validateWorkflowE2EReadiness: validate,
@@ -936,6 +936,19 @@ describe("ec2-ebs delivery", () => {
       log.mockRestore();
     });
 
+    it("refuses to send a planning run without the plan quality members to an older worker when no planQualityNotNegotiated recorder is wired, instead of a run the operation record still calls asked", async () => {
+      const asked = planDocumentInstructions({ kind: "plan", path: "QUICK", planQuality: true });
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", prompt: `Planning phase only.\n\n${asked}\n\nRequest:\nadd it` });
+      // The older worker would be sent the prompt without the members, and a revision would then name members its strict parser rejects: nothing goes out.
+      const unwired = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] }, ["planQualityNotNegotiated"]);
+      await expect(unwired.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+      expect(unwired.post).not.toHaveBeenCalled();
+      // A worker that lists the feature is sent the guidance as asked and needs no recorder.
+      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowPlanDryRun.v1"] }, ["planQualityNotNegotiated"]);
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).prompt).toContain("scenarioProves");
+    });
+
     it("sends a workflow mode only to a worker that advertises the read-only tool boundary", async () => {
       const { deliver, post } = delivery({ workerFeatures: async () => ["task.workflowMode"] });
       const record = taskRecord({ workflowMode: "PLAN" });
@@ -1475,7 +1488,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
     db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record });
     const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions,
       binding: (workspaceId) => workspaceBinding(db, "state", workspaceId),
       sign: kmsSign,
@@ -1517,7 +1530,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
     const markFailed = vi.fn(async () => undefined);
     const markDelivered = vi.fn(async () => undefined);
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions,
       binding: (workspaceId) => workspaceBinding(fixture.db, "state", workspaceId),
       sign: kmsSign,
