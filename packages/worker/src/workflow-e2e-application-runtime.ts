@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE } from "@agentx/contracts";
+import { E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE } from "@agentx/contracts";
 import { assertE2EEnvironmentCannotRedirect, assertE2ESharedAwsConfigCannotRedirect, deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment } from "@agentx/model-runtime";
 import { WEB_API_BUILD_IMAGE, containedRuntimeProfileForHost, createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHostDeps, type DockerCli } from "@agentx/verifier";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
@@ -156,10 +156,12 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
     /** Why the agent step feature is on or off /ping now (Task 4.3a). */
     agentSteps: (): AgentStepsAvailability => agentSteps,
     executor: {
-      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE] as const,
+      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE] as const,
       withheldInvocationFeatures: () => ({
         // Running a replay needs exactly what an application round needs (the executor image on the host), so it is listed, and withheld, with the others (Task 4.6b).
-        ...(latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest, [APPLICATION_CHECKS_V2_FEATURE]: latest, [BASELINE_CHECKS_FEATURE]: latest, [E2E_REPLAY_CHECKS_FEATURE]: latest }),
+        ...(latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest, [APPLICATION_CHECKS_V2_FEATURE]: latest, [BASELINE_CHECKS_FEATURE]: latest, [E2E_REPLAY_CHECKS_FEATURE]: latest,
+          // PLANDRYRUN tries the proposed checks in a throwaway container of the executor image, so it needs the same thing (T6).
+          [PLAN_DRY_RUN_FEATURE]: latest }),
         ...(agentSteps.status === "available" ? {} : { [E2E_AGENT_STEPS_FEATURE]: agentSteps }),
       }),
     },
