@@ -30,6 +30,53 @@ describe("the arguments", () => {
   });
 });
 
+/** What `agentx --json` really prints for a success: `{ ok: true, data: <the broker's answer> }` (packages/cli/src/output.ts formatSuccess). The broker's start answer is { replay: { sourceRoundId, attempt, operationId, roundId, state } }. */
+const cliOk = (data: unknown): CliResult => ok({ ok: true, data });
+const brokerStart = { replay: { sourceRoundId: ROUND, attempt: 1, operationId: "must-not-be-echoed", roundId: "66666666-6666-4666-8666-666666666666", state: "STARTED" } };
+
+describe("the CLI's real JSON envelope (I-5 REPLAYCLI: a successful start was reported as `refused: exit 0`)", () => {
+  it("reports a started replay as started, waits for its record, prints it and exits 0", async () => {
+    const f = fakeDependencies({ start: cliOk(brokerStart), show: [cliOk({ sourceRoundId: ROUND, replays: [{ attempt: 1, state: "STARTED", requestedAt: "t0" }] }), cliOk({ sourceRoundId: ROUND, replays: [recorded] })] });
+    expect(await runReplayRound(parseReplayArgs(ARGS), f.dependencies)).toBe(0);
+    expect(f.err.join("\n")).toContain("replay attempt 1 of round");
+    expect(f.err.join("\n")).toContain("started");
+    expect(f.err.join("\n")).not.toMatch(/refused/);
+    expect(f.calls.filter((call) => call[3] === "show")).toHaveLength(2);
+    expect(JSON.parse(f.out[0]!)).toEqual(recorded);
+    expect(f.out.join("\n") + f.err.join("\n")).not.toContain("must-not-be-echoed");
+  });
+
+  it("exits 1 with the record when the enveloped replay could not be run, and 0 with --no-wait on a start", async () => {
+    const unavailable = { attempt: 1, state: "UNAVAILABLE", reason: "run-failed", requestedAt: "t0" };
+    const failed = fakeDependencies({ start: cliOk(brokerStart), show: [cliOk({ replays: [unavailable] })] });
+    expect(await runReplayRound(parseReplayArgs(ARGS), failed.dependencies)).toBe(1);
+    expect(JSON.parse(failed.out[0]!)).toMatchObject({ attempt: 1, state: "UNAVAILABLE", reason: "run-failed" });
+    const noWait = fakeDependencies({ start: cliOk(brokerStart), show: [cliOk({ replays: [{ attempt: 1, state: "STARTED", requestedAt: "t0" }] })] });
+    expect(await runReplayRound(parseReplayArgs([...ARGS, "--no-wait"]), noWait.dependencies)).toBe(0);
+    expect(noWait.err.join("\n")).not.toMatch(/refused/);
+  });
+
+  it("still exits 2 with the broker's sentence for a refusal, in the CLI's error envelope too", async () => {
+    const envelope: CliResult = { status: 0, stdout: JSON.stringify({ ok: false, error: { code: "CONFIG_INVALID", message: "replay-in-progress: a replay of this round is already being started" } }), stderr: "" };
+    for (const start of [envelope, { ...envelope, status: 2 }]) {
+      const f = fakeDependencies({ start, show: [] });
+      expect(await runReplayRound(parseReplayArgs(ARGS), f.dependencies)).toBe(2);
+      expect(f.err.join("\n")).toContain("replay-in-progress");
+      expect(f.calls).toHaveLength(1);
+    }
+  });
+
+  it("never calls an answer it does not understand `refused`: exit 0 without an attempt exits 1 and says where to look", async () => {
+    for (const start of [cliOk({}), cliOk({ replay: { state: "STARTED" } }), ok({ ok: true }), { status: 0, stdout: "not json", stderr: "" }]) {
+      const f = fakeDependencies({ start, show: [] });
+      expect(await runReplayRound(parseReplayArgs(ARGS), f.dependencies)).toBe(1);
+      expect(f.err.join("\n")).not.toMatch(/refused/);
+      expect(f.err.join("\n")).toContain("e2e-replay show");
+      expect(f.calls).toHaveLength(1);
+    }
+  });
+});
+
 describe("the run", () => {
   it("starts the replay once, polls its record until it is recorded, prints the record's own fields and exits 0", async () => {
     const f = fakeDependencies({ start: ok({ replay: { sourceRoundId: ROUND, attempt: 1, state: "STARTED", operationId: "must-not-be-echoed" } }),
