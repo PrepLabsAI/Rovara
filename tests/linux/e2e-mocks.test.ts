@@ -79,13 +79,17 @@ describe.runIf(process.env.ROVARA_DOCKER === "1")("external-origin mocks and unm
     expect(verdict.result?.mockedOrigins).toBeUndefined();
   }, 300_000);
 
-  it("never makes a case a pass because a declared origin was not called: the run without the call is not a pass either", async () => {
-    // The default qualification app calls its inventory origin only when the page asks; this scenario never asks, so an approved mock goes unused.
+  it("permits a declared origin the case never calls (MOCKUNUSED): the run passes on its assertions and says the mock was declared and not observed", async () => {
+    // The default qualification app calls its inventory origin only when the page asks; this scenario never asks, so an approved mock goes unused. No request step names it, so it is
+    // permitted, not required; a call to it would still be judged, and an unmocked call would still be UNKNOWN.
     const r = await runProbe("web-csv-positive-v1", { defect: null, mock: true });
     expect(r.run.unavailableReason, JSON.stringify(r.host.readDiagnostics(r.fixture.plan.runId))).toBeNull();
     const verdict = (await collectLikeTheWorker(r)).qualification!;
-    expect(verdict.status).toBe("UNKNOWN");
-    expect(verdict.result?.cases[0]).toMatchObject({ status: "unavailable", reason: "application-evidence-floor-unmet" });
+    expect(verdict.status).toBe("PASS");
+    expect(verdict.result?.cases[0]).toMatchObject({ status: "passed", reason: "structural-application-observations-complete" });
+    expect(verdict.result?.cases[0]?.coverage.observedMockedComponentIds).toEqual([]);
+    expect(verdict.result?.cases[0]?.coverage.mockedComponentIds).toHaveLength(1);
+    expect(verdict.mockSummary?.consumptions).toEqual({ success: 0, refusal: 0, invalidData: 0 });
   }, 300_000);
 
   it("runs the mock mode of the executor image under the host's own flags and answers by variant, recording every request", async () => {
@@ -142,8 +146,10 @@ describe.runIf(process.env.ROVARA_DOCKER === "1")("external-origin mocks and unm
     const r = await runProbe("web-csv-positive-v1", { defect: null, mock: true, appEnv: { FIXTURE_WS_PROBE_URL: "ws://mock-inventory-v1:8080/v1/stock?orderId=a1" } });
     expect(r.run.unavailableReason, JSON.stringify(r.host.readDiagnostics(r.fixture.plan.runId))).toBeNull();
     const verdict = (await collectLikeTheWorker(r)).qualification!;
-    expect(verdict.status).toBe("UNKNOWN");
-    expect(verdict.result?.cases[0]).toMatchObject({ status: "unavailable", reason: "application-evidence-floor-unmet" });
+    // The mock is permitted and unused (MOCKUNUSED), so the case rests on its own assertions; the attempt is no consumption, no call, and the executor still records it as blocked.
+    expect(verdict.status).toBe("PASS");
+    expect(verdict.result?.cases[0]).toMatchObject({ status: "passed", reason: "structural-application-observations-complete" });
+    expect(verdict.result?.cases[0]?.coverage.observedMockedComponentIds).toEqual([]);
     expect(verdict.mockSummary?.consumptions).toEqual({ success: 0, refusal: 0, invalidData: 0 });
     expect(verdict.mockSummary?.unmockedCalls).toEqual({ sinkhole: 0, mocked: 0 });
     const blocked = JSON.parse(await readFile(join(r.outDir!, "blocked-requests.json"), "utf8")) as { blocked: { host: string; resourceType: string }[] };
