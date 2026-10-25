@@ -120,7 +120,8 @@ export async function createDeveloperTaskBroker(options: {
     developer, turnRecordsTableName: "turns", slackThreadsTableName: "threads",
     ...(options.realism === undefined ? {} : { realism: options.realism }),
     ...(options.consistency === undefined ? {} : { consistency: options.consistency }),
-    ...(options.brokerExtra === undefined ? {} : { extra: options.brokerExtra }),
+    // The plan self-check (a second automatic planning run) is off unless a test asks for it, so planning tests keep the one-answer flow they were written for.
+    extra: { planSelfCheck: false, ...options.brokerExtra },
   });
   const actions = module.createDeveloperTaskActions(brokerInput as never);
   for (const who of [MAYA, OMAR]) {
