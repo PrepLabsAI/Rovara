@@ -53,6 +53,12 @@ export type ApplicationAdmissionInput = Readonly<{
    */
   baseline?: { baseCommitSha: string; attempt: number };
   /**
+   * T7b: set for a grounding round (the proposed plan's must-not-change scenarios on the unchanged code, before the owner is asked, for information only). Like a baseline its snapshot and
+   * build source are the base commit's and it runs no model; unlike one it runs exactly the scenarios named, and the admission signs no member for it: the broker binds the purpose by the
+   * plan digest (`groundingPlanDigest`), which `buildApplicationGroundingAdmission` derives and the verifier recomputes.
+   */
+  grounding?: { baseCommitSha: string; attempt: number; scenarioIds: readonly string[] };
+  /**
    * M1.4 Task 4.6b: set for an audit replay of a verified round (the same candidate run again with no model, for an operator's check). The admission names no model route, signs the
    * round it replays, what that round showed and the recordings it serves, and keeps the policy as it was pinned, so the AI navigation steps compile and the limits are the ones sized for them.
    */
@@ -116,8 +122,8 @@ const failure = (error: unknown) => (error instanceof Error ? error.message : "u
  * with the targets, runtime references, accounts, source-backed mocks and unavailable references that only those scenarios used dropped with them. A plan with no AI navigation
  * step is returned as it is. A plan whose every scenario has one has nothing to run: `ApplicationBaselineSkipped`.
  */
-export function baselineIntentOf(intent: E2EApplicationPlanIntent): E2EApplicationPlanIntent {
-  const kept = intent.scenarios.filter((scenario) => !scenario.steps.some((step) => step.kind === "agent"));
+export function baselineIntentOf(intent: E2EApplicationPlanIntent, keepScenarioIds?: readonly string[]): E2EApplicationPlanIntent {
+  const kept = intent.scenarios.filter((scenario) => !scenario.steps.some((step) => step.kind === "agent") && (keepScenarioIds === undefined || keepScenarioIds.includes(scenario.scenarioId)));
   if (kept.length === intent.scenarios.length) return intent;
   if (kept.length === 0) throw new ApplicationBaselineSkipped();
   const targetIds = new Set(kept.flatMap((scenario) => scenario.requestedTargetIds));
@@ -130,6 +136,27 @@ export function baselineIntentOf(intent: E2EApplicationPlanIntent): E2EApplicati
     runtimeAccountRefs: intent.runtimeAccountRefs.filter((account) => runtimeRefs.some((ref) => ref.applicationId === account.applicationId && ref.accountProfileId === account.profileId)) });
   if (!parsed.success) throw refusal(`the plan without its AI navigation steps is not a plan a baseline can run: ${parsed.error.issues[0]?.message ?? "invalid"}`);
   return parsed.data;
+}
+
+/** The domain of the plan digest a grounding round is bound by; no candidate, baseline or replay round uses it. */
+export const GROUNDING_PLAN_DIGEST_DOMAIN = "workflow-application-e2e-grounding-plan/v1";
+
+/** What a grounding round is bound to: the proposed plan artifact, the workflow revision it was proposed at, the base commit and the attempt. */
+export type GroundingPlanBinding = Readonly<{ taskId: string; artifactId: string; artifactSha256: string; workflowRevision: number; baseCommitSha: string; attempt: number }>;
+export function groundingPlanDigest(binding: GroundingPlanBinding): string {
+  return sha256(canonicalJson({ domain: GROUNDING_PLAN_DIGEST_DOMAIN, taskId: binding.taskId, artifactId: binding.artifactId, artifactSha256: binding.artifactSha256,
+    workflowRevision: binding.workflowRevision, baseCommitSha: binding.baseCommitSha, attempt: binding.attempt }));
+}
+
+/** A grounding round's admission: the inputs of a baseline's, the scenarios to keep, and the proposed plan it checks. The plan digest is derived here, never passed in. */
+export type ApplicationGroundingAdmissionInput = Omit<ApplicationAdmissionInput, "planDigest" | "replay" | "baseline" | "grounding"> & Readonly<{
+  grounding: NonNullable<ApplicationAdmissionInput["grounding"]>; planArtifactId: string;
+}>;
+export function buildApplicationGroundingAdmission(input: ApplicationGroundingAdmissionInput): ApplicationAdmission {
+  const { planArtifactId, ...rest } = input;
+  const planDigest = groundingPlanDigest({ taskId: input.taskId, artifactId: planArtifactId, artifactSha256: input.artifact.sha256, workflowRevision: input.workflowRevision,
+    baseCommitSha: input.grounding.baseCommitSha, attempt: input.grounding.attempt });
+  return buildApplicationExecutionAdmission({ ...rest, planDigest });
 }
 
 /** The scenarios of a plan that a baseline round leaves out because they have an `agent` step (Ruling DD), by id and title, at most 64 (the display's bound). */
@@ -148,6 +175,9 @@ export function baselineSkippedScenarios(intent: E2EApplicationPlanIntent): Arra
  */
 export function buildApplicationExecutionAdmission(input: ApplicationAdmissionInput): ApplicationAdmission {
   if (input.replay !== undefined && input.baseline !== undefined) throw refusal("a round is a baseline or a replay, not both");
+  if (input.grounding !== undefined && (input.replay !== undefined || input.baseline !== undefined)) throw refusal("a grounding round is neither a baseline nor a replay");
+  // A baseline and a grounding round both run the unchanged code with no model (Ruling CX).
+  const modelFree = input.baseline !== undefined || input.grounding !== undefined;
   // The pinned policy holds the base targets; each qualified base web or API target also offers the signed-out visitor, derived here from the candidate's discovery (Ruling AZ).
   const policy = (() => {
     try {
@@ -155,13 +185,18 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
       // Ruling CX: a baseline round never runs agent steps. Its policy is the model-free projection of the pinned one, so its selection leaves agent scenarios unavailable
       // (`agent-route-not-approved`), and its admission carries `modelRoute: null` and group bindings with `modelRouteRevision: null`. A candidate round keeps the pinned route.
       // Its limits are the model-free ones too (Ruling DD): a route-pinned policy carries limits sized for agent steps, which a round that runs none does not get.
-      const routed = input.baseline === undefined ? stored : { ...stored, modelRouteRevision: null,
+      const routed = !modelFree ? stored : { ...stored, modelRouteRevision: null,
         limits: stored.modelRouteRevision === null ? stored.limits : e2eEffectiveRoundLimits(stored.limits, false) };
       return { ...routed, targets: withE2EAnonymousTargets(routed.targets, inspectE2EApplicationRepository(input.snapshot, input.snapshot.candidate).anonymous) };
     } catch (error) { throw refusal(`the pinned project policy is not valid: ${failure(error)}`); }
   })();
   // Ruling DD: a baseline runs the approved plan without its AI navigation scenarios; a plan that is only such scenarios has no baseline (ApplicationBaselineSkipped, which gates nothing).
-  const intent = input.baseline === undefined ? input.intent : baselineIntentOf(input.intent);
+  if (input.grounding !== undefined && input.grounding.scenarioIds.length === 0) throw refusal("a grounding round names no scenario to run");
+  if (input.grounding !== undefined && input.grounding.scenarioIds.some((id) => !input.intent.scenarios.some((scenario) => scenario.scenarioId === id))) throw refusal("a grounding round was asked to run a scenario the plan does not have");
+  if (input.grounding !== undefined && input.intent.scenarios.some((scenario) => input.grounding!.scenarioIds.includes(scenario.scenarioId) && scenario.steps.some((step) => step.kind === "agent"))) {
+    throw refusal("a grounding round runs no AI navigation, and a scenario it was asked to run has such a step");
+  }
+  const intent = input.grounding !== undefined ? baselineIntentOf(input.intent, input.grounding.scenarioIds) : input.baseline === undefined ? input.intent : baselineIntentOf(input.intent);
   const droppedForBaseline = intent !== input.intent;
   const baselinePolicy = droppedForBaseline ? { ...policy, baselineScenarioIds: policy.baselineScenarioIds.filter((id) => intent.scenarios.some((scenario) => scenario.scenarioId === id)) } : policy;
   const refs = intent.applicationRuntimeRefs;
@@ -240,6 +275,9 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   // A baseline builds from its base commit and nothing else: the commit it signs is the commit of the source it is built from.
   if (input.baseline !== undefined && input.baseline.baseCommitSha !== input.snapshot.commitSha) {
     throw refusal("the base commit of the baseline round is not the commit of the source it would be built from");
+  }
+  if (input.grounding !== undefined && input.grounding.baseCommitSha !== input.snapshot.commitSha) {
+    throw refusal("the base commit of the grounding round is not the commit of the source it would be built from");
   }
   const signedBaseline = input.baseline === undefined ? undefined : { purpose: "baseline" as const, baseCommitSha: input.baseline.baseCommitSha, attempt: input.baseline.attempt };
   const admittedAtMs = input.now;

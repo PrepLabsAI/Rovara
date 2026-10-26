@@ -64,7 +64,7 @@ async function dayCaps(dependencies: E2EModelBudgetDependencies): Promise<{ maxI
 export async function handleE2EModelBudgetCallback(dependencies: E2EModelBudgetDependencies, operation: E2EModelBudgetOperation, rawBody: unknown): Promise<E2EModelDayBudgetResponse> {
   const reference = operation.workflowE2EAdmission;
   if (operation.kind !== "task" || operation.workflowMode !== "CHECKS" || operation.status !== "RUNNING" || reference === undefined
-    || reference.agentSteps !== true || reference.purpose === "baseline" || reference.purpose === "replay") {
+    || reference.agentSteps !== true || reference.purpose === "baseline" || reference.purpose === "replay" || reference.purpose === "grounding") {
     throw forbidden("the model budget is available only to a running CHECKS operation whose admission has AI navigation steps");
   }
   const body: E2EModelDayBudgetRequest = E2EModelDayBudgetRequestSchema.parse(rawBody);
