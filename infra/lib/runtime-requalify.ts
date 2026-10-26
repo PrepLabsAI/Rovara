@@ -101,7 +101,10 @@ export function requalifyDefinition(lambdaArn: string): object {
   poll("AwaitQualification", "awaitQualification", "$.qualification.status", "PutHold", "ReasonQualificationFailed", "ReasonQualificationFailed", "ReasonQualificationFailed");
   task("PutHold", "putHold", "AwaitDrain", "ReasonDrainTimeout");
   poll("AwaitDrain", "awaitDrain", "$.drain.status", "Switch", "ReasonDrainTimeout", "ReasonDrainTimeout", "ReasonDrainTimeout");
-  task("Switch", "switch", "SwitchChoice", "ReasonUnexpected");
+  // The switch may have committed even though the step failed (a timeout, a lost answer): the recovery step finds out from the audit record.
+  task("Switch", "switch", "SwitchChoice", "RecoverSwitch");
+  task("RecoverSwitch", "recoverSwitch", "RecoverChoice", "ReasonUnexpected");
+  states["RecoverChoice"] = { Type: "Choice", Choices: [{ Variable: "$.switch.switched", BooleanEquals: true, Next: "RecordAmi" }], Default: "ReasonUnexpected" };
   states["SwitchChoice"] = { Type: "Choice", Choices: [{ Variable: "$.switch.switched", BooleanEquals: true, Next: "RecordAmi" }], Default: "ReasonSettingsChanged" };
   // From here the new runner serves. A failure alerts and cleans up the old runner; it never ends the new one (the failure steps check the switch and the pointer).
   task("RecordAmi", "recordAmi", "RetireGrace", "ReasonRetireFailed");
@@ -188,7 +191,10 @@ export class RuntimeRequalify extends Construct {
     grant({ sid: "DeleteOwnVolumes", actions: ["ec2:DeleteVolume"], resources: [ec2Arn("volume/*")], conditions: { StringEquals: tagged("aws:ResourceTag") } });
     grant({ sid: "Describe", actions: ["ec2:DescribeInstances", "ec2:DescribeVolumes", "ec2:DescribeLaunchTemplateVersions", "ec2:DescribeSubnets"], resources: ["*"] });
     // EBS encrypts the root and workspace volumes with the foundation's key on the caller's behalf.
-    grant({ sid: "EncryptVolumes", actions: ["kms:CreateGrant", "kms:Decrypt", "kms:DescribeKey", "kms:GenerateDataKeyWithoutPlaintext", "kms:ReEncrypt*"], resources: [foundation.workspaceKmsKeyArn] });
+    // Only through EC2 (EBS), and grants only for AWS resources: the role cannot use the workspace key for anything else.
+    const viaEc2 = { "kms:ViaService": `ec2.${Aws.REGION}.amazonaws.com` };
+    grant({ sid: "EncryptVolumes", actions: ["kms:Decrypt", "kms:DescribeKey", "kms:GenerateDataKeyWithoutPlaintext", "kms:ReEncrypt*"], resources: [foundation.workspaceKmsKeyArn], conditions: { StringEquals: viaEc2 } });
+    grant({ sid: "GrantEbsAccess", actions: ["kms:CreateGrant"], resources: [foundation.workspaceKmsKeyArn], conditions: { StringEquals: viaEc2, Bool: { "kms:GrantIsForAWSResource": "true" } } });
     grant({ sid: "PassWorkerRole", actions: ["iam:PassRole"], resources: [foundation.workerRoleArn], conditions: { StringEquals: { "iam:PassedToService": "ec2.amazonaws.com" } } });
     grant({ sid: "ReadWorkerRole", actions: ["iam:GetRole"], resources: [foundation.workerRoleArn] });
     // Settings: read the AMI and the worker settings, write the one qualified-AMI setting. No decryption.

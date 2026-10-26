@@ -34,7 +34,7 @@ vi.mock("../../packages/broker/src/aws/runtime-requalify.js", async () => {
       for (const kind of ["web", "api"] as const) {
         cloud.ddb.set(cloud.key(readiness.e2eRegisteredRuntimeKey("feature-catalog-1", contracts.REQUALIFY_PROFILE_ID, kind)), { generation, catalogRevision: generation, expiresAt: new Date(cloud.clock + 7 * 24 * 3_600_000).toISOString() });
       }
-      cloud.ddb.set(cloud.key(contracts.requalifyRunKey(input.runId)), { runId: input.runId, images: input.images, amiId: input.amiId });
+      cloud.ddb.set(cloud.key(contracts.requalifyRunKey(input.runId)), { runId: input.runId, generation, previousRunner, images: input.images, amiId: input.amiId });
       cloud.ddb.set(cloud.key(cloud.pointerKey()), { instanceId: input.instanceId, roleId: input.roleId, transportCorrelationId: uuid(), requalifyRunId: input.runId });
       return { registration: {}, generation, previousRunner, record: {} };
     },
@@ -285,6 +285,92 @@ describe("a failure before the switch", () => {
     expect(cloud.launches).toHaveLength(1);
     expect(cloud.instances.get(cloud.launches[0]!)?.state).toBe("terminated");
     expect(survivingRunnerVolumes(runId)).toEqual([]);
+  });
+});
+
+describe("a switch that committed but whose step then failed (review M-2)", () => {
+  /** Runs the real action, then loses the answer: the transaction committed and the machine saw an error. */
+  async function renewLosingTheSwitchAnswer(extra: (action: string) => void = () => undefined) {
+    const runId = randomUUID();
+    const run = await runMachine(definition, { runId }, cloud, async (payload) => {
+      extra(payload.action);
+      const result = await runRequalifyAction(deps, payload);
+      if (payload.action === "switch") throw new Error("Task timed out after 300.00 seconds");
+      return result;
+    });
+    return { run, runId };
+  }
+
+  it("finishes the retirement from the run record instead of stranding the old runner, and sends no alert", async () => {
+    const old = oldInstallation();
+    const { run } = await renewLosingTheSwitchAnswer();
+    expect(run.trace).toContain("RecoverSwitch");
+    expect(run.trace.at(-1)).toBe("Done");
+    expect(cloud.terminated).toEqual([old.id]);
+    expect(cloud.instances.get(old.id)?.state).toBe("terminated");
+    expect(cloud.pointer()?.["instanceId"]).toBe(cloud.launches[0]);
+    expect(cloud.ssm.get(`/agentx/${ENV}/worker-qualified-ami`)).toBe("ami-0abcdef1234567890");
+    expect(cloud.sns).toEqual([]);
+    expect(cloud.hold()).toBeUndefined();
+    expect(cloud.lock()).toBeUndefined();
+  });
+
+  it("when the recovery fails too, says the switch happened and names the old runner to retire, and keeps the new runner", async () => {
+    const old = oldInstallation();
+    const { run } = await renewLosingTheSwitchAnswer();
+    expect(run.status).toBe("Succeeded");
+    // Second run: lose the answer and the recovery.
+    const again = new FakeCloud();
+    holder.cloud = again;
+    deps = again.deps();
+    cloud = again;
+    const oldAgain = oldInstallation();
+    const second = await runMachine(definition, { runId: randomUUID() }, again, async (payload) => {
+      if (payload.action === "recoverSwitch") throw new Error("down");
+      const result = await runRequalifyAction(deps, payload);
+      if (payload.action === "switch") throw new Error("Task timed out after 300.00 seconds");
+      return result;
+    });
+    expect(second.status).toBe("Succeeded");
+    expect(again.terminated).toEqual([]);
+    expect(again.instances.get(again.launches[0]!)?.state).toBe("running");
+    const [sent] = alert();
+    expect(sent?.text).toContain("The new runner is serving");
+    expect(sent?.text).toContain(`previous runner: ${oldAgain.id}`);
+    expect(sent?.text).not.toContain("left as they were");
+    expect(old.id).toBeDefined();
+  });
+
+  it("recovers nothing when the switch did not commit: the failure path runs as before", async () => {
+    const old = oldInstallation();
+    cloud.failRegister = true;
+    const { run } = await renew();
+    expect(run.trace).toContain("RecoverSwitch");
+    expect(run.trace).toContain("ReasonUnexpected");
+    expect(cloud.instances.get(old.id)?.state).toBe("running");
+    expect(alert()[0]?.text).toContain("left as they were");
+  });
+});
+
+describe("a malformed proposal (review M-1)", () => {
+  it("never puts any part of the proposal, which holds the challenge secret, into the machine's error or later inputs", async () => {
+    oldInstallation();
+    delete (deps as { parseProposal?: unknown }).parseProposal;
+    cloud.runner.proposal = Buffer.from(`{"challenge":{"challengeSecret":${SECRET.slice(0, 18)}`);
+    const { run } = await renew();
+    expect(run.trace).toContain("Switch");
+    expect(run.trace).toContain("ReasonUnexpected");
+    expect(JSON.stringify([run.state, run.payloads, run.results, cloud.sns])).not.toContain(SECRET.slice(0, 12));
+    expect(JSON.stringify(run.state["error"])).toContain("the proposal is not valid JSON");
+  });
+
+  it("does the same for a proposal that parses but is not a READY qualification", async () => {
+    oldInstallation();
+    delete (deps as { parseProposal?: unknown }).parseProposal;
+    cloud.runner.proposal = Buffer.from(JSON.stringify({ challenge: { challengeSecret: SECRET } }));
+    const { run } = await renew();
+    expect(JSON.stringify([run.state, run.payloads, run.results, cloud.sns])).not.toContain(SECRET);
+    expect(JSON.stringify(run.state["error"])).toContain("the proposal is not a READY web/API qualification");
   });
 });
 

@@ -37,7 +37,7 @@ export class FakeCloud {
   deleted: string[] = [];
   launches: string[] = [];
   /** What the runner's boot hook does: becomes ready, then qualifies when a challenge appears. */
-  runner: { ready: boolean; qualify: "SUCCEEDED" | "FAILED" | "never"; failure: string[] } = { ready: true, qualify: "SUCCEEDED", failure: [] };
+  runner: { ready: boolean; qualify: "SUCCEEDED" | "FAILED" | "never"; failure: string[]; proposal?: Buffer } = { ready: true, qualify: "SUCCEEDED", failure: [] };
   /** Work that began before the hold and has not finished. */
   activeWork: number | "unknown" = 0;
   failRegister = false;
@@ -97,7 +97,7 @@ export class FakeCloud {
     if (match[3] === "ready") return this.runner.ready && instance.volumes.length > 1 ? Buffer.from("{}") : undefined;
     if (!challenge || this.runner.qualify === "never") return undefined;
     if (match[3] === "status") return Buffer.from(JSON.stringify({ state: this.runner.qualify, reason: "x", finishedAt: "2026-10-27T06:30:00Z", failure: { codes: this.runner.failure } }));
-    return this.runner.qualify === "SUCCEEDED" ? Buffer.from(JSON.stringify({ proposal: true, instance: instance.id })) : undefined;
+    return this.runner.qualify === "SUCCEEDED" ? (this.runner.proposal ?? Buffer.from(JSON.stringify({ proposal: true, instance: instance.id }))) : undefined;
   }
 
   // ---- clients: each `send` dispatches on the command's class name -----------------------------------------------------------------------------

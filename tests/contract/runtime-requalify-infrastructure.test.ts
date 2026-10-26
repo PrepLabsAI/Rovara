@@ -81,6 +81,18 @@ describe("the renewal's infrastructure", () => {
     expect(withAction("ec2:CreateTags")[0]!.Condition!["StringEquals"]).toEqual({ "ec2:CreateAction": ["CreateVolume", "RunInstances"] });
   });
 
+  it("may use the workspace key only through EC2 (EBS), and create grants only for AWS resources", () => {
+    const kms = statements().filter((statement) => [statement.Action].flat().some((action) => action.startsWith("kms:") && action !== "kms:GetPublicKey"));
+    expect(kms.length).toBeGreaterThan(0);
+    for (const statement of kms) {
+      expect(JSON.stringify(statement.Condition?.["StringEquals"]), JSON.stringify(statement.Action)).toContain("kms:ViaService");
+      expect(JSON.stringify(statement.Condition?.["StringEquals"])).toMatch(/ec2\./);
+    }
+    const create = kms.filter((statement) => [statement.Action].flat().includes("kms:CreateGrant"));
+    expect(create).toHaveLength(1);
+    expect(create[0]!.Condition?.["Bool"]).toEqual({ "kms:GrantIsForAWSResource": "true" });
+  });
+
   it("never signs, never reads a secret, and passes only the worker role to EC2", () => {
     const all = statements().flatMap((statement) => [statement.Action].flat());
     expect(all.filter((action) => /kms:Sign|kms:Verify|secretsmanager:|ssm:GetParametersByPath|iam:Create|iam:Put|iam:Attach|sts:/.test(action))).toEqual([]);

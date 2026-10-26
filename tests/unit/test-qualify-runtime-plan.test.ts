@@ -300,7 +300,7 @@ describe("describeRegisteredRows", () => {
 });
 
 /** Effects that record every call and fail where a test says, so the run is driven with no AWS and no clock. */
-function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Array<Buffer | undefined>; failAt?: string; adminFails?: boolean; instanceId?: string; facts?: QualificationFacts; readBack?: Buffer; registeredGeneration?: number; lockHeld?: boolean } = {}) {
+function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Array<Buffer | undefined>; failAt?: string; adminFails?: boolean; instanceId?: string; facts?: QualificationFacts; readBack?: Buffer; registeredGeneration?: number; lockHeld?: boolean; activeRunners?: number } = {}) {
   const calls: string[] = [];
   const bindings: unknown[] = [];
   const ready = [...(options.readies ?? [Buffer.from(JSON.stringify({ state: "READY", reason: "worker-healthy", finishedAt: "2026-10-19T11:50:00Z" }))])];
@@ -336,6 +336,7 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
     async recordModelCheckRunner(runner) { calls.push(`recordModelCheckRunner ${runner.roleId} ${runner.instanceId} ${runner.transportCorrelationId}`); maybeFail("recordModelCheckRunner"); },
     async register(file) { calls.push(`register ${file}`); maybeFail("register"); return JSON.stringify({ profileId: "linux-arm64-web-api-v1", featureCatalogId: "catalog-1", featureRevisions: { web: 1, api: 1 } }); },
     async nextGeneration() { return options.registeredGeneration === undefined ? 1 : options.registeredGeneration + 1; },
+    async countActiveRunners() { return options.activeRunners ?? 0; },
     async acquireLock(runId) { locks.push(`acquire ${runId}`); if (options.lockHeld) throw new Error("the renewal lock is held by another run"); },
     async releaseLock(runId) { locks.push(`release ${runId}`); },
     now: () => clock,
@@ -367,6 +368,16 @@ describe("runTestQualification", () => {
     const bad = harness({ failAt: "createVolume" });
     await expect(runTestQualification(plan(), bad.effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" })).rejects.toThrow("createVolume failed");
     expect(bad.locks).toEqual([`acquire ${RUN_ID}`, `release ${RUN_ID}`]);
+  });
+
+  it("refuses to launch a third runner: with two qualification runners already up it creates nothing, says so, and frees the lock (review M-4)", async () => {
+    const full = harness({ activeRunners: 2 });
+    await expect(runTestQualification(plan(), full.effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" })).rejects.toThrow(/2 qualification runners/);
+    expect(full.calls.some((call) => call.startsWith("createVolume") || call.startsWith("runInstance"))).toBe(false);
+    expect(full.locks).toEqual([`acquire ${RUN_ID}`, `release ${RUN_ID}`]);
+    const one = harness({ activeRunners: 1, statuses: [succeeded] });
+    await runTestQualification(plan(), one.effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
+    expect(one.calls.some((call) => call.startsWith("runInstance"))).toBe(true);
   });
 
   it("creates nothing when another run holds the lock, and does not release a lock it never took", async () => {
