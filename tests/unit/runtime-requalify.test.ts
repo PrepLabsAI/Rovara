@@ -69,23 +69,33 @@ function world(options: { instances?: Record<string, RequalifyInstance> } = {}) 
 }
 
 type World = ReturnType<typeof world>;
-const input = { runId: RUN, instanceId: NEW_ID, roleId: ROLE };
+const WORKSPACE = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+/** What the renewal passes to issue: the run, the runner, and the workspace id and generation the runner was booted with. */
+const inputAt = (generation: number) => ({ runId: RUN, instanceId: NEW_ID, roleId: ROLE, workspaceId: WORKSPACE, generation });
+const input = inputAt(1);
 
 /** Issues the renewal challenge, reads back what the runner would read from the bucket, and builds the proposal the runner would return for it. */
-async function issuedProposal(w: World, run: typeof input = input) {
+async function issuedProposal(w: World, runOrUndefined?: typeof input) {
+  // As the renewal does: the generation the runner was booted with is the next one after the registered rows.
+  const registered = Math.max(0, ...[webKey, apiKey].map((key) => Number(w.items.get(itemKey(key))?.["generation"] ?? 0)));
+  const run = runOrUndefined ?? inputAt(registered + 1);
   const issued = await issueRequalifyChallenge(w.deps, run);
+  const { workspaceId: _workspace, generation: _generation, ...runOnly } = run;
+  void _workspace; void _generation;
   const stored = [...w.objects.entries()].find(([key]) => key.endsWith("/challenge.json"))!;
   const challenge = JSON.parse(stored[1].toString("utf8")) as RuntimeInstallChallenge;
   const fixture = await qualifyInstalledWebApiRuntime({ challenge: webApiChallenge(WEB_API_FIXTURE_NOW), evidenceRoot: await privateEvidenceRoot(), runProbe: fakeProbeRunner().runProbe, environment: fakeLinuxEnvironment(WEB_API_FIXTURE_NOW) });
   const proposal = { ...fixture, challenge };
-  return { issued, challenge, stored, proposal, request: { ...run, proposal, proposalSha256: webApiRuntimeInstallProposalSha256(proposal), amiId: "ami-0123456789abcdef0", images: { worker: "worker@sha256:aaa", executor: null } } };
+  return { issued, challenge, stored, proposal, request: { ...runOnly, proposal, proposalSha256: webApiRuntimeInstallProposalSha256(proposal), amiId: "ami-0123456789abcdef0", images: { worker: "worker@sha256:aaa", executor: null } } };
 }
 
 describe("AUTOREQUALIFY issue: the product opens its own challenge", () => {
   it("derives profile, binding, generation and endpoint itself, and writes the secret to the runner prefix without returning it", async () => {
     const w = world(); w.hold(); w.seedRows(4);
-    const { issued, challenge, stored } = await issuedProposal(w);
-    expect(issued).toEqual({ challengeId: challenge.challengeId, expiresAt: challenge.expiresAt, generation: 5, transportCorrelationId: challenge.transportCorrelationId });
+    const { issued, challenge, stored } = await issuedProposal(w, inputAt(5));
+    expect(issued).toEqual({ challengeId: challenge.challengeId, expiresAt: challenge.expiresAt, generation: 5, transportCorrelationId: WORKSPACE });
+    // The challenge carries the workspace id the runner was booted with (the runner compares them), not a fresh one.
+    expect(challenge.transportCorrelationId).toBe(WORKSPACE);
     // The secret reached the object store (positive control) and nowhere in what the step returns.
     expect(stored[0]).toBe(`e2e-runtime/${ROLE}:${NEW_ID}/challenge.json`);
     expect(challenge.challengeSecret.length).toBeGreaterThan(20);
@@ -100,9 +110,20 @@ describe("AUTOREQUALIFY issue: the product opens its own challenge", () => {
     expect((await issueRequalifyChallenge(w.deps, input)).generation).toBe(1);
   });
 
-  it("takes no profile, binding, generation or endpoint from its input", async () => {
+  it("refuses a generation that is not the next one (the runner was booted for another), and an input without the boot identity, writing nothing", async () => {
+    const w = world(); w.hold(); w.seedRows(4);
+    const before = w.snapshot();
+    for (const generation of [4, 6, 1]) await expect(issueRequalifyChallenge(w.deps, inputAt(generation))).rejects.toThrow(`${REQUALIFY_REFUSAL_PREFIX}generation-not-next`);
+    const { workspaceId: _w, ...noWorkspace } = inputAt(5);
+    const { generation: _g, ...noGeneration } = inputAt(5);
+    void _w; void _g;
+    for (const bad of [noWorkspace, noGeneration, { ...inputAt(5), workspaceId: "not-a-uuid" }]) await expect(issueRequalifyChallenge(w.deps, bad)).rejects.toThrow(`${REQUALIFY_REFUSAL_PREFIX}invalid-input`);
+    expect(w.snapshot()).toBe(before);
+  });
+
+  it("takes no profile, binding or endpoint from its input", async () => {
     const w = world(); w.hold();
-    for (const extra of [{ profileId: "default-sandbox" }, { binding }, { generation: 1 }, { endpoint: "http://10.9.9.9:8080" }]) {
+    for (const extra of [{ profileId: "default-sandbox" }, { binding }, { endpoint: "http://10.9.9.9:8080" }]) {
       await expect(issueRequalifyChallenge(w.deps, { ...input, ...extra })).rejects.toThrow(`${REQUALIFY_REFUSAL_PREFIX}invalid-input`);
     }
     expect(w.objects.size).toBe(0);

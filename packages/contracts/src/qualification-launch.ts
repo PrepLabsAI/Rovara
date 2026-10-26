@@ -62,7 +62,7 @@ export interface QualificationFacts {
 /** The worker's boot configuration for the qualification instance, rendered by the product's own user data helper. */
 export function renderQualificationUserData(
   facts: QualificationFacts,
-  run: { workspaceId: string; volumeId: string; qualification: { profile: typeof E2E_QUALIFICATION_PROFILE_ID } },
+  run: { workspaceId: string; volumeId: string; generation: number; qualification: { profile: typeof E2E_QUALIFICATION_PROFILE_ID } },
   bootScript: string,
 ): string {
   const { settings } = facts;
@@ -71,7 +71,8 @@ export function renderQualificationUserData(
   }
   return ec2WorkerUserData({
     workspaceId: run.workspaceId,
-    generation: 1,
+    // The runner compares what it was booted with to its challenge (workspace id = transport correlation, generation): the caller passes the very values the challenge will carry.
+    generation: run.generation,
     volumeId: run.volumeId,
     expectNewVolume: true,
     workerImage: settings.workerImage,

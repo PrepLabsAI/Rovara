@@ -287,6 +287,8 @@ interface RunState {
   /** The preflight object, from the moment it is put until it is deleted. */
   preflightKey?: string | undefined;
   volumeId?: string;
+  /** The generation the runner is booted with and the challenge is issued with: read once, before the launch, under the lock. */
+  generation?: number;
   instanceId?: string;
   /** e2e-runtime/<role unique ID>:<instance ID>/, once the instance is launched. */
   prefix?: string;
@@ -342,7 +344,9 @@ async function runSteps(steps: readonly QualificationStep[], effects: Qualificat
         case "run-instance": {
           const facts = need(state.facts, "the stack facts");
           state.launchRun = step.clientToken;
-          const userData = renderQualificationUserData(facts, { workspaceId: step.workspaceId, volumeId: need(state.volumeId, "the volume"), qualification: step.qualification }, options.bootScript ?? readBootScript());
+          // The plan's generation is the floor: after an automatic renewal the registered runtime is newer, and a runner booted for generation 1 would fail its own host-identity check against a newer challenge.
+          state.generation = Math.max(1, await effects.nextGeneration());
+          const userData = renderQualificationUserData(facts, { workspaceId: step.workspaceId, volumeId: need(state.volumeId, "the volume"), generation: state.generation, qualification: step.qualification }, options.bootScript ?? readBootScript());
           state.instanceId = await effects.runInstance(buildRunInstancesInput(facts, { env: options.env ?? "", runId: step.clientToken, revision: options.revision, userData }));
           effects.print(`instance ${state.instanceId}`);
           // The grant allows only this exact prefix; the instance builds the same one from its own ID. Both validate the two IDs strictly.
@@ -355,8 +359,7 @@ async function runSteps(steps: readonly QualificationStep[], effects: Qualificat
         case "issue-challenge": {
           const facts = need(state.facts, "the stack facts");
           const binding = Ec2RuntimeBindingSchema.parse(facts.binding);
-          // The plan's generation is the floor: after an automatic renewal the registered runtime is newer, and a challenge at generation 1 would be refused.
-          const generation = Math.max(step.generation, await effects.nextGeneration());
+          const generation = need(state.generation, "the generation the runner was booted with");
           const issued = await effects.issueChallenge({ binding, endpoint: `http://${need(state.privateIp, "the private IP")}:${step.port}`, generation, transportCorrelationId: step.transportCorrelationId, profile: step.profile });
           state.challengeFile = issued.file;
           effects.print(`challenge ${issued.challengeId}, expires ${issued.expiresAt}`);

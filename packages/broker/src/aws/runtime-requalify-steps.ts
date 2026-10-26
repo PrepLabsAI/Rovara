@@ -20,7 +20,7 @@ import {
 } from "@agentx/contracts";
 import { e2eModelCheckRunnerKey } from "../e2e/model-route-registry.js";
 import { e2eRegisteredRuntimeKey } from "./e2e-runtime-readiness.js";
-import { issueRequalifyChallenge, registerRequalifiedRuntime, type RequalifyDependencies } from "./runtime-requalify.js";
+import { issueRequalifyChallenge, nextGeneration, registerRequalifiedRuntime, type RequalifyDependencies } from "./runtime-requalify.js";
 import { acquireRequalifyLock, releaseRequalifyLock } from "./runtime-requalify-lock.js";
 
 /**
@@ -99,7 +99,7 @@ const StateSchema = z.looseObject({
   preflight: z.object({ settingsDigest: z.string().regex(/^[a-f0-9]{64}$/), workerRoleId: Role, refused: z.literal("cost-guard").optional() }).optional(),
   ami: z.object({ amiId: z.string().regex(AL2023_AMI) }).optional(),
   volume: z.object({ volumeId: z.string().regex(/^vol-[0-9a-f]{8,17}$/), deadlineAt: Iso, status: Poll.optional() }).optional(),
-  instance: z.object({ instanceId: Instance, attachDeadlineAt: Iso, readyDeadlineAt: Iso, attachStatus: Poll.optional(), readyStatus: Poll.optional() }).optional(),
+  instance: z.object({ instanceId: Instance, workspaceId: z.string().uuid(), generation: z.number().int().positive(), attachDeadlineAt: Iso, readyDeadlineAt: Iso, attachStatus: Poll.optional(), readyStatus: Poll.optional() }).optional(),
   challenge: z.object({ challengeId: z.string().uuid(), expiresAt: Iso, generation: z.number().int().positive(), transportCorrelationId: z.string().uuid(), qualifyDeadlineAt: Iso, drainDeadlineAt: Iso }).optional(),
   qualification: z.object({ status: Poll, failure: z.array(z.string()).max(16).optional() }).optional(),
   drain: z.object({ status: Poll.optional() }).optional(),
@@ -363,13 +363,16 @@ async function qualificationFacts(deps: RequalifyStepsDependencies, state: Requa
 async function runInstance(deps: RequalifyStepsDependencies, state: RequalifyState): Promise<NonNullable<RequalifyState["instance"]>> {
   const facts = await qualificationFacts(deps, state);
   const volume = need(state.volume, "volume");
-  const userData = renderQualificationUserData(facts, { workspaceId: randomUUID(), volumeId: volume.volumeId, qualification: { profile: E2E_QUALIFICATION_PROFILE_ID } }, deps.bootScript());
+  // One workspace id and one generation for the run: the runner is booted with them and the challenge is issued with them (the runner compares the two). The lock is held, so the generation is stable.
+  const workspaceId = randomUUID();
+  const generation = await nextGeneration(deps);
+  const userData = renderQualificationUserData(facts, { workspaceId, volumeId: volume.volumeId, generation, qualification: { profile: E2E_QUALIFICATION_PROFILE_ID } }, deps.bootScript());
   const request = buildRunInstancesInput(facts, { env: deps.environment, runId: state.runId, revision: "requalify", userData, imageId: need(state.ami, "ami").amiId });
   const launched = await deps.ec2.send(new RunInstancesCommand(request));
   const instances = launched.Instances ?? [];
   if (instances.length !== 1 || instances[0]?.InstanceId === undefined) throw new Error(`RunInstances returned ${instances.length} instances, expected exactly one`);
   const now = nowOf(deps);
-  return { instanceId: instances[0].InstanceId, attachDeadlineAt: iso(now + RUN_WAIT_DEADLINES.attachMs), readyDeadlineAt: iso(now + RUN_WAIT_DEADLINES.attachMs + QUALIFICATION_READY_TIMEOUT_MS) };
+  return { instanceId: instances[0].InstanceId, workspaceId, generation, attachDeadlineAt: iso(now + RUN_WAIT_DEADLINES.attachMs), readyDeadlineAt: iso(now + RUN_WAIT_DEADLINES.attachMs + QUALIFICATION_READY_TIMEOUT_MS) };
 }
 
 async function attachVolume(deps: RequalifyStepsDependencies, state: RequalifyState): Promise<NonNullable<RequalifyState["instance"]>> {
@@ -397,7 +400,8 @@ async function awaitReady(deps: RequalifyStepsDependencies, state: RequalifyStat
 // ---------------------------------------------------------------------------------------------------------------------------------------------------
 
 async function issueChallenge(deps: RequalifyStepsDependencies, state: RequalifyState): Promise<NonNullable<RequalifyState["challenge"]>> {
-  const issued = await issueRequalifyChallenge(deps, { runId: state.runId, instanceId: need(state.instance, "instance").instanceId, roleId: need(state.preflight, "preflight").workerRoleId });
+  const instance = need(state.instance, "instance");
+  const issued = await issueRequalifyChallenge(deps, { runId: state.runId, instanceId: instance.instanceId, roleId: need(state.preflight, "preflight").workerRoleId, workspaceId: instance.workspaceId, generation: instance.generation });
   const expires = Date.parse(issued.expiresAt);
   return {
     challengeId: issued.challengeId, expiresAt: issued.expiresAt, generation: issued.generation, transportCorrelationId: issued.transportCorrelationId,

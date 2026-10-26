@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { DescribeInstancesCommand, type EC2Client } from "@aws-sdk/client-ec2";
@@ -62,6 +62,9 @@ const RunInputSchema = z.object({
 // the same Lambda and hand it straight to `registerRequalifiedRuntime`; it must never travel through Step Functions state or logs.
 export type RequalifyRunInput = z.infer<typeof RunInputSchema>;
 
+/** Issuing also takes what the runner was booted with: its workspace id becomes the challenge's transport correlation and its generation is the challenge's, so the runner's own host-identity check matches. */
+const IssueInputSchema = RunInputSchema.extend({ workspaceId: z.string().uuid(), generation: z.number().int().positive() }).strict();
+
 const RegisterInputSchema = RunInputSchema.extend({
   proposal: z.unknown(),
   proposalSha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -109,14 +112,16 @@ export async function nextGeneration(deps: Pick<RuntimeInstallationDependencies,
  * to the object store and never returned, so it cannot reach workflow state or logs.
  */
 export async function issueRequalifyChallenge(deps: RequalifyDependencies, inputValue: unknown): Promise<{ challengeId: string; expiresAt: string; generation: number; transportCorrelationId: string }> {
-  const input = parseInput(RunInputSchema, inputValue);
+  const input = parseInput(IssueInputSchema, inputValue);
   const identity = requalifierIdentity(deps.environment);
   await assertLockHeld(deps, input.runId);
   const ip = await managedRunnerIp(deps, input);
+  // The runner was booted for one generation; if the registered runtime moved since, it would qualify for the wrong one.
   const generation = await nextGeneration(deps);
+  if (generation !== input.generation) throw refusal("generation-not-next");
   const challenge = await issueChallengeAs(deps, identity, {
     binding: Ec2RuntimeBindingSchema.parse(deps.expectedBinding), profileId: REQUALIFY_PROFILE_ID, endpoint: `http://${ip}:${RUNNER_PORT}`,
-    generation, transportCorrelationId: randomUUID(),
+    generation, transportCorrelationId: input.workspaceId,
   }, { requalifyRunId: input.runId, requalifyInstanceId: input.instanceId, requalifyRoleId: input.roleId });
   await deps.s3.send(new PutObjectCommand({ Bucket: deps.artifactBucketName, Key: `${e2eQualificationPrefix(input.roleId, input.instanceId)}challenge.json`,
     Body: Buffer.from(`${canonicalJson(challenge)}\n`, "utf8"), ContentType: "application/json", ServerSideEncryption: "AES256" }));

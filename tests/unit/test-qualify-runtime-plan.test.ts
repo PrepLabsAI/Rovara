@@ -147,7 +147,7 @@ describe("the qualification instance's user data", () => {
   const exportNames = (script: string) => [...script.matchAll(/^export (\w+)=/gm)].map((match) => match[1]);
 
   it("is the worker's normal boot with only the validated qualification variables added", () => {
-    const rendered = decode(renderQualificationUserData(facts, { workspaceId: WORKSPACE_ID, volumeId: "vol-0123456789abcdef0", qualification }, bootScript));
+    const rendered = decode(renderQualificationUserData(facts, { workspaceId: WORKSPACE_ID, volumeId: "vol-0123456789abcdef0", generation: 1, qualification }, bootScript));
     const normal = ec2WorkerBootScript({
       workspaceId: WORKSPACE_ID, generation: 1, volumeId: "vol-0123456789abcdef0", expectNewVolume: true, workerImage: facts.settings.workerImage, executorImage: facts.settings.executorImage,
       invokePublicKey: facts.invokePublicKey, controlPlaneUrl: facts.controlPlaneUrl, modelProvider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6",
@@ -171,13 +171,13 @@ describe("the qualification instance's user data", () => {
 
   it("refuses a role ID that is not a role's unique ID", () => {
     for (const workerRoleId of ["", "AIDAEXAMPLEUSERID1234", "AROAshort", `${ROLE_ID}/../`, `${ROLE_ID}:${INSTANCE_ID}`, `${ROLE_ID}*`, `${ROLE_ID}'; touch /tmp/bad`]) {
-      expect(() => renderQualificationUserData({ ...facts, workerRoleId }, { workspaceId: WORKSPACE_ID, volumeId: "vol-0123456789abcdef0", qualification }, bootScript), workerRoleId).toThrow();
+      expect(() => renderQualificationUserData({ ...facts, workerRoleId }, { workspaceId: WORKSPACE_ID, volumeId: "vol-0123456789abcdef0", generation: 1, qualification }, bootScript), workerRoleId).toThrow();
     }
   });
 
   it("refuses a run whose settings have no executor image or are not pinned by digest", () => {
     const render = (settings: Partial<QualificationFacts["settings"]>) =>
-      renderQualificationUserData({ ...facts, settings: { ...facts.settings, ...settings } }, { workspaceId: WORKSPACE_ID, volumeId: "vol-0123456789abcdef0", qualification }, bootScript);
+      renderQualificationUserData({ ...facts, settings: { ...facts.settings, ...settings } }, { workspaceId: WORKSPACE_ID, volumeId: "vol-0123456789abcdef0", generation: 1, qualification }, bootScript);
     expect(() => render({ executorImage: undefined })).toThrow(/executor image/);
     expect(() => render({ executorImage: "111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-test/executor:latest" })).toThrow();
   });
@@ -306,6 +306,7 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
   const ready = [...(options.readies ?? [Buffer.from(JSON.stringify({ state: "READY", reason: "worker-healthy", finishedAt: "2026-10-19T11:50:00Z" }))])];
   const printed: string[] = [];
   const locks: string[] = [];
+  const userData: string[] = [];
   let clock = 0;
   const statuses = [...(options.statuses ?? [Buffer.from(JSON.stringify({ state: "SUCCEEDED", reason: "qualified", finishedAt: "2026-10-19T12:00:00Z" }))])];
   const maybeFail = (name: string) => { if (options.failAt === name) throw new Error(`${name} failed`); };
@@ -317,6 +318,7 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
     async getObjectStrict(key) { calls.push(`getObjectStrict ${key}`); maybeFail("getObjectStrict"); return options.readBack ?? preflightBody ?? Buffer.alloc(0); },
     async createVolume(request) { calls.push(`createVolume ${request.clientToken}`); maybeFail("createVolume"); return "vol-0123456789abcdef0"; },
     async runInstance(request) {
+      userData.push(request.UserData ?? "");
       calls.push(`runInstance min=${request.MinCount} max=${request.MaxCount} token=${request.ClientToken}`);
       maybeFail("runInstance");
       return options.instanceId ?? INSTANCE_ID;
@@ -343,7 +345,7 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
     async sleep(ms) { clock += ms; },
     print: (line) => printed.push(line),
   };
-  return { effects, calls, printed, bindings, locks, clockNow: () => clock };
+  return { effects, calls, printed, bindings, locks, userData, clockNow: () => clock };
 }
 const succeeded = Buffer.from(JSON.stringify({ state: "SUCCEEDED", reason: "qualified", finishedAt: "2026-10-19T12:00:00Z" }));
 const failed = (reason: string) => Buffer.from(JSON.stringify({ state: "FAILED", reason, finishedAt: "2026-10-19T12:00:00Z" }));
@@ -353,6 +355,18 @@ describe("runTestQualification", () => {
     const { effects, calls } = harness({ registeredGeneration: 2, statuses: [succeeded] });
     await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
     expect(calls.filter((call) => call.startsWith("issueChallenge")).map((call) => call.split(" ")[2])).toEqual(["3"]);
+  });
+
+  it("boots the runner with the same workspace id and generation the challenge carries, so the runner's host-identity check passes (live finding)", async () => {
+    for (const registered of [undefined, 1, 2]) {
+      const { effects, calls, userData } = harness({ ...(registered === undefined ? {} : { registeredGeneration: registered }), statuses: [succeeded] });
+      await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
+      const script = gunzipSync(Buffer.from(userData[0]!, "base64")).toString("utf8");
+      const issued = calls.find((call) => call.startsWith("issueChallenge"))!.split(" ");
+      expect(script, `registered ${registered}`).toContain(`export AGENTX_SESSION_GENERATION='${issued[2]}'`);
+      expect(script).toContain(`export AGENTX_WORKSPACE_ID='${issued[3]}'`);
+      expect(issued[2]).toBe(String((registered ?? 0) + 1));
+    }
   });
 
   it("issues generation 1 when nothing is registered yet", async () => {

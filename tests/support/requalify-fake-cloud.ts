@@ -18,7 +18,7 @@ export const BINDING: Ec2RuntimeBinding = { deploymentMode: "ec2-ebs", launchTem
 const HOUR = 3_600_000;
 
 type Item = Record<string, unknown>;
-interface FakeInstance { imageId?: string; id: string; state: string; tags: Record<string, string>; ip: string; volumes: string[]; polls: number }
+interface FakeInstance { userData?: string; imageId?: string; id: string; state: string; tags: Record<string, string>; ip: string; volumes: string[]; polls: number }
 interface FakeVolume { id: string; state: string; tags: Record<string, string>; attachedTo?: string }
 const named = (name: string, message = name): Error => Object.assign(new Error(message), { name });
 const hex = (n: number) => n.toString(16).padStart(17, "0");
@@ -139,7 +139,7 @@ export class FakeCloud {
         const rootId = `vol-${hex(this.counter++)}`;
         this.launches.push(id);
         const tags = Object.fromEntries((input["TagSpecifications"][0].Tags as Array<{ Key: string; Value: string }>).map((tag) => [tag.Key, tag.Value]));
-        this.instances.set(id, { imageId: input["ImageId"], id, state: "pending", tags, ip: `10.0.1.${this.counter}`, volumes: [rootId], polls: 0 });
+        this.instances.set(id, { userData: input["UserData"], imageId: input["ImageId"], id, state: "pending", tags, ip: `10.0.1.${this.counter}`, volumes: [rootId], polls: 0 });
         this.volumes.set(rootId, { id: rootId, state: "in-use", tags: {}, attachedTo: id });
         return { Instances: [{ InstanceId: id }] };
       }

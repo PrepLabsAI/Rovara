@@ -1,9 +1,11 @@
 // AUTOREQUALIFY (AR-2): the renewal's step machine run end to end against an in-memory account. The authority module (AR-1) is replaced by a small fake that keeps
 // its contract (lock held, rows +1, pointer moved, previous runner returned); everything else, including the machine definition, is the real code.
 import { randomUUID } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { REQUALIFY_REASON_CODES, REQUALIFY_STEP_REASON_CODES, e2eQualificationPrefix, requalifyRunKey } from "../../packages/contracts/src/index.js";
+import { assertRuntimeInstallationHostIdentity } from "../../packages/verifier/src/install-qualification.js";
 import { requalifyDefinition } from "../../infra/lib/runtime-requalify.js";
 import { runRequalifyAction, type RequalifyStepsDependencies } from "../../packages/broker/src/aws/runtime-requalify-steps.js";
 import { ENV, EXECUTOR_IMAGE, FakeCloud, ROLE_ID, SECRET, WORKER_IMAGE, runMachine, type MachineRun } from "../support/requalify-fake-cloud.js";
@@ -16,13 +18,16 @@ vi.mock("../../packages/broker/src/aws/runtime-requalify.js", async () => {
   const generationOf = (cloud: FakeCloud) => Math.max(0, ...(["web", "api"] as const).map((kind) => Number(cloud.row(kind)?.["generation"] ?? 0)));
   const heldBy = (cloud: FakeCloud, runId: string) => { if (cloud.lock()?.["runId"] !== runId) throw new Error("requalify-refused:lock-not-held"); };
   return {
-    async issueRequalifyChallenge(_deps: unknown, input: { runId: string; instanceId: string; roleId: string }) {
+    async nextGeneration() { return generationOf(holder.cloud) + 1; },
+    async issueRequalifyChallenge(_deps: unknown, input: { runId: string; instanceId: string; roleId: string; workspaceId: string; generation: number }) {
       const cloud = holder.cloud;
       heldBy(cloud, input.runId);
+      // As the real one: the challenge carries the workspace id and generation the runner was booted with, and only if the generation is still the next one.
+      if (input.generation !== generationOf(cloud) + 1) throw new Error("requalify-refused:generation-not-next");
       if (cloud.instances.get(input.instanceId)?.tags["agentx:qualification-run"] !== input.runId) throw new Error("requalify-refused:endpoint-not-managed-instance");
       // The secret reaches the runner's prefix and nothing else.
       await cloud.s3Client.send(new PutObjectCommand({ Bucket: "artifacts", Key: `${contracts.e2eQualificationPrefix(input.roleId, input.instanceId)}challenge.json`, Body: Buffer.from(JSON.stringify({ secret: SECRET })) }));
-      return { challengeId: uuid(), expiresAt: new Date(cloud.clock + 60 * 60_000).toISOString(), generation: generationOf(cloud) + 1, transportCorrelationId: uuid() };
+      return { challengeId: uuid(), expiresAt: new Date(cloud.clock + 60 * 60_000).toISOString(), generation: input.generation, transportCorrelationId: input.workspaceId };
     },
     async registerRequalifiedRuntime(_deps: unknown, input: { runId: string; instanceId: string; roleId: string; amiId: string | null; images: unknown }) {
       const cloud = holder.cloud;
@@ -127,6 +132,39 @@ describe("a successful renewal", () => {
     expect(run.status).toBe("Succeeded");
     expect(cloud.row("web")?.["generation"]).toBe(1);
     expect(cloud.terminated).toEqual([]);
+  });
+});
+
+describe("the runner is booted as the challenge says (live finding: host-identity-mismatch)", () => {
+  const bootEnvironment = (userData: string): Record<string, string> => {
+    const script = gunzipSync(Buffer.from(userData, "base64")).toString("utf8");
+    return Object.fromEntries([...script.matchAll(/^export (\w+)='([^']*)'$/gm)].map((match) => [match[1]!, match[2]!]));
+  };
+  const hostIdentityMatches = (environment: Record<string, string>, challenge: { transportCorrelationId: string; generation: number }): boolean => {
+    try { assertRuntimeInstallationHostIdentity("linux-arm64-web-api-v1", challenge as never, environment); return true; }
+    catch (error) { return !/boot-injected workspace identity and generation/.test((error as Error).message); }
+  };
+
+  it.each([[undefined], [1], [4]])("boots with the workspace id and generation the challenge is issued with (registered generation %s)", async (registered) => {
+    if (registered === undefined) oldInstallation(); else { const old = cloud.addRunner(); cloud.seedRegistered({ generation: registered, pointerInstance: old.id }); }
+    const { run } = await renew();
+    expect(run.trace.at(-1)).toBe("Done");
+    const challenge = run.state["challenge"] as { transportCorrelationId: string; generation: number };
+    const environment = bootEnvironment(cloud.instances.get(cloud.launches[0]!)!.userData!);
+    expect(challenge.generation).toBe((registered ?? 1) + 1);
+    expect(environment["AGENTX_SESSION_GENERATION"]).toBe(String(challenge.generation));
+    expect(environment["AGENTX_WORKSPACE_ID"]).toBe(challenge.transportCorrelationId);
+    // The runner's own check, on what it was booted with and what it will read.
+    expect(hostIdentityMatches(environment, challenge)).toBe(true);
+    expect(hostIdentityMatches({ ...environment, AGENTX_SESSION_GENERATION: "1" }, { ...challenge, generation: 2 })).toBe(false);
+  });
+
+  it("refuses to open a challenge when the registered generation moved after the boot (the runner would be booted for another one)", async () => {
+    oldInstallation();
+    const { run } = await renew(randomUUID(), { after: (action) => { if (action === "runInstance") cloud.seedRegistered({ generation: 5, pointerInstance: cloud.pointer()?.["instanceId"] as string }); } });
+    expect(run.trace).toContain("ReasonQualificationFailed");
+    expect(cloud.row("web")?.["generation"]).toBe(5);
+    expect(cloud.launches.map((id) => cloud.instances.get(id)?.state)).toEqual(["terminated"]);
   });
 });
 
@@ -406,7 +444,7 @@ describe("retiring the old runner", () => {
   it("never ends the runner the pointer names, even if a failed run's state does not say the switch committed", async () => {
     const serving = cloud.addRunner({ runId: "00000000-0000-4000-8000-000000000001" });
     cloud.seedRegistered({ pointerInstance: serving.id });
-    const state = { runId: "00000000-0000-4000-8000-000000000001", preflight: { settingsDigest: "a".repeat(64), workerRoleId: ROLE_ID }, instance: { instanceId: serving.id, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() } };
+    const state = { runId: "00000000-0000-4000-8000-000000000001", preflight: { settingsDigest: "a".repeat(64), workerRoleId: ROLE_ID }, instance: { instanceId: serving.id, workspaceId: randomUUID(), generation: 2, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() } };
     const out = await runRequalifyAction(deps, { action: "terminateNew", state }) as { newTermination?: unknown };
     expect(out.newTermination).toBeUndefined();
     expect(cloud.terminated).toEqual([]);
@@ -415,7 +453,7 @@ describe("retiring the old runner", () => {
   it("does not end the new runner after a switch that committed", async () => {
     const fresh = cloud.addRunner({ runId: "00000000-0000-4000-8000-000000000002" });
     const state = { runId: "00000000-0000-4000-8000-000000000002", preflight: { settingsDigest: "a".repeat(64), workerRoleId: ROLE_ID }, switch: { switched: true, generation: 2, previous: null },
-      instance: { instanceId: fresh.id, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() } };
+      instance: { instanceId: fresh.id, workspaceId: randomUUID(), generation: 2, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() } };
     const out = await runRequalifyAction(deps, { action: "terminateNew", state }) as { newTermination?: unknown };
     expect(out.newTermination).toBeUndefined();
     expect(cloud.terminated).toEqual([]);
@@ -423,14 +461,14 @@ describe("retiring the old runner", () => {
 
   it("refuses to end a runner that carries another run's tag when cleaning up a failed run", async () => {
     const foreign = cloud.addRunner({ runId: "00000000-0000-4000-8000-0000000000aa" });
-    const state = { runId: "00000000-0000-4000-8000-0000000000bb", preflight: { settingsDigest: "a".repeat(64), workerRoleId: ROLE_ID }, instance: { instanceId: foreign.id, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() } };
+    const state = { runId: "00000000-0000-4000-8000-0000000000bb", preflight: { settingsDigest: "a".repeat(64), workerRoleId: ROLE_ID }, instance: { instanceId: foreign.id, workspaceId: randomUUID(), generation: 2, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() } };
     await expect(runRequalifyAction(deps, { action: "terminateNew", state })).rejects.toThrow("not ended automatically");
     expect(cloud.terminated).toEqual([]);
   });
 
   it("refuses to retire the new runner as the previous one", async () => {
     const fresh = cloud.addRunner();
-    const state = { runId: randomUUID(), preflight: { settingsDigest: "a".repeat(64), workerRoleId: ROLE_ID }, instance: { instanceId: fresh.id, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() },
+    const state = { runId: randomUUID(), preflight: { settingsDigest: "a".repeat(64), workerRoleId: ROLE_ID }, instance: { instanceId: fresh.id, workspaceId: randomUUID(), generation: 2, attachDeadlineAt: new Date(cloud.clock).toISOString(), readyDeadlineAt: new Date(cloud.clock).toISOString() },
       switch: { switched: true, generation: 2, previous: { instanceId: fresh.id, roleId: ROLE_ID } } };
     await expect(runRequalifyAction(deps, { action: "terminatePrevious", state })).rejects.toThrow("is the new one");
     expect(cloud.terminated).toEqual([]);
