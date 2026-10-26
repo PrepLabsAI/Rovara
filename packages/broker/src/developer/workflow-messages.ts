@@ -912,9 +912,11 @@ export function answeredWorkflowCard(text: string, note: string): Array<Record<s
 /**
  * What makes two posts the same post, so the thread hears it once: by default the step's revision. The merge step is
  * keyed by what it says (each required pull request's head and state), so a later revision that left them as they
- * were says nothing; opening the pull requests is said once per checked code.
+ * were says nothing; opening the pull requests is said once per checked code. A planning run that the plan self-check sent back to the planner
+ * (`planAutoRevisions` of them, each one revision on, nothing else changed) is the same run: it is keyed by the revision the run started at.
  */
-export function workflowMessageKey(workflow: WorkflowSnapshot): string {
+export function workflowMessageKey(workflow: WorkflowSnapshot, options: { planAutoRevisions?: number } = {}): string {
+  if (workflow.stage === "PLAN" && workflow.state === "RUNNING" && (options.planAutoRevisions ?? 0) > 0) return `revision:${workflow.revision - options.planAutoRevisions!}`;
   if (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING" && freshFeedbackAnswer(workflow) === undefined) {
     return `merge:${(workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.required)
       .map((pullRequest) => `${pullRequest.repositoryId}#${pullRequest.number}@${pullRequest.headSha ?? pullRequest.candidateDigest}=${pullRequest.state === "MERGED" ? "merged" : pullRequest.state === "CLOSED" ? "closed" : "open"}`)

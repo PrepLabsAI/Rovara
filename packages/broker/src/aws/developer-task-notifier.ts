@@ -15,7 +15,7 @@ import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePe
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { PLAN_UNREADABLE_CATEGORIES, planCheckSummary, planUnreadableCategory } from "../developer/plan-check-summary.js";
-import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, type PlanSelfCheckView } from "../developer/plan-self-check.js";
+import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, planRevisionsUsed, type PlanSelfCheckView } from "../developer/plan-self-check.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
@@ -816,6 +816,13 @@ function e2eRoundStarted(workflow: WorkflowSnapshot): boolean {
   return e2e.currentRoundId !== undefined || e2e.qualifiedRound?.candidateDigest === candidate.digest || e2e.failedRound?.candidateDigest === candidate.digest;
 }
 
+/** The automatic revisions the plan self-check has spent on the document being written (each one revision on): the planning run's later revisions are the same run. */
+function planAutoRevisionsOf(task: DeveloperTaskRecord, workflow: WorkflowSnapshot): number {
+  if (workflow.stage !== "PLAN" || workflow.state !== "RUNNING") return 0;
+  const artifactType = workflow.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements" : workflow.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+  return planRevisionsUsed(task.planSelfCheck, artifactType, workflow.artifacts.filter((entry) => entry.type === artifactType).length + 1);
+}
+
 async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot, reopenedPullRequests?: ReadonlyArray<{ repositoryId: string; number: number }>): Promise<Reply | undefined> {
   // A task closed in Slack has its own closed reply; a second "closed" line would say it twice.
   if (workflow.stage === "CLOSED" && task.closedAt !== undefined) return undefined;
@@ -875,7 +882,7 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   const blocks = e2eBlocks === undefined
     ? [...(message.blocks ?? []), ...unavailableE2E].slice(0, 50)
     : [...(message.blocks ?? []), ...e2eBlocks].slice(0, 50);
-  return { ...message, ...(blocks === undefined ? {} : { blocks }), sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
+  return { ...message, ...(blocks === undefined ? {} : { blocks }), sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow, { planAutoRevisions: context.planGroundingHeld === true ? 0 : planAutoRevisionsOf(task, workflow) }), ...(approval === undefined ? {} : { approval }) };
 }
 
 async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice): Promise<Reply | undefined> {

@@ -365,6 +365,26 @@ describe("cards whose step is over lose their buttons (Task 19)", () => {
     expect(edits[0]!.blocks.at(-1)).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: "This task is closed." }] });
   });
 
+  it("POLISH-1: says 'Working on the coding plan' once per planning run, even when the plan self-check asks the planner again", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    const set = (workflow: Record<string, unknown>, planSelfCheck?: Record<string, unknown>) => h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: `SET workflow = :workflow, updatedAt = :now${planSelfCheck === undefined ? "" : ", planSelfCheck = :check"}`,
+      ExpressionAttributeValues: { ":now": now(), ":workflow": { artifacts: [], ...workflow }, ...(planSelfCheck === undefined ? {} : { ":check": planSelfCheck }) } }));
+    const said = () => h.posts.filter((post) => post.text.includes("Working on the coding plan")).length;
+    await set({ revision: 20, stage: "PLAN", state: "RUNNING" });
+    await h.pump();
+    expect(said()).toBe(1);
+    // The self-check revised the plan: one revision on, the same run (the budget record says one automatic revision was spent).
+    await set({ revision: 21, stage: "PLAN", state: "RUNNING" }, { artifactType: "plan", version: 1, used: 1 });
+    await h.pump();
+    expect(said()).toBe(1);
+    // A later planning run (the owner asked for changes) is a new run, said again.
+    await set({ revision: 40, stage: "PLAN", state: "RUNNING" }, { artifactType: "plan", version: 2, used: 0 });
+    await h.pump();
+    expect(said()).toBe(2);
+  });
+
   it("gives up on a card Slack will not edit, and retries one Slack could not edit just then", async () => {
     let failing: string | undefined;
     const updates: Array<{ ts: string; blocks: unknown[] }> = [];
