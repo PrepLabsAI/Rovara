@@ -85,6 +85,16 @@ describe("the operator's request to replay a qualified round refuses before anyt
     expect(replayRows(moved)).toEqual([]);
   });
 
+  it("POLISH-1 (T7b M2): an operation that carries a grounding admission is never the qualified round's source, even with the qualified round's id and content addresses", async () => {
+    const round = await qualified();
+    const operation = round.operationNow() as { workflowE2EAdmission: Record<string, unknown> };
+    // Positive control: the same operation as it is serves the replay check up to the recordings (this round has none).
+    expect(messageOf(await replayCall(round, "POST", { body: { roundId: roundIdOf(round) } }))).toMatch(/^replay-no-recording/);
+    round.harness.db.set({ ...operation, workflowE2EAdmission: { ...operation.workflowE2EAdmission, purpose: "grounding" } } as never);
+    expect(messageOf(await replayCall(round, "POST", { body: { roundId: roundIdOf(round) } }))).toMatch(/^replay-source-unavailable/);
+    expect(replayRows(round)).toEqual([]);
+  });
+
   it("test 17e: a closed task is refused replay-task-closed", async () => {
     const round = await qualified();
     const task = round.taskNow();
