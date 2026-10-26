@@ -405,10 +405,10 @@ function planChecksAddedHtml(context: Context): string {
   const scenarios = summary.scenarios.map((scenario, index) => {
     const ids = plan.scenarioProves?.[plan.e2e!.scenarios[index]!.scenarioId];
     const steps = scenario.steps.length === 0 ? "<li>Looks at the app</li>" : scenario.steps.map((step) => `<li>${t(step)}</li>`).join("");
-    return `<li class="plan-scenario"><p><strong>${t(scenario.scenarioId)}</strong>: as ${t(scenario.account)} on ${t(scenario.targets.join(" and "))}.${proofs(ids)}</p>`
+    return `<li class="plan-scenario"><p><strong>${t(scenario.scenarioId)}</strong>: as ${t(scenario.account)}${scenario.targets.length === 0 ? "" : ` on ${t(scenario.targets.join(" and "))}`}.${proofs(ids)}</p>`
       + `<p>Steps</p><ol class="scenario-steps">${steps}</ol>`
       + `<p>Expects</p><ul class="scenario-expects">${scenario.expects.map((expect) => `<li>${t(expect)}</li>`).join("")}</ul>`
-      + (scenario.mocks.length === 0 ? `<p class="scenario-mocks scenario-no-mocks">No stand-in services on ${t(joinTargets(scenario.targets))}.</p>` : `<p class="scenario-mocks">Stand-in services: ${t(scenario.mocks.join(", "))}.</p>`)
+      + (scenario.mocks.length === 0 ? `<p class="scenario-mocks scenario-no-mocks">No stand-in services${scenario.targets.length === 0 ? "" : ` on ${t(joinTargets(scenario.targets))}`}.</p>` : `<p class="scenario-mocks">Stand-in services: ${t(scenario.mocks.join(", "))}.</p>`)
       + (scenario.requiredReal.length === 0 ? "" : `<p class="scenario-real">Must run for real: ${t(scenario.requiredReal.join(", "))}.</p>`)
       + (scenario.realAndStandIn.length === 0 ? "" : `<p class="scenario-clash">${t(scenario.realAndStandIn.join(", "))} must run for real but is also a stand-in here; approval refuses this.</p>`)
       + (scenario.maxActions === undefined ? "" : `<p class="scenario-actions">An AI step may take up to ${scenario.maxActions} actions.</p>`)
