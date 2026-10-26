@@ -85,6 +85,8 @@ export type RoundOptions = {
   baselinePin?: "other";
   /** What GitHub says the tree of the pinned base commit is (the broker holds the exported tree to it): the exported one, another, or nothing (GitHub cannot be asked). Absent: GitHub is not consulted. */
   githubBaseTree?: "match" | "mismatch" | "unreachable";
+  /** Edits the files of the committed candidate before it is exported (the coding round changed the code): for a candidate whose source no longer gives the approved plan what it needs. */
+  candidateTree?: (files: Record<string, string>) => Record<string, string>;
   /** Runs once the candidate is committed and exported, just before the first dispatch (to seed a row the dispatch reads, say). */
   beforeDispatch?: (harness: RoundBrokerHarness) => void;
 };
@@ -186,7 +188,8 @@ export async function startApplicationRound(options: RoundOptions = {}) {
   // The candidate is a real commit whose tree holds the approved applications, exported the way the worker exports one at the end of an IMPLEMENT run.
   // With the baseline round's source exported, the repository holds the task's base commit under the candidate, as the worker's repository does.
   const withBase = options.baseline === "source";
-  const real = await createRealCandidate({ ...tree, "src/orders.js": "export const orders = [];\n" },
+  const candidateFiles = { ...tree, "src/orders.js": "export const orders = [];\n" };
+  const real = await createRealCandidate(options.candidateTree?.(candidateFiles) ?? candidateFiles,
     withBase ? { repositoryId: "demo", baseTree: tree } : { repositoryId: "demo", baseCommitSha: snapshot.commitSha });
   github.baseTree = real.baseline?.baseTreeSha;
   const task = harness.db.get(taskKey.pk, taskKey.sk)!;
