@@ -99,6 +99,12 @@ describe("the renewal's infrastructure", () => {
     const state = withAction("dynamodb:PutItem");
     expect(state).toHaveLength(1);
     expect(state[0]!.Condition!["ForAllValues:StringLike"]).toEqual({ "dynamodb:LeadingKeys": ["E2E_FEATURE_VERIFIER#*", "RUNTIME_INSTALL_CHALLENGE#*", "RUNTIME_INSTALLATION_EVIDENCE#*", "RUNTIME_REQUALIFY*", "E2E_MODEL_ROUTES"] });
+    // The drain (AR-3) only reads: Query and GetItem under the sessions index and the workspace, setup-marker and setup-execution keys; no write action is granted there.
+    const drain = withAction("dynamodb:Query");
+    expect(drain).toHaveLength(1);
+    expect([drain[0]!.Action].flat().sort()).toEqual(["dynamodb:GetItem", "dynamodb:Query"]);
+    expect(drain[0]!.Condition!["ForAllValues:StringLike"]).toEqual({ "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] });
+    expect(JSON.stringify(drain[0]!.Resource)).toContain("/index/bySessionState");
     // Objects: the runner's prefix and the content-addressed evidence, nothing else; listing only under the runner prefix.
     const objects = withAction("s3:PutObject").flatMap((statement) => JSON.stringify(statement.Resource));
     expect(objects.join(" ")).toMatch(/e2e-runtime\/\*/);

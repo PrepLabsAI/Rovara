@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  E2EApplicationSelectionRecordSchema, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, requalifyLockKey, workflowApplicationRetryOffered,
+  E2EApplicationSelectionRecordSchema, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, requalifyHoldKey as holdKeyOf, workflowApplicationRetryOffered,
   type E2EApplicationSelectionRecord,
 } from "../../packages/contracts/src/index.js";
 import {
-  ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, REQUALIFY_HOLD_MAX_MS, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock, placeRequalifyHold,
-  releaseRequalifyHold, replayPredatesRenewal, requalifyDrainStatus, requalifyHoldActive, requalifyHoldKey, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
+  ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock,
+  replayPredatesRenewal, requalifyDrainCount, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
 } from "../../packages/broker/src/e2e/requalify-hold.js";
 import { E2E_REPLAY_REFUSALS } from "../../packages/contracts/src/index.js";
 import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
@@ -14,7 +14,6 @@ import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/applic
 
 const NOW = Date.parse("2026-10-27T03:00:00.000Z");
 const RUN = "0b8a2f64-7c1d-4e0a-9f1b-3d5c6e7f8a90";
-const OTHER_RUN = "5d1e9c34-2a6b-4f7d-8c0e-1b2a3c4d5e6f";
 const k = (key: { pk: string; sk: string }) => `${key.pk}|${key.sk}`;
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -63,60 +62,31 @@ function table() {
 }
 type Table = ReturnType<typeof table>;
 
-const holdLock = (t: Table, runId = RUN, expiresAt = iso(NOW + 3 * 3_600_000)) => t.items.set(k(requalifyLockKey("linux-arm64-web-api-v1")), { ...requalifyLockKey("linux-arm64-web-api-v1"), runId, acquiredAt: iso(NOW), expiresAt });
+
+const requalifyHoldKey = () => holdKeyOf("linux-arm64-web-api-v1");
+const putHold = (t: Table, until: number, extra: Record<string, unknown> = {}) => t.items.set(k(requalifyHoldKey()), { ...requalifyHoldKey(), entityType: "RUNTIME_REQUALIFY_HOLD", runId: RUN, acquiredAt: iso(NOW), until: iso(until), ...extra });
 
 describe("the hold: new rounds and setup runs wait while a switch is in progress", () => {
-  it("is active only between its placement and its end, and only the run that holds the lock can place it", async () => {
+  it("is active only until its own end, so a renewal that crashed cannot defer work for ever", async () => {
     const t = table();
     expect(await requalifyHoldActive(t.store, NOW)).toBe(false);
-    await expect(placeRequalifyHold(t.store, { runId: RUN, now: NOW, durationMs: 60_000 })).rejects.toThrow(/does not hold the lock/);
-    expect(await requalifyHoldActive(t.store, NOW)).toBe(false);
-    holdLock(t, OTHER_RUN);
-    await expect(placeRequalifyHold(t.store, { runId: RUN, now: NOW, durationMs: 60_000 })).rejects.toThrow(/does not hold the lock/);
-    holdLock(t, RUN, iso(NOW - 1));
-    await expect(placeRequalifyHold(t.store, { runId: RUN, now: NOW, durationMs: 60_000 })).rejects.toThrow(/does not hold the lock/);
-    expect(t.items.has(k(requalifyHoldKey()))).toBe(false);
-    holdLock(t);
-    await placeRequalifyHold(t.store, { runId: RUN, now: NOW, durationMs: 60_000 });
+    putHold(t, NOW + 60_000);
     expect(await requalifyHoldActive(t.store, NOW + 59_000)).toBe(true);
-    // The hold carries its own end: a renewal that crashed cannot defer work for ever.
     expect(await requalifyHoldActive(t.store, NOW + 60_000)).toBe(false);
-  });
-
-  it("refuses a length that is out of range, and a second run's hold over a standing one; the standing one's own run may place it again", async () => {
-    const t = table(); holdLock(t);
-    for (const durationMs of [0, -1, REQUALIFY_HOLD_MAX_MS + 1, 1.5]) await expect(placeRequalifyHold(t.store, { runId: RUN, now: NOW, durationMs })).rejects.toThrow(/length is out of range/);
-    await placeRequalifyHold(t.store, { runId: RUN, now: NOW, durationMs: 60_000 });
-    holdLock(t, OTHER_RUN);
-    await expect(placeRequalifyHold(t.store, { runId: OTHER_RUN, now: NOW, durationMs: 60_000 })).rejects.toThrow(/does not hold the lock/);
-    expect(t.items.get(k(requalifyHoldKey()))!.runId).toBe(RUN);
-    holdLock(t);
-    await placeRequalifyHold(t.store, { runId: RUN, now: NOW + 1_000, durationMs: 120_000 });
-    expect(t.items.get(k(requalifyHoldKey()))!.until).toBe(iso(NOW + 121_000));
-  });
-
-  it("is released only by the run that placed it, and releasing it twice is harmless", async () => {
-    const t = table(); holdLock(t);
-    await placeRequalifyHold(t.store, { runId: RUN, now: NOW, durationMs: 60_000 });
-    await releaseRequalifyHold(t.store, OTHER_RUN);
-    expect(await requalifyHoldActive(t.store, NOW)).toBe(true);
-    await releaseRequalifyHold(t.store, RUN);
-    await releaseRequalifyHold(t.store, RUN);
-    expect(await requalifyHoldActive(t.store, NOW)).toBe(false);
   });
 
   it("reads a row that is not a hold as active (fail closed)", async () => {
     const t = table();
     t.items.set(k(requalifyHoldKey()), { ...requalifyHoldKey(), runId: "not-a-uuid" });
     expect(await requalifyHoldActive(t.store, NOW)).toBe(true);
-    t.items.set(k(requalifyHoldKey()), { ...requalifyHoldKey(), entityType: "RUNTIME_REQUALIFY_HOLD", runId: RUN, placedAt: iso(NOW), until: "tomorrow" });
+    putHold(t, NOW + 60_000, { until: "tomorrow" });
     expect(await requalifyHoldActive(t.store, NOW)).toBe(true);
   });
 
   it("defers an interactive start with a retryable error and one fixed sentence", async () => {
-    const t = table(); holdLock(t);
+    const t = table();
     await assertNoRequalifyHold(t.store, NOW);
-    await placeRequalifyHold(t.store, { runId: RUN, now: NOW, durationMs: 60_000 });
+    putHold(t, NOW + 60_000);
     await expect(assertNoRequalifyHold(t.store, NOW)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${REQUALIFY_DEFERRED_MESSAGE}` });
   });
 });
@@ -173,6 +143,16 @@ describe("the drain: nothing that started on the old machine is still running", 
     const orphan = requalifySetupWorkRow(randomUUID(), live);
     t2.items.set(k(orphan as never), orphan);
     expect(await requalifyDrainStatus(t2.store, NOW)).toMatchObject({ setupRuns: 1 });
+  });
+
+  it("gives the renewal one number: rounds plus setup runs, zero only when both are done", async () => {
+    const t = table();
+    expect(await requalifyDrainCount(t.store, NOW)).toBe(0);
+    session(t, WORKSPACE);
+    operation(t, WORKSPACE, { status: "RUNNING" });
+    const row = requalifySetupWorkRow(randomUUID(), iso(NOW + 600_000));
+    t.items.set(k(row as never), row);
+    expect(await requalifyDrainCount(t.store, NOW)).toBe(2);
   });
 
   it("writes the setup marker so that it expires with the table's time to live, after the run's own end", () => {

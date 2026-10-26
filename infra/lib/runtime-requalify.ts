@@ -18,7 +18,7 @@ import {
   aws_stepfunctions as sfn,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { QUALIFIED_AMI_SETTING_NAME, REQUALIFY_TAGS, WORKER_SETTING_PARAMETERS } from "@agentx/contracts";
+import { QUALIFIED_AMI_SETTING_NAME, REQUALIFY_TAGS, WORKER_SETTING_PARAMETERS, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { packagedFunction } from "./control-plane.js";
 import { EC2_WORKER_AMI_PARAMETER } from "./ec2-workers.js";
 import type { AgentXNaming } from "./naming.js";
@@ -206,6 +206,11 @@ export class RuntimeRequalify extends Construct {
     grant({
       sid: "RenewalState", actions: ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:ConditionCheckItem"], resources: [props.state.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["E2E_FEATURE_VERIFIER#*", "RUNTIME_INSTALL_CHALLENGE#*", "RUNTIME_INSTALLATION_EVIDENCE#*", "RUNTIME_REQUALIFY*", "E2E_MODEL_ROUTES"] } },
+    });
+    // The drain (AR-3), read only: the READY sessions (index), their workspaces' operations, the setup-run markers and the setup executions' state.
+    grant({
+      sid: "DrainRead", actions: ["dynamodb:Query", "dynamodb:GetItem"], resources: [props.state.tableArn, `${props.state.tableArn}/index/${WORKSPACE_SESSION_STATE_INDEX.name}`],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] } },
     });
     grant({ sid: "AlertOperator", actions: ["sns:Publish"], resources: [props.operatorTopic.topicArn] });
     grant({ sid: "Metrics", actions: ["cloudwatch:PutMetricData"], resources: ["*"], conditions: { StringEquals: { "cloudwatch:namespace": naming.metricsNamespace } } });

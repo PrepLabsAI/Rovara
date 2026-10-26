@@ -1,18 +1,16 @@
-import { DeleteCommand, GetCommand, QueryCommand, TransactWriteCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { z } from "zod";
+import { GetCommand, QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { STALE_RUN_SWEEP_AGE_MS } from "@agentx/verifier";
 import {
-  INDEX_EXPIRY_ATTRIBUTE, REQUALIFY_PROFILE_ID, TERMINAL_OPERATION_STATUSES, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKSPACE_SESSION_STATE_INDEX,
-  agentXError, canonicalJson, projectSetupExecutionKey, requalifyLockKey,
+  INDEX_EXPIRY_ATTRIBUTE, REQUALIFY_PROFILE_ID, RequalifyHoldSchema, TERMINAL_OPERATION_STATUSES, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKSPACE_SESSION_STATE_INDEX,
+  agentXError, canonicalJson, projectSetupExecutionKey, requalifyHoldKey,
   type E2EApplicationSelectionRecord, type E2ERegisteredRuntime,
 } from "@agentx/contracts";
-import { isConditional } from "../aws/broker-shared.js";
 import { ApplicationDispatchRefusal, applicationSelectionStillCurrent } from "./application-dispatch-check.js";
 
 /**
  * AUTOREQUALIFY (AR-3): what the renewal of the browser and API test machine asks of the work around it.
  *
- *  - The HOLD row. While a switch is in progress (the renewal drains the old machine, then moves the registered rows), new browser and API rounds and new project setup runs are
+ *  - The HOLD row (written and removed by the renewal's own steps, AR-2; its schema and key are in contracts). While a switch is in progress (the renewal drains the old machine, then moves the registered rows), new browser and API rounds and new project setup runs are
  *    deferred, never blocked: a deferred dispatch row stays due and the recovery sweep tries it again. The hold carries its own end (`until`), so a renewal that crashed cannot defer
  *    work for ever; a hold that cannot be read is read as active (fail closed: a deferral costs minutes, a round started across the switch costs the round).
  *  - The drain. `requalifyDrainStatus` says whether any round or setup run that already started on the old machine is still running.
@@ -20,20 +18,8 @@ import { ApplicationDispatchRefusal, applicationSelectionStillCurrent } from "./
  *    plan, setup, targets and test accounts untouched) is told apart from every other change, so that one automatic retry approves it again. Nothing else is ever approved by Rovara.
  *  - Replays. A round that ran on an earlier machine cannot be replayed exactly (its case ids are bound to the rows it ran on); the refusal says so.
  *
- * Nothing here is built from what a runner, a worker or a model said. The renewal's steps (AR-2) place and release the hold and poll the drain.
+ * Nothing here is built from what a runner, a worker or a model said. The renewal's steps (AR-2) place and release the hold and poll `requalifyDrainCount`.
  */
-
-const ISO_MILLIS = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
-
-/** The longest a hold may stand: the renewal's own execution timeout. A hold past this is refused when placed, and one past its `until` stops deferring work. */
-export const REQUALIFY_HOLD_MAX_MS = 3 * 3_600_000;
-
-export const requalifyHoldKey = (profileId: string = REQUALIFY_PROFILE_ID) => ({ pk: `RUNTIME_REQUALIFY#${profileId}`, sk: "HOLD" });
-
-export const RequalifyHoldSchema = z.object({
-  entityType: z.literal("RUNTIME_REQUALIFY_HOLD"), runId: z.string().uuid(), placedAt: ISO_MILLIS, until: ISO_MILLIS,
-}).strict();
-export type RequalifyHold = z.infer<typeof RequalifyHoldSchema>;
 
 export type RequalifyHoldStore = Readonly<{ documentClient: Pick<DynamoDBDocumentClient, "send">; tableName: string }>;
 
@@ -41,41 +27,11 @@ export type RequalifyHoldStore = Readonly<{ documentClient: Pick<DynamoDBDocumen
 export const REQUALIFY_DEFERRED_MESSAGE = "The browser and API test machine is being renewed; try again in a few minutes.";
 
 /**
- * Places the hold for `runId`. It commits only while the run holds the single-flight lock (the same condition the switch uses), and replaces only its own hold, so a run that lost its lock
- * or a second run cannot defer work. `until` is `now + durationMs`, at most `REQUALIFY_HOLD_MAX_MS`.
- */
-export async function placeRequalifyHold(store: RequalifyHoldStore, input: { runId: string; now: number; durationMs: number }): Promise<void> {
-  if (!Number.isInteger(input.durationMs) || input.durationMs <= 0 || input.durationMs > REQUALIFY_HOLD_MAX_MS) throw agentXError("CONFIG_INVALID", "requalify-hold: the hold's length is out of range");
-  const hold: RequalifyHold = RequalifyHoldSchema.parse({ entityType: "RUNTIME_REQUALIFY_HOLD", runId: input.runId,
-    placedAt: new Date(input.now).toISOString(), until: new Date(input.now + input.durationMs).toISOString() });
-  try {
-    await store.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { ConditionCheck: { TableName: store.tableName, Key: requalifyLockKey(REQUALIFY_PROFILE_ID), ConditionExpression: "runId = :runId AND expiresAt > :now",
-        ExpressionAttributeValues: { ":runId": input.runId, ":now": new Date(input.now).toISOString() } } },
-      { Put: { TableName: store.tableName, Item: { ...requalifyHoldKey(), ...hold }, ConditionExpression: "attribute_not_exists(pk) OR runId = :runId",
-        ExpressionAttributeValues: { ":runId": input.runId } } },
-    ] }));
-  } catch (error) {
-    if (isConditional(error)) throw agentXError("PROJECT_REVISION_MISMATCH", "requalify-hold: the run does not hold the lock or another run's hold stands");
-    throw error;
-  }
-}
-
-/** Ends the hold, if `runId` placed it. Ending a hold that is already gone, or is another run's, changes nothing. */
-export async function releaseRequalifyHold(store: RequalifyHoldStore, runId: string): Promise<void> {
-  try {
-    await store.documentClient.send(new DeleteCommand({ TableName: store.tableName, Key: requalifyHoldKey(), ConditionExpression: "runId = :runId", ExpressionAttributeValues: { ":runId": runId } }));
-  } catch (error) {
-    if (!isConditional(error)) throw error;
-  }
-}
-
-/**
  * Whether a switch is in progress. No row: no. A row that is past its `until`: no (a crashed renewal). A row that cannot be read as a hold: yes. A read that fails throws, and the
  * caller's own retry applies.
  */
 export async function requalifyHoldActive(store: RequalifyHoldStore, now: number): Promise<boolean> {
-  const response = await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: requalifyHoldKey(), ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  const response = await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: requalifyHoldKey(REQUALIFY_PROFILE_ID), ConsistentRead: true })) as { Item?: Record<string, unknown> };
   if (response.Item === undefined) return false;
   const { pk: _pk, sk: _sk, ...fields } = response.Item;
   void _pk; void _sk;
@@ -148,6 +104,12 @@ export async function requalifyDrainStatus(store: RequalifyHoldStore, now: numbe
     if (execution.Item === undefined || execution.Item.state === "ACCEPTED" || execution.Item.state === "DISPATCHING") setupRuns += 1;
   }
   return { drained: applicationRounds === 0 && setupRuns === 0, applicationRounds, setupRuns };
+}
+
+/** What the renewal's drain step asks (AR-2's `RequalifyDrainPort`): how many rounds and setup runs that began on the old machine are still running. A read that fails throws, and the step's own retry applies; it never answers "none" for what it could not read. */
+export async function requalifyDrainCount(store: RequalifyHoldStore, now: number): Promise<number> {
+  const status = await requalifyDrainStatus(store, now);
+  return status.applicationRounds + status.setupRuns;
 }
 
 // ---- a renewal is not any other change of the selection ----------------------------------------------------------------------------------------------------------------------
