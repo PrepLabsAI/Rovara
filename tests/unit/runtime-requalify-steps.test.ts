@@ -276,7 +276,7 @@ describe("a failure before the switch", () => {
     oldInstallation();
     const original = cloud.ec2.send;
     cloud.ec2.send = async (command) => {
-      const result = await original(command);
+      const result: unknown = await original(command);
       if (command.constructor.name === "RunInstancesCommand") throw new Error("connection reset after create");
       return result;
     };

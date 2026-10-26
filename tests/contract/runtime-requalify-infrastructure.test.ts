@@ -5,6 +5,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { REQUALIFY_LOGICAL_ID_PREFIX, requalifyDefinition } from "../../infra/lib/runtime-requalify.js";
+import { checkLambdaBundles } from "../../scripts/lambda-load-check.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
@@ -34,7 +35,7 @@ describe("the renewal's infrastructure", () => {
     .filter((resource) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties["Roles"]).includes(roleId()))
     .flatMap((resource) => (resource.Properties["PolicyDocument"] as { Statement: Statement[] }).Statement);
   const withAction = (action: string) => statements().filter((statement) => [statement.Action].flat().includes(action));
-  const tagConditions = (statement: Statement, kind: "ResourceTag" | "RequestTag") => (statement.Condition?.["StringEquals"] ?? {}) as Record<string, unknown>;
+  const tagConditions = (statement: Statement) => statement.Condition?.["StringEquals"] ?? {};
 
   it("is off by default and, when on, adds only resources with the RuntimeRequalify prefix (an Add-only change set)", () => {
     expect(Object.keys(off).filter((id) => id.startsWith(REQUALIFY_LOGICAL_ID_PREFIX))).toEqual([]);
@@ -51,7 +52,7 @@ describe("the renewal's infrastructure", () => {
       const found = withAction(action);
       expect(found.length, action).toBeGreaterThan(0);
       for (const statement of found) {
-        expect(tagConditions(statement, "ResourceTag"), action).toEqual({
+        expect(tagConditions(statement), action).toEqual({
           "aws:ResourceTag/DeploymentMode": "e2e-qualification", "aws:ResourceTag/Environment": ENV, "aws:ResourceTag/agentx:requalify-managed": "true",
         });
         expect(JSON.stringify(statement.Resource), action).toMatch(/:(instance|volume)\/\*/);
@@ -60,7 +61,7 @@ describe("the renewal's infrastructure", () => {
     // Nothing destructive is granted anywhere without those conditions (a statement listing one of the actions among others counts too).
     for (const statement of statements()) {
       const destructive = [statement.Action].flat().filter((action) => ["ec2:TerminateInstances", "ec2:DeleteVolume", "ec2:DeleteSnapshot", "ec2:StopInstances"].includes(action));
-      if (destructive.length > 0) expect(Object.keys(tagConditions(statement, "ResourceTag")).length, JSON.stringify(statement)).toBe(3);
+      if (destructive.length > 0) expect(Object.keys(tagConditions(statement)).length, JSON.stringify(statement)).toBe(3);
     }
   });
 
@@ -140,7 +141,16 @@ describe("the renewal's step machine", () => {
     for (const [name, state] of Object.entries(definition.States).filter(([stateName]) => stateName.endsWith("Choice") && stateName.startsWith("Await"))) {
       const nexts = (state["Choices"] as Array<{ StringEquals: string; Next: string }>).map((choice) => [choice.StringEquals, choice.Next]);
       expect(nexts.map(([status]) => status).sort(), name).toEqual(["failed", "ready", "timeout", "waiting"]);
-      expect(Object.fromEntries(nexts)["timeout"], name).toMatch(/^Reason|^CleanupFailedReason/);
+      expect((Object.fromEntries(nexts) as Record<string, string>)["timeout"], name).toMatch(/^Reason|^CleanupFailedReason/);
     }
   });
+});
+
+describe("the renewal's Lambda bundle", () => {
+  it("loads (or stops at a missing environment variable only), like every control-plane Lambda", async () => {
+    const report = await checkLambdaBundles({ root: process.cwd(), entries: [{ name: "runtime-requalify", entry: "packages/broker/src/aws/runtime-requalify-handler.ts" }] });
+    expect(report.results.map((result) => result.name)).toEqual(["runtime-requalify"]);
+    expect(report.problems).toEqual([]);
+    expect(report.ok).toBe(true);
+  }, 120_000);
 });

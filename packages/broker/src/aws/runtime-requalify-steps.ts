@@ -266,7 +266,7 @@ async function dueAction(deps: RequalifyStepsDependencies, force: boolean): Prom
 /** The images the last renewal qualified against are in its run record (reached from the model-check pointer); a runner the script recorded has none, which counts as no change. */
 async function imagesChangedSinceLastRenewal(deps: RequalifyStepsDependencies): Promise<boolean> {
   const pointer = (await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: e2eModelCheckRunnerKey(REQUALIFY_PROFILE_ID), ConsistentRead: true }))).Item;
-  const runId = pointer?.["requalifyRunId"];
+  const runId: unknown = pointer?.["requalifyRunId"];
   if (typeof runId !== "string") return false;
   const record = (await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: requalifyRunKey(runId), ConsistentRead: true }))).Item as Partial<RequalifyRunRecord> | undefined;
   if (record?.images === undefined) return false;
@@ -419,7 +419,7 @@ async function putHold(deps: RequalifyStepsDependencies, state: RequalifyState):
       ConditionExpression: "attribute_not_exists(pk) OR runId = :runId OR #until <= :now", ExpressionAttributeNames: { "#until": "until" }, ExpressionAttributeValues: { ":runId": state.runId, ":now": iso(now) },
     }));
   } catch (error) {
-    if ((error as { name?: string }).name === "ConditionalCheckFailedException") throw new Error("another renewal's hold is in place");
+    if ((error as { name?: string }).name === "ConditionalCheckFailedException") throw new Error("another renewal's hold is in place", { cause: error });
     throw error;
   }
 }

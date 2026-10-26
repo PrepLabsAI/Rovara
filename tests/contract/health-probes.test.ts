@@ -3,7 +3,7 @@
 import type { DescribeAlarmsCommand, DescribeAlarmsCommandOutput } from "@aws-sdk/client-cloudwatch";
 import type { GetQueueAttributesCommand, GetQueueAttributesCommandOutput } from "@aws-sdk/client-sqs";
 import { describe, expect, it } from "vitest";
-import { HEALTH_ALARM_SUFFIXES } from "@agentx/contracts";
+import { HEALTH_ALARM_CONDITIONAL_SUFFIXES, HEALTH_ALARM_SUFFIXES } from "@agentx/contracts";
 import { healthProbes, type HealthProbeInput } from "../../packages/broker/src/aws/health-probes.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 
@@ -55,10 +55,10 @@ describe("the broker's production health probes (A13)", () => {
     const { input, alarmCalls } = fakes({ pages: [{ $metadata: {}, MetricAlarms: [{ AlarmName: "agentx-live25d-SlackDeadLetters", StateValue: "OK" }] }] });
     const probes = healthProbes({ ...input, alarmPrefix: "agentx-live25d-" });
     expect(alarmCalls).toEqual([]);
-    // Every other listed alarm is reported missing, except the two that exist only on Bedrock.
+    // Every other listed alarm is reported missing, except the conditional ones (Bedrock-only, and the automatic renewal's).
     expect(await probes.alarms?.()).toStrictEqual([
       { name: "agentx-live25d-SlackDeadLetters", state: "OK" },
-      ...HEALTH_ALARM_SUFFIXES.filter((suffix) => !["SlackDeadLetters", "BedrockThrottling", "ClassifierThrottling"].includes(suffix))
+      ...HEALTH_ALARM_SUFFIXES.filter((suffix) => !["SlackDeadLetters", ...HEALTH_ALARM_CONDITIONAL_SUFFIXES].includes(suffix))
         .map((suffix) => ({ name: `agentx-live25d-${suffix}`, state: "MISSING" })),
     ]);
     // A prefix listing is authorized against *, which the broker is not granted; named alarms are

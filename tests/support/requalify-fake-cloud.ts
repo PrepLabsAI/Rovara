@@ -1,7 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-member-access -- an in-memory test double for AWS clients: command inputs are dynamic by design */
 // An in-memory account for the renewal's tests: EC2, SSM, IAM, S3, DynamoDB, SNS, CloudWatch and Step Functions as far as the renewal uses them, plus an
 // interpreter for the renewal's state machine definition so the real machine runs against the real step code. No AWS call is ever made.
 import { createHash, randomUUID } from "node:crypto";
-import { canonicalJson, e2eQualificationPrefix, REQUALIFY_PROFILE_ID, REQUALIFY_TAGS, type Ec2RuntimeBinding } from "../../packages/contracts/src/index.js";
+import { canonicalJson, e2eQualificationPrefix, REQUALIFY_PROFILE_ID, type Ec2RuntimeBinding } from "../../packages/contracts/src/index.js";
 import { e2eModelCheckRunnerKey } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import type { RequalifyStepsDependencies } from "../../packages/broker/src/aws/runtime-requalify-steps.js";

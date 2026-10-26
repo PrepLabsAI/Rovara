@@ -1,10 +1,6 @@
 import { z } from "zod";
 import { REQUALIFY_TAGS } from "./runtime-requalify.js";
-import {
-  E2E_QUALIFICATION_PROFILE_ID,
-  ec2WorkerUserData,
-  type Ec2RuntimeBinding,
-} from "./session.js";
+import { ec2WorkerUserData, type E2E_QUALIFICATION_PROFILE_ID, type Ec2RuntimeBinding } from "./session.js";
 
 /**
  * How a qualification runner is launched, shared by the operator's script (`scripts/test-qualify-runtime.ts`) and the automatic renewal
