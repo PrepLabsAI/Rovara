@@ -42,9 +42,11 @@ async function workerBinding(): Promise<Ec2RuntimeBinding> {
 
 const drain: RequalifyDrainPort = { activeWork: async () => "unknown" };
 
+let dependencies: Promise<RequalifyStepsDependencies> | undefined;
+
 export function createRequalifyDependencies(): Promise<RequalifyStepsDependencies> {
   binding ??= workerBinding();
-  return binding.then((expectedBinding) => ({
+  dependencies ??= binding.then((expectedBinding) => ({
     documentClient: DynamoDBDocumentClient.from(new DynamoDBClient(region)),
     s3: new S3Client(region),
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
@@ -69,6 +71,7 @@ export function createRequalifyDependencies(): Promise<RequalifyStepsDependencie
       return publicKey;
     },
   }));
+  return dependencies;
 }
 
 export const handler = async (event: unknown): Promise<unknown> => runRequalifyAction(await createRequalifyDependencies(), event);

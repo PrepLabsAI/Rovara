@@ -71,7 +71,7 @@ export function requalifyDefinition(lambdaArn: string): object {
   };
   const reason = (name: string, code: string, next = "FailAlert"): void => { states[name] = { Type: "Pass", Result: code, ResultPath: "$.reason", Next: next }; };
   /** A polling phase: ask, then proceed, wait, or take the failure reasons. `statusPath` is where the action leaves its answer. */
-  const poll = (name: string, action: string, statusPath: string, next: string, onFailed: string, onTimeout: string, onError: string): void => {
+  const poll = (name: string, action: string, statusPath: string, next: string, onFailed: string, onTimeout: string, onError: string, onUnexpected = "ReasonUnexpected"): void => {
     task(name, action, `${name}Choice`, onError, true);
     states[`${name}Choice`] = {
       Type: "Choice",
@@ -81,7 +81,7 @@ export function requalifyDefinition(lambdaArn: string): object {
         { Variable: statusPath, StringEquals: "failed", Next: onFailed },
         { Variable: statusPath, StringEquals: "timeout", Next: onTimeout },
       ],
-      Default: "ReasonUnexpected",
+      Default: onUnexpected,
     };
     states[`${name}Wait`] = { Type: "Wait", Seconds: POLL_SECONDS, Next: name };
   };
@@ -121,8 +121,10 @@ export function requalifyDefinition(lambdaArn: string): object {
   reason("ReasonRetireFailed", "retire-failed");
   // The failure path: one alert, end the new runner (only if the switch did not commit), release the lock. The old runner and the registered rows are never touched.
   task("FailAlert", "failAlert", "TerminateNew", "TerminateNew");
-  task("TerminateNew", "terminateNew", "AwaitTerminatedNew", "CleanupFailedReason");
-  poll("AwaitTerminatedNew", "awaitTerminatedNew", "$.newTermination.status", "ReleaseLock", "CleanupFailedReason", "CleanupFailedReason", "CleanupFailedReason");
+  task("TerminateNew", "terminateNew", "TerminateNewChoice", "CleanupFailedReason");
+  // Nothing was launched (a refusal before the launch): there is nothing to end.
+  states["TerminateNewChoice"] = { Type: "Choice", Choices: [{ Variable: "$.newTermination", IsPresent: true, Next: "AwaitTerminatedNew" }], Default: "ReleaseLock" };
+  poll("AwaitTerminatedNew", "awaitTerminatedNew", "$.newTermination.status", "ReleaseLock", "CleanupFailedReason", "CleanupFailedReason", "CleanupFailedReason", "CleanupFailedReason");
   reason("CleanupFailedReason", "retire-failed", "CleanupAlert");
   task("CleanupAlert", "failAlert", "ReleaseLock", "ReleaseLock");
   task("ReleaseLock", "releaseLock", "Failed", "LockStuck");
@@ -222,10 +224,13 @@ export class RuntimeRequalify extends Construct {
       logs: { destination: new logs.LogGroup(this, "MachineLogs", { retention: logs.RetentionDays.ONE_MONTH, removalPolicy: RemovalPolicy.DESTROY }), level: sfn.LogLevel.ERROR, includeExecutionData: false },
     });
 
+    // The schedule's own role, in this construct: the one the scheduler target would otherwise share is a stack-level resource outside the Add-only prefix.
+    const scheduleRole = new iam.Role(this, "ScheduleRole", { assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com", { conditions: { StringEquals: { "aws:SourceAccount": Aws.ACCOUNT_ID } } }) });
+    this.steps.grantInvoke(scheduleRole);
     new scheduler.Schedule(this, "DailyCheck", {
       description: "Starts the test machine renewal when the registered runtime is close to expiry or the deployed images changed",
       schedule: scheduler.ScheduleExpression.cron({ minute: "0", hour: String(props.checkHourUtc ?? REQUALIFY_DEFAULT_HOUR_UTC) }),
-      target: new schedulerTargets.LambdaInvoke(this.steps, { input: scheduler.ScheduleTargetInput.fromObject({ action: "due" }) }),
+      target: new schedulerTargets.LambdaInvoke(this.steps, { role: scheduleRole, input: scheduler.ScheduleTargetInput.fromObject({ action: "due" }) }),
     });
 
     const alarm = (alarmId: string, suffix: string, description: string, metric: cloudwatch.IMetric, periods: number, comparison: cloudwatch.ComparisonOperator, threshold: number, missing: cloudwatch.TreatMissingData) =>

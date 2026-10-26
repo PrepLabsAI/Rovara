@@ -72,6 +72,14 @@ export interface RequalifyStepsDependencies extends RequalifyDependencies {
   drain: RequalifyDrainPort;
   bootScript(): string;
   invokePublicKey(): Promise<string>;
+  /** Reads the proposal the runner uploaded and its digest; refuses anything that is not a READY web/API proposal. Tests substitute it. */
+  parseProposal?(bytes: Buffer): { proposal: unknown; sha256: string };
+}
+
+/** The proposal as the product defines it: the schema parses it, and the digest is over the parsed form (the registrar re-checks both). */
+function parseRunnerProposal(bytes: Buffer): { proposal: unknown; sha256: string } {
+  const proposal = WebApiRuntimeInstallProposalSchema.parse(JSON.parse(bytes.toString("utf8")));
+  return { proposal, sha256: webApiRuntimeInstallProposalSha256(proposal) };
 }
 
 const Iso = z.string().datetime();
@@ -438,13 +446,14 @@ async function switchRuntime(deps: RequalifyStepsDependencies, state: RequalifyS
   const prefix = e2eQualificationPrefix(pre.workerRoleId, instance.instanceId);
   const bytes = await getObject(deps, `${prefix}proposal.json`);
   if (bytes === undefined) throw new Error("the qualification succeeded but proposal.json does not exist");
-  const proposal = WebApiRuntimeInstallProposalSchema.parse(JSON.parse(bytes.toString("utf8")));
+  const { proposal, sha256 } = (deps.parseProposal ?? parseRunnerProposal)(bytes);
   const result = await registerRequalifiedRuntime(deps, {
-    runId: state.runId, instanceId: instance.instanceId, roleId: pre.workerRoleId, proposal, proposalSha256: webApiRuntimeInstallProposalSha256(proposal),
+    runId: state.runId, instanceId: instance.instanceId, roleId: pre.workerRoleId, proposal, proposalSha256: sha256,
     amiId: need(state.ami, "ami").amiId, images: { worker: values["workerImage"] ?? null, executor: values["executorImage"] && values["executorImage"] !== "none" ? values["executorImage"] : null },
   });
-  // The hold also expires by itself; a failure to delete it is not a failed switch.
+  // The hold also expires by itself, and the one-use challenge is consumed: a failure to delete either is not a failed switch.
   try { await deleteHold(deps, state.runId); } catch { /* expires at its own time */ }
+  try { await deps.s3.send(new DeleteObjectCommand({ Bucket: deps.artifactBucketName, Key: `${prefix}challenge.json` })); } catch { /* consumed already */ }
   return { switched: true, generation: result.generation, previous: result.previousRunner === null ? null : { instanceId: result.previousRunner.instanceId, roleId: result.previousRunner.roleId } };
 }
 
