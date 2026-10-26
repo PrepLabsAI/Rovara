@@ -1882,6 +1882,15 @@ describe("gatherCheckFacts", () => {
       for (const call of fake.calls) expect(["cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources", "lambda get-function", "dynamodb query", "dynamodb scan", "ec2 describe-instances", "iam get-role", "s3api get-object", "bedrock get-inference-profile", "bedrock get-foundation-model-availability", "ssm get-parameter", "service-quotas list-service-quotas"], call.join(" ")).toContain(`${call[0]} ${call[1]}`);
     });
 
+    it("adds the automatic-renewal note to an expiry finding only where the renewal is installed (M3)", () => {
+      const base = { headTemplate: {}, deployedTemplate: {}, lambdaCodeShas: {}, builtZipShas: {}, runnerFacts: undefined, now: NOW, catalogRows: [{ sk: "PROFILE#linux-arm64-web-api-v1#web", state: "READY", expiresAt: hoursFromNow(30) }] };
+      const expiring = (requalify?: Parameters<typeof evaluateTestDeployCheck>[0]["requalify"]) =>
+        evaluateTestDeployCheck({ ...base, ...(requalify === undefined ? {} : { requalify }) }).findings.find((finding) => finding.kind === "catalog-expiring")!.message;
+      expect(expiring()).not.toContain("RuntimeRequalify");
+      expect(expiring({ state: "not-installed" })).not.toContain("RuntimeRequalify");
+      expect(expiring({ state: "installed", lock: { state: "free" }, hold: "none", lastRun: { state: "none" } })).toContain("RuntimeRequalify");
+    });
+
     it("reports an unreadable last renewal as a warning in the check, never as healthy", async () => {
       const fake = withRenewal(true, {
         "RUNTIME_REQUALIFY#linux-arm64-web-api-v1|LOCK": undefined,

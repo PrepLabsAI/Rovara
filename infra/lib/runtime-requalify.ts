@@ -28,6 +28,8 @@ import type { AgentXNaming } from "./naming.js";
  * and the alarms. Mounted only where the CDK context `agentx:autoRequalify` is exactly "enabled" (TEST only until a release says otherwise); all of its
  * resources carry the logical-ID prefix `RuntimeRequalify`, so the `requalify-infra` deploy unit adds them to a live stack with an Add-only change set.
  *
+ * The daily schedule is created DISABLED (AR-5 review I1): nothing renews by itself until the owner has deployed the code, tagged the current runner and run one renewal by hand.
+ *
  * Authority (design section 4): the Lambda may launch only from this environment's launch template and only with the three renewal tags, and may terminate
  * an instance or delete a volume only if it carries all three tags. It has no `kms:Sign`, no Secrets Manager and no wildcard on a destructive action.
  */
@@ -53,6 +55,8 @@ export interface RuntimeRequalifyProps {
   /** The foundation's values the control plane already receives as stack parameters (resolved tokens). */
   foundation: { privateSubnetIds: string; launchTemplateId: string; workerRoleArn: string; workspaceKmsKeyArn: string; logGroupName: string };
   checkHourUtc?: number;
+  /** The daily check is created disabled: infrastructure that exists must not start a renewal by itself. The owner enables it after the live check (test-deploy `requalify-schedule`, or this flag in CDK). */
+  scheduleEnabled?: boolean;
 }
 
 type Task = { Type: "Task"; Resource: string; Parameters: object; OutputPath: string; Retry: object[]; Catch: object[]; Next: string };
@@ -240,6 +244,7 @@ export class RuntimeRequalify extends Construct {
     this.steps.grantInvoke(scheduleRole);
     new scheduler.Schedule(this, "DailyCheck", {
       description: "Starts the test machine renewal when the registered runtime is close to expiry or the deployed images changed",
+      enabled: props.scheduleEnabled === true,
       schedule: scheduler.ScheduleExpression.cron({ minute: "0", hour: String(props.checkHourUtc ?? REQUALIFY_DEFAULT_HOUR_UTC) }),
       target: new schedulerTargets.LambdaInvoke(this.steps, { role: scheduleRole, input: scheduler.ScheduleTargetInput.fromObject({ action: "due" }) }),
     });

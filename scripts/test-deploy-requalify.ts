@@ -1,7 +1,7 @@
 // AUTOREQUALIFY tooling for test-deploy (AR-5): what the `requalify-infra` and `requalify-now` units are, how the check finds out whether the automatic renewal is installed,
 // and how it reports the last renewal. Pure code and read-only AWS reads; nothing here writes. The Lambda unit, the lift context and the step plans are named here so
 // scripts/test-deploy.ts only wires them in.
-import { REQUALIFY_PROFILE_ID, RequalifyLockSchema, RequalifyRunRecordSchema, requalifyHoldKey, requalifyLockKey, requalifyRunKey } from "../packages/contracts/src/index.js";
+import { REQUALIFY_PROFILE_ID, REQUALIFY_TAGS, RequalifyLockSchema, RequalifyRunRecordSchema, requalifyHoldKey, requalifyLockKey, requalifyRunKey } from "../packages/contracts/src/index.js";
 import { e2eModelCheckRunnerKey } from "../packages/broker/src/e2e/model-route-registry.js";
 import type { CheckTemplate, Finding } from "./test-deploy-check.js";
 
@@ -140,7 +140,7 @@ export function requalifyFindings(facts: RequalifyFacts | undefined, renewNow: s
   if (facts.hold === "present") findings.push(finding("requalify-running", "info", "a renewal's drain hold is in place: application checks and project setup are deferred until it ends or its time is up"));
   if (facts.hold === "unreadable") findings.push(finding("requalify-unreadable", "warning", "the renewal's drain hold cannot be read"));
   const run = facts.lastRun;
-  if (run.state === "none") findings.push(finding("requalify-last-run", "info", `no automatic renewal has switched the runtime yet (the runner was qualified by hand); start the first with: ${renewNow}`));
+  if (run.state === "none") findings.push(finding("requalify-last-run", "info", `the runner pointer records no automatic renewal: none has switched the runtime yet, or a by-hand qualification replaced it afterwards (it rewrites the pointer without the run id); start one with: ${renewNow}`));
   else if (run.state === "unreadable") findings.push(finding("requalify-unreadable", "warning", `the last renewal cannot be read: ${run.reason}`));
   else {
     findings.push(finding("requalify-last-run", "info",
@@ -174,3 +174,95 @@ export function parseStartAnswer(text: string): { started: boolean; reason: stri
   }
   return { started: answer.started, reason: answer.reason };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Readiness: what must be true before a renewal may start, by the owner's hand or by the schedule (AR-5 review I1)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The daily schedule's logical ID (CDK's id of `RuntimeRequalify/DailyCheck`). The schedule is created DISABLED by `requalify-infra`; the `requalify-schedule` unit enables it with a
+ * change set that moves only its State.
+ */
+export const REQUALIFY_SCHEDULE_LOGICAL_ID = "RuntimeRequalifyDailyCheckFBF4C861";
+
+/** The deployed template with the schedule's State set to ENABLED, and every other byte as it is. Refuses unless the schedule is there as a schedule. */
+export function enableScheduleTemplate(deployed: CheckTemplate): CheckTemplate {
+  const resource = deployed.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID];
+  if (resource?.Type !== "AWS::Scheduler::Schedule") throw new Error(`the deployed stack has no ${REQUALIFY_SCHEDULE_LOGICAL_ID} schedule; deploy requalify-infra first`);
+  const copy = JSON.parse(JSON.stringify(deployed)) as CheckTemplate;
+  copy.Resources![REQUALIFY_SCHEDULE_LOGICAL_ID]!.Properties = { ...(resource.Properties ?? {}), State: "ENABLED" };
+  return copy;
+}
+
+type Tags = Record<string, string>;
+export type RunnerTagFacts =
+  | { state: "read"; instanceId: string; instanceState: string; instanceTags: Tags; volumes: ReadonlyArray<{ volumeId: string; tags: Tags }> }
+  | { state: "unknown"; reason: string };
+
+const tagMap = (list: unknown): Tags => Object.fromEntries((Array.isArray(list) ? list : []).flatMap((tag: unknown) => {
+  const entry = tag as { Key?: unknown; Value?: unknown } | null;
+  return typeof entry?.Key === "string" && typeof entry.Value === "string" ? [[entry.Key, entry.Value] as const] : [];
+}));
+
+/** The current runner (the model-check pointer's instance), its tags and the tags of its volumes that outlive it, from three read-only calls. Anything unreadable is `unknown`, never ready. */
+export function readRunnerTags(reader: RequalifyReader, input: { table: string; region: string }): RunnerTagFacts {
+  const pointer = readRow(reader, { ...input, key: e2eModelCheckRunnerKey(REQUALIFY_PROFILE_ID) });
+  if (pointer.state !== "found") return { state: "unknown", reason: pointer.state === "absent" ? "no runner pointer is recorded" : `the runner pointer could not be read: ${pointer.reason}` };
+  const instanceId = pointer.item["instanceId"];
+  if (typeof instanceId !== "string" || !/^i-[0-9a-f]{8,17}$/.test(instanceId)) return { state: "unknown", reason: "the runner pointer names no instance" };
+  const read = (args: readonly string[]): unknown => {
+    const result = reader.aws([...args, "--region", input.region, "--output", "json"], true);
+    if (result.status !== 0) return undefined;
+    try { return JSON.parse(result.stdout); } catch { return undefined; }
+  };
+  const instance = read(["ec2", "describe-instances", "--instance-ids", instanceId, "--query", "Reservations[].Instances[].{state:State.Name,tags:Tags}"]);
+  if (!Array.isArray(instance) || instance.length !== 1) return { state: "unknown", reason: `the runner ${instanceId} could not be read` };
+  const volumes = read(["ec2", "describe-volumes", "--filters", `Name=attachment.instance-id,Values=${instanceId}`, "--query", "Volumes[].{id:VolumeId,tags:Tags,root:Attachments[0].DeleteOnTermination}"]);
+  if (!Array.isArray(volumes)) return { state: "unknown", reason: `the volumes of ${instanceId} could not be read` };
+  const first = instance[0] as { state?: unknown; tags?: unknown };
+  return {
+    state: "read", instanceId, instanceState: typeof first.state === "string" ? first.state : "unknown", instanceTags: tagMap(first.tags),
+    // A volume that goes with the instance (the root) is not deleted separately; the workspace volume is, and only if it carries the tags.
+    volumes: volumes.flatMap((volume: unknown) => {
+      const entry = volume as { id?: unknown; tags?: unknown; root?: unknown };
+      return typeof entry.id === "string" && entry.root !== true ? [{ volumeId: entry.id, tags: tagMap(entry.tags) }] : [];
+    }),
+  };
+}
+
+const missingTags = (tags: Tags, env: string): string[] => [
+  ...(tags[REQUALIFY_TAGS.deploymentModeKey] === REQUALIFY_TAGS.deploymentModeValue ? [] : [`${REQUALIFY_TAGS.deploymentModeKey}=${REQUALIFY_TAGS.deploymentModeValue}`]),
+  ...(tags[REQUALIFY_TAGS.environmentKey] === env ? [] : [`${REQUALIFY_TAGS.environmentKey}=${env}`]),
+  ...(tags[REQUALIFY_TAGS.managedKey] === REQUALIFY_TAGS.managedValue ? [] : [`${REQUALIFY_TAGS.managedKey}=${REQUALIFY_TAGS.managedValue}`]),
+];
+
+/**
+ * Why a renewal must not start yet, as owner sentences; empty when it may. A renewal builds a new runner and then retires the old one, so before the first: the control-plane stack and its
+ * Lambdas must be current with this build (a stale dispatcher or broker would not hold work back, a stale renewal Lambda would not be the code that was reviewed), and the current runner and
+ * its workspace volume must carry the tags the retirement requires (without them it builds the new runner and cannot retire the old one).
+ */
+export function readinessProblems(findings: readonly Finding[], runner: RunnerTagFacts, env: string): string[] {
+  const problems: string[] = [];
+  const stale = findings.filter((finding) => finding.severity === "error" && (finding.kind === "stale-lambda" || finding.kind === "iam-missing-grant" || finding.kind === "lambda-env-missing"));
+  for (const finding of stale) problems.push(`${finding.kind === "stale-lambda" ? "control-plane-code is not current" : "the control-plane stack is not current"}: ${finding.kind} ${finding.label}`);
+  if (runner.state === "unknown") return [...problems, `the current runner cannot be checked for its tags: ${runner.reason}`];
+  if (runner.instanceState !== "running") problems.push(`the current runner ${runner.instanceId} is ${runner.instanceState}, not running`);
+  const instanceMissing = missingTags(runner.instanceTags, env);
+  if (instanceMissing.length > 0) problems.push(`the current runner ${runner.instanceId} lacks the tags ${instanceMissing.join(", ")}`);
+  for (const volume of runner.volumes) {
+    const missing = missingTags(volume.tags, env);
+    if (missing.length > 0) problems.push(`the workspace volume ${volume.volumeId} of the current runner lacks the tags ${missing.join(", ")}`);
+  }
+  if (runner.volumes.length === 0) problems.push(`the current runner ${runner.instanceId} has no separate workspace volume to check`);
+  return problems;
+}
+
+/** The order the owner follows; printed by --check while the renewal is not yet running on its own, and by the plan of the units that start it. */
+export const REQUALIFY_DEPLOY_ORDER = [
+  "1. Tier 3 and the control-plane stack update (AR-4 grants, the new alarm, environment variables); the owner runs the guarded change set.",
+  "2. control-plane-code (the renewal's Lambda is left out until it is installed).",
+  "3. requalify-infra (Add only; the daily schedule is created DISABLED).",
+  "4. The owner tags the current runner and its workspace volume: DeploymentMode=e2e-qualification, Environment=<env>, agentx:requalify-managed=true.",
+  "5. requalify-now, once, and the live check (new runner registered, generation +1, old runner and volume gone, --check clean).",
+  "6. requalify-schedule, to enable the daily check.",
+].join("\n");

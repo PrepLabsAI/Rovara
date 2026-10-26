@@ -9,7 +9,9 @@ import {
   patchLiftedCode,
   planTestDeploy,
   plannedRequalifyGrants,
+  assertOnlyExpectedChanges,
   type BuiltArtifacts,
+  type ObservedChange,
   type CfnTemplate,
   type DeployStep,
   type StackParameters,
@@ -18,7 +20,10 @@ import { evaluateTestDeployCheck, tier3Request, type Finding } from "../../scrip
 import {
   REQUALIFY_INFRA,
   REQUALIFY_LAMBDA,
+  REQUALIFY_DEPLOY_ORDER,
   REQUALIFY_NOW_PAYLOAD,
+  REQUALIFY_SCHEDULE_LOGICAL_ID,
+  enableScheduleTemplate,
   lockFact,
   lockHeldMessage,
   parseStartAnswer,
@@ -26,6 +31,8 @@ import {
   readInstalledFacts,
   readLastRun,
   readRow,
+  readRunnerTags,
+  readinessProblems,
   requalifyFindings,
   requalifyInstalled,
   type RequalifyReader,
@@ -85,6 +92,7 @@ describe("the requalify-now unit", () => {
   it("checks the shared lock and then starts one renewal, and only where the renewal is installed", () => {
     const steps = plan(["requalify-now"], true);
     expect(steps).toEqual([
+      { id: "check-requalify-ready", kind: "check-requalify-ready", stack: CONTROL_PLANE, identityMode: "cognito" },
       { id: "check-requalify-lock", kind: "check-requalify-lock", stack: CONTROL_PLANE },
       { id: "start-requalify", kind: "start-requalify", stack: CONTROL_PLANE, logicalId: REQUALIFY_LAMBDA.logicalId },
     ]);
@@ -93,9 +101,19 @@ describe("the requalify-now unit", () => {
     expect(() => plan(["requalify-now", "broker"], true)).toThrow(/runs on its own/);
   });
 
+  it("starts nothing before the ready check: control-plane-code current and the runner and its volume tagged (AR-5 review I1)", () => {
+    expect(plan(["requalify-now"], true)[0]!.kind).toBe("check-requalify-ready");
+    expect(plan(["requalify-schedule"], true)[0]!.kind).toBe("check-requalify-ready");
+  });
+
   it("says in the printed plan that it is owner-run and what it sends", () => {
     const text = formatPlan(plan(["requalify-now"], true));
     expect(text).toContain("owner-run, never started by an agent");
+    // The ready check comes first, and the lock step is honest that the machine, not this step, takes the lock (AR-5 review M1).
+    expect(text.indexOf("check-requalify-ready")).toBeLessThan(text.indexOf("check-requalify-lock"));
+    expect(text).toContain("control-plane-code and the stack are current");
+    expect(text).toContain("agentx:requalify-managed=true");
+    expect(text).toContain("this step does not take the lock, the renewal machine's first step does");
     expect(text).toContain(REQUALIFY_NOW_PAYLOAD);
     expect(REQUALIFY_NOW_PAYLOAD).toBe('{"action":"due","force":true}');
   });
@@ -302,6 +320,8 @@ describe("requalifyFindings", () => {
     const none = requalifyFindings({ state: "installed", lock: { state: "free" }, hold: "none", lastRun: { state: "none" } }, NOW_COMMAND);
     expect(none).toHaveLength(1);
     expect(none[0]!.message).toContain(NOW_COMMAND);
+    // A by-hand qualification writes the pointer without the run id, so "none" can also mean a later by-hand renewal hid the last automatic one.
+    expect(none[0]!.message).toMatch(/or a by-hand qualification replaced it/);
     const busy = requalifyFindings({ state: "installed", lock: { state: "held", runId: RUN_ID, expiresAt: "2026-10-27T15:00:00.000Z" }, hold: "present", lastRun: found }, NOW_COMMAND);
     expect(busy.map((finding) => `${finding.severity} ${finding.kind}`)).toEqual(["info requalify-running", "info requalify-running", "info requalify-last-run"]);
     expect(busy[0]!.message).toContain(RUN_ID);
@@ -396,5 +416,119 @@ describe("the IAM statements the check prints for the renewal's grants", () => {
     expect(REQUALIFY_INFRA.context["agentx:autoRequalify"]).toBe("enabled");
     expect(REQUALIFY_INFRA.logicalIdPrefix).toBe("RuntimeRequalify");
     expect(REQUALIFY_LAMBDA.logicalId.startsWith(REQUALIFY_INFRA.logicalIdPrefix)).toBe(true);
+  });
+});
+
+describe("the requalify-schedule unit (AR-5 review I1)", () => {
+  it("enables the daily check with a change set that may touch only the schedule's State, after the ready check, and verifies it", () => {
+    const steps = plan(["requalify-schedule"], true);
+    expect(steps.map((step) => step.kind)).toEqual(["check-requalify-ready", "create-change-set", "execute-change-set", "verify-requalify-schedule"]);
+    const changeSet = steps[1] as Extract<DeployStep, { kind: "create-change-set" }>;
+    expect(changeSet).toMatchObject({ stack: CONTROL_PLANE, template: { source: "enable-schedule" }, expect: { action: "Modify", logicalIds: [REQUALIFY_SCHEDULE_LOGICAL_ID], allowedAttributes: ["Properties.State"] } });
+    expect(steps[3]).toMatchObject({ kind: "verify-requalify-schedule", logicalId: REQUALIFY_SCHEDULE_LOGICAL_ID });
+    // The guard accepts the State change and nothing else.
+    const modify = (attributes: string[]): ObservedChange[] => [{ action: "Modify", logicalId: REQUALIFY_SCHEDULE_LOGICAL_ID, type: "AWS::Scheduler::Schedule", attributes, replacement: "False" }];
+    expect(() => assertOnlyExpectedChanges(modify(["Properties.State"]), changeSet.expect)).not.toThrow();
+    expect(() => assertOnlyExpectedChanges(modify(["Properties.State", "Properties.ScheduleExpression"]), changeSet.expect)).toThrow(/also changes Properties.ScheduleExpression/);
+    expect(() => assertOnlyExpectedChanges([...modify(["Properties.State"]), { action: "Modify", logicalId: "RuntimeRequalifyStepsAC5E645B", type: "AWS::Lambda::Function", attributes: ["Properties.Code"] }], changeSet.expect)).toThrow(/unexpected changes/);
+    expect(formatPlan(steps)).toContain(`${REQUALIFY_SCHEDULE_LOGICAL_ID} State set to ENABLED`);
+  });
+
+  it("runs alone and only where the renewal is installed", () => {
+    expect(() => plan(["requalify-schedule"], false)).toThrow(/deploy requalify-infra first/);
+    expect(() => plan(["requalify-schedule"])).toThrow(/deploy requalify-infra first/);
+    expect(() => plan(["requalify-schedule", "requalify-now"], true)).toThrow(/runs on its own/);
+    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "requalify-schedule"]).only).toEqual(["requalify-schedule"]);
+    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p"]).only).not.toContain("requalify-schedule");
+  });
+
+  it("sets the State of the schedule and nothing else, on a copy, and refuses a stack without the schedule", () => {
+    const template: CfnTemplate = { Resources: { [REQUALIFY_SCHEDULE_LOGICAL_ID]: { Type: "AWS::Scheduler::Schedule", Properties: { State: "DISABLED", ScheduleExpression: "cron(0 6 * * ? *)" } }, Other: { Type: "AWS::SNS::Topic" } } };
+    const enabled = enableScheduleTemplate(template);
+    expect(enabled.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID]?.Properties).toEqual({ State: "ENABLED", ScheduleExpression: "cron(0 6 * * ? *)" });
+    expect(enabled.Resources?.Other).toEqual(template.Resources?.Other);
+    expect(template.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID]?.Properties?.State).toBe("DISABLED");
+    expect(() => enableScheduleTemplate({ Resources: {} })).toThrow(/deploy requalify-infra first/);
+    expect(() => enableScheduleTemplate({ Resources: { [REQUALIFY_SCHEDULE_LOGICAL_ID]: { Type: "AWS::SNS::Topic" } } })).toThrow(/deploy requalify-infra first/);
+  });
+
+  it("names the owner's order: stack update, control-plane-code, requalify-infra, tags, requalify-now, then the schedule", () => {
+    const at = (needle: string) => REQUALIFY_DEPLOY_ORDER.indexOf(needle);
+    const order = ["Tier 3", "control-plane-code", "requalify-infra", "agentx:requalify-managed=true", "requalify-now", "requalify-schedule"].map(at);
+    expect(order.every((position) => position >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(REQUALIFY_DEPLOY_ORDER).toContain("DISABLED");
+  });
+});
+
+describe("readiness before a renewal starts", () => {
+  const TAGS = { DeploymentMode: "e2e-qualification", Environment: ENV, "agentx:requalify-managed": "true" };
+  const ready = { state: "read", instanceId: "i-0fcff78d50c71bc57", instanceState: "running", instanceTags: TAGS, volumes: [{ volumeId: "vol-02fd92eeeb0b1b1d4", tags: TAGS }] } as const;
+  const finding = (kind: Finding["kind"], severity: Finding["severity"] = "error"): Finding => ({ kind, severity, subject: "X", label: "Broker", message: "m" });
+
+  it("is ready with current code, a running tagged runner and a tagged workspace volume", () => {
+    expect(readinessProblems([], ready, ENV)).toEqual([]);
+    expect(readinessProblems([finding("catalog-expiring", "warning"), finding("requalify-last-run", "info")], ready, ENV)).toEqual([]);
+  });
+
+  it("refuses on a stale Lambda, a missing grant or a missing environment variable, each in its own words", () => {
+    expect(readinessProblems([finding("stale-lambda")], ready, ENV)).toEqual(["control-plane-code is not current: stale-lambda Broker"]);
+    expect(readinessProblems([finding("iam-missing-grant")], ready, ENV)).toEqual(["the control-plane stack is not current: iam-missing-grant Broker"]);
+    expect(readinessProblems([finding("lambda-env-missing")], ready, ENV)).toEqual(["the control-plane stack is not current: lambda-env-missing Broker"]);
+  });
+
+  it("refuses a runner or a volume missing any one of the three tags, or the wrong environment", () => {
+    for (const key of Object.keys(TAGS)) {
+      const without = Object.fromEntries(Object.entries(TAGS).filter(([name]) => name !== key));
+      expect(readinessProblems([], { ...ready, instanceTags: without }, ENV)[0], key).toContain(`runner ${ready.instanceId} lacks the tags`);
+      expect(readinessProblems([], { ...ready, volumes: [{ volumeId: "vol-02fd92eeeb0b1b1d4", tags: without }] }, ENV)[0], key).toContain("workspace volume vol-02fd92eeeb0b1b1d4");
+    }
+    expect(readinessProblems([], { ...ready, instanceTags: { ...TAGS, Environment: "other" } }, ENV)[0]).toContain(`Environment=${ENV}`);
+    expect(readinessProblems([], { ...ready, instanceState: "stopped" }, ENV)).toEqual([`the current runner ${ready.instanceId} is stopped, not running`]);
+    expect(readinessProblems([], { ...ready, volumes: [] }, ENV)[0]).toContain("no separate workspace volume");
+  });
+
+  it("is never ready when the runner cannot be read, and still reports the stale code beside it", () => {
+    expect(readinessProblems([finding("stale-lambda")], { state: "unknown", reason: "no runner pointer is recorded" }, ENV))
+      .toEqual(["control-plane-code is not current: stale-lambda Broker", "the current runner cannot be checked for its tags: no runner pointer is recorded"]);
+  });
+
+  describe("readRunnerTags", () => {
+    const POINTER = "E2E_MODEL_ROUTES|E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1";
+    const reader = (answers: { instance?: unknown; volumes?: unknown; pointer?: Row | "DENIED" | undefined }): { reader: RequalifyReader; calls: string[][] } => {
+      const inner = fakeReader(answers.pointer === undefined ? {} : { [POINTER]: answers.pointer });
+      const calls: string[][] = [];
+      return {
+        calls,
+        reader: {
+          aws(args, allowFailure) {
+            calls.push([...args]);
+            if (args[0] === "ec2" && args[1] === "describe-instances") return answers.instance === undefined ? { status: 254, stdout: "", stderr: "denied" } : { status: 0, stdout: JSON.stringify(answers.instance), stderr: "" };
+            if (args[0] === "ec2" && args[1] === "describe-volumes") return answers.volumes === undefined ? { status: 254, stdout: "", stderr: "denied" } : { status: 0, stdout: JSON.stringify(answers.volumes), stderr: "" };
+            return inner.reader.aws(args, allowFailure);
+          },
+        },
+      };
+    };
+    const tagList = (tags: Record<string, string>) => Object.entries(tags).map(([Key, Value]) => ({ Key, Value }));
+    const pointer = item({ pk: "E2E_MODEL_ROUTES", sk: "E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1", instanceId: "i-0fcff78d50c71bc57" });
+
+    it("reads the pointer's instance and the volumes that outlive it (not the root), with read-only calls", () => {
+      const { reader: r, calls } = reader({ pointer, instance: [{ state: "running", tags: tagList(TAGS) }], volumes: [{ id: "vol-root00000001", tags: null, root: true }, { id: "vol-02fd92eeeb0b1b1d4", tags: tagList(TAGS), root: false }] });
+      expect(readRunnerTags(r, input)).toEqual({ state: "read", instanceId: "i-0fcff78d50c71bc57", instanceState: "running", instanceTags: TAGS, volumes: [{ volumeId: "vol-02fd92eeeb0b1b1d4", tags: TAGS }] });
+      expect(calls.map((call) => `${call[0]} ${call[1]}`)).toEqual(["dynamodb query", "ec2 describe-instances", "ec2 describe-volumes"]);
+      expect(calls[1]).toContain("i-0fcff78d50c71bc57");
+      expect(calls[2]).toContain("Name=attachment.instance-id,Values=i-0fcff78d50c71bc57");
+    });
+
+    it("is unknown, never ready, on every read that fails or answers something else", () => {
+      const ok = { instance: [{ state: "running", tags: [] }], volumes: [] };
+      expect(readRunnerTags(reader({ ...ok }).reader, input)).toMatchObject({ state: "unknown", reason: "no runner pointer is recorded" });
+      expect(readRunnerTags(reader({ ...ok, pointer: "DENIED" }).reader, input)).toMatchObject({ state: "unknown" });
+      expect(readRunnerTags(reader({ ...ok, pointer: item({ pk: "E2E_MODEL_ROUTES", sk: "x" }) }).reader, input)).toEqual({ state: "unknown", reason: "the runner pointer names no instance" });
+      expect(readRunnerTags(reader({ pointer, volumes: [] }).reader, input)).toMatchObject({ state: "unknown", reason: expect.any(String) as string });
+      expect(readRunnerTags(reader({ pointer, instance: [], volumes: [] }).reader, input)).toMatchObject({ state: "unknown" });
+      expect(readRunnerTags(reader({ pointer, instance: [{ state: "running", tags: [] }] }).reader, input)).toMatchObject({ state: "unknown" });
+    });
   });
 });

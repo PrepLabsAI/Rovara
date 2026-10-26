@@ -33,7 +33,7 @@ describe("the renew command and the expiry notice", () => {
     expect(notice(at(-5))).toMatchObject({ severity: "error", problem: `the web runtime expired at ${at(-5)}, so browser and API checks cannot run` });
     expect(notice("not a date")).toMatchObject({ severity: "error" });
     expect(notice(at(30))).toMatchObject({ problem: `the web runtime expires at ${at(30)}, in 30.0 hours, and browser and API checks stop then`, renewCommand: RENEW,
-      message: `the web runtime expires at ${at(30)}, in 30.0 hours, and browser and API checks stop then; renew it with: ${RENEW}. ${E2E_RUNTIME_AUTO_RENEWAL_NOTE}` });
+      message: `the web runtime expires at ${at(30)}, in 30.0 hours, and browser and API checks stop then; renew it with: ${RENEW}` });
   });
 
   it("names the owner's start command for the automatic renewal, and explains that a notice on an installation with it means the renewal did not succeed (AR-5)", () => {
@@ -41,11 +41,13 @@ describe("the renew command and the expiry notice", () => {
       .toBe("npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only requalify-now --apply");
     expect(E2E_RUNTIME_AUTO_RENEWAL_NOTE).toMatch(/72 hours/);
     expect(E2E_RUNTIME_AUTO_RENEWAL_NOTE).toMatch(/did not succeed/);
-    // The note is part of the message only: the doctor shows the problem and the command on their own lines.
-    const notice = e2eRuntimeExpiryNotice({ subject: "the web runtime", expiresAt: at(30), now: NOW, renewCommand: RENEW })!;
-    expect(notice.message.endsWith(E2E_RUNTIME_AUTO_RENEWAL_NOTE)).toBe(true);
-    expect(notice.problem).not.toContain(E2E_RUNTIME_AUTO_RENEWAL_NOTE);
-    expect(notice.renewCommand).toBe(RENEW);
+    // The note is added only by a caller that knows the renewal is installed (the TEST deploy check): the public doctor and installations without it never see it.
+    const plain = e2eRuntimeExpiryNotice({ subject: "the web runtime", expiresAt: at(30), now: NOW, renewCommand: RENEW })!;
+    expect(plain.message).not.toContain("RuntimeRequalify");
+    const noted = e2eRuntimeExpiryNotice({ subject: "the web runtime", expiresAt: at(30), now: NOW, renewCommand: RENEW, note: E2E_RUNTIME_AUTO_RENEWAL_NOTE })!;
+    expect(noted.message).toBe(`${plain.message}. ${E2E_RUNTIME_AUTO_RENEWAL_NOTE}`);
+    expect(noted.problem).toBe(plain.problem);
+    expect(noted.renewCommand).toBe(RENEW);
   });
 });
 

@@ -24,8 +24,8 @@ export function e2eRuntimeRenewCommand(input: { env: string; profile: string }):
 export function e2eRuntimeRequalifyNowCommand(input: { env: string; profile: string }): string {
   return `npx tsx scripts/test-deploy.ts --env ${input.env} --profile ${input.profile} --only requalify-now --apply`;
 }
-/** Added to the full message of a notice: where the automatic renewal is on, a notice means it did not get through. */
-export const E2E_RUNTIME_AUTO_RENEWAL_NOTE = "Where the automatic renewal is installed it starts 72 hours before expiry, so this notice there means the renewal did not succeed: check the RuntimeRequalify alarms and the last renewal in the TEST deploy check.";
+/** Added to the full message by a caller that knows the automatic renewal is installed (the TEST deploy check); nobody else names its alarms. */
+export const E2E_RUNTIME_AUTO_RENEWAL_NOTE = "The automatic renewal is installed here and starts 72 hours before expiry, so this notice means it did not succeed: check the RuntimeRequalify alarms and the last renewal in this check.";
 /** The same command with the two values this caller cannot know left for the reader to fill in. */
 export const E2E_RUNTIME_GENERIC_RENEW_COMMAND = e2eRuntimeRenewCommand({ env: "<env>", profile: "<aws-profile>" });
 
@@ -37,9 +37,9 @@ export type E2ERuntimeExpiryNotice = { severity: "error" | "warning"; problem: s
  * `the web runtime`). Already expired and under 24 hours are `error` (the TEST deploy check fails on them; `agentx doctor` shows every notice as a warning); under 48 hours is `warning`.
  * An expiry that cannot be read is an error, never silence.
  */
-export function e2eRuntimeExpiryNotice(input: { subject: string; expiresAt: string; now: number; renewCommand?: string | undefined }): E2ERuntimeExpiryNotice | undefined {
+export function e2eRuntimeExpiryNotice(input: { subject: string; expiresAt: string; now: number; renewCommand?: string | undefined; note?: string | undefined }): E2ERuntimeExpiryNotice | undefined {
   const renewCommand = input.renewCommand ?? E2E_RUNTIME_GENERIC_RENEW_COMMAND;
-  const notice = (severity: "error" | "warning", problem: string): E2ERuntimeExpiryNotice => ({ severity, problem, renewCommand, message: `${problem}; renew it with: ${renewCommand}. ${E2E_RUNTIME_AUTO_RENEWAL_NOTE}` });
+  const notice = (severity: "error" | "warning", problem: string): E2ERuntimeExpiryNotice => ({ severity, problem, renewCommand, message: `${problem}; renew it with: ${renewCommand}${input.note === undefined ? "" : `. ${input.note}`}` });
   const expiry = Date.parse(input.expiresAt);
   if (Number.isNaN(expiry)) return notice("error", `${input.subject} has an unreadable expiry ${input.expiresAt}`);
   const left = expiry - input.now;

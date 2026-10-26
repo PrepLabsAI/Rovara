@@ -5,6 +5,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { REQUALIFY_LOGICAL_ID_PREFIX, requalifyDefinition } from "../../infra/lib/runtime-requalify.js";
+import { REQUALIFY_SCHEDULE_LOGICAL_ID } from "../../scripts/test-deploy-requalify.js";
 import { checkLambdaBundles } from "../../scripts/lambda-load-check.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -141,6 +142,22 @@ describe("the renewal's infrastructure", () => {
     expect(stale?.Properties).toMatchObject({ EvaluationPeriods: 6, Period: 86400, ComparisonOperator: "LessThanThreshold", Threshold: 1, TreatMissingData: "breaching" });
     // The Lambda may start only the renewal machine.
     expect(JSON.stringify(withAction("states:StartExecution")[0]!.Resource)).toContain("-runtime-requalify");
+  });
+});
+
+describe("the daily schedule is created disabled (AR-5 review I1)", () => {
+  const schedulesOf = (resources: Record<string, Resource>) => Object.entries(resources).filter(([, resource]) => resource.Type === "AWS::Scheduler::Schedule" && JSON.stringify(resource).includes("RuntimeRequalify"));
+
+  it("so no renewal can start just because the infrastructure exists; only the explicit context (set by the requalify-schedule unit's CDK equivalent) enables it", () => {
+    const disabled = schedulesOf(controlPlane({ "agentx:autoRequalify": "enabled" }));
+    expect(disabled).toHaveLength(1);
+    expect(disabled[0]![1].Properties["State"]).toBe("DISABLED");
+    // Only the exact string turns the schedule on, as for the renewal itself.
+    expect(schedulesOf(controlPlane({ "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": true }))[0]![1].Properties["State"]).toBe("DISABLED");
+    const enabled = schedulesOf(controlPlane({ "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": "enabled" }));
+    expect(enabled[0]![1].Properties["State"]).toBe("ENABLED");
+    // The schedule's logical ID is the one the requalify-schedule unit changes.
+    expect(disabled[0]![0]).toBe(REQUALIFY_SCHEDULE_LOGICAL_ID);
   });
 });
 

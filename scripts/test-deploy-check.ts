@@ -8,7 +8,7 @@
 // instance role, or Anthropic, OpenAI or OpenRouter through the provider key's Secrets Manager ARN. Nothing here calls a model, and
 // nothing reads a secret: a key's validity and a customer-managed KMS key are reported as unverifiable (owner decision O6).
 import { E2E_AGENT_BEDROCK_QUOTA_CODES, E2E_AGENT_RECOMMENDED_MODELS, eligibleE2EAgentModel } from "../packages/contracts/src/e2e-agent-models.js";
-import { E2E_RUNTIME_GENERIC_RENEW_COMMAND, e2eRuntimeExpiryNotice } from "../packages/contracts/src/e2e-runtime-expiry.js";
+import { E2E_RUNTIME_AUTO_RENEWAL_NOTE, E2E_RUNTIME_GENERIC_RENEW_COMMAND, e2eRuntimeExpiryNotice } from "../packages/contracts/src/e2e-runtime-expiry.js";
 import { KEYED_MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN, isKeyedModelProvider, type KeyedModelProvider, type ModelProvider } from "../packages/contracts/src/model-providers.js";
 import { WORKER_INVOCATION_FEATURES } from "../packages/contracts/src/protocol.js";
 import { listPricesPerMillion } from "../packages/model-runtime/src/catalog.js";
@@ -277,7 +277,7 @@ export function evaluateTestDeployCheck(input: CheckInput): CheckResult {
     ...staleLambdas(input),
     ...evaluateIamDrift(input.headTemplate, input.deployedTemplate),
     ...evaluateEnvironmentDrift(input.headTemplate, input.deployedTemplate),
-    ...catalogFindings(input.catalogRows, input.now, input.renewCommand),
+    ...catalogFindings(input.catalogRows, input.now, input.renewCommand, input.requalify?.state === "installed" ? E2E_RUNTIME_AUTO_RENEWAL_NOTE : undefined),
     ...runnerFindings(input.runnerFacts, input.renewCommand),
     ...runnerRestartFindings(input.runnerFacts, input.catalogRows, input.renewCommand),
     ...(input.modelRoute === undefined ? [] : routeFindings(input.modelRoute)),
@@ -624,7 +624,7 @@ export function lambdaRoleIds(template: CheckTemplate): Record<string, string> {
 // Catalog and runner
 // ---------------------------------------------------------------------------------------------
 
-function catalogFindings(rows: readonly CatalogRowFact[], now: Date, renewCommand?: string): Finding[] {
+function catalogFindings(rows: readonly CatalogRowFact[], now: Date, renewCommand?: string, note?: string): Finding[] {
   const findings: Finding[] = [];
   for (const kind of CATALOG_KINDS) {
     const kindRows = rows.filter((row) => row.sk.endsWith(`#${kind}`));
@@ -638,7 +638,7 @@ function catalogFindings(rows: readonly CatalogRowFact[], now: Date, renewComman
         continue;
       }
       // Within 24 hours (or already expired, or unreadable) it fails the check; within 48 hours it warns (RUN-3). Either names the time and the command that renews it.
-      const notice = e2eRuntimeExpiryNotice({ subject: row.sk, expiresAt: row.expiresAt, now: now.getTime(), renewCommand });
+      const notice = e2eRuntimeExpiryNotice({ subject: row.sk, expiresAt: row.expiresAt, now: now.getTime(), renewCommand, note });
       if (notice === undefined) continue;
       const unreadable = Number.isNaN(Date.parse(row.expiresAt));
       findings.push({ kind: unreadable ? "catalog-not-ready" : "catalog-expiring", severity: notice.severity, subject: row.sk, label: kind, message: notice.message });

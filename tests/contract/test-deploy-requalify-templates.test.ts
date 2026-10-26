@@ -9,7 +9,7 @@ import {
   CONTROL_PLANE_LAMBDAS, assertCheckAllowsApply, assertOnlyExpectedChanges, liftResources, patchLiftedCode, plannedRequalifyGrants, type CfnTemplate, type ObservedChange,
 } from "../../scripts/test-deploy.js";
 import { evaluateIamDrift, tier3Request } from "../../scripts/test-deploy-check.js";
-import { REQUALIFY_INFRA, REQUALIFY_LAMBDA } from "../../scripts/test-deploy-requalify.js";
+import { REQUALIFY_INFRA, REQUALIFY_LAMBDA, REQUALIFY_SCHEDULE_LOGICAL_ID, enableScheduleTemplate } from "../../scripts/test-deploy-requalify.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
@@ -59,6 +59,19 @@ describe("the renewal's deploy units against the synthesized control-plane stack
     expect(() => assertOnlyExpectedChanges(observed, { action: "Add", logicalIdPrefixes: [REQUALIFY_INFRA.logicalIdPrefix] })).not.toThrow();
     // A change set that also changed an existing resource is refused: the guard is Add-only.
     expect(() => assertOnlyExpectedChanges([...observed, { action: "Modify", logicalId: CONTROL_PLANE_LAMBDAS.broker.logicalId, type: "AWS::Lambda::Function", attributes: ["Properties.Code"] }], { action: "Add", logicalIdPrefixes: [REQUALIFY_INFRA.logicalIdPrefix] })).toThrow(/unexpected changes/);
+  });
+
+  it("lifts the daily schedule DISABLED, and the requalify-schedule change differs from the deployed stack in its State alone (AR-5 review I1)", () => {
+    const lifted = liftResources(deployed, head, REQUALIFY_INFRA.logicalIdPrefix);
+    expect(lifted.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID]?.Type).toBe("AWS::Scheduler::Schedule");
+    expect(lifted.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID]?.Properties?.State).toBe("DISABLED");
+    const enabled = enableScheduleTemplate(lifted);
+    for (const id of Object.keys(lifted.Resources ?? {})) {
+      if (id === REQUALIFY_SCHEDULE_LOGICAL_ID) continue;
+      expect(JSON.stringify(enabled.Resources?.[id]), id).toBe(JSON.stringify(lifted.Resources?.[id]));
+    }
+    expect({ ...enabled.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID]?.Properties, State: "DISABLED" }).toEqual(lifted.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID]?.Properties);
+    expect(enabled.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID]?.Properties?.State).toBe("ENABLED");
   });
 
   it("runs the uploaded zip in the lifted Lambda instead of the CDK asset nobody published", () => {

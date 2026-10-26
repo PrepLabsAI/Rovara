@@ -1050,6 +1050,7 @@ export class ControlPlaneStack extends Stack {
           workspaceKmsKeyArn: foundationValue("WorkspaceKmsKeyArn"), logGroupName: naming.ec2.workerLogGroupName,
         },
         ...(Number.isInteger(hour) && hour >= 0 && hour <= 23 ? { checkHourUtc: hour } : {}),
+        scheduleEnabled: this.node.tryGetContext("agentx:autoRequalifySchedule") === "enabled",
       });
     }
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
