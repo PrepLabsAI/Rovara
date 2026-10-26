@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PLAN_DRY_RUN_CLASSES, PlanQualityFindingSchema, type PlanDryRunClass, type PlanQualityFinding } from "@agentx/contracts";
 import type { PlanDryRunOutcome } from "./plan-dry-run-results.js";
+import { notTriedOf, type PlanNotTriedClass } from "./plan-check-tried.js";
 import { planDryRunWarnings } from "./plan-dry-run-results.js";
 import type { PlanQualityContext } from "./plan-quality.js";
 
@@ -69,14 +70,16 @@ export const NOT_CHECKED_SENTENCE = "Not checked by AgentX's plan check.";
 export interface PlanSelfCheckView {
   checked: boolean;
   sentences: string[];
-  /** Only the classes that say something about the check on the unchanged code; `not-run` and `not-checked` are left out. */
+  /** Only the classes that say something about the check's result on the unchanged code; `not-run` and `not-checked` are in `notTried`. */
   tried: Readonly<Record<string, Extract<PlanDryRunClass, "passed" | "failed" | "broken">>>;
+  /** The checks the dry run did not try, with the fixed class (`not-checked`: needs tools the sandbox does not run; `not-run`: out of time or could not start). */
+  notTried: Readonly<Record<string, PlanNotTriedClass>>;
 }
 
 /** For a document the plan check never judges (requirements, a design): nothing to say, and not "not checked". */
-export const SELF_CHECK_NOT_APPLICABLE: PlanSelfCheckView = Object.freeze({ checked: true, sentences: [], tried: Object.freeze({}) });
+export const SELF_CHECK_NOT_APPLICABLE: PlanSelfCheckView = Object.freeze({ checked: true, sentences: [], tried: Object.freeze({}), notTried: Object.freeze({}) });
 
-const NOT_CHECKED_VIEW = (): PlanSelfCheckView => ({ checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {} });
+const NOT_CHECKED_VIEW = (): PlanSelfCheckView => ({ checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {}, notTried: {} });
 /** The most a record may be: well over any real one (64 findings of a few hundred characters). */
 const SELF_CHECK_RECORD_MAX_CHARS = 64 * 1024;
 
@@ -95,6 +98,7 @@ export function readPlanSelfCheck(raw: string | undefined, artifactSha256: strin
   return {
     checked: true, sentences: [...new Set(sentences)],
     tried: Object.fromEntries((tried ?? []).flatMap((entry) => (entry.class === "passed" || entry.class === "failed" || entry.class === "broken" ? [[entry.checkId, entry.class] as const] : []))),
+    notTried: notTriedOf(tried ?? []),
   };
 }
 

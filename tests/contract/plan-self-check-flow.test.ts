@@ -7,6 +7,7 @@ import { planDocumentInstructions, withoutPlanQualityText, asksForPlanQuality } 
 import {
   PLAN_AUTO_REVISIONS_MAX, PlanSelfCheckRecordSchema, autoRevisableFindings, planRevisionPrompt, planRevisionsUsed,
 } from "../../packages/broker/src/developer/plan-self-check.js";
+import { planQualityFindings } from "../../packages/broker/src/developer/plan-quality.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { createPlanQualityNegotiationRecorder } from "../../packages/broker/src/aws/dispatcher.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
@@ -498,5 +499,20 @@ describe("the plan quality guidance in the planner's prompt", () => {
       for (const word of ["scenarioProves", "expectOnBase", "file-contains"]) expect(stripped).not.toContain(word);
     }
     for (const kind of ["requirements", "design"] as const) expect(asksForPlanQuality(planDocumentInstructions({ kind, path: "FULL", planQuality: true }))).toBe(false);
+  });
+
+  it("DRYMSG: asks for an expectOnBase on every proposed check, but a plan without one is never a finding", () => {
+    for (const path of ["QUICK", "FULL"] as const) {
+      const text = planDocumentInstructions({ kind: "plan", path, planQuality: true });
+      expect(text, path).toContain("Give every proposed check an `expectOnBase`");
+      expect(text, path).not.toContain("may predict");
+      expect(text, path).not.toContain("if you like");
+    }
+    const check = { id: "proposed-1", label: "Retry is wired", command: { cwd: "repo/demo", executable: "grep", args: ["retry", "src/pay.ts"], timeoutSeconds: 60 } };
+    const withExpectation = planDocument({ checks: { proposed: [check], proves: { "proposed-1": ["1"] }, expectOnBase: { "proposed-1": "fail" } } });
+    const without = planDocument({ checks: { proposed: [check], proves: { "proposed-1": ["1"] } } });
+    const findings = planQualityFindings(without, { kind: "plan" });
+    expect(findings).toEqual(planQualityFindings(withExpectation, { kind: "plan" }));
+    expect(findings.filter((finding) => finding.checkIds?.includes("proposed-1"))).toEqual([]);
   });
 });

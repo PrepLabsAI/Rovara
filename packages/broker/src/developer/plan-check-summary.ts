@@ -1,5 +1,6 @@
 import { builtinFileCheckOf, canonicalJson, notChangingReference, redactText, type PlanDocument, type PlanQualityFinding } from "@agentx/contracts";
 import { NOT_CHECKED_SENTENCE, type PlanSelfCheckView } from "./plan-self-check.js";
+import { NOT_TRIED_SENTENCES, NO_EXPECTATION_SUFFIX } from "./plan-check-tried.js";
 
 /**
  * PLANVIEW: what a coding plan's checks say, in plain words, from structured fields only. Pure: the Slack card, the task
@@ -159,7 +160,7 @@ const DIRECTION_WORDS = { fail: "should fail now and pass after the change", pas
 function triedText(outcome: "passed" | "failed" | "broken", expected: "pass" | "fail" | undefined): string {
   if (outcome === "broken") return "tried on current code: could not run";
   const word = outcome === "passed" ? "passed" : "failed";
-  if (expected === undefined) return `tried on current code: ${word}`;
+  if (expected === undefined) return `tried on current code: ${word}${NO_EXPECTATION_SUFFIX}`;
   return (outcome === "passed") === (expected === "pass") ? `tried on current code: ${word} as expected` : `tried on current code: ${word}, not as expected`;
 }
 
@@ -226,7 +227,8 @@ function checkSummary(plan: PlanDocument, input: PlanCheckSummaryInput, limits: 
   const proves = (plan.checks?.proves[check.id] ?? []).map(provedName);
   const outcome = input.triedOnCurrentCode?.[check.id] ?? input.selfCheck?.tried[check.id];
   const expectedOnBase = plan.checks?.expectOnBase?.[check.id];
-  const tried = outcome === undefined ? undefined : triedText(outcome, expectedOnBase);
+  const notTried = outcome === undefined ? input.selfCheck?.notTried[check.id] : undefined;
+  const tried = outcome !== undefined ? triedText(outcome, expectedOnBase) : notTried === undefined ? undefined : NOT_TRIED_SENTENCES[notTried];
   const direction = expectedOnBase === undefined ? undefined : DIRECTION_WORDS[expectedOnBase];
   const label = plain(check.label, 80);
   return {
