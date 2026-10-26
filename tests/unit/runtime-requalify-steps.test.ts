@@ -94,7 +94,10 @@ describe("a successful renewal", () => {
     expect(cloud.instances.get(old.id)?.state).toBe("terminated");
     expect(cloud.deleted).toEqual([oldVolume]);
     expect(survivingRunnerVolumes(runId)).toHaveLength(1);
-    expect(cloud.ssm.get(`/agentx/${ENV}/worker-qualified-ami`)).toBe("ami-0abcdef1234567890");
+    // The pin task workers boot from (AR-4 reads exactly this name): the AMI the new runner was launched with, in the shape AR-4 accepts.
+    const pin = cloud.ssm.get(`/agentx/${ENV}/worker-qualified-ami`);
+    expect(pin).toBe(cloud.instances.get(fresh!)?.imageId);
+    expect(pin).toMatch(/^ami-[0-9a-f]{8,17}$/);
     expect(cloud.metrics).toEqual(["RequalifySucceeded"]);
     expect(cloud.sns).toEqual([]);
     expect(cloud.lock()).toBeUndefined();
@@ -110,6 +113,13 @@ describe("a successful renewal", () => {
     expect(cloud.secretWrites).toBe(1);
     expect(JSON.stringify([run.payloads, run.results, run.state, run.trace, cloud.sns])).not.toContain(SECRET);
     expect([...cloud.s3.values()].some((bytes) => bytes.includes(SECRET))).toBe(false);
+  });
+
+  it("does not write the pin when the renewal fails before the switch, so task workers keep the AMI they have", async () => {
+    oldInstallation();
+    cloud.ssm.set(`/agentx/${ENV}/worker-qualified-ami`, "ami-0123456789abcdef0");
+    await renew(randomUUID(), { failAction: "awaitQualification" });
+    expect(cloud.ssm.get(`/agentx/${ENV}/worker-qualified-ami`)).toBe("ami-0123456789abcdef0");
   });
 
   it("launches the first runner when nothing is registered yet (no old runner to retire)", async () => {

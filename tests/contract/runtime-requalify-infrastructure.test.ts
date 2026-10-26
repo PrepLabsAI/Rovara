@@ -103,7 +103,9 @@ describe("the renewal's infrastructure", () => {
     // SSM: reads the AMI and the worker settings, writes exactly one setting, and never with decryption.
     const put = withAction("ssm:PutParameter");
     expect(put).toHaveLength(1);
-    expect(JSON.stringify(put[0]!.Resource)).toContain("worker-qualified-ami");
+    // Exactly the one parameter AR-4's provisioner and reconciler read: <worker settings prefix>worker-qualified-ami.
+    expect(JSON.stringify(put[0]!.Resource)).toContain(`parameter/agentx/${ENV}/worker-qualified-ami`);
+    expect([put[0]!.Resource].flat()).toHaveLength(1);
     expect(all).not.toContain("ssm:GetParameterHistory");
   });
 
