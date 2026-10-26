@@ -2603,14 +2603,37 @@ async function loadCommittedSourceRecovery(
 }
 
 /** The owner-approved coding plan, read back and checked against the digest the approval recorded. */
-async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ text: string; sha256: string; e2eIntent?: WorkflowFeatureE2EIntent }> {
+async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ text: string; sha256: string; e2eIntent?: WorkflowFeatureE2EIntent; notChanging?: string[] }> {
   const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
   if (plan === undefined) throw agentXError("WORKSPACE_NOT_READY", "the approved coding plan is missing");
   // A structured plan is given as its Markdown copy, with the owner's answers and the comments they sent with the approval.
   const loaded = await loadWorkflowDocument((objectKey, maxBytes) => deps.actions.readArtifact(objectKey, maxBytes), plan, { answers: await ownerAnswersFor(deps, workflow, plan) });
   if (loaded === undefined) throw agentXError("WORKSPACE_NOT_READY", "the approved coding plan failed its digest check");
   return { text: loaded.markdown, sha256: plan.sha256,
-    ...(loaded.format === "structured" && loaded.plan.e2e !== undefined ? { e2eIntent: loaded.plan.e2e } : {}) };
+    ...(loaded.format === "structured" && loaded.plan.e2e !== undefined ? { e2eIntent: loaded.plan.e2e } : {}),
+    ...(loaded.format === "structured" ? { notChanging: loaded.plan.notChanging } : {}) };
+}
+
+/** How many of the owner's plan-review instructions a coding prompt repeats (the newest): each is at most 500 characters. */
+const OWNER_PLAN_INSTRUCTIONS_MAX = 5;
+
+/**
+ * What every later round of the coder must keep to, whoever sent the work back (the owner's Send back, a finding to fix, a restart, or Rovara by itself): the owner's own instructions from
+ * plan review (their Request changes reasons) and the approved plan's Not changing list. A fix prompted only by "the app stopped" cannot then undo what the owner told the planner, as
+ * the live test showed (the owner said not to change package.json; the coder's fix changed it). The owner's words stand outside the untrusted problem tags, as the owner's note does.
+ * Empty when there is nothing to carry.
+ */
+function ownerConstraintsSection(workflow: WorkflowSnapshot, plan: { notChanging?: string[] }): string {
+  const instructions = workflow.decisions
+    .filter((decision) => decision.decision === "REQUEST_CHANGES" && decision.actorRole !== "AGENTX" && (decision.source === undefined || decision.source === "GATE"))
+    .slice(-OWNER_PLAN_INSTRUCTIONS_MAX).map((decision) => decision.reason);
+  // A plan with nothing that stays as it is says "None".
+  const staying = (plan.notChanging ?? []).filter((entry) => entry.trim().toLowerCase() !== "none");
+  const lines = [
+    ...(instructions.length === 0 ? [] : ["The owner's instructions from plan review (the owner's own words). They still hold: this change must not undo them.", ...instructions.map((reason, index) => `${index + 1}. ${reason}`)]),
+    ...(staying.length === 0 ? [] : [...(instructions.length === 0 ? [] : [""]), "The approved plan says these stay as they are (Not changing). Do not change them:", ...staying.map((entry) => `- ${entry}`)]),
+  ];
+  return lines.length === 0 ? "" : `\n\n${lines.join("\n")}`;
 }
 
 /** Reload the exact whole-plan artifact bound by the Owner so a retry cannot fall back to plain coding. */
@@ -2768,7 +2791,7 @@ async function retryWorkflowImplementation(
   const { blockReason: _blockReason, ...unblocked } = workflow;
   void _blockReason;
   const next: WorkflowSnapshot = { ...unblocked, revision: workflow.revision + 1, state: "RUNNING", updatedAt: iso(deps) };
-  const prompt = (notes: string) => `Implement the human-approved plan below. The previous coding run stopped before it finished; continue from the current code. Follow its ordered steps, run the listed checks, and report results and limitations. ${NO_PUBLISH_NOTE}\n\nOwner note: ${request.instructions}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
+  const prompt = (notes: string) => `Implement the human-approved plan below. The previous coding run stopped before it finished; continue from the current code. Follow its ordered steps, run the listed checks, and report results and limitations. ${NO_PUBLISH_NOTE}\n\nOwner note: ${request.instructions}${ownerConstraintsSection(workflow, plan)}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
   return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next,
     request: request.instructions, response: workflowDependencies === undefined ? "Restarting the coding step" : "Restarting the approved ordered work plan", ...(workflowDependencies === undefined ? {} : { workflowDependencies }) });
 }
@@ -2817,7 +2840,7 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
   };
   // The problems are reviewer and check output, marked untrusted; the owner's note stays outside, as the instruction.
   const problems = sendBackProblemsPromptSection(sendBackProblems(workflow, E2E_OWNER_SENTENCES.groupSentence), promptTagId(task, request.requestId));
-  const prompt = (notes: string) => `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nOwner note (the owner's own instructions for this step): ${request.instructions}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
+  const prompt = (notes: string) => `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nOwner note (the owner's own instructions for this step): ${request.instructions}${ownerConstraintsSection(workflow, plan)}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
   const next: WorkflowSnapshot = { ...returned, revision: returned.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next,
     request: request.instructions, response: workflowDependencies === undefined ? "AgentX sent the change back to coding" : "AgentX restarted the approved ordered work plan",
@@ -2874,7 +2897,7 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
       return note === "" ? [] : [`${index + 1}. ${note}`];
     });
     const ownerNotes = instructions.length === 0 ? "none beyond fixing the problems." : `\n${instructions.join("\n")}`;
-    const prompt = (notes: string) => `Address only the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nOwner instructions for these problems (the owner's own instructions for this step; the numbers follow the order the problems are listed in): ${ownerNotes}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
+    const prompt = (notes: string) => `Address only the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nOwner instructions for these problems (the owner's own instructions for this step; the numbers follow the order the problems are listed in): ${ownerNotes}${ownerConstraintsSection(workflow, plan)}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
     const running: WorkflowSnapshot = { ...next, revision: next.revision + 1, state: "RUNNING", updatedAt: receivedAt };
     return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next: running,
       request: `Fix ${toFix.length} review finding${toFix.length === 1 ? "" : "s"}`, response: workflowDependencies === undefined ? "AgentX sent the findings to fix back to coding" : "AgentX restarted the approved ordered work plan for the review findings",
@@ -3221,7 +3244,7 @@ export async function autoSendBackToCodingFromSystem(
   };
   // The problems are check and reviewer output, marked untrusted, as in the owner's Send back; there is no owner note, only Rovara's fixed one.
   const problems = sendBackProblemsPromptSection(sendBackProblems(workflow, E2E_OWNER_SENTENCES.groupSentence), promptTagId(task, requestId));
-  const prompt = (notes: string) => `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nNote (written by AgentX, which sent this back by itself): ${input.reason}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
+  const prompt = (notes: string) => `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nNote (written by AgentX, which sent this back by itself): ${input.reason}${ownerConstraintsSection(workflow, plan)}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
   const next: WorkflowSnapshot = { ...returned, revision: returned.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   await queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId, prompt, next,
     request: input.reason, response: workflowDependencies === undefined ? "AgentX sent the change back to coding by itself" : "AgentX restarted the approved ordered work plan by itself",
