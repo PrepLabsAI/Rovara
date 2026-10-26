@@ -220,7 +220,7 @@ import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeoplePropos
   submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
-import { isRuntimeRenewedBlock, requireRenewalOnlyReapproval } from "../e2e/requalify-hold.js";
+import { isRuntimeRenewedBlock, requalifyHoldFence, requireRenewalOnlyReapproval } from "../e2e/requalify-hold.js";
 import { AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
 import {
   commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
@@ -3347,6 +3347,7 @@ export async function startTaskWorkflowE2EChecksFromSystem(
       receivedAt, finishedAt: iso(deps), request: "Run admitted E2E verification", response: `Broker-admitted E2E CHECKS started as operation ${operation.id}.`, operationId: operation.id,
     })),
     ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+    requalifyHoldFence(deps.tableName, deps.now()), // AUTOREQUALIFY: no round starts once the test machine is being switched
   ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission,
     readiness: workflowSelectedChecks(workflow.checkPolicy).map((check) => check.command), ...taskBaseOption(task, next) });
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
@@ -3396,6 +3397,7 @@ export async function startTaskWorkflowE2EBaselineFromSystem(
     })),
     ...extra,
     ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+    requalifyHoldFence(deps.tableName, deps.now()), // AUTOREQUALIFY: no round starts once the test machine is being switched
   ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission, readiness: [] });
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
@@ -3445,6 +3447,7 @@ export async function startTaskWorkflowE2EGroundingFromSystem(
     })),
     ...extra,
     ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+    requalifyHoldFence(deps.tableName, deps.now()), // AUTOREQUALIFY: no round starts once the test machine is being switched
   ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission, readiness: [] });
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
@@ -3494,6 +3497,7 @@ export async function startTaskWorkflowE2EReplayFromSystem(
     })),
     ...extra,
     ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+    requalifyHoldFence(deps.tableName, deps.now()), // AUTOREQUALIFY: no round starts once the test machine is being switched
   ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission, readiness: [] });
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }

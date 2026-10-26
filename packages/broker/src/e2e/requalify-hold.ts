@@ -37,7 +37,27 @@ export async function requalifyHoldActive(store: RequalifyHoldStore, now: number
   const { pk: _pk, sk: _sk, ...fields } = response.Item;
   void _pk; void _sk;
   const hold = RequalifyHoldSchema.safeParse(fields);
-  return !hold.success || Date.parse(hold.data.until) > now;
+  if (hold.success) return Date.parse(hold.data.until) > now;
+  // Not a hold this code wrote (an extra attribute, a damaged time): still read as active, but never for ever. It ends at its own `until` if that is a time, else `acquiredAt` plus the
+  // longest a renewal may run; with neither, it stands and the log says so (a fixed event, no row contents).
+  const until = typeof fields.until === "string" ? Date.parse(fields.until) : Number.NaN;
+  const acquired = typeof fields.acquiredAt === "string" ? Date.parse(fields.acquiredAt) : Number.NaN;
+  const end = Number.isFinite(until) ? until : Number.isFinite(acquired) ? acquired + REQUALIFY_HOLD_MAX_MS : Number.NaN;
+  if (!Number.isFinite(end)) console.log(JSON.stringify({ component: "broker", event: "requalify.hold_unreadable" }));
+  return !Number.isFinite(end) || end > now;
+}
+
+/** The longest a renewal may run (its execution timeout): the bound of a hold row that cannot be read as one. */
+export const REQUALIFY_HOLD_MAX_MS = 3 * 3_600_000;
+
+/**
+ * The hold as a condition inside a round's or setup run's own start transaction (the item is a ConditionCheck on the HOLD row): the start commits only while no hold stands. A start that
+ * passed the earlier look just before the renewal placed its hold is refused here, so no round or setup run can begin on the old machine once the switch is in progress. A hold row that
+ * cannot be read as one fails the check too, until its `until` string sorts before now.
+ */
+export function requalifyHoldFence(tableName: string, now: number): Record<string, unknown> {
+  return { ConditionCheck: { TableName: tableName, Key: requalifyHoldKey(REQUALIFY_PROFILE_ID), ConditionExpression: "attribute_not_exists(pk) OR #until <= :now",
+    ExpressionAttributeNames: { "#until": "until" }, ExpressionAttributeValues: { ":now": new Date(now).toISOString() } } };
 }
 
 /** For an interactive start (a project setup): refuses while a switch is in progress, with a retryable error and a fixed sentence. */
@@ -131,6 +151,9 @@ export function isRenewalOnlyChange(recorded: E2EApplicationSelectionRecord, cur
   if (!applicationSelectionStillCurrent(recorded, { ...current, runtimeRows: recorded.runtimeRows }).ok) return false;
   const accounts = (selection: E2EApplicationSelectionRecord) => canonicalJson([...selection.accountRefs].sort((left, right) => `${left.applicationId}\0${left.profileId}`.localeCompare(`${right.applicationId}\0${right.profileId}`)));
   if (accounts(recorded) !== accounts(current)) return false;
+  // What the dispatch comparison leaves out: the criteria that wait. (The application plan and bundle digests are not compared: they are derived from the runtime rows and move with every
+  // renewal. The catalog revision is only allowed to grow for the same reason: every registration of a row writes the next one.)
+  if (canonicalJson(recorded.unavailableCriteria) !== canonicalJson(current.unavailableCriteria)) return false;
   const renewed = (row: SelectionRow, now: SelectionRow) => now.kind === row.kind && now.profileId === row.profileId && now.runtimeCatalogId === row.runtimeCatalogId
     && now.bindingDigest === row.bindingDigest && now.capabilityDigest === row.capabilityDigest && now.generation > row.generation && now.catalogRevision >= row.catalogRevision;
   let moved = false;

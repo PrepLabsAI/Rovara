@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   E2EApplicationSelectionRecordSchema, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, requalifyHoldKey as holdKeyOf, workflowApplicationRetryOffered,
@@ -6,7 +7,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import {
   ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock,
-  recycleDriftedWorker, replayPredatesRenewal, requalifyDrainCount, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
+  recycleDriftedWorker, replayPredatesRenewal, requalifyHoldFence, requalifyDrainCount, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
 } from "../../packages/broker/src/e2e/requalify-hold.js";
 import { E2E_REPLAY_REFUSALS } from "../../packages/contracts/src/index.js";
 import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
@@ -88,6 +89,38 @@ describe("the hold: new rounds and setup runs wait while a switch is in progress
     await assertNoRequalifyHold(t.store, NOW);
     putHold(t, NOW + 60_000);
     await expect(assertNoRequalifyHold(t.store, NOW)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${REQUALIFY_DEFERRED_MESSAGE}` });
+  });
+});
+
+describe("the hold as a condition inside a start's own transaction", () => {
+  const fence = (t: Table, now: number) => requalifyHoldFence("state", now).ConditionCheck as { Key: { pk: string; sk: string }; ConditionExpression: string; ExpressionAttributeValues: Record<string, string> };
+  it("names the HOLD row and passes only when it is absent or has ended", () => {
+    const check = fence(table(), NOW);
+    expect(check.Key).toEqual(requalifyHoldKey());
+    expect(check.ConditionExpression).toBe("attribute_not_exists(pk) OR #until <= :now");
+    expect(check.ExpressionAttributeValues[":now"]).toBe(iso(NOW));
+  });
+  it("is the item every start transaction carries: the four system starts of a CHECKS operation (checks, baseline, grounding, replay) and the setup run's admission", () => {
+    // The checks start is exercised end to end (contract test); the others share its shape, and a start without the item would let a round begin on the old machine.
+    expect(readFileSync("packages/broker/src/aws/developer-tasks.ts", "utf8").split("requalifyHoldFence(deps.tableName").length - 1).toBe(4);
+    expect(readFileSync("packages/broker/src/aws/broker.ts", "utf8")).toContain("requalifyHoldFence(dependencies.tableName, Date.now())] };");
+  });
+});
+
+describe("a hold row that is not exactly a hold", () => {
+  it("ends at its own `until`, or three hours after `acquiredAt`, rather than standing for ever; with neither it stands and is logged", async () => {
+    const t = table();
+    t.items.set(k(requalifyHoldKey()), { ...requalifyHoldKey(), entityType: "RUNTIME_REQUALIFY_HOLD", runId: RUN, acquiredAt: iso(NOW), until: iso(NOW + 60_000), extra: "x" });
+    expect(await requalifyHoldActive(t.store, NOW)).toBe(true);
+    expect(await requalifyHoldActive(t.store, NOW + 60_000)).toBe(false);
+    t.items.set(k(requalifyHoldKey()), { ...requalifyHoldKey(), runId: RUN, acquiredAt: iso(NOW), until: "tomorrow" });
+    expect(await requalifyHoldActive(t.store, NOW + 3 * 3_600_000 - 1)).toBe(true);
+    expect(await requalifyHoldActive(t.store, NOW + 3 * 3_600_000)).toBe(false);
+    t.items.set(k(requalifyHoldKey()), { ...requalifyHoldKey(), runId: RUN });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    expect(await requalifyHoldActive(t.store, NOW)).toBe(true);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("requalify.hold_unreadable"));
+    log.mockRestore();
   });
 });
 
@@ -188,6 +221,7 @@ describe("a renewal of the test machine is not any other change of the approved 
     ["the binding changed", () => selection({ runtimeRows: renewedRows({ bindingDigest: digest("e") }) })],
     ["the capabilities changed", () => selection({ runtimeRows: renewedRows({ capabilityDigest: digest("e") }) })],
     ["the catalog changed", () => selection({ runtimeRows: renewedRows({ runtimeCatalogId: "other" }) })],
+    ["the criteria that wait changed", () => selection({ runtimeRows: renewedRows(), unavailableCriteria: [{ criterionId: "c1", reason: "no runtime" }] })],
     ["the catalog revision went back", () => selection({ runtimeRows: renewedRows({ catalogRevision: 2 }) })],
     ["a row is gone", () => selection({ runtimeRows: [renewedRows()[0]] })],
     ["a row was swapped for another profile's", () => selection({ runtimeRows: [renewedRows()[0], row("api", { profileId: "other-profile", generation: 5 })] })],

@@ -307,7 +307,7 @@ import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.j
 import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval, type ApplicationAccountsInput, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
-import { ApplicationRuntimeRenewed, assertNoRequalifyHold, recycleDriftedWorker, replayPredatesRenewal, requalifyHoldActive, requalifySetupWorkRow, selectionChangedRefusal } from "../e2e/requalify-hold.js";
+import { ApplicationRuntimeRenewed, assertNoRequalifyHold, recycleDriftedWorker, requalifyHoldFence, replayPredatesRenewal, requalifyHoldActive, requalifySetupWorkRow, selectionChangedRefusal } from "../e2e/requalify-hold.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationGroundingAdmission, buildApplicationReplayAdmission, groundingPlanDigest } from "../e2e/application-admission.js";
 import {
@@ -2140,7 +2140,6 @@ async function createProjectSetupAdmissionRows(
   retry?: { attemptId: string; retryOfExecutionId: string },
 ): Promise<{ transactionItems: Array<Record<string, unknown>> } | undefined> {
   if (!dependencies.projectSetupRuntimeCatalogId || project.runtimeBinding.deploymentMode !== "ec2-ebs") return undefined;
-  await assertNoRequalifyHold(dependencies, Date.now()); // AUTOREQUALIFY: no new setup run while the test machine is being switched
   const endpoint = new URL(runtime.endpoint);
   if (endpoint.protocol !== "http:" || !z.ipv4().safeParse(endpoint.hostname).success) return undefined;
   const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${project.definition.name}`, sk: `PROPOSAL#${setupApproval.proposalSha256}` });
@@ -2255,6 +2254,7 @@ async function createProjectSetupAdmissionRows(
       transportCorrelationId, endpoint: runtime.endpoint, expiresAt: runtime.expiresAt },
     ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}),
   };
+  await assertNoRequalifyHold(dependencies, Date.now()); // AUTOREQUALIFY: no new setup run while the test machine is being switched
   const executionBytes = Buffer.from(canonicalJson(executionObject), "utf8");
   const executionDigest = createHash("sha256").update(executionBytes).digest("hex");
   const executionRef = { key: `project-setup-executions/sha256/${executionDigest}.json`, sha256: executionDigest, byteLength: executionBytes.byteLength };
@@ -2291,7 +2291,7 @@ async function createProjectSetupAdmissionRows(
   const put = (item: Record<string, unknown>) => ({ Put: { TableName: dependencies.tableName, Item: item, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } });
   return { transactionItems: [put({ ...projectSetupExecutionKey(setupExecutionId), entityType: "PROJECT_SETUP_EXECUTION", ...execution }),
     put({ ...projectSetupSessionKey(setupExecutionId), entityType: "PROJECT_SETUP_SESSION", ...session }), put(operation), put(outbox),
-    put(requalifySetupWorkRow(setupExecutionId, execution.deadlineAt))] };
+    put(requalifySetupWorkRow(setupExecutionId, execution.deadlineAt)), requalifyHoldFence(dependencies.tableName, Date.now())] };
 }
 
 async function retryProjectSetupAsAdministrator(
@@ -10779,6 +10779,8 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     await remove();
     return outcome === "STALE" ? "STALE" : "DISPATCHED";
   } catch (error) {
+    // AUTOREQUALIFY: a start refused by the hold fence inside its transaction surfaces as a busy workspace; while the hold stands that is a deferral, not a failure.
+    if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY" && await requalifyHoldActive(dependencies, Date.now()).catch(() => false)) return "DISPATCHED";
     if (error instanceof ApplicationPlanDefect) {
       // The approved plan can no longer run as written, which only a corrected plan fixes: the task goes back to plan review, where Request changes is the way on.
       try {
@@ -11434,6 +11436,7 @@ async function startReplayApplicationRound(
   const refuse = (code: E2EReplayRefusal, detail: string) => agentXError(code === "replay-in-progress" ? "TASK_BUSY" : "CONFIG_INVALID", `${code}: ${detail}`);
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
   if (task.closedAt !== undefined) throw refuse("replay-task-closed", "the task is closed");
+  await assertNoRequalifyHold(store, Date.now()); // AUTOREQUALIFY: no replay starts while the test machine is being switched (the start transaction holds the same fence)
   const workflow = task.workflow;
   const qualified = workflow?.e2e?.required === true ? workflow.e2e.qualifiedRound : undefined;
   if (workflow === undefined || qualified === undefined || qualified.roundId !== sourceRoundId) throw refuse("replay-not-qualified", "that round is not the task's qualified round");

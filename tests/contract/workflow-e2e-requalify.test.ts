@@ -64,6 +64,28 @@ describe("a switch in progress defers new browser and API rounds, and never bloc
     expect(taskOf(harness).workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
   });
 
+  it("fences the hold into the round's own start: a hold placed after BOTH looks still refuses the start, and the row stays due without spending its failure budget", async () => {
+    const harness = await firstDispatch({ before: (h) => {
+      const send = h.db.send.bind(h.db);
+      let looks = 0;
+      h.db.send = async (command) => {
+        const key = (command as { input?: { Key?: { pk?: string; sk?: string } } }).input?.Key;
+        const result = await send(command);
+        // Neither look finds a hold; the switch begins right after the second, before the start transaction commits.
+        if (command.constructor.name === "GetCommand" && key?.pk === requalifyHoldKey().pk && key.sk === requalifyHoldKey().sk && (looks += 1) === 2) h.db.set(holdRow(Date.now() + 600_000));
+        return result;
+      };
+    } });
+    expect(checksOperations(harness)).toEqual([]);
+    expect(taskOf(harness).workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+    expect(taskOf(harness).workflow.blockReason).toBeUndefined();
+    expect(dispatchRows(harness)).toHaveLength(1);
+    expect(dispatchRows(harness)[0]!.attempts ?? 0).toBe(0);
+    harness.db.delete(requalifyHoldKey().pk, requalifyHoldKey().sk);
+    await sweep(harness);
+    expect(checksOperations(harness)).toHaveLength(1);
+  });
+
   it("does not defer for a hold that has ended (a renewal that crashed), but defers for a row it cannot read as a hold", async () => {
     const ended = await startApplicationRound({ beforeDispatch: (h) => h.db.set(holdRow(Date.now() - 1)) });
     expect(ended.checksOperations()).toHaveLength(1);
