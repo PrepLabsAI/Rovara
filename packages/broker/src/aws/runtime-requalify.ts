@@ -58,6 +58,8 @@ const RunInputSchema = z.object({
   instanceId: z.string().regex(E2E_QUALIFICATION_INSTANCE_ID_PATTERN),
   roleId: z.string().regex(E2E_QUALIFICATION_ROLE_ID_PATTERN),
 }).strict();
+// The register input carries the whole proposal, which holds the challenge secret. The caller (AR-2) must read `proposal.json` from the runner's prefix inside
+// the same Lambda and hand it straight to `registerRequalifiedRuntime`; it must never travel through Step Functions state or logs.
 export type RequalifyRunInput = z.infer<typeof RunInputSchema>;
 
 const RegisterInputSchema = RunInputSchema.extend({
@@ -115,7 +117,7 @@ export async function issueRequalifyChallenge(deps: RequalifyDependencies, input
   const challenge = await issueChallengeAs(deps, identity, {
     binding: Ec2RuntimeBindingSchema.parse(deps.expectedBinding), profileId: REQUALIFY_PROFILE_ID, endpoint: `http://${ip}:${RUNNER_PORT}`,
     generation, transportCorrelationId: randomUUID(),
-  }, { requalifyRunId: input.runId, requalifyInstanceId: input.instanceId });
+  }, { requalifyRunId: input.runId, requalifyInstanceId: input.instanceId, requalifyRoleId: input.roleId });
   await deps.s3.send(new PutObjectCommand({ Bucket: deps.artifactBucketName, Key: `${e2eQualificationPrefix(input.roleId, input.instanceId)}challenge.json`,
     Body: Buffer.from(`${canonicalJson(challenge)}\n`, "utf8"), ContentType: "application/json", ServerSideEncryption: "AES256" }));
   return { challengeId: challenge.challengeId, expiresAt: challenge.expiresAt, generation, transportCorrelationId: challenge.transportCorrelationId };
@@ -185,7 +187,7 @@ function assertNarrow(deps: RequalifyDependencies, input: RequalifyRunInput, ip:
   if (endpoint === undefined || endpoint.protocol !== "http:" || endpoint.hostname !== ip || endpoint.port !== RUNNER_PORT || endpoint.username !== "" || endpoint.password !== "") throw refusal("endpoint-not-managed-instance");
   if (challenge.generation !== nextGenerationNumber) throw refusal("generation-not-next");
   if (challenge.issuedBySubject !== requalifierSubject(deps.environment) || challenge.issuedByOwnerKey !== requalifierIdentity(deps.environment).ownerKey
-    || challengeRow["requalifyRunId"] !== input.runId || challengeRow["requalifyInstanceId"] !== input.instanceId) throw refusal("challenge-not-requalifier");
+    || challengeRow["requalifyRunId"] !== input.runId || challengeRow["requalifyInstanceId"] !== input.instanceId || challengeRow["requalifyRoleId"] !== input.roleId) throw refusal("challenge-not-requalifier");
 }
 
 /** Reads one instance with `DescribeInstances` (read only); an instance that does not exist is undefined, any other fault is thrown. */

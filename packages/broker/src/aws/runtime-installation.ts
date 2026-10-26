@@ -7,7 +7,7 @@ import {
   runtimeInstallationProposalSha256, type RuntimeInstallChallenge, type RuntimeInstallationProposal,
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_RUNTIME_PROFILE_ID, WebApiRuntimeInstallProposalSchema, webApiRuntimeInstallProposalSha256, type WebApiRuntimeInstallProposal,
-  agentXError,
+  agentXError, REQUALIFIER_ISSUER,
 } from "@agentx/contracts";
 import { parseE2EReport, verifyWebApiProbeRecord } from "@agentx/verifier";
 import type { AuthenticatedIdentity } from "../auth.js";
@@ -54,6 +54,17 @@ function challengeKey(challengeId: string): { pk: string; sk: string } { return 
 function evidenceKey(proposalSha256: string): { pk: string; sk: string } { return { pk: `RUNTIME_INSTALLATION_EVIDENCE#${proposalSha256}`, sk: "EVIDENCE" }; }
 function runtimeEvidenceObjectKey(proposalSha256: string): string { return `runtime-installations/sha256/${proposalSha256}.json`; }
 
+/**
+ * The seams below are exported for the AUTOREQUALIFY wrapper, so they judge authority themselves: an administrator claim, or the internal
+ * service identity (`rovara:internal`, which the JWT authenticator cannot produce because it pins the configured issuer) when the caller
+ * brings the narrowing the wrapper adds (`scoped`). Anything else, including the service identity without that narrowing, is refused.
+ */
+function assertSeamAuthority(identity: AuthenticatedIdentity, scoped: boolean): void {
+  if (identity.isAdministrator) return;
+  if (identity.issuer === REQUALIFIER_ISSUER && scoped) return;
+  throw agentXError("FORBIDDEN", "administrator claim is required");
+}
+
 export async function issueRuntimeInstallChallenge(
   deps: RuntimeInstallationDependencies,
   identity: AuthenticatedIdentity,
@@ -73,6 +84,7 @@ export async function issueChallengeAs(
   requestInput: unknown,
   rowExtras: Readonly<Record<string, string>> = {},
 ): Promise<RuntimeInstallChallenge> {
+  assertSeamAuthority(identity, Object.keys(rowExtras).length > 0);
   const request = RuntimeInstallChallengeRequestSchema.parse(requestInput);
   if (!knownProfile(request.profileId)) throw agentXError("CONFIG_INVALID", "runtime profile is not enabled for this catalog");
   const issuedAtMs = nowFor(deps);
@@ -312,6 +324,7 @@ export async function registerWebApiRuntimeInstallation(
   request: { proposal: unknown; proposalSha256: string },
   hooks: WebApiRegistrationHooks = {},
 ): Promise<WebApiRuntimeRegistrationResult> {
+  assertSeamAuthority(identity, hooks.authorize !== undefined);
   const parsed = WebApiRuntimeInstallProposalSchema.safeParse(request.proposal);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", `runtime proposal is not a READY web/API qualification: ${evidenceRefusal(request.proposal, parsed.error.issues) ?? parsed.error.issues[0]?.message ?? "invalid proposal"}`);
   const proposal = parsed.data;
