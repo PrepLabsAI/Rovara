@@ -279,7 +279,7 @@ describe("featureCatalogIdFromTemplate", () => {
   });
   it("refuses a missing, non-literal or ambiguous ID rather than guessing which rows to read", () => {
     for (const resources of [{}, { A: lambda({ Ref: "Param" }) }, { A: lambda("catalog-1"), B: lambda("catalog-2") }]) {
-      expect(() => featureCatalogIdFromTemplate(JSON.stringify({ Resources: resources }))).toThrow(/catalog/);
+      expect(() => featureCatalogIdFromTemplate(JSON.stringify({ Resources: resources }))).toThrow(/CATALOG_ID/);
     }
     expect(() => featureCatalogIdFromTemplate("not json")).toThrow(/not JSON/);
   });
