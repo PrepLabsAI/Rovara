@@ -26,7 +26,9 @@ const hex = () => randomUUID().replaceAll("-", "").slice(0, 17);
 
 type Start = (input: { stateMachineArn: string; name: string; input: string }) => Promise<string>;
 
-function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; sweepStuckCancels?: ReconcilerDependencies["sweepStuckCancels"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; sweepUnwaitedTasks?: ReconcilerDependencies["sweepUnwaitedTasks"]; log?: ReconcilerDependencies["log"] } = {}) {
+type SetupOptions = { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; sweepStuckCancels?: ReconcilerDependencies["sweepStuckCancels"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; sweepUnwaitedTasks?: ReconcilerDependencies["sweepUnwaitedTasks"]; qualifiedWorkerAmi?: ReconcilerDependencies["qualifiedWorkerAmi"]; log?: ReconcilerDependencies["log"] };
+
+function setup(options: SetupOptions = {}) {
   const db = new FakeDynamoDb();
   const start = vi.fn<Start>(async ({ name }) => `arn:aws:states:us-east-1:111122223333:execution:provisioner:${name}`);
   const sessions = new SessionManager({
@@ -59,6 +61,7 @@ function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; ex
     ...(options.sweepStuckCancels === undefined ? {} : { sweepStuckCancels: options.sweepStuckCancels }),
     ...(options.expireIndexDays === undefined ? {} : { expireIndexDays: options.expireIndexDays }),
     ...(options.sweepUnwaitedTasks === undefined ? {} : { sweepUnwaitedTasks: options.sweepUnwaitedTasks }),
+    ...(options.qualifiedWorkerAmi === undefined ? {} : { qualifiedWorkerAmi: options.qualifiedWorkerAmi }),
   });
   return { db, sessions, state, start, terminate, deleteVolume, quarantine, emit, reconcile };
 }
@@ -142,6 +145,143 @@ describe("reconciler: instances", () => {
     const third = await reconcile();
     expect(third.unresponsiveInstances).toEqual([worker.instanceId]);
     expect(terminate).toHaveBeenCalledExactlyOnceWith(worker.instanceId);
+  });
+});
+
+describe("reconciler: workers on another AMI than the qualified one (AUTOREQUALIFY AR-4)", () => {
+  const PINNED = "ami-0aaaaaaaaaaaaaaaa";
+  const STALE = "ami-0bbbbbbbbbbbbbbbb";
+
+  /** One READY worker running `imageId`, its session seeded as the provisioner leaves it. */
+  function readyWorker(options: SetupOptions, imageId: string | undefined, workspace: Record<string, unknown> = {}, fields: Record<string, unknown> = {}) {
+    const harness = setup(options);
+    // Idle for 10 minutes unless a test says otherwise: past the recycle threshold.
+    const worker = { ...ready(), lastActivityAt: minutesAgo(10) };
+    const workspaceId = seedSession(harness.db, "READY", { ...worker, ...fields }, workspace);
+    harness.state.instances = [{ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60), ...(imageId === undefined ? {} : { imageId }) }];
+    return { ...harness, worker, workspaceId };
+  }
+
+  it("stops an idle worker on another AMI so the next dispatch provisions the pinned one, and counts it", async () => {
+    const { db, reconcile, emit, workspaceId, terminate } = readyWorker({ qualifiedWorkerAmi: async () => PINNED }, STALE);
+    const report = await reconcile();
+    expect(report.recycledStaleAmi).toEqual([workspaceId]);
+    // The same READY -> STOPPING claim the idle reaper makes; the reaper terminates and finishes it.
+    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "STOPPING", sessionState: "STOPPING" });
+    expect(terminate).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerRecycledStaleAmi: 1 }));
+  });
+
+  it("recycles per worker: only the one on another AMI", async () => {
+    const harness = setup({ qualifiedWorkerAmi: async () => PINNED });
+    const stale = { ...ready(), lastActivityAt: minutesAgo(10) };
+    const current = { ...ready(), lastActivityAt: minutesAgo(10) };
+    const staleWorkspace = seedSession(harness.db, "READY", stale);
+    const currentWorkspace = seedSession(harness.db, "READY", { ...current, privateIp: "10.42.128.11" });
+    harness.state.instances = [
+      { instanceId: stale.instanceId, state: "running", workspaceId: staleWorkspace, launchedAt: minutesAgo(60), imageId: STALE },
+      { instanceId: current.instanceId, state: "running", workspaceId: currentWorkspace, launchedAt: minutesAgo(60), imageId: PINNED },
+    ];
+    expect((await harness.reconcile()).recycledStaleAmi).toEqual([staleWorkspace]);
+    expect(sessionOf(harness.db, staleWorkspace)).toMatchObject({ state: "STOPPING" });
+    expect(sessionOf(harness.db, currentWorkspace)).toMatchObject({ state: "READY" });
+  });
+
+  const cases: Array<[string, string | undefined, () => Promise<string | undefined>]> = [
+    ["is on the pinned AMI", PINNED, async () => PINNED],
+    ["has no pin yet (before the first automatic requalification)", STALE, async () => undefined],
+    ["reports no AMI", undefined, async () => PINNED],
+  ];
+  it.each(cases)("leaves a worker alone when it %s", async (_case, imageId, qualifiedWorkerAmi) => {
+    const { db, reconcile, workspaceId } = readyWorker({ qualifiedWorkerAmi }, imageId);
+    const report = await reconcile();
+    expect(report.recycledStaleAmi).toEqual([]);
+    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY" });
+  });
+
+  it("waits until the worker has been idle for 5 minutes, like the reaper, so a warm worker is not cold-started mid-session", async () => {
+    const recent = readyWorker({ qualifiedWorkerAmi: async () => PINNED }, STALE, {}, { lastActivityAt: minutesAgo(4) });
+    expect((await recent.reconcile()).recycledStaleAmi).toEqual([]);
+    expect(sessionOf(recent.db, recent.workspaceId)).toMatchObject({ state: "READY" });
+
+    const settled = readyWorker({ qualifiedWorkerAmi: async () => PINNED }, STALE, {}, { lastActivityAt: minutesAgo(6) });
+    expect((await settled.reconcile()).recycledStaleAmi).toEqual([settled.workspaceId]);
+  });
+
+  it("rolls a renewal gradually: at most 2 idle workers per run, the rest on the next runs", async () => {
+    const harness = setup({ qualifiedWorkerAmi: async () => PINNED });
+    const workspaces: string[] = [];
+    harness.state.instances = [];
+    for (let index = 0; index < 5; index += 1) {
+      const worker = { ...ready(), lastActivityAt: minutesAgo(10), privateIp: `10.42.128.${10 + index}` };
+      const workspaceId = seedSession(harness.db, "READY", worker);
+      workspaces.push(workspaceId);
+      harness.state.instances.push({ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60), imageId: STALE });
+    }
+    const stoppingNow = () => workspaces.filter((id) => sessionOf(harness.db, id).state === "STOPPING");
+    const first = await harness.reconcile();
+    expect(first.recycledStaleAmi).toHaveLength(2);
+    expect(stoppingNow()).toHaveLength(2);
+    expect(harness.emit).toHaveBeenLastCalledWith(expect.objectContaining({ ReconcilerRecycledStaleAmi: 2 }));
+    // The two stopped workers' instances leave (as after the reaper's terminate); the rest wait their turn.
+    harness.state.instances = harness.state.instances.filter((instance) => !stoppingNow().includes(instance.workspaceId!));
+    expect((await harness.reconcile()).recycledStaleAmi).toHaveLength(2);
+    expect(workspaces.filter((id) => sessionOf(harness.db, id).state === "STOPPING")).toHaveLength(4);
+  });
+
+  it("never touches a worker that reports busy, however stale its AMI", async () => {
+    const { db, reconcile, workspaceId } = readyWorker({ qualifiedWorkerAmi: async () => PINNED, ping: async () => "HealthyBusy" }, STALE);
+    expect((await reconcile()).recycledStaleAmi).toEqual([]);
+    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY" });
+  });
+
+  it("never touches a worker that cannot be probed (the unresponsive path owns it)", async () => {
+    const { db, reconcile, workspaceId } = readyWorker({ qualifiedWorkerAmi: async () => PINNED, ping: async () => { throw new Error("timeout"); } }, STALE);
+    expect((await reconcile()).recycledStaleAmi).toEqual([]);
+    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY" });
+  });
+
+  it("never stops a worker whose workspace has an operation in progress, or work parked for it", async () => {
+    const running = readyWorker({ qualifiedWorkerAmi: async () => PINNED }, STALE, { status: "BUSY", activeOperationId: randomUUID() });
+    expect((await running.reconcile()).recycledStaleAmi).toEqual([]);
+    expect(sessionOf(running.db, running.workspaceId)).toMatchObject({ state: "READY" });
+
+    const parked = readyWorker({ qualifiedWorkerAmi: async () => PINNED }, STALE, {}, { waitingOutboxIds: new Set([randomUUID()]) });
+    expect((await parked.reconcile()).recycledStaleAmi).toEqual([]);
+    expect(sessionOf(parked.db, parked.workspaceId)).toMatchObject({ state: "READY" });
+  });
+
+  it("loses to a dispatch that touched the session after the reconciler read it", async () => {
+    let touch = () => undefined as unknown;
+    // The ping is where a dispatch can land between the session read and the claim.
+    const harness = readyWorker({ qualifiedWorkerAmi: async () => PINNED, ping: async () => { touch(); return "Healthy"; } }, STALE);
+    touch = () => harness.db.set({ ...sessionOf(harness.db, harness.workspaceId), lastActivityAt: NOW.toISOString() });
+    expect((await harness.reconcile()).recycledStaleAmi).toEqual([]);
+    expect(sessionOf(harness.db, harness.workspaceId)).toMatchObject({ state: "READY" });
+  });
+
+  it("when the pin cannot be read, recycles nothing, logs only the error name, and still repairs the rest", async () => {
+    const log = vi.fn<(entry: Record<string, unknown>) => void>();
+    const { db, reconcile, workspaceId, emit } = readyWorker({ qualifiedWorkerAmi: async () => { throw new Error("WORKER_AMI_PARAMETER_MALFORMED secret-looking-text"); }, log }, STALE);
+    const lost = ready();
+    const lostWorkspace = seedSession(db, "READY", lost);
+    const report = await reconcile();
+    expect(report.recycledStaleAmi).toEqual([]);
+    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY" });
+    // The ordinary lost-instance repair still ran.
+    expect(report.lostInstances).toEqual([lost.instanceId]);
+    expect(sessionOf(db, lostWorkspace)).toMatchObject({ state: "STOPPED" });
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({ event: "reconciler.qualified_ami_unreadable", errorName: "Error" }));
+    expect(JSON.stringify(log.mock.calls)).not.toContain("secret-looking-text");
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerQualifiedAmiReadFailures: 1, ReconcilerRecycledStaleAmi: 0 }));
+  });
+
+  it("changes nothing where the pin is not wired (report and metrics as before)", async () => {
+    const { db, reconcile, emit, workspaceId } = readyWorker({}, STALE);
+    const report = await reconcile();
+    expect(report).not.toHaveProperty("recycledStaleAmi");
+    expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY" });
+    expect(Object.keys(emit.mock.calls[0]![0])).not.toContain("ReconcilerRecycledStaleAmi");
   });
 });
 
