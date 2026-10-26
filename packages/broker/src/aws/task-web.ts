@@ -65,6 +65,8 @@ export interface TaskDocumentView {
   access?: { role: TaskRole; canComment: boolean; canSuggest: boolean; canDecide: boolean; canAsk: boolean };
   /** Present while the task is blocked on an approved browser and API round that one retry can fix; `canRetry` is whether this reader (the owner) may make it. */
   applicationRetry?: { canRetry: boolean };
+  /** AUTOFIX: what Rovara already tried on its own and why it asks, as plain sentences (nothing a worker or model said); absent when it did nothing on this task. */
+  autofix?: { lines: string[] };
   /** The per-scenario results of the task's browser and API round (M1.3 Task 3.7), derived by the broker from evidence it verified itself, and the baseline round on the unchanged code. */
   e2eResults?: E2EScenarioResults;
   /** The task's comments, replies and AgentX replies, oldest first, as stored (redacted when written; the page escapes them). */
@@ -378,6 +380,13 @@ function decideBar(view: TaskDocumentView): string {
     + `<button type="button" id="decide-approve" hidden>Approve ${escapeHtml(name)}</button> <button type="button" id="decide-request-changes" hidden>Request changes to ${escapeHtml(name)}</button></div>`;
 }
 
+/** What Rovara did by itself and why it asks, in the blocked step's place on the page. */
+function autofixSection(view: TaskDocumentView): string {
+  if (view.autofix === undefined || view.autofix.lines.length === 0) return "";
+  return '<section id="autofix" aria-label="Automatic fixing"><h2>What Rovara did on its own</h2><ul>'
+    + view.autofix.lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("") + "</ul></section>";
+}
+
 /** The retry of a blocked browser and API round: the owner's button (on with the script, as the decide buttons are) or who may press it. */
 function applicationRetrySection(view: TaskDocumentView): string {
   if (view.applicationRetry === undefined) return "";
@@ -461,6 +470,7 @@ async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequ
     + `<main>${unverified}${documents}${noDocuments}`
     + (checks === undefined || checks === "" ? "" : `<section id="checks" aria-label="Checks"><h2>Checks</h2>${checks}</section>`)
     + (view.e2eResults === undefined ? "" : renderE2EScenarioRowsHtml(view.e2eResults, { artifactPath: (sha256) => `/review/${encodeURIComponent(view.taskId)}/task/api/e2e/artifacts/${sha256}` }))
+    + autofixSection(view)
     + applicationRetrySection(view)
     + `<section id="findings" aria-label="Review findings"><h2>Review findings</h2>${findings}</section>`
     + `<section id="pull-requests" aria-label="Pull requests"><h2>Pull requests</h2>${pullRequests}</section>`

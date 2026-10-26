@@ -83,6 +83,13 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
         notices.push({ id: `${taskId}:workflow:${String(afterWorkflow.revision)}`, kind: "workflow", taskId, at, workflowRevision: Number(afterWorkflow.revision),
           ...(reopened ? { pullRequestReopened: true as const, reopenedPullRequests: reopenedNumbers } : {}) });
       }
+      // AUTOFIX: Rovara wrote why it asks for the blocked step after the step's own card; the card (or a post of its own) carries it.
+      const afterAsk = record(next.autofixAsk);
+      const beforeAsk = record(previous?.autofixAsk);
+      if (afterAsk !== undefined && eventId !== "" && typeof afterAsk.workflowRevision === "number" && afterAsk.workflowRevision === afterWorkflow?.revision
+        && (beforeAsk === undefined || beforeAsk.workflowRevision !== afterAsk.workflowRevision || beforeAsk.at !== afterAsk.at)) {
+        notices.push({ id: `${taskId}:autofix:${afterAsk.workflowRevision}`, kind: "workflow", taskId, at, workflowRevision: afterAsk.workflowRevision });
+      }
       if (after !== undefined && before === undefined) notices.push({ id: `${taskId}:start`, kind: "start", taskId, at });
       // A mode notice is named by its stream event; without one, two changes would collapse into one ID.
       else if (after !== undefined && before !== undefined && after.mode !== before.mode && eventId !== "") {

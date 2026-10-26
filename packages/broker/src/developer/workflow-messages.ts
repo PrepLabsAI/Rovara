@@ -9,6 +9,7 @@ import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import { WORKFLOW_ACTION_IDS } from "./workflow-actions.js";
 import { isE2EPlanCorrectionBlockReason } from "./task-records.js";
 import { PLAN_UNREADABLE_SENTENCES, type PlanUnreadableCategory } from "./plan-check-summary.js";
+import { autoFixCardLines, type AutoFixAsk } from "./autofix-messages.js";
 
 export interface WorkflowMessageContext {
   taskId: string;
@@ -53,6 +54,8 @@ export interface WorkflowMessageContext {
   publishFailure?: { category: string; codeChanged?: boolean | undefined } | undefined;
   /** The step a closed required pull request's reopening started (the numbers reopened; empty when not known). */
   pullRequestReopened?: ReadonlyArray<{ repositoryId: string; number: number }> | undefined;
+  /** AUTOFIX: automatic fixing is on for this deployment; a blocked checks or reviews card then says what Rovara already tried and, from `autoFixAsk`, why it is asking. Absent: the card reads as it always did. */
+  autoFix?: { ask?: AutoFixAsk | undefined } | undefined;
 }
 export interface WorkflowMessage { text: string; blocks: Array<Record<string, unknown>> }
 
@@ -728,6 +731,12 @@ function pushingFixTo(workflow: WorkflowSnapshot): string | undefined {
   return pending.length === 0 ? undefined : pullRequestNames(pending, (pullRequest) => link(pullRequest.url, `PR #${pullRequest.number}`));
 }
 
+/** AUTOFIX: the lines for what Rovara already tried and why it is asking, under a blocked card; nothing when automatic fixing is off or has nothing to add. */
+function withAutoFix(context: WorkflowMessageContext, copy: { text: string; buttons: Button[] }): { text: string; buttons: Button[] } {
+  const lines = context.autoFix === undefined ? [] : autoFixCardLines(context.workflow, context.autoFix.ask);
+  return lines.length === 0 ? copy : { ...copy, text: `${copy.text}\n${lines.map(slackText).join("\n")}` };
+}
+
 function implementRunning(context: WorkflowMessageContext): string {
   const { workflow } = context;
   const decision = leadingDecision(workflow);
@@ -735,6 +744,7 @@ function implementRunning(context: WorkflowMessageContext): string {
   if (feedback?.decision === "APPROVE" && feedback.workflowRevision >= workflow.revision - 2 && (decision === undefined || feedback.at >= decision.at)) {
     return "PR feedback approved. Updating the code now; the checks and reviews run again after.";
   }
+  if (decision?.source === "AUTO_FIX") return "Rovara sent this back to coding by itself. Checks and reviews will run again after.";
   if (decision?.source === "SEND_BACK" || decision?.source === "FINDINGS") {
     const problems = sendBackProblems(workflow);
     const issues = problems.filter((problem) => problem.source !== "check").length;
@@ -816,10 +826,10 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
       // Rewritten history can't be coded on again: a new task is the way on.
       buttons: workflow.blockReason === WORKFLOW_HISTORY_REWRITTEN_MESSAGE ? [exits.close] : [exits.button("agentx_workflow_retry_implementation", "Retry coding"), exits.close] };
     case "VERIFY/RUNNING": return plain("Running the selected checks again on the current code. No code is being changed.");
-    case "VERIFY/BLOCKED": return verifyBlocked(context, exits);
+    case "VERIFY/BLOCKED": return withAutoFix(context, verifyBlocked(context, exits));
     case "REVIEW/WAITING": return plain(`${allPassed} Starting the code and security reviews.`);
     case "REVIEW/RUNNING": return plain(`${allPassed} Code and security reviews are running on the ${reviewOnly ? "current" : "checked"} code.`);
-    case "REVIEW/BLOCKED": return reviewBlocked(context, exits);
+    case "REVIEW/BLOCKED": return withAutoFix(context, reviewBlocked(context, exits));
     // The pull requests are already open after approved PR feedback: the fix is pushed to them. While it runs, nothing new is said.
     case "PULL_REQUEST/READY": case "PULL_REQUEST/RUNNING": {
       const pushing = pushingFixTo(workflow);

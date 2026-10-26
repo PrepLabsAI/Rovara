@@ -133,6 +133,12 @@ import {
   keepWorkflowPullRequests,
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE,
   returnWorkflowToImplementation,
+  returnWorkflowToImplementationAutomatically,
+  workflowAutomaticRetryDecision,
+  workflowAutoActionRequestId,
+  WORKFLOW_AGENTX_ACTOR_ID,
+  type WorkflowAutoSpend,
+  type WorkflowDecision,
   sendBackProblems,
   workflowSendBackOffered,
   workflowReadmitsApplicationRound,
@@ -214,6 +220,7 @@ import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeoplePropos
   submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
+import { AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
 import {
   commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
   currentStepDocument, queueCommentAnswer, setSuggestion, suggestionsFor, type PageActor, type SlackRequestQueue,
@@ -1280,7 +1287,7 @@ export async function taskView(
   if (task.workflow !== undefined) {
     const { workflowDependenciesOperationId: _internalOperationId, ...publicWorkflow } = task.workflow;
     void _internalOperationId;
-    workflow = { ...publicWorkflow, decisions: task.workflow.decisions.map(({ answerOverrides, commentsIncluded, via, ...decision }) => { void answerOverrides; void commentsIncluded; void via; return decision; }) };
+    workflow = { ...publicWorkflow, decisions: task.workflow.decisions.map((stored) => publicWorkflowDecision(stored)) };
   }
   // PLANINC-2: planning that shows RUNNING although its run ended and the workspace is free (a stop recorded before the cancel fix)
   // reads as blocked, so the owner is offered Retry; the stored row is blocked by that retry, never by a read.
@@ -2232,7 +2239,7 @@ function keptProposedIds(policy: WorkflowCheckPolicy | undefined): string[] {
 }
 
 /** `afterRecovery`: this call is the one retryTaskWorkflow makes itself once it has blocked a stranded planning step; it never recovers twice. */
-async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown, afterRecovery = false): Promise<{ task: DeveloperTaskView }> {
+async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown, afterRecovery = false, automatic?: AutomaticRetry): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-retry");
   const access = await authorizeTaskAction(deps, caller, taskId, "retry");
   const { task } = access;
@@ -2312,6 +2319,9 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
     if (selected.length === 0 && !readmitsApplicationRound) throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.retryNeedsOneCheck);
     await actionableWorkspace(deps, task);
     const receivedAt = iso(deps);
+    // AUTOFIX: Rovara's own retry (never the plan's re-approval, which only the owner gives) records its decision in the same write as the retry.
+    const autoDecision = automatic === undefined ? undefined : automaticRetryDecision(workflow, "VERIFY", automatic, receivedAt);
+    const retryActorId = automatic === undefined ? access.actorId : WORKFLOW_AGENTX_ACTOR_ID;
     const { blockReason: _previousBlockReason, ...unblocked } = workflow;
     void _previousBlockReason;
     const next: WorkflowSnapshot = {
@@ -2321,8 +2331,9 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       state: "RUNNING",
       checkPolicy: { ...policy, selectedOptionalIds, selectedProposedIds },
       verificationRetries: [...(workflow.verificationRetries ?? []), {
-        requestId: request.requestId, actorId: access.actorId, selectedOptionalCheckIds: selectedOptionalIds, selectedProposedCheckIds: selectedProposedIds, at: receivedAt,
+        requestId: request.requestId, actorId: retryActorId, selectedOptionalCheckIds: selectedOptionalIds, selectedProposedCheckIds: selectedProposedIds, at: receivedAt,
       }],
+      ...(autoDecision === undefined ? {} : { decisions: [...workflow.decisions, autoDecision] }),
       updatedAt: receivedAt,
     };
     const selectedReadiness = selected.map((check) => check.command);
@@ -2350,6 +2361,8 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       let reapproved: { selection: E2EApplicationSelectionRecord; conditions: TransactItems } | undefined;
       let reapproval: E2EApplicationReapproval | undefined;
       if (workflow.e2e.applicationSelection !== undefined && workflowApplicationRetryOffered(workflow)) {
+        // Approving the plan again against the runtime that is ready now is the owner's authority: Rovara's own retry never does it.
+        if (automatic !== undefined) throw agentXError("CONFIG_INVALID", "this block needs the owner to approve the plan again; it is not retried automatically");
         const planArtifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
         const intent = (await approvedCodingPlan(deps, workflow)).e2eIntent;
         if (planArtifact === undefined || workflow.e2e.contractDigest !== planArtifact.sha256 || intent?.schemaVersion !== 2) {
@@ -2374,9 +2387,10 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
           ...(reapproved === undefined || reapproval === undefined ? {} : { applicationSelection: reapproved.selection,
             applicationReapprovals: [...(workflow.e2e.applicationReapprovals ?? []), reapproval].slice(-20) }) },
         verificationRetries: [...(workflow.verificationRetries ?? []), {
-          requestId: request.requestId, actorId: access.actorId, selectedOptionalCheckIds: selectedOptionalIds,
+          requestId: request.requestId, actorId: retryActorId, selectedOptionalCheckIds: selectedOptionalIds,
           selectedProposedCheckIds: selectedProposedIds, at: receivedAt,
         }],
+        ...(autoDecision === undefined ? {} : { decisions: [...workflow.decisions, autoDecision] }),
         updatedAt: receivedAt,
       });
       try {
@@ -2657,6 +2671,17 @@ function workflowWithCurrentGraphOperation(workflow: WorkflowSnapshot, operation
   if (priorCursor !== undefined) retainedBySequence.set(priorCursor.sequence, priorCursor);
   const progress = [...retainedBySequence.values()].sort((left, right) => left.sequence - right.sequence);
   return { ...withoutPrevious, ...(progress.length === 0 ? { workflowDependenciesProgress: [] } : { workflowDependenciesProgress: progress }), workflowDependenciesOperationId: operationId };
+}
+
+/**
+ * A stored decision as the public task view shows it. Older MCP and CLI clients parse decisions strictly, so the slice 2 fields stay out, and so do the AUTOFIX values they
+ * do not know: Rovara's own automatic decision (actor AGENTX, source AUTO_FIX or AUTO_RETRY, with its `auto` stage) reads as an ordinary SEND_BACK with the task owner's
+ * role. The actor ID stays the fixed AgentX one (a valid ID to them), and the reason says in words that Rovara did it ("Rovara sent this back ...").
+ */
+export function publicWorkflowDecision(stored: WorkflowDecision): Omit<WorkflowDecision, "answerOverrides" | "commentsIncluded" | "via" | "auto"> {
+  const { answerOverrides, commentsIncluded, via, auto, ...decision } = stored;
+  void answerOverrides; void commentsIncluded; void via; void auto;
+  return decision.actorRole === "AGENTX" ? { ...decision, actorRole: "TASK_OWNER", source: "SEND_BACK" } : decision;
 }
 
 /** The commands of the project's required checks, the approved plan's proposed ones and the owner's selected optional ones, in that order. */
@@ -3081,12 +3106,15 @@ async function queueWorkflowReview(
   note: string,
   access?: TaskAccess,
   actor?: DeveloperCaller,
+  /** AUTOFIX: Rovara's own retry of blocked reviews records its decision in the same write. */
+  autoDecision?: WorkflowDecision,
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   const receivedAt = iso(deps);
   const candidateDigest = workflow.candidate.digest;
   const { blockReason: _blockReason, reviews: _oldReviews, ...retryBase } = workflow;
   void _blockReason; void _oldReviews;
-  const next: WorkflowSnapshot = { ...retryBase, revision: workflow.revision + 1, state: "RUNNING", updatedAt: receivedAt };
+  const next: WorkflowSnapshot = { ...retryBase, revision: workflow.revision + 1, state: "RUNNING",
+    ...(autoDecision === undefined ? {} : { decisions: [...workflow.decisions, autoDecision] }), updatedAt: receivedAt };
   const prompt = `Perform the required read-only critic and security reviews for the task. The current verified candidate digest is ${candidateDigest}. Do not edit files. Reviewer findings must be concise and refer to code evidence. The owner retry note is carried separately as untrusted reviewer context.`;
   const reviewPlan = await workflowReviewPlanOption(deps, workflow);
   const reviewFeedback = await workflowReviewFeedbackOption(deps, task, workflow);
@@ -3134,6 +3162,115 @@ export async function startTaskWorkflowReviewFromSystem(
   const note = workflow.verification.reviewOnly === true ? AUTOMATIC_REVIEW_ONLY_NOTE : AUTOMATIC_REVIEW_NOTE;
   const accepted = await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, requestId, note, dispatchAccess, actor);
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
+}
+
+/** What Rovara's own retry (AUTOFIX) carries: the revision it was decided on, the money inputs the guard holds again, and the fixed reason the decision records. */
+export interface AutomaticRetry { expectedRevision: number; spend: WorkflowAutoSpend; reason: string }
+
+/** The AUTO_RETRY decision for the blocked `stage`, from the contracts' guard; its refusals (stale, limits, cap) are conflicts here. */
+function automaticRetryDecision(workflow: WorkflowSnapshot, stage: "VERIFY" | "REVIEW", automatic: AutomaticRetry, now: string): WorkflowDecision {
+  try {
+    return workflowAutomaticRetryDecision(workflow, { expectedRevision: automatic.expectedRevision, stage, reason: automatic.reason, spend: automatic.spend, now });
+  } catch (error) {
+    if (error instanceof WorkflowTransitionError) throw agentXError("IDEMPOTENCY_CONFLICT", error.message);
+    throw error;
+  }
+}
+
+/** The caller Rovara's own actions use to reach the task's routes: the task's owner identity, never a person's session. Decisions it records are AGENTX's, not the owner's. */
+function automaticCaller(task: DeveloperTaskRecord): DeveloperCaller {
+  return { developerId: task.developerId, sessionId: "workflow-autofix", amr: task.provider, name: task.developerName };
+}
+
+/**
+ * AUTOFIX: Rovara sends blocked checks or reviews back to coding by itself. It records an AGENTX decision (`returnWorkflowToImplementationAutomatically`: the policy's limits and the money
+ * cap held again) and starts the coding run in one write conditional on the blocked revision, exactly as the owner's Send back does, so when the owner presses Send back at the same
+ * moment only one of the two commits and there is one coding run. The request ID is derived from the task and the revision, so a repeated trigger finds the decision it already made.
+ * "STALE": the task moved on (the owner was first, or it closed). It only ever makes this one move: never an approval, a skip, a rejection or a publication.
+ */
+export async function autoSendBackToCodingFromSystem(
+  deps: DeveloperTaskRouteDependencies, taskId: string, input: { expectedRevision: number; reason: string; spend: WorkflowAutoSpend },
+): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined) return "STALE";
+  const requestId = workflowAutoActionRequestId(taskId, input.expectedRevision, "AUTO_FIX");
+  if (workflow.decisions.some((decision) => decision.requestId === requestId)) return "DUPLICATE";
+  if (workflow.revision !== input.expectedRevision) return "STALE";
+  const receivedAt = iso(deps);
+  let returned: WorkflowSnapshot;
+  try {
+    returned = returnWorkflowToImplementationAutomatically(workflow, { expectedRevision: input.expectedRevision, reason: input.reason, spend: input.spend, now: receivedAt });
+  } catch (error) {
+    if (error instanceof WorkflowTransitionError) return "STALE";
+    throw error;
+  }
+  const caller = automaticCaller(task);
+  const access = await authorizeTaskAction(deps, caller, taskId, "control");
+  await actionableWorkspace(deps, task);
+  const plan = await approvedCodingPlan(deps, workflow);
+  const workflowDependencies = await approvedWorkflowDependencies(deps, task, access.peopleRevision);
+  if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
+    throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to continue it");
+  }
+  const restartApprovedGraph = workflowDependencies === undefined ? undefined : {
+    ...workflowDependencies,
+    resumeTreeSha: workflowDependencies.resumeTreeSha,
+    sequenceStart: workflow.workflowDependenciesProgress?.at(-1)?.sequence ?? workflowDependencies.sequenceStart ?? 0,
+    resumeProgress: [],
+  };
+  // The problems are check and reviewer output, marked untrusted, as in the owner's Send back; there is no owner note, only Rovara's fixed one.
+  const problems = sendBackProblemsPromptSection(sendBackProblems(workflow, E2E_OWNER_SENTENCES.groupSentence), promptTagId(task, requestId));
+  const prompt = (notes: string) => `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nNote (written by AgentX, which sent this back by itself): ${input.reason}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
+  const next: WorkflowSnapshot = { ...returned, revision: returned.revision + 1, state: "RUNNING", updatedAt: receivedAt };
+  await queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId, prompt, next,
+    request: input.reason, response: workflowDependencies === undefined ? "AgentX sent the change back to coding by itself" : "AgentX restarted the approved ordered work plan by itself",
+    ...(restartApprovedGraph === undefined ? {} : { workflowDependencies: restartApprovedGraph }) });
+  return "STARTED";
+}
+
+/**
+ * AUTOFIX: Rovara retries blocked checks by itself, once per candidate (the contracts' guard). The same route as the owner's Retry checks with the same checks selected, with its AGENTX
+ * decision in the same write; the plan's re-approval stays with the owner. "STALE": the task moved on or the retry is out of date.
+ */
+export async function autoRetryChecksFromSystem(deps: DeveloperTaskRouteDependencies, taskId: string, input: AutomaticRetry): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined) return "STALE";
+  const requestId = workflowAutoActionRequestId(taskId, input.expectedRevision, "AUTO_RETRY");
+  if (workflow.decisions.some((decision) => decision.requestId === requestId)) return "DUPLICATE";
+  if (workflow.revision !== input.expectedRevision || workflow.stage !== "VERIFY" || workflow.state !== "BLOCKED") return "STALE";
+  try {
+    await retryTaskWorkflow(deps, automaticCaller(task), taskId, { requestId, expectedRevision: input.expectedRevision, instructions: input.reason }, false, input);
+  } catch (error) {
+    if (error instanceof AgentXError && error.code === "IDEMPOTENCY_CONFLICT") return "STALE";
+    throw error;
+  }
+  return "STARTED";
+}
+
+/** AUTOFIX: Rovara retries blocked reviews by itself, once per candidate, on the code whose checks passed. Same start as the owner's Retry reviews, with its AGENTX decision in the same write. */
+export async function autoRetryReviewsFromSystem(deps: DeveloperTaskRouteDependencies, taskId: string, input: AutomaticRetry): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined) return "STALE";
+  const requestId = workflowAutoActionRequestId(taskId, input.expectedRevision, "AUTO_RETRY");
+  if (workflow.decisions.some((decision) => decision.requestId === requestId)) return "DUPLICATE";
+  if (workflow.revision !== input.expectedRevision || workflow.stage !== "REVIEW" || workflow.state !== "BLOCKED" || workflow.candidate === undefined
+    || workflow.verification?.candidateDigest !== workflow.candidate.digest || workflow.verification.results.some((result) => result.status !== "PASS")) return "STALE";
+  const receivedAt = iso(deps);
+  let decision: WorkflowDecision;
+  try {
+    decision = automaticRetryDecision(workflow, "REVIEW", input, receivedAt);
+  } catch (error) {
+    if (error instanceof AgentXError && error.code === "IDEMPOTENCY_CONFLICT") return "STALE";
+    throw error;
+  }
+  const caller = automaticCaller(task);
+  const access = await authorizeTaskAction(deps, caller, taskId, "retry");
+  await actionableWorkspace(deps, task);
+  await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, requestId, input.reason, access, caller, decision);
+  return "STARTED";
 }
 
 /** Starts a separate server-admitted native CHECKS operation from VERIFY/WAITING. */
@@ -3813,13 +3950,15 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     if (found !== undefined) history.push({ at: artifact.createdAt, text: `${found.name} was written`, link: found.link });
   }
   for (const decision of workflow?.decisions ?? []) {
-    const who = decision.actorRole === "PROJECT_ADMIN" ? "A project admin" : personName(decision.actorId);
+    const who = decision.actorRole === "AGENTX" ? "Rovara" : decision.actorRole === "PROJECT_ADMIN" ? "A project admin" : personName(decision.actorId);
     const artifact = decision.artifactDigest === undefined ? undefined : workflow?.artifacts.find((item) => item.sha256 === decision.artifactDigest);
     const found = artifact === undefined ? undefined : documentOf(artifact);
     const name = found?.name ?? "the document";
     const reason = `: ${cutReason(decision.reason)}`;
     let text: string;
-    if (decision.source === "SEND_BACK") text = `${who} sent the task back to coding${reason}`;
+    if (decision.source === "AUTO_FIX") text = `${who} sent the task back to coding by itself${reason}`;
+    else if (decision.source === "AUTO_RETRY") text = `${who} retried the ${decision.auto?.stage === "REVIEW" ? "reviews" : "checks"} by itself${reason}`;
+    else if (decision.source === "SEND_BACK") text = `${who} sent the task back to coding${reason}`;
     else if (decision.source === "FINDINGS") text = `${who} resolved the review findings${reason}`;
     else if (decision.decision === "APPROVE") text = `${who} approved ${name}${decisionExtras(decision)}`;
     else if (decision.decision === "REQUEST_CHANGES") text = `${who} asked for changes to ${name}${decisionExtras(decision)}${reason}`;
@@ -3911,6 +4050,9 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     try { e2eResults = await deps.workflowE2EScenarioResults({ task, operations: (await workspaceReads(deps, task)).operations, actor: owner ? "owner" : "viewer" }); }
     catch (error) { log(deps, { event: "developer.task_e2e_results_unavailable", taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
   }
+  // AUTOFIX: what Rovara did by itself and, while the step is blocked, why it asks (the stored ask, read as data).
+  const autofixAsk = AutoFixAskSchema.safeParse(task.autofixAsk);
+  const autofixLines = workflow === undefined ? [] : autoFixCardLines(workflow, workflow.state === "BLOCKED" && autofixAsk.success ? autofixAsk.data : undefined, { plain: true });
   return {
     taskId, now: deps.now(), title: task.title, ...taskPageStage(workflow, task.closedAt !== undefined, owner, await publicationAttempts(deps, task)),
     ...(e2eResults === undefined ? {} : { e2eResults }),
@@ -3920,6 +4062,7 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     ...(visibleWorkflowDependenciesProgress === undefined ? {} : { workflowDependenciesProgress: visibleWorkflowDependenciesProgress }),
     pullRequests: (workflow?.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state })),
     ...(workflow !== undefined && task.closedAt === undefined && workflowApplicationRetryOffered(workflow) ? { applicationRetry: { canRetry: can(access.role, "retry") } } : {}),
+    ...(autofixLines.length === 0 ? {} : { autofix: { lines: autofixLines } }),
     history, access: pageAccess(access), ...(capabilities.peopleRevision === undefined ? {} : { peopleRevision: capabilities.peopleRevision }), canManagePeople: capabilities.canManagePeople,
     canTakeOwnership: capabilities.canTakeOwnership, comments, suggestions: shownSuggestions, askAvailable: await commentAnswersAvailable(deps, task),
     ...await pageDecidingView(deps, { task, caller, comments, suggestions: shownSuggestions, citations, claimIds }),

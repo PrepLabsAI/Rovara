@@ -366,8 +366,8 @@ export interface WorkflowDispatchRecord {
   entityType: "WORKFLOW_DISPATCH";
   taskId: string;
   workflowRevision: number;
-  /** UPDATE: an approved fix's checks and reviews passed, and it is pushed to the pull requests already open. */
-  kind: "CHECKS" | "REVIEW" | "PUBLISH" | "UPDATE" | "REPLAN";
+  /** UPDATE: an approved fix's checks and reviews passed, and it is pushed to the pull requests already open. AUTOFIX: the workflow blocked in VERIFY or REVIEW, and the automatic-fix policy looks at it once (never blocks or gives up anything itself). */
+  kind: "CHECKS" | "REVIEW" | "PUBLISH" | "UPDATE" | "REPLAN" | "AUTOFIX";
   /** For REPLAN, the digest of `planPrompt`: there is no candidate yet. */
   candidateDigest: string;
   /** REPLAN: what the planner is told on the automatic second run of a plan (the findings, or what was unreadable). */

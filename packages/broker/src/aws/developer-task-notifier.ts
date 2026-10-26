@@ -19,6 +19,7 @@ import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, type PlanSelfCheckView } 
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
+import { AUTOFIX_CARD_HOLD_MS, AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
 import { deriveTaskStatus, failureCategory, plannerRepliesKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
@@ -842,6 +843,15 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   } else if (workflow.state === "BLOCKED" || (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING")) {
     // Replies that came in after the plan and that no step has taken: said, with where to read them.
     context.newReplies = await newThreadReplies(deps, task);
+    // AUTOFIX: what Rovara already tried and why it asks, from its decisions and the ask record kept for this blocked revision (nothing is added when it never acted).
+    if (workflow.state === "BLOCKED" && (workflow.stage === "VERIFY" || workflow.stage === "REVIEW")) {
+      // Rovara is still looking at this block (its row is not resolved): the card waits, so it can carry what Rovara tried and why it asks. After the hold the card is posted as it is,
+      // and the ask follows as its own post when it is written.
+      const looking = await getItem<{ kind?: unknown; createdAt?: unknown }>(deps, { pk: "WORKFLOW_DISPATCH", sk: `${task.taskId}#${workflow.revision}` });
+      if (looking?.kind === "AUTOFIX" && typeof looking.createdAt === "string" && deps.now() - Date.parse(looking.createdAt) < AUTOFIX_CARD_HOLD_MS) throw new AutofixPending();
+      const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
+      context.autoFix = { ask: ask.success ? ask.data : undefined };
+    }
     // PLANREADMSG: why the plan could not be read, as a fixed category (the stored problems quote the model and are never shown).
     if (workflow.stage === "PLAN" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable && task.planUnreadable?.workflowRevision === workflow.revision) {
       // The category the broker stored (a fixed set); a record from before it was stored is read from the problems.
@@ -885,7 +895,8 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
       const published = PullRequestResultSchema.safeParse((await operation())?.result);
       return published.success ? said(pullRequestReply(published.data.url)) : undefined;
     }
-    case "workflow": return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow, notice.pullRequestReopened === true ? reopenedOf(notice.reopenedPullRequests) : undefined);
+    case "workflow": if (notice.id.includes(":autofix:")) return autofixFollowUp(deps, task);
+      return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow, notice.pullRequestReopened === true ? reopenedOf(notice.reopenedPullRequests) : undefined);
     case "ended": {
       const ended = await operation();
       if (ended === undefined || !ENDED_STATUSES.has(ended.status)) return undefined;
@@ -1456,6 +1467,25 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
 
 /** How long one notice holds the words it is posting; longer than a post's timeout. */
 const SAID_LEASE_MS = 60_000;
+
+/** Rovara is still deciding what to do about the blocked step: its card is retried shortly, so it can say it. */
+class AutofixPending extends Error {
+  constructor() { super("automatic fixing is still looking at this blocked step"); this.name = "AutofixPending"; }
+}
+
+/**
+ * The ask written after the blocked card was posted without it (the look took longer than the hold): its lines as a post of their own, once. Nothing when the card is not posted yet
+ * (it carries the ask itself when it is) or already carries it.
+ */
+async function autofixFollowUp(deps: NotifierDependencies, task: DeveloperTaskRecord): Promise<Reply | undefined> {
+  const workflow = task.workflow;
+  const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
+  if (workflow === undefined || !ask.success || ask.data.workflowRevision !== workflow.revision) return undefined;
+  const card = await getItem<NoticeMarker>(deps, noticeMarker(task.taskId, `${task.taskId}:workflow:${workflow.revision}`));
+  if (card?.deliveredAt === undefined || card.postedText?.includes("Why I'm asking you") === true) return undefined;
+  const lines = autoFixCardLines(workflow, ask.data).map(slackText);
+  return lines.length === 0 ? undefined : { text: `More on the step above:\n${lines.join("\n")}`, sameAs: `autofix:${workflow.revision}` };
+}
 
 /** Another notice holds the claim on the same words: this one is retried (C9). */
 class SaidPending extends Error {
