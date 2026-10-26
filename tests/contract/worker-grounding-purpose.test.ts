@@ -128,6 +128,16 @@ describe("the worker keeps grounding rounds apart from every other kind", () => 
     await expect(run(round, groundingReference(round))).rejects.toThrow(/grounding/i);
   });
 
+  it("refuses an admission with a replay member under a grounding reference, whatever else about it is right", async () => {
+    const round = await built({});
+    const { admissionDigest: _digest, ...body } = JSON.parse(round.admission.bytes.toString("utf8")) as Record<string, unknown>;
+    void _digest;
+    // A replay member sealed into an otherwise grounding-shaped admission: the validator may or may not accept it, but the worker must never run it as a grounding round.
+    const withReplay = { ...body, replay: { purpose: "replay", sourceRoundId: randomUUID(), sourceAdmissionSha256: "3".repeat(64), sourceEvidenceSha256: "4".repeat(64), attempt: 1, sourceCases: [], traces: [] } };
+    const tampered = Buffer.from(canonicalJson({ ...withReplay, admissionDigest: createHash("sha256").update(canonicalJson(withReplay)).digest("hex") }), "utf8");
+    await expect(run(round, groundingReference(round), tampered)).rejects.not.toThrow(REACHED);
+  });
+
   it("refuses an admission of another commit, and an admission that routes a model, under a grounding reference", async () => {
     const plain = await built({});
     await expect(run(plain, groundingReference(plain, { baseCommitSha: "b".repeat(40) }))).rejects.toThrow(/grounding/i);

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { E2E_DISPLAY_ASSERTION_KINDS } from "./e2e-view.js";
 
 /**
  * Plan quality findings: what the broker's plan self-check says is wrong, or missing, in a coding plan that parsed.
@@ -87,6 +88,8 @@ export const PlanQualityFindingSchema = z.object({
   /** How many claims and Not changing entries a `checks-waived` finding leaves without proof. */
   count: z.number().int().min(0).max(1_000).optional(),
   targetReason: z.enum(PLAN_QUALITY_TARGET_REASONS).optional(),
+  /** T7b: the scenario steps a `scenario-base-mismatch` finding names: the scenario, the assertion kind that failed and, when the verification names it, the step. Fixed fields only. */
+  steps: z.array(z.object({ scenarioId: z.string().min(1).max(120), assertionKind: z.enum(E2E_DISPLAY_ASSERTION_KINDS), stepIndex: z.number().int().min(0).max(1_000).optional() }).strict()).max(32).optional(),
   /** For the owner: one fixed sentence. */
   ownerSentence: z.string().min(1).max(1_000),
   /** For the planner's next prompt: one line from plan IDs and fixed text. */
@@ -106,6 +109,7 @@ export type PlanQualityFindingInput = {
   limit?: number;
   count?: number;
   targetReason?: PlanQualityTargetReason;
+  steps?: ReadonlyArray<{ scenarioId: string; assertionKind: (typeof E2E_DISPLAY_ASSERTION_KINDS)[number]; stepIndex?: number }>;
 };
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/;
@@ -242,11 +246,15 @@ function sentences(input: PlanQualityFindingInput): { owner: string; planner: st
         owner: `The proposed check ${idList(input.checkIds)} did not do on the current code what the plan said it would.`,
         planner: `check-base-mismatch: check ${idList(input.checkIds)} gave a different result on the unchanged code than its expectOnBase says. Correct expectOnBase or the check.`,
       };
-    case "scenario-base-mismatch":
+    case "scenario-base-mismatch": {
+      // The assertion kinds are a fixed enum, so they are safe words; nothing the app showed or the plan wrote goes into a sentence.
+      const kinds = [...new Set((input.steps ?? []).map((step) => step.assertionKind))];
+      const which = kinds.length === 0 ? "" : ` (the ${kinds.join(", ")} check)`;
       return {
-        owner: `The current app does not behave as the plan assumes for ${idList(input.scenarioIds)}, which should stay unchanged.`,
-        planner: `scenario-base-mismatch: scenario ${idList(input.scenarioIds)} fails on the unchanged app although it proves a Not changing entry. Correct its expected values from the current code.`,
+        owner: `The current app does not behave as the plan assumes for ${idList(input.scenarioIds)}${which}, which should stay unchanged.`,
+        planner: `scenario-base-mismatch: scenario ${idList(input.scenarioIds)}${which} fails on the unchanged app although it proves a Not changing entry. Correct its expected values from the current code.`,
       };
+    }
   }
 }
 
@@ -262,6 +270,7 @@ export function planQualityFinding(input: PlanQualityFindingInput): PlanQualityF
     ...(input.limit === undefined ? {} : { limit: input.limit }),
     ...(input.count === undefined ? {} : { count: input.count }),
     ...(input.targetReason === undefined ? {} : { targetReason: input.targetReason }),
+    ...(input.steps === undefined ? {} : { steps: input.steps.map((step) => ({ ...step })) }),
     ownerSentence: text.owner,
     plannerLine: text.planner,
   };

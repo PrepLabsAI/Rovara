@@ -1,4 +1,4 @@
-import type { WorkerInvocation } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, type WorkerInvocation } from "@agentx/contracts";
 import type { WorkerTerminalResult } from "./server.js";
 import type { createWorkerCallbackSinks } from "./callback-client.js";
 
@@ -55,9 +55,9 @@ export async function postWorkerTerminalResult(
     if (invocation.kind === "task" && invocation.payload.workflowMode === "PLAN" && invocation.payload.workflowE2EGroundingSource === true && callbacks.baselineSourceSink !== undefined) {
       try { await callbacks.baselineSourceSink(baselineSource as Parameters<NonNullable<CallbackSinks["baselineSourceSink"]>>[0]); }
       catch (error) {
-        const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
-        // Only the fixed code: the text of a failure is not logged for a planning run.
-        log({ component: "worker", level: "warn", event: "grounding-source.delivery_failed", operationId: result.operationId, errorCode: typeof code === "string" ? code : "UNKNOWN" });
+        // Only a fixed class: the text of a failure is not logged for a planning run, and neither is a code that is not one of the AgentX error codes.
+        const code = AgentXErrorCodeSchema.safeParse(error instanceof Error ? (error as { code?: unknown }).code : undefined);
+        log({ component: "worker", level: "warn", event: "grounding-source.delivery_failed", operationId: result.operationId, errorCode: code.success ? code.data : "UNKNOWN" });
       }
     }
     await callbacks.terminalSink({ ...result, result: terminalResult });
