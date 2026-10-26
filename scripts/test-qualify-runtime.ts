@@ -71,6 +71,8 @@ const INSTANCE_TYPE = QUALIFICATION_INSTANCE_TYPE;
 /** The web/API challenge lives 60 minutes (docs/runtime-installation.md): registration is refused after that. */
 export { QUALIFICATION_POLL_TIMEOUT_MS };
 const POLL_INTERVAL_MS = 30_000;
+/** The old runner and the one being qualified: a run that finds this many already up launches nothing. */
+const MAX_ACTIVE_RUNNERS = 2;
 /** The worker uploads ready.json once it answers /ping: boot, volume attach and image pulls take a few minutes. */
 const READY_TIMEOUT_MS = QUALIFICATION_READY_TIMEOUT_MS;
 
@@ -211,6 +213,8 @@ export interface QualificationEffects {
   recordModelCheckRunner(runner: { roleId: string; instanceId: string; transportCorrelationId: string }): Promise<void>;
   /** The generation the next challenge needs: one past the newest registered runtime, read the way the automatic renewal reads it (1 when nothing is registered). */
   nextGeneration(): Promise<number>;
+  /** How many qualification runners of this environment are not yet terminated; the automatic renewal refuses to start a third, and so does this script. */
+  countActiveRunners(): Promise<number>;
   /** Takes the renewal lock (the one the automatic renewal holds); throws when another run holds it. */
   acquireLock(runId: string): Promise<void>;
   /** Releases the lock if this run holds it. */
@@ -303,6 +307,9 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
   const runId = launches[0].clientToken;
   await effects.acquireLock(runId);
   try {
+    // The cost guard of the automatic renewal: the existing runner plus the one this run would launch is the most there may ever be.
+    const active = await effects.countActiveRunners();
+    if (active >= MAX_ACTIVE_RUNNERS) throw new Error(`${active} qualification runners of this environment are already up (at most ${MAX_ACTIVE_RUNNERS - 1} may be, so the new one makes ${MAX_ACTIVE_RUNNERS}); end the extra one first, nothing was launched`);
     await runSteps(steps, effects, options, state);
   } finally {
     await effects.releaseLock(runId);
@@ -740,6 +747,24 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
       const table = requireOutput(outputsOf(await stack(environmentStackName(args.env, "control-plane"))), "StateTableName", environmentStackName(args.env, "control-plane"));
       await documents.send(new PutCommand({ TableName: table, Item: { ...e2eModelCheckRunnerKey(WEB_API_RUNTIME_PROFILE_ID), entityType: "E2E_MODEL_CHECK_RUNNER", roleId: runner.roleId, instanceId: runner.instanceId,
         transportCorrelationId: runner.transportCorrelationId, recordedAt: new Date().toISOString() } }));
+    },
+
+    async countActiveRunners() {
+      let count = 0;
+      let token: string | undefined;
+      for (let page = 0; page < 20; page += 1) {
+        const response = await ec2.send(new DescribeInstancesCommand({
+          Filters: [
+            { Name: "tag:DeploymentMode", Values: ["e2e-qualification"] }, { Name: "tag:Environment", Values: [args.env] },
+            { Name: "instance-state-name", Values: ["pending", "running", "stopping", "stopped"] },
+          ],
+          ...(token === undefined ? {} : { NextToken: token }),
+        }));
+        count += (response.Reservations ?? []).reduce((sum, reservation) => sum + (reservation.Instances?.length ?? 0), 0);
+        token = response.NextToken;
+        if (token === undefined) return count;
+      }
+      return count + MAX_ACTIVE_RUNNERS;
     },
 
     async nextGeneration() {

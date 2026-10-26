@@ -18,7 +18,7 @@ export const BINDING: Ec2RuntimeBinding = { deploymentMode: "ec2-ebs", launchTem
 const HOUR = 3_600_000;
 
 type Item = Record<string, unknown>;
-interface FakeInstance { id: string; state: string; tags: Record<string, string>; ip: string; volumes: string[]; polls: number }
+interface FakeInstance { imageId?: string; id: string; state: string; tags: Record<string, string>; ip: string; volumes: string[]; polls: number }
 interface FakeVolume { id: string; state: string; tags: Record<string, string>; attachedTo?: string }
 const named = (name: string, message = name): Error => Object.assign(new Error(message), { name });
 const hex = (n: number) => n.toString(16).padStart(17, "0");
@@ -37,7 +37,7 @@ export class FakeCloud {
   deleted: string[] = [];
   launches: string[] = [];
   /** What the runner's boot hook does: becomes ready, then qualifies when a challenge appears. */
-  runner: { ready: boolean; qualify: "SUCCEEDED" | "FAILED" | "never"; failure: string[] } = { ready: true, qualify: "SUCCEEDED", failure: [] };
+  runner: { ready: boolean; qualify: "SUCCEEDED" | "FAILED" | "never"; failure: string[]; proposal?: Buffer } = { ready: true, qualify: "SUCCEEDED", failure: [] };
   /** Work that began before the hold and has not finished. */
   activeWork: number | "unknown" = 0;
   failRegister = false;
@@ -97,7 +97,7 @@ export class FakeCloud {
     if (match[3] === "ready") return this.runner.ready && instance.volumes.length > 1 ? Buffer.from("{}") : undefined;
     if (!challenge || this.runner.qualify === "never") return undefined;
     if (match[3] === "status") return Buffer.from(JSON.stringify({ state: this.runner.qualify, reason: "x", finishedAt: "2026-10-27T06:30:00Z", failure: { codes: this.runner.failure } }));
-    return this.runner.qualify === "SUCCEEDED" ? Buffer.from(JSON.stringify({ proposal: true, instance: instance.id })) : undefined;
+    return this.runner.qualify === "SUCCEEDED" ? (this.runner.proposal ?? Buffer.from(JSON.stringify({ proposal: true, instance: instance.id }))) : undefined;
   }
 
   // ---- clients: each `send` dispatches on the command's class name -----------------------------------------------------------------------------
@@ -139,7 +139,7 @@ export class FakeCloud {
         const rootId = `vol-${hex(this.counter++)}`;
         this.launches.push(id);
         const tags = Object.fromEntries((input["TagSpecifications"][0].Tags as Array<{ Key: string; Value: string }>).map((tag) => [tag.Key, tag.Value]));
-        this.instances.set(id, { id, state: "pending", tags, ip: `10.0.1.${this.counter}`, volumes: [rootId], polls: 0 });
+        this.instances.set(id, { imageId: input["ImageId"], id, state: "pending", tags, ip: `10.0.1.${this.counter}`, volumes: [rootId], polls: 0 });
         this.volumes.set(rootId, { id: rootId, state: "in-use", tags: {}, attachedTo: id });
         return { Instances: [{ InstanceId: id }] };
       }

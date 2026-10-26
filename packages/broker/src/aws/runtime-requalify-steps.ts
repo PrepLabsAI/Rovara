@@ -78,8 +78,12 @@ export interface RequalifyStepsDependencies extends RequalifyDependencies {
 
 /** The proposal as the product defines it: the schema parses it, and the digest is over the parsed form (the registrar re-checks both). */
 function parseRunnerProposal(bytes: Buffer): { proposal: unknown; sha256: string } {
-  const proposal = WebApiRuntimeInstallProposalSchema.parse(JSON.parse(bytes.toString("utf8")));
-  return { proposal, sha256: webApiRuntimeInstallProposalSha256(proposal) };
+  // The proposal holds the challenge secret and a parser's or schema's message can quote the input around the fault: only fixed messages leave this function.
+  let value: unknown;
+  try { value = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("the proposal is not valid JSON"); }
+  const parsed = WebApiRuntimeInstallProposalSchema.safeParse(value);
+  if (!parsed.success) throw new Error("the proposal is not a READY web/API qualification");
+  return { proposal: parsed.data, sha256: webApiRuntimeInstallProposalSha256(parsed.data) };
 }
 
 const Iso = z.string().datetime();
@@ -109,7 +113,7 @@ export type RequalifyState = z.infer<typeof StateSchema>;
 
 const ActionSchema = z.object({
   action: z.enum(["due", "lock", "preflight", "pinAmi", "createVolume", "awaitVolume", "runInstance", "attachVolume", "awaitReady", "issueChallenge", "awaitQualification", "putHold", "awaitDrain",
-    "switch", "recordAmi", "terminatePrevious", "awaitTerminatedPrevious", "complete", "failAlert", "terminateNew", "awaitTerminatedNew", "releaseLock"]),
+    "switch", "recoverSwitch", "recordAmi", "terminatePrevious", "awaitTerminatedPrevious", "complete", "failAlert", "terminateNew", "awaitTerminatedNew", "releaseLock"]),
   state: z.unknown().optional(),
   force: z.boolean().optional(),
 }).strict();
@@ -140,6 +144,7 @@ async function perform(deps: RequalifyStepsDependencies, action: Exclude<z.infer
     case "putHold": await putHold(deps, state); return { drain: {} };
     case "awaitDrain": return { drain: await awaitDrain(deps, state) };
     case "switch": return { switch: await switchRuntime(deps, state) };
+    case "recoverSwitch": return { switch: await recoverSwitch(deps, state) };
     case "recordAmi": await recordAmi(deps, state); return {};
     case "terminatePrevious": return { previousTermination: await terminatePrevious(deps, state) };
     case "awaitTerminatedPrevious": return { previousTermination: await awaitTerminated(deps, state, need(state.previousTermination, "previousTermination"), "previous") };
@@ -457,6 +462,18 @@ async function switchRuntime(deps: RequalifyStepsDependencies, state: RequalifyS
   return { switched: true, generation: result.generation, previous: result.previousRunner === null ? null : { instanceId: result.previousRunner.instanceId, roleId: result.previousRunner.roleId } };
 }
 
+/**
+ * The switch step failed or its answer was lost. The audit record is written in the switch's own transaction, so it exists exactly when the switch
+ * committed: if it does, carry on to the retirement from it (the previous runner is in it); if not, nothing was switched.
+ */
+async function recoverSwitch(deps: RequalifyStepsDependencies, state: RequalifyState): Promise<NonNullable<RequalifyState["switch"]>> {
+  const item = (await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: requalifyRunKey(state.runId), ConsistentRead: true }))).Item as Partial<RequalifyRunRecord> | undefined;
+  if (item?.runId !== state.runId || typeof item.generation !== "number") return { switched: false };
+  try { await deleteHold(deps, state.runId); } catch { /* expires at its own time */ }
+  const previous = item.previousRunner;
+  return { switched: true, generation: item.generation, previous: previous === null || previous === undefined ? null : { instanceId: previous.instanceId, roleId: previous.roleId } };
+}
+
 async function recordAmi(deps: RequalifyStepsDependencies, state: RequalifyState): Promise<void> {
   await deps.ssm.send(new PutParameterCommand({ Name: `${deps.config.workerSettingsPrefix}${QUALIFIED_AMI_SETTING_NAME}`, Type: "String", Overwrite: true, Value: need(state.ami, "ami").amiId }));
 }
@@ -569,6 +586,17 @@ async function soonestExpiry(deps: RequalifyStepsDependencies): Promise<number |
   return known.length === 0 ? undefined : Math.min(...known);
 }
 
+async function pointerNames(deps: RequalifyStepsDependencies, instanceId: string | undefined): Promise<boolean> {
+  if (instanceId === undefined) return false;
+  const pointer = (await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: e2eModelCheckRunnerKey(REQUALIFY_PROFILE_ID), ConsistentRead: true }))).Item;
+  return pointer?.["instanceId"] === instanceId;
+}
+
+async function recordedPrevious(deps: RequalifyStepsDependencies, runId: string): Promise<{ instanceId: string } | null> {
+  const item = (await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: requalifyRunKey(runId), ConsistentRead: true }))).Item as Partial<RequalifyRunRecord> | undefined;
+  return item?.previousRunner ?? null;
+}
+
 /** Lifts the hold, deletes the challenge, counts the failure and sends the one alert. The runner itself is ended by the next steps. */
 async function failAlert(deps: RequalifyStepsDependencies, state: RequalifyState): Promise<void> {
   const reason = alertReason(state);
@@ -582,12 +610,15 @@ async function failAlert(deps: RequalifyStepsDependencies, state: RequalifyState
     const soonest = await soonestExpiry(deps);
     if (soonest === undefined || soonest - nowOf(deps) > REQUALIFY_ALERT_WINDOW_MS) return;
   }
+  // The switch may have committed without the machine knowing (its answer was lost and the recovery failed too): the pointer and the run record say so.
+  const committed = state.switch?.switched === true || await pointerNames(deps, state.instance?.instanceId);
+  const previous = state.switch?.previous ?? (committed ? await recordedPrevious(deps, state.runId) : null);
   const detail = state.qualification?.failure?.join(",") ?? refusalDetail(state.error);
   const lines = [
     `The automatic renewal of the browser and API test machine did not finish (${deps.environment}).`,
     `reason: ${reason}${detail ? ` (${detail})` : ""}`, `run: ${state.runId}`,
-    ...(state.instance ? [`new runner: ${state.instance.instanceId}`] : []), ...(state.switch?.previous ? [`previous runner: ${state.switch.previous.instanceId}`] : []),
-    state.switch?.switched === true ? "The new runner is serving; only the old one's cleanup failed." : "The old runner and the registered rows were left as they were.",
+    ...(state.instance ? [`new runner: ${state.instance.instanceId}`] : []), ...(previous ? [`previous runner: ${previous.instanceId}`] : []),
+    committed ? `The new runner is serving. ${previous ? "Check that the previous runner is gone and end it if not." : "No previous runner was recorded."}` : "The old runner and the registered rows were left as they were.",
   ];
   await deps.sns.send(new PublishCommand({ TopicArn: deps.config.operatorTopicArn, Subject: `Rovara test machine renewal: ${reason}`.slice(0, 100), Message: lines.join("\n") }));
 }
