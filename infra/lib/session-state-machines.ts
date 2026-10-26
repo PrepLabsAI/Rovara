@@ -115,6 +115,7 @@ export function provisionerDefinition(props: SessionStateMachineProps): State {
           volumeSizeGiB: "{% $states.input.volumeSizeGiB %}",
           volumeType: "{% $states.input.volumeType %}",
           qualifiedAmi: null,
+          pinFallback: null,
           // The execution name: CreateVolume and RunInstances are idempotent per generation.
           clientToken: "{% 'ws-' & $states.input.workspaceId & '-gen-' & $string($states.input.generation) %}",
           expectNewVolume: false,
@@ -181,16 +182,17 @@ export function provisionerDefinition(props: SessionStateMachineProps): State {
         Next: "ReadQualifiedAmi",
       }),
       // AUTOREQUALIFY AR-4: workers boot from the AMI the test machine was qualified on, so a renewal
-      // causes no kernel drift. No parameter yet (before the first automatic requalification) launches
-      // from the launch template's AMI as before; any other fault, or a value that is not an AMI ID,
-      // fails the provisioning rather than launching a worker that would drift.
+      // causes no kernel drift. The pin must never stop a worker from starting: no parameter yet (before
+      // the first automatic requalification), any read fault whatever its error name, and a value that is
+      // not an AMI ID all launch from the launch template's AMI as before. The last two record a fixed
+      // reason (pinFallback) in the execution, and the reconciler reports an unreadable pin.
       ReadQualifiedAmi: {
         Type: "Task",
         Resource: ssm("getParameter"),
         Arguments: { Name: props.workerAmiParameterName },
         Assign: { qualifiedAmi: "{% $states.result.Parameter.Value %}" },
         Retry: [{ ErrorEquals: [PARAMETER_NOT_FOUND], MaxAttempts: 0 }, ...RETRY_IDEMPOTENT],
-        Catch: [{ ErrorEquals: [PARAMETER_NOT_FOUND], Next: "RunInstance" }, toCleanup],
+        Catch: [{ ErrorEquals: [PARAMETER_NOT_FOUND], Next: "RunInstance" }, { ErrorEquals: ["States.ALL"], Next: "QualifiedAmiReadFailed" }],
         Next: "QualifiedAmiWellFormed",
       },
       QualifiedAmiWellFormed: {
@@ -198,7 +200,8 @@ export function provisionerDefinition(props: SessionStateMachineProps): State {
         Choices: [{ Condition: `{% $count($match($qualifiedAmi, /${AMI_ID_PATTERN_SOURCE}/)) > 0 %}`, Next: "RunInstancePinned" }],
         Default: "QualifiedAmiMalformed",
       },
-      QualifiedAmiMalformed: { Type: "Pass", Assign: { failure: "the qualified worker AMI setting is not an AMI ID" }, Next: "Cleanup" },
+      QualifiedAmiReadFailed: { Type: "Pass", Assign: { qualifiedAmi: null, pinFallback: "qualified-ami-read-failed" }, Next: "RunInstance" },
+      QualifiedAmiMalformed: { Type: "Pass", Assign: { qualifiedAmi: null, pinFallback: "qualified-ami-malformed" }, Next: "RunInstance" },
       RunInstance: runInstance(props, workspaceTags, false),
       RunInstancePinned: runInstance(props, workspaceTags, true),
       RecordInstance: step(props, {

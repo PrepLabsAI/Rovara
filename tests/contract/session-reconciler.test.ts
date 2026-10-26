@@ -155,7 +155,8 @@ describe("reconciler: workers on another AMI than the qualified one (AUTOREQUALI
   /** One READY worker running `imageId`, its session seeded as the provisioner leaves it. */
   function readyWorker(options: SetupOptions, imageId: string | undefined, workspace: Record<string, unknown> = {}, fields: Record<string, unknown> = {}) {
     const harness = setup(options);
-    const worker = ready();
+    // Idle for 10 minutes unless a test says otherwise: past the recycle threshold.
+    const worker = { ...ready(), lastActivityAt: minutesAgo(10) };
     const workspaceId = seedSession(harness.db, "READY", { ...worker, ...fields }, workspace);
     harness.state.instances = [{ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60), ...(imageId === undefined ? {} : { imageId }) }];
     return { ...harness, worker, workspaceId };
@@ -173,8 +174,8 @@ describe("reconciler: workers on another AMI than the qualified one (AUTOREQUALI
 
   it("recycles per worker: only the one on another AMI", async () => {
     const harness = setup({ qualifiedWorkerAmi: async () => PINNED });
-    const stale = ready();
-    const current = ready();
+    const stale = { ...ready(), lastActivityAt: minutesAgo(10) };
+    const current = { ...ready(), lastActivityAt: minutesAgo(10) };
     const staleWorkspace = seedSession(harness.db, "READY", stale);
     const currentWorkspace = seedSession(harness.db, "READY", { ...current, privateIp: "10.42.128.11" });
     harness.state.instances = [
@@ -196,6 +197,36 @@ describe("reconciler: workers on another AMI than the qualified one (AUTOREQUALI
     const report = await reconcile();
     expect(report.recycledStaleAmi).toEqual([]);
     expect(sessionOf(db, workspaceId)).toMatchObject({ state: "READY" });
+  });
+
+  it("waits until the worker has been idle for 5 minutes, like the reaper, so a warm worker is not cold-started mid-session", async () => {
+    const recent = readyWorker({ qualifiedWorkerAmi: async () => PINNED }, STALE, {}, { lastActivityAt: minutesAgo(4) });
+    expect((await recent.reconcile()).recycledStaleAmi).toEqual([]);
+    expect(sessionOf(recent.db, recent.workspaceId)).toMatchObject({ state: "READY" });
+
+    const settled = readyWorker({ qualifiedWorkerAmi: async () => PINNED }, STALE, {}, { lastActivityAt: minutesAgo(6) });
+    expect((await settled.reconcile()).recycledStaleAmi).toEqual([settled.workspaceId]);
+  });
+
+  it("rolls a renewal gradually: at most 2 idle workers per run, the rest on the next runs", async () => {
+    const harness = setup({ qualifiedWorkerAmi: async () => PINNED });
+    const workspaces: string[] = [];
+    harness.state.instances = [];
+    for (let index = 0; index < 5; index += 1) {
+      const worker = { ...ready(), lastActivityAt: minutesAgo(10), privateIp: `10.42.128.${10 + index}` };
+      const workspaceId = seedSession(harness.db, "READY", worker);
+      workspaces.push(workspaceId);
+      harness.state.instances.push({ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60), imageId: STALE });
+    }
+    const stoppingNow = () => workspaces.filter((id) => sessionOf(harness.db, id).state === "STOPPING");
+    const first = await harness.reconcile();
+    expect(first.recycledStaleAmi).toHaveLength(2);
+    expect(stoppingNow()).toHaveLength(2);
+    expect(harness.emit).toHaveBeenLastCalledWith(expect.objectContaining({ ReconcilerRecycledStaleAmi: 2 }));
+    // The two stopped workers' instances leave (as after the reaper's terminate); the rest wait their turn.
+    harness.state.instances = harness.state.instances.filter((instance) => !stoppingNow().includes(instance.workspaceId!));
+    expect((await harness.reconcile()).recycledStaleAmi).toHaveLength(2);
+    expect(workspaces.filter((id) => sessionOf(harness.db, id).state === "STOPPING")).toHaveLength(4);
   });
 
   it("never touches a worker that reports busy, however stale its AMI", async () => {

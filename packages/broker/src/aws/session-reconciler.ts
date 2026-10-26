@@ -28,6 +28,13 @@ export const GRACE_MS = 15 * 60_000;
 export const CLOSED_VOLUME_MS = 60 * 60_000;
 /** Consecutive failed /ping probes before a READY worker is replaced. */
 export const UNRESPONSIVE_PROBES = 3;
+/**
+ * AUTOREQUALIFY AR-4: a worker on another AMI than the pinned one is recycled only after it has been
+ * idle this long (the idle reaper's threshold), and at most this many per run (every 10 minutes), so a
+ * renewal rolls through the warm workers gradually instead of cold-starting them all at once.
+ */
+export const STALE_AMI_IDLE_MS = 5 * 60_000;
+export const MAX_STALE_AMI_RECYCLES_PER_RUN = 2;
 export const QUARANTINE_TAG = "agentx:quarantined";
 const WORKER_PORT = 8080;
 const PING_TIMEOUT_MS = 2_000;
@@ -148,7 +155,7 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
     for (const session of sessions.values()) {
       switch (session.state) {
         case "READY": {
-          const worker = await reconcileReady(dependencies, session, instanceById, report, log, qualifiedAmi);
+          const worker = await reconcileReady(dependencies, session, instanceById, report, log, now, qualifiedAmi);
           if (worker !== undefined) workers.set(session.workspaceId, worker);
           break;
         }
@@ -320,6 +327,7 @@ async function reconcileReady(
   instances: Map<string, InstanceView>,
   report: ReconcilerReport,
   log: (entry: Record<string, unknown>) => void,
+  now: number,
   qualifiedAmi?: string,
 ): Promise<StuckCancelWorker | undefined> {
   const instance = instances.get(session.instanceId!);
@@ -349,7 +357,11 @@ async function reconcileReady(
   if ((session.waitingOutboxIds ?? []).length > 0) {
     const { requeued } = await dependencies.sessions.requeueParked(session.workspaceId);
     report.requeued.push(...requeued);
-  } else if (status === "Healthy" && isStaleWorkerAmi(instance.imageId, qualifiedAmi)) {
+  } else if (
+    status === "Healthy" && isStaleWorkerAmi(instance.imageId, qualifiedAmi)
+    && (report.recycledStaleAmi?.length ?? 0) < MAX_STALE_AMI_RECYCLES_PER_RUN
+    && now - Date.parse(session.lastActivityAt!) > STALE_AMI_IDLE_MS
+  ) {
     // AUTOREQUALIFY AR-4: the recycle mark. The same READY -> STOPPING claim the idle reaper makes,
     // so it holds only if nothing touched the session since it was read and the workspace has no
     // operation in progress (a dispatch racing it always wins). The reaper terminates the instance

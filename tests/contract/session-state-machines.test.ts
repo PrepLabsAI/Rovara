@@ -1,3 +1,4 @@
+import jsonata from "jsonata";
 import { describe, expect, it } from "vitest";
 import { WORKER_AMI_ID_PATTERN } from "../../packages/broker/src/aws/worker-ami.js";
 import {
@@ -87,7 +88,7 @@ describe("provisioner", () => {
   it("sends every failure through cleanup: terminate any instance, keep the volume, mark failed", () => {
     for (const [name, state] of Object.entries(states)) {
       if (state.Type !== "Task" || name === "MarkFailed" || name === "TerminateInstance") continue;
-      // The AMI pin is optional: an absent parameter launches unpinned; every other fault cleans up.
+      // The AMI pin is optional: any fault in reading it launches from today's AMI (its own Catch is tested below).
       if (name === "ReadQualifiedAmi") continue;
       expect(state.Catch?.map((c) => c.Next), name).toEqual(["Cleanup"]);
     }
@@ -111,28 +112,60 @@ describe("provisioner: pinned worker AMI (AUTOREQUALIFY AR-4)", () => {
     expect(read.Next).toBe("QualifiedAmiWellFormed");
   });
 
-  it("launches unpinned only when the parameter does not exist, without retrying that answer", () => {
+  it("never stops a worker from starting because the pin cannot be read: any fault launches from today's AMI", () => {
     const read = states.ReadQualifiedAmi!;
+    // Not found (the state before the first requalification) goes straight to the unpinned launch.
+    // Every other error, whatever its name, goes to a fallback state that records a fixed reason.
     expect(read.Catch).toEqual([
       { ErrorEquals: [NOT_FOUND], Next: "RunInstance" },
-      expect.objectContaining({ ErrorEquals: ["States.ALL"], Next: "Cleanup" }),
+      { ErrorEquals: ["States.ALL"], Next: "QualifiedAmiReadFailed" },
     ]);
+    expect(states.QualifiedAmiReadFailed).toMatchObject({ Type: "Pass", Next: "RunInstance", Assign: { qualifiedAmi: null, pinFallback: "qualified-ami-read-failed" } });
     // First retrier matches the not-found answer with zero attempts, ahead of the catch-all retrier.
     const retry = read.Retry as unknown as Array<{ ErrorEquals: string[]; MaxAttempts?: number }>;
     expect(retry[0]).toMatchObject({ ErrorEquals: [NOT_FOUND], MaxAttempts: 0 });
     expect(retry.slice(1).every((retrier) => !retrier.ErrorEquals.includes(NOT_FOUND))).toBe(true);
+    // The fallback state is the unpinned launch, which has no ImageId.
+    expect(states.RunInstance!.Arguments).not.toHaveProperty("ImageId");
   });
 
-  it("launches the pinned AMI when the value is an AMI ID, and fails the provisioning when it is not", () => {
+  it("launches the pinned AMI when the value is an AMI ID, and falls back to today's AMI when it is not", () => {
     const choice = states.QualifiedAmiWellFormed!;
     expect(choice.Choices![0]!.Next).toBe("RunInstancePinned");
     expect(choice.Default).toBe("QualifiedAmiMalformed");
-    expect(states.QualifiedAmiMalformed!.Next).toBe("Cleanup");
+    // A corrupt pin never stops a worker from starting either; it is recorded by a fixed reason.
+    expect(states.QualifiedAmiMalformed).toMatchObject({ Type: "Pass", Next: "RunInstance", Assign: { qualifiedAmi: null, pinFallback: "qualified-ami-malformed" } });
     const condition = (choice.Choices![0] as unknown as { Condition: string }).Condition;
     // The state machine's own pattern is the broker's pattern.
     const embedded = /\/(.+)\//.exec(condition)![1]!;
     expect(embedded).toBe(WORKER_AMI_ID_PATTERN.source);
-    expect(JSON.stringify(states.QualifiedAmiMalformed)).not.toContain("qualifiedAmi");
+  });
+
+  // The JSONata the machine runs, evaluated for real (Step Functions strips the {% %} delimiters).
+  const expression = (condition: string) => /^\{% (.*) %\}$/s.exec(condition)![1]!;
+  const wellFormed = (value: unknown) => jsonata(expression((states.QualifiedAmiWellFormed!.Choices![0] as unknown as { Condition: string }).Condition)).evaluate({}, { qualifiedAmi: value });
+
+  it.each(["ami-0123456789abcdef0", "ami-01234567", "ami-0fedcba9876543210"])("the Choice accepts the AMI ID %s", async (value) => {
+    expect(await wellFormed(value)).toBe(true);
+  });
+
+  it.each(["", "ami-", "ami-xyz", "ami-0123456789abcdef0 ", " ami-0123456789abcdef0", "ami-0123456789abcdef01", "AMI-0123456789abcdef0", "garbage", "resolve:ssm:/aws/service/x"])("the Choice refuses %j", async (value) => {
+    expect(await wellFormed(value)).toBe(false);
+  });
+
+  it("the Choice refuses a missing value instead of failing", async () => {
+    expect(await wellFormed(undefined)).toBe(false);
+  });
+
+  it("agrees with the broker's pattern on every sample", async () => {
+    for (const value of ["ami-0123456789abcdef0", "ami-01234567", "ami-0123456789", "ami-ABCDEF12", "ami-0123456789abcdef0\n"]) {
+      expect(await wellFormed(value), value).toBe(WORKER_AMI_ID_PATTERN.test(value));
+    }
+  });
+
+  it("reads the pin's value from the SSM answer's Parameter.Value", async () => {
+    const assigned = (states.ReadQualifiedAmi!.Assign as Record<string, string>).qualifiedAmi!;
+    expect(await jsonata(expression(assigned)).evaluate({}, { states: { result: { Parameter: { Value: "ami-0123456789abcdef0" } } } })).toBe("ami-0123456789abcdef0");
   });
 
   it("differs from the unpinned launch by the ImageId alone, with the same idempotency token and tags", () => {
