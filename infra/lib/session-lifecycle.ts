@@ -261,6 +261,9 @@ export class SessionLifecycle extends Construct {
       "A READY EC2 worker's instance disappeared; its session was stopped and its running operation failed. Check the reconciler's logs and the instance's EC2 history.");
     findingAlarm("StuckProvisioningAlarm", "ReconcilerStuckProvisioning",
       "An EC2 session provisioning ended without finishing and was marked failed by the reconciler. Open the provisioner execution named in the reconciler's logs.");
+    // AR-4 review M3: the pin could not be read (denied, throttled, malformed), so no stale worker is recycled and the next renewal's pin is not applied. Task machines still launch from today's image.
+    findingAlarm("QualifiedAmiReadFailuresAlarm", "ReconcilerQualifiedAmiReadFailures",
+      "The reconciler could not read the qualified worker AMI setting, so workers on an older image are not being recycled. Check the setting's value and the reconciler's logs (reconciler.qualified_ami_unreadable).");
     new cloudwatch.Alarm(this, "ReconcilerErrorsAlarm", {
       alarmName: naming.alarmName("SessionReconcilerErrors"),
       alarmDescription: "The EC2 session reconciler failed twice in a row; drift is not being repaired. Check the reconciler's logs.",

@@ -8382,6 +8382,32 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::IAM::Policy",
     },
+    "SessionsQualifiedAmiReadFailuresAlarm8D544306": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "The reconciler could not read the qualified worker AMI setting, so workers on an older image are not being recycled. Check the setting's value and the reconciler's logs (reconciler.qualified_ami_unreadable).",
+        "AlarmName": "agentx-staging-ReconcilerQualifiedAmiReadFailures",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "ReconcilerQualifiedAmiReadFailures",
+        "Namespace": "AgentX/staging",
+        "Period": 900,
+        "Statistic": "Maximum",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
     "SessionsQuarantinedVolumesAlarm444AC785": {
       "Properties": {
         "AlarmActions": [

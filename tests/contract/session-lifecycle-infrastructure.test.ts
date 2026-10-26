@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
@@ -216,6 +216,17 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
   it("alarms on quarantined volumes, lost instances and stuck provisioning (#86)", () => {
     const names = ofType("AWS::CloudWatch::Alarm").map(([, a]) => a.Properties.AlarmName);
     expect(names).toEqual(expect.arrayContaining(["AgentXReconcilerQuarantinedVolumes", "AgentXReconcilerLostInstances", "AgentXReconcilerStuckProvisioning"]));
+  });
+
+  it("alarms the operator when the reconciler cannot read the qualified-AMI pin (AR-4 review M3), as a finding alarm that stays quiet while no datapoint arrives", () => {
+    const [, alarm] = ofType("AWS::CloudWatch::Alarm").find(([, a]) => a.Properties.AlarmName === "AgentXReconcilerQualifiedAmiReadFailures")!;
+    expect(alarm.Properties).toMatchObject({
+      MetricName: "ReconcilerQualifiedAmiReadFailures", Statistic: "Maximum", Threshold: 1, EvaluationPeriods: 1,
+      ComparisonOperator: "GreaterThanOrEqualToThreshold", TreatMissingData: "notBreaching",
+    });
+    expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
+    // The metric the reconciler emits (session-reconciler.ts) is the one the alarm reads.
+    expect(readFileSync(new URL("../../packages/broker/src/aws/session-reconciler.ts", import.meta.url), "utf8")).toContain("ReconcilerQualifiedAmiReadFailures:");
   });
 
   it("alarms the operator when either state machine fails or times out", () => {

@@ -4105,6 +4105,26 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::IAM::Policy",
     },
+    "SessionsQualifiedAmiReadFailuresAlarm8D544306": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "The reconciler could not read the qualified worker AMI setting, so workers on an older image are not being recycled. Check the setting's value and the reconciler's logs (reconciler.qualified_ami_unreadable).",
+        "AlarmName": "AgentXReconcilerQualifiedAmiReadFailures",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "ReconcilerQualifiedAmiReadFailures",
+        "Namespace": "AgentX",
+        "Period": 900,
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
     "SessionsQuarantinedVolumesAlarm444AC785": {
       "Properties": {
         "AlarmActions": [
