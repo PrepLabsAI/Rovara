@@ -1141,7 +1141,7 @@ describe("the read-only reader (F6)", () => {
     expect([...CHECK_READ_VERBS].sort()).toEqual([
       "bedrock get-foundation-model-availability", "bedrock get-inference-profile",
       "cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources",
-      "dynamodb query", "dynamodb scan", "ec2 describe-instances", "iam get-role", "lambda get-function", "s3api get-object", "service-quotas list-service-quotas", "ssm get-parameter",
+      "dynamodb query", "dynamodb scan", "ec2 describe-instances", "ec2 describe-volumes", "iam get-role", "lambda get-function", "s3api get-object", "service-quotas list-service-quotas", "ssm get-parameter",
     ]);
   });
 
