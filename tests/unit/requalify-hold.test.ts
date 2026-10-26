@@ -7,10 +7,11 @@ import {
 } from "../../packages/contracts/src/index.js";
 import {
   ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock,
-  recycleDriftedWorker, replayPredatesRenewal, requalifyHoldFence, requalifyDrainCount, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
+  recycleDriftedWorker, rethrowAsDeferredIfHeld, replayPredatesRenewal, requalifyHoldFence, requalifyDrainCount, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
 } from "../../packages/broker/src/e2e/requalify-hold.js";
 import { E2E_REPLAY_REFUSALS } from "../../packages/contracts/src/index.js";
 import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
 
 const NOW = Date.parse("2026-10-27T03:00:00.000Z");
@@ -97,13 +98,55 @@ describe("the hold as a condition inside a start's own transaction", () => {
   it("names the HOLD row and passes only when it is absent or has ended", () => {
     const check = fence(table(), NOW);
     expect(check.Key).toEqual(requalifyHoldKey());
-    expect(check.ConditionExpression).toBe("attribute_not_exists(pk) OR #until <= :now");
+    expect(check.ConditionExpression).toBe("attribute_not_exists(pk) OR #until <= :now OR #acquired <= :bound");
     expect(check.ExpressionAttributeValues[":now"]).toBe(iso(NOW));
   });
   it("is the item every start transaction carries: the four system starts of a CHECKS operation (checks, baseline, grounding, replay) and the setup run's admission", () => {
     // The checks start is exercised end to end (contract test); the others share its shape, and a start without the item would let a round begin on the old machine.
     expect(readFileSync("packages/broker/src/aws/developer-tasks.ts", "utf8").split("requalifyHoldFence(deps.tableName").length - 1).toBe(4);
-    expect(readFileSync("packages/broker/src/aws/broker.ts", "utf8")).toContain("requalifyHoldFence(dependencies.tableName, Date.now())] };");
+    const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
+    expect(broker).toContain("requalifyHoldFence(dependencies.tableName, Date.now())] };");
+    // Both setup transactions (the registration and the admin retry) report a refused fence as the fixed reason.
+    expect(broker.split("await rethrowAsDeferredIfHeld(dependencies, error, Date.now())").length - 1).toBe(2);
+  });
+});
+
+describe("the fence and the code-level read bound a hold the same way", () => {
+  const rows: Array<[string, Record<string, unknown> | undefined]> = [
+    ["no hold", undefined],
+    ["a hold in force", { entityType: "RUNTIME_REQUALIFY_HOLD", runId: RUN, acquiredAt: iso(NOW - 60_000), until: iso(NOW + 60_000) }],
+    ["a hold past its until", { entityType: "RUNTIME_REQUALIFY_HOLD", runId: RUN, acquiredAt: iso(NOW - 120_000), until: iso(NOW - 1) }],
+    ["a hold past three hours, with an until still ahead", { entityType: "RUNTIME_REQUALIFY_HOLD", runId: RUN, acquiredAt: iso(NOW - 3 * 3_600_000), until: iso(NOW + 60_000) }],
+    ["a damaged until, inside three hours", { runId: RUN, acquiredAt: iso(NOW - 60_000), until: "tomorrow" }],
+    ["a damaged until, past three hours", { runId: RUN, acquiredAt: iso(NOW - 3 * 3_600_000), until: "tomorrow" }],
+    ["no until at all, past three hours", { runId: RUN, acquiredAt: iso(NOW - 4 * 3_600_000) }],
+    ["an extra attribute", { entityType: "RUNTIME_REQUALIFY_HOLD", runId: RUN, acquiredAt: iso(NOW - 60_000), until: iso(NOW + 60_000), extra: 1 }],
+  ];
+  it.each(rows)("%s: a start transaction commits exactly when the code says no hold stands", async (_name, item) => {
+    const db = new FakeDynamoDb();
+    if (item !== undefined) db.set({ ...requalifyHoldKey(), ...item });
+    const { TransactWriteCommand } = await import("@aws-sdk/lib-dynamodb");
+    let committed = true;
+    try {
+      await db.send(new TransactWriteCommand({ TransactItems: [requalifyHoldFence("state", NOW), { Put: { TableName: "state", Item: { pk: "X", sk: "Y" } } }] }));
+    } catch { committed = false; }
+    expect(committed).toBe(!(await requalifyHoldActive({ documentClient: db as never, tableName: "state" }, NOW)));
+  });
+});
+
+describe("a cancelled start while a switch is in progress", () => {
+  const cancelled = Object.assign(new Error("cancelled"), { name: "TransactionCanceledException" });
+  it("is told as the fixed retryable reason; any other cancellation, or any other error, is left alone", async () => {
+    const t = table();
+    await expect(rethrowAsDeferredIfHeld(t.store, cancelled, NOW)).resolves.toBeUndefined();
+    putHold(t, NOW + 60_000);
+    await expect(rethrowAsDeferredIfHeld(t.store, cancelled, NOW)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${REQUALIFY_DEFERRED_MESSAGE}` });
+    await expect(rethrowAsDeferredIfHeld(t.store, new Error("boom"), NOW)).resolves.toBeUndefined();
+    expect(REQUALIFY_DEFERRED_MESSAGE).toBe("A test machine switch is in progress; try again in a few minutes.");
+  });
+  it("is left alone when the hold has ended", async () => {
+    const t = table(); putHold(t, NOW + 60_000);
+    await expect(rethrowAsDeferredIfHeld(t.store, cancelled, NOW + 60_000)).resolves.toBeUndefined();
   });
 });
 

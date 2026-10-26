@@ -6,6 +6,7 @@ import {
   type E2EApplicationSelectionRecord, type E2ERegisteredRuntime,
 } from "@agentx/contracts";
 import type { SessionManager } from "../aws/sessions.js";
+import { isConditional } from "../aws/broker-shared.js";
 import { ApplicationDispatchRefusal, applicationSelectionStillCurrent } from "./application-dispatch-check.js";
 
 /**
@@ -25,7 +26,7 @@ import { ApplicationDispatchRefusal, applicationSelectionStillCurrent } from "./
 export type RequalifyHoldStore = Readonly<{ documentClient: Pick<DynamoDBDocumentClient, "send">; tableName: string }>;
 
 /** The sentence an interactive caller (a project setup) is given when it is deferred. */
-export const REQUALIFY_DEFERRED_MESSAGE = "The browser and API test machine is being renewed; try again in a few minutes.";
+export const REQUALIFY_DEFERRED_MESSAGE = "A test machine switch is in progress; try again in a few minutes.";
 
 /**
  * Whether a switch is in progress. No row: no. A row that is past its `until`: no (a crashed renewal). A row that cannot be read as a hold: yes. A read that fails throws, and the
@@ -36,15 +37,15 @@ export async function requalifyHoldActive(store: RequalifyHoldStore, now: number
   if (response.Item === undefined) return false;
   const { pk: _pk, sk: _sk, ...fields } = response.Item;
   void _pk; void _sk;
-  const hold = RequalifyHoldSchema.safeParse(fields);
-  if (hold.success) return Date.parse(hold.data.until) > now;
-  // Not a hold this code wrote (an extra attribute, a damaged time): still read as active, but never for ever. It ends at its own `until` if that is a time, else `acquiredAt` plus the
-  // longest a renewal may run; with neither, it stands and the log says so (a fixed event, no row contents).
+  // A hold ends at its own `until`, and in any case `acquiredAt` plus the longest a renewal may run (also for a row that is not exactly one this code wrote: an extra attribute, a damaged
+  // time). The start transaction's fence uses the same two bounds. With neither time readable it stands, and the log says so (a fixed event, no row contents).
   const until = typeof fields.until === "string" ? Date.parse(fields.until) : Number.NaN;
   const acquired = typeof fields.acquiredAt === "string" ? Date.parse(fields.acquiredAt) : Number.NaN;
-  const end = Number.isFinite(until) ? until : Number.isFinite(acquired) ? acquired + REQUALIFY_HOLD_MAX_MS : Number.NaN;
-  if (!Number.isFinite(end)) console.log(JSON.stringify({ component: "broker", event: "requalify.hold_unreadable" }));
-  return !Number.isFinite(end) || end > now;
+  if (!Number.isFinite(until) && !Number.isFinite(acquired)) {
+    if (!RequalifyHoldSchema.safeParse(fields).success) console.log(JSON.stringify({ component: "broker", event: "requalify.hold_unreadable" }));
+    return true;
+  }
+  return !((Number.isFinite(until) && until <= now) || (Number.isFinite(acquired) && acquired + REQUALIFY_HOLD_MAX_MS <= now));
 }
 
 /** The longest a renewal may run (its execution timeout): the bound of a hold row that cannot be read as one. */
@@ -56,8 +57,14 @@ export const REQUALIFY_HOLD_MAX_MS = 3 * 3_600_000;
  * cannot be read as one fails the check too, until its `until` string sorts before now.
  */
 export function requalifyHoldFence(tableName: string, now: number): Record<string, unknown> {
-  return { ConditionCheck: { TableName: tableName, Key: requalifyHoldKey(REQUALIFY_PROFILE_ID), ConditionExpression: "attribute_not_exists(pk) OR #until <= :now",
-    ExpressionAttributeNames: { "#until": "until" }, ExpressionAttributeValues: { ":now": new Date(now).toISOString() } } };
+  return { ConditionCheck: { TableName: tableName, Key: requalifyHoldKey(REQUALIFY_PROFILE_ID), ConditionExpression: "attribute_not_exists(pk) OR #until <= :now OR #acquired <= :bound",
+    ExpressionAttributeNames: { "#until": "until", "#acquired": "acquiredAt" },
+    ExpressionAttributeValues: { ":now": new Date(now).toISOString(), ":bound": new Date(now - REQUALIFY_HOLD_MAX_MS).toISOString() } } };
+}
+
+/** For a start transaction that was cancelled: when the cancellation is a condition failure and a switch is in progress, it is the fence, and the caller is told so with the fixed retryable reason. Any other error is left to the caller. */
+export async function rethrowAsDeferredIfHeld(store: RequalifyHoldStore, error: unknown, now: number): Promise<void> {
+  if (isConditional(error) && await requalifyHoldActive(store, now).catch(() => false)) throw agentXError("RUNTIME_UNAVAILABLE", REQUALIFY_DEFERRED_MESSAGE);
 }
 
 /** For an interactive start (a project setup): refuses while a switch is in progress, with a retryable error and a fixed sentence. */

@@ -307,7 +307,7 @@ import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.j
 import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval, type ApplicationAccountsInput, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
-import { ApplicationRuntimeRenewed, assertNoRequalifyHold, recycleDriftedWorker, requalifyHoldFence, replayPredatesRenewal, requalifyHoldActive, requalifySetupWorkRow, selectionChangedRefusal } from "../e2e/requalify-hold.js";
+import { ApplicationRuntimeRenewed, assertNoRequalifyHold, recycleDriftedWorker, rethrowAsDeferredIfHeld, requalifyHoldFence, replayPredatesRenewal, requalifyHoldActive, requalifySetupWorkRow, selectionChangedRefusal } from "../e2e/requalify-hold.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationGroundingAdmission, buildApplicationReplayAdmission, groundingPlanDigest } from "../e2e/application-admission.js";
 import {
@@ -2018,6 +2018,7 @@ async function registerProject(
       }
       return respond(withoutKeys(record), false, preflight);
     } catch (error) {
+      await rethrowAsDeferredIfHeld(dependencies, error, Date.now()); // AUTOREQUALIFY: the start fence refused the setup run: say so, not "catalog conflict"
       if (!isConditional(error)) throw error;
       // A same-revision registration may have won concurrently. Validate the immutable record and
       // catalog before returning duplicate success; otherwise retry only a catalog/history advance.
@@ -2417,6 +2418,7 @@ async function retryProjectSetupAsAdministrator(
       && typeof duplicate.setupExecutionId === "string" && typeof duplicate.operationId === "string") {
       return { setupExecutionId: duplicate.setupExecutionId, operationId: duplicate.operationId, status: "QUEUED", duplicate: true };
     }
+    await rethrowAsDeferredIfHeld(dependencies, error, Date.now()); // AUTOREQUALIFY: the start fence refused the retry
     throw error;
   }
   return { setupExecutionId: String(nextExecution.setupExecutionId), operationId: String(nextOperation.operationId), status: "QUEUED", duplicate: false };
@@ -11326,6 +11328,8 @@ async function startBaselineApplicationRound(
   } catch (error) {
     // The candidate goes on: its own dispatch makes the same checks and, for a plan that cannot run, blocks the workflow with the reason. The baseline only says it could not be checked.
     // A plan that is only AI navigation scenarios has nothing to run on the unchanged code (Ruling DD): that is said as its own reason, and it gates nothing.
+    // AUTOREQUALIFY: a start refused by the hold fence is a deferral (the dispatch row stays due), not a baseline that could not be checked.
+    if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY") && await requalifyHoldActive(dependencies, Date.now()).catch(() => false)) throw error;
     const reason = baselineStartFailureReason(error);
     console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_not_started", taskId: task.taskId, reason, errorName: error instanceof Error ? error.name : "unknown" }));
     return unavailable(reason);

@@ -86,6 +86,27 @@ describe("a switch in progress defers new browser and API rounds, and never bloc
     expect(checksOperations(harness)).toHaveLength(1);
   });
 
+  it("a baseline start that loses the race with the hold is deferred with the round, not recorded as a baseline that could not be checked", async () => {
+    const harness = await firstDispatch({ baseline: "source", before: (h) => {
+      const send = h.db.send.bind(h.db);
+      let looks = 0;
+      h.db.send = async (command) => {
+        const key = (command as { input?: { Key?: { pk?: string; sk?: string } } }).input?.Key;
+        const result = await send(command);
+        if (command.constructor.name === "GetCommand" && key?.pk === requalifyHoldKey().pk && key.sk === requalifyHoldKey().sk && (looks += 1) === 2) h.db.set(holdRow(Date.now() + 600_000));
+        return result;
+      };
+    } });
+    const baselines = () => harness.db.find((item) => item.entityType === "WORKFLOW_E2E_BASELINE") as Array<{ state: string }>;
+    expect(baselines().filter((record) => record.state === "UNAVAILABLE")).toEqual([]);
+    expect(checksOperations(harness)).toEqual([]);
+    expect(dispatchRows(harness)[0]!.attempts ?? 0).toBe(0);
+    harness.db.delete(requalifyHoldKey().pk, requalifyHoldKey().sk);
+    await sweep(harness);
+    expect(baselines().map((record) => record.state)).toEqual(["STARTED"]);
+    expect(checksOperations(harness)).toHaveLength(1);
+  });
+
   it("does not defer for a hold that has ended (a renewal that crashed), but defers for a row it cannot read as a hold", async () => {
     const ended = await startApplicationRound({ beforeDispatch: (h) => h.db.set(holdRow(Date.now() - 1)) });
     expect(ended.checksOperations()).toHaveLength(1);
