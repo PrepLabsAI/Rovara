@@ -697,7 +697,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     h.fail(undefined);
     await h.pump();
-    expect(h.posts.filter((post) => post.text.startsWith("Running the selected checks again"))).toHaveLength(1);
+    expect(h.posts.filter((post) => post.text.startsWith("Running the selected checks"))).toHaveLength(1);
     expect(h.logs.filter((entry) => entry.event === "developer_notifier.said_post_uncertain")).toEqual([
       expect.objectContaining({ reason: "claim_retaken", noticeId: `${h.taskId}:workflow:2` }),
     ]);

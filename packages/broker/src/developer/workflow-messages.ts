@@ -732,6 +732,18 @@ function pushingFixTo(workflow: WorkflowSnapshot): string | undefined {
 }
 
 /** AUTOFIX: the lines for what Rovara already tried and why it is asking, under a blocked card; nothing when automatic fixing is off or has nothing to add. */
+/**
+ * Whether the checks on this code are being run a second time: the owner pressed Retry checks, or Rovara retried them by itself, and the change was not sent back since (a send back is new code,
+ * and its first run is a first run). The first run after coding has no such sign, so it must not say "again".
+ */
+function checksRunBefore(workflow: WorkflowSnapshot): boolean {
+  const decisions = workflow.decisions ?? [];
+  const last = decisions.at(-1);
+  if (last?.source === "AUTO_RETRY" && last.auto?.stage === "VERIFY") return true;
+  const retry = workflow.verificationRetries?.at(-1);
+  return retry !== undefined && (last === undefined || retry.at > last.at);
+}
+
 function withAutoFix(context: WorkflowMessageContext, copy: { text: string; buttons: Button[] }): { text: string; buttons: Button[] } {
   const lines = context.autoFix === undefined ? [] : autoFixCardLines(context.workflow, context.autoFix.ask);
   return lines.length === 0 ? copy : { ...copy, text: `${copy.text}\n${lines.map(slackText).join("\n")}` };
@@ -825,7 +837,7 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
       : `Coding stopped before it finished. ${plainBlockReason(workflow.blockReason)}`,
       // Rewritten history can't be coded on again: a new task is the way on.
       buttons: workflow.blockReason === WORKFLOW_HISTORY_REWRITTEN_MESSAGE ? [exits.close] : [exits.button("agentx_workflow_retry_implementation", "Retry coding"), exits.close] };
-    case "VERIFY/RUNNING": return plain("Running the selected checks again on the current code. No code is being changed.");
+    case "VERIFY/RUNNING": return plain(`Running the selected checks${checksRunBefore(workflow) ? " again" : ""} on the current code. No code is being changed.`);
     case "VERIFY/BLOCKED": return withAutoFix(context, verifyBlocked(context, exits));
     case "REVIEW/WAITING": return plain(`${allPassed} Starting the code and security reviews.`);
     case "REVIEW/RUNNING": return plain(`${allPassed} Code and security reviews are running on the ${reviewOnly ? "current" : "checked"} code.`);
