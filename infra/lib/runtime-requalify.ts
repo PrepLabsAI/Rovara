@@ -258,8 +258,8 @@ export class RuntimeRequalify extends Construct {
     alarm("MachineFailuresAlarm", "RuntimeRequalifyMachineFailures", "A test machine renewal execution failed or timed out without cleaning up. Open it in Step Functions.",
       new cloudwatch.MathExpression({ expression: "FILL(failed, 0) + FILL(timedOut, 0)", usingMetrics: { failed: this.machine.metricFailed({ period: Duration.minutes(5) }), timedOut: this.machine.metricTimedOut({ period: Duration.minutes(5) }) }, period: Duration.minutes(5) }),
       1, cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD, 1, cloudwatch.TreatMissingData.NOT_BREACHING);
-    // No success for six days: the runtime rows last seven. A daily period with a missing datapoint counts as breaching.
+    // No success for six days. Missing data is NOT breaching: until the owner enables the schedule (or a first renewal ran) the metric does not exist and the owner must not be mailed; the runtime-expiry check covers a renewal nobody started.
     alarm("StaleAlarm", "RuntimeRequalifyStale", "The browser and API test machine has not been renewed for six days; its registration expires after seven. Run test-deploy --only requalify-now or qualify by hand.",
-      new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName: "RequalifySucceeded", statistic: "Sum", period: Duration.days(1) }), 6, cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD, 1, cloudwatch.TreatMissingData.BREACHING);
+      new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName: "RequalifySucceeded", statistic: "Sum", period: Duration.days(1) }), 6, cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD, 1, cloudwatch.TreatMissingData.NOT_BREACHING);
   }
 }

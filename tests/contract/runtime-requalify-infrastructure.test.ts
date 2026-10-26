@@ -139,7 +139,8 @@ describe("the renewal's infrastructure", () => {
     expect(schedules[0]!.Properties["ScheduleExpression"]).toBe("cron(0 6 * * ? *)");
     expect(JSON.stringify(schedules[0]!.Properties["Target"])).toContain('{\\"action\\":\\"due\\"}');
     const stale = Object.values(on).find((resource) => resource.Type === "AWS::CloudWatch::Alarm" && JSON.stringify(resource.Properties).includes("RequalifySucceeded"));
-    expect(stale?.Properties).toMatchObject({ EvaluationPeriods: 6, Period: 86400, ComparisonOperator: "LessThanThreshold", Threshold: 1, TreatMissingData: "breaching" });
+    expect(stale?.Properties).toMatchObject({ EvaluationPeriods: 6, Period: 86400, ComparisonOperator: "LessThanThreshold", Threshold: 1, TreatMissingData: "notBreaching" });
+    // No data is not a failure: before the schedule is enabled (or the first renewal) the metric does not exist, and the owner must not be mailed for that. The runtime-expiry check covers a forgotten renewal.
     // The Lambda may start only the renewal machine.
     expect(JSON.stringify(withAction("states:StartExecution")[0]!.Resource)).toContain("-runtime-requalify");
   });
