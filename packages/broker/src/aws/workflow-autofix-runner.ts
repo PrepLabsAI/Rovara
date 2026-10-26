@@ -211,8 +211,8 @@ export async function runWorkflowAutofix(deps: AutofixDependencies, task: Develo
     }
     throw error;
   };
-  /** A guard in the system move refused although the policy allowed it (the limits or the money read differently): nobody else will look, so the owner is asked. */
-  const guardRefused = async (askCodes: readonly AutoFixCode[]): Promise<AutofixOutcome> => ((await blockedHere()) ? ask("inputs-missing", askCodes) : "STALE");
+  /** A guard in the system move refused although the policy allowed it (the limits or the money read differently): nobody else will look, so the owner is asked. It is not "spend unreadable" (`inputs-missing`): the spend was read. */
+  const guardRefused = async (askCodes: readonly AutoFixCode[]): Promise<AutofixOutcome> => ((await blockedHere()) ? ask("needs-a-person", askCodes) : "STALE");
 
   // The original-code result decides send back or ask (owner rule). A round that was requested at approval but never started can still run: the first CHECKS dispatch after a retry runs it
   // before the candidate's checks. So when its code is exported, the one automatic Retry checks (counted as this stage's retry) is used, and the next block is decided with the result.

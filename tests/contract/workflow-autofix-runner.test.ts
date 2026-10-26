@@ -152,7 +152,8 @@ describe("an unclear browser and API fault is settled by each UNKNOWN scenario's
     moves.sendBack.mockResolvedValueOnce("STALE" as never);
     const { deps: d, writes } = deps({ baseline: recorded([row("a", "PASSED")]), unknown: ["a"] });
     expect(await run(d)).toBe("ASKED");
-    expect(asked(writes)).toMatchObject({ reason: "inputs-missing" });
+    // POLISH-1: a refused move is not "spend unreadable": the card must not say it could not read the spend.
+    expect(asked(writes)).toMatchObject({ reason: "needs-a-person" });
     expect(moves.sendBack).toHaveBeenCalledTimes(1);
   });
 
