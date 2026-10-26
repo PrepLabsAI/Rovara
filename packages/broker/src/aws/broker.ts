@@ -10528,6 +10528,7 @@ async function blockWorkflowE2EReadiness(dependencies: AwsBrokerDependencies, it
     return;
   }
   const now = new Date().toISOString();
+  const blocked = blockWorkflow(workflow, reason, now);
   await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
     { Delete: { TableName: dependencies.tableName, Key: { pk: item.pk, sk: item.sk },
       ConditionExpression: "attribute_exists(pk) AND workflowRevision = :revision AND candidateDigest = :candidate",
@@ -10536,10 +10537,15 @@ async function blockWorkflowE2EReadiness(dependencies: AwsBrokerDependencies, it
       UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
       ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
       ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
-        ":workflow": blockWorkflow(workflow, reason, now), ":now": now, ":revision": item.workflowRevision,
+        ":workflow": blocked, ":now": now, ":revision": item.workflowRevision,
         ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": item.candidateDigest,
       } } },
+    // AUTOFIX (LIVEFIX-1): a block written here, before the round started, is looked at by the automatic-fix policy exactly like one a finished run writes: it sends the work back, retries, or
+    // asks. The row commits with the block, so no blocked VERIFY step is left for nobody to decide.
+    ...(dependencies.autofix?.enabled === true ? [workflowDispatchItem(dependencies.tableName, item.taskId, blocked.revision, "AUTOFIX", blocked.candidate?.digest ?? "0".repeat(64), now)] : []),
   ] }));
+  // Run the look right away (never throws); the recovery sweep is the fallback if this is lost.
+  if (dependencies.autofix?.enabled === true) await dispatchWorkflowContinuation(dependencies, item.taskId);
 }
 
 /**
