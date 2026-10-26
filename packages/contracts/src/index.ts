@@ -31,6 +31,7 @@ export * from "./review-output.js";
 export * from "./release.js";
 export * from "./session.js";
 export * from "./runtime-installation.js";
+export * from "./runtime-requalify.js";
 export * from "./e2e-web-api-qualification.js";
 export * from "./e2e-chromium-sandbox.js";
 export * from "./slack.js";
