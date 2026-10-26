@@ -11801,7 +11801,8 @@ export async function finishPlanGrounding(dependencies: AwsBrokerDependencies, t
   const holdValues = { ":revision": workflow.revision, ":plan": "PLAN", ":running": "RUNNING", ":held": hold.artifactSha256 };
   const now = new Date().toISOString();
   if (task.closedAt !== undefined || workflow.stage !== "PLAN" || workflow.state !== "RUNNING") {
-    // The task moved on (closed, or stopped to a block): the hold means nothing now and asks nobody anything; the dispatch run drops the row.
+    // The task moved on (closed, or stopped to a block): the hold means nothing now and asks nobody anything; the dispatch run drops the row, and the marker goes so no sweep reads it again.
+    await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: { pk: PLAN_GROUNDING_HOLD_PK, sk: `TASK#${taskId}` } }));
     return "NOOP";
   }
   const markerKey = { pk: PLAN_GROUNDING_HOLD_PK, sk: `TASK#${taskId}` };

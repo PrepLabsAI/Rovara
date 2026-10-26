@@ -321,6 +321,16 @@ const freeWorkspace = (harness: Harness, workspaceId: string) => {
 };
 
 describe("fix round 1 (review of T7c)", () => {
+  it("M5: a hold whose task was closed leaves no marker behind: the next look at it deletes the marker and nothing else is asked", async () => {
+    const { harness, taskId, workspaceId } = await setup("start");
+    await finishPlanning(harness, workspaceId, groundedAnswer());
+    expect(harness.db.find((item) => item.pk === "PLAN_GROUNDING_HOLD")).toHaveLength(1);
+    harness.db.set({ ...taskOf(harness, taskId), closedAt: new Date().toISOString() });
+    expect(await finishPlanGrounding(harness.brokerInput as never, taskId)).toBe("NOOP");
+    expect(harness.db.find((item) => item.pk === "PLAN_GROUNDING_HOLD")).toEqual([]);
+    expect(planRuns(harness, workspaceId)).toHaveLength(1);
+  });
+
   it("B1: a held plan whose row gave up (the finish keeps failing) is not left running for ever: planning is blocked with its Retry, the hold, the row and the marker are gone", async () => {
     const { harness, taskId, workspaceId } = await setup("start");
     await finishPlanning(harness, workspaceId, groundedAnswer());

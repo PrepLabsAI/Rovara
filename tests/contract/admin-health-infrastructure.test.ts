@@ -133,7 +133,12 @@ describe("the health route's grants (A13)", () => {
     expect(brokerUses).toEqual([
       "        slackUserId: user.data, channelId: thread.data.channelId, threadTs: thread.data.threadTs, message, at, [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(at) },",
       "      [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(operation.createdAt),",
+      // T7c: the held plan's marker (a small item the recovery sweep reads), always given a TTL; every finish deletes it, the TTL is only the backstop.
+      "        [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(planHold.deadlineAt) / 1000) + 7 * 86_400 } } }]",
     ]);
+    const holdMarker = broker.slice(broker.indexOf("// The hold's own marker"), broker.indexOf("// The hold's own marker") + 700);
+    expect(holdMarker).toContain('entityType: "PLAN_GROUNDING_HOLD"');
+    expect(holdMarker).toContain(brokerUses.at(-1));
     // Task 19: a refused Slack press's private note, delivered within the hour and then dead weight.
     const refusal = broker.slice(broker.indexOf("async function recordSlackWorkflowRefusal("), broker.indexOf("async function answerSlackWorkflowEvent("));
     expect(refusal).toContain('entityType: "WORKFLOW_ACTION_REFUSAL"');
