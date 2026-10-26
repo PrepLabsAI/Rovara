@@ -50,7 +50,7 @@ import {
   nextStandingFailures,
   type StandingFailure,
   submitWorkflowArtifact,
-  parsePlanDocument,
+  parsePlanDocument, groundingScenarioIds,
   parseCommentAnswers,
   commentRefInAuthor,
   commentIdInAuthor,
@@ -307,7 +307,11 @@ import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.j
 import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval, type ApplicationAccountsInput, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
-import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationReplayAdmission } from "../e2e/application-admission.js";
+import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationGroundingAdmission, buildApplicationReplayAdmission, groundingPlanDigest } from "../e2e/application-admission.js";
+import {
+  E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
+  verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
+} from "./workflow-e2e-grounding.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
 import { ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, untestedRouteSentence, type ModelCheckDependencies } from "../e2e/model-checks.js";
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, readE2EModelRouteShape, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
@@ -320,7 +324,7 @@ import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from ".
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, planUnreadablePrompt, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EBaselineFromSystem, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowE2EGroundingFromSystem, startTaskWorkflowE2EReplayFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPlanRevisionFromSystem, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { planQualityFindings } from "../developer/plan-quality.js";
 import { planDryRunFindings, readPlanDryRunOutcome } from "../developer/plan-dry-run-results.js";
@@ -4278,6 +4282,11 @@ async function taskOperationParts(
     console.log(JSON.stringify({ component: "broker", event: "developer.shared_reread_omitted", operationId }));
   }
   // M1.3 Task 3.7b: the coding run exports the unchanged code when approval asked for it, and again on any later coding run (a retry) while the baseline is still only requested.
+  // T7b: a coding plan run that negotiates the application plan is asked for the unchanged code too, so the plan's must-not-change scenarios can be tried on the current app before the
+  // owner is asked. The worker exports only when the plan it wrote has such scenarios; delivery withholds the request from a worker that cannot (see withoutGroundingSource). A project that
+  // switched the baseline off gets no grounding either.
+  const askGroundingSource = input.workflowMode === "PLAN" && codingPlan && input.legacyTask !== true && offersApplicationE2EPlan(e2ePlanningContext) && projectE2EBaselineWanted(settings);
+  if (askGroundingSource) operation.groundingSourceAsked = true;
   const askBaselineSource = input.workflowE2EBaselineSource === true || (input.workflowMode === "IMPLEMENT" && await baselineSourceStillRequested(dependencies, workspace.id));
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -4286,7 +4295,7 @@ async function taskOperationParts(
     workspaceId: workspace.id,
     fence,
     projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined, chatgpt !== undefined, input.workflowMode === "IMPLEMENT", input.workflowE2EAdmission !== undefined, input.workflowE2EAdmission?.agentSteps === true),
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined, chatgpt !== undefined, input.workflowMode === "IMPLEMENT", input.workflowE2EAdmission !== undefined, input.workflowE2EAdmission?.agentSteps === true, askGroundingSource),
     payload: {
       conversationId: input.conversationId,
       prompt,
@@ -4302,6 +4311,7 @@ async function taskOperationParts(
       ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
       ...(input.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: input.workflowE2EAdmission }),
       ...(askBaselineSource ? { workflowE2EBaselineSource: true as const } : {}),
+      ...(askGroundingSource ? { workflowE2EGroundingSource: true as const } : {}),
       ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
       ...(input.workflowBase === undefined ? {} : { workflowBase: input.workflowBase }),
       ...(input.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: input.workflowReviewChecks }),
@@ -6262,8 +6272,10 @@ async function handleCallback(
     return json(await handleWorkflowCandidateBuildSource(dependencies, operation, body), request.requestId);
   }
   if (action === "baseline-source") {
-    if (operation.kind !== "task" || operation.workflowMode !== "IMPLEMENT" || operation.status !== "RUNNING") {
-      throw agentXError("CALLBACK_FORBIDDEN", "baseline source export is limited to the current implementation operation");
+    // T7b: the current implementation run's, or a planning run that was asked for the unchanged code to ground its plan (and only that: the upload is keyed to the operation that sends it).
+    const planAsked = operation.workflowMode === "PLAN" && operation.groundingSourceAsked === true;
+    if (operation.kind !== "task" || (operation.workflowMode !== "IMPLEMENT" && !planAsked) || operation.status !== "RUNNING") {
+      throw agentXError("CALLBACK_FORBIDDEN", "baseline source export is limited to the current implementation operation or a planning operation asked for it");
     }
     return json(await handleWorkflowBaselineSource(dependencies, operation, body), request.requestId);
   }
@@ -6284,6 +6296,17 @@ async function handleCallback(
       if (task === undefined || task.workspaceId !== operation.workspaceId || task.closedAt !== undefined || record === undefined || record.state !== "STARTED" || record.operationId !== operation.id
         || record.roundId !== reference.roundId || record.admissionSha256 !== reference.admissionRef.sha256) {
         throw agentXError("STALE_FENCE", "the replay round is no longer the one that was started");
+      }
+    } else if (reference.purpose === "grounding") {
+      // T7b: a grounding round is not the workflow's round either (the task is holding its plan card back, in PLAN): it is read on what the grounding record says, this operation is the
+      // round that record started, for this plan artifact, base commit and attempt, and the task is still open and still holding that plan.
+      const record = task === undefined || reference.planArtifactSha256 === undefined || reference.attempt === undefined ? undefined
+        : await readWorkflowE2EGroundingRecord(dependencies, { taskId: task.taskId, planArtifactSha256: reference.planArtifactSha256, attempt: reference.attempt });
+      const held = (task as { planGrounding?: { artifactSha256?: unknown } } | undefined)?.planGrounding;
+      if (task === undefined || task.workspaceId !== operation.workspaceId || task.closedAt !== undefined || record === undefined || record.state !== "STARTED" || record.operationId !== operation.id
+        || record.roundId !== reference.roundId || record.admissionSha256 !== reference.admissionRef.sha256 || record.baseCommitSha !== reference.baseCommitSha
+        || record.attempt !== reference.attempt || record.planArtifactSha256 !== reference.planArtifactSha256 || held?.artifactSha256 !== reference.planArtifactSha256) {
+        throw agentXError("STALE_FENCE", "the grounding round is no longer the one that was started");
       }
     } else if (reference.purpose === "baseline") {
       // M1.3 Task 3.7b: a baseline round is not the workflow's current round (the workflow is not running it, and its candidate is another), so it is read on what the baseline's
@@ -6605,6 +6628,9 @@ async function handleWorkflowBaselineSource(dependencies: AwsBrokerDependencies,
   const uploadKey = { pk: `WORKSPACE#${operation.workspaceId}`, sk: `BASELINE_SOURCE#${operation.id}` };
   const stagingKey = (uploadId: string, index: number) => `workflow-baseline-staging/${operation.workspaceId}/${operation.id}/${uploadId}/${index}.chunk`;
   const recorded = StoredBaselineSourceSchema.safeParse(operation.baselineSource);
+  // T7b: a planning run asked for the unchanged code uploads it under its own operation (the same per-operation upload key and fence), and the record lands on that operation's row only,
+  // so it can never replace an implementation run's baseline source. Its worker's free text (git and file system messages) is never stored: a failure is one fixed sentence.
+  const planAsked = operation.workflowMode === "PLAN" && operation.groundingSourceAsked === true;
   /** Records `stored` once; a record already there is answered from, and differs only as an error. `closing` closes the upload row in the same transaction. */
   const record = async (stored: StoredBaselineSource, closing?: { uploadId: string; sha256: string }): Promise<unknown> => {
     try {
@@ -6614,8 +6640,8 @@ async function handleWorkflowBaselineSource(dependencies: AwsBrokerDependencies,
           ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":complete": "COMPLETE", ":open": "OPEN", ":uploadId": closing.uploadId, ":sha256": closing.sha256,
             ":operationId": operation.id, ":fence": operation.fence } } }]),
         { Update: { TableName: dependencies.tableName, Key: operationRowKey, UpdateExpression: "SET baselineSource = :stored",
-          ConditionExpression: "#status = :running AND fence = :fence AND workflowMode = :mode AND attribute_not_exists(baselineSource)",
-          ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":stored": stored, ":running": "RUNNING", ":fence": operation.fence, ":mode": "IMPLEMENT" } } },
+          ConditionExpression: `#status = :running AND fence = :fence AND workflowMode = :mode AND attribute_not_exists(baselineSource)${planAsked ? " AND groundingSourceAsked = :asked" : ""}`,
+          ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":stored": stored, ":running": "RUNNING", ":fence": operation.fence, ":mode": planAsked ? "PLAN" : "IMPLEMENT", ...(planAsked ? { ":asked": true } : {}) } } },
       ] }));
     } catch (error) {
       if (!isConditional(error)) throw error;
@@ -6627,7 +6653,7 @@ async function handleWorkflowBaselineSource(dependencies: AwsBrokerDependencies,
     return { accepted: stored.status === "READY", baselineSource: stored };
   };
   if (body.stage === "unavailable") {
-    const stored: StoredBaselineSource = { status: "REFUSED", reason: `the worker could not export the unchanged code: ${body.reason}`.slice(0, 600) };
+    const stored: StoredBaselineSource = { status: "REFUSED", reason: planAsked ? GROUNDING_SOURCE_NOT_EXPORTED_REASON : `the worker could not export the unchanged code: ${body.reason}`.slice(0, 600) };
     if (recorded.success) {
       if (canonicalJson(recorded.data) !== canonicalJson(stored)) throw agentXError("CALLBACK_FORBIDDEN", "this implementation already recorded a different baseline source");
       return { accepted: false, baselineSource: stored, duplicate: true };
@@ -6702,7 +6728,7 @@ async function handleWorkflowBaselineSource(dependencies: AwsBrokerDependencies,
     if (sourceBytes.toString("base64") !== wire.sourceBase64 || manifestBytes.toString("base64") !== wire.manifestBase64) throw new Error("the baseline source encoding is invalid");
     stored = assessBaselineSource({ sourceBytes, manifestBytes });
   } catch (error) {
-    throw agentXError("CONFIG_INVALID", `baseline source export is malformed or is not the unchanged code of one repository: ${error instanceof Error ? error.message : "unreadable"}`.slice(0, 480));
+    throw agentXError("CONFIG_INVALID", `baseline source export is malformed or is not the unchanged code of one repository: ${planAsked ? "unreadable" : error instanceof Error ? error.message : "unreadable"}`.slice(0, 480));
   }
   if (stored.status === "READY") {
     const content = [{ key: stored.sourceRef.key, bytes: sourceBytes, limit: MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES }, { key: stored.buildSource.manifestRef.key, bytes: manifestBytes, limit: E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES }];
@@ -6722,6 +6748,9 @@ async function handleWorkflowBaselineSource(dependencies: AwsBrokerDependencies,
   for (let index = 0; index < Number(upload.chunkCount); index += 1) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: stagingKey(body.uploadId, index) }));
   return answer;
 }
+
+/** The one sentence a planning run's failed export of the unchanged code is stored as (the grounding record reads it as `not-exported`). */
+const GROUNDING_SOURCE_NOT_EXPORTED_REASON = "the worker could not export the unchanged code for the plan";
 
 const WORKFLOW_E2E_TRANSFER_CHUNK_BYTES = 64 * 1024;
 const WORKFLOW_E2E_ADMISSION_MAX_BYTES = 24 * 1024 * 1024;
@@ -7605,6 +7634,7 @@ async function verifyWorkflowE2EEvidence(
     // round says: its own completion path verifies it (verifyBaselineEvidence), and nothing here can turn it into a verdict on the candidate.
     if (reference?.purpose === "baseline") return unavailable("baseline-admission-is-not-a-candidate-round");
     if (reference?.purpose === "replay") return unavailable("replay-admission-is-not-a-candidate-round");
+    if (reference?.purpose === "grounding") return unavailable("grounding-admission-is-not-a-candidate-round");
     const evidenceRef = operation.workflowE2EEvidenceRef;
     const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
     const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
@@ -8195,6 +8225,50 @@ async function verifyReplayRound(dependencies: AwsBrokerDependencies, operation:
   return verifyReplayEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
     candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
   aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", replay: admission.replay });
+}
+
+/**
+ * T7b: the grounding round's own completion. When its operation ends, this settles the grounding record, and does nothing else: no workflow transition, no `qualifiedRound` or `failedRound`,
+ * no send-back, no publication, no model spend. An operation that did not succeed leaves the record saying the plan could not be checked on the current app (a fixed reason); one that
+ * succeeded is verified exactly as a candidate's evidence is read (`loadApplicationEvidenceInputs`, then the verifier for the purpose it was signed with, bound to the plan digest and base
+ * commit recomputed from the record), and only that verification is recorded, conditionally, on the plan artifact, base commit, attempt, operation, round and admission the record started.
+ * It never throws: whatever goes wrong here, the record stays STARTED and is read as not run once its time is up. Whoever holds the plan's card back reads the record afterwards.
+ */
+export async function settleGroundingRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus): Promise<void> {
+  const reference = operation.workflowE2EAdmission;
+  if (operation.kind !== "task" || reference?.purpose !== "grounding" || reference.baseCommitSha === undefined || reference.attempt === undefined || reference.planArtifactSha256 === undefined) return;
+  try {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(reference.taskId));
+    if (task === undefined || task.workspaceId !== operation.workspaceId) return;
+    const ref = { taskId: task.taskId, planArtifactSha256: reference.planArtifactSha256, attempt: reference.attempt };
+    const record = await readWorkflowE2EGroundingRecord(dependencies, ref);
+    if (record === undefined || record.state !== "STARTED" || record.operationId !== operation.id) return;
+    const unavailable = (reason: GroundingUnavailableReason) => markWorkflowE2EGroundingUnavailable(dependencies, ref, reason, { from: ["STARTED"], operationId: operation.id });
+    if (status !== "SUCCEEDED") { await unavailable(status === "CANCELLED" ? "stopped" : "run-failed"); return; }
+    const verified = await verifyGroundingRound(dependencies, operation, reference, record);
+    if (verified === undefined) { await unavailable("unverified"); return; }
+    await recordWorkflowE2EGrounding({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, s3: dependencies.s3, artifactBucketName: dependencies.artifactBucketName }, task, ref,
+      { verified, expected: { operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256, baseCommitSha: reference.baseCommitSha } });
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_grounding_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
+  }
+}
+
+/** The broker's own verification of a finished grounding round's evidence, or undefined when the admission or the evidence cannot be read or verify to no rows. */
+async function verifyGroundingRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, reference: E2EWorkflowAdmissionRef, record: GroundingRecord) {
+  const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
+  if (admissionText === undefined || reference.baseCommitSha === undefined || reference.attempt === undefined) return undefined;
+  const admissionBytes = Buffer.from(admissionText, "utf8");
+  if (createHash("sha256").update(admissionBytes).digest("hex") !== reference.admissionRef.sha256 || admissionBytes.byteLength !== reference.admissionRef.byteLength) return undefined;
+  let admission: E2EApplicationExecutionAdmission;
+  try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return undefined; }
+  const loaded = await loadApplicationEvidenceInputs(dependencies, operation, reference, admission);
+  if ("unavailable" in loaded) return undefined;
+  const planDigest = groundingPlanDigest({ taskId: reference.taskId, artifactId: record.planArtifactId, artifactSha256: record.planArtifactSha256, workflowRevision: reference.workflowRevision,
+    baseCommitSha: reference.baseCommitSha, attempt: reference.attempt });
+  return verifyGroundingEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
+    candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
+  aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", grounding: { planDigest, baseCommitSha: reference.baseCommitSha } });
 }
 
 /**
@@ -11097,6 +11171,85 @@ async function startBaselineApplicationRound(
 }
 
 /**
+ * T7b: starts one grounding round for a coding plan the task is holding back: the proposed plan's must-not-change scenarios (`groundingScenarioIds`) on the unchanged code the PLAN run
+ * exported (held to the base the task pinned and to GitHub's tree for it), with an admission built from that code and signed as a grounding round, and the one CHECKS operation that
+ * carries exactly that admission, with the record's own start in the same transaction. The selection is derived now for the proposed artifact in approve mode (nothing is reused at
+ * approval, which derives its own). Anything missing or disagreeing leaves the record saying the plan could not be checked, with a fixed reason; it never throws for those, and it never
+ * changes the workflow. Returns what happened so whoever holds the card back knows whether to wait for the round or post the card now.
+ */
+export async function startPlanGroundingRound(
+  dependencies: AwsBrokerDependencies,
+  routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
+  input: { task: DeveloperTaskRecord; caller: Parameters<typeof startTaskWorkflowReviewFromSystem>[3]; planOperationId: string; plan: PlanDocument; artifact: { id: string; sha256: string }; attempt?: number },
+): Promise<{ outcome: "STARTED" | "DUPLICATE" | "STALE" } | { outcome: "UNAVAILABLE"; reason: GroundingUnavailableReason } | { outcome: "NOTHING_TO_GROUND" }> {
+  const { task, plan, artifact } = input;
+  const attempt = input.attempt ?? E2E_GROUNDING_ATTEMPT;
+  const workflow = task.workflow!;
+  const scenarioIds = groundingScenarioIds(plan);
+  if (scenarioIds.length === 0) return { outcome: "NOTHING_TO_GROUND" };
+  const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
+  const ref = { taskId: task.taskId, planArtifactSha256: artifact.sha256, attempt };
+  await requestWorkflowE2EGroundingRound(store, ref, { scenarioIds, planArtifactId: artifact.id });
+  const existing = await readWorkflowE2EGroundingRecord(store, ref);
+  if (existing === undefined) return { outcome: "UNAVAILABLE", reason: "start-failed" };
+  if (existing.state !== "REQUESTED") return { outcome: "DUPLICATE" };
+  const unavailable = async (reason: GroundingUnavailableReason): Promise<{ outcome: "UNAVAILABLE"; reason: GroundingUnavailableReason }> => {
+    await markWorkflowE2EGroundingUnavailable(store, ref, reason, { from: ["REQUESTED"] });
+    return { outcome: "UNAVAILABLE", reason };
+  };
+  try {
+    const intent = plan.e2e;
+    if (intent?.schemaVersion !== 2) return await unavailable("refused");
+    const planOperation = await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, input.planOperationId));
+    if (planOperation === undefined || planOperation.kind !== "task" || planOperation.workflowMode !== "PLAN" || planOperation.groundingSourceAsked !== true) return await unavailable("not-exported");
+    const exported = StoredBaselineSourceSchema.safeParse(planOperation.baselineSource);
+    if (!exported.success || exported.data.status === "REFUSED") return await unavailable("not-exported");
+    const stored: ReadyBaselineSource = exported.data;
+    const project = await requireProject(dependencies, task.project, task.startingRevision);
+    const repository = project.definition.repositories.length === 1 ? project.definition.repositories[0] : undefined;
+    const pinned = repository === undefined ? undefined : (workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === repository.name);
+    if (repository === undefined || pinned === undefined || stored.repositoryId !== pinned.repositoryId || stored.baseCommitSha !== pinned.baseCommitSha || stored.buildSource.commitSha !== stored.baseCommitSha
+      || stored.buildSource.treeSha !== stored.baseTreeSha) return await unavailable("refused");
+    // The exported tree is held to GitHub's tree for the pinned base, so a worker cannot label other code as the unchanged code (as the baseline round does).
+    if (dependencies.githubPullRequests.getCommitTree !== undefined && await dependencies.githubPullRequests.getCommitTree(repository.url, stored.baseCommitSha) !== stored.baseTreeSha) return await unavailable("refused");
+    const sourceBytes = await readStoredBytes(dependencies, stored.sourceRef.key, MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES);
+    if (sourceBytes === undefined || sourceBytes.byteLength !== stored.sourceRef.byteLength || createHash("sha256").update(sourceBytes).digest("hex") !== stored.sourceRef.sha256) return await unavailable("refused");
+    const exportedSource = parseBaselineExport(sourceBytes);
+    const exportedRepository = exportedSource.repositories[0]!;
+    if (exportedRepository.commitSha !== stored.baseCommitSha || exportedRepository.treeSha !== stored.baseTreeSha || exportedSource.candidate.digest !== stored.sourceRef.candidateDigest) return await unavailable("refused");
+    const manifest = await readCandidateBuildSourceManifest(dependencies, stored.buildSource);
+    const snapshot: E2ESourceSnapshot = { candidate: exportedSource.candidate, commitSha: exportedRepository.commitSha, treeSha: exportedRepository.treeSha, treeComplete: true, treePaths: exportedRepository.treePaths,
+      sources: exportedRepository.sources.map((source) => ({ path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })) };
+    // The selection for the proposed artifact, derived now in approve mode: the same derivation approval would make, kept nowhere but as a digest on the record.
+    const derived = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact, { mode: "approve", pinned: [] });
+    if (!derived.ok) return await unavailable(derived.kind === "unevaluable" ? "start-failed" : derived.scope === "runtime" ? "runtime-not-ready" : derived.scope === "accounts" ? "accounts-not-ready" : "refused");
+    const creatorAuthority = await requireWorkflowE2ECreatorAuthority(dependencies, task);
+    const workspace = await routeDependencies.actions.workspace(task.workspaceId);
+    const operationId = randomUUID();
+    const built = buildApplicationGroundingAdmission({ taskId: task.taskId, operationId, operationFence: workspace.fence + 1, workflowRevision: workflow.revision, roundId: randomUUID(),
+      runId: randomUUID, intent, artifact, planArtifactId: artifact.id, snapshot, setupProposal: derived.inputs.setup.setupProposal, setupApproval: derived.inputs.setup.setupApproval, policy: derived.inputs.policy,
+      registeredRuntimes: derived.inputs.rows, runtimeCatalogId: derived.inputs.runtimeCatalogId, runtimeBinding: derived.inputs.runtimeBinding,
+      buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored.buildSource) }, now: Date.now(), creatorAuthority, accountEntries: derived.inputs.accountEntries,
+      recordedSelection: derived.selection, grounding: { baseCommitSha: stored.baseCommitSha, attempt, scenarioIds } });
+    const admissionRef = E2EWorkflowAdmissionRefSchema.parse({ schemaVersion: 1, kind: "application", taskId: task.taskId, workflowRevision: workflow.revision, candidateDigest: built.admission.candidateDigest,
+      roundId: built.roundId, groupRunIds: built.groupRunIds, admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength },
+      purpose: E2E_GROUNDING_PURPOSE, baseCommitSha: stored.baseCommitSha, attempt, planArtifactSha256: artifact.sha256 });
+    await storeWorkflowE2EAdmission(dependencies, { key: admissionRef.admissionRef.key, sha256: built.sha256, bytes: built.bytes, taskId: task.taskId, candidateDigest: built.admission.candidateDigest });
+    const outcome = await startTaskWorkflowE2EGroundingFromSystem(routeDependencies, task.taskId, { workflowRevision: workflow.revision, planArtifactSha256: artifact.sha256 }, admissionRef, operationId,
+      [groundingStartItem(store, ref, { baseCommitSha: stored.baseCommitSha, operationId, roundId: built.roundId, admissionSha256: built.sha256,
+        selectionDigest: createHash("sha256").update(canonicalJson(derived.selection)).digest("hex"), startedAt: new Date().toISOString(), deadlineAt: built.admission.round.deadlineAt })],
+      input.caller);
+    if (outcome === "STALE") return await unavailable("start-failed");
+    return { outcome };
+  } catch (error) {
+    // Only a fixed reason is kept; the error's text (it can name paths or accounts) is not logged.
+    const reason = groundingStartFailureReason(error);
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_grounding_not_started", taskId: task.taskId, reason, errorName: error instanceof Error ? error.name : "unknown" }));
+    return unavailable(reason);
+  }
+}
+
+/**
  * M1.4 Task 4.6b: the operator's request to replay a verified AI-navigated round. Everything that can refuse refuses here, before a runner is started or anything is recorded:
  *
  *  - the task is open, and the round asked for is its qualified round, of its current candidate (`replay-task-closed`, `replay-not-qualified`);
@@ -12833,9 +12986,14 @@ async function recordTerminalResult(
   if (recordedStatus === terminalStatus) await settleBaselineRound(dependencies, operation, terminalStatus);
   // M1.4 Task 4.6b: so does an audit replay, into a record of its own.
   if (recordedStatus === terminalStatus) await settleReplayRound(dependencies, operation, terminalStatus);
+  // T7b: so does a grounding round (the proposed plan's must-not-change checks on the unchanged code), into a record of its own.
+  if (recordedStatus === terminalStatus) await settleGroundingRound(dependencies, operation, terminalStatus);
   // A replay that was stopped ends through the cancel operation that stopped it (the target's own terminal state is written with the cancel's): its record says so.
   if (recordedStatus === terminalStatus && operation.kind === "cancel" && terminalStatus === "SUCCEEDED" && cancelTargetOperation?.workflowE2EAdmission?.purpose === "replay") {
     await settleReplayRound(dependencies, cancelTargetOperation, "CANCELLED");
+  }
+  if (recordedStatus === terminalStatus && operation.kind === "cancel" && terminalStatus === "SUCCEEDED" && cancelTargetOperation?.workflowE2EAdmission?.purpose === "grounding") {
+    await settleGroundingRound(dependencies, cancelTargetOperation, "CANCELLED");
   }
   // Gap 6: start any step this result made due (its dispatch row committed above); a lost start is the sweep's.
   if (taskPointer !== undefined) await dispatchWorkflowContinuation(dependencies, taskPointer.taskId);

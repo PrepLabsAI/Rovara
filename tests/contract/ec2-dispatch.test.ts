@@ -861,6 +861,57 @@ describe("ec2-ebs delivery", () => {
           expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EBaselineSource");
         });
       });
+
+      describe("grounding rounds (T7b)", () => {
+        const groundingRef = () => admission({ kind: "application", purpose: "grounding", baseCommitSha: "c".repeat(40), attempt: 1, planArtifactSha256: "9".repeat(64) });
+        const applicationOnly = [...checksFeatures, "task.workflowE2EApplicationChecks"];
+        const withGrounding = [...applicationOnly, "task.workflowE2EGroundingChecks.v1"];
+        const v2 = async () => "workflow-e2e-application-admission/v1";
+
+        it("never sends a grounding admission to a worker that runs application admissions but not grounding rounds, and says why", async () => {
+          const record = checks(groundingRef());
+          const older = delivery({ workerFeatures: async () => [...applicationOnly, "task.workflowE2EBaselineChecks"], workflowE2EAdmissionSchemaVersion: v2 });
+          const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+          expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+          expect(refusal?.message).toContain("task.workflowE2EGroundingChecks.v1");
+          expect(older.post).not.toHaveBeenCalled();
+        });
+
+        it("hands a grounding admission, unchanged, to a worker that lists the feature", async () => {
+          const ref = groundingRef();
+          const record = checks(ref);
+          const capable = delivery({ workerFeatures: async () => withGrounding, workflowE2EAdmissionSchemaVersion: v2 });
+          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
+        });
+
+        it("fails closed for a grounding admission when the worker cannot be asked which features it lists", async () => {
+          const record = checks(groundingRef());
+          const failing = delivery({ workerFeatures: async () => { throw new Error("ping down"); } });
+          await expect(failing.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+          expect(failing.post).not.toHaveBeenCalled();
+        });
+
+        it("asks a coding plan run to export the unchanged code only of a worker that can, and only while the run still negotiates the application plan", async () => {
+          const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+          const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2, workflowE2EGroundingSource: true });
+          const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EApplicationPlan", "task.workflowE2EGroundingChecks.v1"] });
+          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(capable.post)).toMatchObject({ workflowMode: "PLAN", workflowE2EPlanVersion: 2, workflowE2EGroundingSource: true });
+          // A worker without the grounding feature is sent the plan run without the request.
+          const noGrounding = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EApplicationPlan"] });
+          expect(await noGrounding.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(noGrounding.post)).not.toHaveProperty("workflowE2EGroundingSource");
+          expect(postedPayload(noGrounding.post)).toMatchObject({ workflowE2EPlanVersion: 2 });
+          // A worker that lists the grounding feature but not the application plan has the plan version removed, and the request goes with it (the schema refuses one without the other).
+          const noPlans = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EGroundingChecks.v1"] });
+          expect(await noPlans.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(noPlans.post)).not.toHaveProperty("workflowE2EPlanVersion");
+          expect(postedPayload(noPlans.post)).not.toHaveProperty("workflowE2EGroundingSource");
+          expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({ event: "dispatch.grounding_source_omitted", operationId: record.operationId }));
+          log.mockRestore();
+        });
+      });
     });
 
     it("refuses to downgrade a version 2 application plan when no applicationPlanNotNegotiated recorder is wired, instead of posting a run the operation record still calls version 2 (2.2b N4)", async () => {

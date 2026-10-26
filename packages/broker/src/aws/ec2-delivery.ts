@@ -4,6 +4,7 @@ import {
   E2E_AGENT_UNAVAILABLE_REASONS,
   E2E_MODEL_FREE_LIMITS_FEATURE,
   E2E_REPLAY_CHECKS_FEATURE,
+  GROUNDING_CHECKS_FEATURE,
   PLAN_DRY_RUN_FEATURE,
   E2E_APPLICATION_ADMISSION_SCHEMA_V2,
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
@@ -372,6 +373,11 @@ async function forWorkerFeatures(
   if (carriesApplicationAdmission && invocation.kind === "task" && invocation.payload.workflowE2EAdmission?.purpose === "baseline" && !features.includes("task.workflowE2EBaselineChecks")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "the baseline round on the unchanged code needs a worker that runs baseline rounds (it must list task.workflowE2EBaselineChecks); this worker predates it or has no executor image on its host, so no baseline round was sent to it");
   }
+  // T7b: a grounding round (the proposed plan's must-not-change checks on the unchanged code) is a kind of its own too. A worker without its feature would not know the purpose, so it is
+  // refused here before compute is spent; the plan then reads "not checked against the current app".
+  if (carriesApplicationAdmission && invocation.kind === "task" && invocation.payload.workflowE2EAdmission?.purpose === "grounding" && !features.includes(GROUNDING_CHECKS_FEATURE)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the plan grounding round needs a worker that runs grounding rounds (it must list task.workflowE2EGroundingChecks.v1); this worker predates it, so no grounding round was sent to it");
+  }
   // M1.4 Task 4.6b: an audit replay is an application round of a kind of its own, run with no model by a worker that lists its feature. An older worker could not parse the purpose, and one
   // that runs application rounds only would run it as a candidate's; it is never handed one, and nothing is spent on a worker that cannot run it.
   if (carriesApplicationAdmission && invocation.kind === "task" && invocation.payload.workflowE2EAdmission?.purpose === "replay" && !features.includes(E2E_REPLAY_CHECKS_FEATURE)) {
@@ -535,8 +541,14 @@ async function forWorkerFeatures(
   }
   // M1.3 Task 3.7b: the request to export the unchanged code is only for a worker that can; an older one runs the coding without it (a baseline never stops the coding), and the
   // baseline then says it could not be checked.
-  const sent = withoutBaselineSource(qualified, features);
-  if (sent !== qualified) {
+  const baselineTrimmed = withoutBaselineSource(qualified, features);
+  // T7b: a planning run's request to export the unchanged code (to ground the plan) goes only to a worker that can, and only while the run still negotiates the application plan the
+  // request depends on (a worker that does not parse that plan has it removed above, and the schema refuses the request without it).
+  const sent = withoutGroundingSource(baselineTrimmed, features);
+  if (sent !== baselineTrimmed) {
+    console.log(JSON.stringify({ component: "dispatcher", event: "dispatch.grounding_source_omitted", operationId: invocation.operationId, workspaceId: invocation.workspaceId }));
+  }
+  if (baselineTrimmed !== qualified) {
     console.log(JSON.stringify({
       component: "dispatcher",
       event: "dispatch.baseline_source_omitted",
@@ -552,6 +564,15 @@ async function forWorkerFeatures(
 function withoutBaselineSource(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
   if (invocation.kind !== "task" || invocation.payload.workflowE2EBaselineSource === undefined || features.includes("task.workflowE2EBaselineSource")) return invocation;
   const { workflowE2EBaselineSource: _request, ...payload } = invocation.payload;
+  void _request;
+  return { ...invocation, payload };
+}
+
+/** A planning run without the request to export the unchanged code for grounding, for a worker that does not list the grounding feature or whose run no longer negotiates the application plan. */
+function withoutGroundingSource(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || invocation.payload.workflowE2EGroundingSource === undefined) return invocation;
+  if (features.includes(GROUNDING_CHECKS_FEATURE) && invocation.payload.workflowE2EPlanVersion === 2) return invocation;
+  const { workflowE2EGroundingSource: _request, ...payload } = invocation.payload;
   void _request;
   return { ...invocation, payload };
 }
