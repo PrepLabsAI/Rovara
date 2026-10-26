@@ -95,6 +95,8 @@ export interface DeveloperTaskRecord {
   planSelfCheck?: PlanSelfCheckState;
   /** T7c: the coding plan the task is holding back while its must-not-change checks run on the current app; the plan is not yet submitted, so there is nothing to approve. */
   planGrounding?: PlanGroundingHold;
+  /** T7c: the owner closed the task while the plan was held (the held plan's digest): the finish clears the hold and asks nobody anything. */
+  planGroundingAbandoned?: string;
   /** Broker-private fence requiring a new E2E plan after the protected source disproved an approved plan reference. */
   e2ePlanCorrection?: { artifactId: string; artifactSha256: string; candidateDigest: string; reasonCode: string; requiredE2E: true };
   /** Gap 2: how many thread replies are saved for the task (NOTE# items). */

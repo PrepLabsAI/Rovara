@@ -167,6 +167,23 @@ describe("a planning run asked for the unchanged code may upload it, and nothing
     expect(String((coding.operation().baselineSource as { reason: string }).reason)).toContain("secret-repo");
   });
 
+  it("stores a refused build source of a planning run as one fixed sentence, never the validator's own text (it can name manifest paths); a coding run keeps its reason (control)", async () => {
+    const repo = await repository();
+    const built = readyOf(await exportBaselineSource({ repositories: inputsOf(repo), signal: new AbortController().signal }));
+    const manifest = (built.buildSource as unknown as { manifest: Record<string, unknown> }).manifest;
+    const tampered = { ...built, buildSource: { ...built.buildSource, manifest: { ...manifest, schemaVersion: "src/secret-dir/not-a-manifest" } } } as never;
+    const planning = harness();
+    await planning.sinks.baselineSourceSink(tampered);
+    expect(planning.operation().baselineSource).toEqual({ status: "REFUSED", reason: "the unchanged code's build source was refused for the plan" });
+    const coding = harness();
+    coding.putOperation({ workflowMode: "IMPLEMENT", groundingSourceAsked: undefined });
+    coding.setCapability(coding.issue(true));
+    await coding.sinks.baselineSourceSink(tampered);
+    const kept = coding.operation().baselineSource as { status: string; reason: string };
+    expect(kept.status).toBe("REFUSED");
+    expect(kept.reason).not.toBe("the unchanged code's build source was refused for the plan");
+  });
+
   it("says only a fixed word when the export of a planning run is malformed", async () => {
     const repo = await repository();
     const built = readyOf(await exportBaselineSource({ repositories: inputsOf(repo), signal: new AbortController().signal }));

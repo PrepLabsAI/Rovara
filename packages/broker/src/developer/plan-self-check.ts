@@ -188,8 +188,6 @@ export interface PlanGroundingHold {
   /** The planning run whose answer is held (its operation holds the exported unchanged code). */
   planOperationId: string;
   heldAt: string; deadlineAt: string;
-  /** The owner closed the task: the finish clears the hold and asks nobody anything. */
-  abandoned?: true;
 }
 
 const GROUNDING_REASON_WORDS: Readonly<Record<string, string>> = {

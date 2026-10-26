@@ -5909,8 +5909,8 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
       // so the workspace is free for the close.
       if (task.planGrounding !== undefined && task.workflow?.stage === "PLAN" && task.workflow.state === "RUNNING") {
         try {
-          await deps.actions.transact([{ Update: { TableName: deps.tableName, Key: taskKey(taskId), UpdateExpression: "SET planGrounding.abandoned = :yes",
-            ConditionExpression: "attribute_exists(planGrounding) AND planGrounding.artifactSha256 = :held", ExpressionAttributeValues: { ":yes": true, ":held": task.planGrounding.artifactSha256 } } }]);
+          await deps.actions.transact([{ Update: { TableName: deps.tableName, Key: taskKey(taskId), UpdateExpression: "SET planGroundingAbandoned = :held",
+            ConditionExpression: "planGrounding.artifactSha256 = :held", ExpressionAttributeValues: { ":held": task.planGrounding.artifactSha256 } } }]);
         } catch (error) {
           if (!isConditional(error)) throw error;
         }

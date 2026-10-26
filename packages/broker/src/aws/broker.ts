@@ -11683,11 +11683,11 @@ async function runGroundingStep(dependencies: AwsBrokerDependencies, routeDepend
   if (hold === undefined) return "DONE";
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
   try {
-    const record = hold.abandoned === true ? undefined : await readWorkflowE2EGroundingRecord(store, { taskId: task.taskId, planArtifactSha256: hold.artifactSha256, attempt: hold.attempt });
-    if (hold.abandoned !== true && (record === undefined || record.state === "REQUESTED")) {
+    const record = task.planGroundingAbandoned === hold.artifactSha256 ? undefined : await readWorkflowE2EGroundingRecord(store, { taskId: task.taskId, planArtifactSha256: hold.artifactSha256, attempt: hold.attempt });
+    if (task.planGroundingAbandoned !== hold.artifactSha256 && (record === undefined || record.state === "REQUESTED")) {
       const entry = { id: hold.artifactId, type: "plan" as const, version: hold.version, sha256: hold.artifactSha256, producer: "agentx-worker-untrusted" as const,
         objectKey: `private/${task.ownerKey}/${task.workspaceId}/plan-documents/${hold.artifactId}.json`, createdAt: hold.artifactCreatedAt, format: "structured" as const };
-      const loaded = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), entry as never, {});
+      const loaded = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), entry, {});
       if (loaded?.format !== "structured") return await finishThenWait(dependencies, item, task.taskId, "start-failed");
       await (dependencies.startPlanGrounding ?? startPlanGroundingRound)(dependencies, routeDependencies, { task, caller, planOperationId: hold.planOperationId, plan: loaded.plan, artifact: { id: hold.artifactId, sha256: hold.artifactSha256 }, attempt: hold.attempt });
     }
@@ -11738,10 +11738,10 @@ export async function finishPlanGrounding(dependencies: AwsBrokerDependencies, t
     // The task moved on (closed, cancelled to a block): the hold means nothing now. Clear it; the dispatch run drops the row.
     return "NOOP";
   }
-  if (hold.abandoned === true) {
+  if (task.planGroundingAbandoned === hold.artifactSha256) {
     try {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-        { Update: { TableName: dependencies.tableName, Key: taskKey(taskId), UpdateExpression: "REMOVE planGrounding", ConditionExpression: holdCondition, ExpressionAttributeNames: holdNames, ExpressionAttributeValues: holdValues } },
+        { Update: { TableName: dependencies.tableName, Key: taskKey(taskId), UpdateExpression: "REMOVE planGrounding, planGroundingAbandoned", ConditionExpression: holdCondition, ExpressionAttributeNames: holdNames, ExpressionAttributeValues: holdValues } },
         { Delete: { TableName: dependencies.tableName, Key: rowKey } },
       ] }));
       return "FINISHED";
@@ -11791,7 +11791,7 @@ export async function finishPlanGrounding(dependencies: AwsBrokerDependencies, t
   const forget = unreadable === null && task.planUnreadable !== undefined;
   const items: TransactItems = [
     { Update: { TableName: dependencies.tableName, Key: taskKey(taskId),
-      UpdateExpression: `SET workflow = :workflow, updatedAt = :now${unreadable === undefined || unreadable === null ? "" : ", planUnreadable = :unreadable"}${stored?.selfCheck === undefined ? "" : ", planSelfCheck = :selfCheck"}${unreadable === null && task.threadNotesFedThrough !== undefined ? ", threadNotesFedFrom = :fedFrom" : ""} REMOVE planGrounding${forget ? ", planUnreadable" : ""}`,
+      UpdateExpression: `SET workflow = :workflow, updatedAt = :now${unreadable === undefined || unreadable === null ? "" : ", planUnreadable = :unreadable"}${stored?.selfCheck === undefined ? "" : ", planSelfCheck = :selfCheck"}${unreadable === null && task.threadNotesFedThrough !== undefined ? ", threadNotesFedFrom = :fedFrom" : ""} REMOVE planGrounding, planGroundingAbandoned${forget ? ", planUnreadable" : ""}`,
       ConditionExpression: holdCondition, ExpressionAttributeNames: holdNames,
       ExpressionAttributeValues: { ...holdValues, ":workflow": next, ":now": now,
         ...(unreadable === undefined || unreadable === null ? {} : { ":unreadable": unreadable }),
