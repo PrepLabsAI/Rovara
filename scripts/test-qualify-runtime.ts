@@ -25,15 +25,29 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CloudFormationClient, DescribeStackResourcesCommand, DescribeStacksCommand } from "@aws-sdk/client-cloudformation";
+import { CloudFormationClient, DescribeStackResourcesCommand, DescribeStacksCommand, GetTemplateCommand } from "@aws-sdk/client-cloudformation";
 import { AttachVolumeCommand, CreateVolumeCommand, DescribeInstancesCommand, DescribeLaunchTemplateVersionsCommand, DescribeVolumesCommand, EC2Client, RunInstancesCommand, type RunInstancesCommandInput } from "@aws-sdk/client-ec2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { nextGeneration } from "../packages/broker/src/aws/runtime-requalify.js";
+import { acquireRequalifyLock, releaseRequalifyLock } from "../packages/broker/src/aws/runtime-requalify-lock.js";
 import { e2eModelCheckRunnerKey } from "../packages/broker/src/e2e/model-route-registry.js";
 import { ec2Binding } from "../packages/cli/src/setup/project-add.js";
 import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
+import {
+  QUALIFICATION_INSTANCE_TYPE,
+  QUALIFICATION_POLL_TIMEOUT_MS,
+  QUALIFICATION_READY_TIMEOUT_MS,
+  QUALIFICATION_VOLUME_DEVICE,
+  buildRunInstancesInput,
+  launchTemplateShapeProblem,
+  qualificationVolumeTags,
+  renderQualificationUserData,
+  type QualificationFacts,
+  type QualificationSettings,
+} from "../packages/contracts/src/qualification-launch.js";
 import {
   E2E_QUALIFICATION_PROFILE_ID,
   Ec2RuntimeBindingSchema,
@@ -41,7 +55,6 @@ import {
   chunkParameterNames,
   E2E_QUALIFICATION_ROLE_ID_PATTERN,
   e2eQualificationPrefix,
-  ec2WorkerUserData,
   type Ec2RuntimeBinding,
 } from "../packages/contracts/src/session.js";
 import { WEB_API_RUNTIME_PROFILE_ID } from "../packages/contracts/src/e2e-web-api-qualification.js";
@@ -52,45 +65,18 @@ const DEFAULT_REGION = "us-east-1";
 const ALLOWLIST_ERROR = "test-qualify-runtime only targets allowlisted TEST installations";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const WORKER_PORT = 8080;
-const VOLUME_DEVICE = "/dev/sdf";
+const VOLUME_DEVICE = QUALIFICATION_VOLUME_DEVICE;
 const VOLUME_SIZE_GIB = 20;
-const INSTANCE_TYPE = "m6g.large";
+const INSTANCE_TYPE = QUALIFICATION_INSTANCE_TYPE;
 /** The web/API challenge lives 60 minutes (docs/runtime-installation.md): registration is refused after that. */
-export const QUALIFICATION_POLL_TIMEOUT_MS = 60 * 60_000;
+export { QUALIFICATION_POLL_TIMEOUT_MS };
 const POLL_INTERVAL_MS = 30_000;
 /** The worker uploads ready.json once it answers /ping: boot, volume attach and image pulls take a few minutes. */
-const READY_TIMEOUT_MS = 20 * 60_000;
+const READY_TIMEOUT_MS = QUALIFICATION_READY_TIMEOUT_MS;
 
-export interface QualificationSettings {
-  workerImage: string;
-  /** Required to qualify, though optional in the worker settings: the web/API runtime needs it. */
-  executorImage?: string | undefined;
-  modelProvider: string;
-  modelId: string;
-  promptCacheRetention: "short" | "long";
-  openRouterSecretArn?: string | undefined;
-  openRouterProviders?: string | undefined;
-  anthropicSecretArn?: string | undefined;
-  openaiSecretArn?: string | undefined;
-}
-
-/** What is read from the live stack: nothing about the TEST installation is written into this file. */
-export interface QualificationFacts {
-  region: string;
-  artifactBucket: string;
-  controlPlaneUrl: string;
-  invokePublicKey: string;
-  logGroupName: string;
-  launchTemplateId: string;
-  /** The unique ID (AROA...) of the worker instance role: the first half of the instance's `${aws:userid}`, which scopes its grant. */
-  workerRoleId: string;
-  /** The binding `agentx project add` registers for this foundation: every worker subnet. The challenge, and so the registered rows, carry it. */
-  binding: Ec2RuntimeBinding;
-  /** The one subnet of the binding the worker is launched into. */
-  subnet: { availabilityZone: string; subnetId: string };
-  volumeSizeGiB: number;
-  settings: QualificationSettings;
-}
+/** The launch code lives in contracts (the automatic renewal shares it); the script keeps exporting it. */
+export { buildRunInstancesInput, renderQualificationUserData };
+export type { QualificationFacts, QualificationSettings };
 
 /** The runtime binding project registration builds from the foundation's outputs (its own function), and the subnet to launch into: the first by zone. */
 export function qualificationBinding(outputs: Record<string, string>, stackName: string): { binding: Ec2RuntimeBinding; launchSubnet: { availabilityZone: string; subnetId: string } } {
@@ -185,7 +171,7 @@ export function formatQualificationPlan(steps: readonly QualificationStep[], inp
       case "attach-volume": return `attach the volume to that instance at ${step.device}`;
       case "read-private-ip": return "read the instance's private IP address";
       case "wait-ready": return `wait up to ${step.timeoutMs / 60_000} minutes for the worker to upload ${PLAN_PREFIX}${step.object} (it is healthy), so boot time does not use the challenge's lifetime`;
-      case "issue-challenge": return `issue a ${step.profile} challenge (agentx admin runtime-installation challenge) for http://<private ip>:${step.port}, generation ${step.generation}, correlation ${step.transportCorrelationId}`;
+      case "issue-challenge": return `issue a ${step.profile} challenge (agentx admin runtime-installation challenge) for http://<private ip>:${step.port}, generation ${step.generation} or one past the registered runtime if that is higher, correlation ${step.transportCorrelationId}`;
       case "upload-challenge": return `upload challenge.json to s3://<control artifacts bucket>/${PLAN_PREFIX}${step.object}`;
       case "poll-status": return `poll ${PLAN_PREFIX}${step.object} every ${step.intervalMs / 1000}s for up to ${step.timeoutMs / 60_000} minutes (the challenge's lifetime)`;
       case "download-proposal": return `only if the status is SUCCEEDED: download ${PLAN_PREFIX}${step.object}`;
@@ -202,68 +188,6 @@ export function formatQualificationPlan(steps: readonly QualificationStep[], inp
     `Spend: one instance (${INSTANCE_TYPE}) and one ${VOLUME_SIZE_GIB} GiB gp3 volume, billed until you end them. Launching it needs the owner's explicit OK at run time.`,
     "On any failure the instance is left running for diagnosis: this script never terminates an instance or deletes a volume (it deletes only its own preflight and challenge objects), and prints how.",
   ].join("\n");
-}
-
-/** The worker's boot configuration for the qualification instance, rendered by the product's own user data helper. */
-export function renderQualificationUserData(
-  facts: QualificationFacts,
-  run: { workspaceId: string; volumeId: string; qualification: { profile: typeof E2E_QUALIFICATION_PROFILE_ID } },
-  bootScript: string,
-): string {
-  const { settings } = facts;
-  if (settings.executorImage === undefined) {
-    throw new Error("the worker settings have no executor image, which the web/API runtime needs; deploy it first (test-deploy --only executor-image)");
-  }
-  return ec2WorkerUserData({
-    workspaceId: run.workspaceId,
-    generation: 1,
-    volumeId: run.volumeId,
-    expectNewVolume: true,
-    workerImage: settings.workerImage,
-    executorImage: settings.executorImage,
-    invokePublicKey: facts.invokePublicKey,
-    controlPlaneUrl: facts.controlPlaneUrl,
-    modelProvider: settings.modelProvider,
-    modelId: settings.modelId,
-    promptCacheRetention: settings.promptCacheRetention,
-    ...(settings.openRouterSecretArn ? { openRouterSecretArn: settings.openRouterSecretArn } : {}),
-    ...(settings.openRouterProviders ? { openRouterProviders: settings.openRouterProviders } : {}),
-    ...(settings.anthropicSecretArn ? { anthropicSecretArn: settings.anthropicSecretArn } : {}),
-    ...(settings.openaiSecretArn ? { openaiSecretArn: settings.openaiSecretArn } : {}),
-    logGroupName: facts.logGroupName,
-    e2eQualification: { bucket: facts.artifactBucket, roleId: facts.workerRoleId, profile: run.qualification.profile },
-  }, bootScript);
-}
-
-/** One instance from the environment's own launch template: its instance type, profile and security group stay the template's. */
-export function buildRunInstancesInput(
-  facts: QualificationFacts,
-  run: { env: string; runId: string; revision: string; userData: string },
-): RunInstancesCommandInput {
-  return {
-    ClientToken: run.runId,
-    MinCount: 1,
-    MaxCount: 1,
-    LaunchTemplate: { LaunchTemplateId: facts.launchTemplateId, Version: "$Default" },
-    SubnetId: facts.subnet.subnetId,
-    UserData: run.userData,
-    TagSpecifications: [{
-      ResourceType: "instance",
-      Tags: [
-        { Key: "Application", Value: "AgentX" },
-        // Not the launch template's ec2-ebs: the session reconciler ends an ec2-ebs instance of this environment that no session owns once it is
-        // 15 minutes old, which would end this one mid-qualification. The request's tags override the template's for the same key.
-        { Key: "DeploymentMode", Value: "e2e-qualification" },
-        { Key: "Environment", Value: run.env },
-        { Key: "Name", Value: `agentx-${run.env}-web-api-qualification-${run.runId.slice(0, 8)}` },
-        { Key: "agentx:env", Value: run.env },
-        { Key: "agentx:run", Value: run.runId },
-        { Key: "agentx:qualification-run", Value: run.runId },
-        { Key: "agentx:revision", Value: run.revision },
-        { Key: "agentx:runtime-purpose", Value: "web-api-qualification" },
-      ],
-    }],
-  };
 }
 
 export interface QualificationEffects {
@@ -285,6 +209,12 @@ export interface QualificationEffects {
   register(proposalFile: string): Promise<string>;
   /** Records the runner that serves model checks (`E2E_MODEL_CHECK_RUNNER#<profile>`), with the registration's transport correlation, so a check is only ever sent to the runner that was qualified. */
   recordModelCheckRunner(runner: { roleId: string; instanceId: string; transportCorrelationId: string }): Promise<void>;
+  /** The generation the next challenge needs: one past the newest registered runtime, read the way the automatic renewal reads it (1 when nothing is registered). */
+  nextGeneration(): Promise<number>;
+  /** Takes the renewal lock (the one the automatic renewal holds); throws when another run holds it. */
+  acquireLock(runId: string): Promise<void>;
+  /** Releases the lock if this run holds it. */
+  releaseLock(runId: string): Promise<void>;
   now(): number;
   sleep(ms: number): Promise<void>;
   print(line: string): void;
@@ -367,7 +297,19 @@ interface RunState {
 /** Runs the plan against effects. Never retries a launch, never registers without a SUCCEEDED status, and never ends anything it started. */
 export async function runTestQualification(steps: readonly QualificationStep[], effects: QualificationEffects, options: RunOptions): Promise<void> {
   const state: RunState = {};
-  if (steps.filter((step) => step.kind === "run-instance").length !== 1) throw new Error("a qualification plan launches exactly one instance");
+  const launches = steps.filter((step): step is Extract<QualificationStep, { kind: "run-instance" }> => step.kind === "run-instance");
+  if (launches.length !== 1 || launches[0] === undefined) throw new Error("a qualification plan launches exactly one instance");
+  // One run at a time with the automatic renewal: it would otherwise launch, qualify and retire machines under this run.
+  const runId = launches[0].clientToken;
+  await effects.acquireLock(runId);
+  try {
+    await runSteps(steps, effects, options, state);
+  } finally {
+    await effects.releaseLock(runId);
+  }
+}
+
+async function runSteps(steps: readonly QualificationStep[], effects: QualificationEffects, options: RunOptions, state: RunState): Promise<void> {
   try {
     for (const step of steps) {
       effects.print(`== ${step.id}`);
@@ -385,7 +327,7 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
           const facts = need(state.facts, "the stack facts");
           state.volumeId = await effects.createVolume({
             availabilityZone: facts.subnet.availabilityZone, sizeGiB: facts.volumeSizeGiB, clientToken: step.clientToken,
-            tags: { Application: "AgentX", "agentx:run": step.clientToken, "agentx:runtime-purpose": "web-api-qualification" },
+            tags: qualificationVolumeTags({ env: options.env ?? "", runId: step.clientToken }),
           });
           effects.print(`volume ${state.volumeId}`);
           break;
@@ -406,7 +348,9 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
         case "issue-challenge": {
           const facts = need(state.facts, "the stack facts");
           const binding = Ec2RuntimeBindingSchema.parse(facts.binding);
-          const issued = await effects.issueChallenge({ binding, endpoint: `http://${need(state.privateIp, "the private IP")}:${step.port}`, generation: step.generation, transportCorrelationId: step.transportCorrelationId, profile: step.profile });
+          // The plan's generation is the floor: after an automatic renewal the registered runtime is newer, and a challenge at generation 1 would be refused.
+          const generation = Math.max(step.generation, await effects.nextGeneration());
+          const issued = await effects.issueChallenge({ binding, endpoint: `http://${need(state.privateIp, "the private IP")}:${step.port}`, generation, transportCorrelationId: step.transportCorrelationId, profile: step.profile });
           state.challengeFile = issued.file;
           effects.print(`challenge ${issued.challengeId}, expires ${issued.expiresAt}`);
           break;
@@ -528,6 +472,19 @@ function reportLeftovers(state: RunState, options: RunOptions, print: (line: str
   }
 }
 
+/** The feature-verifier catalog ID the deployed Broker is configured with: a literal in its environment, as test-deploy reads it. */
+export function featureCatalogIdFromTemplate(body: unknown): string {
+  let template: { Resources?: Record<string, { Type?: string; Properties?: { Environment?: { Variables?: Record<string, unknown> } } }> };
+  try { template = typeof body === "string" ? JSON.parse(body) as typeof template : body as typeof template; } catch { throw new Error("the control-plane template is not JSON; cannot find the feature catalog"); }
+  const ids = new Set(Object.values(template.Resources ?? {}).flatMap((resource) => {
+    const value = resource.Type === "AWS::Lambda::Function" ? resource.Properties?.Environment?.Variables?.["AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID"] : undefined;
+    return typeof value === "string" ? [value] : [];
+  }));
+  const [only] = [...ids];
+  if (ids.size !== 1 || only === undefined) throw new Error("the deployed Broker has no single literal AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID, so the registered generation cannot be read");
+  return only;
+}
+
 export interface QualifyArgs {
   env: string;
   profile: string;
@@ -586,6 +543,17 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
     return found;
   };
 
+  // The state table and the feature catalog the registered rows live under, read once from the live control-plane stack.
+  let live: { table: string; catalogId: string } | undefined;
+  const liveFacts = async (): Promise<{ table: string; catalogId: string }> => {
+    if (live !== undefined) return live;
+    const controlPlaneName = environmentStackName(args.env, "control-plane");
+    const table = requireOutput(outputsOf(await stack(controlPlaneName)), "StateTableName", controlPlaneName);
+    const body = (await cloudFormation.send(new GetTemplateCommand({ StackName: controlPlaneName }))).TemplateBody;
+    live = { table, catalogId: featureCatalogIdFromTemplate(body) };
+    return live;
+  };
+
   return {
     async checkAdminSession() {
       const result = cli(["admin", "workspace", "list"]);
@@ -641,10 +609,8 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
 
       // The template is launched as it is: refuse one that is not the reviewed shape instead of overriding it.
       const template = (await ec2.send(new DescribeLaunchTemplateVersionsCommand({ LaunchTemplateId: launchTemplateId, Versions: ["$Default"] }))).LaunchTemplateVersions?.[0]?.LaunchTemplateData;
-      if (template === undefined) throw new Error("the launch template's default version was not found");
-      if (template.InstanceType !== INSTANCE_TYPE || template.MetadataOptions?.HttpTokens !== "required" || template.MetadataOptions.HttpPutResponseHopLimit !== 1 || template.UserData !== undefined || template.IamInstanceProfile === undefined) {
-        throw new Error(`the launch template is not ${INSTANCE_TYPE} with IMDSv2 required, hop limit 1, an instance profile and no user data of its own; stop for review`);
-      }
+      const shapeProblem = launchTemplateShapeProblem(template);
+      if (shapeProblem !== undefined) throw new Error(shapeProblem);
 
       return {
         region: args.region,
@@ -774,6 +740,23 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
       const table = requireOutput(outputsOf(await stack(environmentStackName(args.env, "control-plane"))), "StateTableName", environmentStackName(args.env, "control-plane"));
       await documents.send(new PutCommand({ TableName: table, Item: { ...e2eModelCheckRunnerKey(WEB_API_RUNTIME_PROFILE_ID), entityType: "E2E_MODEL_CHECK_RUNNER", roleId: runner.roleId, instanceId: runner.instanceId,
         transportCorrelationId: runner.transportCorrelationId, recordedAt: new Date().toISOString() } }));
+    },
+
+    async nextGeneration() {
+      const { table, catalogId } = await liveFacts();
+      return nextGeneration({ documentClient: documents, tableName: table, featureCatalogId: catalogId });
+    },
+
+    async acquireLock(runId) {
+      const { table } = await liveFacts();
+      if (!(await acquireRequalifyLock({ documentClient: documents, tableName: table }, runId))) {
+        throw new Error("the renewal lock is held by another run (the automatic renewal or another qualification); try again when it has finished");
+      }
+    },
+
+    async releaseLock(runId) {
+      const { table } = await liveFacts();
+      await releaseRequalifyLock({ documentClient: documents, tableName: table }, runId);
     },
 
     now: () => Date.now(),

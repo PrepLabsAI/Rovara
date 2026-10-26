@@ -256,7 +256,7 @@ function isWebApiProposal(proposal: unknown): boolean {
 }
 
 /** Reads an existing per-kind row's revision and the worker generation it was qualified on. */
-export async function readWebApiCatalogRow(deps: RuntimeInstallationDependencies, key: { pk: string; sk: string }): Promise<{ revision: number; generation: number } | undefined> {
+export async function readWebApiCatalogRow(deps: Pick<RuntimeInstallationDependencies, "documentClient" | "tableName">, key: { pk: string; sk: string }): Promise<{ revision: number; generation: number } | undefined> {
   const result = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }));
   const item = result.Item as Record<string, unknown> | undefined;
   if (item === undefined) return undefined;

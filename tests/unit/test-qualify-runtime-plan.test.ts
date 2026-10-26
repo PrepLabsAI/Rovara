@@ -10,6 +10,7 @@ import {
   buildRunInstancesInput,
   classifyGetObjectFailure,
   describeRegisteredRows,
+  featureCatalogIdFromTemplate,
   formatQualificationPlan,
   parseQualifyArgs,
   planTestQualification,
@@ -271,6 +272,19 @@ describe("parseQualifyArgs", () => {
   });
 });
 
+describe("featureCatalogIdFromTemplate", () => {
+  const lambda = (id: unknown) => ({ Type: "AWS::Lambda::Function", Properties: { Environment: { Variables: { AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: id } } } });
+  it("reads the one literal catalog ID the deployed functions share, from a JSON template body", () => {
+    expect(featureCatalogIdFromTemplate(JSON.stringify({ Resources: { A: lambda("catalog-1"), B: lambda("catalog-1"), C: { Type: "AWS::SQS::Queue" } } }))).toBe("catalog-1");
+  });
+  it("refuses a missing, non-literal or ambiguous ID rather than guessing which rows to read", () => {
+    for (const resources of [{}, { A: lambda({ Ref: "Param" }) }, { A: lambda("catalog-1"), B: lambda("catalog-2") }]) {
+      expect(() => featureCatalogIdFromTemplate(JSON.stringify({ Resources: resources }))).toThrow(/catalog/);
+    }
+    expect(() => featureCatalogIdFromTemplate("not json")).toThrow(/not JSON/);
+  });
+});
+
 describe("describeRegisteredRows", () => {
   it("names the two catalog rows and their revisions from the registration answer, bare or wrapped", () => {
     const answer = { profileId: "linux-arm64-web-api-v1", featureCatalogId: "catalog-1", featureRevisions: { web: 1, api: 2 }, proposalSha256: "f".repeat(64) };
@@ -286,11 +300,12 @@ describe("describeRegisteredRows", () => {
 });
 
 /** Effects that record every call and fail where a test says, so the run is driven with no AWS and no clock. */
-function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Array<Buffer | undefined>; failAt?: string; adminFails?: boolean; instanceId?: string; facts?: QualificationFacts; readBack?: Buffer } = {}) {
+function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Array<Buffer | undefined>; failAt?: string; adminFails?: boolean; instanceId?: string; facts?: QualificationFacts; readBack?: Buffer; registeredGeneration?: number; lockHeld?: boolean } = {}) {
   const calls: string[] = [];
   const bindings: unknown[] = [];
   const ready = [...(options.readies ?? [Buffer.from(JSON.stringify({ state: "READY", reason: "worker-healthy", finishedAt: "2026-10-19T11:50:00Z" }))])];
   const printed: string[] = [];
+  const locks: string[] = [];
   let clock = 0;
   const statuses = [...(options.statuses ?? [Buffer.from(JSON.stringify({ state: "SUCCEEDED", reason: "qualified", finishedAt: "2026-10-19T12:00:00Z" }))])];
   const maybeFail = (name: string) => { if (options.failAt === name) throw new Error(`${name} failed`); };
@@ -320,16 +335,47 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
     saveProposal(bytes) { calls.push(`saveProposal ${bytes.toString()}`); return "/tmp/proposal.json"; },
     async recordModelCheckRunner(runner) { calls.push(`recordModelCheckRunner ${runner.roleId} ${runner.instanceId} ${runner.transportCorrelationId}`); maybeFail("recordModelCheckRunner"); },
     async register(file) { calls.push(`register ${file}`); maybeFail("register"); return JSON.stringify({ profileId: "linux-arm64-web-api-v1", featureCatalogId: "catalog-1", featureRevisions: { web: 1, api: 1 } }); },
+    async nextGeneration() { return options.registeredGeneration === undefined ? 1 : options.registeredGeneration + 1; },
+    async acquireLock(runId) { locks.push(`acquire ${runId}`); if (options.lockHeld) throw new Error("the renewal lock is held by another run"); },
+    async releaseLock(runId) { locks.push(`release ${runId}`); },
     now: () => clock,
     async sleep(ms) { clock += ms; },
     print: (line) => printed.push(line),
   };
-  return { effects, calls, printed, bindings, clockNow: () => clock };
+  return { effects, calls, printed, bindings, locks, clockNow: () => clock };
 }
 const succeeded = Buffer.from(JSON.stringify({ state: "SUCCEEDED", reason: "qualified", finishedAt: "2026-10-19T12:00:00Z" }));
 const failed = (reason: string) => Buffer.from(JSON.stringify({ state: "FAILED", reason, finishedAt: "2026-10-19T12:00:00Z" }));
 
 describe("runTestQualification", () => {
+  it("issues the challenge at the registered generation + 1, so the manual fallback still registers after an automatic renewal (AR-1 review I-2)", async () => {
+    const { effects, calls } = harness({ registeredGeneration: 2, statuses: [succeeded] });
+    await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
+    expect(calls.filter((call) => call.startsWith("issueChallenge")).map((call) => call.split(" ")[2])).toEqual(["3"]);
+  });
+
+  it("issues generation 1 when nothing is registered yet", async () => {
+    const { effects, calls } = harness({ statuses: [succeeded] });
+    await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
+    expect(calls.filter((call) => call.startsWith("issueChallenge")).map((call) => call.split(" ")[2])).toEqual(["1"]);
+  });
+
+  it("holds the renewal lock for the run and releases it after success and after a failure", async () => {
+    const ok = harness({ statuses: [succeeded] });
+    await runTestQualification(plan(), ok.effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
+    expect(ok.locks).toEqual([`acquire ${RUN_ID}`, `release ${RUN_ID}`]);
+    const bad = harness({ failAt: "createVolume" });
+    await expect(runTestQualification(plan(), bad.effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" })).rejects.toThrow("createVolume failed");
+    expect(bad.locks).toEqual([`acquire ${RUN_ID}`, `release ${RUN_ID}`]);
+  });
+
+  it("creates nothing when another run holds the lock, and does not release a lock it never took", async () => {
+    const held = harness({ lockHeld: true });
+    await expect(runTestQualification(plan(), held.effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" })).rejects.toThrow("lock is held");
+    expect(held.calls.some((call) => call.startsWith("createVolume") || call.startsWith("runInstance"))).toBe(false);
+    expect(held.locks).toEqual([`acquire ${RUN_ID}`]);
+  });
+
   it("runs every step once, in order, and registers the downloaded proposal only after the status says SUCCEEDED", async () => {
     const { effects, calls, printed } = harness({ statuses: [undefined, undefined, succeeded] });
     await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
