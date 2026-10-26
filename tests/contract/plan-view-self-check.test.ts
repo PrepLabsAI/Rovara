@@ -135,7 +135,7 @@ describe("DRYMSG: what the card says of a check the dry run did not try, or trie
     const summary = planCheckSummary(three({ "proposed-1": "fail" }), { selfCheck: view });
     expect(summary.checks[1]!.tried).toBe("not tried on current code: it needs tools the sandbox does not run");
     expect(summary.checks[1]!.tried).toBe(NOT_TRIED_SENTENCES["not-checked"]);
-    expect(summary.checks[2]!.tried).toBe("not tried on current code: it ran out of time or the sandbox could not start it");
+    expect(summary.checks[2]!.tried).toBe("not tried on current code: it ran out of time, was cancelled, or the sandbox could not start it");
     expect(summary.checks[1]!.line).toContain('Check "Exits with 1" runs node --eval process.exit(1); proves claim 1; not tried on current code: it needs tools the sandbox does not run');
     expect(summary.checks[2]!.line).toContain("; not tried on current code: it ran out of time");
     expect(summary.checks[0]!.line).toContain("tried on current code: failed as expected");

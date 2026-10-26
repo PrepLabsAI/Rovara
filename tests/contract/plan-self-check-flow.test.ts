@@ -506,6 +506,7 @@ describe("the plan quality guidance in the planner's prompt", () => {
       const text = planDocumentInstructions({ kind: "plan", path, planQuality: true });
       expect(text, path).toContain("Give every proposed check an `expectOnBase`");
       expect(text, path).not.toContain("may predict");
+      expect(text, path).not.toContain("if you like");
     }
     const check = { id: "proposed-1", label: "Retry is wired", command: { cwd: "repo/demo", executable: "grep", args: ["retry", "src/pay.ts"], timeoutSeconds: 60 } };
     const withExpectation = planDocument({ checks: { proposed: [check], proves: { "proposed-1": ["1"] }, expectOnBase: { "proposed-1": "fail" } } });

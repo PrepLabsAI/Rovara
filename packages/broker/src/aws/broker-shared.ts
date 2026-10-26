@@ -154,7 +154,7 @@ const PLAN_QUALITY_GUIDANCE = [
   "- A claim that says something is hidden needs a scenario that asserts it is not visible, as the account that must not see it.",
   "- An AI navigation step (`agent`) takes no more actions than the request allows, and never more than 8.",
   "- Give every proposed check an `expectOnBase`: \"pass\" when it already holds today, \"fail\" when it tests new behaviour. AgentX tries the commands on the unchanged code and compares; without it the owner is told the plan gave no expectation.",
-  "- To test that a file holds, or lacks, some text, write the check as `{ label, kind: \"file-contains\" | \"file-not-contains\", cwd, path, text, proves }` (add `expectOnBase` if you like) instead of a `grep` command. Commands that print counts (`grep -c`), use `grep -L` or `-v`, or match quote marks give the wrong answer.",
+  "- To test that a file holds, or lacks, some text, write the check as `{ label, kind: \"file-contains\" | \"file-not-contains\", cwd, path, text, proves }` (with an `expectOnBase`) instead of a `grep` command. Commands that print counts (`grep -c`), use `grep -L` or `-v`, or match quote marks give the wrong answer.",
   PLAN_QUALITY_CLOSE,
 ].join("\n");
 

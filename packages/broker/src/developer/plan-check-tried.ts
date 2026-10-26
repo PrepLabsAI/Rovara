@@ -11,7 +11,7 @@ export type PlanNotTriedClass = Extract<PlanDryRunClass, "not-checked" | "not-ru
 /** `not-checked`: the dry run only tries file checks and plain grep/test; `not-run`: it was meant to try the check but could not. */
 export const NOT_TRIED_SENTENCES: Readonly<Record<PlanNotTriedClass, string>> = {
   "not-checked": "not tried on current code: it needs tools the sandbox does not run",
-  "not-run": "not tried on current code: it ran out of time or the sandbox could not start it",
+  "not-run": "not tried on current code: it ran out of time, was cancelled, or the sandbox could not start it",
 };
 
 /** Appended to a tried check's result when the plan gave no `expectOnBase`: says why there is no "as expected". */
