@@ -95,7 +95,7 @@ describe("test-deploy --check on the synthesized control-plane template", () => 
     expect(() => assertCheckAllowsApply(findings, ["broker"], head)).not.toThrow();
   });
 
-  it("sees the notifier's WORKFLOW_DISPATCH read grant (LIVEFIX-1) as an IAM gap: control-plane-code and the notifier unit refuse until the stack is updated", () => {
+  it("sees the notifier's WORKFLOW_DISPATCH read grant (LIVEFIX-1) as an IAM gap: control-plane-code (the only unit that moves the notifier) refuses until the stack is updated", () => {
     const deployed = clone();
     const holders = Object.entries(deployed.Resources ?? {}).filter(([, resource]) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties).includes("WORKFLOW_DISPATCH"));
     // Only the notifier's own policy names the key: no other Lambda was given it.
@@ -106,7 +106,6 @@ describe("test-deploy --check on the synthesized control-plane template", () => 
     expect(findings.map((finding) => [finding.kind, findingLabel(finding.roleLogicalId ?? "")])).toEqual([["iam-missing-grant", expect.stringContaining("DeveloperTaskNotifier")]]);
     expect(JSON.stringify(findings[0]?.statements)).toContain("WORKFLOW_DISPATCH");
     expect(() => assertCheckAllowsApply(findings, ["control-plane-code"], head)).toThrow(/iam-missing-grant .*needs Tier 3 approval/);
-    expect(() => assertCheckAllowsApply(findings, ["developer-task-notifier"], head)).toThrow(/iam-missing-grant .*needs Tier 3 approval/);
     expect(() => assertCheckAllowsApply(findings, ["broker"], head)).not.toThrow();
   });
 
