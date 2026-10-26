@@ -35,6 +35,12 @@ describe("the renewal's infrastructure", () => {
   const statements = (): Statement[] => Object.values(on)
     .filter((resource) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties["Roles"]).includes(roleId()))
     .flatMap((resource) => (resource.Properties["PolicyDocument"] as { Statement: Statement[] }).Statement);
+  const provisionerStatements = (): Statement[] => {
+    const roles = Object.entries(on).filter(([id, resource]) => resource.Type === "AWS::IAM::Role" && id.startsWith("SessionsProvisionerRole")).map(([id]) => id);
+    return Object.values(on)
+      .filter((resource) => resource.Type === "AWS::IAM::Policy" && roles.some((role) => JSON.stringify(resource.Properties["Roles"]).includes(role)))
+      .flatMap((resource) => (resource.Properties["PolicyDocument"] as { Statement: Statement[] }).Statement);
+  };
   const withAction = (action: string) => statements().filter((statement) => [statement.Action].flat().includes(action));
   const tagConditions = (statement: Statement) => statement.Condition?.["StringEquals"] ?? {};
 
@@ -80,6 +86,33 @@ describe("the renewal's infrastructure", () => {
     expect(image?.Condition?.["StringEquals"]).toEqual({ "ec2:Owner": "amazon" });
     // Tags are written only as part of creating the volume or the instance.
     expect(withAction("ec2:CreateTags")[0]!.Condition!["StringEquals"]).toEqual({ "ec2:CreateAction": ["CreateVolume", "RunInstances"] });
+  });
+
+  it("can resolve the launch template's AMI from the public SSM parameter (GetParameters and GetParameter, that one ARN), as the session provisioner can", () => {
+    const resolve = statements().filter((statement) => [statement.Action].flat().includes("ssm:GetParameters") && JSON.stringify(statement.Resource).includes("al2023-ami-kernel-default-arm64"));
+    expect(resolve).toHaveLength(1);
+    expect([resolve[0]!.Action].flat().sort()).toEqual(["ssm:GetParameter", "ssm:GetParameters"]);
+    expect([resolve[0]!.Resource].flat()).toHaveLength(1);
+    expect(resolve[0]!.Condition).toBeUndefined();
+    const provisioner = provisionerStatements().find((statement) => statement.Sid === "ResolveWorkerAmi")!;
+    expect(JSON.stringify(resolve[0]!.Resource)).toBe(JSON.stringify(provisioner.Resource));
+  });
+
+  it("holds every launch permission the session provisioner needs to start a worker from the same template (parity, so a missing one fails here and not live)", () => {
+    const needed = ["ec2:RunInstances", "ec2:CreateVolume", "ec2:CreateTags", "ec2:AttachVolume", "iam:PassRole", "ssm:GetParameters", "ssm:GetParameter",
+      "kms:CreateGrant", "kms:Decrypt", "kms:DescribeKey", "kms:GenerateDataKeyWithoutPlaintext", "kms:ReEncrypt*"];
+    const provisioner = new Set(provisionerStatements().flatMap((statement) => [statement.Action].flat()));
+    const ours = new Set(statements().flatMap((statement) => [statement.Action].flat()));
+    for (const action of needed) {
+      expect(provisioner.has(action), `the provisioner no longer holds ${action}: update this list`).toBe(true);
+      expect(ours.has(action), `the renewal role lacks ${action}, which launching from the template needs`).toBe(true);
+    }
+    // The resources RunInstances touches beyond the instance: the template, subnet, security group, network interface, volume and the image.
+    const launchResources = JSON.stringify(withAction("ec2:RunInstances").map((statement) => statement.Resource));
+    for (const kind of [":launch-template/", ":subnet/*", ":security-group/*", ":network-interface/*", ":volume/*", "::image/*", ":instance/*"]) expect(launchResources, kind).toContain(kind);
+    // The instance profile's role is passed to EC2 (and only that role), and tags are written on create for the instance and the volume.
+    expect(withAction("iam:PassRole")[0]!.Resource).toEqual(provisionerStatements().find((statement) => statement.Sid === "PassInstanceRole")!.Resource);
+    expect(JSON.stringify(withAction("ec2:CreateTags")[0]!.Resource)).toMatch(/instance\/\*[\s\S]*volume\/\*|volume\/\*[\s\S]*instance\/\*/);
   });
 
   it("may use the workspace key only through EC2 (EBS), and create grants only for AWS resources", () => {

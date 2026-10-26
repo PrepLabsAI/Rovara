@@ -203,7 +203,8 @@ export class RuntimeRequalify extends Construct {
     grant({ sid: "ReadWorkerRole", actions: ["iam:GetRole"], resources: [foundation.workerRoleArn] });
     // Settings: read the AMI and the worker settings, write the one qualified-AMI setting. No decryption.
     const settingsArn = (name: string) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${naming.ec2.workerSettingsPrefix}${name}`;
-    grant({ sid: "ReadAmiParameter", actions: ["ssm:GetParameter"], resources: [`arn:${Aws.PARTITION}:ssm:${Aws.REGION}::parameter${EC2_WORKER_AMI_PARAMETER}`] });
+    // GetParameters too: the launch template names its image as a public SSM parameter, which EC2 resolves with the caller's permission (as for the session provisioner).
+    grant({ sid: "ReadAmiParameter", actions: ["ssm:GetParameter", "ssm:GetParameters"], resources: [`arn:${Aws.PARTITION}:ssm:${Aws.REGION}::parameter${EC2_WORKER_AMI_PARAMETER}`] });
     grant({ sid: "ReadWorkerSettings", actions: ["ssm:GetParameters"], resources: Object.values(WORKER_SETTING_PARAMETERS).map(settingsArn) });
     grant({ sid: "WriteQualifiedAmi", actions: ["ssm:PutParameter"], resources: [settingsArn(QUALIFIED_AMI_SETTING_NAME)] });
     // The invoke public key goes into the runner's user data. Public key only: never kms:Sign.
