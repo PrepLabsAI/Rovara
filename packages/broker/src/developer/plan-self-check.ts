@@ -32,7 +32,7 @@ export function planRevisionsUsed(state: unknown, artifactType: PlanSelfCheckArt
   return parsed.success && parsed.data.artifactType === artifactType && parsed.data.version === version ? parsed.data.used : 0;
 }
 
-export const PLAN_SELF_CHECK_NOTE_CODES = ["checks-not-tried"] as const;
+export const PLAN_SELF_CHECK_NOTE_CODES = ["checks-not-tried", "grounding-not-checked", "grounding-undecided"] as const;
 const PlanSelfCheckNoteSchema = z.object({ code: z.enum(PLAN_SELF_CHECK_NOTE_CODES), ownerSentence: z.string().min(1).max(300) }).strict();
 export type PlanSelfCheckNote = z.infer<typeof PlanSelfCheckNoteSchema>;
 
@@ -178,3 +178,46 @@ export function recordedPlanQualityContext(value: unknown): PlanQualityContext |
   const parsed = PlanQualityContextSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
 }
+
+/** T7c: how long a plan is held back for its check on the current app, from the moment it is held. */
+export const PLAN_GROUNDING_HOLD_MS = 15 * 60_000;
+
+/** The coding plan a task holds back while its must-not-change checks run on the current app (kept on the task row until the one finish clears it). */
+export interface PlanGroundingHold {
+  artifactId: string; artifactSha256: string; artifactCreatedAt: string; version: number; attempt: number;
+  /** The planning run whose answer is held (its operation holds the exported unchanged code). */
+  planOperationId: string;
+  heldAt: string; deadlineAt: string;
+  /** The owner closed the task: the finish clears the hold and asks nobody anything. */
+  abandoned?: true;
+}
+
+const GROUNDING_REASON_WORDS: Readonly<Record<string, string>> = {
+  "worker-too-old": "the runner is too old for this check",
+  "not-exported": "the current code was not available to the runner",
+  "runtime-not-ready": "the test environment was not ready",
+  "accounts-not-ready": "the test accounts were not ready",
+  "refused": "the check was refused for this plan",
+  "start-failed": "the check could not be started",
+  "run-failed": "the check run failed",
+  "unverified": "its result could not be verified",
+  "timed-out": "it ran out of time",
+  "ai-only": "these checks use AI navigation, which is not run before approval",
+  "disabled": "it is turned off",
+  "stopped": "it was stopped",
+};
+
+/** The note for a plan whose current-app check did not give a result: a fixed sentence per fixed reason. */
+export function groundingNotCheckedNote(reason: string): PlanSelfCheckNote {
+  return { code: "grounding-not-checked", ownerSentence: `Not checked against the current app: ${GROUNDING_REASON_WORDS[reason] ?? "it could not be run"}.` };
+}
+
+/** The note for scenarios that ran on the current app but could not be decided either way. */
+export function groundingUndecidedNote(count: number): PlanSelfCheckNote {
+  return { code: "grounding-undecided", ownerSentence: `${count === 1 ? "One check" : `${count} checks`} on the current app could not be decided either way.` };
+}
+
+/** What a held plan's check on the current app came to: scenarios that failed on the unchanged app (as findings) and ones undecided, or a fixed reason it gave no result. */
+export type GroundingOutcome =
+  | { kind: "checked"; findings: PlanQualityFinding[]; undecided: number }
+  | { kind: "unavailable"; reason: string };

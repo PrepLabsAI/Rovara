@@ -5905,6 +5905,17 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     } else if (workspace.status === "PREPARING") {
       throw agentXError("TASK_BUSY", `task ${taskId} is still starting; cancel it with agentx_cancel_task, then close it once it has stopped`);
     } else if (workspace.status !== "CLOSED") {
+      // T7c: a plan held back for its check on the current app is not asked about again: the hold is marked abandoned (its one finish then clears it quietly) and the round is stopped,
+      // so the workspace is free for the close.
+      if (task.planGrounding !== undefined && task.workflow?.stage === "PLAN" && task.workflow.state === "RUNNING") {
+        try {
+          await deps.actions.transact([{ Update: { TableName: deps.tableName, Key: taskKey(taskId), UpdateExpression: "SET planGrounding.abandoned = :yes",
+            ConditionExpression: "attribute_exists(planGrounding) AND planGrounding.artifactSha256 = :held", ExpressionAttributeValues: { ":yes": true, ":held": task.planGrounding.artifactSha256 } } }]);
+        } catch (error) {
+          if (!isConditional(error)) throw error;
+        }
+        if (workspace.activeOperationId) await deps.actions.cancelRunning(developerTaskIdentity(task), workspace, () => []).catch(() => undefined);
+      }
       let started: Awaited<ReturnType<DeveloperTaskActions["startClose"]>>;
       try {
         // startClose answers a close in flight, and a repeated requestId, with the existing close

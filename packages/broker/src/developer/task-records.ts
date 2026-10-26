@@ -33,7 +33,7 @@ import {
 import type { AuthenticatedIdentity } from "../auth.js";
 import { isHeartbeat, modelCallView } from "./model-call-view.js";
 import type { ShareDecision } from "./share.js";
-import type { PlanSelfCheckState } from "./plan-self-check.js";
+import type { PlanGroundingHold, PlanSelfCheckState } from "./plan-self-check.js";
 import type { PlanUnreadableCategory } from "./plan-check-summary.js";
 import type { AutoFixAsk } from "./autofix-messages.js";
 
@@ -93,6 +93,8 @@ export interface DeveloperTaskRecord {
   autofixAsk?: AutoFixAsk;
   /** Plan self-check: which document version the automatic revision budget is for, and how much is spent (see plan-self-check.ts). */
   planSelfCheck?: PlanSelfCheckState;
+  /** T7c: the coding plan the task is holding back while its must-not-change checks run on the current app; the plan is not yet submitted, so there is nothing to approve. */
+  planGrounding?: PlanGroundingHold;
   /** Broker-private fence requiring a new E2E plan after the protected source disproved an approved plan reference. */
   e2ePlanCorrection?: { artifactId: string; artifactSha256: string; candidateDigest: string; reasonCode: string; requiredE2E: true };
   /** Gap 2: how many thread replies are saved for the task (NOTE# items). */

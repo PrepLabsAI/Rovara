@@ -56,6 +56,8 @@ export interface WorkflowMessageContext {
   pullRequestReopened?: ReadonlyArray<{ repositoryId: string; number: number }> | undefined;
   /** AUTOFIX: automatic fixing is on for this deployment; a blocked checks or reviews card then says what Rovara already tried and, from `autoFixAsk`, why it is asking. Absent: the card reads as it always did. */
   autoFix?: { ask?: AutoFixAsk | undefined } | undefined;
+  /** T7c: the coding plan is written and held back while its must-not-change checks run on the current app; no card to approve yet. */
+  planGroundingHeld?: boolean | undefined;
 }
 export interface WorkflowMessage { text: string; blocks: Array<Record<string, unknown>> }
 
@@ -783,6 +785,9 @@ function approvedBy(context: WorkflowMessageContext, decision: { actorRole: stri
   return context.ownerSlackUserId === undefined || decision.actorRole !== "TASK_OWNER" ? "" : ` by <@${context.ownerSlackUserId}>`;
 }
 
+/** T7c: said while the plan waits for its check on the current app (a few minutes). */
+export const PLAN_GROUNDING_HOLD_LINE = "Checking the coding plan against the current app before asking you (a few minutes).";
+
 function planRunning(context: WorkflowMessageContext): string {
   const { workflow } = context;
   const name = workflowDocumentName(workflow);
@@ -806,7 +811,7 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
   const checksAndReviewsPassed = reviewOnly ? "Reviews passed (no automated check applied)." : "Checks and reviews passed.";
   if (context.publishFailure !== undefined && workflow.stage === "PULL_REQUEST") return publishFailed(context, exits, context.publishFailure);
   switch (`${workflow.stage}/${workflow.state}`) {
-    case "PLAN/RUNNING": return plain(planRunning(context));
+    case "PLAN/RUNNING": return plain(context.planGroundingHeld === true ? PLAN_GROUNDING_HOLD_LINE : planRunning(context));
     case "PLAN/BLOCKED": return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable
       ? planUnreadableText(context)
       : stoppedByOwner(workflow.blockReason) ? plainBlockReason(workflow.blockReason)
