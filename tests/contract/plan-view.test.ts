@@ -52,6 +52,21 @@ function ordersPlan(overrides: Partial<PlanDocument> = {}, extraScenarios: Raw[]
 }
 
 describe("planCheckSummary", () => {
+  it("POLISH-1: a derived account target has no readable name, so the line and the page omit it instead of showing its hash", async () => {
+    const opaque = "account-target-7dc634a1b2c3d4e5f60718293a4b5c6d7e8f9012a3b4c5d6e7f8091a2b3c4d5e";
+    const plan = ordersPlan({}, [scenario("orders-region", "orders-owner", opaque, [{ kind: "navigate", path: "/" }], [{ kind: "visible", testId: "region", equals: true }])], ["web-owner", opaque]);
+    const summary = planCheckSummary(plan);
+    const derived = summary.scenarios.find((item) => item.scenarioId === "orders-region")!;
+    expect(derived.line.startsWith("As orders-owner: expects ")).toBe(true);
+    expect(derived.targets).toEqual([]);
+    expect(derived.mocks).toEqual(["inventory-v1"]);
+    expect(JSON.stringify(summary)).not.toContain("account-target-");
+    // A named target still reads as before.
+    expect(summary.lines[0]!.startsWith("As owner on web-owner: ")).toBe(true);
+    const page = await renderPlanDocument({ anchor: "coding-plan", kind: "plan", version: 1, approved: false, current: true, plan, openWhatChanged: false });
+    expect(page).not.toContain("account-target-");
+  });
+
   it("says each scenario in plain words from its structured fields", () => {
     const summary = planCheckSummary(ordersPlan());
     expect(summary.scenarios).toHaveLength(4);

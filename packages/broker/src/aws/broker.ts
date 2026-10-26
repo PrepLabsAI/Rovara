@@ -219,7 +219,7 @@ import {
   type E2EApplicationPlanIntent,
   type E2EApplicationSelectionRecord, type E2ERuntimeAccountRef, type E2EApplicationAccountDefinition, readE2EApplicationProjectContract, e2eSyntheticAccountContractDigest,
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, e2eAnonymousTargetId, e2eAnonymousVariantOf,
-  E2E_AGENT_UNAVAILABLE_REASONS, TaskUsageTelemetrySchema, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
+  E2E_AGENT_UNAVAILABLE_REASONS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, E2E_MODEL_ROUTE_DEFAULT_BUDGETS,
   E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX,
   type E2EScenarioResults, type E2ESharedView,
@@ -10836,6 +10836,9 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
 /** At most this many looks at one blocked step: a failing look is retried each sweep, then dropped (the task stays blocked with its card). */
 const AUTOFIX_ATTEMPTS_MAX = 60;
 
+/** AUTOFIX reads only the cost of a usage record, and not its other fields: a worker that adds a field must not make every task's spend unknown (which would switch automatic fixing off). */
+const AutofixUsageCostSchema = z.object({ costUsd: z.number().nonnegative().nullable() });
+
 /** At most this many pages of one operation's events are read for its usage records; an operation with more is spend that cannot be read. */
 const AUTOFIX_USAGE_PAGES_MAX = 40;
 
@@ -10854,7 +10857,7 @@ async function autofixOperationUsage(dependencies: AwsBrokerDependencies, operat
       ConsistentRead: true, ...(start === undefined ? {} : { ExclusiveStartKey: start }),
     })) as { Items?: Array<{ payload?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
     for (const item of response.Items ?? []) {
-      const usage = TaskUsageTelemetrySchema.safeParse(item.payload);
+      const usage = AutofixUsageCostSchema.safeParse(item.payload);
       records += 1;
       // A usage record with no cost (an unpriced model) counts as one more round's estimate, never as free; one that cannot be read makes the whole spend unknown.
       if (!usage.success) return undefined;

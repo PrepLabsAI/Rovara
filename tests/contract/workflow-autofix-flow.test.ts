@@ -242,6 +242,19 @@ describe("automatic fixing of blocked checks and reviews (AUTOFIX)", () => {
     expect(AutoFixAskSchema.parse(taskOf(harness, ctx.taskId).autofixAsk)).toMatchObject({ reason: "inputs-missing" });
   });
 
+  it("POLISH-1: a usage record from a newer worker (one more field) still counts its cost, so automatic fixing is not switched off", async () => {
+    const harness = await broker();
+    const ctx = await startCoding(harness);
+    const candidate = await ctx.finishCoding(1);
+    const review = reviewRuns(harness, ctx.workspaceId).at(-1)!;
+    const newer = { ...usagePayload(7), addedByANewerWorker: "x" };
+    await harness.events(ctx.workspaceId, String(review.id), [{ type: "usage", payload: newer }, { type: "usage", payload: newer }]);
+    await harness.finish(ctx.workspaceId, String(review.id), "SUCCEEDED", findingsReview(String(review.id), candidate));
+    expect(automatic(harness, ctx.taskId)).toHaveLength(0);
+    // Read as 14 dollars of spend against the 15 dollar cap (not as "spend unreadable").
+    expect(AutoFixAskSchema.parse(taskOf(harness, ctx.taskId).autofixAsk)).toMatchObject({ reason: "spend-cap", capUsd: 15 });
+  });
+
   it("shows the ask on the task page, in the blocked step's place, with what Rovara tried and the cap", async () => {
     const harness = await broker();
     const ctx = await startCoding(harness);

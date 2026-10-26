@@ -163,11 +163,18 @@ function triedText(outcome: "passed" | "failed" | "broken", expected: "pass" | "
   return (outcome === "passed") === (expected === "pass") ? `tried on current code: ${word} as expected` : `tried on current code: ${word}, not as expected`;
 }
 
+/**
+ * A target made for a second account (`e2eApplicationAccountTargetId`) is named by a hash of its base target and account: it has no readable name, and the plan
+ * does not carry the base target. Such a target is left out of a line instead of shown as the hash.
+ */
+const OPAQUE_TARGET_ID = /^account-target-[0-9a-f]{8,}$/u;
+const readableTargetIds = (ids: readonly string[]): string[] => ids.filter((id) => !OPAQUE_TARGET_ID.test(id)).map((id) => plain(id, 60));
+
 function scenarioSummary(plan: PlanDocument, scenario: Scenario, limits: Limits): PlanScenarioSummary {
   const intent = plan.e2e!;
-  const targets = scenario.requestedTargetIds.map((id) => plain(id, 60));
+  const targets = readableTargetIds(scenario.requestedTargetIds);
   const refs = (intent.mockFixtureRefs ?? []).filter((ref) => scenario.requestedTargetIds.includes(ref.requestedTargetId));
-  const mocks = refs.map((ref) => `${plain(ref.componentId, 60)} on ${plain(ref.requestedTargetId, 60)}`);
+  const mocks = refs.map((ref) => (OPAQUE_TARGET_ID.test(ref.requestedTargetId) ? plain(ref.componentId, 60) : `${plain(ref.componentId, 60)} on ${plain(ref.requestedTargetId, 60)}`));
   const standIns = [...new Set(refs.map((ref) => plain(ref.componentId, 60)))];
   const requiredReal = scenario.requiredRealComponentIds.map((id) => plain(id, 60));
   const realAndStandIn = requiredReal.filter((id) => standIns.includes(id));
@@ -180,7 +187,7 @@ function scenarioSummary(plan: PlanDocument, scenario: Scenario, limits: Limits)
   // The line, most important first: expected values, what it proves, the stand-in and real services (a missing stand-in and a
   // real-and-stand-in clash must show), then the steps. When it is too long the steps go first, then the names of the services,
   // and the expected values are shortened last.
-  const head = `As ${account} on ${joinWords(targets)}:`;
+  const head = `As ${account}${targets.length === 0 ? "" : ` on ${joinWords(targets)}`}:`;
   const build = (expectList: readonly string[], stepsPart: string, servicesPart: string): string => [
     `expects ${expectList.join("; ")}`, proves.length === 0 ? "proves no claim" : `proves ${joinWords(proves)}`,
     ...(realAndStandIn.length === 0 ? [] : [`${joinWords(realAndStandIn)} must be real but is also a stand-in`]),

@@ -365,6 +365,26 @@ describe("cards whose step is over lose their buttons (Task 19)", () => {
     expect(edits[0]!.blocks.at(-1)).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: "This task is closed." }] });
   });
 
+  it("POLISH-1: says 'Working on the coding plan' once per planning run, even when the plan self-check asks the planner again", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    const set = (workflow: Record<string, unknown>, planSelfCheck?: Record<string, unknown>) => h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: `SET workflow = :workflow, updatedAt = :now${planSelfCheck === undefined ? "" : ", planSelfCheck = :check"}`,
+      ExpressionAttributeValues: { ":now": now(), ":workflow": { artifacts: [], ...workflow }, ...(planSelfCheck === undefined ? {} : { ":check": planSelfCheck }) } }));
+    const said = () => h.posts.filter((post) => post.text.includes("Working on the coding plan")).length;
+    await set({ revision: 20, stage: "PLAN", state: "RUNNING" });
+    await h.pump();
+    expect(said()).toBe(1);
+    // The self-check revised the plan: one revision on, the same run (the budget record says one automatic revision was spent).
+    await set({ revision: 21, stage: "PLAN", state: "RUNNING" }, { artifactType: "plan", version: 1, used: 1 });
+    await h.pump();
+    expect(said()).toBe(1);
+    // A later planning run (the owner asked for changes) is a new run, said again.
+    await set({ revision: 40, stage: "PLAN", state: "RUNNING" }, { artifactType: "plan", version: 2, used: 0 });
+    await h.pump();
+    expect(said()).toBe(2);
+  });
+
   it("gives up on a card Slack will not edit, and retries one Slack could not edit just then", async () => {
     let failing: string | undefined;
     const updates: Array<{ ts: string; blocks: unknown[] }> = [];
@@ -2374,6 +2394,35 @@ describe("the blocked card carries what Rovara tried and why it asks (AUTOFIX)",
     expect(h.queue).toEqual([]);
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.autofix_hold_unreadable", taskId: h.taskId, error: "AccessDeniedException" }));
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "workflow", outcome: "posted" }));
+  });
+
+  it("POLISH-1: an ask written while the card is still being posted is retried, not dropped", async () => {
+    const h = await blockedTask(true);
+    const before = h.posts.length;
+    await h.pump();
+    h.advance(11 * 60_000);
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    // The card's post is in flight again: its marker has no deliveredAt yet and its words are claimed.
+    const cardKey = { pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:workflow:9` };
+    const saidKey = { pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:said:revision:9` };
+    const card = h.db.get(cardKey.pk, cardKey.sk) as Record<string, unknown>;
+    const said = h.db.get(saidKey.pk, saidKey.sk) as Record<string, unknown>;
+    const { deliveredAt: cardDelivered, ...cardInFlight } = card;
+    const { deliveredAt: saidDelivered, ...saidInFlight } = said;
+    h.db.set({ ...cardInFlight, ...cardKey });
+    h.db.set({ ...saidInFlight, ...saidKey, claimedBy: "card-notice", claimUntil: h.now() + 60_000 });
+    await setAsk(h, ASK(9));
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.queue.length).toBeGreaterThan(0);
+    // The card lands; the ask is then said once, as a post of its own.
+    h.db.set({ ...card, ...cardKey, deliveredAt: cardDelivered });
+    h.db.set({ ...said, ...saidKey, deliveredAt: saidDelivered });
+    await h.pump();
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 2);
+    expect(h.posts.at(-1)!.text).toContain("Why I'm asking you");
   });
 
   it("adds nothing for a task Rovara never touched: the card is today's, with no wait", async () => {
