@@ -13,6 +13,7 @@ import { KEYED_MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN, isKey
 import { WORKER_INVOCATION_FEATURES } from "../packages/contracts/src/protocol.js";
 import { listPricesPerMillion } from "../packages/model-runtime/src/catalog.js";
 import { DEFAULT_E2E_AGENT_MODELS, requireKeyedModel } from "../packages/model-runtime/src/config.js";
+import { requalifyFindings, type RequalifyFacts } from "./test-deploy-requalify.js";
 
 /** A CloudFormation template as far as the check reads it. Structurally the same as test-deploy's `CfnTemplate`. */
 export interface CheckTemplate {
@@ -31,6 +32,10 @@ export type FindingKind =
   | "runner-image-mismatch"
   | "worker-feature-missing"
   | "runner-restarted"
+  | "requalify-not-installed"
+  | "requalify-running"
+  | "requalify-last-run"
+  | "requalify-unreadable"
   | "model-route-not-approved"
   | "model-access-unverified"
   | "model-agreement-missing"
@@ -152,6 +157,8 @@ export interface CheckInput {
   modelRoute?: ModelRouteCheck | undefined;
   /** The exact command that qualifies the runtime again, for the findings that need it (RUN-3). A generic one with `<env>` and `<aws-profile>` is shown when it is not given. */
   renewCommand?: string | undefined;
+  /** AUTOREQUALIFY (AR-5): whether the automatic renewal is installed, and its lock, hold and last renewal. Undefined skips these findings. */
+  requalify?: RequalifyFacts | undefined;
 }
 
 /** What `bedrock get-foundation-model-availability` says about one foundation model. */
@@ -274,6 +281,7 @@ export function evaluateTestDeployCheck(input: CheckInput): CheckResult {
     ...runnerFindings(input.runnerFacts, input.renewCommand),
     ...runnerRestartFindings(input.runnerFacts, input.catalogRows, input.renewCommand),
     ...(input.modelRoute === undefined ? [] : routeFindings(input.modelRoute)),
+    ...requalifyFindings(input.requalify, input.renewCommand ?? E2E_RUNTIME_GENERIC_RENEW_COMMAND),
   ];
   return { ok: findings.every((finding) => finding.severity !== "error"), findings };
 }

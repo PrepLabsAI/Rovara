@@ -2,6 +2,8 @@
 //
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test [--apply]
 //     [--only control-plane-code,broker,dispatcher,worker-image,executor-image,qualification-transport]
+//   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only requalify-infra [--apply]   (adds the automatic test machine renewal: Add-only)
+//   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only requalify-now [--apply]     (owner-run: starts one renewal)
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only model-fallback-settings [--apply]
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only e2e-agent-settings [--apply]
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only e2e-agent-model --e2e-model <model id or default> [--apply]
@@ -41,7 +43,7 @@ import {
   type DescribeChangeSetCommandOutput,
   type Stack,
 } from "@aws-sdk/client-cloudformation";
-import { GetFunctionConfigurationCommand, LambdaClient } from "@aws-sdk/client-lambda";
+import { GetFunctionConfigurationCommand, InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { build as bundle } from "esbuild";
 import { LAMBDA_BUNDLE_OPTIONS, checkLambdaBundles, lambdaLoadError } from "./lambda-load-check.js";
 import { CDK_CONSTRUCT_IDS, cdkAppArguments } from "../packages/cli/src/deploy/cdk-engine.js";
@@ -51,7 +53,8 @@ import { KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, isKeyedModelProvider, type Mode
 import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest } from "../packages/model-runtime/src/e2e-route-derive.js";
 import { WORKER_SETTING_PARAMETERS } from "../packages/contracts/src/session.js";
 import { WEB_API_RUNTIME_PROFILE_ID } from "../packages/contracts/src/e2e-web-api-qualification.js";
-import { e2eRuntimeRenewCommand } from "../packages/contracts/src/e2e-runtime-expiry.js";
+import { e2eRuntimeRenewCommand, e2eRuntimeRequalifyNowCommand } from "../packages/contracts/src/e2e-runtime-expiry.js";
+import { REQUALIFY_PROFILE_ID, requalifyLockKey } from "../packages/contracts/src/index.js";
 import {
   Runner,
   assertDigestImage,
@@ -94,13 +97,25 @@ import {
   type RunnerFacts,
   type SettingFact,
 } from "./test-deploy-check.js";
+import {
+  REQUALIFY_INFRA,
+  REQUALIFY_LAMBDA,
+  REQUALIFY_NOW_PAYLOAD,
+  lockFact,
+  lockHeldMessage,
+  parseStartAnswer,
+  readInstalledFacts,
+  readRow,
+  requalifyInstalled,
+  type RequalifyFacts,
+} from "./test-deploy-requalify.js";
 
 /**
  * `control-plane-code` rebuilds every packaged control-plane Lambda (CONTROL_PLANE_LAMBDAS) in one change set; `broker` and
  * `dispatcher` rebuild just those two, and are contained in `control-plane-code`.
  */
-export type DeployUnit = "control-plane-code" | "broker" | "dispatcher" | "worker-image" | "executor-image" | "qualification-transport" | "e2e-agent-settings" | "e2e-agent-model" | "model-fallback-settings";
-export const DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "broker", "dispatcher", "worker-image", "executor-image", "qualification-transport", "e2e-agent-settings", "e2e-agent-model", "model-fallback-settings"];
+export type DeployUnit = "control-plane-code" | "broker" | "dispatcher" | "worker-image" | "executor-image" | "qualification-transport" | "e2e-agent-settings" | "e2e-agent-model" | "model-fallback-settings" | "requalify-infra" | "requalify-now";
+export const DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "broker", "dispatcher", "worker-image", "executor-image", "qualification-transport", "e2e-agent-settings", "e2e-agent-model", "model-fallback-settings", "requalify-infra", "requalify-now"];
 /** What a normal TEST deploy changes: all control-plane code, so no function is left on old code, and the worker image. */
 export const DEFAULT_DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "worker-image"];
 const DEFAULT_REGION = "us-east-1";
@@ -173,6 +188,8 @@ export type TemplatePlan =
       logicalIdPrefix: string;
       /** Synthesized parameters to add to the deployed template with the lifted resources. */
       parameterNames?: readonly string[];
+      /** Lambda functions among the lifted resources whose Code is replaced by an uploaded zip (the synth names a CDK asset that was never published). */
+      codePatches?: ReadonlyArray<{ logicalId: string; zip: string }>;
       construct: string;
       cdkContext: Readonly<Record<string, string>>;
       /** The synth runs with the app and context the deploy engine passes, which depend on this. */
@@ -190,7 +207,16 @@ export type TemplatePlan =
 
 export type DeployStep =
   | { id: string; kind: "build-lambda-zip"; unit: LambdaUnit; logicalId: string; entry: string; zipPath: string; extraFiles?: ReadonlyArray<ExtraFile> }
-  | { id: string; kind: "upload-artifact"; bucketFromStack: "access"; logicalId: string; from: string; keyPrefix: string }
+  | {
+      id: string;
+      kind: "upload-artifact";
+      bucketFromStack: "access";
+      logicalId: string;
+      from: string;
+      keyPrefix: string;
+      /** The deployed Lambda whose Code bucket must be the artifact bucket, when `logicalId` is not deployed yet (a function the same change set adds). */
+      bucketCheckLogicalId?: string;
+    }
   | { id: string; kind: "ecr-push"; image: "worker" | "executor"; repositoryUri: string; revision: string }
   | {
       id: string;
@@ -206,7 +232,9 @@ export type DeployStep =
   | { id: string; kind: "verify-lambda-code"; stack: string; logicalId: string; expectedSha256Base64: StepRef }
   | { id: string; kind: "verify-stack-resources"; stack: string; createdBy: string; logicalIdPrefix: string; expectedStatus: string }
   | { id: string; kind: "verify-stack-parameter"; stack: string; key: string; expected: StepRef | { literal: string } }
-  | { id: string; kind: "verify-lambda-environment"; stack: string; logicalId: string; key: string; expected: { literal: string } };
+  | { id: string; kind: "verify-lambda-environment"; stack: string; logicalId: string; key: string; expected: { literal: string } }
+  | { id: string; kind: "check-requalify-lock"; stack: string }
+  | { id: string; kind: "start-requalify"; stack: string; logicalId: string };
 
 /** A file the release bundle holds beside the handler (`packagedFunction`'s extraFiles): repo-relative source, name in the zip. */
 export interface ExtraFile {
@@ -248,13 +276,19 @@ export const CONTROL_PLANE_LAMBDAS = {
 export const CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED: Readonly<Record<string, string>> = {
   TaskPersonProofFunction817A5A36: "invoked through a published Lambda version, which a code-only change set cannot move; it needs a CDK deploy",
 };
-export type LambdaUnit = keyof typeof CONTROL_PLANE_LAMBDAS;
-const LAMBDAS: Readonly<Record<LambdaUnit, LambdaSpec>> = CONTROL_PLANE_LAMBDAS;
-const LAMBDA_UNITS = Object.keys(CONTROL_PLANE_LAMBDAS) as LambdaUnit[];
-/** The Lambda units a deploy of `units` moves: `control-plane-code` is all of them. */
-export function lambdaUnitsFor(units: readonly DeployUnit[]): LambdaUnit[] {
+type AlwaysLambdaUnit = keyof typeof CONTROL_PLANE_LAMBDAS;
+/** The renewal's Lambda (AUTOREQUALIFY) is a code unit too, but only on a stack that deployed `requalify-infra`: it is not in CONTROL_PLANE_LAMBDAS, which equals the default synth. */
+export type LambdaUnit = AlwaysLambdaUnit | typeof REQUALIFY_LAMBDA.unit;
+const LAMBDAS: Readonly<Record<LambdaUnit, LambdaSpec>> = { ...CONTROL_PLANE_LAMBDAS, [REQUALIFY_LAMBDA.unit]: REQUALIFY_LAMBDA };
+const LAMBDA_UNITS = Object.keys(CONTROL_PLANE_LAMBDAS) as AlwaysLambdaUnit[];
+/**
+ * The Lambda units a deploy of `units` moves with a code-only change set: `control-plane-code` is all of them, and the renewal's Lambda too when the stack has it
+ * (`requalifyIsInstalled`; a stack without it cannot patch what it lacks). `requalify-infra` adds that Lambda with its own change set instead.
+ */
+export function lambdaUnitsFor(units: readonly DeployUnit[], requalifyIsInstalled = false): LambdaUnit[] {
   const allCode = units.includes("control-plane-code");
-  return LAMBDA_UNITS.filter((unit) => allCode || units.some((chosen) => chosen === unit));
+  const chosen: LambdaUnit[] = LAMBDA_UNITS.filter((unit) => allCode || units.some((candidate) => candidate === unit));
+  return allCode && requalifyIsInstalled ? [...chosen, REQUALIFY_LAMBDA.unit] : chosen;
 }
 function buildStepFor(unit: LambdaUnit, zipPath: string): Extract<DeployStep, { kind: "build-lambda-zip" }> {
   const { logicalId, entry, extraFiles } = LAMBDAS[unit];
@@ -359,7 +393,11 @@ export function resolveCodeArtifactBucket(runner: AwsReader, region: string, env
 }
 
 export function planTestDeploy(
-  input: { env: string; only: DeployUnit[]; artifacts: BuiltArtifacts; previous: StackParameters; identityMode?: IdentityMode; e2eModel?: string; region?: string },
+  input: {
+    env: string; only: DeployUnit[]; artifacts: BuiltArtifacts; previous: StackParameters; identityMode?: IdentityMode; e2eModel?: string; region?: string;
+    /** Whether the deployed control-plane stack already has the renewal's Lambda (read from its template). Without it `control-plane-code` leaves that Lambda out, `requalify-now` refuses, and `requalify-infra` adds it. */
+    requalifyInstalled?: boolean;
+  },
   allowlist: readonly string[] = loadAllowlist(),
 ): DeployStep[] {
   if (!allowlist.includes(input.env)) throw new Error(ALLOWLIST_ERROR);
@@ -373,6 +411,10 @@ export function planTestDeploy(
   for (const unit of ["e2e-agent-settings", "e2e-agent-model", "model-fallback-settings"] as const) {
     if (units.includes(unit) && units.length > 1) throw new Error(`${unit} changes a stack template or setting; run it on its own, apart from the other units`);
   }
+  for (const unit of ["requalify-infra", "requalify-now"] as const) {
+    if (units.includes(unit) && units.length > 1) throw new Error(`${unit} runs on its own, apart from the other units: ${unit === "requalify-infra" ? "it adds resources to the control-plane stack with an Add-only change set" : "it starts a renewal of the test machine, which an owner starts alone"}`);
+  }
+  const requalifyIsInstalled = input.requalifyInstalled === true;
   if (input.e2eModel !== undefined && !units.includes("e2e-agent-model")) throw new Error("--e2e-model goes only with the e2e-agent-model unit");
   const { revision } = input.artifacts;
   if (!/^[a-f0-9]{7,40}$/.test(revision)) throw new Error("the revision must be a hexadecimal git commit");
@@ -528,8 +570,39 @@ export function planTestDeploy(
     );
   }
 
+  if (units.includes("requalify-infra")) {
+    if (requalifyIsInstalled) throw new Error("the automatic renewal is already installed on this stack; its code moves with control-plane-code, and requalify-infra only adds");
+    const unit = REQUALIFY_LAMBDA.unit;
+    steps.push(
+      buildStepFor(unit, join(input.artifacts.outputDir, `${unit}-${revision}.zip`)),
+      // The renewal's function does not exist yet, so the bucket check is made against the Broker, which reads its code from the same artifact bucket.
+      { id: `upload-${unit}`, kind: "upload-artifact", bucketFromStack: "access", logicalId: REQUALIFY_LAMBDA.logicalId, from: `build-${unit}`, keyPrefix: `test-deploy/${revision}/${REQUALIFY_LAMBDA.logicalId}-`, bucketCheckLogicalId: CONTROL_PLANE_LAMBDAS.broker.logicalId },
+      {
+        id: "change-set-requalify-infra",
+        kind: "create-change-set",
+        stack: stacks["control-plane"],
+        stackKind: "control-plane",
+        changeSetPrefix: `test-deploy-requalify-${revision.slice(0, 12)}`,
+        template: { source: "lift-resources", logicalIdPrefix: REQUALIFY_INFRA.logicalIdPrefix, construct: QUALIFICATION.construct, cdkContext: REQUALIFY_INFRA.context, identityMode, codePatches: [{ logicalId: REQUALIFY_LAMBDA.logicalId, zip: `upload-${unit}` }] },
+        parameters: usePrevious("control-plane"),
+        expect: { action: "Add", logicalIdPrefixes: [REQUALIFY_INFRA.logicalIdPrefix] },
+      },
+      { id: "execute-requalify-infra", kind: "execute-change-set", stack: stacks["control-plane"], createdBy: "change-set-requalify-infra" },
+      { id: "verify-requalify-infra", kind: "verify-stack-resources", stack: stacks["control-plane"], createdBy: "change-set-requalify-infra", logicalIdPrefix: REQUALIFY_INFRA.logicalIdPrefix, expectedStatus: "CREATE_COMPLETE" },
+      { id: `verify-${unit}`, kind: "verify-lambda-code", stack: stacks["control-plane"], logicalId: REQUALIFY_LAMBDA.logicalId, expectedSha256Base64: { fromStep: `build-${unit}`, output: "sha256Base64" } },
+    );
+  }
+
+  if (units.includes("requalify-now")) {
+    if (!requalifyIsInstalled) throw new Error("requalify-now needs the automatic renewal on this stack; deploy requalify-infra first");
+    steps.push(
+      { id: "check-requalify-lock", kind: "check-requalify-lock", stack: stacks["control-plane"] },
+      { id: "start-requalify", kind: "start-requalify", stack: stacks["control-plane"], logicalId: REQUALIFY_LAMBDA.logicalId },
+    );
+  }
+
   // One change set holds every Lambda code change of the run, so the exact-change guard has one list of code units to check.
-  const lambdas = lambdaUnitsFor(units);
+  const lambdas = lambdaUnitsFor(units, requalifyIsInstalled);
   if (lambdas.length > 0) {
     for (const unit of lambdas) {
       const { logicalId } = LAMBDAS[unit];
@@ -937,6 +1010,11 @@ export function patchLambdaCode(
   return copy;
 }
 
+/** A lifted template whose new Lambda functions run the uploaded code: the synth names a CDK asset nobody published. No patches leaves the template as it is. */
+export function patchLiftedCode(template: CfnTemplate, patches: Parameters<typeof patchLambdaCode>[1]): CfnTemplate {
+  return patches.length === 0 ? template : patchLambdaCode(template, patches);
+}
+
 export interface TestDeployArgs {
   env: string;
   profile: string;
@@ -1008,7 +1086,7 @@ export function formatPlan(steps: readonly DeployStep[]): string {
     const head = `${index + 1}. [${step.id}]`;
     switch (step.kind) {
       case "build-lambda-zip": return `${head} build ${step.logicalId} zip from ${step.entry}${(step.extraFiles ?? []).map((file) => ` plus ${file.name} from ${file.from}`).join("")} -> ${step.zipPath}`;
-      case "upload-artifact": return `${head} upload ${step.from} zip to the access stack's versioned artifact bucket (after checking versioning is Enabled and that ${step.logicalId} already reads its code from it) under ${step.keyPrefix}<sha256>.zip`;
+      case "upload-artifact": return `${head} upload ${step.from} zip to the access stack's versioned artifact bucket (after checking versioning is Enabled and that ${step.bucketCheckLogicalId ?? step.logicalId} already reads its code from it) under ${step.keyPrefix}<sha256>.zip`;
       case "ecr-push": return `${head} build the ${step.image} image and push it to the existing repository ${step.repositoryUri} (tag test-*), then pin its digest; test-deploy never creates a repository, and stops if this one is missing`;
       case "create-change-set": {
         const changed = step.parameters.flatMap((parameter) => ("value" in parameter ? [`${parameter.key}=${describeRef(parameter.value)}`] : "literal" in parameter ? [`${parameter.key}=${parameter.literal}`] : []));
@@ -1016,7 +1094,7 @@ export function formatPlan(steps: readonly DeployStep[]): string {
           : step.template.source === "lambda-code" ? `deployed template with Code replaced for ${step.template.patches.map((patch) => patch.logicalId).join(", ")}`
           : step.template.source === "lift-declared"
             ? `deployed template plus only ${[...step.template.environment.map((entry) => `${entry.logicalId} environment variable ${entry.variable}`), ...step.template.grants.map((entry) => `the ssm:GetParameters grant for ${entry.parameterName} in ${entry.logicalId}`)].join(", ")}, taken from a CDK synth of ${step.template.construct} (identity=${step.template.identityMode}, ${Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`).join(", ")}); refuses if head differs from the deployed template by anything more`
-          : `deployed template plus ${step.template.logicalIdPrefix}*${(step.template.parameterNames ?? []).length === 0 ? "" : ` and parameter ${(step.template.parameterNames ?? []).join(", ")}`} from a CDK synth of ${step.template.construct} (${[`identity=${step.template.identityMode}`, ...Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`)].join(", ")})`;
+          : `deployed template plus ${step.template.logicalIdPrefix}*${(step.template.parameterNames ?? []).length === 0 ? "" : ` and parameter ${(step.template.parameterNames ?? []).join(", ")}`}${(step.template.codePatches ?? []).length === 0 ? "" : ` (Code replaced for ${(step.template.codePatches ?? []).map((patch) => patch.logicalId).join(", ")} by the uploaded zip)`} from a CDK synth of ${step.template.construct} (${[`identity=${step.template.identityMode}`, ...Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`)].join(", ")})`;
         const allowed = [...(step.expect.logicalIds ?? []), ...(step.expect.logicalIdPrefixes ?? []).map((prefix) => `${prefix}*`)].join(", ");
         const reevaluations = step.expect.allowArnReevaluations === true
           ? `, plus Modify entries accepted only as no-op re-evaluations caused by ${(step.expect.arnSources ?? step.expect.logicalIds ?? []).map(arnOf).join(", ")} (every detail Dynamic ResourceAttribute, never a replacement; a code unit may carry such a detail only when another listed code unit's Arn causes it)`
@@ -1028,6 +1106,8 @@ export function formatPlan(steps: readonly DeployStep[]): string {
       case "verify-lambda-code": return `${head} verify ${step.logicalId} CodeSha256 equals ${describeRef(step.expectedSha256Base64)}`;
       case "verify-stack-parameter": return `${head} verify ${step.stack} parameter ${step.key} equals ${"literal" in step.expected ? step.expected.literal : describeRef(step.expected)}`;
       case "verify-lambda-environment": return `${head} verify ${step.logicalId} runs with environment variable ${step.key}=${step.expected.literal} (GetFunctionConfiguration)`;
+      case "check-requalify-lock": return `${head} read the renewal lock in ${step.stack}'s state table (read only) and stop if a renewal or a by-hand qualification holds it`;
+      case "start-requalify": return `${head} invoke ${step.logicalId} once with ${REQUALIFY_NOW_PAYLOAD}: it starts one renewal of the test machine (its first step takes the same lock); owner-run, never started by an agent`;
     }
   }).join("\n");
 }
@@ -1172,15 +1252,16 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
     const deployedBody = (await context.cloudFormation.send(new GetTemplateCommand({ StackName: step.stack, TemplateStage: "Original" }))).TemplateBody ?? "";
     let deployed: CfnTemplate;
     try { deployed = JSON.parse(deployedBody) as CfnTemplate; } catch { throw new Error(`the deployed template of ${step.stack} is not JSON; stop for review`); }
+    const uploadedCode = (patch: { logicalId: string; zip: string }) => {
+      const upload = context.outputs.get(patch.zip);
+      if (upload?.bucket === undefined || upload.s3Key === undefined || upload.s3ObjectVersion === undefined) throw new Error(`step ${patch.zip} did not upload`);
+      return { logicalId: patch.logicalId, code: { S3Bucket: upload.bucket, S3Key: upload.s3Key, S3ObjectVersion: upload.s3ObjectVersion } };
+    };
     const prepared = step.template.source === "lambda-code"
-      ? patchLambdaCode(deployed, step.template.patches.map((patch) => {
-        const upload = context.outputs.get(patch.zip);
-        if (upload?.bucket === undefined || upload.s3Key === undefined || upload.s3ObjectVersion === undefined) throw new Error(`step ${patch.zip} did not upload`);
-        return { logicalId: patch.logicalId, code: { S3Bucket: upload.bucket, S3Key: upload.s3Key, S3ObjectVersion: upload.s3ObjectVersion } };
-      }))
+      ? patchLambdaCode(deployed, step.template.patches.map(uploadedCode))
       : step.template.source === "lift-declared"
         ? liftDeclaredSettings(deployed, synthesizeLiftSource(context, step.template), { environment: step.template.environment, grants: step.template.grants })
-        : liftResources(deployed, synthesizeLiftSource(context, step.template), step.template.logicalIdPrefix, step.template.parameterNames);
+        : patchLiftedCode(liftResources(deployed, synthesizeLiftSource(context, step.template), step.template.logicalIdPrefix, step.template.parameterNames), (step.template.codePatches ?? []).map(uploadedCode));
     const body = Buffer.from(`${JSON.stringify(prepared, null, 2)}\n`);
     const bucket = resolveArtifactBucket(context.runner, context.region, context.env);
     const key = `test-deploy/${context.revision}/${step.stackKind}-template-${sha256(body).digest("hex")}.json`;
@@ -1257,9 +1338,11 @@ function assertRepositoryExists(context: ApplyContext, repository: string): void
 }
 
 /** Builds the repo, then bundles and loads each Lambda `units` moves (scripts/lambda-load-check.ts); throws, changing nothing, if one does not load. */
-export async function assertLambdasLoad(context: ApplyContext, units: readonly DeployUnit[]): Promise<void> {
+export async function assertLambdasLoad(context: ApplyContext, units: readonly DeployUnit[], requalifyIsInstalled = false): Promise<void> {
   runNpmBuild(context);
-  const entries = lambdaUnitsFor(units).map((unit) => ({ name: unit, entry: LAMBDAS[unit].entry }));
+  // `requalify-infra` adds the renewal's Lambda with its own change set, but it runs from this bundle all the same.
+  const moving = [...lambdaUnitsFor(units, requalifyIsInstalled), ...(units.includes("requalify-infra") ? [REQUALIFY_LAMBDA.unit] : [])];
+  const entries = moving.map((unit) => ({ name: unit, entry: LAMBDAS[unit].entry }));
   console.log(`\n== lambda-load-check (${entries.length} bundle(s))`);
   const report = await checkLambdaBundles({ root: process.cwd(), entries });
   for (const result of report.results) console.log(`${result.status} ${result.name}: ${result.detail}`);
@@ -1301,7 +1384,7 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
     case "upload-artifact": {
       const built = context.outputs.get(step.from);
       if (built?.zipPath === undefined || built.sha256Hex === undefined) throw new Error(`step ${step.from} built nothing`);
-      const bucket = resolveCodeArtifactBucket(context.runner, context.region, context.env, step.logicalId);
+      const bucket = resolveCodeArtifactBucket(context.runner, context.region, context.env, step.bucketCheckLogicalId ?? step.logicalId);
       const key = `${step.keyPrefix}${built.sha256Hex}.zip`;
       const version = putVerifiedObject(context, bucket, key, built.zipPath, "application/zip");
       recordOutput(context, step.id, { bucket, s3Key: key, s3ObjectVersion: version });
@@ -1359,6 +1442,24 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
       console.log(`${step.logicalId} runs with ${step.key}=${actual}`);
       return;
     }
+    case "check-requalify-lock": {
+      const table = stackOutput(describeStack(context.runner, context.region, step.stack), "StateTableName");
+      const lock = lockFact(readRow(context.runner, { table, region: context.region, key: requalifyLockKey(REQUALIFY_PROFILE_ID) }), new Date());
+      if (lock.state === "held") throw new Error(lockHeldMessage(lock));
+      if (lock.state === "unreadable") throw new Error(`the renewal lock cannot be read (${lock.reason}); stop for review`);
+      console.log("the renewal lock is free");
+      return;
+    }
+    case "start-requalify": {
+      const resource = (await context.cloudFormation.send(new DescribeStackResourceCommand({ StackName: step.stack, LogicalResourceId: step.logicalId }))).StackResourceDetail;
+      const answer = await context.lambda.send(new InvokeCommand({ FunctionName: resource?.PhysicalResourceId, Payload: Buffer.from(REQUALIFY_NOW_PAYLOAD) }));
+      // The function's own error text can quote more than anyone wants printed: only the fact that it failed is shown, and its logs hold the rest.
+      if (answer.FunctionError !== undefined || (answer.StatusCode ?? 0) >= 300) throw new Error(`the renewal Lambda did not answer cleanly (${answer.FunctionError ?? `status ${answer.StatusCode}`}); read its CloudWatch logs`);
+      const started = parseStartAnswer(Buffer.from(answer.Payload ?? []).toString("utf8"));
+      if (!started.started) throw new Error(`no renewal was started (${started.reason}); an execution for this hour may already exist: look at the renewal state machine`);
+      console.log(`a renewal was started (${started.reason}); follow it in the Step Functions console or with test-deploy --check`);
+      return;
+    }
   }
 }
 
@@ -1401,10 +1502,10 @@ export interface CheckReaders {
   runner: AwsReader;
   region: string;
   env: string;
-  /** The control-plane template head synthesizes. */
-  headTemplate: () => CfnTemplate;
-  /** The head build of every control-plane Lambda: its zip sha256 (base64) and the repo paths the bundle comes from, by logical ID. */
-  builtZips: () => Promise<{ shas: Record<string, string>; sources: Record<string, string[]> }>;
+  /** The control-plane template head synthesizes; with `requalify` the automatic renewal's resources are in it too (they are, when the stack has them, and for the review of what `requalify-infra` would add). */
+  headTemplate: (options?: { requalify?: boolean }) => CfnTemplate;
+  /** The head build of every control-plane Lambda: its zip sha256 (base64) and the repo paths the bundle comes from, by logical ID. With `requalify`, the renewal's Lambda is built too (the stack has it). */
+  builtZips: (options?: { requalify?: boolean }) => Promise<{ shas: Record<string, string>; sources: Record<string, string[]> }>;
   headRevision: string;
   /** Whether any of `paths` differs between `revision` and head; undefined when git cannot tell. */
   changedSince: (revision: string, paths: readonly string[]) => boolean | undefined;
@@ -1419,11 +1520,11 @@ function awsJson<T>(readers: Pick<CheckReaders, "runner" | "region">, args: read
 }
 
 /** The deployed Lambdas' CodeSha256 by logical ID, for every control-plane Lambda this script moves. list-stack-resources pages through all of them; describe-stack-resources stops at 100 and the stack has more. */
-function deployedCodeShas(readers: CheckReaders, stack: string): Record<string, string> {
+function deployedCodeShas(readers: CheckReaders, stack: string, includeRequalify = false): Record<string, string> {
   const resources = awsJson<Array<[string, string]>>(readers, ["cloudformation", "list-stack-resources", "--stack-name", stack, "--query", "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].[LogicalResourceId,PhysicalResourceId]"]) ?? [];
   const physical = new Map(resources);
   const shas: Record<string, string> = {};
-  for (const { logicalId } of Object.values(CONTROL_PLANE_LAMBDAS)) {
+  for (const { logicalId } of [...Object.values(CONTROL_PLANE_LAMBDAS), ...(includeRequalify ? [REQUALIFY_LAMBDA] : [])]) {
     const functionName = physical.get(logicalId);
     if (functionName === undefined) continue;
     const sha = awsJson<string>(readers, ["lambda", "get-function", "--function-name", functionName, "--query", "Configuration.CodeSha256"]);
@@ -1674,6 +1775,14 @@ export function readModelRoute(readers: CheckReaders, input: { table: string; fo
   };
 }
 
+/**
+ * The IAM statements the `requalify-infra` unit would create, for the owner's review before the change set exists: head's grants of the renewal's roles that the deployed template lacks
+ * (all of them, while it is not installed). The same comparison as the drift check, limited to the renewal's own roles.
+ */
+export function plannedRequalifyGrants(headWithRenewal: CfnTemplate, deployed: CfnTemplate): Finding[] {
+  return evaluateIamDrift(headWithRenewal, deployed).filter((finding) => finding.kind === "iam-missing-grant" && (finding.roleLogicalId ?? "").startsWith(REQUALIFY_INFRA.logicalIdPrefix));
+}
+
 /** Everything `evaluateTestDeployCheck` needs but the time, read from the live installation and the head build. */
 export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts: CheckFacts; notes: string[] }> {
   const readers: CheckReaders = { ...unchecked, runner: readOnlyAws(unchecked.runner) };
@@ -1694,8 +1803,10 @@ export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts
     roleArn: stackOutput(describeStack(readers.runner, readers.region, foundationStack), "Ec2WorkerInstanceRoleArn"),
     controlPlaneTemplate: deployedTemplate, controlPlaneParameters,
   });
-  const lambdaCodeShas = deployedCodeShas(readers, stacks["control-plane"]);
-  const built = await readers.builtZips();
+  // The renewal's Lambda counts only on a stack that has it: without it there is nothing to be stale, and the renewal is reported as not installed.
+  const renewalInstalled = requalifyInstalled(deployedTemplate);
+  const lambdaCodeShas = deployedCodeShas(readers, stacks["control-plane"], renewalInstalled);
+  const built = await readers.builtZips({ requalify: renewalInstalled });
   // Only a Lambda whose zip differs from head's, and whose key proves where its code came from, needs a look at what changed since.
   const inputsChanged: Record<string, boolean | undefined> = {};
   for (const [logicalId, sha] of Object.entries(built.shas)) {
@@ -1705,7 +1816,10 @@ export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts
     const provenance = parseDeployedCodeKey(typeof key === "string" ? key : undefined, logicalId, deployedSha);
     if ("revision" in provenance) inputsChanged[logicalId] = readers.changedSince(provenance.revision, built.sources[logicalId] ?? []);
   }
-  const headTemplate = readers.headTemplate();
+  const headTemplate = readers.headTemplate({ requalify: renewalInstalled });
+  const requalify: RequalifyFacts = renewalInstalled
+    ? readInstalledFacts(readers.runner, { table: stackOutput(controlPlane, "StateTableName"), region: readers.region, now: new Date() })
+    : { state: "not-installed", plannedGrants: plannedRequalifyGrants(readers.headTemplate({ requalify: true }), deployedTemplate) };
   return {
     facts: {
       headTemplate,
@@ -1717,6 +1831,7 @@ export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts
       catalogRows: catalog.map(({ sk, state, expiresAt, qualifiedAt }) => ({ sk, state, expiresAt, ...(qualifiedAt === undefined ? {} : { qualifiedAt }) })),
       runnerFacts: runner.facts,
       modelRoute,
+      requalify,
     },
     notes: [...runner.notes, ...iamEvaluationNotes(headTemplate, deployedTemplate)],
   };
@@ -1727,9 +1842,9 @@ export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts
  * function lacks an environment variable head sets. The new code would run and fail (AccessDenied as SessionsSteps did in the M1.2 demo, or a
  * missing setting), and a code-only change set can fix neither. The message carries the statements for a Tier 3 request. IAM is never applied here.
  */
-export function assertCheckAllowsApply(findings: readonly Finding[], units: readonly DeployUnit[], headTemplate: CfnTemplate): void {
+export function assertCheckAllowsApply(findings: readonly Finding[], units: readonly DeployUnit[], headTemplate: CfnTemplate, requalifyIsInstalled = false): void {
   const roles = lambdaRoleIds(headTemplate);
-  const moving = lambdaUnitsFor(units).map((unit) => LAMBDAS[unit].logicalId);
+  const moving = lambdaUnitsFor(units, requalifyIsInstalled).map((unit) => LAMBDAS[unit].logicalId);
   const deployingRoles = new Set(moving.flatMap((logicalId) => roles[logicalId] ?? []));
   const grants = findings.filter((finding) => finding.kind === "iam-missing-grant" && finding.roleLogicalId !== undefined && deployingRoles.has(finding.roleLogicalId));
   const environments = findings.filter((finding) => finding.kind === "lambda-env-missing" && moving.includes(finding.subject));
@@ -1746,10 +1861,10 @@ export function assertCheckAllowsApply(findings: readonly Finding[], units: read
 }
 
 function builtLambdaZips(context: ApplyContext): CheckReaders["builtZips"] {
-  return async () => {
+  return async (options) => {
     const shas: Record<string, string> = {};
     const sources: Record<string, string[]> = {};
-    for (const unit of LAMBDA_UNITS) {
+    for (const unit of [...LAMBDA_UNITS, ...(options?.requalify === true ? [REQUALIFY_LAMBDA.unit] : [])]) {
       const step = buildStepFor(unit, join(context.outputDir, `${unit}-${context.revision}.zip`));
       const built = await buildLambdaZip(context, step);
       shas[step.logicalId] = built.sha256Base64;
@@ -1768,8 +1883,8 @@ function gitChangedSince(runner: Runner): CheckReaders["changedSince"] {
 }
 
 /** Head's control-plane template: the engine's synth with the standing qualification transport, as TEST runs it. */
-function synthesizeHeadTemplate(context: ApplyContext, identityMode: IdentityMode): CfnTemplate {
-  return synthesizeLiftSource(context, { construct: QUALIFICATION.construct, cdkContext: QUALIFICATION.context, identityMode });
+function synthesizeHeadTemplate(context: ApplyContext, identityMode: IdentityMode, options?: { requalify?: boolean }): CfnTemplate {
+  return synthesizeLiftSource(context, { construct: QUALIFICATION.construct, cdkContext: options?.requalify === true ? REQUALIFY_INFRA.context : QUALIFICATION.context, identityMode });
 }
 
 function checkContext(args: TestDeployArgs, runner: Runner, options: ReleaseOptions, revision: string, outputDir: string): ApplyContext {
@@ -1815,16 +1930,21 @@ async function runCheck(args: TestDeployArgs, runner: Runner, options: ReleaseOp
   const context = checkContext(args, runner, options, build.revision, build.outputDir);
   const { facts, notes } = await gatherCheckFacts({
     runner, region: args.region, env: args.env,
-    headTemplate: () => synthesizeHeadTemplate(context, build.identityMode),
+    headTemplate: (options) => synthesizeHeadTemplate(context, build.identityMode, options),
     builtZips: builtLambdaZips(context),
     headRevision: build.revision,
     changedSince: gitChangedSince(runner),
   });
   for (const note of notes) say(note);
-  const result = evaluateTestDeployCheck({ ...facts, now: new Date(), renewCommand: e2eRuntimeRenewCommand({ env: args.env, profile: args.profile }) });
+  // With the automatic renewal installed, the by-hand way to renew is the owner's start command; without it, the qualification script.
+  const renewCommand = facts.requalify?.state === "installed" ? e2eRuntimeRequalifyNowCommand({ env: args.env, profile: args.profile }) : e2eRuntimeRenewCommand({ env: args.env, profile: args.profile });
+  const result = evaluateTestDeployCheck({ ...facts, now: new Date(), renewCommand });
   say(`\n${formatFindings(result.findings)}`);
   const request = tier3Request(result.findings);
   if (request !== "") say(`\nTier 3 request, the exact statements to add (this script never applies IAM):\n${request}`);
+  if (facts.requalify?.state === "not-installed" && (facts.requalify.plannedGrants ?? []).length > 0) {
+    say(`\nTier 3 review, the IAM statements the requalify-infra unit would create (a new role and policies, in an Add-only change set; nothing is applied by this check):\n${tier3Request(facts.requalify.plannedGrants ?? [])}`);
+  }
   if (args.json) console.log(JSON.stringify(checkReport(result, notes, { env: args.env, revision: build.revision })));
   if (!result.ok) throw new DeployCheckFindingsError(result.findings.filter((finding) => finding.severity === "error").length);
   say("\nTEST deploy check passed.");
@@ -1846,7 +1966,10 @@ export async function main(argv: readonly string[]): Promise<void> {
     "control-plane": currentParameters(runner, args.region, stacks["control-plane"]),
     runtime: needsRuntime ? currentParameters(runner, args.region, stacks.runtime) : {},
   };
-  const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir }, previous, identityMode, region: args.region, ...(args.e2eModel === undefined ? {} : { e2eModel: args.e2eModel }) });
+  // Whether the stack already has the renewal's Lambda decides what these units plan; the deployed template is a read (get-template).
+  const renewalInstalled = args.only.some((unit) => unit === "control-plane-code" || unit === "requalify-infra" || unit === "requalify-now")
+    && requalifyInstalled(deployedTemplateOf(runner, args.region, stacks["control-plane"]));
+  const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir }, previous, identityMode, region: args.region, requalifyInstalled: renewalInstalled, ...(args.e2eModel === undefined ? {} : { e2eModel: args.e2eModel }) });
   console.log(`TEST deploy plan for ${args.env} (${args.region}), revision ${revision}\n${formatPlan(steps)}`);
   if (!args.apply) {
     console.log("\nDry run: nothing was changed. Add --apply to run this plan.");
@@ -1855,16 +1978,17 @@ export async function main(argv: readonly string[]): Promise<void> {
   if (runner.capture("git", ["status", "--porcelain"]).stdout.trim() !== "") throw new Error("the working tree is dirty; commit first so the deployed bytes match the revision");
   const context = checkContext(args, runner, options, revision, outputDir);
   // Before anything is pushed or changed: new Lambda code must not go onto a role that lacks a grant head needs.
-  if (steps.some((step) => step.kind === "build-lambda-zip")) {
-    const headTemplate = synthesizeHeadTemplate(context, identityMode);
+  // Not for requalify-infra: its change set adds the renewal's role and policies (reviewed as Tier 3 by --check), so the deployed stack lacks every one of them by design.
+  if (steps.some((step) => step.kind === "build-lambda-zip") && !args.only.includes("requalify-infra")) {
+    const headTemplate = synthesizeHeadTemplate(context, identityMode, { requalify: renewalInstalled });
     const deployedTemplate = deployedTemplateOf(runner, args.region, resolveTestStacks(args.env)["control-plane"]);
     const drift = [...evaluateIamDrift(headTemplate, deployedTemplate), ...evaluateEnvironmentDrift(headTemplate, deployedTemplate)];
     console.log(`\n${formatFindings(drift)}`);
-    assertCheckAllowsApply(drift, args.only, headTemplate);
+    assertCheckAllowsApply(drift, args.only, headTemplate, renewalInstalled);
   }
   // Also before anything is pushed or changed: every Lambda this deploy moves must load. A bundle that crashes at init (acb278a1: import.meta in
   // CJS) would otherwise replace working code on TEST, and a code-only change set has nothing that stops it.
-  if (steps.some((step) => step.kind === "build-lambda-zip")) await assertLambdasLoad(context, args.only);
+  if (steps.some((step) => step.kind === "build-lambda-zip")) await assertLambdasLoad(context, args.only, renewalInstalled);
   for (const step of steps) await applyStep(context, step);
   console.log("\nTEST deploy complete.");
 }
