@@ -44,9 +44,11 @@ export const AUTO_FIX_CODES = [
 export type AutoFixCode = (typeof AUTO_FIX_CODES)[number];
 
 /** Group codes that are Rovara's or the environment's, and that a retry may fix. `cancelled` is only transient when the owner did not cancel (facts). */
-export const AUTO_FIX_TRANSIENT_GROUP_CODES = ["deadline-exceeded", "executor-failed", "executor-result-mismatch", "mock-unavailable", "model-channel-unavailable", "cancelled", "evidence too large"] as const;
+export const AUTO_FIX_TRANSIENT_GROUP_CODES = ["deadline-exceeded", "executor-failed", "executor-result-mismatch", "mock-unavailable", "model-channel-unavailable", "cancelled", "evidence too large",
+  // AUTOREQUALIFY (AR-3): the task worker and the test machine were on different kernels. Rovara recycles the worker (it comes back on the qualified image) and retries once; a second time asks.
+  "runtime-environment-drifted"] as const;
 /** Group codes only a person (an administrator, the project's setup) can fix. */
-export const AUTO_FIX_PERSON_GROUP_CODES = ["runtime-expired", "runtime-environment-drifted", "model-environment-unsafe", "login-failed", "model-route-changed-reapprove", "agent-route-not-approved", "model-route-not-tested"] as const;
+export const AUTO_FIX_PERSON_GROUP_CODES = ["runtime-expired", "model-environment-unsafe", "login-failed", "model-route-changed-reapprove", "agent-route-not-approved", "model-route-not-tested"] as const;
 
 /** Why Rovara asks instead of acting. The limit reasons name the limit the ask card tells the person about. */
 export const AUTO_FIX_ASK_REASONS = [

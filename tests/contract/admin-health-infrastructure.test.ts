@@ -125,6 +125,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/aws/workflow-e2e-grounding.ts",
       // The audit replay's record (M1.4 Task 4.6b) has the baseline record's expiry: 30 days after it was last written.
       "packages/broker/src/aws/workflow-e2e-replay.ts",
+      // The marker a project setup run leaves for the test machine renewal's drain (AUTOREQUALIFY AR-3) ends at the run's deadline and expires on it a day later.
+      "packages/broker/src/e2e/requalify-hold.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

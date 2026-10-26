@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   E2EApplicationSelectionRecordSchema, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, requalifyHoldKey as holdKeyOf, workflowApplicationRetryOffered,
   type E2EApplicationSelectionRecord,
 } from "../../packages/contracts/src/index.js";
 import {
   ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock,
-  replayPredatesRenewal, requalifyDrainCount, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
+  recycleDriftedWorker, replayPredatesRenewal, requalifyDrainCount, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
 } from "../../packages/broker/src/e2e/requalify-hold.js";
 import { E2E_REPLAY_REFUSALS } from "../../packages/contracts/src/index.js";
 import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
@@ -250,5 +250,27 @@ describe("a replay of a round from before a renewal", () => {
     expect(replayPredatesRenewal([registered("api")], [registered("api", { qualifiedAt: "2026-10-27T00:00:00.000Z" })])).toBe(true);
     expect(replayPredatesRenewal([registered("api")], [registered("web")])).toBe(true);
     expect(replayPredatesRenewal([registered("web"), registered("api")], [registered("api")])).toBe(true);
+  });
+});
+
+describe("recycling a task worker that booted on another image than the test machine", () => {
+  const session = (state: string) => ({ workspaceId: "ws-1", state, generation: 2 });
+  const sessions = (seen: { state: string } | undefined, claimed = true) => {
+    const claim = vi.fn(async () => claimed);
+    return { claim, manager: { get: async () => seen as never, claimStop: claim } };
+  };
+  it("claims a READY worker with the reaper's atomic claim, and reports whether it won", async () => {
+    const won = sessions(session("READY"));
+    expect(await recycleDriftedWorker(won.manager, "ws-1")).toBe(true);
+    expect(won.claim).toHaveBeenCalledWith(session("READY"));
+    const lost = sessions(session("READY"), false);
+    expect(await recycleDriftedWorker(lost.manager, "ws-1")).toBe(false);
+  });
+  it("leaves a worker that is not READY, or no worker at all, alone", async () => {
+    for (const seen of [session("STOPPING"), session("STOPPED"), session("PROVISIONING"), undefined]) {
+      const w = sessions(seen);
+      expect(await recycleDriftedWorker(w.manager, "ws-1")).toBe(false);
+      expect(w.claim).not.toHaveBeenCalled();
+    }
   });
 });

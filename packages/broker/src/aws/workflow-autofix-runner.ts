@@ -65,6 +65,8 @@ export interface AutofixDependencies {
   ownerCancelledChecks(task: DeveloperTaskRecord): Promise<boolean>;
   /** The text at an object key (a plan's stored self-check record), or undefined. */
   readArtifactText(objectKey: string): Promise<string | undefined>;
+  /** AUTOREQUALIFY: stops the task's idle worker so the retry runs on a fresh one (used when the block is a kernel mismatch between worker and test machine). */
+  recycleWorker?(task: DeveloperTaskRecord): Promise<unknown>;
   now(): number;
   log(entry: Record<string, unknown>): void;
 }
@@ -242,6 +244,7 @@ export async function runWorkflowAutofix(deps: AutofixDependencies, task: Develo
       return outcome === "STARTED" ? "SENT_BACK" : outcome === "DUPLICATE" ? "DUPLICATE" : guardRefused(decision.codes);
     }
     case "RETRY": {
+      if (decision.codes.includes("runtime-environment-drifted")) await deps.recycleWorker?.(task);
       const input2 = { expectedRevision: workflow.revision, spend, reason: autoFixRetryReason(decision.stage, decision.codes) };
       let outcome: Awaited<ReturnType<typeof autoRetryChecksFromSystem>>;
       try {

@@ -307,7 +307,7 @@ import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.j
 import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval, type ApplicationAccountsInput, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
-import { ApplicationRuntimeRenewed, assertNoRequalifyHold, replayPredatesRenewal, requalifyHoldActive, requalifySetupWorkRow, selectionChangedRefusal } from "../e2e/requalify-hold.js";
+import { ApplicationRuntimeRenewed, assertNoRequalifyHold, recycleDriftedWorker, replayPredatesRenewal, requalifyHoldActive, requalifySetupWorkRow, selectionChangedRefusal } from "../e2e/requalify-hold.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationGroundingAdmission, buildApplicationReplayAdmission, groundingPlanDigest } from "../e2e/application-admission.js";
 import {
@@ -10940,6 +10940,7 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
         return exported.success && exported.data.status === "READY";
       },
       readArtifactText: async (key) => { const bytes = await readStoredBytes(dependencies, key, 64 * 1024 + 1); return bytes?.toString("utf8"); },
+      recycleWorker: (current) => recycleDriftedWorker(ec2Sessions, current.workspaceId),
       now: Date.now,
       log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
     };
