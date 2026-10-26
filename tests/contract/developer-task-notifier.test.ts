@@ -2,7 +2,7 @@
 // Spec 025 FR-032, FR-034, C7 to C9: the notifier, fed from the fake table's writes, posting to a
 // fake Slack. The queue is an array; a failed notice stays in it with its attempt count.
 import { createHash, randomUUID } from "node:crypto";
-import { PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId, planQualityFinding } from "@agentx/contracts";
 import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/src/developer/task-records.js";
@@ -2298,8 +2298,8 @@ describe("page decisions and comments in Slack (spec 061 slice 2)", () => {
 describe("the blocked card carries what Rovara tried and why it asks (AUTOFIX)", () => {
   const ASK = (revision: number) => ({ workflowRevision: revision, reason: "spend-cap", codes: ["review-findings"], capUsd: 15, at: new Date().toISOString() });
   /** A workflow blocked in REVIEW with an introduced finding, and (when `looking`) the broker's automatic-fix row for it that has not been resolved yet. */
-  async function blockedTask(looking: boolean) {
-    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+  async function blockedTask(looking: boolean, options: Parameters<typeof notifierHarness>[1] = {}) {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, options);
     await h.pump();
     await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
     await h.pump();
@@ -2362,6 +2362,20 @@ describe("the blocked card carries what Rovara tried and why it asks (AUTOFIX)",
     expect(h.posts).toHaveLength(before + 2);
   });
 
+  it("posts the blocked card even when the hold lookup is refused, and says so in the log (LIVEFIX-1: the notifier's grant lacked WORKFLOW_DISPATCH)", async () => {
+    const h = await blockedTask(true, { documentClient: (db) => ({ send: async (command: unknown) => {
+      if (command instanceof GetCommand && (command.input.Key as { pk?: string } | undefined)?.pk === "WORKFLOW_DISPATCH") throw Object.assign(new Error("User is not authorized"), { name: "AccessDeniedException" });
+      return db.send(command as Parameters<FakeDynamoDb["send"]>[0]);
+    } }) });
+    const before = h.posts.length;
+    await h.pump();
+    // Without the fix the lookup threw, the notice was retried and nothing was posted.
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.queue).toEqual([]);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.autofix_hold_unreadable", taskId: h.taskId, error: "AccessDeniedException" }));
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "workflow", outcome: "posted" }));
+  });
+
   it("adds nothing for a task Rovara never touched: the card is today's, with no wait", async () => {
     const h = await blockedTask(false);
     const before = h.posts.length;
@@ -2369,5 +2383,94 @@ describe("the blocked card carries what Rovara tried and why it asks (AUTOFIX)",
     expect(h.posts).toHaveLength(before + 1);
     expect(h.posts.at(-1)!.text).not.toContain("Rovara");
     expect(h.posts.at(-1)!.text).not.toContain("Why I'm asking you");
+  });
+});
+
+describe("a task-state card is not dropped after the hour (LIVEFIX-1 item 5)", () => {
+  const HOUR = 3_600_000;
+  const noticeIdOf = (h: { logs: Array<Record<string, unknown>> }) => String(h.logs.find((entry) => entry.event === "developer_notifier.retry" && entry.kind === "workflow")?.noticeId);
+  /** A blocked step whose card cannot be delivered: Slack refuses, and the notice is retried. */
+  async function undeliverableCard() {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    h.stream.take();
+    const operationId = h.active();
+    const candidateDigest = "a".repeat(64);
+    await h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now", ExpressionAttributeValues: { ":now": new Date().toISOString(), ":workflow": {
+        revision: 9, stage: "REVIEW", state: "BLOCKED", artifacts: [], decisions: [], candidate: { digest: candidateDigest },
+        verification: { candidateDigest, results: [{ checkId: "diff-check", status: "PASS" }] },
+        reviews: [{ operationId, candidateDigest, role: "CRITIC", provider: "t", version: "1", status: "FINDINGS", readOnly: true, recordedAt: new Date().toISOString(),
+          findings: [{ text: "The new parser drops the last line.", origin: "INTRODUCED", severity: "HIGH" }] }],
+      } } }));
+    h.fail("ratelimited");
+    await h.pump();
+    expect(h.queue).toHaveLength(1);
+    return h;
+  }
+
+  it("keeps retrying past the hour, counts the failure once, leaves a durable record, and posts the card when Slack recovers", async () => {
+    const h = await undeliverableCard();
+    const before = h.posts.length;
+    h.advance(HOUR + 5_000);
+    await h.pump();
+    // The alarm's metric fires once, at the hour, as before; the notice is no longer dropped.
+    expect(h.deliveryFailed).toHaveBeenCalledTimes(1);
+    expect(h.queue).toHaveLength(1);
+    const noticeId = noticeIdOf(h);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_failed", kind: "workflow", noticeId, reason: "ratelimited", retrying: true }));
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).toMatchObject({ entityType: "NOTICE_FAILURE", kind: "workflow", noticeId, reason: "ratelimited", firstFailedAt: expect.any(String) as string });
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).not.toHaveProperty("abandonedAt");
+    // Hours later it is still retried (the delay is set again), and the count does not grow.
+    const retriesAtTheHour = h.retryLater.mock.calls.length;
+    h.advance(3 * HOUR);
+    await h.pump();
+    expect(h.deliveryFailed).toHaveBeenCalledTimes(1);
+    expect(h.queue).toHaveLength(1);
+    expect(h.retryLater.mock.calls.length).toBeGreaterThan(retriesAtTheHour);
+    // Slack recovers: the card is posted, once.
+    h.fail(undefined);
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.queue).toEqual([]);
+    expect(h.deliveryFailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up after twelve hours, with a second count, a log line and the record marked abandoned", async () => {
+    const h = await undeliverableCard();
+    h.advance(HOUR + 5_000);
+    await h.pump();
+    const noticeId = noticeIdOf(h);
+    h.advance(12 * HOUR);
+    await h.pump();
+    expect(h.queue).toEqual([]);
+    expect(h.deliveryFailed).toHaveBeenCalledTimes(2);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_abandoned", kind: "workflow", noticeId, reason: "ratelimited" }));
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).toMatchObject({ reason: "ratelimited", abandonedAt: expect.any(String) as string });
+  });
+
+  it("records only a fixed reason code, never error text, and still counts when the record cannot be written", async () => {
+    const h = await undeliverableCard();
+    h.fail("a very long Slack error with a token xoxb-1111-2222-secret in it");
+    h.advance(HOUR + 5_000);
+    await h.pump();
+    const noticeId = noticeIdOf(h);
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).toMatchObject({ reason: "unknown" });
+    expect(JSON.stringify(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`))).not.toContain("xoxb");
+    expect(JSON.stringify(h.logs.filter((entry) => String(entry.event).startsWith("developer_notifier.delivery_")))).not.toContain("xoxb");
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_failed", reason: "unknown" }));
+  });
+
+  it("still drops a start message after the hour: its replies depend on the thread, and that behaviour is unchanged", async () => {
+    const h = await notifierHarness();
+    h.fail("channel_not_found");
+    await h.pump();
+    h.advance(HOUR + 2_000);
+    await h.pump();
+    expect(h.queue).toEqual([]);
+    expect(h.deliveryFailed).toHaveBeenCalledTimes(1);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_failed", kind: "start", reason: "channel_not_found" }));
   });
 });

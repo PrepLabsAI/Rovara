@@ -847,7 +847,11 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
     if (workflow.state === "BLOCKED" && (workflow.stage === "VERIFY" || workflow.stage === "REVIEW")) {
       // Rovara is still looking at this block (its row is not resolved): the card waits, so it can carry what Rovara tried and why it asks. After the hold the card is posted as it is,
       // and the ask follows as its own post when it is written.
-      const looking = await getItem<{ kind?: unknown; createdAt?: unknown }>(deps, { pk: "WORKFLOW_DISPATCH", sk: `${task.taskId}#${workflow.revision}` });
+      // The wait is a courtesy: a lookup that cannot be read (a missing grant, a throttled table) posts the card without it, so a blocked step is never lost to the hold.
+      const looking = await getItem<{ kind?: unknown; createdAt?: unknown }>(deps, { pk: "WORKFLOW_DISPATCH", sk: `${task.taskId}#${workflow.revision}` }).catch((error: unknown) => {
+        deps.log({ event: "developer_notifier.autofix_hold_unreadable", taskId: task.taskId, error: errorName(error) });
+        return undefined;
+      });
       if (looking?.kind === "AUTOFIX" && typeof looking.createdAt === "string" && deps.now() - Date.parse(looking.createdAt) < AUTOFIX_CARD_HOLD_MS) throw new AutofixPending();
       const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
       context.autoFix = { ask: ask.success ? ask.data : undefined };
@@ -1532,6 +1536,48 @@ async function releaseSaid(deps: NotifierDependencies, said: { pk: string; sk: s
   }
 }
 
+/** How long a task-state card ("workflow" notice) is retried before it is given up on: far longer than the hour of the other notices, and well inside the queue's day of retention and its 100 receives. */
+export const WORKFLOW_CARD_RETRY_WINDOW_MS = 12 * 60 * 60_000;
+
+/** The delivery-failure count the SlackDeliveryFailed alarm watches. An expired notice is dropped whatever happens to its count, so it can never loop. */
+function countDeliveryFailure(deps: NotifierDependencies): void {
+  try {
+    deps.deliveryFailed();
+  } catch (metricError) {
+    deps.log({ event: "developer_notifier.metric_failed", error: errorName(metricError) });
+  }
+}
+
+/** The failure reason kept on a durable record: a fixed code (a Slack error code or an error name), never free text. */
+const failureReasonCode = (reason: string): string => (/^[A-Za-z0-9_.-]{1,64}$/.test(reason) ? reason : "unknown");
+
+/**
+ * A notice that could not be delivered leaves a record next to its task (`NOTICE_FAILED#<id>`: when it first failed, a fixed reason, and when it was given up on), so a missing card is
+ * visible after the fact and not only in the logs. "new": this call made the record; "known": an earlier call did; "unrecorded": it could not be written (logged, never thrown).
+ */
+async function recordDeliveryFailure(deps: NotifierDependencies, notice: Notice, reason: string, abandoned: boolean): Promise<"new" | "known" | "unrecorded"> {
+  if (notice.taskId === undefined) return "unrecorded";
+  const key = { pk: `DEVTASK#${notice.taskId}`, sk: `NOTICE_FAILED#${notice.id}` };
+  const at = new Date(deps.now()).toISOString();
+  try {
+    let created = true;
+    try {
+      await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, ConditionExpression: "attribute_not_exists(pk)",
+        Item: { ...key, entityType: "NOTICE_FAILURE", kind: notice.kind, noticeId: notice.id, reason: failureReasonCode(reason), firstFailedAt: at, ...noticeExpiry(deps) } }));
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      created = false;
+    }
+    if (abandoned) {
+      await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET abandonedAt = :at", ExpressionAttributeValues: { ":at": at } }));
+    }
+    return created ? "new" : "known";
+  } catch (error) {
+    deps.log({ event: "developer_notifier.failure_record_failed", noticeId: notice.id, error: errorName(error) });
+    return "unrecorded";
+  }
+}
+
 export function createNotifierHandler(deps: NotifierDependencies) {
   return async (event: { Records?: unknown[] }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
     const records = event.Records ?? [];
@@ -1562,7 +1608,15 @@ export function createNotifierHandler(deps: NotifierDependencies) {
           batchItemFailures.push({ itemIdentifier: record.messageId });
           continue;
         }
-        if (notice.kind === "canvas_closeout" || deps.now() - Date.parse(notice.at) < SHARE_DELIVERY_WINDOW_MS) {
+        const elapsed = deps.now() - Date.parse(notice.at);
+        // A task-state card (a blocked step, a plan to approve) is kept for much longer than the hour: dropping it leaves the owner waiting on a task nobody told them about.
+        const keepRetrying = notice.kind === "canvas_closeout" || elapsed < SHARE_DELIVERY_WINDOW_MS || (notice.kind === "workflow" && elapsed < WORKFLOW_CARD_RETRY_WINDOW_MS);
+        if (keepRetrying) {
+          // Past the hour the failure is counted once (the alarm) and recorded durably; the later tries only retry.
+          if (notice.kind === "workflow" && elapsed >= SHARE_DELIVERY_WINDOW_MS && await recordDeliveryFailure(deps, notice, reason, false) !== "known") {
+            deps.log({ event: "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason: failureReasonCode(reason), retrying: true });
+            countDeliveryFailure(deps);
+          }
           const attempt = Number(record.attributes?.ApproximateReceiveCount ?? "1");
           try {
             await deps.retryLater(record.receiptHandle, retryDelaySeconds(attempt));
@@ -1573,13 +1627,11 @@ export function createNotifierHandler(deps: NotifierDependencies) {
             ...(error instanceof CanvasCloseoutPending ? { reason: error.reason } : { reason }) });
           batchItemFailures.push({ itemIdentifier: record.messageId });
         } else {
-          deps.log({ event: "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason });
-          try {
-            deps.deliveryFailed();
-          } catch (metricError) {
-            // An expired notice is dropped whatever happens to its count, so it can never loop.
-            deps.log({ event: "developer_notifier.metric_failed", error: errorName(metricError) });
-          }
+          // A card that was retried past the hour ends here with its own words and the durable record marked; every other notice is dropped as before, with its record.
+          const abandoned = notice.kind === "workflow";
+          deps.log({ event: abandoned ? "developer_notifier.delivery_abandoned" : "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason: abandoned ? failureReasonCode(reason) : reason });
+          await recordDeliveryFailure(deps, notice, reason, true);
+          countDeliveryFailure(deps);
           if (notice.kind === "start" && notice.taskId !== undefined) {
             try {
               await markPostFailed(deps, notice.taskId);
