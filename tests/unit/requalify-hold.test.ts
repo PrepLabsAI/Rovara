@@ -8,6 +8,8 @@ import {
   ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, REQUALIFY_HOLD_MAX_MS, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock, placeRequalifyHold,
   releaseRequalifyHold, replayPredatesRenewal, requalifyDrainStatus, requalifyHoldActive, requalifyHoldKey, requalifySetupWorkRow, requireRenewalOnlyReapproval, selectionChangedRefusal,
 } from "../../packages/broker/src/e2e/requalify-hold.js";
+import { E2E_REPLAY_REFUSALS } from "../../packages/contracts/src/index.js";
+import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
 
 const NOW = Date.parse("2026-10-27T03:00:00.000Z");
@@ -37,7 +39,7 @@ function table() {
         for (const write of input.TransactItems) {
           if (write.ConditionCheck?.ConditionExpression === "runId = :runId AND expiresAt > :now") {
             const lock = items.get(k(write.ConditionCheck.Key));
-            if (lock === undefined || lock.runId !== write.ConditionCheck.ExpressionAttributeValues[":runId"] || String(lock.expiresAt) <= write.ConditionCheck.ExpressionAttributeValues[":now"]) throw conditional();
+            if (lock === undefined || lock.runId !== write.ConditionCheck.ExpressionAttributeValues[":runId"] || String(lock.expiresAt) <= String(write.ConditionCheck.ExpressionAttributeValues[":now"])) throw conditional();
           }
           if (write.Put?.ConditionExpression === "attribute_not_exists(pk) OR runId = :runId") {
             const current = items.get(k(write.Put.Item));
@@ -51,7 +53,7 @@ function table() {
         const rows = [...items.values()];
         if (input.IndexName === "bySessionState") return { Items: rows.filter((row) => row.sessionState === input.ExpressionAttributeValues[":state"]) };
         const pk = input.ExpressionAttributeValues[":pk"];
-        const prefix = input.ExpressionAttributeValues[":operation"] ?? input.ExpressionAttributeValues[":setup"];
+        const prefix = input.ExpressionAttributeValues[":operation"] ?? input.ExpressionAttributeValues[":setup"] ?? "";
         return { Items: rows.filter((row) => row.pk === pk && String(row.sk).startsWith(prefix)) };
       }
       default: throw new Error(`unexpected ${command.constructor.name}`);
@@ -256,6 +258,11 @@ describe("a renewal of the test machine is not any other change of the approved 
 });
 
 describe("a replay of a round from before a renewal", () => {
+  it("has its own refusal code and one fixed sentence", () => {
+    expect(E2E_REPLAY_REFUSALS).toContain("replay-runtime-renewed");
+    expect(E2E_OWNER_SENTENCES.replayRuntimeRenewed).toBe("The test machine was renewed since this round, so it can't be replayed exactly.");
+  });
+
   const registered = (kind: "web" | "api", extra: Record<string, unknown> = {}) => ({ profileId: "linux-arm64-web-api-v1", generation: 4, capabilities: { kind }, qualifiedAt: "2026-10-26T00:00:00.000Z", ...extra }) as never;
   it("is a replay of an earlier machine when a row it ran on is gone or is not the registered row", () => {
     expect(replayPredatesRenewal([registered("api")], [registered("api")])).toBe(false);
