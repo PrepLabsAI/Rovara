@@ -6,6 +6,8 @@ import { groundingScenarioIds, planQualityFinding, type PlanDocument, type Workf
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { csvScenario, planFixture } from "../support/e2e-application-plan-fixtures.js";
+import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
+import { agentXError } from "@agentx/contracts";
 import { failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
 import type { DurableOutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import type { finishPlanGrounding as FinishPlanGrounding, startPlanGroundingRound } from "../../packages/broker/src/aws/broker.js";
@@ -16,7 +18,7 @@ import { PlanSelfCheckRecordSchema } from "../../packages/broker/src/developer/p
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
 type Mode = "start" | "unavailable" | "throw";
-type StoredTask = Record<string, unknown> & { workspaceId: string; workflow: WorkflowSnapshot; planGrounding?: { artifactSha256: string; attempt: number; deadlineAt: string }; planGroundingAbandoned?: string; planSelfCheck?: unknown };
+type StoredTask = Record<string, unknown> & { workspaceId: string; workflow: WorkflowSnapshot; planGrounding?: { artifactId: string; artifactSha256: string; attempt: number; deadlineAt: string }; planGroundingAbandoned?: string; planSelfCheck?: unknown };
 
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
 const REQUIRED_CHECK = { id: "required-1", label: "npm test", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 } };
@@ -224,7 +226,8 @@ describe("a plan with must-not-change scenarios is held back while they run on t
     await settle(harness, taskId, { findings: [MISMATCH] });
     expect(taskOf(harness, taskId).planGrounding).toBeUndefined();
     expect(taskOf(harness, taskId).planGroundingAbandoned).toBeUndefined();
-    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN", state: "RUNNING" });
+    // Planning is stopped (never left running with nothing running), and nobody is asked: no card, no planner run.
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN", state: "BLOCKED" });
     expect(workflowOf(harness, taskId).artifacts).toHaveLength(0);
     expect(planRuns(harness, workspaceId)).toHaveLength(1);
     expect(rows(harness)).toEqual([]);
@@ -296,5 +299,120 @@ describe("the thread says it is checking the plan while the plan is held", () =>
     const plain = workflowMessage({ taskId, ownerSlackUserId: "U1", workflow })!;
     expect(plain.text).toContain("Working on the coding plan.");
     expect(plain.text).not.toBe(held.text);
+  });
+});
+
+/** A grounding round in flight for the held plan: its operation holds the workspace, and its record is STARTED under it. */
+function plantRunningRound(harness: Harness, taskId: string, workspaceId: string, status = "RUNNING") {
+  const hold = taskOf(harness, taskId).planGrounding!;
+  const operationId = randomUUID();
+  harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, entityType: "OPERATION", id: operationId, workspaceId, kind: "task", workflowMode: "CHECKS", status, fence: 9, eventSequence: 0,
+    requestId: randomUUID(), payloadHash: "a".repeat(64), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    workflowE2EAdmission: { purpose: "grounding", taskId, planArtifactSha256: hold.artifactSha256, attempt: hold.attempt, baseCommitSha: "a".repeat(40), roundId: "round-1", admissionRef: { key: "k", sha256: "b".repeat(64), byteLength: 1 } } });
+  harness.db.set({ ...(harness.db.get(`WORKSPACE#${workspaceId}`, "META") as object), pk: `WORKSPACE#${workspaceId}`, sk: "META", activeOperationId: operationId, fence: 9, status: "READY" });
+  const key = { pk: `DEVTASK#${taskId}`, sk: `E2E_GROUNDING#${hold.artifactSha256}#${hold.attempt}` };
+  harness.db.set({ ...harness.db.get(key.pk, key.sk)!, operationId });
+  return { operationId, hold, key };
+}
+const freeWorkspace = (harness: Harness, workspaceId: string) => {
+  const { activeOperationId: _active, ...meta } = harness.db.get(`WORKSPACE#${workspaceId}`, "META") as Record<string, unknown>;
+  void _active;
+  harness.db.set({ ...meta, pk: `WORKSPACE#${workspaceId}`, sk: "META" });
+};
+
+describe("fix round 1 (review of T7c)", () => {
+  it("B1: a held plan whose row gave up (the finish keeps failing) is not left running for ever: planning is blocked with its Retry, the hold, the row and the marker are gone", async () => {
+    const { harness, taskId, workspaceId } = await setup("start");
+    await finishPlanning(harness, workspaceId, groundedAnswer());
+    const hold = taskOf(harness, taskId).planGrounding!;
+    // The saved answer cannot be read, so every finish throws.
+    for (const key of [...harness.s3.objects.keys()]) if (key.includes("/ARTIFACT") || key.endsWith("plan.md") || key.includes(hold.artifactId)) harness.s3.objects.delete(key);
+    harness.db.set({ ...harness.db.get(`WORKSPACE#${workspaceId}`, `ARTIFACT#${hold.artifactId}`)!, objectKey: "private/missing/answer.md" });
+    // The round ended, so every look goes on to read the answer back, and that keeps failing.
+    const recordKey = { pk: `DEVTASK#${taskId}`, sk: `E2E_GROUNDING#${hold.artifactSha256}#${hold.attempt}` };
+    harness.db.set({ ...harness.db.get(recordKey.pk, recordKey.sk)!, state: "RECORDED", results: { status: "PASSED", scenarios: [] }, findings: [] });
+    for (let look = 0; look < 12; look += 1) await sweep(harness);
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN", state: "BLOCKED" });
+    expect(taskOf(harness, taskId).planGrounding).toBeUndefined();
+    expect(rows(harness)).toEqual([]);
+    expect(harness.db.find((item) => item.pk === "PLAN_GROUNDING_HOLD")).toEqual([]);
+  });
+
+  it("B1: a hold whose row is gone is still found by the sweep and ended at its deadline, with the card and the timed-out reason", async () => {
+    const { harness, taskId, workspaceId } = await setup("start");
+    await finishPlanning(harness, workspaceId, groundedAnswer());
+    const hold = taskOf(harness, taskId).planGrounding!;
+    for (const row of rows(harness)) harness.db.delete?.(row.pk as string, row.sk as string);
+    harness.db.set({ ...taskOf(harness, taskId), planGrounding: { ...hold, deadlineAt: "2000-01-01T00:00:00.000Z" } });
+    for (const marker of harness.db.find((item) => item.pk === "PLAN_GROUNDING_HOLD")) harness.db.set({ ...marker, deadlineAt: "2000-01-01T00:00:00.000Z" });
+    expect(harness.db.find((item) => item.pk === "PLAN_GROUNDING_HOLD")).toHaveLength(1);
+    expect(rows(harness)).toEqual([]);
+    await harness.handler({ source: "agentx.workflow-dispatch-recovery" });
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(quality(harness, taskId)!.notes.at(-1)!.ownerSentence).toBe("Not checked against the current app: it ran out of time.");
+    expect(harness.db.find((item) => item.pk === "PLAN_GROUNDING_HOLD")).toEqual([]);
+  });
+
+  it("I1: Close while the round runs stops it and closes the task (no TASK_BUSY); the abandoned finish never leaves PLAN/RUNNING with nothing running", async () => {
+    const { harness, taskId, workspaceId } = await setup("start");
+    await finishPlanning(harness, workspaceId, groundedAnswer());
+    plantRunningRound(harness, taskId, workspaceId, "CANCEL_REQUESTED");
+    setTimeout(() => freeWorkspace(harness, workspaceId), 800);
+    const closed = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
+    expect(closed.status, JSON.stringify(closed.body)).toBe(200);
+    expect(harness.db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSING" });
+    // And with no close following (the owner only pressed it once the round could not be stopped): the finish blocks planning instead of leaving it running.
+    const other = await setup("start");
+    await finishPlanning(other.harness, other.workspaceId, groundedAnswer());
+    const hold = taskOf(other.harness, other.taskId).planGrounding!;
+    other.harness.db.set({ ...taskOf(other.harness, other.taskId), planGroundingAbandoned: hold.artifactSha256 });
+    expect(await finishPlanGrounding(other.harness.brokerInput as never, other.taskId)).toBe("FINISHED");
+    expect(workflowOf(other.harness, other.taskId)).toMatchObject({ stage: "PLAN", state: "BLOCKED" });
+    expect(taskOf(other.harness, other.taskId).planGrounding).toBeUndefined();
+  });
+
+  it("I2: a transient fault while the round runs does not mark it start-failed or stop it; a busy workspace at start waits", async () => {
+    const { harness, taskId, workspaceId } = await setup("start");
+    await finishPlanning(harness, workspaceId, groundedAnswer());
+    const { key } = plantRunningRound(harness, taskId, workspaceId);
+    const hold = taskOf(harness, taskId).planGrounding!;
+    const saved = new Map(harness.s3.objects);
+    for (const k of [...harness.s3.objects.keys()]) if (k.includes(hold.artifactId)) harness.s3.objects.delete(k);
+    harness.db.set({ ...harness.db.get(`WORKSPACE#${workspaceId}`, `ARTIFACT#${hold.artifactId}`)!, objectKey: "private/missing/answer.md" });
+    // The round ended well; reading the held plan back faults once.
+    harness.db.set({ ...harness.db.get(key.pk, key.sk)!, state: "RECORDED", results: { status: "PASSED", scenarios: [] }, findings: [] });
+    await sweep(harness);
+    expect(harness.db.get(key.pk, key.sk)).toMatchObject({ state: "RECORDED" });
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN", state: "RUNNING" });
+    expect(rows(harness)).toHaveLength(1);
+    void saved;
+
+    const busy = await createDeveloperTaskBroker({ brokerExtra: { planSelfCheck: true, startPlanGrounding: (async () => { throw agentXError("WORKSPACE_BUSY", "busy"); }) } });
+    const run = await startTask(busy);
+    await finishPlanning(busy, run.workspaceId, groundedAnswer());
+    expect(workflowOf(busy, run.taskId)).toMatchObject({ stage: "PLAN", state: "RUNNING" });
+    expect(rows(busy)).toHaveLength(1);
+  });
+
+  it("M2: a mismatch names what the plan expected, in the plan's own words, never what the app showed", async () => {
+    const { harness, taskId, workspaceId } = await setup("start");
+    await finishPlanning(harness, workspaceId, groundedAnswer());
+    await settle(harness, taskId, { findings: [MISMATCH] });
+    await finishPlanning(harness, workspaceId, groundedAnswer());
+    await settle(harness, taskId, { findings: [MISMATCH] });
+    const sentence = quality(harness, taskId)!.findings[0]!.ownerSentence;
+    expect(sentence).toContain("The plan expects: 2 columns, 1 row.");
+    expect(sentence).not.toContain("secret");
+  });
+
+  it("M4: the worker's terminal callback for the round ends the hold without any sweep", async () => {
+    const { harness, taskId, workspaceId } = await setup("start");
+    await finishPlanning(harness, workspaceId, groundedAnswer());
+    const { operationId } = plantRunningRound(harness, taskId, workspaceId);
+    harness.db.set({ pk: `OUTBOX#${operationId}`, sk: "OUTBOX", entityType: "OUTBOX", id: operationId, status: "DISPATCHED", workspaceId, operationId,
+      invocation: { kind: "task", fence: 9, callbackCapability: issueCapability(harness.brokerInput, workspaceId, operationId, 9, false) } });
+    await harness.finish(workspaceId, operationId, "CANCELLED");
+    expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(quality(harness, taskId)!.notes.at(-1)!.ownerSentence).toBe("Not checked against the current app: it was stopped.");
   });
 });

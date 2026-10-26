@@ -312,7 +312,8 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { groundingFindingsOf } from "../developer/plan-grounding-findings.js";
+import { planQualityFinding } from "@agentx/contracts";
+import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
 import { ModelCheckError, readCurrentTiers, readModelCheck, startModelCheck, untestedRouteSentence, type ModelCheckDependencies } from "../e2e/model-checks.js";
 import { E2EModelRouteError, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, deriveE2EAgentRoute, e2eAgentInstallationFromParameters, readE2EModelRouteShape, e2eAgentRoutePolicyLimits, isTransientAwsFault, e2eDayBudgetRoom, planE2EAgentRoute,
@@ -10417,6 +10418,14 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
       }));
       return;
     }
+    // T7c: the held plan's check could not be looked after: the one finish ends the hold as a plan that could not be checked (its card posts); if even that fails, planning is stopped with its Retry.
+    if (item.kind === "GROUNDING") {
+      try { if (await finishPlanGrounding(dependencies, item.taskId, { force: "start-failed" }) !== "WAITING") { await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: key })); return; } } catch (finishError) {
+        console.log(JSON.stringify({ component: "broker", event: "workflow.grounding_give_up_finish_failed", taskId: item.taskId, error: finishError instanceof Error ? finishError.name : "unknown" }));
+      }
+      await stopStuckGroundingHold(dependencies, item.taskId);
+      return;
+    }
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
     const workflow = task?.workflow;
     const deleteRow = { Delete: { TableName: dependencies.tableName, Key: key, ...sameRow } };
@@ -11376,6 +11385,8 @@ export async function startPlanGroundingRound(
     return { outcome };
   } catch (error) {
     // Only a fixed reason is kept; the error's text (it can name paths or accounts) is not logged.
+    // A busy workspace is not a failed start: the record stays REQUESTED and the held plan's next look starts it again.
+    if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY")) throw error;
     const reason = groundingStartFailureReason(error);
     console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_grounding_not_started", taskId: task.taskId, reason, errorName: error instanceof Error ? error.name : "unknown" }));
     return unavailable(reason);
@@ -11659,6 +11670,55 @@ async function dispatchWorkflowContinuation(dependencies: AwsBrokerDependencies,
   }
 }
 
+/** T7c: the marker partition of held plans (one small item per hold), read by the recovery sweep. */
+const PLAN_GROUNDING_HOLD_PK = "PLAN_GROUNDING_HOLD";
+
+/**
+ * T7c: the last resort for a held plan whose finish keeps failing: planning is stopped with its Retry (as a failed planning run would leave it), the hold, its row and its marker are removed
+ * in one transaction conditioned on the hold. Never throws.
+ */
+async function stopStuckGroundingHold(dependencies: AwsBrokerDependencies, taskId: string): Promise<void> {
+  try {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+    const hold = task?.planGrounding;
+    const workflow = task?.workflow;
+    if (task === undefined || hold === undefined || workflow === undefined) {
+      await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: { pk: PLAN_GROUNDING_HOLD_PK, sk: `TASK#${taskId}` } }));
+      return;
+    }
+    const now = new Date().toISOString();
+    const stopped = workflow.stage === "PLAN" && workflow.state === "RUNNING" && task.closedAt === undefined;
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: { TableName: dependencies.tableName, Key: taskKey(taskId),
+        UpdateExpression: stopped ? "SET workflow = :workflow, updatedAt = :now REMOVE planGrounding, planGroundingAbandoned" : "REMOVE planGrounding, planGroundingAbandoned",
+        ConditionExpression: "planGrounding.artifactSha256 = :held AND workflow.revision = :revision", ExpressionAttributeValues: { ":held": hold.artifactSha256, ":revision": workflow.revision,
+          ...(stopped ? { ":workflow": blockWorkflow(workflow, workflowRunEndedReason("PLAN", "FAILED"), now), ":now": now } : {}) } } },
+      { Delete: { TableName: dependencies.tableName, Key: { pk: WORKFLOW_DISPATCH_PK, sk: `${taskId}#${workflow.revision}` } } },
+      { Delete: { TableName: dependencies.tableName, Key: { pk: PLAN_GROUNDING_HOLD_PK, sk: `TASK#${taskId}` } } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) console.log(JSON.stringify({ component: "broker", event: "workflow.grounding_stop_failed", taskId, error: error instanceof Error ? error.name : "unknown" }));
+  }
+}
+
+/** The sweep's look at the held plans: one past its deadline is finished (its row may be lost); one that cannot be finished long after that is stopped. Never throws. */
+async function sweepGroundingHolds(dependencies: AwsBrokerDependencies): Promise<void> {
+  try {
+    const holds = await queryAllItems(dependencies, PLAN_GROUNDING_HOLD_PK, "TASK#");
+    for (const marker of holds) {
+      const taskId = String(marker.taskId);
+      const deadline = Date.parse(String(marker.deadlineAt));
+      if (!Number.isFinite(deadline) || Date.now() < deadline) continue;
+      try { await finishPlanGrounding(dependencies, taskId); } catch (error) {
+        console.log(JSON.stringify({ component: "broker", event: "workflow.grounding_sweep_finish_failed", taskId, error: error instanceof Error ? error.name : "unknown" }));
+        if (Date.now() > deadline + 30 * 60_000) await stopStuckGroundingHold(dependencies, taskId);
+      }
+    }
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "workflow.grounding_sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
+  }
+}
+
 /** T7c: how soon the held plan's check is looked at again while it runs. */
 const GROUNDING_POLL_MS = 30_000;
 
@@ -11682,22 +11742,28 @@ async function runGroundingStep(dependencies: AwsBrokerDependencies, routeDepend
   const hold = task.planGrounding;
   if (hold === undefined) return "DONE";
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
-  try {
-    const record = task.planGroundingAbandoned === hold.artifactSha256 ? undefined : await readWorkflowE2EGroundingRecord(store, { taskId: task.taskId, planArtifactSha256: hold.artifactSha256, attempt: hold.attempt });
-    if (task.planGroundingAbandoned !== hold.artifactSha256 && (record === undefined || record.state === "REQUESTED")) {
-      const entry = { id: hold.artifactId, type: "plan" as const, version: hold.version, sha256: hold.artifactSha256, producer: "agentx-worker-untrusted" as const,
-        objectKey: `private/${task.ownerKey}/${task.workspaceId}/plan-documents/${hold.artifactId}.json`, createdAt: hold.artifactCreatedAt, format: "structured" as const };
+  const abandoned = task.planGroundingAbandoned === hold.artifactSha256;
+  // Only a read or the finish itself can fail outside the start; those errors go to the row's retry (bounded, and at its end the give-up finishes the hold), never into the round.
+  const record = abandoned ? undefined : await readWorkflowE2EGroundingRecord(store, { taskId: task.taskId, planArtifactSha256: hold.artifactSha256, attempt: hold.attempt });
+  if (!abandoned && (record === undefined || record.state === "REQUESTED")) {
+    const entry = { id: hold.artifactId, type: "plan" as const, version: hold.version, sha256: hold.artifactSha256, producer: "agentx-worker-untrusted" as const,
+      objectKey: `private/${task.ownerKey}/${task.workspaceId}/plan-documents/${hold.artifactId}.json`, createdAt: hold.artifactCreatedAt, format: "structured" as const };
+    let plan: PlanDocument | undefined;
+    try {
       const loaded = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), entry, {});
-      if (loaded?.format !== "structured") return await finishThenWait(dependencies, item, task.taskId, "start-failed");
-      await (dependencies.startPlanGrounding ?? startPlanGroundingRound)(dependencies, routeDependencies, { task, caller, planOperationId: hold.planOperationId, plan: loaded.plan, artifact: { id: hold.artifactId, sha256: hold.artifactSha256 }, attempt: hold.attempt });
+      if (loaded?.format === "structured") plan = loaded.plan;
+    } catch { plan = undefined; }
+    if (plan === undefined) return await finishThenWait(dependencies, item, task.taskId, "start-failed");
+    try {
+      await (dependencies.startPlanGrounding ?? startPlanGroundingRound)(dependencies, routeDependencies, { task, caller, planOperationId: hold.planOperationId, plan, artifact: { id: hold.artifactId, sha256: hold.artifactSha256 }, attempt: hold.attempt });
+    } catch (error) {
+      // A workspace that is busy for a moment is waited out (the finish ends the hold at its deadline); any other fault of the start ends the hold as a plan that could not be checked.
+      if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY")) return await finishThenWait(dependencies, item, task.taskId);
+      console.log(JSON.stringify({ component: "broker", event: "workflow.grounding_step_failed", taskId: task.taskId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
+      return await finishThenWait(dependencies, item, task.taskId, "start-failed");
     }
-    return await finishThenWait(dependencies, item, task.taskId);
-  } catch (error) {
-    // A workspace that is busy for a moment is waited out (the hold's deadline bounds it); anything else ends the hold as a plan that could not be checked.
-    if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY") && Date.now() < Date.parse(hold.deadlineAt)) { await pollGroundingLater(dependencies, item); return "WAIT"; }
-    console.log(JSON.stringify({ component: "broker", event: "workflow.grounding_step_failed", taskId: task.taskId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
-    return await finishThenWait(dependencies, item, task.taskId, "start-failed");
   }
+  return await finishThenWait(dependencies, item, task.taskId);
 }
 
 async function finishThenWait(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord, taskId: string, force?: GroundingUnavailableReason): Promise<"WAIT" | "DONE"> {
@@ -11735,14 +11801,18 @@ export async function finishPlanGrounding(dependencies: AwsBrokerDependencies, t
   const holdValues = { ":revision": workflow.revision, ":plan": "PLAN", ":running": "RUNNING", ":held": hold.artifactSha256 };
   const now = new Date().toISOString();
   if (task.closedAt !== undefined || workflow.stage !== "PLAN" || workflow.state !== "RUNNING") {
-    // The task moved on (closed, cancelled to a block): the hold means nothing now. Clear it; the dispatch run drops the row.
+    // The task moved on (closed, or stopped to a block): the hold means nothing now and asks nobody anything; the dispatch run drops the row.
     return "NOOP";
   }
+  const markerKey = { pk: PLAN_GROUNDING_HOLD_PK, sk: `TASK#${taskId}` };
   if (task.planGroundingAbandoned === hold.artifactSha256) {
     try {
+      // The owner closed the task: nobody is asked anything, and planning is stopped (never left running with nothing running); the close goes on.
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-        { Update: { TableName: dependencies.tableName, Key: taskKey(taskId), UpdateExpression: "REMOVE planGrounding, planGroundingAbandoned", ConditionExpression: holdCondition, ExpressionAttributeNames: holdNames, ExpressionAttributeValues: holdValues } },
+        { Update: { TableName: dependencies.tableName, Key: taskKey(taskId), UpdateExpression: "SET workflow = :stopped, updatedAt = :now REMOVE planGrounding, planGroundingAbandoned", ConditionExpression: holdCondition, ExpressionAttributeNames: holdNames,
+          ExpressionAttributeValues: { ...holdValues, ":stopped": blockWorkflow(workflow, workflowRunEndedReason("PLAN", "CANCELLED"), now), ":now": now } } },
         { Delete: { TableName: dependencies.tableName, Key: rowKey } },
+        { Delete: { TableName: dependencies.tableName, Key: markerKey } },
       ] }));
       return "FINISHED";
     } catch (error) { if (isConditional(error)) return "NOOP"; throw error; }
@@ -11767,7 +11837,6 @@ export async function finishPlanGrounding(dependencies: AwsBrokerDependencies, t
     }
   }
   let outcome: GroundingOutcome;
-  if (record === undefined && !open(record)) return "NOOP";
   if (record === undefined || open(record)) {
     if (options.force === undefined && !overdue) return "WAITING";
     outcome = { kind: "unavailable", reason: options.force ?? "timed-out" };
@@ -11798,6 +11867,7 @@ export async function finishPlanGrounding(dependencies: AwsBrokerDependencies, t
         ...(stored?.selfCheck === undefined ? {} : { ":selfCheck": stored.selfCheck }),
         ...(unreadable === null && task.threadNotesFedThrough !== undefined ? { ":fedFrom": task.threadNotesFedThrough } : {}) } } },
     { Delete: { TableName: dependencies.tableName, Key: rowKey } },
+    { Delete: { TableName: dependencies.tableName, Key: markerKey } },
     ...(stored?.revision === undefined ? [] : [workflowDispatchItem(dependencies.tableName, taskId, next.revision, "REPLAN", createHash("sha256").update(stored.revision.prompt, "utf8").digest("hex"), now, stored.revision.prompt)]),
     ...(stored?.evidenceJob === undefined ? [] : [{ Put: { TableName: dependencies.tableName, Item: planEvidenceJobItem({ taskId, ...stored.evidenceJob, now: Date.parse(now) }), ConditionExpression: "attribute_not_exists(pk)" } }]),
     ...(stored?.plannerReplies === undefined ? [] : [{ Put: plannerRepliesItem(dependencies.tableName, stored.plannerReplies, now) }]),
@@ -11824,6 +11894,7 @@ export async function finishPlanGrounding(dependencies: AwsBrokerDependencies, t
  * it changed only runs again later, since every write to it is conditional and the start itself is idempotent.
  */
 async function retryDueWorkflowDispatches(dependencies: AwsBrokerDependencies): Promise<{ attempted: number; dispatched: number }> {
+  await sweepGroundingHolds(dependencies);
   const page = await dependencies.documentClient.send(new QueryCommand({
     TableName: dependencies.tableName,
     IndexName: WORKFLOW_DISPATCH_DUE_INDEX.name,
@@ -12546,7 +12617,10 @@ async function completedWorkflowItems(
   // Only a coding or check run makes reviews due: a review run's own result never queues another review.
   // Task 12: both reviews passed, so the draft pull request is due the same way; AgentX opens it with no one asking.
   const dispatch = planHold !== undefined
-    ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "GROUNDING", planHold.artifactSha256, now)]
+    ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "GROUNDING", planHold.artifactSha256, now),
+      // The hold's own marker: the recovery sweep finds a hold past its deadline even if its dispatch row is lost.
+      { Put: { TableName: dependencies.tableName, Item: { pk: PLAN_GROUNDING_HOLD_PK, sk: `TASK#${task.taskId}`, entityType: "PLAN_GROUNDING_HOLD", taskId: task.taskId, deadlineAt: planHold.deadlineAt,
+        [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(planHold.deadlineAt) / 1000) + 7 * 86_400 } } }]
     : planRevision !== undefined
     ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "REPLAN", createHash("sha256").update(planRevision.prompt, "utf8").digest("hex"), now, planRevision.prompt)]
     : operation.workflowMode === "IMPLEMENT" && task.workflow.e2e?.required === true
@@ -12760,9 +12834,14 @@ async function storePlanAnswer(
       }
     } else {
       // The check ran on the plan as held; a plan that reads differently now was not the one checked.
-      const outcome: GroundingOutcome = grounded.sha256 === heldSha ? grounded.outcome : { kind: "unavailable", reason: "refused" };
+      let outcome: GroundingOutcome = grounded.sha256 === heldSha ? grounded.outcome : { kind: "unavailable", reason: "refused" };
       if (outcome.kind === "checked") {
-        findings = [...findings, ...outcome.findings];
+        // What the plan itself expected is added to each mismatch (its own words, never the app's value).
+        const withExpected = outcome.findings.map((finding) => (finding.code !== "scenario-base-mismatch" || finding.steps === undefined ? finding : planQualityFinding({
+          code: finding.code, ...(finding.scenarioIds === undefined ? {} : { scenarioIds: finding.scenarioIds }),
+          steps: finding.steps.map((step) => { const expected = plannedExpectation(plan, step.scenarioId, step.assertionKind); return { scenarioId: step.scenarioId, assertionKind: step.assertionKind, ...(step.stepIndex === undefined ? {} : { stepIndex: step.stepIndex }), ...(expected === undefined || expected === "" ? {} : { expected }) }; }) })));
+        outcome = { ...outcome, findings: withExpected };
+        findings = [...findings, ...withExpected];
         if (outcome.undecided > 0) notes = [...notes, groundingUndecidedNote(outcome.undecided)];
         const revisableGrounding = autoRevisableFindings(outcome.findings, operation.planQualityAsked === true);
         if (revisableGrounding.length > 0 && revisionLeft) return askAgain(planRevisionPrompt(revisableGrounding));

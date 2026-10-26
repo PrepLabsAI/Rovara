@@ -47,7 +47,7 @@ export function plannedExpectation(plan: Pick<PlanDocument, "e2e">, scenarioId: 
     case "text": return escapedPlanText(assertion.equals);
     case "visible": return assertion.equals ? "visible" : "not visible";
     case "http-status": return String(assertion.equals);
-    case "csv": return `${assertion.columns.length} columns, ${assertion.rows.length} rows`;
+    case "csv": return `${assertion.columns.length} ${assertion.columns.length === 1 ? "column" : "columns"}, ${assertion.rows.length} ${assertion.rows.length === 1 ? "row" : "rows"}`;
     case "file": return escapedPlanText(assertion.relativePath);
     case "json": case "state": return escapedPlanText(JSON.stringify(assertion.equals) ?? "");
   }

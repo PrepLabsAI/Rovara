@@ -89,7 +89,7 @@ export const PlanQualityFindingSchema = z.object({
   count: z.number().int().min(0).max(1_000).optional(),
   targetReason: z.enum(PLAN_QUALITY_TARGET_REASONS).optional(),
   /** T7b: the scenario steps a `scenario-base-mismatch` finding names: the scenario, the assertion kind that failed and, when the verification names it, the step. Fixed fields only. */
-  steps: z.array(z.object({ scenarioId: z.string().min(1).max(120), assertionKind: z.enum(E2E_DISPLAY_ASSERTION_KINDS), stepIndex: z.number().int().min(0).max(1_000).optional() }).strict()).max(32).optional(),
+  steps: z.array(z.object({ scenarioId: z.string().min(1).max(120), assertionKind: z.enum(E2E_DISPLAY_ASSERTION_KINDS), stepIndex: z.number().int().min(0).max(1_000).optional(), /** What the plan itself expects (its own words, escaped, at most 80 characters); never the app's value. */ expected: z.string().min(1).max(80).optional() }).strict()).max(32).optional(),
   /** For the owner: one fixed sentence. */
   ownerSentence: z.string().min(1).max(1_000),
   /** For the planner's next prompt: one line from plan IDs and fixed text. */
@@ -109,7 +109,7 @@ export type PlanQualityFindingInput = {
   limit?: number;
   count?: number;
   targetReason?: PlanQualityTargetReason;
-  steps?: ReadonlyArray<{ scenarioId: string; assertionKind: (typeof E2E_DISPLAY_ASSERTION_KINDS)[number]; stepIndex?: number }>;
+  steps?: ReadonlyArray<{ scenarioId: string; assertionKind: (typeof E2E_DISPLAY_ASSERTION_KINDS)[number]; stepIndex?: number; expected?: string }>;
 };
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/;
@@ -250,8 +250,10 @@ function sentences(input: PlanQualityFindingInput): { owner: string; planner: st
       // The assertion kinds are a fixed enum, so they are safe words; nothing the app showed or the plan wrote goes into a sentence.
       const kinds = [...new Set((input.steps ?? []).map((step) => step.assertionKind))];
       const which = kinds.length === 0 ? "" : ` (the ${kinds.join(", ")} check)`;
+      // What the plan expected is the plan's own (escaped, bounded) words; what the app showed is never in a sentence.
+      const expected = (input.steps ?? []).find((step) => step.expected !== undefined)?.expected;
       return {
-        owner: `The current app does not behave as the plan assumes for ${idList(input.scenarioIds)}${which}, which should stay unchanged.`,
+        owner: `The current app does not behave as the plan assumes for ${idList(input.scenarioIds)}${which}, which should stay unchanged.${expected === undefined ? "" : ` The plan expects: ${expected}.`}`,
         planner: `scenario-base-mismatch: scenario ${idList(input.scenarioIds)}${which} fails on the unchanged app although it proves a Not changing entry. Correct its expected values from the current code.`,
       };
     }

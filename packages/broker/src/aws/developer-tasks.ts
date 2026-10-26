@@ -5885,6 +5885,10 @@ async function closeNeverStarted(deps: DeveloperTaskRouteDependencies, task: Dev
  * requestId while a close is in flight, or after the task closed, answers with that close and
  * writes no new record: nothing new was accepted (the close already has its accepted record).
  */
+/** How long a close waits for a stopped grounding round to free the workspace, and how often it looks. */
+const GROUNDING_STOP_WAIT_MS = 12_000;
+const GROUNDING_STOP_POLL_MS = 400;
+
 async function closeTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<DeveloperCloseResponse> {
   const request = parse(DeveloperTaskCloseRequestSchema, value, deps, "close");
   let access = await authorizeTaskActor(deps, caller, taskId, "close");
@@ -5898,7 +5902,7 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   let unpublished: DeveloperCloseResponse["unpublished"];
   let operation: Operation | undefined;
   if (task.closedAt === undefined) {
-    const workspace = await deps.actions.workspace(task.workspaceId);
+    let workspace = await deps.actions.workspace(task.workspaceId);
     if (workspace.status === "PREPARATION_FAILED") {
       // A task whose setup failed has nothing to check: it closes now and frees its slot.
       await closeNeverStarted(deps, task, record("Closed; the task's workspace never started."), receivedAt, access);
@@ -5914,7 +5918,15 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
         } catch (error) {
           if (!isConditional(error)) throw error;
         }
-        if (workspace.activeOperationId) await deps.actions.cancelRunning(developerTaskIdentity(task), workspace, () => []).catch(() => undefined);
+        if (workspace.activeOperationId) {
+          await deps.actions.cancelRunning(developerTaskIdentity(task), workspace, () => []).catch(() => undefined);
+          // The stopped round frees the workspace within seconds; the close waits for it (bounded) instead of answering busy.
+          for (let waited = 0; waited < GROUNDING_STOP_WAIT_MS; waited += GROUNDING_STOP_POLL_MS) {
+            if ((await deps.actions.workspace(task.workspaceId)).activeOperationId === undefined) break;
+            await new Promise((resolve) => setTimeout(resolve, GROUNDING_STOP_POLL_MS));
+          }
+          workspace = await deps.actions.workspace(task.workspaceId);
+        }
       }
       let started: Awaited<ReturnType<DeveloperTaskActions["startClose"]>>;
       try {
