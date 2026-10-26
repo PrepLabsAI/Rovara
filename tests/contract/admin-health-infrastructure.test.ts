@@ -119,6 +119,7 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/e2e/model-budget-endpoint.ts",
       // The baseline round's record (M1.3 Task 3.7b, owner decision D4): it expires 30 days after it was last written.
       "packages/broker/src/aws/workflow-e2e-baseline.ts",
+      "packages/broker/src/aws/workflow-e2e-grounding.ts",
       // The audit replay's record (M1.4 Task 4.6b) has the baseline record's expiry: 30 days after it was last written.
       "packages/broker/src/aws/workflow-e2e-replay.ts",
     ]);
