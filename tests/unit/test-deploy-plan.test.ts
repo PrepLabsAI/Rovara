@@ -827,6 +827,8 @@ describe("the control-plane-code unit", () => {
     }
     // The setup page belongs to the installer stack, which test-deploy never changes.
     entries.delete("packages/cli/src/init/ui/setup-lambda.ts");
+    // The automatic renewal's Lambda exists only where agentx:autoRequalify is on and is added by the requalify-infra unit; AR-5 registers its code unit here.
+    entries.delete("packages/broker/src/aws/runtime-requalify-handler.ts");
     expect([...entries].sort()).toEqual(Object.values(CONTROL_PLANE_LAMBDAS).map((lambda) => lambda.entry).sort());
   });
 

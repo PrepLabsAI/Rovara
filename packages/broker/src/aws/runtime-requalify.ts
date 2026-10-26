@@ -98,7 +98,7 @@ async function managedRunnerIp(deps: RequalifyDependencies, input: RequalifyRunI
 }
 
 /** The generation the renewed rows must carry: one past the newest registered generation of either kind (1 when nothing is registered). */
-async function nextGeneration(deps: RequalifyDependencies): Promise<number> {
+export async function nextGeneration(deps: Pick<RuntimeInstallationDependencies, "documentClient" | "tableName" | "featureCatalogId">): Promise<number> {
   const before = await Promise.all((["web", "api"] as const).map((kind) => readWebApiCatalogRow(deps, e2eRegisteredRuntimeKey(deps.featureCatalogId, REQUALIFY_PROFILE_ID, kind))));
   return Math.max(0, ...before.map((row) => row?.generation ?? 0)) + 1;
 }
