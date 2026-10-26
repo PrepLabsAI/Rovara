@@ -35,7 +35,12 @@ export type ApplicationEvidenceInput = Readonly<{
    * What the round is for. A `baseline` round (the unchanged code, for information only) shows a screenshot on every row; its display is the same derivation, and it is
    * never read as a verdict by anything that gates.
    */
-  purpose?: "candidate" | "baseline" | "replay";
+  purpose?: "candidate" | "baseline" | "replay" | "grounding";
+  /**
+   * T7b: what a `grounding` verification holds the admission to. A grounding round signs no member, so it is told apart from a candidate's by the plan digest it was admitted under
+   * (`groundingPlanDigest`, recomputed by the caller from the grounding record) and by running the base commit with no model. Required for the purpose `grounding`, ignored otherwise.
+   */
+  grounding?: Readonly<{ planDigest: string; baseCommitSha: string }>;
   /**
    * The definition the model route registry stores for the route revision the admission names (Task 4.4a, ruling DJ), read by the async caller with one GetItem; absent when the
    * caller had no route to read (the admission names none, or no group uses the model). The route a group's receipts are judged against is this one and nothing a worker uploads;
@@ -98,7 +103,7 @@ export type ApplicationEvidenceVerification = Readonly<{
   /** The broker's own projection of every group it re-collected, for display; never read as a verdict. */
   results: readonly E2EQualifiedResult[];
   /** What the round was signed as and so how its rows are labelled: a replay's are `replay`, never `candidate`. Present once the admission verified and the rows were derived. */
-  purpose?: "candidate" | "baseline" | "replay";
+  purpose?: "candidate" | "baseline" | "replay" | "grounding";
   /**
    * The per-scenario rows and the screenshots behind them, derived from the verification above and from nothing the worker says about itself (see application-display.ts).
    * Present once the admission verified. Display only: it is never read as a verdict.
@@ -138,7 +143,18 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     // M1.3 Task 3.7b: a baseline round is signed as one. It is read only as a baseline and a candidate round only as a candidate's, so evidence of the unchanged code can never become
     // a verdict on the candidate, whatever else about the operation is true.
     // M1.4 Task 4.6b: an audit replay is signed as one too, and is read only as one.
-    const signedPurpose = admission.baseline !== undefined ? "baseline" : admission.replay !== undefined ? "replay" : "candidate";
+    const signedMember = admission.baseline !== undefined ? "baseline" : admission.replay !== undefined ? "replay" : "candidate";
+    // T7b: a grounding round signs no member. It is accepted only as one, only with the plan digest and base commit the caller recomputed, and only as a model-free run of that commit.
+    if (input.purpose === "grounding") {
+      const expected = input.grounding;
+      if (expected === undefined) refuse("a grounding verification needs the plan digest and base commit it checks");
+      if (signedMember !== "candidate") refuse(`the admission is a ${signedMember} round, not a grounding round`);
+      const digests = [admission.applicationApprovalBinding?.planDigest, admission.bundle.planDigest, ...admission.groups.map((group) => group.outerBinding.planDigest)];
+      if (digests.some((digest) => digest !== expected.planDigest)) refuse("the admission is not bound to the plan the grounding round checks");
+      if (admission.candidateCommitSha !== expected.baseCommitSha) refuse("the admission does not run the base commit of the grounding round");
+      if (admission.modelRoute !== null || admissionHasAgentSteps(admission)) refuse("a grounding round runs no AI navigation");
+    }
+    const signedPurpose = input.purpose === "grounding" ? "grounding" as const : signedMember;
     if (signedPurpose !== (input.purpose ?? "candidate")) {
       refuse(signedPurpose === "baseline" ? "the admission is a baseline round (the unchanged code), not a candidate round"
         : signedPurpose === "replay" ? "the admission is an audit replay, not a candidate round" : "the admission is a candidate round, not a baseline or replay round (the purpose differs)");
@@ -221,12 +237,12 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
 }
 
 /** The display of a verified round, or nothing: a failure to build rows never changes the verdict they sit beside. */
-function displayOf(input: { plan: E2EExecutionPlan; authoritative: boolean; purpose: "candidate" | "baseline" | "replay"; shown: readonly E2EQualifiedResult[];
-  groups: ReadonlyArray<{ runId: string; group: Omit<DisplayGroupInput, "result"> }> }): { purpose: "candidate" | "baseline" | "replay"; display?: NonNullable<ApplicationEvidenceVerification["display"]> } {
+function displayOf(input: { plan: E2EExecutionPlan; authoritative: boolean; purpose: "candidate" | "baseline" | "replay" | "grounding"; shown: readonly E2EQualifiedResult[];
+  groups: ReadonlyArray<{ runId: string; group: Omit<DisplayGroupInput, "result"> }> }): { purpose: "candidate" | "baseline" | "replay" | "grounding"; display?: NonNullable<ApplicationEvidenceVerification["display"]> } {
   const { purpose } = input;
   try {
     const targetKinds = new Map(input.plan.effectiveTargets.flatMap((target) => (target.kind === "web" || target.kind === "api" ? [[target.targetId, target.kind] as const] : [])));
-    const built = buildScenarioRows({ authoritative: input.authoritative, attach: input.purpose === "baseline" ? "all" : "failed-or-incomplete", targetKinds,
+    const built = buildScenarioRows({ authoritative: input.authoritative, attach: input.purpose === "baseline" || input.purpose === "grounding" ? "all" : "failed-or-incomplete", targetKinds,
       groups: input.groups.map(({ runId, group }) => ({ ...group, result: input.shown.find((result) => result.binding.runId === runId) })) });
     return { purpose, display: built };
   } catch { return { purpose }; }

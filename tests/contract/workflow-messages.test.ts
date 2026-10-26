@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WORKFLOW_REVIEW_FAILURE_REASONS, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WorkflowStageSchema, WorkflowStateSchema, createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, WorkflowSnapshotViewSchema, workflowFindingFingerprint, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WORKFLOW_REVIEW_FAILURE_REASONS, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WorkflowStageSchema, WorkflowStateSchema, WORKFLOW_AGENTX_ACTOR_ID, createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, WorkflowSnapshotViewSchema, workflowFindingFingerprint, type WorkflowSnapshot } from "@agentx/contracts";
 import { WORKFLOW_ACTION_IDS, documentSummaryLines, slackSectionTexts, feedbackReviewFailedMessage, plainBlockReason, planReviewLink, workflowMessage, workflowMessageKey, workflowModalCopy } from "../../packages/broker/src/developer/workflow-messages.js";
 import { WORKFLOW_ACTION_IDS as INTERACTIVITY_ACTION_IDS } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
@@ -829,5 +829,33 @@ describe("splitting a long Slack text into sections (0.2.12 review)", () => {
     const code = slackSectionTexts(`${"x".repeat(2_700)} \`${"y".repeat(200)}\``);
     expect(code.join("")).toBe(`${"x".repeat(2_700)} \`${"y".repeat(200)}\``);
     for (const section of code) expect((section.match(/`/g) ?? []).length % 2).toBe(0);
+  });
+});
+
+describe("the words for checks that are running (LIVEFIX-1 item 4)", () => {
+  const first = "Running the selected checks on the current code. No code is being changed.";
+  const again = "Running the selected checks again on the current code. No code is being changed.";
+  const owner = "a".repeat(64);
+  const at = (minute: number) => `2026-10-07T12:${String(minute).padStart(2, "0")}:00.000Z`;
+  const retry = (minute: number) => ({ requestId: "33333333-3333-4333-8333-333333333333", actorId: owner, selectedOptionalCheckIds: [], at: at(minute) });
+  const decision = (minute: number, extra: Record<string, unknown>) => ({ requestId: "44444444-4444-4444-8444-444444444444", workflowRevision: 6, decision: "REQUEST_CHANGES", actorId: owner, actorRole: "TASK_OWNER", reason: "Fix it.", at: at(minute), ...extra });
+  const say = (extra: Record<string, unknown>) => workflowMessage({ taskId, workflow: snapshot("VERIFY", "RUNNING", extra) })!.text;
+
+  it("does not say 'again' on the first run of the checks on a change, even when coding already recorded passing checks (the live case)", () => {
+    expect(say({})).toBe(first);
+    expect(say({ checkPolicy })).toBe(first);
+  });
+
+  it("says 'again' after the owner pressed Retry checks, or after Rovara retried the checks by itself", () => {
+    expect(say({ verificationRetries: [retry(5)] })).toBe(again);
+    const automatic = decision(7, { actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX", source: "AUTO_RETRY", auto: { stage: "VERIFY", candidateDigest: candidate.digest } });
+    expect(say({ decisions: [automatic] })).toBe(again);
+  });
+
+  it("is a first run again once the change was sent back after the retry: the new code has not been checked before", () => {
+    expect(say({ verificationRetries: [retry(5)], decisions: [decision(9, { source: "SEND_BACK" })] })).toBe(first);
+    // An automatic retry of the review stage says nothing about the checks.
+    const review = decision(7, { actorId: WORKFLOW_AGENTX_ACTOR_ID, actorRole: "AGENTX", source: "AUTO_RETRY", auto: { stage: "REVIEW", candidateDigest: candidate.digest } });
+    expect(say({ decisions: [review] })).toBe(first);
   });
 });

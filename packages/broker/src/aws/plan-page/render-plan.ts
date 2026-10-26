@@ -4,6 +4,8 @@
 // owns the styles) and no inline style or event handler.
 import { commentIdInAuthor, commentRefInAuthor, creditsPageComment, diffPlanDocuments, redactText, taskGraphDigest, taskGraphOrder, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput, type WorkItemProgressV1 } from "@agentx/contracts";
 import { escapeHtml } from "../web-session.js";
+import { planCheckSummary } from "../../developer/plan-check-summary.js";
+import { NOT_CHECKED_SENTENCE, type PlanSelfCheckView } from "../../developer/plan-self-check.js";
 import { renderDiagram } from "./diagrams.js";
 import { commentCountBadge, renderThreads, suggestionLines, targetKey, type PageCommentView, type PageSuggestionView } from "./comments.js";
 
@@ -48,6 +50,8 @@ export interface RenderPlanInput {
    */
   quoteComments?: Record<string, { name: string; you: boolean; text: string }>;
   commentRefs?: Record<string, string>;
+  /** A coding plan: what AgentX's plan check stored beside it. Absent reads as "not checked". */
+  selfCheck?: PlanSelfCheckView;
 }
 
 /** How many claims, per level, and how many decisions in all, show before the rest fold away. */
@@ -373,6 +377,54 @@ function checksHtml(context: Context): string {
   return `<section id="${escapeHtml(checksAnchor(context.input.version))}" class="checks"><h3>Checks</h3><table><thead><tr><th class="check-label">Check</th><th class="check-from">From</th><th class="check-proves">Proves</th><th class="check-status">Status</th></tr></thead><tbody>${rows}</tbody></table>${threads}${others}</section>`;
 }
 
+/**
+ * PLANVIEW: "Checks this plan adds": every browser and API scenario (who runs it, where, every step, every expected value,
+ * the stand-in services per target, the AI step limit and what it proves) and every proposed check, in the same plain
+ * words the approval card uses. Nothing is left out here; the card lists the first few.
+ */
+const joinTargets = (targets: string[]): string => (targets.length <= 1 ? targets.join("") : `${targets.slice(0, -1).join(", ")} and ${targets.at(-1)!}`);
+
+/**
+ * "AgentX's plan check": what the broker's own check of a coding plan stored beside it (T5's record), in its fixed sentences. A plan with no usable record says it was
+ * not checked, never that nothing was found. Requirements and designs are not judged and show nothing.
+ */
+function planSelfCheckHtml(context: Context): string {
+  if (context.input.kind !== "plan") return "";
+  const view = context.input.selfCheck;
+  const body = view === undefined || !view.checked ? `<p class="plan-check-not-checked">${t(NOT_CHECKED_SENTENCE)}</p>`
+    : view.sentences.length === 0 ? `<p class="plan-check-clear">AgentX's plan check found no problems.</p>`
+    : `<ul class="plan-check-findings">${view.sentences.map((sentence) => `<li>${t(sentence)}</li>`).join("")}</ul>`;
+  return `<section id="${escapeHtml(`${context.input.anchor}-v${context.input.version}-plan-check`)}" class="plan-check"><h3>AgentX's plan check</h3>${body}</section>`;
+}
+
+function planChecksAddedHtml(context: Context): string {
+  const { plan, version } = context.input;
+  const summary = planCheckSummary(plan, { detail: "page", ...(context.input.selfCheck === undefined ? {} : { selfCheck: context.input.selfCheck }) });
+  if (summary.scenarios.length === 0 && summary.checks.length === 0) return "";
+  const proofs = (ids: string[] | undefined): string => (ids === undefined || ids.length === 0 ? "" : ` <span class="proves">Proves: ${ids.map((id) => provesLink(context, id)).join(", ")}</span>`);
+  const scenarios = summary.scenarios.map((scenario, index) => {
+    const ids = plan.scenarioProves?.[plan.e2e!.scenarios[index]!.scenarioId];
+    const steps = scenario.steps.length === 0 ? "<li>Looks at the app</li>" : scenario.steps.map((step) => `<li>${t(step)}</li>`).join("");
+    return `<li class="plan-scenario"><p><strong>${t(scenario.scenarioId)}</strong>: as ${t(scenario.account)}${scenario.targets.length === 0 ? "" : ` on ${t(scenario.targets.join(" and "))}`}.${proofs(ids)}</p>`
+      + `<p>Steps</p><ol class="scenario-steps">${steps}</ol>`
+      + `<p>Expects</p><ul class="scenario-expects">${scenario.expects.map((expect) => `<li>${t(expect)}</li>`).join("")}</ul>`
+      + (scenario.mocks.length === 0 ? `<p class="scenario-mocks scenario-no-mocks">No stand-in services${scenario.targets.length === 0 ? "" : ` on ${t(joinTargets(scenario.targets))}`}.</p>` : `<p class="scenario-mocks">Stand-in services: ${t(scenario.mocks.join(", "))}.</p>`)
+      + (scenario.requiredReal.length === 0 ? "" : `<p class="scenario-real">Must run for real: ${t(scenario.requiredReal.join(", "))}.</p>`)
+      + (scenario.realAndStandIn.length === 0 ? "" : `<p class="scenario-clash">${t(scenario.realAndStandIn.join(", "))} must run for real but is also a stand-in here; approval refuses this.</p>`)
+      + (scenario.maxActions === undefined ? "" : `<p class="scenario-actions">An AI step may take up to ${scenario.maxActions} actions.</p>`)
+      + "</li>";
+  }).join("");
+  const checks = summary.checks.map((check) => {
+    const ids = plan.checks?.proves[check.checkId];
+    return `<li class="plan-added-check"><strong>${t(check.label)}</strong> ${t(check.does)}.${proofs(ids)}${check.direction === undefined ? "" : ` <span class="check-direction">This check ${t(check.direction)}.</span>`}${check.tried === undefined ? "" : ` ${t(check.tried)}.`}</li>`;
+  }).join("");
+  return `<section id="${escapeHtml(`${context.input.anchor}-v${version}-added-checks`)}" class="plan-checks"><h3>Checks this plan adds <span class="as-proposed">(as proposed in this version)</span></h3>`
+    + (scenarios === "" ? "" : `<h4>Browser and API scenarios</h4><ol class="plan-scenarios">${scenarios}</ol>`)
+    + (checks === "" ? "" : `<h4>Other checks</h4><ul class="plan-added-checks">${checks}</ul>`)
+    + (summary.noneReason !== undefined && checks === "" ? `<p>No other checks apply: ${t(summary.noneReason)}</p>` : "")
+    + "</section>";
+}
+
 /** "Comments on this document": the whole-document threads, and the Comment control for someone who may comment. */
 function documentCommentsHtml(context: Context): string {
   const threads = threadsHtml(context, "document", { controlLabel: "Comment on this document" });
@@ -462,6 +514,8 @@ export async function renderPlanDocument(input: RenderPlanInput): Promise<string
     whatChangedHtml(context),
     whyHtml(plan),
     `<div class="claims">${await claimList(context, plan.claims, 1)}${decisionsBlock}</div>`,
+    planSelfCheckHtml(context),
+    planChecksAddedHtml(context),
     notChangingHtml(context, plan.notChanging),
     list("Risks", "risks", plan.risks),
     checksHtml(context),

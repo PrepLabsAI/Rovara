@@ -8,14 +8,14 @@ import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-bro
 import { createTaskWebApi } from "../../packages/broker/src/aws/task-web-api.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { startApplicationRound } from "../support/e2e-application-round-harness.js";
-import { DEV_ISSUER, MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { DEV_ISSUER, MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
 
 // A project registered before the catalog carried `latestRevision` (the live TEST project the-mentor-test) has a
 // catalog row without it. Publication authority guards that row with `latestRevision = :latest`, so it repairs the
 // pointer from the revision history first and keeps the guard strict.
 
-type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
+type Harness = Awaited<ReturnType<typeof createSingleAnswerPlanBroker>>;
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
 const REQUIRED_CHECK = { id: "required-1", label: "npm test", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 } };
 const CATALOG = { pk: "PROJECT_CATALOG", sk: "PROJECT#payments" };
@@ -85,7 +85,7 @@ afterEach(async () => { vi.restoreAllMocks(); await disposeRealCandidates(); });
 
 describe("publication of a project whose catalog row predates latestRevision", () => {
   it("starts the automatic publication, repairing the pointer from the revision history", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
     await finishImplementation();
     makeLegacyCatalog(harness);
@@ -98,7 +98,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
   });
 
   it("starts the owner's Retry opening the pull request", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
     await finishImplementation();
     await passReviews(harness, workspaceId, candidate);
@@ -114,7 +114,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
   });
 
   it("keeps a project that already has its pointer exactly as before: no repair write", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
     await finishImplementation();
     const before = harness.db.get(CATALOG.pk, CATALOG.sk);
@@ -124,7 +124,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
   });
 
   it("stays correct when two publications repair the pointer at the same time", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { workspaceId, start } = await readyToPublish(harness);
     makeLegacyCatalog(harness);
     const firstRegisteredAt = harness.db.get(CATALOG.pk, CATALOG.sk)?.firstRegisteredAt;
@@ -144,7 +144,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
 
   it("refuses a project with no revision history with a plain sentence, logs the project and reason, and is never a busy workspace", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { workspaceId, start } = await readyToPublish(harness);
     makeLegacyCatalog(harness);
     for (const project of harness.db.find((item) => item.entityType === "PROJECT" && (item.definition as { name?: string } | undefined)?.name === "payments")) {
@@ -161,7 +161,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
 
   it("refuses an ambiguous catalog row the same way and leaves it untouched", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { start } = await readyToPublish(harness);
     // A catalog row that names another project is not this project's index: it is never rewritten.
     const ambiguous = { pk: CATALOG.pk, sk: CATALOG.sk, entityType: "PROJECT_CATALOG", name: "someone-else", firstRegisteredAt: "2026-10-08T20:03:16.000Z" };
@@ -174,7 +174,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
 
   it("never creates a catalog row: an absent row is refused the same way and stays absent", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { workspaceId, start } = await readyToPublish(harness);
     harness.db.delete(CATALOG.pk, CATALOG.sk);
     log.mockClear();
@@ -187,7 +187,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
   });
 
   it("tells the owner the plain sentence on Retry through the API", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
     await finishImplementation();
     await passReviews(harness, workspaceId, candidate);
@@ -199,7 +199,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
   });
 
   it("tells the owner the plain sentence in the Slack thread and on the task page", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     // A task started from Slack, so its Retry button can be pressed there.
     const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000071" };
     const started = await harness.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread, userId: MAYA.slackUserId,
@@ -240,7 +240,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
   describe("a cancelled publication acceptance", () => {
     it("names the extra item that failed, logs every item's reason, and is not WORKSPACE_BUSY when the workspace was free", async () => {
       const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-      const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+      const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
       const { workspaceId, start } = await readyToPublish(harness);
       // The pointer exists but is not the newest revision: the catalog guard fails, nothing else does.
       harness.db.set({ ...harness.db.get(CATALOG.pk, CATALOG.sk)!, latestRevision: 99 });
@@ -260,7 +260,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
 
     it("stays WORKSPACE_BUSY when the workspace's own item was the conflict", async () => {
       const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-      const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+      const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
       const { start } = await readyToPublish(harness);
       const reasons = [{ Code: "ConditionalCheckFailed" }, ...Array.from({ length: 6 }, () => ({ Code: "None" }))];
       log.mockClear();
@@ -271,7 +271,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
     });
 
     it("is still answered as stale when the task moved on, whichever kind of item cancelled", async () => {
-      const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+      const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
       const { taskId, start } = await readyToPublish(harness);
       const task = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
       // The task read inside the start is the one before the move; the transaction then meets the moved task.
@@ -289,7 +289,7 @@ describe("publication of a project whose catalog row predates latestRevision", (
 
     it("pull-request updates (acceptPullRequestUpdate) log reasons per item and answer extra-item failures as CONFIG_INVALID", async () => {
       const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-      const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+      const harness = await createSingleAnswerPlanBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
       const { taskId, workspaceId, candidate } = await readyToPublish(harness);
       const task = harness.db.get(`DEVTASK#${taskId}`, "META") as never;
       log.mockClear();
@@ -323,7 +323,7 @@ describe("required-E2E publication authority of a project whose catalog row pred
       maxActionsPerCase: 1, maxModelRequests: 1, maxInputTokens: 128, maxOutputTokens: 128, maxSpendUsd: null } };
   /** A required-E2E task whose feature intent the owner approved, with a candidate recorded, ready for its current-authority check. */
   async function approvedE2ETask() {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { e2eFeatureRuntimeCatalogId: "test-feature-catalog", projectSetupRuntimeCatalogId: "test-setup-catalog" } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { e2eFeatureRuntimeCatalogId: "test-feature-catalog", projectSetupRuntimeCatalogId: "test-setup-catalog" } });
     const payments = harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     harness.db.set({ ...payments, setupApproval: { decision: "approve", proposalRef: "test", proposalSha256: "a".repeat(64), candidateDigest: "b".repeat(64), policyDigest: "c".repeat(64) },
       definition: { ...(payments.definition as Record<string, unknown>), e2e: policy } });

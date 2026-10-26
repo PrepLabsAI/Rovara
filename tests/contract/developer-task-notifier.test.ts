@@ -2,14 +2,14 @@
 // Spec 025 FR-032, FR-034, C7 to C9: the notifier, fed from the fake table's writes, posting to a
 // fake Slack. The queue is an array; a failed notice stays in it with its attempt count.
 import { createHash, randomUUID } from "node:crypto";
-import { PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId } from "@agentx/contracts";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId, planQualityFinding } from "@agentx/contracts";
 import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/src/developer/task-records.js";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
 import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { noticesOf, type Notice } from "../../packages/broker/src/developer/notifications.js";
-import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
+import { MAYA, createSingleAnswerPlanBroker, recordStream } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
@@ -159,7 +159,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   reviewUrlBase?: string;
   workflowE2EBlocks?: NotifierDependencies["workflowE2EBlocks"];
 } = {}) {
-  const harness = await createDeveloperTaskBroker();
+  const harness = await createSingleAnswerPlanBroker();
   const postOverride = options.post;
   // Gap 12: every thread post stays brief (1,200 visible characters, blocks included).
   const strict = new StrictSlackWeb({ briefLimit: 1_200 });
@@ -363,6 +363,26 @@ describe("cards whose step is over lose their buttons (Task 19)", () => {
     expect(edits).toHaveLength(1);
     expect(edits[0]!.blocks.some((block) => (block as { type: string }).type === "actions")).toBe(false);
     expect(edits[0]!.blocks.at(-1)).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: "This task is closed." }] });
+  });
+
+  it("POLISH-1: says 'Working on the coding plan' once per planning run, even when the plan self-check asks the planner again", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    const set = (workflow: Record<string, unknown>, planSelfCheck?: Record<string, unknown>) => h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: `SET workflow = :workflow, updatedAt = :now${planSelfCheck === undefined ? "" : ", planSelfCheck = :check"}`,
+      ExpressionAttributeValues: { ":now": now(), ":workflow": { artifacts: [], ...workflow }, ...(planSelfCheck === undefined ? {} : { ":check": planSelfCheck }) } }));
+    const said = () => h.posts.filter((post) => post.text.includes("Working on the coding plan")).length;
+    await set({ revision: 20, stage: "PLAN", state: "RUNNING" });
+    await h.pump();
+    expect(said()).toBe(1);
+    // The self-check revised the plan: one revision on, the same run (the budget record says one automatic revision was spent).
+    await set({ revision: 21, stage: "PLAN", state: "RUNNING" }, { artifactType: "plan", version: 1, used: 1 });
+    await h.pump();
+    expect(said()).toBe(1);
+    // A later planning run (the owner asked for changes) is a new run, said again.
+    await set({ revision: 40, stage: "PLAN", state: "RUNNING" }, { artifactType: "plan", version: 2, used: 0 });
+    await h.pump();
+    expect(said()).toBe(2);
   });
 
   it("gives up on a card Slack will not edit, and retries one Slack could not edit just then", async () => {
@@ -631,6 +651,39 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(h.posts.at(-1)!.text).toBe("Coding stopped before it finished. The run stopped unexpectedly.");
   });
 
+  it("says a coding run the owner stopped once, and an unreadable plan by its category (CANCELDUP, PLANREADMSG)", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const set = (workflow: Record<string, unknown>, unreadable?: Record<string, unknown>) => h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: `SET workflow = :workflow, updatedAt = :now${unreadable === undefined ? "" : ", planUnreadable = :unreadable"}`,
+      ExpressionAttributeValues: { ":now": new Date().toISOString(), ":workflow": { artifacts: [], ...workflow }, ...(unreadable === undefined ? {} : { ":unreadable": unreadable }) } }));
+    await set({ revision: 7, stage: "IMPLEMENT", state: "BLOCKED", blockReason: "implementation operation ended cancelled" });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("Coding was stopped before it finished. Choose Retry to run it again.");
+    // The stored problems quote the model: only the category sentence reaches Slack.
+    await set({ revision: 8, stage: "PLAN", state: "BLOCKED", blockReason: "the plan couldn't be read" },
+      { workflowRevision: 8, errors: [`the plan: e2e scenarios 1 steps 2 maxActions is missing ${SECRET}`, "claim 1: text is empty"] });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("AgentX couldn't read the coding plan it wrote: the browser and API checks part did not match the required format. Choose Retry planning (it gets the problems found), or Close.");
+    expect(h.posts.map((post) => post.text).join("\n")).not.toContain(SECRET);
+    // Problems kept for an older block say nothing about this one.
+    await set({ revision: 9, stage: "PLAN", state: "BLOCKED", blockReason: "the plan couldn't be read" }, { workflowRevision: 8, errors: ["the plan: e2e scenarios 1 steps 2 maxActions is missing"] });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("AgentX couldn't read the coding plan it wrote.");
+    // After the automatic second try: the category the broker stored (not recomputed from the problems) and that AgentX already tried again.
+    await set({ revision: 10, stage: "PLAN", state: "BLOCKED", blockReason: "the plan couldn't be read" },
+      { workflowRevision: 10, errors: ["something unrecognisable"], category: "checks-shape", autoRetried: true });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("AgentX couldn't read the coding plan it wrote: the checks it proposed did not match the required format. AgentX tried once more by itself and got the same problem. Choose Retry planning (it gets the problems found), or Close.");
+    // A category that is not in the fixed set is not trusted: it is read from the problems.
+    await set({ revision: 11, stage: "PLAN", state: "BLOCKED", blockReason: "the plan couldn't be read" },
+      { workflowRevision: 11, errors: ["claim 1: text is empty"], category: "<!channel>", autoRetried: true });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("AgentX couldn't read the coding plan it wrote: the claims or decisions did not match the required format. AgentX tried once more by itself and got the same problem. Choose Retry planning (it gets the problems found), or Close.");
+  });
+
   it("posts one message per workflow step and never repeats a blocked review for a stale notice", async () => {
     const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
     await h.pump();
@@ -664,7 +717,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     h.fail(undefined);
     await h.pump();
-    expect(h.posts.filter((post) => post.text.startsWith("Running the selected checks again"))).toHaveLength(1);
+    expect(h.posts.filter((post) => post.text.startsWith("Running the selected checks"))).toHaveLength(1);
     expect(h.logs.filter((entry) => entry.event === "developer_notifier.said_post_uncertain")).toEqual([
       expect.objectContaining({ reason: "claim_retaken", noticeId: `${h.taskId}:workflow:2` }),
     ]);
@@ -989,6 +1042,81 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     const actions = (message.blocks?.at(-1) as { elements: Array<{ action_id: string; url?: string }> }).elements;
     expect(actions.map((button) => button.action_id)).toEqual(["agentx_open_review", "agentx_workflow_approve", "agentx_workflow_changes", "agentx_workflow_close"]);
     expect(actions[0]!.url).toBe(opening);
+  });
+
+  it("lists the checks a structured plan adds and the answers Approve here uses, within the brief limit", async () => {
+    const plan = planDocument({
+      decisions: [{ id: "d1", claimId: "1", question: "How many times should a payment be retried?", options: [{ id: "three", label: "Three times", consequence: "Soon." }, { id: "five", label: "Five times", consequence: "Late." }], recommended: "five" }],
+      scenarioProves: { "viewer-api": ["2"] },
+      e2e: { schemaVersion: 1, requestedTargetIds: ["api-viewer"], accountContextRefs: [], semanticExportDeltas: [], scenarios: [{ scenarioId: "viewer-api", requirementId: "r", requestedTargetIds: ["api-viewer"], required: true,
+        accountProfileId: "viewer", minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "request", requestId: "r1", path: "/api/orders.csv", method: "GET", body: {} }],
+        assertions: [{ kind: "http-status", path: "/api/orders.csv", method: "GET", equals: 403 }] }] } as never,
+    });
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, { readArtifact: async (key) => String(h.s3.objects.get(key)), reviewUrlBase: "https://agentx.example.test" });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const planning = h.active();
+    await h.artifact(h.workspaceId, planning, "plan.md", planAnswer(plan));
+    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await h.pump();
+    const text = h.posts.at(-1)!.text;
+    expect(text).toContain("• d1: How many times should a payment be retried? Answer: Five times");
+    expect(text).toContain("• As viewer on api-viewer: expects GET /api/orders.csv answers 403; proves claim 2; no stand-ins; steps: sends GET /api/orders.csv");
+    expect(visibleSlackText(text).length).toBeLessThanOrEqual(1_200);
+  });
+
+  describe("what AgentX's plan check stored beside the plan (T5's record)", () => {
+    const finding = planQualityFinding({ code: "claim-not-covered", claimIds: ["2"] });
+    const shaOf = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+    /** Plans the harness's broker stored, read through a notifier whose reader answers the record beside each document as `record` says. */
+    async function planCard(record: (document: string) => string | Error | undefined) {
+      const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+        readArtifact: async (key) => {
+          if (key.endsWith(".quality.json")) {
+            const answer = record(String(h.s3.objects.get(key.replace(/\.quality\.json$/u, ".json"))));
+            if (answer instanceof Error) throw answer;
+            if (answer === undefined) throw Object.assign(new Error("missing"), { name: "NoSuchKey" });
+            return answer;
+          }
+          return String(h.s3.objects.get(key));
+        }, reviewUrlBase: "https://agentx.example.test",
+      });
+      await h.pump();
+      await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+      await h.pump();
+      const planning = h.active();
+      await h.artifact(h.workspaceId, planning, "plan.md", planAnswer(planDocument({ decisions: [] })));
+      await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+      await h.pump();
+      return visibleSlackText(h.posts.at(-1)!.text);
+    }
+    const checkedRecord = (extra: Record<string, unknown>) => (document: string) => JSON.stringify({ schemaVersion: 1, status: "checked", artifactId: "plan", artifactSha256: shaOf(document), checkedAt: "2026-10-25T10:00:00.000Z",
+      findings: [], notes: [], autoRevisions: 0, ...extra });
+
+    it("shows a finding that survived the automatic revision on the approval card", async () => {
+      const text = await planCard(checkedRecord({ findings: [finding] }));
+      expect(text).toContain(`• ${finding.ownerSentence}`);
+      expect(text).not.toContain("Not checked");
+      expect(text.length).toBeLessThanOrEqual(1_200);
+    });
+
+    it("says 'Not checked by AgentX's plan check.' when there is no record, an unreadable one, one for another document, or a not-checked one", async () => {
+      for (const [name, record] of [
+        ["no record", () => undefined], ["unreadable", () => "{nope"], ["read fails", () => new Error("boom")],
+        ["another document", checkedRecord({ artifactSha256: "b".repeat(64), findings: [finding] })],
+        ["not checked", checkedRecord({ status: "not-checked", reason: "disabled" })],
+      ] as const) {
+        const text = await planCard(record);
+        expect(text, name).toContain("• Not checked by AgentX's plan check.");
+        expect(text, name).not.toContain(finding.ownerSentence);
+      }
+    });
+
+    it("says nothing about the plan check when it ran and found nothing", async () => {
+      const text = await planCard(checkedRecord({}));
+      expect(text).not.toContain("plan check");
+    });
   });
 
   it("lists every claim of a tiny structured plan, and keeps a plan of fifty long claims and twenty decisions within the brief limit", async () => {
@@ -2184,5 +2312,214 @@ describe("page decisions and comments in Slack (spec 061 slice 2)", () => {
     await h.pump();
     expect(h.posts).toHaveLength(before);
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "comment_nudge", outcome: "not_shared" }));
+  });
+});
+
+describe("the blocked card carries what Rovara tried and why it asks (AUTOFIX)", () => {
+  const ASK = (revision: number) => ({ workflowRevision: revision, reason: "spend-cap", codes: ["review-findings"], capUsd: 15, at: new Date().toISOString() });
+  /** A workflow blocked in REVIEW with an introduced finding, and (when `looking`) the broker's automatic-fix row for it that has not been resolved yet. */
+  async function blockedTask(looking: boolean, options: Parameters<typeof notifierHarness>[1] = {}) {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, options);
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const operationId = h.active();
+    const candidateDigest = "a".repeat(64);
+    await h.finish(h.workspaceId, operationId, "SUCCEEDED", { result: { result: "Both reviews PASS" } });
+    h.stream.take();
+    await h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now", ExpressionAttributeValues: { ":now": new Date().toISOString(), ":workflow": {
+        revision: 9, stage: "REVIEW", state: "BLOCKED", artifacts: [], decisions: [], candidate: { digest: candidateDigest },
+        verification: { candidateDigest, results: [{ checkId: "diff-check", status: "PASS" }] },
+        reviews: [{ operationId, candidateDigest, role: "CRITIC", provider: "t", version: "1", status: "FINDINGS", readOnly: true, recordedAt: new Date().toISOString(),
+          findings: [{ text: "The new parser drops the last line.", origin: "INTRODUCED", severity: "HIGH" }] }],
+      } } }));
+    if (looking) h.db.set({ pk: "WORKFLOW_DISPATCH", sk: `${h.taskId}#9`, entityType: "WORKFLOW_DISPATCH", taskId: h.taskId, workflowRevision: 9, kind: "AUTOFIX", candidateDigest, createdAt: new Date(h.now()).toISOString(), attempts: 0 });
+    return h;
+  }
+  const setAsk = (h: Awaited<ReturnType<typeof blockedTask>>, ask: unknown) => h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+    UpdateExpression: "SET autofixAsk = :ask", ExpressionAttributeValues: { ":ask": ask } }));
+
+  it("holds the card while Rovara is still looking, then posts it once with the ask", async () => {
+    const h = await blockedTask(true);
+    const before = h.posts.length;
+    await h.pump();
+    // Held: nothing posted for the blocked step, and the notice is retried.
+    expect(h.posts).toHaveLength(before);
+    expect(h.queue).toHaveLength(1);
+    // Rovara asks and resolves its row.
+    await setAsk(h, ASK(9));
+    h.db.delete("WORKFLOW_DISPATCH", `${h.taskId}#9`);
+    await h.pump();
+    const card = h.posts.at(-1)!;
+    expect(h.posts).toHaveLength(before + 1);
+    expect(card.text).toContain("Reviews found 1 issue in this change.");
+    expect(card.text).toContain("Why I'm asking you:* Another automatic round would go over the $15 per-task cap on automatic fixing.");
+    // The ask arriving also queued a notice of its own: the card already carries it, so nothing more is posted.
+    await h.pump();
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+  });
+
+  it("posts the card as it is after the hold, and the ask follows once as a post of its own", async () => {
+    const h = await blockedTask(true);
+    const before = h.posts.length;
+    await h.pump();
+    expect(h.posts).toHaveLength(before);
+    h.advance(11 * 60_000);
+    await h.pump();
+    const card = h.posts.at(-1)!;
+    expect(h.posts).toHaveLength(before + 1);
+    expect(card.text).not.toContain("Why I'm asking you");
+    // Later Rovara writes its ask: one follow-up with the lines, and no second card.
+    await setAsk(h, ASK(9));
+    await h.pump();
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 2);
+    expect(h.posts.at(-1)!.text).toContain("Why I'm asking you:* Another automatic round would go over the $15 per-task cap on automatic fixing.");
+    expect(h.posts.at(-1)!.blocks?.some((block) => (block as { type: string }).type === "actions")).toBeFalsy();
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 2);
+  });
+
+  it("posts the blocked card even when the hold lookup is refused, and says so in the log (LIVEFIX-1: the notifier's grant lacked WORKFLOW_DISPATCH)", async () => {
+    const h = await blockedTask(true, { documentClient: (db) => ({ send: async (command: unknown) => {
+      if (command instanceof GetCommand && (command.input.Key as { pk?: string } | undefined)?.pk === "WORKFLOW_DISPATCH") throw Object.assign(new Error("User is not authorized"), { name: "AccessDeniedException" });
+      return db.send(command as Parameters<FakeDynamoDb["send"]>[0]);
+    } }) });
+    const before = h.posts.length;
+    await h.pump();
+    // Without the fix the lookup threw, the notice was retried and nothing was posted.
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.queue).toEqual([]);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.autofix_hold_unreadable", taskId: h.taskId, error: "AccessDeniedException" }));
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "workflow", outcome: "posted" }));
+  });
+
+  it("POLISH-1: an ask written while the card is still being posted is retried, not dropped", async () => {
+    const h = await blockedTask(true);
+    const before = h.posts.length;
+    await h.pump();
+    h.advance(11 * 60_000);
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    // The card's post is in flight again: its marker has no deliveredAt yet and its words are claimed.
+    const cardKey = { pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:workflow:9` };
+    const saidKey = { pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:said:revision:9` };
+    const card = h.db.get(cardKey.pk, cardKey.sk) as Record<string, unknown>;
+    const said = h.db.get(saidKey.pk, saidKey.sk) as Record<string, unknown>;
+    const { deliveredAt: cardDelivered, ...cardInFlight } = card;
+    const { deliveredAt: saidDelivered, ...saidInFlight } = said;
+    h.db.set({ ...cardInFlight, ...cardKey });
+    h.db.set({ ...saidInFlight, ...saidKey, claimedBy: "card-notice", claimUntil: h.now() + 60_000 });
+    await setAsk(h, ASK(9));
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.queue.length).toBeGreaterThan(0);
+    // The card lands; the ask is then said once, as a post of its own.
+    h.db.set({ ...card, ...cardKey, deliveredAt: cardDelivered });
+    h.db.set({ ...said, ...saidKey, deliveredAt: saidDelivered });
+    await h.pump();
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 2);
+    expect(h.posts.at(-1)!.text).toContain("Why I'm asking you");
+  });
+
+  it("adds nothing for a task Rovara never touched: the card is today's, with no wait", async () => {
+    const h = await blockedTask(false);
+    const before = h.posts.length;
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.posts.at(-1)!.text).not.toContain("Rovara");
+    expect(h.posts.at(-1)!.text).not.toContain("Why I'm asking you");
+  });
+});
+
+describe("a task-state card is not dropped after the hour (LIVEFIX-1 item 5)", () => {
+  const HOUR = 3_600_000;
+  const noticeIdOf = (h: { logs: Array<Record<string, unknown>> }) => String(h.logs.find((entry) => entry.event === "developer_notifier.retry" && entry.kind === "workflow")?.noticeId);
+  /** A blocked step whose card cannot be delivered: Slack refuses, and the notice is retried. */
+  async function undeliverableCard() {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    h.stream.take();
+    const operationId = h.active();
+    const candidateDigest = "a".repeat(64);
+    await h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now", ExpressionAttributeValues: { ":now": new Date().toISOString(), ":workflow": {
+        revision: 9, stage: "REVIEW", state: "BLOCKED", artifacts: [], decisions: [], candidate: { digest: candidateDigest },
+        verification: { candidateDigest, results: [{ checkId: "diff-check", status: "PASS" }] },
+        reviews: [{ operationId, candidateDigest, role: "CRITIC", provider: "t", version: "1", status: "FINDINGS", readOnly: true, recordedAt: new Date().toISOString(),
+          findings: [{ text: "The new parser drops the last line.", origin: "INTRODUCED", severity: "HIGH" }] }],
+      } } }));
+    h.fail("ratelimited");
+    await h.pump();
+    expect(h.queue).toHaveLength(1);
+    return h;
+  }
+
+  it("keeps retrying past the hour, counts the failure once, leaves a durable record, and posts the card when Slack recovers", async () => {
+    const h = await undeliverableCard();
+    const before = h.posts.length;
+    h.advance(HOUR + 5_000);
+    await h.pump();
+    // The alarm's metric fires once, at the hour, as before; the notice is no longer dropped.
+    expect(h.deliveryFailed).toHaveBeenCalledTimes(1);
+    expect(h.queue).toHaveLength(1);
+    const noticeId = noticeIdOf(h);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_failed", kind: "workflow", noticeId, reason: "ratelimited", retrying: true }));
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).toMatchObject({ entityType: "NOTICE", kind: "workflow", noticeId, reason: "ratelimited", firstFailedAt: expect.any(String) as string });
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).not.toHaveProperty("abandonedAt");
+    // Hours later it is still retried (the delay is set again), and the count does not grow.
+    const retriesAtTheHour = h.retryLater.mock.calls.length;
+    h.advance(3 * HOUR);
+    await h.pump();
+    expect(h.deliveryFailed).toHaveBeenCalledTimes(1);
+    expect(h.queue).toHaveLength(1);
+    expect(h.retryLater.mock.calls.length).toBeGreaterThan(retriesAtTheHour);
+    // Slack recovers: the card is posted, once.
+    h.fail(undefined);
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.queue).toEqual([]);
+    expect(h.deliveryFailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up after twelve hours, with a second count, a log line and the record marked abandoned", async () => {
+    const h = await undeliverableCard();
+    h.advance(HOUR + 5_000);
+    await h.pump();
+    const noticeId = noticeIdOf(h);
+    h.advance(12 * HOUR);
+    await h.pump();
+    expect(h.queue).toEqual([]);
+    expect(h.deliveryFailed).toHaveBeenCalledTimes(2);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_abandoned", kind: "workflow", noticeId, reason: "ratelimited" }));
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).toMatchObject({ reason: "ratelimited", abandonedAt: expect.any(String) as string });
+  });
+
+  it("records only a fixed reason code, never error text, and still counts when the record cannot be written", async () => {
+    const h = await undeliverableCard();
+    h.fail("a very long Slack error with a token xoxb-1111-2222-secret in it");
+    h.advance(HOUR + 5_000);
+    await h.pump();
+    const noticeId = noticeIdOf(h);
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).toMatchObject({ reason: "unknown" });
+    expect(JSON.stringify(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`))).not.toContain("xoxb");
+    expect(JSON.stringify(h.logs.filter((entry) => String(entry.event).startsWith("developer_notifier.delivery_")))).not.toContain("xoxb");
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_failed", reason: "unknown" }));
+  });
+
+  it("still drops a start message after the hour: its replies depend on the thread, and that behaviour is unchanged", async () => {
+    const h = await notifierHarness();
+    h.fail("channel_not_found");
+    await h.pump();
+    h.advance(HOUR + 2_000);
+    await h.pump();
+    expect(h.queue).toEqual([]);
+    expect(h.deliveryFailed).toHaveBeenCalledTimes(1);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_failed", kind: "start", reason: "channel_not_found" }));
   });
 });

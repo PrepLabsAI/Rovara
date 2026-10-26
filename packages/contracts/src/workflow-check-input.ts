@@ -37,6 +37,64 @@ export const WorkflowProposedCheckInputSchema = z.object({
 }).strict();
 export type WorkflowProposedCheckInput = z.infer<typeof WorkflowProposedCheckInputSchema>;
 
+/** A planner's own prediction of how a proposed check does on the unchanged code: "fail" means the check tests new behaviour. */
+export const WorkflowCheckExpectOnBaseSchema = z.enum(["pass", "fail"]);
+export type WorkflowCheckExpectOnBase = z.infer<typeof WorkflowCheckExpectOnBaseSchema>;
+
+/**
+ * Built-in check kinds with fixed meanings, so a plan never needs a hand-written `grep` to test that a file holds, or
+ * lacks, a piece of text. The planner names the kind, the file and the literal text; AgentX writes the command (below),
+ * so the exit code can only mean what the kind says: `file-contains` passes when the text is in the file;
+ * `file-not-contains` passes only when the file is readable and the text is not in it (a missing file fails both).
+ */
+export const WORKFLOW_BUILTIN_CHECK_KINDS = ["file-contains", "file-not-contains"] as const;
+export type WorkflowBuiltinCheckKind = (typeof WORKFLOW_BUILTIN_CHECK_KINDS)[number];
+/** The longest literal text a built-in file check looks for. */
+export const WORKFLOW_BUILTIN_CHECK_TEXT_MAX = 300;
+
+/** The fixed script of each built-in kind: `$1` is the literal text, `$2` the file (relative to the check's folder). */
+const BUILTIN_SCRIPTS: Record<WorkflowBuiltinCheckKind, string> = {
+  // A symbolic link may point outside the repository, so neither kind follows one (the check fails).
+  "file-contains": 'test ! -L "$2" && grep -qF -e "$1" -- "$2"',
+  // grep exits 1 for "no match" and 2 for a trouble (such as a missing file); only "no match" passes.
+  "file-not-contains": 'test ! -L "$2" && { grep -qF -e "$1" -- "$2"; test "$?" -eq 1; }',
+};
+
+const SECRET_FILE_NAME = /^(?:\.env(?:\..*)?|\.npmrc|\.netrc|id_.*|.*\.pem|.*\.key)$/u;
+/**
+ * True when a built-in file check may not read the path: anything in a `.git` folder, a dotenv file, a key or a token
+ * file. A check that says "this file holds, or lacks, this text" would leak one bit about it, and a file check has no
+ * reason to read them.
+ */
+export function builtinCheckPathRefused(path: string): boolean {
+  const segments = path.split("/");
+  return segments.some((segment) => segment === ".git" || segment === ".ssh" || segment === ".aws") || SECRET_FILE_NAME.test(segments.at(-1) ?? "");
+}
+
+/** A built-in check as the planner writes it in a plan's `checks` member: the kind, a file in its folder and the exact text. */
+export const WorkflowBuiltinCheckInputSchema = z.object({
+  label: PlainText(z.string().trim().min(1).max(80)),
+  kind: z.enum(WORKFLOW_BUILTIN_CHECK_KINDS),
+  cwd: RelativeWorkspacePathSchema,
+  path: PlainText(RelativeWorkspacePathSchema).refine((value) => !builtinCheckPathRefused(value)),
+  text: PlainText(z.string().min(1).max(WORKFLOW_BUILTIN_CHECK_TEXT_MAX)),
+  timeoutSeconds: z.number().int().min(1).max(1_800).optional(),
+}).strict();
+export type WorkflowBuiltinCheckInput = z.infer<typeof WorkflowBuiltinCheckInputSchema>;
+
+/** The command a built-in check runs. */
+export function builtinFileCheckCommand(input: Pick<WorkflowBuiltinCheckInput, "kind" | "cwd" | "path" | "text">): { cwd: string; executable: string; args: string[] } {
+  return { cwd: input.cwd, executable: "sh", args: ["-c", BUILTIN_SCRIPTS[input.kind], "sh", input.text, input.path] };
+}
+
+/** What a stored command is when AgentX wrote it for a built-in check; undefined for any other command. */
+export function builtinFileCheckOf(command: { executable: string; args: readonly string[] }): { kind: WorkflowBuiltinCheckKind; text: string; path: string } | undefined {
+  const [flag, script, name, text, path, ...rest] = command.args;
+  if (command.executable !== "sh" || flag !== "-c" || name !== "sh" || text === undefined || path === undefined || rest.length > 0) return undefined;
+  const kind = WORKFLOW_BUILTIN_CHECK_KINDS.find((candidate) => BUILTIN_SCRIPTS[candidate] === script);
+  return kind === undefined ? undefined : { kind, text, path };
+}
+
 const CHECK_FIELDS = new Set(["label", "cwd", "executable", "args", "timeoutSeconds"]);
 
 /**

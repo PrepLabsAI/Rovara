@@ -63,6 +63,19 @@ describe("the control-plane client (FR-027)", () => {
       expectedPeopleRevision: 1, personId: "22222222-2222-4222-8222-222222222222", role: "viewer" }))
       .rejects.toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
   });
+  it("reads the full plan from its own route and refuses an answer it cannot read", async () => {
+    const plan = { taskId: view.taskId, document: "plan", version: 2, sha256: "a".repeat(64), approved: true, current: false, versions: [1, 2], content: { title: "t" },
+      summary: { lines: ["As owner on web: opens /; expects x is shown"], decisions: [], later: 1 } };
+    const fetch = vi.fn().mockResolvedValueOnce(reply(200, { plan, requestId: "r" })).mockResolvedValueOnce(reply(200, { plan: { ...plan, version: "2" }, requestId: "r" }));
+    const api = client(fetch);
+    await expect(api.getTaskPlan(view.taskId, { document: "plan", version: 2 })).resolves.toMatchObject({ version: 2, current: false, summary: { lines: plan.summary.lines } });
+    expect(String(fetch.mock.calls[0]![0])).toBe(`https://agentx.example.test/v1/dev/tasks/${view.taskId}/plan?document=plan&version=2`);
+    await expect(api.getTaskPlan(view.taskId, {})).rejects.toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
+    fetch.mockResolvedValueOnce(reply(200, { plan, requestId: "r" }));
+    await api.getTaskPlan(view.taskId, {});
+    expect(String(fetch.mock.calls[2]![0])).toBe(`https://agentx.example.test/v1/dev/tasks/${view.taskId}/plan`);
+  });
+
   it("sends the token and a trace ID, and parses a response with fields it does not know", async () => {
     const fetch = vi.fn(async () => reply(200, { task: { ...view, later: true }, requestId: "r" }));
     expect((await client(fetch).startTask(start)).status).toBe("STARTING");

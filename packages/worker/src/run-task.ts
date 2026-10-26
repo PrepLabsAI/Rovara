@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EModelDayBudgetRequest, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, groundingScenarioIds, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EModelDayBudgetRequest, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -36,6 +36,7 @@ import { readCheckHistory, restoreCheckHistory } from "./verification/check-hist
 import { candidateUnchangedSinceBase, commitCandidateWorktree, readCandidateRepositories, readCommittedCandidateSourceExport, type CandidateRepositoryInput, type CommittedCandidateSourceExport } from "./verification/candidate.js";
 import { exportCandidateBuildSourceInScratch, type CandidateBuildSourceExport } from "./e2e-build-source-export.js";
 import { exportBaselineSource, type BaselineSourceExport } from "./baseline-source-export.js";
+import { proposedChecksOfPlan, runPlanDryRun } from "./plan-dry-run.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
@@ -111,6 +112,8 @@ export async function runTaskInvocation(
     modelCallLimits?: { deadlineMs?: number; stallMs?: number; abortConfirmMs?: number; heartbeatMs?: number; tickMs?: number };
     /** Where the worker's structured model-call lines go. Default: stdout, as the worker's other log lines. */
     log?: WorkerLogSink;
+    /** PLANDRYRUN: how a coding plan's proposed checks are tried on the unchanged code; tests supply a fake. Default: `runPlanDryRun` (a sandbox container per check). */
+    planDryRun?: typeof runPlanDryRun;
   },
 ): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
@@ -236,6 +239,8 @@ export async function runTaskInvocation(
         ? "AgentX is running the approved browser and API checks once on the code as the task started, for information only. It has no code-editing tools and decides nothing about the change."
         : invocation.payload.workflowE2EAdmission?.purpose === "replay"
         ? "AgentX is replaying a verified AI-navigated check from its recording, with no model, for an operator's audit. It has no code-editing tools and decides nothing about the change."
+        : invocation.payload.workflowE2EAdmission?.purpose === "grounding"
+        ? "AgentX is checking the plan's unchanged-behaviour checks against the current app. It has no code-editing tools and decides nothing about the change."
         : "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
       const runners = dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
@@ -837,9 +842,35 @@ export async function runTaskInvocation(
         if (Buffer.byteLength(plan, "utf8") > WORKFLOW_PLAN_MAX_BYTES) throw agentXError("OPERATION_INTERRUPTED", "the planning run exceeded the maximum plan size");
         await dependencies.artifactSink({ name: "plan.md", mediaType: "text/markdown; charset=utf-8", content: plan });
         await publishEvidence();
+        // PLANDRYRUN: the plan is saved; its proposed checks are tried on the unchanged code and only a fixed class per check is reported. It never fails the planning run.
+        if (invocation.payload.planFormat === "structured" && planDocumentKind(invocation.payload.workflowPhase) === "plan") {
+          const repositoryPaths = manifest.repositories.map((repository) => repository.path);
+          const proposed = proposedChecksOfPlan(plan, repositoryPaths);
+          const [repository] = manifest.repositories;
+          if (proposed.length > 0 && repository !== undefined) {
+            let dryRun: Awaited<ReturnType<typeof runPlanDryRun>> | undefined;
+            try {
+              dryRun = await (dependencies.planDryRun ?? runPlanDryRun)({ planText: plan, checks: proposed, repositoryPath: repository.path,
+                repositories: candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase), signal: verificationStop.signal });
+            } catch (error) {
+              if (verificationStop.signal.aborted && dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
+              if (error instanceof WorkerOperationCancelledError) throw error;
+            }
+            if (dryRun !== undefined) await emit("progress", { message: "AgentX tried the proposed checks on the code as the task started.", planDryRun: dryRun });
+          }
+        }
+        // T7a PLANGROUNDING: when the broker asked, the unchanged code is exported for the plan's must-not-change scenarios, to be run on the current app before the owner is asked. Only a plan with
+        // such a scenario exports anything. It never decides the plan: a base that cannot be exported is reported with its reason, and only the operation's own cancellation throws.
+        let planGroundingSource: BaselineSourceExport | undefined;
+        if (invocation.payload.workflowE2EGroundingSource === true && planDocumentKind(invocation.payload.workflowPhase) === "plan") {
+          const read = parsePlanDocument(plan, { kind: "plan" });
+          if (read.ok && groundingScenarioIds(read.plan).length > 0) {
+            planGroundingSource = await exportBaselineSource({ signal: verificationStop.signal, repositories: candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase) });
+          }
+        }
         outcome = "SUCCEEDED";
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN" });
-        taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN" };
+        taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN", ...(planGroundingSource === undefined ? {} : { workflowBaselineSource: planGroundingSource }) };
       } else if (reviewing) {
         const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
         const beforeReview = createCandidateManifest(await readCandidateRepositories(repositories));

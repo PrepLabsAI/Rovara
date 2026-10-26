@@ -251,20 +251,28 @@ export const E2EWorkflowAdmissionRefSchema = z.object({
    * M1.3 Task 3.7b: a baseline round (the approved scenarios on the unchanged code, for information only) says so here, with the base commit it runs and the attempt, and the
    * admission it names signs the same. A reference without these is a candidate round's. Only an application round can be a baseline.
    */
-  purpose: z.enum(["baseline", "replay"]).optional(), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(), attempt: positiveInt.optional(),
+  purpose: z.enum(["baseline", "replay", "grounding"]).optional(), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(), attempt: positiveInt.optional(),
   /**
    * M1.4 Task 4.6b: an audit replay of a verified round (the same candidate run again with no model, for an operator's check) names the round it replays. A reference without a
    * purpose is a candidate round's. Only an application round can be a replay.
    */
   sourceRoundId: z.string().uuid().optional(),
+  /**
+   * T7a: a grounding round (the proposed plan's must-not-change checks run on the unchanged code before the owner is asked, for information only) names the proposed plan
+   * artifact it checks. A grounding reference also carries the base commit and the attempt, never a source round or agent steps. Only an application round can be a grounding round.
+   */
+  planArtifactSha256: digest.optional(),
 }).strict().superRefine((reference, context) => {
   const baseline = reference.purpose === "baseline";
   const replay = reference.purpose === "replay";
-  if (baseline !== (reference.baseCommitSha !== undefined) || (baseline || replay) !== (reference.attempt !== undefined)) {
-    context.addIssue({ code: "custom", path: ["purpose"], message: "a baseline or replay reference carries its attempt (a baseline also its base commit), and only those references do" });
+  const grounding = reference.purpose === "grounding";
+  if ((baseline || grounding) !== (reference.baseCommitSha !== undefined) || (baseline || replay || grounding) !== (reference.attempt !== undefined)) {
+    context.addIssue({ code: "custom", path: ["purpose"], message: "a baseline, replay or grounding reference carries its attempt (a baseline or grounding reference also its base commit), and only those references do" });
   }
   if (replay !== (reference.sourceRoundId !== undefined)) context.addIssue({ code: "custom", path: ["sourceRoundId"], message: "a replay reference names the round it replays, and only a replay reference does" });
-  if ((baseline || replay) && reference.kind !== "application") context.addIssue({ code: "custom", path: ["kind"], message: "only an application round can be a baseline or a replay" });
+  if (grounding !== (reference.planArtifactSha256 !== undefined)) context.addIssue({ code: "custom", path: ["planArtifactSha256"], message: "a grounding reference names the proposed plan it checks, and only a grounding reference does" });
+  if (grounding && reference.agentSteps !== undefined) context.addIssue({ code: "custom", path: ["agentSteps"], message: "a grounding round runs no AI navigation" });
+  if ((baseline || replay || grounding) && reference.kind !== "application") context.addIssue({ code: "custom", path: ["kind"], message: "only an application round can be a baseline, a replay or a grounding round" });
 });
 export type E2EWorkflowAdmissionRef = z.infer<typeof E2EWorkflowAdmissionRefSchema>;
 /**

@@ -11,12 +11,15 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, taskGraphDigest, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_BLOCK_REASONS, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, taskGraphDigest, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
+import { PLAN_UNREADABLE_CATEGORIES, planCheckSummary, planUnreadableCategory } from "../developer/plan-check-summary.js";
+import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, planRevisionsUsed, type PlanSelfCheckView } from "../developer/plan-self-check.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
+import { AUTOFIX_CARD_HOLD_MS, AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
 import { deriveTaskStatus, failureCategory, plannerRepliesKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
@@ -637,14 +640,17 @@ const CANVAS_UNAVAILABLE = new Set([
 const TINY_PLAN_CLAIMS = 3;
 
 /** What a structured document's card shows: the top claims (all of them, children indented, for a tiny plan) and the counts. */
-function structuredCardClaims(plan: PlanDocument): NonNullable<WorkflowMessageContext["structured"]> {
+function structuredCardClaims(plan: PlanDocument, selfCheck: PlanSelfCheckView): NonNullable<WorkflowMessageContext["structured"]> {
   const claimCount = planClaimCount(plan);
   const tiny = claimCount <= TINY_PLAN_CLAIMS && plan.decisions.length === 0;
   const everyClaim = (claims: PlanClaim[], depth: number): string[] => {
     const lines = planSummaryLines({ ...plan, claims }, claims.length);
     return claims.flatMap((claim, index) => [`${"  ".repeat(depth)}${lines[index]!}`, ...everyClaim(claim.children ?? [], depth + 1)]);
   };
-  return { claims: tiny ? everyClaim(plan.claims, 0) : planSummaryLines(plan), claimCount, decisionCount: plan.decisions.length, tiny };
+  // PLANVIEW: the answers an Approve here uses, the checks the plan adds and what AgentX's plan check stored of it, in plain words.
+  const summary = planCheckSummary(plan, { selfCheck });
+  return { claims: tiny ? everyClaim(plan.claims, 0) : planSummaryLines(plan), claimCount, decisionCount: plan.decisions.length, tiny,
+    decisions: summary.decisions, checkLines: summary.lines, selfCheckLines: summary.selfCheckLines };
 }
 
 /**
@@ -671,7 +677,9 @@ async function prepareDocumentLink(deps: NotifierDependencies, task: DeveloperTa
   // the page at this document and version.
   if (loaded.format === "structured") {
     if (fallback === undefined) unavailable("task_page_unconfigured");
-    return { structured: structuredCardClaims(loaded.plan), ...(loaded.plan.workBreakdown === undefined ? {} : { workBreakdownDigest: taskGraphDigest(loaded.plan.workBreakdown) }),
+    // What the plan self-check stored beside this document; a document it cannot be read for is "not checked", never "no problems". Only a coding plan was ever checked.
+    const selfCheck = plan.type === "plan" ? await loadPlanSelfCheck(async (key) => read(key), plan) : SELF_CHECK_NOT_APPLICABLE;
+    return { structured: structuredCardClaims(loaded.plan, selfCheck), ...(loaded.plan.workBreakdown === undefined ? {} : { workBreakdownDigest: taskGraphDigest(loaded.plan.workBreakdown) }),
       ...(fallback === undefined ? {} : { url: planReviewLink(fallback, workflow, plan.version) }) };
   }
   const markdown = loaded.markdown;
@@ -808,6 +816,13 @@ function e2eRoundStarted(workflow: WorkflowSnapshot): boolean {
   return e2e.currentRoundId !== undefined || e2e.qualifiedRound?.candidateDigest === candidate.digest || e2e.failedRound?.candidateDigest === candidate.digest;
 }
 
+/** The automatic revisions the plan self-check has spent on the document being written (each one revision on): the planning run's later revisions are the same run. */
+function planAutoRevisionsOf(task: DeveloperTaskRecord, workflow: WorkflowSnapshot): number {
+  if (workflow.stage !== "PLAN" || workflow.state !== "RUNNING") return 0;
+  const artifactType = workflow.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements" : workflow.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+  return planRevisionsUsed(task.planSelfCheck, artifactType, workflow.artifacts.filter((entry) => entry.type === artifactType).length + 1);
+}
+
 async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot, reopenedPullRequests?: ReadonlyArray<{ repositoryId: string; number: number }>): Promise<Reply | undefined> {
   // A task closed in Slack has its own closed reply; a second "closed" line would say it twice.
   if (workflow.stage === "CLOSED" && task.closedAt !== undefined) return undefined;
@@ -817,6 +832,7 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   const context: WorkflowMessageContext = { taskId: task.taskId, ownerSlackUserId: task.slackUserId, workflow, peopleEnabled: deps.peopleChangesEnabled === true,
     ...(page === undefined ? {} : { findingsUrl: `${page}#findings`, taskPageUrl: page }), ...(reopened ? { pullRequestReopened: reopenedPullRequests } : {}) };
   let approval: WorkflowArtifact | undefined;
+  if (workflow.stage === "PLAN" && workflow.state === "RUNNING" && task.planGrounding !== undefined && task.planGroundingAbandoned !== task.planGrounding.artifactSha256) context.planGroundingHeld = true;
   if (workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
     const document = await prepareDocumentLink(deps, task, workflow);
     context.documentSummary = document.summary;
@@ -835,6 +851,26 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   } else if (workflow.state === "BLOCKED" || (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING")) {
     // Replies that came in after the plan and that no step has taken: said, with where to read them.
     context.newReplies = await newThreadReplies(deps, task);
+    // AUTOFIX: what Rovara already tried and why it asks, from its decisions and the ask record kept for this blocked revision (nothing is added when it never acted).
+    if (workflow.state === "BLOCKED" && (workflow.stage === "VERIFY" || workflow.stage === "REVIEW")) {
+      // Rovara is still looking at this block (its row is not resolved): the card waits, so it can carry what Rovara tried and why it asks. After the hold the card is posted as it is,
+      // and the ask follows as its own post when it is written.
+      // The wait is a courtesy: a lookup that cannot be read (a missing grant, a throttled table) posts the card without it, so a blocked step is never lost to the hold.
+      const looking = await getItem<{ kind?: unknown; createdAt?: unknown }>(deps, { pk: "WORKFLOW_DISPATCH", sk: `${task.taskId}#${workflow.revision}` }).catch((error: unknown) => {
+        deps.log({ event: "developer_notifier.autofix_hold_unreadable", taskId: task.taskId, error: errorName(error) });
+        return undefined;
+      });
+      if (looking?.kind === "AUTOFIX" && typeof looking.createdAt === "string" && deps.now() - Date.parse(looking.createdAt) < AUTOFIX_CARD_HOLD_MS) throw new AutofixPending();
+      const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
+      context.autoFix = { ask: ask.success ? ask.data : undefined };
+    }
+    // PLANREADMSG: why the plan could not be read, as a fixed category (the stored problems quote the model and are never shown).
+    if (workflow.stage === "PLAN" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable && task.planUnreadable?.workflowRevision === workflow.revision) {
+      // The category the broker stored (a fixed set); a record from before it was stored is read from the problems.
+      const stored = task.planUnreadable.category;
+      context.planUnreadableCategory = stored !== undefined && PLAN_UNREADABLE_CATEGORIES.includes(stored) ? stored : planUnreadableCategory(task.planUnreadable.errors);
+      if (task.planUnreadable.autoRetried === true) context.planUnreadableAutoRetried = true;
+    }
   }
   const message = workflowMessage(context);
   if (message === undefined) return undefined;
@@ -850,7 +886,7 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   const blocks = e2eBlocks === undefined
     ? [...(message.blocks ?? []), ...unavailableE2E].slice(0, 50)
     : [...(message.blocks ?? []), ...e2eBlocks].slice(0, 50);
-  return { ...message, ...(blocks === undefined ? {} : { blocks }), sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
+  return { ...message, ...(blocks === undefined ? {} : { blocks }), sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow, { planAutoRevisions: context.planGroundingHeld === true ? 0 : planAutoRevisionsOf(task, workflow) }), ...(approval === undefined ? {} : { approval }) };
 }
 
 async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice): Promise<Reply | undefined> {
@@ -871,7 +907,8 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
       const published = PullRequestResultSchema.safeParse((await operation())?.result);
       return published.success ? said(pullRequestReply(published.data.url)) : undefined;
     }
-    case "workflow": return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow, notice.pullRequestReopened === true ? reopenedOf(notice.reopenedPullRequests) : undefined);
+    case "workflow": if (notice.id.includes(":autofix:")) return autofixFollowUp(deps, task);
+      return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow, notice.pullRequestReopened === true ? reopenedOf(notice.reopenedPullRequests) : undefined);
     case "ended": {
       const ended = await operation();
       if (ended === undefined || !ENDED_STATUSES.has(ended.status)) return undefined;
@@ -1443,6 +1480,31 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
 /** How long one notice holds the words it is posting; longer than a post's timeout. */
 const SAID_LEASE_MS = 60_000;
 
+/** Rovara is still deciding what to do about the blocked step: its card is retried shortly, so it can say it. */
+class AutofixPending extends Error {
+  constructor() { super("automatic fixing is still looking at this blocked step"); this.name = "AutofixPending"; }
+}
+
+/**
+ * The ask written after the blocked card was posted without it (the look took longer than the hold): its lines as a post of their own, once. Nothing when the card is not posted yet
+ * (it carries the ask itself when it is) or already carries it.
+ */
+async function autofixFollowUp(deps: NotifierDependencies, task: DeveloperTaskRecord): Promise<Reply | undefined> {
+  const workflow = task.workflow;
+  const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
+  if (workflow === undefined || !ask.success || ask.data.workflowRevision !== workflow.revision) return undefined;
+  const card = await getItem<NoticeMarker>(deps, noticeMarker(task.taskId, `${task.taskId}:workflow:${workflow.revision}`));
+  if (card?.deliveredAt === undefined) {
+    // The card's post may be in flight (its words are claimed and not yet delivered): this notice is retried and then finds the card delivered.
+    const claim = await getItem<NoticeMarker & { claimUntil?: number }>(deps, noticeMarker(task.taskId, `${task.taskId}:said:revision:${workflow.revision}`));
+    if (claim !== undefined && claim.deliveredAt === undefined && (claim.claimUntil ?? 0) > deps.now()) throw new SaidPending();
+    return undefined;
+  }
+  if (card.postedText?.includes("Why I'm asking you") === true) return undefined;
+  const lines = autoFixCardLines(workflow, ask.data).map(slackText);
+  return lines.length === 0 ? undefined : { text: `More on the step above:\n${lines.join("\n")}`, sameAs: `autofix:${workflow.revision}` };
+}
+
 /** Another notice holds the claim on the same words: this one is retried (C9). */
 class SaidPending extends Error {
   constructor() { super("another notice is posting the same message"); this.name = "SaidPending"; }
@@ -1488,6 +1550,48 @@ async function releaseSaid(deps: NotifierDependencies, said: { pk: string; sk: s
   }
 }
 
+/** How long a task-state card ("workflow" notice) is retried before it is given up on: far longer than the hour of the other notices, and well inside the queue's day of retention and its 100 receives. */
+export const WORKFLOW_CARD_RETRY_WINDOW_MS = 12 * 60 * 60_000;
+
+/** The delivery-failure count the SlackDeliveryFailed alarm watches. An expired notice is dropped whatever happens to its count, so it can never loop. */
+function countDeliveryFailure(deps: NotifierDependencies): void {
+  try {
+    deps.deliveryFailed();
+  } catch (metricError) {
+    deps.log({ event: "developer_notifier.metric_failed", error: errorName(metricError) });
+  }
+}
+
+/** The failure reason kept on a durable record: a fixed code (a Slack error code or an error name), never free text. */
+const failureReasonCode = (reason: string): string => (/^[A-Za-z0-9_.-]{1,64}$/.test(reason) ? reason : "unknown");
+
+/**
+ * A notice that could not be delivered leaves a record next to its task (a NOTICE item, `NOTICE_FAILED#<id>`: when it first failed, a fixed reason, and when it was given up on), so a missing card is
+ * visible after the fact and not only in the logs. "new": this call made the record; "known": an earlier call did; "unrecorded": it could not be written (logged, never thrown).
+ */
+async function recordDeliveryFailure(deps: NotifierDependencies, notice: Notice, reason: string, abandoned: boolean): Promise<"new" | "known" | "unrecorded"> {
+  if (notice.taskId === undefined) return "unrecorded";
+  const key = { pk: `DEVTASK#${notice.taskId}`, sk: `NOTICE_FAILED#${notice.id}` };
+  const at = new Date(deps.now()).toISOString();
+  try {
+    let created = true;
+    try {
+      await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, ConditionExpression: "attribute_not_exists(pk)",
+        Item: { ...key, entityType: "NOTICE", kind: notice.kind, noticeId: notice.id, reason: failureReasonCode(reason), firstFailedAt: at, ...noticeExpiry(deps) } }));
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      created = false;
+    }
+    if (abandoned) {
+      await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET abandonedAt = :at", ExpressionAttributeValues: { ":at": at } }));
+    }
+    return created ? "new" : "known";
+  } catch (error) {
+    deps.log({ event: "developer_notifier.failure_record_failed", noticeId: notice.id, error: errorName(error) });
+    return "unrecorded";
+  }
+}
+
 export function createNotifierHandler(deps: NotifierDependencies) {
   return async (event: { Records?: unknown[] }): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
     const records = event.Records ?? [];
@@ -1518,7 +1622,15 @@ export function createNotifierHandler(deps: NotifierDependencies) {
           batchItemFailures.push({ itemIdentifier: record.messageId });
           continue;
         }
-        if (notice.kind === "canvas_closeout" || deps.now() - Date.parse(notice.at) < SHARE_DELIVERY_WINDOW_MS) {
+        const elapsed = deps.now() - Date.parse(notice.at);
+        // A task-state card (a blocked step, a plan to approve) is kept for much longer than the hour: dropping it leaves the owner waiting on a task nobody told them about.
+        const keepRetrying = notice.kind === "canvas_closeout" || elapsed < SHARE_DELIVERY_WINDOW_MS || (notice.kind === "workflow" && elapsed < WORKFLOW_CARD_RETRY_WINDOW_MS);
+        if (keepRetrying) {
+          // Past the hour the failure is counted once (the alarm) and recorded durably; the later tries only retry.
+          if (notice.kind === "workflow" && elapsed >= SHARE_DELIVERY_WINDOW_MS && await recordDeliveryFailure(deps, notice, reason, false) !== "known") {
+            deps.log({ event: "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason: failureReasonCode(reason), retrying: true });
+            countDeliveryFailure(deps);
+          }
           const attempt = Number(record.attributes?.ApproximateReceiveCount ?? "1");
           try {
             await deps.retryLater(record.receiptHandle, retryDelaySeconds(attempt));
@@ -1529,13 +1641,11 @@ export function createNotifierHandler(deps: NotifierDependencies) {
             ...(error instanceof CanvasCloseoutPending ? { reason: error.reason } : { reason }) });
           batchItemFailures.push({ itemIdentifier: record.messageId });
         } else {
-          deps.log({ event: "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason });
-          try {
-            deps.deliveryFailed();
-          } catch (metricError) {
-            // An expired notice is dropped whatever happens to its count, so it can never loop.
-            deps.log({ event: "developer_notifier.metric_failed", error: errorName(metricError) });
-          }
+          // A card that was retried past the hour ends here with its own words and the durable record marked; every other notice is dropped as before, with its record.
+          const abandoned = notice.kind === "workflow";
+          deps.log({ event: abandoned ? "developer_notifier.delivery_abandoned" : "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason: abandoned ? failureReasonCode(reason) : reason });
+          await recordDeliveryFailure(deps, notice, reason, true);
+          countDeliveryFailure(deps);
           if (notice.kind === "start" && notice.taskId !== undefined) {
             try {
               await markPostFailed(deps, notice.taskId);

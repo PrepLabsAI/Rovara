@@ -8,7 +8,7 @@ import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js
 import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import type { ChatGptConnections } from "../../packages/broker/src/chatgpt/connections.js";
 import { finishPlanningWithMarkdown } from "../support/plan-documents.js";
-import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
+import { createSingleAnswerPlanBroker, MAYA } from "../support/developer-task-broker.js";
 import { registerSlackProject } from "../support/slack-broker.js";
 import { loadRollback0212Parser } from "../support/rollback-0212-parser.js";
 
@@ -55,7 +55,7 @@ describe("immutable 0.2.12 parser fixture", () => {
       view: async () => ({ connected: true, status: "connected", email: "owner@example.test", models: ["gpt-6.1-sol"] }),
       accessToken: async () => ({ access: "test-token", expiresAt: Date.now() + 60_000, models: ["gpt-6.1-sol"] }),
     } as unknown as ChatGptConnections;
-    const harness = await createDeveloperTaskBroker({ register: false, brokerExtra: { chatgpt } });
+    const harness = await createSingleAnswerPlanBroker({ register: false, brokerExtra: { chatgpt } });
     const fallbackModel = { provider: "amazon-bedrock", modelId: "default-model" };
     await registerSlackProject(harness.handler, { models: { default: fallbackModel, approved: [fallbackModel] } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
@@ -99,7 +99,7 @@ describe("immutable 0.2.12 parser fixture", () => {
 
     let postedBody: string | undefined;
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "127.0.0.1" }) },
       binding: async () => binding,
       sign: async () => new Uint8Array([1, 2, 3]),

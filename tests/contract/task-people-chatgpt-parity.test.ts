@@ -8,7 +8,7 @@ import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-a
 import type { ChatGptConnections } from "../../packages/broker/src/chatgpt/connections.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { finishPlanningWithMarkdown } from "../support/plan-documents.js";
-import { createDeveloperTaskBroker, type Developer } from "../support/developer-task-broker.js";
+import { createSingleAnswerPlanBroker, type Developer } from "../support/developer-task-broker.js";
 import { SLACK_TEAM } from "../support/slack-broker.js";
 
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
@@ -39,7 +39,7 @@ describe("PEOPLE and ChatGPT task identity parity", () => {
       view,
       accessToken,
     } as unknown as ChatGptConnections;
-    const harness = await createDeveloperTaskBroker({
+    const harness = await createSingleAnswerPlanBroker({
       channelMembers: async (request) => ({ ok: true, memberOf: [...request.channelIds] }),
       developerExtra: {
         taskPeopleConfiguration: { peopleChangesEnabled: true },
@@ -121,7 +121,7 @@ describe("PEOPLE and ChatGPT task identity parity", () => {
       return ["task.workflowMode", "task.workflowBase", "model.chatgpt"];
     });
     const pausedDelivery = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "127.0.0.1" }) },
       binding: async () => binding,
       sign,
@@ -151,7 +151,7 @@ describe("PEOPLE and ChatGPT task identity parity", () => {
 
     const workerFeatures = vi.fn(async () => ["task.workflowMode", "task.workflowBase", "model.chatgpt"]);
     const delivered = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "127.0.0.1" }) },
       binding: async () => binding,
       sign,

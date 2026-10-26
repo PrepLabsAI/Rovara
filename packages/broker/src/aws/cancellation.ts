@@ -20,6 +20,7 @@ import { hashJson, isConditional } from "./broker-shared.js";
 import type { WorkflowE2EReadinessMarker } from "./broker-shared.js";
 import type { ExtraItems } from "./developer-task-actions.js";
 import type { DurableOutboxRecord, RuntimeBinding } from "./lambda.js";
+import type { PlanQualityContext } from "../developer/plan-quality.js";
 
 /** The State table, as the broker and the reconciler reach it. */
 export interface StateTable {
@@ -55,11 +56,17 @@ export interface OperationRecord extends Operation {
   candidateBuildSource?: StoredCandidateBuildSource;
   /** M1.3 Task 3.7b: the unchanged code (the task's base commit) the worker exported beside the candidate for the baseline round, or why there is none; absent when the worker sent nothing. */
   baselineSource?: StoredBaselineSource;
+  /** T7b: a planning run that was asked to export the unchanged code so its plan's must-not-change scenarios can be tried on the current app (absent: it was not). It may upload that one export, under its own operation key. */
+  groundingSourceAsked?: true;
   workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } | undefined;
   /** A PR feedback review started by a broker that gives the critic only the owner's notes for its round (absent: an earlier release's run). */
   feedbackNotesScoped?: true;
   /** A planning run that was asked for the schema-v2 application plan (absent: it was not, so a v2 plan from it is refused). */
   workflowE2EPlanVersion?: 2;
+  /** A planning run: the part of the planning context its planner was given that the plan self-check reads (absent: it was given none). */
+  planQualityContext?: PlanQualityContext;
+  /** A planning run whose prompt asked the planner for the plan quality members (absent: it was not, or delivery dropped the guidance for an older worker). */
+  planQualityAsked?: true;
   publication?: {
     repository: string;
     repositoryUrl: string;
@@ -220,6 +227,8 @@ export function issueCapability(
   allowCandidateExport = false,
   allowWorkflowE2E = false,
   allowE2EModelBudget = false,
+  /** T7b: a planning run asked for the unchanged code may send that one export (the "baseline-source" action) and nothing else of the implementation run's. */
+  allowGroundingSource = false,
 ): string {
   const claims: CallbackClaims = {
     workspaceId,
@@ -229,7 +238,7 @@ export function issueCapability(
       "artifacts",
       "events",
       "result",
-      ...(allowCandidateExport ? ["candidate-export" as const, "candidate-build-source" as const, "baseline-source" as const] : []),
+      ...(allowCandidateExport ? ["candidate-export" as const, "candidate-build-source" as const, "baseline-source" as const] : allowGroundingSource ? ["baseline-source" as const] : []),
       ...(allowWorkflowE2E ? ["e2e-admission" as const, "e2e-evidence" as const] : []),
       // M1.4 Task 4.3a: only a round whose admission has AI navigation steps charges the project's day budget.
       ...(allowE2EModelBudget ? ["e2e-model-budget" as const] : []),

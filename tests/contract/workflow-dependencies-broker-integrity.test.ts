@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createCandidateManifest, workflowFindingFingerprint } from "../../packages/contracts/src/task-workflow.js";
 import { taskGraphDigest, type WorkItemProgressV1 } from "../../packages/contracts/src/workflow-dependencies.js";
 import { executeSerialWorkflowDependencies } from "../../packages/worker/src/workflow-dependencies.js";
-import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 const passingChecks = () => ({ status: "verified", source: "project", preambleVersion: "1", preambleSha256: "c".repeat(64),
@@ -11,7 +11,7 @@ const passingChecks = () => ({ status: "verified", source: "project", preambleVe
   extraTry: "not_needed", agentClaim: "success" });
 
 async function approvedGraph(includeGraphDigest = true, itemCount = 1) {
-  const harness = await createDeveloperTaskBroker({ developerExtra: { workflowDependenciesEnabled: true },
+  const harness = await createSingleAnswerPlanBroker({ developerExtra: { workflowDependenciesEnabled: true },
     brokerExtra: { githubPullRequests: { getCommitTree: vi.fn(async () => "a".repeat(40)) } } });
   const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
     requestId: randomUUID(), project: "payments", instructions: "Implement the ordered change", client: "test-client", workflow: true, workflowPath: "QUICK",

@@ -37,6 +37,7 @@ function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}, without: Rea
   const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{\"accepted\":true}" }));
   const progress = vi.fn<Ec2DeliveryDependencies["progress"]>(async () => undefined);
   const applicationPlanNotNegotiated = vi.fn<NonNullable<Ec2DeliveryDependencies["applicationPlanNotNegotiated"]>>(async () => undefined);
+  const planQualityNotNegotiated = vi.fn<NonNullable<Ec2DeliveryDependencies["planQualityNotNegotiated"]>>(async () => undefined);
   const dependencies: Ec2DeliveryDependencies = {
     sessions: { ensureSession: async () => ({ ready: true, generation: 3, privateIp: "10.42.128.10" }) },
     binding: async () => binding,
@@ -44,12 +45,13 @@ function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}, without: Rea
     post,
     progress,
     applicationPlanNotNegotiated,
+    planQualityNotNegotiated,
     now: () => NOW,
     ...overrides,
   };
   for (const key of without) delete dependencies[key];
   const deliver = createEc2Delivery(dependencies);
-  return { deliver, post, progress, applicationPlanNotNegotiated };
+  return { deliver, post, progress, applicationPlanNotNegotiated, planQualityNotNegotiated };
 }
 
 function readinessFixture() {
@@ -212,7 +214,7 @@ describe("ec2-ebs delivery", () => {
     const complete = createWorkflowE2EReadinessCompleter({ documentClient: documentClient as never, tableName: "state" });
     const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation, privateIp: "10.42.128.10" }) },
       binding: async () => binding, sign: kmsSign, post, progress: async () => undefined, now: () => NOW,
       validateWorkflowE2EReadiness: validate,
@@ -859,6 +861,57 @@ describe("ec2-ebs delivery", () => {
           expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EBaselineSource");
         });
       });
+
+      describe("grounding rounds (T7b)", () => {
+        const groundingRef = () => admission({ kind: "application", purpose: "grounding", baseCommitSha: "c".repeat(40), attempt: 1, planArtifactSha256: "9".repeat(64) });
+        const applicationOnly = [...checksFeatures, "task.workflowE2EApplicationChecks"];
+        const withGrounding = [...applicationOnly, "task.workflowE2EGroundingChecks.v1"];
+        const v2 = async () => "workflow-e2e-application-admission/v1";
+
+        it("never sends a grounding admission to a worker that runs application admissions but not grounding rounds, and says why", async () => {
+          const record = checks(groundingRef());
+          const older = delivery({ workerFeatures: async () => [...applicationOnly, "task.workflowE2EBaselineChecks"], workflowE2EAdmissionSchemaVersion: v2 });
+          const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+          expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+          expect(refusal?.message).toContain("task.workflowE2EGroundingChecks.v1");
+          expect(older.post).not.toHaveBeenCalled();
+        });
+
+        it("hands a grounding admission, unchanged, to a worker that lists the feature", async () => {
+          const ref = groundingRef();
+          const record = checks(ref);
+          const capable = delivery({ workerFeatures: async () => withGrounding, workflowE2EAdmissionSchemaVersion: v2 });
+          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
+        });
+
+        it("fails closed for a grounding admission when the worker cannot be asked which features it lists", async () => {
+          const record = checks(groundingRef());
+          const failing = delivery({ workerFeatures: async () => { throw new Error("ping down"); } });
+          await expect(failing.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+          expect(failing.post).not.toHaveBeenCalled();
+        });
+
+        it("asks a coding plan run to export the unchanged code only of a worker that can, and only while the run still negotiates the application plan", async () => {
+          const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+          const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2, workflowE2EGroundingSource: true });
+          const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EApplicationPlan", "task.workflowE2EGroundingChecks.v1"] });
+          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(capable.post)).toMatchObject({ workflowMode: "PLAN", workflowE2EPlanVersion: 2, workflowE2EGroundingSource: true });
+          // A worker without the grounding feature is sent the plan run without the request.
+          const noGrounding = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EApplicationPlan"] });
+          expect(await noGrounding.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(noGrounding.post)).not.toHaveProperty("workflowE2EGroundingSource");
+          expect(postedPayload(noGrounding.post)).toMatchObject({ workflowE2EPlanVersion: 2 });
+          // A worker that lists the grounding feature but not the application plan has the plan version removed, and the request goes with it (the schema refuses one without the other).
+          const noPlans = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EGroundingChecks.v1"] });
+          expect(await noPlans.deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedPayload(noPlans.post)).not.toHaveProperty("workflowE2EPlanVersion");
+          expect(postedPayload(noPlans.post)).not.toHaveProperty("workflowE2EGroundingSource");
+          expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({ event: "dispatch.grounding_source_omitted", operationId: record.operationId }));
+          log.mockRestore();
+        });
+      });
     });
 
     it("refuses to downgrade a version 2 application plan when no applicationPlanNotNegotiated recorder is wired, instead of posting a run the operation record still calls version 2 (2.2b N4)", async () => {
@@ -912,6 +965,39 @@ describe("ec2-ebs delivery", () => {
         event: "dispatch.code_anchors_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
       }));
       log.mockRestore();
+    });
+
+    it("asks a planning run for the plan quality members only on a worker that lists task.workflowPlanDryRun.v1; an older worker is sent the prompt without them", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const asked = planDocumentInstructions({ kind: "plan", path: "QUICK", planQuality: true });
+      const plain = planDocumentInstructions({ kind: "plan", path: "QUICK" });
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", prompt: `Planning phase only.\n\n${asked}\n\nRequest:\nadd it` });
+      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowPlanDryRun.v1"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).prompt).toContain("scenarioProves");
+      expect(capable.planQualityNotNegotiated).not.toHaveBeenCalled();
+      const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post).prompt).toBe(`Planning phase only.\n\n${plain}\n\nRequest:\nadd it`);
+      // The operation record is told, so the broker never sends that planner a revision naming the members.
+      expect(older.planQualityNotNegotiated).toHaveBeenCalledWith(record);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.plan_quality_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
+    it("refuses to send a planning run without the plan quality members to an older worker when no planQualityNotNegotiated recorder is wired, instead of a run the operation record still calls asked", async () => {
+      const asked = planDocumentInstructions({ kind: "plan", path: "QUICK", planQuality: true });
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", prompt: `Planning phase only.\n\n${asked}\n\nRequest:\nadd it` });
+      // The older worker would be sent the prompt without the members, and a revision would then name members its strict parser rejects: nothing goes out.
+      const unwired = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] }, ["planQualityNotNegotiated"]);
+      await expect(unwired.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+      expect(unwired.post).not.toHaveBeenCalled();
+      // A worker that lists the feature is sent the guidance as asked and needs no recorder.
+      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowPlanDryRun.v1"] }, ["planQualityNotNegotiated"]);
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).prompt).toContain("scenarioProves");
     });
 
     it("sends a workflow mode only to a worker that advertises the read-only tool boundary", async () => {
@@ -1453,7 +1539,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
     db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record });
     const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions,
       binding: (workspaceId) => workspaceBinding(db, "state", workspaceId),
       sign: kmsSign,
@@ -1495,7 +1581,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
     const markFailed = vi.fn(async () => undefined);
     const markDelivered = vi.fn(async () => undefined);
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions,
       binding: (workspaceId) => workspaceBinding(fixture.db, "state", workspaceId),
       sign: kmsSign,

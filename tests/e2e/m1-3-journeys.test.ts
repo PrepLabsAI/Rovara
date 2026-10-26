@@ -34,7 +34,7 @@ import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/docker-app
 import { ciImage } from "../support/ci-images.js";
 import { call } from "../support/slack-broker.js";
 import { collectOnThisHost } from "../support/linux-web-api-probes.js";
-import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
+import { createSingleAnswerPlanBroker, MAYA } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import type { binding as projectBinding} from "../support/e2e-application-plan-fixtures.js";
@@ -177,7 +177,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       treeComplete: true, treePaths: treeFiles, sources };
 
     // The broker, with the project registered and its setup approved on the qualified web profile (one admin proposal, approval and registration, as `agentx admin` makes them).
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture: async () => snapshot }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { projectSetupSource: { capture: async () => snapshot }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
     const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     const runtimeBinding = projectRow().runtimeBinding as typeof projectBinding;
     const webRowKey = e2eRegisteredRuntimeKey("catalog", PROFILE, "web");
@@ -303,7 +303,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
       try { return await guardTaskDispatch({ documentClient: harness.db, tableName: "state", admission }, record); } finally { admission.close(); }
     };
     const delivery = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true as const, generation: 1, privateIp: "127.0.0.1" }) },
       binding: async () => runtimeBinding,
       sign: async (message) => cryptoSign("sha256", message, workerKeys.privateKey),

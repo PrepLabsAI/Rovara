@@ -33,6 +33,9 @@ import {
 import type { AuthenticatedIdentity } from "../auth.js";
 import { isHeartbeat, modelCallView } from "./model-call-view.js";
 import type { ShareDecision } from "./share.js";
+import type { PlanGroundingHold, PlanSelfCheckState } from "./plan-self-check.js";
+import type { PlanUnreadableCategory } from "./plan-check-summary.js";
+import type { AutoFixAsk } from "./autofix-messages.js";
 
 /** Whether a block reason is one of the two that send a task back to plan review for a corrected E2E plan: a source reference that does not match the candidate, or an application plan that can no longer run as written. */
 export function isE2EPlanCorrectionBlockReason(blockReason: string | undefined): boolean {
@@ -85,7 +88,15 @@ export interface DeveloperTaskRecord {
   /** The commit each repository's preparation checked out, from the prepare result; the task's base until one is pinned. */
   preparedBase?: WorkflowReviewBase;
   /** Spec 061: why the planner's last answer could not be read, kept for Retry planning; `workflowRevision` is the blocked step's revision. */
-  planUnreadable?: { workflowRevision: number; errors: string[] };
+  planUnreadable?: { workflowRevision: number; errors: string[]; /** The fixed category of the problem (never the validator's words), for the owner's message. */ category?: PlanUnreadableCategory; /** Whether AgentX already asked the planner once more by itself. */ autoRetried?: true };
+  /** AUTOFIX: why Rovara asked the owner instead of fixing a blocked step by itself, for the blocked revision `workflowRevision` (see autofix-messages.ts). */
+  autofixAsk?: AutoFixAsk;
+  /** Plan self-check: which document version the automatic revision budget is for, and how much is spent (see plan-self-check.ts). */
+  planSelfCheck?: PlanSelfCheckState;
+  /** T7c: the coding plan the task is holding back while its must-not-change checks run on the current app; the plan is not yet submitted, so there is nothing to approve. */
+  planGrounding?: PlanGroundingHold;
+  /** T7c: the owner closed the task while the plan was held (the held plan's digest): the finish clears the hold and asks nobody anything. */
+  planGroundingAbandoned?: string;
   /** Broker-private fence requiring a new E2E plan after the protected source disproved an approved plan reference. */
   e2ePlanCorrection?: { artifactId: string; artifactSha256: string; candidateDigest: string; reasonCode: string; requiredE2E: true };
   /** Gap 2: how many thread replies are saved for the task (NOTE# items). */

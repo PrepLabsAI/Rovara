@@ -6,7 +6,7 @@ import type { TaskComment } from "@agentx/contracts";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
 import { TASK_PAGE_API, createTaskWebApi, type TaskWebApiDependencies } from "../../packages/broker/src/aws/task-web-api.js";
-import { DEV_ISSUER, MAYA, OMAR, createDeveloperTaskBroker, type Developer } from "../support/developer-task-broker.js";
+import { DEV_ISSUER, MAYA, OMAR, createSingleAnswerPlanBroker, type Developer } from "../support/developer-task-broker.js";
 import { pagePlan } from "../support/page-tasks.js";
 import { planAnswer } from "../support/plan-documents.js";
 import { SLACK_CHANNEL } from "../support/slack-broker.js";
@@ -205,7 +205,7 @@ describe("task page API through the broker", () => {
 
   /** A shared task whose structured coding plan v1 waits for Maya; Lee is in the channel, Nia and Omar are not. */
   async function sharedTask(onMembership: () => void = () => undefined) {
-    const harness = await createDeveloperTaskBroker({ channelMembers: async (request) => (onMembership(), {
+    const harness = await createSingleAnswerPlanBroker({ channelMembers: async (request) => (onMembership(), {
       ok: true, memberOf: request.slackUserId === MAYA.slackUserId || request.slackUserId === LEE.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [],
     }) });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test", shareToChannel: true, workflow: true, workflowPath: "QUICK" });

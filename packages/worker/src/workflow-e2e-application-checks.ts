@@ -288,6 +288,12 @@ export async function executeWorkflowE2EApplicationChecks(input: {
     || canonicalJson([...runIds].sort()) !== canonicalJson([...reference.groupRunIds].sort()) || new Set(runIds).size !== runIds.length) {
     throw new Error("native E2E application admission does not match the signed CHECKS invocation");
   }
+  // T7a: a grounding round (the proposed plan's must-not-change checks on the unchanged code, before the owner is asked) is bound by its plan digest, not by a signed member, so the worker
+  // refuses it unless the admission is exactly a model-free run of the base commit with neither a baseline nor a replay member. It is checked again below for AI navigation.
+  if (reference.purpose === "grounding" && (admission.baseline !== undefined || admission.replay !== undefined || admission.candidateCommitSha !== reference.baseCommitSha
+    || admission.modelRoute !== null || reference.agentSteps !== undefined)) {
+    throw new Error("native E2E grounding admission does not match the purpose, base commit and model-free run of the signed CHECKS reference");
+  }
   // M1.3 Task 3.7b: a baseline round (the approved scenarios on the unchanged code) is a kind of its own. The operation's signed reference and the admission it names must agree on
   // that kind, on the base commit and on the attempt, so a baseline is never run as a candidate round and a candidate round is never run as a baseline.
   const signedBaseline = admission.baseline;
@@ -312,6 +318,7 @@ export async function executeWorkflowE2EApplicationChecks(input: {
   // admission has an agent step", and a baseline round (which never runs those) never carries it. An audit replay (Task 4.6b) runs its agent steps with no model, so no group of it uses
   // one and its reference never carries the flag either.
   const anyGroupUsesModel = validated.applicationSuites.some(groupUsesModel);
+  if (reference.purpose === "grounding" && anyGroupUsesModel) throw new Error("native E2E grounding round carries AI navigation steps");
   if ((reference.agentSteps === true) !== anyGroupUsesModel) throw new Error("native E2E reference agentSteps flag does not match the admission it names");
   if (reference.purpose === "baseline" && (reference.agentSteps === true || anyGroupUsesModel)) throw new Error("native E2E baseline round carries AI navigation steps");
   const round = admission.round;

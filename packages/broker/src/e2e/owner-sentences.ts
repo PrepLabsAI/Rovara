@@ -175,6 +175,12 @@ export const E2E_OWNER_SENTENCES = Object.freeze({
   slackLine: (input: { steps: number; modelCalls: number }): string =>
     `AI navigation: ${input.steps} ${input.steps === 1 ? "step" : "steps"}, ${input.modelCalls} model ${input.modelCalls === 1 ? "call" : "calls"} (checks decide)`,
 
+  /**
+   * Why a scenario that ran could not be decided, for the case reason `undeclared-mock-consumption` (MOCKUNUSED): in a group that runs several targets together the host serves the
+   * group's stand-in services to every one of them, and this check's app called one the plan did not set for this check's target. A fixed sentence chosen by the code.
+   */
+  undeclaredMockConsumption: "called a stand-in service the plan did not set for this check's target",
+
   baseline: Object.freeze({
     /** A baseline that could not run because every scenario of the plan uses AI navigation. */
     agentStepsOnly: "Before the change: not run. Every check here uses AI navigation, which runs only on the change.",

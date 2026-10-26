@@ -10,7 +10,7 @@ import { accountRegistryEntriesFromRows } from "../../packages/broker/src/e2e/ap
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
-import { createDeveloperTaskBroker, MAYA, type Developer } from "./developer-task-broker.js";
+import { createSingleAnswerPlanBroker, MAYA, type Developer } from "./developer-task-broker.js";
 import { createRealCandidate } from "./e2e-application-candidate.js";
 import { call, type Handler } from "./slack-broker.js";
 import { planAnswer, planDocument } from "./plan-documents.js";
@@ -85,6 +85,8 @@ export type RoundOptions = {
   baselinePin?: "other";
   /** What GitHub says the tree of the pinned base commit is (the broker holds the exported tree to it): the exported one, another, or nothing (GitHub cannot be asked). Absent: GitHub is not consulted. */
   githubBaseTree?: "match" | "mismatch" | "unreachable";
+  /** Edits the files of the committed candidate before it is exported (the coding round changed the code): for a candidate whose source no longer gives the approved plan what it needs. */
+  candidateTree?: (files: Record<string, string>) => Record<string, string>;
   /** Runs once the candidate is committed and exported, just before the first dispatch (to seed a row the dispatch reads, say). */
   beforeDispatch?: (harness: RoundBrokerHarness) => void;
 };
@@ -106,7 +108,7 @@ async function prepareRound(options: RoundOptions = {}) {
       if (options.githubBaseTree === "unreachable") throw new Error("GitHub is down");
       return options.githubBaseTree === "mismatch" ? "e".repeat(40) : github.baseTree ?? "0".repeat(40);
     } } };
-  const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...githubGateway, ...options.brokerExtra } });
+  const harness = await createSingleAnswerPlanBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog", ...githubGateway, ...options.brokerExtra } });
   const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
   const projectBinding = projectRow().runtimeBinding as typeof binding;
   harness.db.set({ ...apiRowKey, ...webApiRow("api"), binding: projectBinding, bindingDigest: shaCanonical(projectBinding) });
@@ -186,7 +188,8 @@ export async function startApplicationRound(options: RoundOptions = {}) {
   // The candidate is a real commit whose tree holds the approved applications, exported the way the worker exports one at the end of an IMPLEMENT run.
   // With the baseline round's source exported, the repository holds the task's base commit under the candidate, as the worker's repository does.
   const withBase = options.baseline === "source";
-  const real = await createRealCandidate({ ...tree, "src/orders.js": "export const orders = [];\n" },
+  const candidateFiles = { ...tree, "src/orders.js": "export const orders = [];\n" };
+  const real = await createRealCandidate(options.candidateTree?.(candidateFiles) ?? candidateFiles,
     withBase ? { repositoryId: "demo", baseTree: tree } : { repositoryId: "demo", baseCommitSha: snapshot.commitSha });
   github.baseTree = real.baseline?.baseTreeSha;
   const task = harness.db.get(taskKey.pk, taskKey.sk)!;

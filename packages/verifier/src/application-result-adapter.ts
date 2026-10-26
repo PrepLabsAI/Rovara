@@ -1728,14 +1728,19 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
       const executorRows = caseConsumptions.filter((row) => !hostedComponents.has(row.componentId));
       const hostedRows = caseConsumptions.filter((row) => hostedComponents.has(row.componentId));
       const mockRequestsBound = mockConsumptionRequestsMatch(facts.scenario, capture, executorSpecs, executorRows);
-      const hostedWitnessesAll = hostedMockWitnesses(hostedSpecs, hostedRows, proofById, true);
-      const hostedWitnessesSome = hostedMockWitnesses(hostedSpecs, hostedRows, proofById, false);
-      const mocksConsumed = expectedMockComponentSet.every((componentId) => observedMockComponents.includes(componentId))
+      // A hosted mock is permitted for every case on its target but required only of a case whose own request step names it (MOCKUNUSED): the oracle still lists every one it permits
+      // (`expectedMocksByCase`, digest unchanged), and a call the app does make to one is judged as before. A deny-only case that never reaches a dependency is decidable.
+      const requiredHostedSpecs = requiredHostedMockSpecs(facts.scenario, hostedSpecs);
+      const requiredMockComponents = [...new Set([...executorSpecs, ...requiredHostedSpecs].map((spec) => spec.componentId))];
+      const hostedWitnessesAll = hostedMockWitnesses(hostedSpecs, hostedRows, proofById, requiredHostedSpecs);
+      const hostedWitnessesSome = hostedMockWitnesses(hostedSpecs, hostedRows, proofById, null);
+      const mocksConsumed = requiredMockComponents.every((componentId) => observedMockComponents.includes(componentId))
         && observedMockComponents.every((componentId) => expectedMockComponentSet.includes(componentId))
         && mockRowsBound && mockRequestsBound && mockWitnessesMatch(executorSpecs, executorRows, proofById, true, facts.scenario, capture) && hostedWitnessesAll.ok;
       const failureMockPreconditions = mockRowsBound && mockRequestsBound
         && mockWitnessesMatch(executorSpecs, executorRows, proofById, false, facts.scenario, capture) && hostedWitnessesSome.ok;
       // Any call that no approved mock matched makes the case UNKNOWN: it is never a pass, and it is never a failure either, because what the app did with an answer nobody approved says nothing about the feature.
+      const consumedUndeclaredMock = caseConsumptions.some((row) => !expectedMockComponents.includes(row.componentId));
       const caseUnmockedCalls = (collection.unmockedCalls ?? []).filter((item) => item.caseId === expected.caseId).flatMap((item) => item.calls);
       const originOfComponent = new Map((oracle.mockOrigins ?? []).map((item) => [item.componentId, item.originRef]));
       const caseMockedOrigins = [...new Set(hostedSpecs.flatMap((spec) => originOfComponent.get(spec.componentId) ?? []))].sort();
@@ -1786,7 +1791,8 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
       caseFactRows.push({ caseId: expected.caseId, csvSha256: csvAssertionIndex < 0 ? null : evaluated[csvAssertionIndex]?.contentSha256 ?? null, agentSteps: replaySteps });
       return { caseId: expected.caseId, executionDescriptorDigest: expected.executionDescriptorDigest, accountContextId: expected.accountContextId,
         accountContextDigest: expected.accountContextDigest, status, reason: status === "passed" ? "structural-application-observations-complete" : status === "failed" ? "observed-application-assertion-failure"
-          : caseUnmockedCalls.length > 0 ? UNMOCKED_EXTERNAL_CALL_REASON : agentResult?.verdict.kind === "unknown" ? agentResult.verdict.code : replayCode !== null ? replayCode : "application-evidence-floor-unmet",
+          : caseUnmockedCalls.length > 0 ? UNMOCKED_EXTERNAL_CALL_REASON : agentResult?.verdict.kind === "unknown" ? agentResult.verdict.code : replayCode !== null ? replayCode
+          : consumedUndeclaredMock ? UNDECLARED_MOCK_CONSUMPTION_REASON : "application-evidence-floor-unmet",
         attemptCount: 1, assertionDigest: expected.assertionDigest, assertionReceipts, artifacts: [], coverage,
         ...(caseMockedOrigins.length > 0 ? { mockedOrigins: caseMockedOrigins } : {}) };
     });
@@ -1896,6 +1902,23 @@ function mockWitnessesMatch(expected: readonly z.infer<typeof E2EMockSpecSchema>
 /** The reason of a case, and of a run with no failed case, that made a call to a declared origin no approved mock matched. */
 export const UNMOCKED_EXTERNAL_CALL_REASON = "unmocked-external-call";
 
+/**
+ * The reason of a case whose application called a mock the host serves to its whole group but that the plan did not set for the case's own target (a hybrid group: one target has the
+ * mock, so the host serves it to all). The case is UNKNOWN, as it was; only the reason is specific, so the owner is not told "the evidence was not enough".
+ */
+export const UNDECLARED_MOCK_CONSUMPTION_REASON = "undeclared-mock-consumption";
+
+/**
+ * The host-served mocks a scenario must see consumed: the ones one of its request steps names (the fixture's method and path), and any hosted mock with no API fixture to compare
+ * (kept required, as before). Every other hosted mock bound to the case's target is only permitted.
+ */
+export function requiredHostedMockSpecs(scenario: z.infer<typeof E2EScenarioSchema>, hostedSpecs: readonly z.infer<typeof E2EMockSpecSchema>[]): z.infer<typeof E2EMockSpecSchema>[] {
+  return hostedSpecs.filter((spec) => {
+    const fixture = spec.kind === "api" ? spec.apiFixture : undefined;
+    return fixture === undefined || scenario.steps.some((step) => step.kind === "request" && step.method === fixture.method && step.path === fixture.path);
+  });
+}
+
 const hostedRequestFrame = z.object({ requestId: id(256), componentId: id(120), caseId: id(160), method: id(12), path: id(2048), input: z.record(z.string(), boundedData),
   origin: z.literal("application") }).strict();
 const hostedResponseFrame = z.object({ responseId: id(256), requestId: id(256), status: z.number().int().min(100).max(599), body: boundedData }).strict();
@@ -1904,11 +1927,11 @@ type HostedMockWitnesses = Readonly<{ ok: true; variants: readonly ("success" | 
 /**
  * Whether every call the application made to an approved, host-served mock is exactly what that mock's fixture would answer: the request frame is the fixture's method and path
  * with the one input field set to a variant's value, and the response frame is that variant's status and body. Nothing here relies on a step of the scenario, because it is the
- * application, not the executor, that makes the call. With `requireEveryExpected`, every approved mock of the case must also have been called at least once, so a dependency
- * that was never exercised cannot let a case pass.
+ * application, not the executor, that makes the call. With `required`, each of those mocks (the ones the case's own request steps name) must also have been called at least once, so a
+ * dependency the case is about cannot go unexercised and still let it pass; a mock that is only permitted may be called or not, and a call to it is judged exactly the same.
  */
 function hostedMockWitnesses(expected: readonly z.infer<typeof E2EMockSpecSchema>[], rows: readonly E2EApplicationMockConsumption[],
-  proofById: ReadonlyMap<string, E2EApplicationProofBytes>, requireEveryExpected: boolean): HostedMockWitnesses {
+  proofById: ReadonlyMap<string, E2EApplicationProofBytes>, required: readonly z.infer<typeof E2EMockSpecSchema>[] | null): HostedMockWitnesses {
   const variants: ("success" | "refusal" | "invalid-data")[] = [];
   const seen = new Set<string>();
   for (const row of rows) {
@@ -1929,7 +1952,7 @@ function hostedMockWitnesses(expected: readonly z.infer<typeof E2EMockSpecSchema
       seen.add(row.requestId); variants.push(variant.id);
     } catch { return { ok: false }; }
   }
-  if (requireEveryExpected && !expected.every((spec) => rows.some((row) => row.componentId === spec.componentId))) return { ok: false };
+  if (required !== null && !required.every((spec) => rows.some((row) => row.componentId === spec.componentId))) return { ok: false };
   return { ok: true, variants };
 }
 

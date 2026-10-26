@@ -11,13 +11,13 @@ import { createPageComment, listPageComments, type DeveloperTaskRouteDependencie
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { deleteTaskComment, editTaskComment, takeAskRateAcrossTasks, takeRate } from "../../packages/broker/src/developer/page-comments.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
-import { MAYA, createDeveloperTaskBroker, teammate } from "../support/developer-task-broker.js";
+import { MAYA, createSingleAnswerPlanBroker, teammate } from "../support/developer-task-broker.js";
 import { planAnswer } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 import { validatingDocumentClient } from "../support/validating-document-client.js";
 
-type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
+type Harness = Awaited<ReturnType<typeof createSingleAnswerPlanBroker>>;
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
 const PLAN: PlanDocument = pagePlan();
 delete PLAN.checks;
@@ -34,7 +34,7 @@ const commentItems = (harness: Harness, taskId: string) => harness.db.find((item
 
 /** A Quick task whose structured coding plan waits for Maya; started in a Slack thread unless `fromTool`. */
 async function waitingTask(options: { fromTool?: boolean; queue?: false | ((sent: Sent) => Promise<void>); wrap?: (client: DeveloperTaskRouteDependencies["documentClient"]) => DeveloperTaskRouteDependencies["documentClient"] } = {}) {
-  const harness = await createDeveloperTaskBroker();
+  const harness = await createSingleAnswerPlanBroker();
   const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000071" };
   let taskId: string;
   if (options.fromTool === true) {

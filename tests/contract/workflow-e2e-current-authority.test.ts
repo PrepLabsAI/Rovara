@@ -8,7 +8,7 @@ import { projectSetupBindingDigest } from "../../packages/broker/src/aws/project
 import { createWorkflowE2EDisplayObject } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "../../packages/broker/src/aws/workflow-e2e-current-authority.js";
-import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
+import { createSingleAnswerPlanBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 const authority = () => ({
@@ -102,7 +102,7 @@ describe("current workflow E2E authority", () => {
   });
 
   it("resolves canonical no-graph approval during recovery before later admission validation", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { e2eFeatureRuntimeCatalogId: "test-feature-catalog", projectSetupRuntimeCatalogId: "test-setup-catalog" } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { e2eFeatureRuntimeCatalogId: "test-feature-catalog", projectSetupRuntimeCatalogId: "test-setup-catalog" } });
     const payments = harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     const policy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: ["scenario-1"],
       targets: [{ kind: "contract", targetId: "target-1", applicationId: "payments", requestedTargetId: "target-1", adapterProfileId: "synthetic",

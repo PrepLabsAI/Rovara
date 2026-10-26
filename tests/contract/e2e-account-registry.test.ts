@@ -12,7 +12,7 @@ import {
 import { readAccountRegistryEntries } from "../../packages/broker/src/aws/e2e-account-registry.js";
 import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { taskPageStage } from "../../packages/broker/src/aws/developer-tasks.js";
-import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { call } from "../support/slack-broker.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { prepareApplicationRound, startApplicationRound, type RoundBrokerHarness } from "../support/e2e-application-round-harness.js";
@@ -418,7 +418,7 @@ describe("the broker's project registration writes the accounts (Task 3.1, owner
   type Proposal = { ref: string; sha: string; policy: unknown };
   async function brokerWith(initial: ReturnType<typeof snapshotOf>) {
     const source = { current: initial };
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture: async () => source.current }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+    const harness = await createSingleAnswerPlanBroker({ brokerExtra: { projectSetupSource: { capture: async () => source.current }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
     const projectRows = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")
       .sort((left, right) => Number((left.definition as { revision: number }).revision) - Number((right.definition as { revision: number }).revision));
     const propose = async (user = admin): Promise<Proposal> => {

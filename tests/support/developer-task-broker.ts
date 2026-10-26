@@ -255,3 +255,12 @@ export function recordStream(db: FakeDynamoDb): { take(): StreamRecord[]; duplic
     duplicateNext: () => { duplicates += 1; },
   };
 }
+
+/**
+ * A developer task broker that keeps the single-answer planning flow: the plan self-check (a second automatic planning run for an unreadable answer or a
+ * fixable finding) is off. Production has it on, and `createDeveloperTaskBroker` follows production. A suite uses this only when its fixture plans carry no checks
+ * for their claims and the suite is about something other than planning (approval, dispatch, evidence, pages...); a test of planning behaviour opts back in with
+ * `brokerExtra: { planSelfCheck: true }`. The self-check itself is covered by plan-self-check-flow.test.ts.
+ */
+export const createSingleAnswerPlanBroker: typeof createDeveloperTaskBroker = (options) =>
+  createDeveloperTaskBroker({ ...options, brokerExtra: { planSelfCheck: false, ...options?.brokerExtra } });
