@@ -93,6 +93,13 @@ export class DeveloperTaskNotifier extends Construct {
       resources: [props.state.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*", "WORKSPACE#*", "OPERATION#*", "CHATGPT_NOTICE#*"] } },
     }));
+    // AUTOFIX (T8): a blocked step's card waits while Rovara's own dispatch row for that step is open, so the notifier reads that one row by key (no query, no write). Without this
+    // grant the read was refused and every blocked VERIFY or REVIEW card was lost after an hour of retries (LIVEFIX-1).
+    this.function.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:GetItem"],
+      resources: [props.state.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["WORKFLOW_DISPATCH"] } },
+    }));
     // #342: a ChatGPT fallback's notice is marked told, once per operation, by its own key.
     this.function.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:PutItem"],
