@@ -90,7 +90,7 @@ describe("the operator's request to replay a qualified round refuses before anyt
     const operation = round.operationNow() as { workflowE2EAdmission: Record<string, unknown> };
     // Positive control: the same operation as it is serves the replay check up to the recordings (this round has none).
     expect(messageOf(await replayCall(round, "POST", { body: { roundId: roundIdOf(round) } }))).toMatch(/^replay-no-recording/);
-    round.harness.db.set({ ...operation, workflowE2EAdmission: { ...operation.workflowE2EAdmission, purpose: "grounding" } } as never);
+    round.harness.db.set({ ...operation, workflowE2EAdmission: { ...operation.workflowE2EAdmission, purpose: "grounding" } });
     expect(messageOf(await replayCall(round, "POST", { body: { roundId: roundIdOf(round) } }))).toMatch(/^replay-source-unavailable/);
     expect(replayRows(round)).toEqual([]);
   });
