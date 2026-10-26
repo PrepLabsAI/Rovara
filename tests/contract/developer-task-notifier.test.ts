@@ -2382,6 +2382,35 @@ describe("the blocked card carries what Rovara tried and why it asks (AUTOFIX)",
     expect(h.posts).toHaveLength(before + 2);
   });
 
+  it("POLISH-1: an ask written while the card is still being posted is retried, not dropped", async () => {
+    const h = await blockedTask(true);
+    const before = h.posts.length;
+    await h.pump();
+    h.advance(11 * 60_000);
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    // The card's post is in flight again: its marker has no deliveredAt yet and its words are claimed.
+    const cardKey = { pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:workflow:9` };
+    const saidKey = { pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:said:revision:9` };
+    const card = h.db.get(cardKey.pk, cardKey.sk) as Record<string, unknown>;
+    const said = h.db.get(saidKey.pk, saidKey.sk) as Record<string, unknown>;
+    const { deliveredAt: cardDelivered, ...cardInFlight } = card;
+    const { deliveredAt: saidDelivered, ...saidInFlight } = said;
+    h.db.set({ ...cardInFlight, ...cardKey });
+    h.db.set({ ...saidInFlight, ...saidKey, claimedBy: "card-notice", claimUntil: h.now() + 60_000 });
+    await setAsk(h, ASK(9));
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.queue.length).toBeGreaterThan(0);
+    // The card lands; the ask is then said once, as a post of its own.
+    h.db.set({ ...card, ...cardKey, deliveredAt: cardDelivered });
+    h.db.set({ ...said, ...saidKey, deliveredAt: saidDelivered });
+    await h.pump();
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 2);
+    expect(h.posts.at(-1)!.text).toContain("Why I'm asking you");
+  });
+
   it("adds nothing for a task Rovara never touched: the card is today's, with no wait", async () => {
     const h = await blockedTask(false);
     const before = h.posts.length;

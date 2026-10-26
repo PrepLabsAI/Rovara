@@ -1490,7 +1490,13 @@ async function autofixFollowUp(deps: NotifierDependencies, task: DeveloperTaskRe
   const ask = AutoFixAskSchema.safeParse(task.autofixAsk);
   if (workflow === undefined || !ask.success || ask.data.workflowRevision !== workflow.revision) return undefined;
   const card = await getItem<NoticeMarker>(deps, noticeMarker(task.taskId, `${task.taskId}:workflow:${workflow.revision}`));
-  if (card?.deliveredAt === undefined || card.postedText?.includes("Why I'm asking you") === true) return undefined;
+  if (card?.deliveredAt === undefined) {
+    // The card's post may be in flight (its words are claimed and not yet delivered): this notice is retried and then finds the card delivered.
+    const claim = await getItem<NoticeMarker & { claimUntil?: number }>(deps, noticeMarker(task.taskId, `${task.taskId}:said:revision:${workflow.revision}`));
+    if (claim !== undefined && claim.deliveredAt === undefined && (claim.claimUntil ?? 0) > deps.now()) throw new SaidPending();
+    return undefined;
+  }
+  if (card.postedText?.includes("Why I'm asking you") === true) return undefined;
   const lines = autoFixCardLines(workflow, ask.data).map(slackText);
   return lines.length === 0 ? undefined : { text: `More on the step above:\n${lines.join("\n")}`, sameAs: `autofix:${workflow.revision}` };
 }
