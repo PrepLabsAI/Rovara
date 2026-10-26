@@ -2421,7 +2421,7 @@ describe("a task-state card is not dropped after the hour (LIVEFIX-1 item 5)", (
     expect(h.queue).toHaveLength(1);
     const noticeId = noticeIdOf(h);
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.delivery_failed", kind: "workflow", noticeId, reason: "ratelimited", retrying: true }));
-    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).toMatchObject({ entityType: "NOTICE_FAILURE", kind: "workflow", noticeId, reason: "ratelimited", firstFailedAt: expect.any(String) as string });
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).toMatchObject({ entityType: "NOTICE", kind: "workflow", noticeId, reason: "ratelimited", firstFailedAt: expect.any(String) as string });
     expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE_FAILED#${noticeId}`)).not.toHaveProperty("abandonedAt");
     // Hours later it is still retried (the delay is set again), and the count does not grow.
     const retriesAtTheHour = h.retryLater.mock.calls.length;

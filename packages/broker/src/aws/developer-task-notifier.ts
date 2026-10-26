@@ -1552,7 +1552,7 @@ function countDeliveryFailure(deps: NotifierDependencies): void {
 const failureReasonCode = (reason: string): string => (/^[A-Za-z0-9_.-]{1,64}$/.test(reason) ? reason : "unknown");
 
 /**
- * A notice that could not be delivered leaves a record next to its task (`NOTICE_FAILED#<id>`: when it first failed, a fixed reason, and when it was given up on), so a missing card is
+ * A notice that could not be delivered leaves a record next to its task (a NOTICE item, `NOTICE_FAILED#<id>`: when it first failed, a fixed reason, and when it was given up on), so a missing card is
  * visible after the fact and not only in the logs. "new": this call made the record; "known": an earlier call did; "unrecorded": it could not be written (logged, never thrown).
  */
 async function recordDeliveryFailure(deps: NotifierDependencies, notice: Notice, reason: string, abandoned: boolean): Promise<"new" | "known" | "unrecorded"> {
@@ -1563,7 +1563,7 @@ async function recordDeliveryFailure(deps: NotifierDependencies, notice: Notice,
     let created = true;
     try {
       await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, ConditionExpression: "attribute_not_exists(pk)",
-        Item: { ...key, entityType: "NOTICE_FAILURE", kind: notice.kind, noticeId: notice.id, reason: failureReasonCode(reason), firstFailedAt: at, ...noticeExpiry(deps) } }));
+        Item: { ...key, entityType: "NOTICE", kind: notice.kind, noticeId: notice.id, reason: failureReasonCode(reason), firstFailedAt: at, ...noticeExpiry(deps) } }));
     } catch (error) {
       if (!isConditional(error)) throw error;
       created = false;
