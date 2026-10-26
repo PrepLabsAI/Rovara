@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DescribeInstancesCommand } from "@aws-sdk/client-ec2";
 import { RequalifyRunRecordSchema, REQUALIFY_REFUSAL_PREFIX, REQUALIFY_TAGS, requalifyLockKey, requalifyRunKey, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { e2eModelCheckRunnerKey } from "../../packages/broker/src/e2e/model-route-registry.js";
-import { issueRuntimeInstallChallenge, registerRuntimeInstallation } from "../../packages/broker/src/aws/runtime-installation.js";
+import { issueChallengeAs, issueRuntimeInstallChallenge, registerRuntimeInstallation, registerWebApiRuntimeInstallation } from "../../packages/broker/src/aws/runtime-installation.js";
 import { ec2RequalifyInstanceReader, issueRequalifyChallenge, registerRequalifiedRuntime, requalifierIdentity, type RequalifyDependencies, type RequalifyInstance } from "../../packages/broker/src/aws/runtime-requalify.js";
 import { qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
 import { createFakeRuntimeRegistry } from "../support/runtime-registry-fakes.js";
@@ -13,6 +13,7 @@ import { fakeLinuxEnvironment, fakeProbeRunner, privateEvidenceRoot, webApiChall
 // The committed probe evidence is bound to one fixed challenge, so a renewal challenge (random id, issued by the service identity) cannot re-derive it.
 // `evidence.bypass` lets the success-path tests stand in for a runner that produced matching evidence; the "evidence is still re-derived" test leaves it off.
 const evidence = vi.hoisted(() => ({ bypass: false }));
+afterEach(() => { evidence.bypass = false; });
 vi.mock("@agentx/verifier", async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown> & { verifyWebApiProbeRecord: (input: unknown) => { ok: boolean } }>();
   return { ...actual, verifyWebApiProbeRecord: (input: unknown) => (evidence.bypass ? { ok: true as const } : actual.verifyWebApiProbeRecord(input)) };
@@ -215,10 +216,22 @@ describe("AUTOREQUALIFY switch: one transaction", () => {
     // A challenge a human administrator issued is refused by the issuer rule: the service is not that administrator.
     const humanRow = { ...row, issuedByOwnerKey: "admin", issuedBySubject: "admin" };
     w.items.set(`RUNTIME_INSTALL_CHALLENGE#${t.challenge.challengeId}|CHALLENGE`, humanRow);
-    await expect(registerRequalifiedRuntime(w.deps, t.request)).rejects.toThrow();
-    evidence.bypass = false;
+    await expect(registerRequalifiedRuntime(w.deps, t.request)).rejects.toThrow(/runtime challenge is missing, stale, mismatched/);
     w.items.set(`RUNTIME_INSTALL_CHALLENGE#${t.challenge.challengeId}|CHALLENGE`, row);
     expect(w.snapshot()).toBe(before);
+  });
+
+  it("refuses a role different from the one the challenge was issued for", async () => {
+    const w = world(); w.hold(); evidence.bypass = true;
+    const t = await issuedProposal(w);
+    const before = w.snapshot();
+    await expect(registerRequalifiedRuntime(w.deps, { ...t.request, roleId: "AROAOTHERROLE0123456789" })).rejects.toThrow(`${REQUALIFY_REFUSAL_PREFIX}challenge-not-requalifier`);
+    expect(w.snapshot()).toBe(before);
+  });
+
+  it("does not treat a lock stored without milliseconds as valid past its expiry", async () => {
+    const w = world(); w.hold(RUN, "2026-10-19T12:30:00Z");
+    await expect(issueRequalifyChallenge(w.deps, input)).rejects.toThrow(`${REQUALIFY_REFUSAL_PREFIX}lock-not-held`);
   });
 
   it("refuses a proposal for any other profile", async () => {
@@ -226,7 +239,8 @@ describe("AUTOREQUALIFY switch: one transaction", () => {
     const t = await issuedProposal(w);
     const other = { ...t.proposal, challenge: { ...t.challenge, profileId: "linux-arm64-docker-v1" } };
     const before = w.snapshot();
-    await expect(registerRequalifiedRuntime(w.deps, { ...t.request, proposal: other, proposalSha256: "a".repeat(64) })).rejects.toThrow();
+    // The proposal's schema judges the profile before its digest is ever compared, so the refusal is the profile's.
+    await expect(registerRequalifiedRuntime(w.deps, { ...t.request, proposal: other, proposalSha256: "a".repeat(64) })).rejects.toThrow(/challenge profile must be the web\/API runtime profile/);
     evidence.bypass = false;
     expect(w.snapshot()).toBe(before);
   });
@@ -275,6 +289,21 @@ describe("the service identity has no human or HTTP authority", () => {
     await expect(issueRuntimeInstallChallenge(w.deps, identity, { binding, endpoint: "http://10.0.3.7:8080", generation: 1, transportCorrelationId: randomUUID(), profileId: "linux-arm64-web-api-v1" })).rejects.toThrow(/administrator/);
     await expect(registerRuntimeInstallation(w.deps, identity, { proposal: {}, proposalSha256: "a".repeat(64) })).rejects.toThrow(/administrator/);
     expect(w.items.size).toBe(0);
+  });
+
+  it("is checked by the exported seams themselves: a non-admin identity cannot issue or register through them", async () => {
+    const w = world(); w.hold();
+    const jwtUser = { issuer: "https://idp.example", subject: "someone", ownerKey: "someone", isAdministrator: false, claims: {} };
+    const request = { binding, endpoint: "http://10.0.3.7:8080", generation: 1, transportCorrelationId: randomUUID(), profileId: "linux-arm64-web-api-v1" };
+    await expect(issueChallengeAs(w.deps, jwtUser, request)).rejects.toThrow(/administrator|authority/);
+    // The service identity may use the seam only with the narrowing extras the wrapper adds.
+    await expect(issueChallengeAs(w.deps, requalifierIdentity(ENV), request)).rejects.toThrow(/administrator|authority/);
+    await expect(registerWebApiRuntimeInstallation(w.deps, jwtUser, { proposal: {}, proposalSha256: "a".repeat(64) })).rejects.toThrow(/administrator|authority/);
+    await expect(registerWebApiRuntimeInstallation(w.deps, requalifierIdentity(ENV), { proposal: {}, proposalSha256: "a".repeat(64) })).rejects.toThrow(/administrator|authority/);
+    // A JWT identity that merely claims the internal issuer, with a hook of its own, is still not the service.
+    await expect(registerWebApiRuntimeInstallation(w.deps, { ...jwtUser, issuer: "rovara:internal" }, { proposal: {}, proposalSha256: "a".repeat(64) }, {})).rejects.toThrow(/administrator|authority/);
+    expect(w.items.size).toBe(1);
+    expect(w.objects.size).toBe(0);
   });
 
   it("cannot be built for a malformed environment", () => {

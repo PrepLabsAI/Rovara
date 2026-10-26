@@ -48,8 +48,10 @@ const ImageRefSchema = z.string().min(1).max(300).regex(/^[A-Za-z0-9._:/@+=-]+$/
 export const requalifyRunKey = (runId: string) => ({ pk: `RUNTIME_REQUALIFY_RUN#${runId}`, sk: "RECORD" });
 export const requalifyLockKey = (profileId: string) => ({ pk: `RUNTIME_REQUALIFY#${profileId}`, sk: "LOCK" });
 
+/** The `toISOString` form only: the switch compares the lock's expiry as a string inside its transaction, which is correct only for one fixed-width format. */
+const ISO_MILLIS = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
 export const RequalifyLockSchema = z.object({
-  entityType: z.literal("RUNTIME_REQUALIFY_LOCK"), runId: z.string().uuid(), acquiredAt: z.string().datetime(), expiresAt: z.string().datetime(),
+  entityType: z.literal("RUNTIME_REQUALIFY_LOCK"), runId: z.string().uuid(), acquiredAt: ISO_MILLIS, expiresAt: ISO_MILLIS,
 }).strict();
 
 /** The audit record of one committed switch: written in the same transaction that moves the rows, so it exists exactly when the switch happened. */
