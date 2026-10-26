@@ -135,6 +135,8 @@ const GROUP_SENTENCES_BY_TEXT: Readonly<Record<string, string>> = GROUP_SENTENCE
 const SEND_BACK_CODES: ReadonlyArray<E2EGroupReasonCode> = E2E_APPLICATION_SEND_BACK_CODES;
 
 export const E2E_OWNER_SENTENCES = Object.freeze({
+  /** AUTOREQUALIFY (AR-3): why an audit replay of a round that ran before the test machine was renewed is refused. */
+  replayRuntimeRenewed: "The test machine was renewed since this round, so it can't be replayed exactly.",
   /**
    * Why a scenario could not be decided, for the codes the collector gives a case whose AI navigation was not clean (`E2E_AGENT_UNKNOWN_CODES`). `ctx` is the provider and model of the
    * route definition the broker stored for the admitted revision, or undefined when there is none.

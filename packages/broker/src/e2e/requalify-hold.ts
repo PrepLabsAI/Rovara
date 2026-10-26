@@ -1,0 +1,211 @@
+import { DeleteCommand, GetCommand, QueryCommand, TransactWriteCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { z } from "zod";
+import { STALE_RUN_SWEEP_AGE_MS } from "@agentx/verifier";
+import {
+  INDEX_EXPIRY_ATTRIBUTE, REQUALIFY_PROFILE_ID, TERMINAL_OPERATION_STATUSES, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKSPACE_SESSION_STATE_INDEX,
+  agentXError, canonicalJson, projectSetupExecutionKey, requalifyLockKey,
+  type E2EApplicationSelectionRecord, type E2ERegisteredRuntime,
+} from "@agentx/contracts";
+import { isConditional } from "../aws/broker-shared.js";
+import { ApplicationDispatchRefusal, applicationSelectionStillCurrent } from "./application-dispatch-check.js";
+
+/**
+ * AUTOREQUALIFY (AR-3): what the renewal of the browser and API test machine asks of the work around it.
+ *
+ *  - The HOLD row. While a switch is in progress (the renewal drains the old machine, then moves the registered rows), new browser and API rounds and new project setup runs are
+ *    deferred, never blocked: a deferred dispatch row stays due and the recovery sweep tries it again. The hold carries its own end (`until`), so a renewal that crashed cannot defer
+ *    work for ever; a hold that cannot be read is read as active (fail closed: a deferral costs minutes, a round started across the switch costs the round).
+ *  - The drain. `requalifyDrainStatus` says whether any round or setup run that already started on the old machine is still running.
+ *  - The renewal-only change. A selection that differs from the approved one only because the machine was renewed (same profile, binding and capabilities, a newer generation, the
+ *    plan, setup, targets and test accounts untouched) is told apart from every other change, so that one automatic retry approves it again. Nothing else is ever approved by Rovara.
+ *  - Replays. A round that ran on an earlier machine cannot be replayed exactly (its case ids are bound to the rows it ran on); the refusal says so.
+ *
+ * Nothing here is built from what a runner, a worker or a model said. The renewal's steps (AR-2) place and release the hold and poll the drain.
+ */
+
+const ISO_MILLIS = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+/** The longest a hold may stand: the renewal's own execution timeout. A hold past this is refused when placed, and one past its `until` stops deferring work. */
+export const REQUALIFY_HOLD_MAX_MS = 3 * 3_600_000;
+
+export const requalifyHoldKey = (profileId: string = REQUALIFY_PROFILE_ID) => ({ pk: `RUNTIME_REQUALIFY#${profileId}`, sk: "HOLD" });
+
+export const RequalifyHoldSchema = z.object({
+  entityType: z.literal("RUNTIME_REQUALIFY_HOLD"), runId: z.string().uuid(), placedAt: ISO_MILLIS, until: ISO_MILLIS,
+}).strict();
+export type RequalifyHold = z.infer<typeof RequalifyHoldSchema>;
+
+export type RequalifyHoldStore = Readonly<{ documentClient: Pick<DynamoDBDocumentClient, "send">; tableName: string }>;
+
+/** The sentence an interactive caller (a project setup) is given when it is deferred. */
+export const REQUALIFY_DEFERRED_MESSAGE = "The browser and API test machine is being renewed; try again in a few minutes.";
+
+/**
+ * Places the hold for `runId`. It commits only while the run holds the single-flight lock (the same condition the switch uses), and replaces only its own hold, so a run that lost its lock
+ * or a second run cannot defer work. `until` is `now + durationMs`, at most `REQUALIFY_HOLD_MAX_MS`.
+ */
+export async function placeRequalifyHold(store: RequalifyHoldStore, input: { runId: string; now: number; durationMs: number }): Promise<void> {
+  if (!Number.isInteger(input.durationMs) || input.durationMs <= 0 || input.durationMs > REQUALIFY_HOLD_MAX_MS) throw agentXError("CONFIG_INVALID", "requalify-hold: the hold's length is out of range");
+  const hold: RequalifyHold = RequalifyHoldSchema.parse({ entityType: "RUNTIME_REQUALIFY_HOLD", runId: input.runId,
+    placedAt: new Date(input.now).toISOString(), until: new Date(input.now + input.durationMs).toISOString() });
+  try {
+    await store.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { ConditionCheck: { TableName: store.tableName, Key: requalifyLockKey(REQUALIFY_PROFILE_ID), ConditionExpression: "runId = :runId AND expiresAt > :now",
+        ExpressionAttributeValues: { ":runId": input.runId, ":now": new Date(input.now).toISOString() } } },
+      { Put: { TableName: store.tableName, Item: { ...requalifyHoldKey(), ...hold }, ConditionExpression: "attribute_not_exists(pk) OR runId = :runId",
+        ExpressionAttributeValues: { ":runId": input.runId } } },
+    ] }));
+  } catch (error) {
+    if (isConditional(error)) throw agentXError("PROJECT_REVISION_MISMATCH", "requalify-hold: the run does not hold the lock or another run's hold stands");
+    throw error;
+  }
+}
+
+/** Ends the hold, if `runId` placed it. Ending a hold that is already gone, or is another run's, changes nothing. */
+export async function releaseRequalifyHold(store: RequalifyHoldStore, runId: string): Promise<void> {
+  try {
+    await store.documentClient.send(new DeleteCommand({ TableName: store.tableName, Key: requalifyHoldKey(), ConditionExpression: "runId = :runId", ExpressionAttributeValues: { ":runId": runId } }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+  }
+}
+
+/**
+ * Whether a switch is in progress. No row: no. A row that is past its `until`: no (a crashed renewal). A row that cannot be read as a hold: yes. A read that fails throws, and the
+ * caller's own retry applies.
+ */
+export async function requalifyHoldActive(store: RequalifyHoldStore, now: number): Promise<boolean> {
+  const response = await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: requalifyHoldKey(), ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  if (response.Item === undefined) return false;
+  const { pk: _pk, sk: _sk, ...fields } = response.Item;
+  void _pk; void _sk;
+  const hold = RequalifyHoldSchema.safeParse(fields);
+  return !hold.success || Date.parse(hold.data.until) > now;
+}
+
+/** For an interactive start (a project setup): refuses while a switch is in progress, with a retryable error and a fixed sentence. */
+export async function assertNoRequalifyHold(store: RequalifyHoldStore, now: number): Promise<void> {
+  if (await requalifyHoldActive(store, now)) throw agentXError("RUNTIME_UNAVAILABLE", REQUALIFY_DEFERRED_MESSAGE);
+}
+
+// ---- the drain ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+/** How long after its deadline a project setup run is still counted as running if its record cannot be read. */
+const SETUP_RUN_GRACE_MS = 5 * 60_000;
+const setupWorkKey = (setupExecutionId: string) => ({ pk: `RUNTIME_REQUALIFY_WORK#${REQUALIFY_PROFILE_ID}`, sk: `SETUP#${setupExecutionId}` });
+
+/**
+ * The marker a project setup run leaves when it is admitted on the registered machine, so the drain can find it (executions have no index of their own). It ends with the run's
+ * deadline plus a grace and expires with the table's time to live. Written in the same transaction as the run's rows.
+ */
+export function requalifySetupWorkRow(setupExecutionId: string, deadlineAt: string): Record<string, unknown> {
+  const until = new Date(Date.parse(deadlineAt) + SETUP_RUN_GRACE_MS).toISOString();
+  return { ...setupWorkKey(setupExecutionId), entityType: "RUNTIME_REQUALIFY_SETUP_WORK", setupExecutionId, until, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(until) / 1000) + 86_400 };
+}
+
+export interface RequalifyDrainStatus { drained: boolean; applicationRounds: number; setupRuns: number }
+
+async function queryAll(store: RequalifyHoldStore, input: Record<string, unknown>): Promise<Array<Record<string, unknown>>> {
+  const items: Array<Record<string, unknown>> = [];
+  let start: Record<string, unknown> | undefined;
+  do {
+    const page = await store.documentClient.send(new QueryCommand({ TableName: store.tableName, ...input, ...(start === undefined ? {} : { ExclusiveStartKey: start }) })) as
+      { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+    items.push(...(page.Items ?? []));
+    start = page.LastEvaluatedKey;
+  } while (start !== undefined);
+  return items;
+}
+
+/**
+ * Whether anything that started on the old machine is still running: a browser and API CHECKS operation (any purpose) of a workspace whose compute is READY, or a project setup run that
+ * was admitted and has not ended. An operation that has not moved for longer than the stale-run sweep is not counted (the sweep ends it; a round cannot still be running). A setup run
+ * counts until its record is terminal or its marker ends. Reads only.
+ */
+export async function requalifyDrainStatus(store: RequalifyHoldStore, now: number): Promise<RequalifyDrainStatus> {
+  const sessions = await queryAll(store, { IndexName: WORKSPACE_SESSION_STATE_INDEX.name, KeyConditionExpression: "#index = :state",
+    ExpressionAttributeNames: { "#index": WORKSPACE_SESSION_STATE_INDEX.partitionKey }, ExpressionAttributeValues: { ":state": "READY" } });
+  let applicationRounds = 0;
+  for (const session of sessions) {
+    if (typeof session.workspaceId !== "string") continue;
+    const operations = await queryAll(store, { KeyConditionExpression: "pk = :pk AND begins_with(sk, :operation)", ConsistentRead: true,
+      ExpressionAttributeValues: { ":pk": `WORKSPACE#${session.workspaceId}`, ":operation": "OPERATION#" } });
+    for (const operation of operations) {
+      const admission = operation.workflowE2EAdmission as { kind?: unknown } | undefined;
+      if (operation.entityType !== "OPERATION" || operation.workflowMode !== "CHECKS" || admission?.kind !== "application") continue;
+      if ((TERMINAL_OPERATION_STATUSES as ReadonlySet<unknown>).has(operation.status)) continue;
+      const touched = Date.parse(typeof operation.updatedAt === "string" ? operation.updatedAt : typeof operation.createdAt === "string" ? operation.createdAt : "");
+      if (Number.isFinite(touched) && now - touched > STALE_RUN_SWEEP_AGE_MS) continue;
+      applicationRounds += 1;
+    }
+  }
+  let setupRuns = 0;
+  const markers = await queryAll(store, { KeyConditionExpression: "pk = :pk AND begins_with(sk, :setup)", ConsistentRead: true,
+    ExpressionAttributeValues: { ":pk": setupWorkKey("x").pk, ":setup": "SETUP#" } });
+  for (const marker of markers) {
+    if (typeof marker.setupExecutionId !== "string" || Date.parse(String(marker.until)) <= now) continue;
+    const execution = await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: projectSetupExecutionKey(marker.setupExecutionId), ConsistentRead: true })) as { Item?: { state?: unknown } };
+    if (execution.Item === undefined || execution.Item.state === "ACCEPTED" || execution.Item.state === "DISPATCHING") setupRuns += 1;
+  }
+  return { drained: applicationRounds === 0 && setupRuns === 0, applicationRounds, setupRuns };
+}
+
+// ---- a renewal is not any other change of the selection ----------------------------------------------------------------------------------------------------------------------
+
+/** A dispatch refused only because the test machine was renewed. Its message begins with `WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX`. */
+export class ApplicationRuntimeRenewed extends ApplicationDispatchRefusal {}
+
+type SelectionRow = E2EApplicationSelectionRecord["runtimeRows"][number];
+
+/**
+ * Whether `current` differs from the `recorded` (approved) selection only by a renewal of the runtime rows: every other field the dispatch compares is the same, the pinned test
+ * accounts are the same, each recorded row has a current row of the same kind and profile with the same catalog id, binding and capabilities and a newer generation, and at least one row
+ * moved. Anything else (a row that is gone, re-bound or with other capabilities, a changed plan, setup, target or account) is not a renewal.
+ */
+export function isRenewalOnlyChange(recorded: E2EApplicationSelectionRecord, current: E2EApplicationSelectionRecord): boolean {
+  if (recorded.runtimeRows.length === 0 || recorded.runtimeRows.length !== current.runtimeRows.length) return false;
+  // Everything the dispatch compares, with the rows taken as approved: a difference in any of it is not a renewal.
+  if (!applicationSelectionStillCurrent(recorded, { ...current, runtimeRows: recorded.runtimeRows }).ok) return false;
+  const accounts = (selection: E2EApplicationSelectionRecord) => canonicalJson([...selection.accountRefs].sort((left, right) => `${left.applicationId}\0${left.profileId}`.localeCompare(`${right.applicationId}\0${right.profileId}`)));
+  if (accounts(recorded) !== accounts(current)) return false;
+  const renewed = (row: SelectionRow, now: SelectionRow) => now.kind === row.kind && now.profileId === row.profileId && now.runtimeCatalogId === row.runtimeCatalogId
+    && now.bindingDigest === row.bindingDigest && now.capabilityDigest === row.capabilityDigest && now.generation > row.generation && now.catalogRevision >= row.catalogRevision;
+  let moved = false;
+  for (const row of recorded.runtimeRows) {
+    const now = current.runtimeRows.find((item) => item.kind === row.kind && item.profileId === row.profileId);
+    if (now === undefined) return false;
+    if (canonicalJson(now) === canonicalJson(row)) continue;
+    if (!renewed(row, now)) return false;
+    moved = true;
+  }
+  return moved;
+}
+
+/**
+ * The refusal for an approved selection that is no longer the current one: the renewal kind when the machine was only renewed, else the ordinary one that asks for a person. The
+ * message is the prefix plus the reason `applicationSelectionStillCurrent` gave.
+ */
+export function selectionChangedRefusal(recorded: E2EApplicationSelectionRecord, current: E2EApplicationSelectionRecord, reason: string, ordinaryPrefix: string): ApplicationDispatchRefusal {
+  return isRenewalOnlyChange(recorded, current) ? new ApplicationRuntimeRenewed(`${WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX}${reason}`) : new ApplicationDispatchRefusal(`${ordinaryPrefix}${reason}`);
+}
+
+/** Whether a block reason is the renewal kind, whose approval again Rovara's own retry may do (once, by the policy's retry limit). */
+export const isRuntimeRenewedBlock = (blockReason: string | undefined): boolean => blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX) === true;
+
+/**
+ * The guard on Rovara's own re-approval: the selection derived again must be the approved one with only the rows renewed (and the same test accounts, which the owner's re-approval would
+ * otherwise move to the latest). Anything else needs the owner, so the automatic retry refuses.
+ */
+export function requireRenewalOnlyReapproval(approved: E2EApplicationSelectionRecord, derived: E2EApplicationSelectionRecord): void {
+  if (!isRenewalOnlyChange(approved, derived)) throw agentXError("CONFIG_INVALID", "this block needs the owner to approve the plan again; only a renewal of the test machine is approved again automatically");
+}
+
+// ---- replays ------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+/** Whether a round ran on runtime rows that are not the registered ones any more (a row that is gone or was requalified since). */
+export function replayPredatesRenewal(admitted: readonly E2ERegisteredRuntime[], current: readonly E2ERegisteredRuntime[]): boolean {
+  return admitted.some((row) => {
+    const now = current.find((item) => item.capabilities.kind === row.capabilities.kind && item.profileId === row.profileId);
+    return now === undefined || canonicalJson(now) !== canonicalJson(row);
+  });
+}

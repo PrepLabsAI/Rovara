@@ -59,6 +59,7 @@ const CODE_SENTENCES: Readonly<Record<AutoFixCode, string>> = Object.freeze({
   "review-run-failed": "A review stopped before it finished.",
   "provider-outage": "The AI provider was unavailable.",
   "runner-busy": "The runner was busy.",
+  "runtime-renewed": "The test machine was renewed, so the approved browser and API checks were approved again against it.",
   "runtime-expired": "The browser and API runtime's qualification expired.",
   "runtime-environment-drifted": "The test machine changed since it was qualified.",
   "model-environment-unsafe": "The runner's setup could let AI model calls be redirected.",
