@@ -72,6 +72,10 @@ export class SessionLifecycle extends Construct {
     this.instanceRoleName = Fn.select(naming.env === undefined ? 1 : 3, Fn.split("/", instanceRoleArn.valueAsString));
     const launchTemplateId = parameter("Ec2WorkerLaunchTemplateId", "The EC2 workers' launch template");
 
+    // AUTOREQUALIFY AR-4: written by the requalifier (never by this construct's principals); read by
+    // the provisioner (to launch from it) and the reconciler (to recycle workers on another AMI).
+    const workerAmiParameterName = `${naming.ec2.workerSettingsPrefix}worker-qualified-ami`;
+    const workerAmiParameterArn = `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${workerAmiParameterName}`;
     const settingParameterArns = Object.values(WORKER_SETTING_PARAMETERS).map((name) =>
       `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${naming.ec2.workerSettingsPrefix}${name}`);
     this.steps = packagedFunction(this, "Steps", "packages/broker/src/aws/session-steps.ts", {
@@ -99,6 +103,7 @@ export class SessionLifecycle extends Construct {
       environmentTag: naming.environmentTagValue,
       ...(naming.env === undefined ? {} : { env: naming.env }),
       resourcePrefix: naming.resourcePrefix,
+      workerAmiParameterName,
     };
     const ec2Arn = (resource: string) => `arn:${Aws.PARTITION}:ec2:${Aws.REGION}:${Aws.ACCOUNT_ID}:${resource}`;
     // Only instances and volumes this environment's session lifecycle created.
@@ -136,6 +141,11 @@ export class SessionLifecycle extends Construct {
         sid: "ResolveWorkerAmi",
         actions: ["ssm:GetParameters", "ssm:GetParameter"],
         resources: [`arn:${Aws.PARTITION}:ssm:${Aws.REGION}::parameter${EC2_WORKER_AMI_PARAMETER}`],
+      }),
+      new iam.PolicyStatement({
+        sid: "ReadQualifiedWorkerAmi",
+        actions: ["ssm:GetParameter"],
+        resources: [workerAmiParameterArn],
       }),
       new iam.PolicyStatement({
         sid: "PassInstanceRole",
@@ -210,6 +220,7 @@ export class SessionLifecycle extends Construct {
       DELETER_ARN: this.deleter.stateMachineArn,
       ENVIRONMENT_TAG: naming.environmentTagValue,
       AGENTX_METRICS_NAMESPACE: naming.metricsNamespace,
+      WORKER_QUALIFIED_AMI_PARAMETER: workerAmiParameterName,
     }, Duration.minutes(4));
     inVpc(this.reconciler);
     props.state.grantReadWriteData(this.reconciler);
@@ -217,6 +228,7 @@ export class SessionLifecycle extends Construct {
     this.provisioner.grantRead(this.reconciler);
     this.deleter.grantRead(this.reconciler);
     this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "Describe", actions: ["ec2:DescribeInstances", "ec2:DescribeVolumes"], resources: ["*"] }));
+    this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadQualifiedWorkerAmi", actions: ["ssm:GetParameter"], resources: [workerAmiParameterArn] }));
     this.reconciler.addToRolePolicy(new iam.PolicyStatement({
       sid: "RepairOwn",
       actions: ["ec2:TerminateInstances", "ec2:DeleteVolume"],

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { WORKER_AMI_ID_PATTERN } from "../../packages/broker/src/aws/worker-ami.js";
 import {
   PROBE_ATTEMPTS,
   PROBE_INTERVAL_SECONDS,
@@ -9,7 +10,7 @@ import {
 type State = { Type: string; Next?: string; Default?: string; Choices?: Array<{ Next: string }>; Catch?: Array<{ Next: string }>; Retry?: unknown[]; Resource?: string; Arguments?: Record<string, unknown> };
 type Definition = { StartAt: string; QueryLanguage: string; States: Record<string, State> };
 
-const props = { stepsFunctionArn: "arn:aws:lambda:us-east-1:111122223333:function:steps", workspaceKeyArn: "arn:aws:kms:us-east-1:111122223333:key/k", environmentTag: "production", resourcePrefix: "agentx-production" };
+const props = { stepsFunctionArn: "arn:aws:lambda:us-east-1:111122223333:function:steps", workspaceKeyArn: "arn:aws:kms:us-east-1:111122223333:key/k", environmentTag: "production", resourcePrefix: "agentx-production", workerAmiParameterName: "/agentx/production/worker-qualified-ami" };
 const provisioner = provisionerDefinition(props) as unknown as Definition;
 const deleter = deleterDefinition(props) as unknown as Definition;
 
@@ -86,12 +87,69 @@ describe("provisioner", () => {
   it("sends every failure through cleanup: terminate any instance, keep the volume, mark failed", () => {
     for (const [name, state] of Object.entries(states)) {
       if (state.Type !== "Task" || name === "MarkFailed" || name === "TerminateInstance") continue;
+      // The AMI pin is optional: an absent parameter launches unpinned; every other fault cleans up.
+      if (name === "ReadQualifiedAmi") continue;
       expect(state.Catch?.map((c) => c.Next), name).toEqual(["Cleanup"]);
     }
     expect(states.Cleanup!.Choices![0]!.Next).toBe("TerminateInstance");
     expect(states.TerminateInstance!.Next).toBe("MarkFailed");
     expect(states.TerminateInstance!.Catch![0]!.Next).toBe("MarkFailed");
     expect(JSON.stringify(provisioner)).not.toContain("deleteVolume");
+  });
+});
+
+describe("provisioner: pinned worker AMI (AUTOREQUALIFY AR-4)", () => {
+  const states = provisioner.States as unknown as Record<string, State & { Assign?: Record<string, unknown>; Catch?: Array<{ ErrorEquals: string[]; Next: string }> }>;
+  const NOT_FOUND = "Ssm.ParameterNotFoundException";
+
+  it("reads the pin after the launch configuration and before launching, by the environment's parameter name only", () => {
+    expect(states.LaunchConfiguration!.Next).toBe("ReadQualifiedAmi");
+    const read = states.ReadQualifiedAmi!;
+    expect(read.Resource).toBe("arn:aws:states:::aws-sdk:ssm:getParameter");
+    // Plain read: a pin is an AMI ID, never a secret, so no WithDecryption.
+    expect(read.Arguments).toEqual({ Name: props.workerAmiParameterName });
+    expect(read.Next).toBe("QualifiedAmiWellFormed");
+  });
+
+  it("launches unpinned only when the parameter does not exist, without retrying that answer", () => {
+    const read = states.ReadQualifiedAmi!;
+    expect(read.Catch).toEqual([
+      { ErrorEquals: [NOT_FOUND], Next: "RunInstance" },
+      expect.objectContaining({ ErrorEquals: ["States.ALL"], Next: "Cleanup" }),
+    ]);
+    // First retrier matches the not-found answer with zero attempts, ahead of the catch-all retrier.
+    const retry = read.Retry as unknown as Array<{ ErrorEquals: string[]; MaxAttempts?: number }>;
+    expect(retry[0]).toMatchObject({ ErrorEquals: [NOT_FOUND], MaxAttempts: 0 });
+    expect(retry.slice(1).every((retrier) => !retrier.ErrorEquals.includes(NOT_FOUND))).toBe(true);
+  });
+
+  it("launches the pinned AMI when the value is an AMI ID, and fails the provisioning when it is not", () => {
+    const choice = states.QualifiedAmiWellFormed!;
+    expect(choice.Choices![0]!.Next).toBe("RunInstancePinned");
+    expect(choice.Default).toBe("QualifiedAmiMalformed");
+    expect(states.QualifiedAmiMalformed!.Next).toBe("Cleanup");
+    const condition = (choice.Choices![0] as unknown as { Condition: string }).Condition;
+    // The state machine's own pattern is the broker's pattern.
+    const embedded = /\/(.+)\//.exec(condition)![1]!;
+    expect(embedded).toBe(WORKER_AMI_ID_PATTERN.source);
+    expect(JSON.stringify(states.QualifiedAmiMalformed)).not.toContain("qualifiedAmi");
+  });
+
+  it("differs from the unpinned launch by the ImageId alone, with the same idempotency token and tags", () => {
+    const unpinned = states.RunInstance!;
+    const pinned = states.RunInstancePinned!;
+    expect(unpinned.Arguments).not.toHaveProperty("ImageId");
+    expect(pinned.Arguments).toMatchObject({ ImageId: "{% $qualifiedAmi %}", ClientToken: "{% $clientToken %}" });
+    const rest: Record<string, unknown> = { ...pinned.Arguments };
+    delete rest.ImageId;
+    expect(rest).toEqual(unpinned.Arguments);
+    expect({ ...pinned, Arguments: undefined }).toEqual({ ...unpinned, Arguments: undefined });
+    expect(pinned.Next).toBe("RecordInstance");
+    expect(pinned.Catch!.map((c) => c.Next)).toEqual(["Cleanup"]);
+  });
+
+  it("starts with no pin held, so a retried execution never reuses an earlier value", () => {
+    expect(states.Start!.Assign).toMatchObject({ qualifiedAmi: null });
   });
 });
 

@@ -172,6 +172,47 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     expect([...actions(statements)]).toEqual(expect.arrayContaining(["states:DescribeExecution", "states:StartExecution"]));
   });
 
+  describe("pinned worker AMI (AUTOREQUALIFY AR-4)", () => {
+    const PARAMETER = "/agentx/production/worker-qualified-ami";
+    const readGrants = (roleId: string) => roleStatements(roleId).filter((st) => [st.Action].flat().some((a) => a.startsWith("ssm:")) && JSON.stringify(st.Resource).includes("worker-qualified-ami"));
+    const machineRoleId = (name: string) => {
+      const [, machine] = ofType("AWS::StepFunctions::StateMachine").find(([id]) => id.startsWith(`Sessions${name}`))!;
+      return (machine.Properties.RoleArn as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+    };
+
+    it("lets the provisioner read exactly the pin parameter, read only and without a wildcard", () => {
+      const grants = readGrants(machineRoleId("Provisioner"));
+      expect(grants).toHaveLength(1);
+      expect([grants[0]!.Action].flat()).toEqual(["ssm:GetParameter"]);
+      const resource = JSON.stringify(grants[0]!.Resource);
+      expect(resource).toContain(`:parameter${PARAMETER}"`);
+      expect(resource).not.toContain("*");
+    });
+
+    it("hands the provisioner the same parameter name its grant names", () => {
+      const [, machine] = ofType("AWS::StepFunctions::StateMachine").find(([id]) => id.startsWith("SessionsProvisioner"))!;
+      expect(JSON.stringify(machine.Properties.DefinitionString)).toContain(PARAMETER);
+    });
+
+    it("lets the reconciler read the pin, so it can recycle workers on another AMI, and names it in its environment", () => {
+      const [, reconciler] = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("SessionsReconciler"))!;
+      expect((reconciler.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ WORKER_QUALIFIED_AMI_PARAMETER: PARAMETER });
+      const roleId = (reconciler.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+      const grants = readGrants(roleId);
+      expect(grants).toHaveLength(1);
+      expect([grants[0]!.Action].flat()).toEqual(["ssm:GetParameter"]);
+      expect(JSON.stringify(grants[0]!.Resource)).toContain(`:parameter${PARAMETER}"`);
+    });
+
+    it("grants no SSM write anywhere in the session lifecycle: only the requalifier ever writes the pin", () => {
+      const roles = [machineRoleId("Provisioner"), machineRoleId("Deleter"), stepsId(), ...["Reaper", "Reconciler"].map((prefix) => ofType("AWS::Lambda::Function").find(([id]) => id.startsWith(`Sessions${prefix}`))![0])]
+        .map((id) => (resources[id]?.Type === "AWS::Lambda::Function" ? (resources[id].Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0] : id));
+      for (const roleId of roles) {
+        expect([...actions(roleStatements(roleId))].filter((a) => /^ssm:(Put|Delete|Add|Label)/.test(a)), roleId).toEqual([]);
+      }
+    });
+  });
+
   it("alarms on quarantined volumes, lost instances and stuck provisioning (#86)", () => {
     const names = ofType("AWS::CloudWatch::Alarm").map(([, a]) => a.Properties.AlarmName);
     expect(names).toEqual(expect.arrayContaining(["AgentXReconcilerQuarantinedVolumes", "AgentXReconcilerLostInstances", "AgentXReconcilerStuckProvisioning"]));
