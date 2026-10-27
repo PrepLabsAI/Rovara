@@ -117,7 +117,7 @@ import {
   requalifyInstalled,
   type RequalifyFacts,
 } from "./test-deploy-requalify.js";
-import { recordEnabledMarker, wantsScheduleEnabled } from "./test-deploy-requalify-schedule.js";
+import { recordEnabledMarkerReport, scheduleStateOf, wantsScheduleEnabled } from "./test-deploy-requalify-schedule.js";
 
 /**
  * `control-plane-code` rebuilds every packaged control-plane Lambda (CONTROL_PLANE_LAMBDAS) in one change set; `broker` and
@@ -249,7 +249,7 @@ export type DeployStep =
   | { id: string; kind: "check-requalify-ready"; stack: string; identityMode: IdentityMode }
   | { id: string; kind: "check-requalify-lock"; stack: string }
   | { id: string; kind: "verify-requalify-schedule"; stack: string; logicalId: string }
-  | { id: string; kind: "record-requalify-enabled"; stack: string }
+  | { id: string; kind: "record-requalify-enabled"; stack: string; /** After a code deploy: a record that cannot be written is said, not fatal (the renewal's daily check writes it too). */ optional?: true }
   | { id: string; kind: "start-requalify"; stack: string; logicalId: string };
 
 /** A file the release bundle holds beside the handler (`packagedFunction`'s extraFiles): repo-relative source, name in the zip. */
@@ -413,6 +413,8 @@ export function planTestDeploy(
     env: string; only: DeployUnit[]; artifacts: BuiltArtifacts; previous: StackParameters; identityMode?: IdentityMode; e2eModel?: string; region?: string;
     /** Whether the deployed control-plane stack already has the renewal's Lambda (read from its template). Without it `control-plane-code` leaves that Lambda out, `requalify-now` refuses, and `requalify-infra` adds it. */
     requalifyInstalled?: boolean;
+    /** Whether the deployed schedule is already ENABLED (read from the deployed template). A code deploy then records, once, that it was enabled: a schedule that was on before the record existed would otherwise never be reported as switched off. */
+    requalifyScheduleOn?: boolean;
   },
   allowlist: readonly string[] = loadAllowlist(),
 ): DeployStep[] {
@@ -672,6 +674,11 @@ export function planTestDeploy(
         expectedSha256Base64: { fromStep: `build-${unit}`, output: "sha256Base64" },
       })),
     );
+  }
+
+  // ARGUARD M2: a schedule that was already on before the record existed. Conditional put, so a record that is there is never moved.
+  if (units.includes("control-plane-code") && requalifyIsInstalled && input.requalifyScheduleOn === true) {
+    steps.push({ id: "record-requalify-enabled", kind: "record-requalify-enabled", stack: stacks["control-plane"], optional: true });
   }
 
   if (units.includes("qualification-transport")) {
@@ -1515,7 +1522,7 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
     }
     case "record-requalify-enabled": {
       const table = stackOutput(describeStack(context.runner, context.region, step.stack), "StateTableName");
-      console.log(recordEnabledMarker(context.runner, { table, region: context.region, now: new Date() }) === "written" ? "recorded that the daily schedule was enabled" : "the daily schedule was already recorded as enabled");
+      console.log(recordEnabledMarkerReport(context.runner, { table, region: context.region, now: new Date() }, step.optional === true));
       return;
     }
     case "check-requalify-lock": {
@@ -2050,9 +2057,11 @@ export async function main(argv: readonly string[]): Promise<void> {
     runtime: needsRuntime ? currentParameters(runner, args.region, stacks.runtime) : {},
   };
   // Whether the stack already has the renewal's Lambda decides what these units plan; the deployed template is a read (get-template).
-  const renewalInstalled = args.only.some((unit) => unit === "control-plane-code" || unit === "requalify-infra" || unit === "requalify-now" || unit === "requalify-schedule")
-    && requalifyInstalled(deployedTemplateOf(runner, args.region, stacks["control-plane"]));
-  const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir }, previous, identityMode, region: args.region, requalifyInstalled: renewalInstalled, ...(args.e2eModel === undefined ? {} : { e2eModel: args.e2eModel }) });
+  const renewalTemplate = args.only.some((unit) => unit === "control-plane-code" || unit === "requalify-infra" || unit === "requalify-now" || unit === "requalify-schedule")
+    ? deployedTemplateOf(runner, args.region, stacks["control-plane"]) : undefined;
+  const renewalInstalled = renewalTemplate !== undefined && requalifyInstalled(renewalTemplate);
+  const scheduleOn = renewalInstalled && scheduleStateOf(renewalTemplate) === "ENABLED";
+  const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir }, previous, identityMode, region: args.region, requalifyInstalled: renewalInstalled, ...(scheduleOn ? { requalifyScheduleOn: true } : {}), ...(args.e2eModel === undefined ? {} : { e2eModel: args.e2eModel }) });
   console.log(`TEST deploy plan for ${args.env} (${args.region}), revision ${revision}\n${formatPlan(steps)}`);
   if (!args.apply) {
     console.log("\nDry run: nothing was changed. Add --apply to run this plan.");

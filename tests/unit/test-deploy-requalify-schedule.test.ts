@@ -6,7 +6,7 @@ import { evaluateTestDeployCheck } from "../../scripts/test-deploy-check.js";
 import { planTestDeploy, type DeployStep } from "../../scripts/test-deploy.js";
 import { REQUALIFY_INFRA, readScheduleFact, requalifyFindings, requalifyHeadContext, type RequalifyFacts } from "../../scripts/test-deploy-requalify.js";
 import {
-  REQUALIFY_SCHEDULE_CONTEXT_KEY, REQUALIFY_SCHEDULE_LOGICAL_ID, enabledMarkerPutArgs, recordEnabledMarker, scheduleFindings, scheduleStateOf, wantsScheduleEnabled, type ScheduleFact,
+  REQUALIFY_SCHEDULE_CONTEXT_KEY, REQUALIFY_SCHEDULE_LOGICAL_ID, enabledMarkerPutArgs, recordEnabledMarker, recordEnabledMarkerReport, scheduleFindings, scheduleStateOf, wantsScheduleEnabled, type ScheduleFact,
 } from "../../scripts/test-deploy-requalify-schedule.js";
 
 const AT = "2026-10-20T06:00:00.000Z";
@@ -136,6 +136,38 @@ describe("the requalify-schedule unit records that the schedule was enabled", ()
     expect(JSON.parse(args[args.indexOf("--item") + 1]!)).toEqual({
       pk: { S: requalifyScheduleEnabledKey(REQUALIFY_PROFILE_ID).pk }, sk: { S: "SCHEDULE_ENABLED" }, entityType: { S: "RUNTIME_REQUALIFY_SCHEDULE_ENABLED" }, at: { S: AT },
     });
+  });
+});
+
+describe("a schedule that was already on before the record existed (ARGUARD M2)", () => {
+  const plan = (extra: { requalifyInstalled?: boolean; requalifyScheduleOn?: boolean }, only: Parameters<typeof planTestDeploy>[0]["only"] = ["control-plane-code"]): DeployStep[] => planTestDeploy({
+    env: "agentxlivetest123", only, artifacts: { revision: "0123456789ab", outputDir: "/tmp/test-deploy-0123456789ab" }, previous: { "control-plane": { OidcIssuer: "https://issuer.example" }, runtime: {} }, ...extra,
+  });
+  const recorded = (steps: DeployStep[]) => steps.filter((step) => step.kind === "record-requalify-enabled");
+
+  it("a code deploy to a stack whose schedule is ENABLED records, once and after the code is verified, that it was enabled (optional: the deploy never fails on it)", () => {
+    const steps = plan({ requalifyInstalled: true, requalifyScheduleOn: true });
+    expect(recorded(steps)).toHaveLength(1);
+    expect(recorded(steps)[0]).toMatchObject({ id: "record-requalify-enabled", kind: "record-requalify-enabled", optional: true });
+    const kinds = steps.map((step) => step.kind);
+    expect(kinds.indexOf("record-requalify-enabled")).toBeGreaterThan(kinds.lastIndexOf("verify-lambda-code"));
+  });
+
+  it("adds nothing while the schedule is off, when the renewal is not installed, or for units that do not move the code", () => {
+    expect(recorded(plan({ requalifyInstalled: true }))).toEqual([]);
+    expect(recorded(plan({ requalifyInstalled: true, requalifyScheduleOn: false }))).toEqual([]);
+    expect(recorded(plan({ requalifyScheduleOn: true }))).toEqual([]);
+    expect(recorded(plan({ requalifyInstalled: true, requalifyScheduleOn: true }, ["dispatcher"]))).toEqual([]);
+  });
+
+  it("after a code deploy a refused write is a warning that names the next step (the deploy is not failed); in the requalify-schedule unit it still stops", () => {
+    const denied = { aws: () => ({ status: 254, stdout: "", stderr: "AccessDeniedException arn:aws:iam::123456789012:user/someone" }) };
+    const input = { table: "state", region: "us-east-1", now: new Date(AT) };
+    const line = recordEnabledMarkerReport(denied, input, true);
+    expect(line).toMatch(/^WARNING: .*daily check writes it/);
+    expect(line).not.toContain("123456789012");
+    expect(() => recordEnabledMarkerReport(denied, input, false)).toThrow(/daily check writes it/);
+    expect(recordEnabledMarkerReport({ aws: () => ({ status: 0, stdout: "", stderr: "" }) }, input, true)).toBe("recorded that the daily schedule was enabled");
   });
 });
 

@@ -300,7 +300,8 @@ describe("describeRegisteredRows", () => {
 });
 
 /** Effects that record every call and fail where a test says, so the run is driven with no AWS and no clock. */
-function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Array<Buffer | undefined>; failAt?: string; adminFails?: boolean; instanceId?: string; facts?: QualificationFacts; readBack?: Buffer; registeredGeneration?: number; lockHeld?: boolean; activeRunners?: number } = {}) {
+function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Array<Buffer | undefined>; failAt?: string; adminFails?: boolean; instanceId?: string; facts?: QualificationFacts; readBack?: Buffer; registeredGeneration?: number; movedGenerationAfterBoot?: number; lockHeld?: boolean; activeRunners?: number } = {}) {
+  let booted = false;
   const calls: string[] = [];
   const bindings: unknown[] = [];
   const ready = [...(options.readies ?? [Buffer.from(JSON.stringify({ state: "READY", reason: "worker-healthy", finishedAt: "2026-10-19T11:50:00Z" }))])];
@@ -319,6 +320,7 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
     async createVolume(request) { calls.push(`createVolume ${request.clientToken}`); maybeFail("createVolume"); return "vol-0123456789abcdef0"; },
     async runInstance(request) {
       userData.push(request.UserData ?? "");
+      booted = true;
       calls.push(`runInstance min=${request.MinCount} max=${request.MaxCount} token=${request.ClientToken}`);
       maybeFail("runInstance");
       return options.instanceId ?? INSTANCE_ID;
@@ -338,7 +340,7 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
     async recordSuccess(runId) { calls.push(`recordSuccess ${runId}`); maybeFail("recordSuccess"); },
     async recordModelCheckRunner(runner) { calls.push(`recordModelCheckRunner ${runner.roleId} ${runner.instanceId} ${runner.transportCorrelationId}`); maybeFail("recordModelCheckRunner"); },
     async register(file) { calls.push(`register ${file}`); maybeFail("register"); return JSON.stringify({ profileId: "linux-arm64-web-api-v1", featureCatalogId: "catalog-1", featureRevisions: { web: 1, api: 1 } }); },
-    async nextGeneration() { return options.registeredGeneration === undefined ? 1 : options.registeredGeneration + 1; },
+    async nextGeneration() { return booted && options.movedGenerationAfterBoot !== undefined ? options.movedGenerationAfterBoot : options.registeredGeneration === undefined ? 1 : options.registeredGeneration + 1; },
     async countActiveRunners() { return options.activeRunners ?? 0; },
     async acquireLock(runId) { locks.push(`acquire ${runId}`); if (options.lockHeld) throw new Error("the renewal lock is held by another run"); },
     async releaseLock(runId) { locks.push(`release ${runId}`); },
@@ -368,6 +370,17 @@ describe("runTestQualification", () => {
       expect(script).toContain(`export AGENTX_WORKSPACE_ID='${issued[3]}'`);
       expect(issued[2]).toBe(String((registered ?? 0) + 1));
     }
+  });
+
+  it("re-checks the generation just before the challenge: when another renewal moved the registered runtime after the boot, nothing is issued and the lock is freed (review M2 of AR-fix1)", async () => {
+    const moved = harness({ registeredGeneration: 2, movedGenerationAfterBoot: 5, statuses: [succeeded] });
+    await expect(runTestQualification(plan(), moved.effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" })).rejects.toThrow(/registered runtime moved after the runner was booted/);
+    expect(moved.calls.some((call) => call.startsWith("issueChallenge") || call.startsWith("register ") || call.startsWith("putObject"))).toBe(false);
+    expect(moved.locks).toEqual([`acquire ${RUN_ID}`, `release ${RUN_ID}`]);
+    // Positive control: the same run without the move issues its challenge at the booted generation.
+    const steady = harness({ registeredGeneration: 2, statuses: [succeeded] });
+    await runTestQualification(plan(), steady.effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
+    expect(steady.calls.filter((call) => call.startsWith("issueChallenge")).map((call) => call.split(" ")[2])).toEqual(["3"]);
   });
 
   it("issues generation 1 when nothing is registered yet", async () => {
