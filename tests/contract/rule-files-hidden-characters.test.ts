@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { inertContextText } from "../../packages/worker/src/context-text.js";
+import { devcontainerContextFile } from "../../packages/worker/src/devcontainer.js";
 import {
   loadRepositoryContextFiles,
   MAX_REPOSITORY_CONTEXT_FILE_BYTES,
@@ -67,7 +68,7 @@ describe("hidden characters in a repository's rule file (A4)", () => {
     expect(files[0]!.content.endsWith("\n\nLine one.\nLine two.\n")).toBe(true);
     expect(inertContextText(`${cp(0xfeff)}a\r\nb`)).toEqual({ text: "a\nb", removed: 0 });
     // A byte-order mark anywhere else, and a lone carriage return, are still hidden characters.
-    expect(inertContextText(`a${cp(0xfeff)}b\rc`)).toEqual({ text: "abc", removed: 2 });
+    expect(inertContextText(`a${cp(0xfeff)}b`)).toEqual({ text: "ab", removed: 1 });
   });
 
   it("keeps newlines and tabs, and leaves ordinary non-English text and emoji unchanged", async () => {
@@ -124,5 +125,30 @@ describe("hidden characters in a repository's rule file (A4)", () => {
   it("inertContextText reports the removed count and keeps \\n and \\t but drops other controls", () => {
     expect(inertContextText(`a\tb\nc${cp(0x00)}${cp(0x1b)}${cp(0x0d)}${cp(0xfeff)}${cp(0xad)}d`)).toEqual({ text: "a\tb\ncd", removed: 5 });
     expect(inertContextText("")).toEqual({ text: "", removed: 0 });
+  });
+
+  it("removes a format character that is not default-ignorable, and an unassigned code point, each counted once", () => {
+    // U+0600 and U+06DD are \p{Cf} only; U+0378 is unassigned (\p{Cn}) and not default-ignorable.
+    for (const code of [0x0600, 0x06dd, 0x0378]) {
+      expect(inertContextText(`a${cp(code)}b`), `U+${code.toString(16)}`).toEqual({ text: "ab", removed: 1 });
+    }
+  });
+
+  it("turns a lone carriage return into a line break without counting it", async () => {
+    expect(inertContextText("one\rtwo\r")).toEqual({ text: "one\ntwo\n", removed: 0 });
+    expect(inertContextText("a\r\nb\rc\n")).toEqual({ text: "a\nb\nc\n", removed: 0 });
+    const rootPath = await workspace("AGENTS.md", "Line one.\rLine two.\r");
+    const { files, diagnostics } = await loadRepositoryContextFiles(rootPath, repositories);
+    expect(diagnostics).toEqual([]);
+    expect(files[0]!.content.endsWith("\n\nLine one.\nLine two.\n")).toBe(true);
+  });
+
+  it("the devcontainer note carries no hidden characters from its folders", () => {
+    const content = devcontainerContextFile({
+      hostFolder: `/work/repo${ZERO_WIDTH_SPACE}${TAG_PAYLOAD}`,
+      containerFolder: `/workspaces/sample${RIGHT_TO_LEFT_OVERRIDE}${VARIATION_SELECTORS}`,
+    }).content;
+    expect(content).toContain("The repository is at /work/repo. Inside the devcontainer it is also at /workspaces/sample.");
+    expect(hiddenIn(content)).toEqual([]);
   });
 });
