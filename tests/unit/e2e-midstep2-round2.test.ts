@@ -100,7 +100,7 @@ describe("N-2: an evidence-only value learned after a trace is on disk scrubs or
   });
 
   it("the registry tells the child's file writer which values are evidence-only, and the host and the parent use the tagged file", () => {
-    const told: Array<{ value: string; evidenceOnly: boolean; maskOnly: boolean }> = [];
+    const told: Array<{ value: string; evidenceOnly: boolean }> = [];
     const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]), onRegister: (value, options) => { told.push({ value, evidenceOnly: options?.evidenceOnly === true }); } });
     registry.register("credential-value-0123456789");
     registry.register("evidence-value-0123456789", { evidenceOnly: true });
