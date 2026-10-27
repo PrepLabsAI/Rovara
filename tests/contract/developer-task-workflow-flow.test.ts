@@ -5,9 +5,9 @@ import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependenc
 import { executeSerialWorkflowDependencies } from "../../packages/worker/src/workflow-dependencies.js";
 import { canonicalPlanJson, parsePlanDocument, planDocumentMarkdown, readCanonicalPlan, type PlanDocument, type TaskPersonProofRequest, type TaskPersonProofResponse, type WorkItemProgressV1 } from "@agentx/contracts";
 import { SlackThreadWorkspaceResultSchema } from "@agentx/contracts";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
 import * as workflowContracts from "../../packages/contracts/src/task-workflow.js";
-import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { plainBlockReason, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
@@ -1109,11 +1109,20 @@ describe("native developer task workflow", () => {
     const changedNoteRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: retryRequestId, expectedRevision: retryBlocked.workflow.revision, candidateDigest: candidate.digest, instructions: `${retryNote} changed` });
     expect(changedNoteRetry.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
 
+    // A review that stopped because its base rule files could not be verified says so, in the block reason the owner reads.
+    const unverifiedRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: randomUUID(), expectedRevision: retryBlocked.workflow.revision, candidateDigest: candidate.digest, instructions: "Retry once more" });
+    expect(unverifiedRetry.status).toBe(200);
+    const unverifiedOperation = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.workflowMode === "REVIEW" && item.id !== reviewOperation?.id && item.id !== reviewRetryOperation?.id) as { id?: string } | undefined;
+    await harness.finish(workspaceId, String(unverifiedOperation?.id), "FAILED", { error: `CONFIG_INVALID: ${WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE}` });
+    const unverifiedBlocked = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { revision: number; stage: string; state: string; blockReason?: string } };
+    expect(unverifiedBlocked.workflow).toMatchObject({ stage: "REVIEW", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.ruleFilesUnverified });
+    expect(plainBlockReason(unverifiedBlocked.workflow.blockReason)).toContain("couldn't verify the base rule files");
+
     const secondRetryNote = "Please verify the timeout edge case.";
     const secondRetryRequestId = randomUUID();
-    const secondRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: secondRetryRequestId, expectedRevision: retryBlocked.workflow.revision, candidateDigest: candidate.digest, instructions: secondRetryNote });
+    const secondRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: secondRetryRequestId, expectedRevision: unverifiedBlocked.workflow.revision, candidateDigest: candidate.digest, instructions: secondRetryNote });
     expect(secondRetry.status).toBe(200);
-    const secondRetryOperation = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.workflowMode === "REVIEW" && item.id !== reviewOperation?.id && item.id !== reviewRetryOperation?.id) as { id?: string; payloadHash?: string } | undefined;
+    const secondRetryOperation = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.workflowMode === "REVIEW" && item.id !== reviewOperation?.id && item.id !== reviewRetryOperation?.id && item.id !== unverifiedOperation?.id) as { id?: string; payloadHash?: string } | undefined;
     expect(secondRetryOperation?.payloadHash).not.toBe(reviewRetryOperation?.payloadHash);
     const secondRetryPayload = (harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === secondRetryOperation?.id)[0]?.invocation as { payload: { workflowReviewNote?: string } }).payload;
     expect(secondRetryPayload.workflowReviewNote).toBe(secondRetryNote);

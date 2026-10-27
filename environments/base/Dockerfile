@@ -84,6 +84,18 @@ COPY --from=build /opt/agentx/packages/contracts ./packages/contracts
 COPY --from=build /opt/agentx/packages/verifier ./packages/verifier
 COPY --from=build /opt/agentx/packages/worker ./packages/worker
 
+# Empty, read-only git directories (one per object format) for the worker's verified base read (packages/worker/src/trusted-base-objects.ts).
+# Git runs in one of these with GIT_OBJECT_DIRECTORY pointed at a scratch objects directory, so no process that can write the workspace can give
+# Git a config to read. Root-owned, nothing writable, outside the workspace and every mount a dev container is given.
+RUN set -eu; \
+    install -d -o root -g root -m 0755 /usr/share/agentx; \
+    for format in sha1 sha256; do \
+      git init --bare --quiet --template= "--object-format=$format" "/usr/share/agentx/empty-$format.git"; \
+    done; \
+    chown -R root:root /usr/share/agentx; \
+    find /usr/share/agentx -type d -exec chmod 0555 {} +; \
+    find /usr/share/agentx -type f -exec chmod 0444 {} +
+
 # AGENTX_WORKER_PROCESS_SCOPE: this container is the worker's own process namespace, so before a push every other
 # process of the worker's user in it is stopped (packages/worker/src/workspace-processes.ts).
 ENV AGENTX_WORKSPACE_ROOT=/mnt/workspace \

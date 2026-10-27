@@ -1,9 +1,9 @@
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { AgentXNameSchema, RelativeWorkspacePathSchema } from "@agentx/contracts";
+import { AgentXNameSchema, RelativeWorkspacePathSchema, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, agentXError } from "@agentx/contracts";
 import { inertContextText } from "./context-text.js";
-import { runIsolatedGit } from "./isolated-repository.js";
 import type { PreparationManifest } from "./prepare.js";
+import { readVerifiedBaseRuleFile, type BaseRuleFile } from "./trusted-base-objects.js";
 
 // Pi discovers these names in its working directory, in the directories above it, and in the
 // agent directory. The worker runs Pi at the workspace root, so the repositories checked out
@@ -67,7 +67,8 @@ export async function readPreparedRepositories(
  * repository without one contributes nothing; a file that escapes its repository or exceeds
  * the size cap is skipped with a diagnostic. Hidden characters are removed from what is loaded
  * (A4). With `at: "base-commit"` the file is read from the repository's recorded commit, never
- * from the working tree (A5): without a usable commit a repository contributes no file.
+ * from the working tree (A5): without a commit a repository contributes no file, and a commit that cannot be verified
+ * against its own ids stops the load (see {@link isRuleFilesUnverified}).
  */
 export async function loadRepositoryContextFiles(
   rootPath: string,
@@ -96,7 +97,7 @@ export async function loadRepositoryContextFiles(
     }
     if (!located.directory) continue;
     const read = atBase
-      ? await readBaseCommitRuleFile(located.directory, repository)
+      ? await readBaseCommitRuleFile(located.directory, repository, canonicalRoot)
       : await readWorkingTreeRuleFile(located.directory, repository);
     if (read.diagnostic) diagnostics.push(read.diagnostic);
     if (read.raw) {
@@ -263,69 +264,47 @@ async function readWorkingTreeRuleFile(
   return {};
 }
 
-const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
-const GIT_TIMEOUT_MS = 60_000;
+/** Whether `error` is the worker's fixed stop for a base commit whose rule files could not be verified. */
+export function isRuleFilesUnverified(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE);
+}
 
 /**
- * The same candidate order, size cap and checks, read from `repository.baseCommit` through the worker's
- * isolated Git (a throwaway repository that never reads the repository's own config, hooks or attributes).
- * A commit that is missing, malformed or unreadable gives no file and a diagnostic: the working tree is never the fallback.
+ * The same candidate order, size cap and checks, read from `repository.baseCommit` through a verified copy of that commit's objects
+ * (trusted-base-objects.ts): the commit, its tree and the rule file are each checked against their own id, and Git never reads the
+ * repository's own config, hooks or object store settings. No base commit sent gives no file and a diagnostic (an older task); a base
+ * commit that was sent but cannot be verified stops the load with one fixed reason, because the working tree is never the fallback and
+ * a review must not run without its rule files. A base commit that simply holds no rule file gives neither a file nor a diagnostic.
  */
 async function readBaseCommitRuleFile(
   directory: string,
   repository: WorkspaceRepositoryReference,
+  workspaceRoot: string,
 ): Promise<RuleFileRead> {
-  const unusable: RuleFileRead = { diagnostic: `skipped the context file of ${repository.name}: no usable base commit` };
   const commit = repository.baseCommit;
-  if (commit === undefined || !COMMIT_ID.test(commit)) return unusable;
-  let listing: string;
+  if (commit === undefined) return { diagnostic: `skipped the context file of ${repository.name}: no usable base commit` };
+  let found: BaseRuleFile;
   try {
-    listing = await runIsolatedGit(directory, ["ls-tree", "-z", "-l", commit, "--", ...REPOSITORY_CONTEXT_FILE_CANDIDATES], {
-      refs: false,
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer: 1024 * 1024,
-    });
+    found = await readVerifiedBaseRuleFile(directory, commit, REPOSITORY_CONTEXT_FILE_CANDIDATES, MAX_REPOSITORY_CONTEXT_FILE_BYTES, { workspaceRoot });
   } catch {
-    return unusable;
+    throw agentXError("CONFIG_INVALID", WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE);
   }
-  const entries = new Map<string, { mode: string; type: string; oid: string; size: number }>();
-  for (const line of listing.split("\0")) {
-    const tab = line.indexOf("\t");
-    if (tab < 0) continue;
-    const [mode, type, oid, size] = line.slice(0, tab).split(/\s+/u);
-    if (mode === undefined || type === undefined || oid === undefined || size === undefined) continue;
-    entries.set(line.slice(tab + 1), { mode, type, oid, size: Number(size) });
+  if (found.kind === "absent") return { usable: true };
+  if (found.kind === "symlink") {
+    return { usable: true, skipped: found.candidate, diagnostic: `skipped ${repository.path}/${found.candidate}: it is a symbolic link in the base commit` };
   }
-  for (const candidate of REPOSITORY_CONTEXT_FILE_CANDIDATES) {
-    const entry = entries.get(candidate);
-    // Directories and submodules are passed over, as the working-tree read passes over them.
-    if (entry === undefined || entry.type !== "blob") continue;
-    if (entry.mode === "120000") {
-      return { usable: true, skipped: candidate, diagnostic: `skipped ${repository.path}/${candidate}: it is a symbolic link in the base commit` };
-    }
-    if (!Number.isFinite(entry.size) || entry.size > MAX_REPOSITORY_CONTEXT_FILE_BYTES) {
-      return {
-        usable: true,
-        skipped: candidate,
-        diagnostic: `skipped ${repository.path}/${candidate}: ${entry.size} bytes exceeds the ${MAX_REPOSITORY_CONTEXT_FILE_BYTES}-byte limit`,
-      };
-    }
-    let content: string;
-    try {
-      content = await runIsolatedGit(directory, ["cat-file", "blob", entry.oid], {
-        refs: false,
-        timeout: GIT_TIMEOUT_MS,
-        maxBuffer: MAX_REPOSITORY_CONTEXT_FILE_BYTES * 4,
-      });
-    } catch {
-      return unusable;
-    }
-    if (Buffer.byteLength(content, "utf8") > MAX_REPOSITORY_CONTEXT_FILE_BYTES) {
-      return { usable: true, skipped: candidate, diagnostic: `skipped ${repository.path}/${candidate}: it exceeds the ${MAX_REPOSITORY_CONTEXT_FILE_BYTES}-byte limit` };
-    }
-    return { usable: true, raw: { candidate, path: resolve(directory, candidate), content } };
+  if (found.kind === "oversize") {
+    return {
+      usable: true,
+      skipped: found.candidate,
+      diagnostic: `skipped ${repository.path}/${found.candidate}: ${found.size} bytes exceeds the ${MAX_REPOSITORY_CONTEXT_FILE_BYTES}-byte limit`,
+    };
   }
-  return { usable: true };
+  const content = found.content.toString("utf8");
+  if (Buffer.byteLength(content, "utf8") > MAX_REPOSITORY_CONTEXT_FILE_BYTES) {
+    return { usable: true, skipped: found.candidate, diagnostic: `skipped ${repository.path}/${found.candidate}: it exceeds the ${MAX_REPOSITORY_CONTEXT_FILE_BYTES}-byte limit` };
+  }
+  return { usable: true, raw: { candidate: found.candidate, path: resolve(directory, found.candidate), content } };
 }
 
 function labelledContent(

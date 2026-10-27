@@ -145,15 +145,23 @@ describe("rule files at the base commit (A5)", () => {
     expect(diagnostics[0]).toContain("repo/payments/AGENTS.md");
   });
 
-  it("fails closed without a usable commit: no rule file and a diagnostic, never the working-tree file", async () => {
-    for (const baseCommit of [undefined, "not-a-commit", "b".repeat(40)]) {
+  it("fails closed without a base commit: no rule file and a diagnostic, never the working-tree file", async () => {
+    const { rootPath, directory } = await preparedWorkspace({ "AGENTS.md": BASE_RULE });
+    await writeFile(join(directory, "AGENTS.md"), EDITED_RULE);
+
+    const { files, diagnostics } = await loadRepositoryContextFiles(rootPath, await repositoriesAt(rootPath, undefined), { at: "base-commit" });
+
+    expect(files).toEqual([]);
+    expect(diagnostics).toEqual(["skipped the context file of payments: no usable base commit"]);
+  });
+
+  it("a base commit that was sent but is malformed or not in the repository stops the load, and never reads the working-tree file", async () => {
+    for (const baseCommit of ["not-a-commit", "b".repeat(40)]) {
       const { rootPath, directory } = await preparedWorkspace({ "AGENTS.md": BASE_RULE });
       await writeFile(join(directory, "AGENTS.md"), EDITED_RULE);
 
-      const { files, diagnostics } = await loadRepositoryContextFiles(rootPath, await repositoriesAt(rootPath, baseCommit), { at: "base-commit" });
-
-      expect(files, String(baseCommit)).toEqual([]);
-      expect(diagnostics, String(baseCommit)).toEqual(["skipped the context file of payments: no usable base commit"]);
+      await expect(loadRepositoryContextFiles(rootPath, await repositoriesAt(rootPath, baseCommit), { at: "base-commit" }), baseCommit)
+        .rejects.toThrow("CONFIG_INVALID: couldn't verify the base rule files");
     }
   });
 
@@ -220,17 +228,15 @@ describe("pi sessions and the rule file source (A5)", () => {
     expect(files.filter((file) => file.content.includes("This change edits"))).toHaveLength(1);
   });
 
-  it("a session asked for the base commit without a usable one gets no rule file, a diagnostic, and the workspace note", async () => {
+  it("a session asked for a base commit that cannot be verified is not opened", async () => {
     const { rootPath, directory } = await preparedWorkspace({ "AGENTS.md": BASE_RULE });
     await writeFile(join(directory, "AGENTS.md"), EDITED_RULE);
     const capture = capturingAdapter();
-    const diagnostics: string[] = [];
 
-    await createWorkspacePiSession({ rootPath, model, contextFilesAt: "base-commit", baseCommits: [{ repositoryId: "payments", baseCommitSha: "b".repeat(40) }], onDiagnostic: (message) => diagnostics.push(message) }, capture.adapter);
+    await expect(createWorkspacePiSession({ rootPath, model, contextFilesAt: "base-commit", baseCommits: [{ repositoryId: "payments", baseCommitSha: "b".repeat(40) }] }, capture.adapter))
+      .rejects.toThrow("CONFIG_INVALID: couldn't verify the base rule files");
 
-    expect(text(capture.inputs[0])).not.toContain("TODO");
-    expect(diagnostics).toEqual(["skipped the context file of payments: no usable base commit"]);
-    expect(capture.inputs[0]!.contextFiles[0]!.content).toContain("AgentX workspace note");
+    expect(capture.inputs).toEqual([]);
   });
 
   it("a session asked for the base commit with no broker-given base reads no rule file, whatever the manifest records", async () => {

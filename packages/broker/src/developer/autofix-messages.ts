@@ -76,6 +76,7 @@ const CODE_SENTENCES: Readonly<Record<AutoFixCode, string>> = Object.freeze({
   "check-broken": "A check could not run because the check itself is broken.",
   "fails-on-original-code": "A check fails on the original code too.",
   "review-unusable": "A review could not be used.",
+  "rule-files-unverified": "The base rule files could not be verified, so the review did not run.",
   "pull-request-open": "A pull request is already open for part of this change.",
   "unknown-group-code": "A check group ended in a way Rovara has no wording for.",
   unreadable: "The block could not be read.",

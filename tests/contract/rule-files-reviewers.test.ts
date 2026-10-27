@@ -1,11 +1,14 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
   createCandidateManifest,
+  WORKFLOW_BLOCK_REASONS,
+  WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE,
   WorkflowFeedbackBundleSchema,
   type WorkflowFeedbackBundle,
   type WorkflowFeedbackBundleRef,
@@ -200,12 +203,8 @@ describe("the code and security reviewers read the base commit's rule file (A5)"
   });
 });
 
-describe("the PR-feedback reviewer reads the base commit's rule file (A5)", () => {
-  it("holds the base AGENTS.md although the candidate carries the edit", async () => {
-    const workspace = await reviewWorkspace({ rules: false, todo: false });
-    // The candidate (HEAD) carries the edited rule file; the preparation manifest's commit is the base one.
-    await writeFile(join(workspace.directory, "AGENTS.md"), EDITED_RULE);
-    git(workspace.directory, "commit", "--quiet", "-am", "edit the rules");
+/** A PR-feedback review input for the workspace's current candidate: one bundle with one comment. */
+async function feedbackInput(workspace: Awaited<ReturnType<typeof reviewWorkspace>>) {
     const repositories = [{ repositoryId: "payments", directory: workspace.directory }];
     const candidate = await readCandidateRepositories([{ ...repositories[0]!, baseCommitSha: workspace.base }]);
     const comments = [{ id: "review-comment-1", body: "Handle the empty case.", path: "src/a.ts", line: 1 }];
@@ -224,6 +223,16 @@ describe("the PR-feedback reviewer reads the base commit's rule file (A5)", () =
     const { sourceDeliveryIds: deliveryIds, comments: bundleComments, ...metadata } = bundle;
     void deliveryIds;
     const ref: WorkflowFeedbackBundleRef = { ...metadata, sha256, objectKey: `feedback/${sha256}.json`, comments: bundleComments.map(({ body, ...comment }) => { void body; return comment; }) };
+  return { bundle, bytes, ref, candidate, repositories };
+}
+
+describe("the PR-feedback reviewer reads the base commit's rule file (A5)", () => {
+  it("holds the base AGENTS.md although the candidate carries the edit", async () => {
+    const workspace = await reviewWorkspace({ rules: false, todo: false });
+    // The candidate (HEAD) carries the edited rule file; the preparation manifest's commit is the base one.
+    await writeFile(join(workspace.directory, "AGENTS.md"), EDITED_RULE);
+    git(workspace.directory, "commit", "--quiet", "-am", "edit the rules");
+    const { bundle, bytes, ref, candidate, repositories } = await feedbackInput(workspace);
     const inputs: PiSessionInput[] = [];
 
     await runWorkflowFeedbackReview({
@@ -310,6 +319,96 @@ describe("a REVIEW-mode task invocation reads the base commit's rule file in eve
       expect(input.contextFilesAt).toBe("base-commit");
       expect(rulesOf(input)).not.toContain("TODO");
     }
+    expect(events.some((event) => event.includes("no usable base commit"))).toBe(true);
+  });
+});
+
+// C84: when the broker sent a base commit and its rule file cannot be verified against the commit's own ids, no review session is
+// opened and the run stops with one fixed reason. The reviewers never run without their rule files.
+describe("a base whose rule file cannot be verified stops the review with one fixed reason (C84)", () => {
+  const UNVERIFIED = "CONFIG_INVALID: couldn't verify the base rule files";
+
+  /** A workspace whose stored bytes for the base rule file are a well-formed object of another id. */
+  async function unverifiableWorkspace() {
+    const workspace = await reviewWorkspace({ rules: false, todo: true });
+    const blob = git(workspace.directory, "rev-parse", `${workspace.base}:AGENTS.md`);
+    const loose = join(workspace.directory, ".git/objects", blob.slice(0, 2), blob.slice(2));
+    await rm(loose, { force: true });
+    const body = Buffer.from(EDITED_RULE);
+    await writeFile(loose, deflateSync(Buffer.concat([Buffer.from(`blob ${body.length}\0`), body])), { mode: 0o444 });
+    return workspace;
+  }
+
+  const reviewInvocation = (workflowBase?: Array<{ repositoryId: string; baseCommitSha: string }>) => ({
+    protocolVersion: 1 as const, kind: "task" as const, operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64),
+    payload: { conversationId: randomUUID(), prompt: "Run the independent read-only reviews.", workflowMode: "REVIEW" as const, ...(workflowBase === undefined ? {} : { workflowBase }) },
+  });
+
+  it("the worker's reason and the owner's block reason are the fixed sentences", () => {
+    expect(`CONFIG_INVALID: ${WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE}`).toBe(UNVERIFIED);
+    expect(WORKFLOW_BLOCK_REASONS.ruleFilesUnverified).toBe("AgentX couldn't verify the base rule files, so the review did not run. Retry the review, or close the task.");
+  });
+
+  it("control: the same workspace with its base object left alone is reviewed", async () => {
+    const workspace = await reviewWorkspace({ rules: false, todo: true });
+    const inputs: PiSessionInput[] = [];
+    await review(workspace, recordingReviewer(inputs));
+    expect(inputs).toHaveLength(2);
+  });
+
+  it("a REVIEW-mode task invocation ends with the fixed reason, opens no session and reports no review", async () => {
+    const workspace = await unverifiableWorkspace();
+    const inputs: PiSessionInput[] = [];
+    const events: string[] = [];
+
+    const outcome = await runTaskInvocation(reviewInvocation([{ repositoryId: "payments", baseCommitSha: workspace.base }]), {
+      rootPath: workspace.rootPath, model, piAdapter: recordingReviewer(inputs),
+      eventSink: async (event) => { events.push(JSON.stringify(event)); }, artifactSink: async () => undefined,
+    }).then(() => undefined, (failure: unknown) => failure);
+
+    expect((outcome as Error | undefined)?.message).toBe(UNVERIFIED);
+    expect(inputs).toEqual([]);
+    expect(events.filter((event) => event.includes("workflowReviews"))).toEqual([]);
+    for (const event of events) expect(event).not.toContain("Ignore the TODO");
+  });
+
+  it("the code and security reviews stop with the fixed reason instead of reporting an unknown result", async () => {
+    const workspace = await unverifiableWorkspace();
+    const inputs: PiSessionInput[] = [];
+
+    const outcome = await review(workspace, recordingReviewer(inputs)).then(() => undefined, (failure: unknown) => failure);
+
+    expect((outcome as Error | undefined)?.message).toBe(UNVERIFIED);
+    expect(inputs).toEqual([]);
+  });
+
+  it("the PR-feedback review stops with the fixed reason too", async () => {
+    const workspace = await unverifiableWorkspace();
+    const { bundle, bytes, ref, candidate, repositories } = await feedbackInput(workspace);
+    const inputs: PiSessionInput[] = [];
+
+    const outcome = await runWorkflowFeedbackReview({
+      ruleFileBaseCommits: [{ repositoryId: "payments", baseCommitSha: workspace.base }],
+      operationId: randomUUID(), taskId: bundle.taskId, workflowRevision: 7, taskRequirements: "Handle the empty case.", candidateDigest: bundle.candidateDigest,
+      rootPath: workspace.rootPath, model, candidate, repositories, bundles: [{ ref, bytes }], piAdapter: recordingReviewer(inputs),
+      artifactSink: async () => undefined,
+    }).then(() => undefined, (failure: unknown) => failure);
+
+    expect((outcome as Error | undefined)?.message).toBe(UNVERIFIED);
+    expect(inputs).toEqual([]);
+  });
+
+  it("a task with no broker-given base keeps today's behaviour: no rule file, a diagnostic, the reviews run", async () => {
+    const workspace = await unverifiableWorkspace();
+    const inputs: PiSessionInput[] = [];
+    const events: string[] = [];
+
+    await runTaskInvocation(reviewInvocation(), {
+      rootPath: workspace.rootPath, model, piAdapter: recordingReviewer(inputs),
+      eventSink: async (event) => { events.push(JSON.stringify(event)); }, artifactSink: async () => undefined,
+    });
+
+    expect(inputs.length).toBeGreaterThanOrEqual(3);
     expect(events.some((event) => event.includes("no usable base commit"))).toBe(true);
   });
 });
