@@ -270,10 +270,10 @@ describe("a REVIEW-mode task invocation reads the base commit's rule file in eve
     const opened: PiSessionInput[] = [];
     const base = recordingReviewer(created);
     const adapter: PiSessionAdapter = {
-      create: base.create,
+      create: (input) => base.create(input),
       async open(input) {
         opened.push(input);
-        return base.create({ ...input, conversationId: input.conversationId });
+        return base.create({ ...input });
       },
     };
     const conversationId = randomUUID();
