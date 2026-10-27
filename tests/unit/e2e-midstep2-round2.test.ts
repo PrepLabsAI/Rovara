@@ -208,6 +208,15 @@ describe("fix round 3 (re-check 2)", () => {
     expect(classifyStorageEntry({ name: "lastRoute", value: JSON.stringify(path) }).filter((item) => item.tier === "strong")).toEqual([]);
   });
 
+  it("N-7: the path rule counts digit ids and hex ids as well as words, and needs half of the segments, not one", () => {
+    for (const path of ["/Api/8423/12345/6789/4321/Items/55", "/Files/9F8A7B6C5D4E3F2A/1B0C9D8E7F6A5B4C/3D2E1F0A9B8C7D6E"]) {
+      expect(classifyString("anything", path).filter((item) => item.tier === "strong"), path).toEqual([]);
+    }
+    // One digits-only piece between random base64 segments does not make a token a path.
+    const token = "k3JqZ8vR2mT9wXyB4nL7/12/pQ1sD6fH0gA5eC8uV3iO2Yb";
+    expect(classifyString("anything", token).map((item) => item.tier)).toContain("strong");
+  });
+
   it("N-7: random standard-base64 tokens with slashes stay strong (10 000 seeded tokens, with and without a leading slash; any miss must be a token without a digit)", () => {
     let seed = 20_261_027;
     const next = (): number => { seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0; return seed; };
