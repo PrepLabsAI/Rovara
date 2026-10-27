@@ -80,7 +80,7 @@ describe("the sweep before a push", () => {
 
   it("removes the mask volumes once no container but the worker's is left, and only those", async () => {
     let containers = [container(SELF), container("b".repeat(64))];
-    let volumes = ["agentx-mask-agentx-aaaaaaaaaaaa", "agentx-docker-data-mask-bbbbbbbbbbbb", "project-cache", "agentx-mask-notes"];
+    let volumes = ["agentx-mask-agentx-aaaaaaaaaaaa", "agentx-docker-data-mask-bbbbbbbbbbbb", "agentx-docker-data-mask", "project-cache", "agentx-mask-notes"];
     const removedVolumes: string[] = [];
     const docker: DockerApi = {
       listContainers: async () => [...containers],
@@ -89,18 +89,50 @@ describe("the sweep before a push", () => {
       removeVolume: async (name) => { removedVolumes.push(name); volumes = volumes.filter((entry) => entry !== name); },
     };
     await sweepWorkspaceContainers({ rootPath: "/mnt/workspace", scope: "container", docker, socketMounted: async () => true, selfContainerId: async () => SELF, log: () => undefined });
-    expect(removedVolumes.sort()).toEqual(["agentx-docker-data-mask-bbbbbbbbbbbb", "agentx-mask-agentx-aaaaaaaaaaaa"]);
+    // The fixed name an older worker used is swept too.
+    expect(removedVolumes.sort()).toEqual(["agentx-docker-data-mask", "agentx-docker-data-mask-bbbbbbbbbbbb", "agentx-mask-agentx-aaaaaaaaaaaa"]);
     expect(volumes).toEqual(["project-cache", "agentx-mask-notes"]);
   });
 });
 
+describe("the sweep before a push, when a volume cannot be removed", () => {
+  it("logs it and goes on with the others", async () => {
+    const removedVolumes: string[] = [];
+    const events: Array<Record<string, unknown>> = [];
+    const docker: DockerApi = {
+      listContainers: async () => [{ id: SELF, names: ["/self"], labels: {}, state: "running" }],
+      removeContainer: async () => undefined,
+      listVolumes: async () => ["agentx-mask-agentx-aaaaaaaaaaaa", "agentx-mask-agent-sessions-aaaaaaaaaaaa", "agentx-docker-data-mask-aaaaaaaaaaaa"],
+      removeVolume: async (name) => {
+        if (name === "agentx-mask-agentx-aaaaaaaaaaaa") throw new Error("Docker answered 409: volume is in use");
+        removedVolumes.push(name);
+      },
+    };
+    await expect(sweepWorkspaceContainers({ rootPath: "/mnt/workspace", scope: "container", docker, socketMounted: async () => true, selfContainerId: async () => SELF, log: (event) => { events.push(event); } })).resolves.toEqual({ removed: 0 });
+    expect(removedVolumes).toEqual(["agentx-mask-agent-sessions-aaaaaaaaaaaa", "agentx-docker-data-mask-aaaaaaaaaaaa"]);
+    expect(events.filter((event) => event.event === "publish.volumes.remove.failed")).toHaveLength(1);
+  });
+});
+
 describe("the worker's startup sweep", () => {
+  it("says how many volumes Docker removed, not how many it listed", async () => {
+    const docker: DockerCli = {
+      run: async (args) => {
+        if (args[1] === "ls") return { exitCode: 0, stdout: "agentx-mask-agentx-aaaaaaaaaaaa\nagentx-docker-data-mask\nagentx-mask-agent-sessions-aaaaaaaaaaaa\n", stderr: "" };
+        // Docker prints each name it removed and fails for the one in use.
+        return { exitCode: 1, stdout: "agentx-mask-agentx-aaaaaaaaaaaa\nagentx-docker-data-mask\n", stderr: "Error response from daemon: remove agentx-mask-agent-sessions-aaaaaaaaaaaa: volume is in use" };
+      },
+    };
+    await expect(removeLeftoverMaskVolumes(docker)).resolves.toBe(2);
+  });
+
   it("removes the mask volumes no container uses, asking Docker for unused ones, and says how many", async () => {
     const calls: string[][] = [];
     const docker: DockerCli = {
       run: async (args) => {
         calls.push([...args]);
         if (args[0] === "volume" && args[1] === "ls") return { exitCode: 0, stdout: "agentx-mask-agentx-aaaaaaaaaaaa\nagentx-docker-data-mask-bbbbbbbbbbbb\nproject-cache\n", stderr: "" };
+        if (args[0] === "volume" && args[1] === "rm") return { exitCode: 0, stdout: `${args.slice(2).join("\n")}\n`, stderr: "" };
         return { exitCode: 0, stdout: "", stderr: "" };
       },
     };

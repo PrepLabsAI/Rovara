@@ -175,7 +175,7 @@ below is refused, with a message naming the setting, before any container starts
 | A bind mount (`mounts`, `workspaceMount`, or `-v`/`--volume`/`--mount` in `runArgs`) of `/`, `/var/run/docker.sock`, the workspace root itself, the worker's own folders in it (`.docker`, `.agentx`, `agent-sessions`, `.agentx-runtime`; AgentX hides them inside the container too), or any path outside the workspace, including through a link (whether or not its target exists), or a path AgentX cannot check | They expose host files or the Docker socket. |
 | A feature AgentX cannot pin to the content it checked (one fetched from a GitHub release) | Its content could change before the container is built. |
 | A volume with `volume-opt` or `volume-driver` options | Such a volume can be a bind mount of any host path. |
-| `build.dockerfile` outside the workspace, or `build.context` outside the repository folder | The build would read host files, or the worker's own folders of the workspace. |
+| `build.dockerfile` or `build.context` outside the repository folder, or a `BUILDKIT_*` build argument (`build.args`, or `--build-arg` in `build.options`) | The build shares the Dockerfile's folder and the context with its frontend, and the workspace holds more than the repository (the worker's own folders). |
 | `build.options` with `--network=host` or `container:…`, `--output`/`-o`, `--iidfile`, `--metadata-file`, `--allow`, `--security-opt`, `--secret`, `--ssh`, `--build-context`, `--cache-to` or `--file`/`-f` | They reach the host's network, extra privileges, or files outside the build. |
 
 Everything else is allowed: `image` or `build` (with options such as `--build-arg`, `--target`,

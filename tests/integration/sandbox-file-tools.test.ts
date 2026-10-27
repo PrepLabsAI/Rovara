@@ -12,7 +12,7 @@ import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type FauxResponseS
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { devcontainerMounts, notMountedMessage, toContainerPath, toHostPath, virtualDirectoryEntries } from "../../packages/worker/src/devcontainer-file-paths.js";
-import { FILE_OPS_ENVIRONMENT_RESET, FILE_OPS_NODE_FLAGS, fileOpsExec, type FileOpsTarget } from "../../packages/worker/src/file-ops-exec.js";
+import { FILE_OPS_NODE_FLAGS, fileOpsExec, type FileOpsTarget } from "../../packages/worker/src/file-ops-exec.js";
 import {
   FILE_TOOLS_NEED_SANDBOX_MESSAGE,
   createDefaultPiSessionAdapter,
@@ -159,7 +159,7 @@ describe("the task sandbox's file tools", () => {
     // Every call is the sandbox's: docker exec -i as uid 1000, with the sandbox's Node and helper by absolute path.
     expect(fake.execs.length).toBeGreaterThanOrEqual(6);
     for (const exec of fake.execs) {
-      expect(exec.args.slice(0, 12)).toEqual(["exec", "-i", "--user", "1000:1000", ...FILE_OPS_ENVIRONMENT_RESET, sandbox.name, NODE, ...FILE_OPS_NODE_FLAGS, HELPER]);
+      expect(exec.args.slice(0, 12)).toEqual(["exec", "-i", "--user", "1000:1000", "-e", "NODE_OPTIONS=", "-e", "NODE_PATH=", sandbox.name, NODE, ...FILE_OPS_NODE_FLAGS, HELPER]);
       expect(exec.request.root).toBe(rootPath);
     }
     const ops = new Set(fake.execs.map(({ request }) => request.op));
@@ -322,7 +322,7 @@ describe("the devcontainer's file tools", () => {
     try { expect(await settle(handle, "read")).toBe("resolved"); } finally { handle.dispose(); }
     expect(results[0]!.content[0]!.text).toBe("api alpha\n");
     for (const exec of fake.execs) {
-      expect(exec.args.slice(0, 12)).toEqual(["exec", "-i", "--user", "vscode", ...FILE_OPS_ENVIRONMENT_RESET, "dev-container-id", "/opt/agentx-file-ops/node", ...FILE_OPS_NODE_FLAGS, "/opt/agentx-file-ops/sandbox-file-ops.js"]);
+      expect(exec.args.slice(0, 12)).toEqual(["exec", "-i", "--user", "vscode", "-e", "NODE_OPTIONS=", "-e", "NODE_PATH=", "dev-container-id", "/opt/agentx-file-ops/node", ...FILE_OPS_NODE_FLAGS, "/opt/agentx-file-ops/sandbox-file-ops.js"]);
       expect(exec.request).toMatchObject({ root: "/workspaces/api", path: "/workspaces/api/a.txt" });
     }
   });

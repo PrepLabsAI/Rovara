@@ -420,8 +420,11 @@ async function removeStartedContainer(containers: DevcontainerChecks, containerI
 export async function removeLeftoverMaskVolumes(docker: DockerCli = createDockerCli()): Promise<number> {
   const listed = await docker.run(["volume", "ls", "--quiet", "--filter", "dangling=true", "--filter", "name=agentx-"], { timeoutMs: DOCKER_CALL_TIMEOUT_MS });
   const names = listed.exitCode === 0 ? listed.stdout.split("\n").map((line) => line.trim()).filter(isMaskVolumeName) : [];
-  if (names.length > 0) await docker.run(["volume", "rm", ...names], { timeoutMs: DOCKER_CALL_TIMEOUT_MS });
-  return names.length;
+  if (names.length === 0) return 0;
+  // Docker prints the name of each volume it removed and fails for one still in use, so what it printed is what went.
+  const removed = await docker.run(["volume", "rm", ...names], { timeoutMs: DOCKER_CALL_TIMEOUT_MS });
+  const gone = new Set(removed.stdout.split("\n").map((line) => line.trim()));
+  return names.filter((name) => gone.has(name)).length;
 }
 
 async function startDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget, hidden: readonly string[], frozenLockfile: boolean): Promise<DevcontainerUpResult> {

@@ -76,8 +76,17 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
     ["build.context outside the repository folder (/mnt/workspace/repo)", { build: { dockerfile: "Dockerfile", context: "../.." } }],
     ["build.context outside the repository folder (/mnt/workspace/.agentx)", { build: { dockerfile: "Dockerfile", context: "../../../.agentx" } }],
     ["build.context outside the repository folder (/mnt/workspace/repo/other)", { context: "../../other" }],
-    ["build.dockerfile outside the workspace (/etc/Dockerfile)", { build: { dockerfile: "/etc/Dockerfile" } }],
-    ["build.dockerfile outside the workspace (${localEnv:HOME}/Dockerfile)", { build: { dockerfile: "${localEnv:HOME}/Dockerfile" } }],
+    ["build.dockerfile outside the repository folder (/etc/Dockerfile)", { build: { dockerfile: "/etc/Dockerfile" } }],
+    ["build.dockerfile outside the repository folder (${localEnv:HOME}/Dockerfile)", { build: { dockerfile: "${localEnv:HOME}/Dockerfile" } }],
+    // The build shares the Dockerfile's whole folder, so it must be inside the repository too: not the workspace root, not a sibling.
+    ["build.dockerfile outside the repository folder (/mnt/workspace/Dockerfile)", { build: { dockerfile: "../../../Dockerfile" } }],
+    ["build.dockerfile outside the repository folder (/mnt/workspace/repo/Dockerfile)", { dockerFile: "../../Dockerfile" }],
+    ["build.dockerfile outside the repository folder (/mnt/workspace/repo/other/Dockerfile)", { build: { dockerfile: "../../other/Dockerfile" } }],
+    ["build.dockerfile outside the repository folder (/mnt/workspace/.agentx/Dockerfile)", { build: { dockerfile: "../../../.agentx/Dockerfile" } }],
+    ["build.args BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", args: { BUILDKIT_SYNTAX: "example.test/frontend:1" } } }],
+    ["build.args BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", args: { buildkit_syntax: "example.test/frontend:1" } } }],
+    ["build.options --build-arg BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", options: ["--build-arg", "BUILDKIT_SYNTAX=example.test/frontend:1"] } }],
+    ["build.options --build-arg BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", options: ["--build-arg=BUILDKIT_SYNTAX=example.test/frontend:1"] } }],
     ["securityOpt", { securityOpt: ["apparmor=unconfined"] }],
     ["initializeCommand (it runs on the worker host)", { initializeCommand: "id" }],
     ["dockerComposeFile (Docker Compose dev containers)", { dockerComposeFile: "compose.yml", service: "app" }],
@@ -93,6 +102,9 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
     expect(refusal({})).toBeUndefined();
     // A build context is the repository folder or below it.
     for (const folder of ["..", ".", "../src", "${localWorkspaceFolder}/docker"]) expect(refusal({ build: { dockerfile: "Dockerfile", context: folder } }), folder).toBeUndefined();
+    // A Dockerfile is in the repository folder or below it, and ordinary build arguments are fine.
+    for (const file of ["Dockerfile", "../Dockerfile", "../docker/Dockerfile", "${localWorkspaceFolder}/Dockerfile"]) expect(refusal({ build: { dockerfile: file } }), file).toBeUndefined();
+    expect(refusal({ build: { dockerfile: "Dockerfile", args: { VARIANT: "22" }, options: ["--build-arg", "A=1"] } })).toBeUndefined();
     expect(devcontainerConfigRefusal({
       build: { dockerfile: "Dockerfile", context: "..", options: ["--add-host", "db:10.0.0.2", "--build-arg", "A=1", "--pull"] },
       features: { "ghcr.io/devcontainers/features/node:1": {} },

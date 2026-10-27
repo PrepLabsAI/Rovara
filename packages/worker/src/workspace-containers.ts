@@ -130,13 +130,23 @@ export async function sweepWorkspaceContainers(options: SweepWorkspaceContainers
  */
 async function removeMaskVolumes(docker: DockerApi, log: (event: Record<string, unknown>) => void): Promise<void> {
   if (docker.listVolumes === undefined || docker.removeVolume === undefined) return;
+  let names: string[];
   try {
-    const names = (await docker.listVolumes()).filter(isMaskVolumeName);
-    for (const name of names) await docker.removeVolume(name);
-    if (names.length > 0) log({ event: "publish.volumes.removed", volumes: names.length });
+    names = (await docker.listVolumes()).filter(isMaskVolumeName);
   } catch (error) {
     log({ event: "publish.volumes.remove.failed", reason: errorMessage(error).slice(0, 200) });
+    return;
   }
+  let removed = 0;
+  for (const name of names) {
+    try {
+      await docker.removeVolume(name);
+      removed += 1;
+    } catch (error) {
+      log({ event: "publish.volumes.remove.failed", volume: name, reason: errorMessage(error).slice(0, 200) });
+    }
+  }
+  if (removed > 0) log({ event: "publish.volumes.removed", volumes: removed });
 }
 
 /**

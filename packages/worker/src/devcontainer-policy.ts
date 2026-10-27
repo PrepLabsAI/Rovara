@@ -69,10 +69,14 @@ export function devcontainerConfigRefusal(config: unknown, context: Devcontainer
   const build = settings.build !== null && typeof settings.build === "object" && !Array.isArray(settings.build)
     ? settings.build as Record<string, unknown>
     : {};
-  for (const [name, value, within] of [["build.dockerfile", build.dockerfile ?? settings.dockerFile, "workspace"], ["build.context", build.context ?? settings.context, "repository folder"]] as const) {
+  for (const [name, value] of [["build.dockerfile", build.dockerfile ?? settings.dockerFile], ["build.context", build.context ?? settings.context]] as const) {
     if (value === undefined) continue;
-    const outside = buildPathRefusal(value, context, within);
-    if (outside !== undefined) return `${name} outside the ${within} (${outside})`;
+    const outside = buildPathRefusal(value, context);
+    if (outside !== undefined) return `${name} outside the repository folder (${outside})`;
+  }
+  if (build.args !== undefined && build.args !== null && typeof build.args === "object" && !Array.isArray(build.args)) {
+    const refused = Object.keys(build.args).find(isBuildKitArgument);
+    if (refused !== undefined) return `build.args ${refused.toUpperCase()}`;
   }
   if (build.options !== undefined) {
     if (!Array.isArray(build.options) || !build.options.every((arg) => typeof arg === "string")) return "build.options that are not a list of strings";
@@ -83,21 +87,23 @@ export function devcontainerConfigRefusal(config: unknown, context: Devcontainer
 }
 
 /**
- * A Dockerfile or build context path, relative to devcontainer.json's folder. A Dockerfile is allowed anywhere inside the
- * workspace; a build context only inside the repository folder, since the build sends the whole context into the image
- * build, and the workspace holds more than the repository.
+ * A Dockerfile or build context path, relative to devcontainer.json's folder: allowed only inside the repository folder.
+ * The build shares the whole context, and the whole folder of the Dockerfile, with the build's frontend, and the workspace
+ * holds more than the repository (the worker's own folders).
  */
-function buildPathRefusal(value: unknown, context: DevcontainerPolicyContext, within: "workspace" | "repository folder"): string | undefined {
+function buildPathRefusal(value: unknown, context: DevcontainerPolicyContext): string | undefined {
   if (typeof value !== "string") return String(value);
   const substituted = substituteLocal(value, context);
   if (substituted.includes("${")) return value;
   const folder = context.configFolder ?? join(context.workspaceFolder, ".devcontainer");
   const path = resolve(folder, substituted);
   const resolvePath = context.resolvePath ?? ((candidate: string) => resolve(candidate));
-  if (within === "workspace") return hostPathAllowed(resolvePath(path), resolvePath(resolve(context.rootPath)), { allowRoot: true }) ? undefined : path;
   const fromRepository = relative(resolvePath(resolve(context.workspaceFolder)), resolvePath(path));
   return fromRepository.startsWith("..") || isAbsolute(fromRepository) ? path : undefined;
 }
+
+/** A build argument that sets BuildKit itself (`BUILDKIT_SYNTAX` names the frontend image that reads the build). */
+const isBuildKitArgument = (name: string) => /^buildkit_/iu.test(name);
 
 /**
  * `docker build` options that reach outside the build: the host's network or extra privileges, files written to or
@@ -113,6 +119,10 @@ function buildOptionsRefusal(args: readonly string[]): string | undefined {
       const equals = arg.indexOf("=");
       const name = equals === -1 ? arg : arg.slice(0, equals);
       if (BUILD_REFUSED.has(name)) return name;
+      if (name === "--build-arg") {
+        const given = equals === -1 ? args[++index] ?? "" : arg.slice(equals + 1);
+        if (isBuildKitArgument(given)) return `--build-arg ${given.split("=")[0]!.toUpperCase()}`;
+      }
       if (name === "--network" || name === "--net") {
         const given = equals === -1 ? args[++index] ?? "" : arg.slice(equals + 1);
         if (given === "host") return "--network=host";
