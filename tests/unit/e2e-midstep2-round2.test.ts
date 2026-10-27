@@ -19,14 +19,12 @@ import { readSessionSecretFile, scanOutputFile, sessionSecretLine } from "../../
 import { E2E_SESSION_SYNC_MAX_WEAK_VALUES } from "../../packages/verifier/src/executor/session-sync.js";
 import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
-import { call } from "../support/e2e-model-fixtures.js";
 import { createMidstep2Harness } from "../support/e2e-midstep2-harness.js";
 
 // MIDSTEP-2 fix round 2: N-1 (numeric and hex id paths), N-2 (a weak value learned after a trace is on disk), N-3 (the main frame is never skipped), N-6 (survivors).
 
 const JWT = `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from('{"sub":"user-1234567890"}').toString("base64url")}.c2lnbmF0dXJlLWJ5dGVzLWhlcmU`;
 const sha = (value: string) => createHash("sha256").update(value).digest("hex");
-const bytesOf = (text: string) => Buffer.from(text, "utf8");
 
 let dir: string;
 const closers: Array<() => Promise<unknown>> = [];
@@ -199,6 +197,3 @@ describe("N-6: survivors", () => {
     expect(told).toHaveLength(1);
   });
 });
-
-// Keeps the shared harness's call helper referenced for the end-to-end case above.
-void call;
