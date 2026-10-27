@@ -12,7 +12,7 @@ Before saving E2E setup, AgentX shows the proposed setup and readiness commands,
 
 ## Supported stacks
 
-`project add` lists a browser or API target for every `package.json` it finds. A target is only runnable when Rovara can also build and start the app, which it can do for a Node.js app that:
+`project add` lists a browser or API target for every web or service `package.json` it finds (React Native packages get a mobile target and Electron packages a desktop target instead). A target is only runnable when Rovara can also build and start the app, which it can do for a Node.js app that:
 
 - has a `package.json` with a `start` script (and optionally a `build` script) at the root of the repository, and an npm lockfile next to it (`package-lock.json` or `npm-shrinkwrap.json`). Rovara runs `npm ci`, then `npm run build` if there is one, then `npm start`.
 - runs on Node 22 (the fixed image is `node:22.23.2-bookworm-slim`, arm64) and needs no outside service: no database, no docker-compose services, and no private package registry (an `.npmrc` is ignored and traffic to private networks is blocked).
@@ -20,7 +20,7 @@ Before saving E2E setup, AgentX shows the proposed setup and readiness commands,
 
 A Node project with no start script, or with only a pnpm, yarn or bun lockfile, still gets a target in the proposal, but its browser and API checks stay unavailable until it has a start script and an npm lockfile.
 
-`project add` says "no targets detected" when it finds no `package.json` in the repository, as with a Python, Ruby, Go, Java or docker-compose project. Those projects are not supported yet.
+`project add` says "no targets detected" when it finds no usable `package.json` (missing, unreadable, or past the limit on how many it reads) in the repository, as with a Python, Ruby, Go, Java or docker-compose project. Those projects are not supported yet.
 
 ## Approve or decline
 

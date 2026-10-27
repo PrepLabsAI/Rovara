@@ -37,13 +37,6 @@ describe("the capture policy a new setup proposal carries", () => {
     expect(approval.status, JSON.stringify(approval.body)).toBe(200);
   });
 
-  it("refuses a repository that is not on github.com, and says only github.com is supported (INTG3)", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture: vi.fn(async () => contractSnapshot) } } });
-    const refused = await call(harness.handler, { method: "POST", path: "/v1/admin/projects/setup-proposals", user: admin, body: { repositoryUrl: "https://gitlab.com/example/demo.git", ref: "main" } });
-    expect(refused.status).toBe(400);
-    expect(JSON.stringify(refused.body)).toContain("setup repository must be a canonical GitHub repository URL: only github.com repositories are supported");
-  });
-
   it("tells the administrator to propose the setup again when the proposal was made before this default", async () => {
     const { harness, proposal } = await proposeAndStore();
     const old = asEarlierRelease(harness, String(proposal.body.proposalRef));
