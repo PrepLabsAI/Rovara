@@ -104,6 +104,10 @@ describe("a JWT inside an oversized neutral value is found", () => {
     expect(oversizedTokens("aaaaaaaa.".repeat(150_000))).toEqual([]);
     expect(oversizedTokens(`${"z ".repeat(600_000)}${JWT}`)).toEqual([]);
     expect(Date.now() - started).toBeLessThan(1_000);
+    // A run longer than 64 KiB is not tested, whatever its shape.
+    const huge = `${JWT.split(".")[0]!}.${"A".repeat(70_000)}.${"B".repeat(20)}`;
+    expect(isTokenShape(huge)).toBe(true);
+    expect(oversizedTokens(` ${huge} `)).toEqual([]);
     expect(oversizedTokens(Array.from({ length: 300 }, (_unused, index) => `${JWT}${index.toString(36)} `).join("")).length).toBe(100);
   });
 });
@@ -126,6 +130,21 @@ describe("the mask has a hard time and size bound; past it the view fails closed
     const out = registry.maskForModel("ab".repeat(100_000));
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(out).not.toContain("ababab");
+  });
+  it("5 values of 32 KB sharing their first 32,000 characters (too few to split the tree) against a 200 KB periodic text: cut short by the work bound, under a second", () => {
+    const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
+    const common = "ab".repeat(16_000);
+    for (let index = 0; index < 5; index += 1) registry.register(`${common}${String(index).padStart(4, "0")}${"z".repeat(100)}`, { maskOnly: true });
+    const started = Date.now();
+    const out = registry.maskForModel("ab".repeat(100_000));
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(out).not.toContain("ababab");
+  });
+  it("a bucket that fills through weak evidence values degrades the mask too, and the registry reports it", () => {
+    const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
+    for (let index = 0; index < 5_000; index += 1) registry.register(`Zq8LmW${String(index).padStart(4, "0")}`, { evidenceOnly: true });
+    expect(registry.maskOverflowed()).toBe(true);
+    expect(registry.maskForModel("order Zq8LmW4999 and Zq8LmW0003")).toBe("order <session> and <session>");
   });
   it("the work bound: a text that costs more than the budget is cut short and reported, a normal text is not", () => {
     const redactor = createCredentialRedactor([]);
@@ -212,7 +231,7 @@ describe("the context wiring, for a signed-in context as well as a visitor's (re
   }, 60_000);
 
   it.skipIf(!haveChromium)("a signed-in context's request watch uses the signed-in bar for the Authorization header, and its case-close read takes the visitor-style id too", async () => {
-    const { origin, context } = await page(() => ({ headers: { "set-cookie": `visitor=${VISITOR}; Path=/` }, body: `<html><body><script>localStorage.setItem("visitor_id", "${VISITOR}"); fetch("/api/me", { headers: { Authorization: "Bearer ${SESSION}" } });</script></body></html>` }));
+    const { origin, context } = await page(() => ({ headers: { "set-cookie": `visitor=${VISITOR}; Path=/` }, body: `<html><body><script>localStorage.setItem("visitor_id", "${VISITOR}"); localStorage.setItem("sb-abcdefgh-auth-token", JSON.stringify({ access_token: "${JWT}" })); fetch("/api/me", { headers: { Authorization: "Bearer ${SESSION}" } });</script></body></html>` }));
     const r = recorder();
     wireCaseContext({ browserContext: context, sessionRef: "owned-2", isAnonymous: () => false, sessionSync: r.source, registerSecret: () => undefined });
     const p = await context.newPage();
@@ -226,6 +245,7 @@ describe("the context wiring, for a signed-in context as well as a visitor's (re
     const visitorClose = recorder();
     await readCaseContextAtClose({ browserContext: context, sessionRef: "visitor-2", isAnonymous: (ref) => ref === "visitor-2", sessionSync: visitorClose.source });
     expect(visitorClose.learned.map((item) => item.value)).not.toContain(VISITOR);
+    expect(visitorClose.learned.map((item) => item.value)).toContain(JWT);
     await readCaseContextAtClose({ browserContext: undefined, sessionRef: "none", isAnonymous: () => true, sessionSync: closing.source });
   }, 60_000);
 
