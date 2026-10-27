@@ -19,11 +19,10 @@ const execFile = promisify(execFileCallback);
  * - `workspace` (anywhere else: a developer machine, tests): every process of the worker's user whose working
  *   directory is inside the workspace. A process elsewhere on a shared machine is not the worker's to stop.
  *
- * This is not a sandbox. On EC2 workers, when a project has no dev container, the coding step currently runs with the
- * worker's Docker access, and a container is outside this function's reach. So before the token is fetched,
- * publication also removes the containers started by the task (workspace-containers.ts), and repeats both until
- * neither finds anything. Running AI-written code as a separate user without Docker access is tracked in #325
- * (docs/project-configuration.md, "Security follow-ups").
+ * This is not the sandbox. On EC2 workers, task code runs in a container without the worker's Docker access (the
+ * dev container, or the task sandbox for a project without one, task-sandbox.ts), so it is not among this process's
+ * children, and a container is outside this function's reach. Before the token is fetched, publication also removes
+ * every container but the worker's own (workspace-containers.ts), and repeats both until neither finds anything.
  */
 export type WorkspaceProcessScope = "container" | "workspace";
 

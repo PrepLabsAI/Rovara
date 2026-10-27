@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -112,6 +112,64 @@ describe("repository context files", () => {
     const rootPath = await workspace();
     await expect(readPreparedRepositories(rootPath)).resolves.toEqual(repositories);
     await expect(readPreparedRepositories(join(rootPath, "repo"))).resolves.toEqual([]);
+  });
+});
+
+// the task controls AGENTS.md and can flip it between a real file and a link while the worker reads it. The read needs
+// /proc/self/fd, so this runs on Linux (CI).
+(process.platform === "linux" ? describe : describe.skip)("a context file the task flips to a link that leaves the repository", () => {
+  it("never reads anything outside the repository, however the flips fall", async () => {
+    const rootPath = await workspace();
+    const secret = join(rootPath, "secret-outside.md");
+    await writeFile(secret, "WORKER-SIDE-SECRET");
+    const directory = join(rootPath, "repo/api");
+    const agents = join(directory, "AGENTS.md");
+    await writeFile(agents, "real guidance\n");
+    let flipping = true;
+    const flipper = (async () => {
+      let toOutside = true;
+      while (flipping) {
+        const temporary = join(directory, "AGENTS.md.flip");
+        await rm(temporary, { force: true });
+        if (toOutside) await symlink(secret, temporary); else await writeFile(temporary, "real guidance\n");
+        await rename(temporary, agents).catch(() => undefined);
+        toOutside = !toOutside;
+        // Each state is held for a random moment up to 2 ms (sometimes none), so loads land in both and the flips also fall mid-load.
+        await new Promise<void>((done) => { const wait = Math.random() * 2; if (wait < 0.4) setImmediate(done); else setTimeout(done, wait); });
+      }
+    })();
+    // The control: reading the path the way the old code did does reach the secret while it flips.
+    let naiveLeaks = 0;
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if ((await readFile(agents, "utf8").catch(() => "")) === "WORKER-SIDE-SECRET") naiveLeaks += 1;
+    }
+    expect(naiveLeaks).toBeGreaterThan(0);
+    const loaded: Array<Awaited<ReturnType<typeof loadRepositoryContextFiles>>> = [];
+    const real = () => loaded.filter(({ files }) => files.length === 1 && files[0]!.content.includes("real guidance")).length;
+    // At least 300 loads, and on until a few caught the real file: a load is quick, so the flips fall on it unevenly.
+    for (let attempt = 0; attempt < 5_000 && (attempt < 300 || real() < 3); attempt += 1) loaded.push(await loadRepositoryContextFiles(rootPath, repositories));
+    flipping = false;
+    await flipper;
+    const everything = JSON.stringify(loaded);
+    expect(everything).not.toContain("WORKER-SIDE-SECRET");
+    expect(everything).not.toContain(secret);
+    // Some loads got the real file, some were refused as outside: the flips really fell both ways.
+    expect(real()).toBeGreaterThan(0);
+  }, 60_000);
+
+  it("reads a link that stays inside the repository, and refuses one into a sibling repository", async () => {
+    const rootPath = await workspace();
+    await mkdir(join(rootPath, "repo/api/docs"), { recursive: true });
+    await writeFile(join(rootPath, "repo/api/docs/GUIDE.md"), "guide inside\n");
+    await symlink("docs/GUIDE.md", join(rootPath, "repo/api/AGENTS.md"));
+    const inside = await loadRepositoryContextFiles(rootPath, repositories);
+    expect(inside.files[0]?.content).toContain("guide inside");
+    await rm(join(rootPath, "repo/api/AGENTS.md"));
+    await writeFile(join(rootPath, "repo/personal-website/AGENTS.md"), "sibling guidance\n");
+    await symlink("../personal-website/AGENTS.md", join(rootPath, "repo/api/AGENTS.md"));
+    const sibling = await loadRepositoryContextFiles(rootPath, [repositories[1]!]);
+    expect(sibling.files).toEqual([]);
+    expect(sibling.diagnostics).toEqual(["skipped repo/api/AGENTS.md: it resolves outside the repository"]);
   });
 });
 

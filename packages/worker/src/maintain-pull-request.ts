@@ -15,6 +15,7 @@ import type { PullRequestUpdateSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { containWorkspace, runReadinessChecks, temporaryIndexTree } from "./publish.js";
+import type { TaskShellSelection } from "./task-sandbox.js";
 import { stopWorkspaceProcesses } from "./workspace-processes.js";
 import { sweepWorkspaceContainers } from "./workspace-containers.js";
 import { storedCommandOutput } from "./command-failure.js";
@@ -32,6 +33,8 @@ export async function maintainPullRequest(options: {
   codeBuildSink?: CodeBuildSink;
   /** The `devcontainer` CLI, as a seam for tests. */
   devcontainerCli?: DevcontainerCli;
+  /** Where readiness checks run in a project without a devcontainer. Default: from the worker's environment. */
+  taskShell?: TaskShellSelection;
   /** A workflow task's fix stops every process left from the workspace before the push credential is fetched. A seam for tests, as in publication. */
   stopWorkspaceProcesses?: (rootPath: string) => Promise<{ stopped: number } | void>;
   /** A workflow task's fix removes every container but the worker's own before the push credential is fetched. A seam for tests, as in publication. */
@@ -39,7 +42,10 @@ export async function maintainPullRequest(options: {
 }): Promise<PullRequestLifecycleResult> {
   const { invocation } = options;
   // In the devcontainer preparation recorded, as at publication (#183).
-  const readinessOptions = options.devcontainerCli !== undefined ? { devcontainerCli: options.devcontainerCli } : {};
+  const readinessOptions = {
+    ...(options.devcontainerCli !== undefined ? { devcontainerCli: options.devcontainerCli } : {}),
+    ...(options.taskShell !== undefined ? { taskShell: options.taskShell } : {}),
+  };
   const rootPath = await realpath(resolve(options.rootPath));
   const manifest = await loadManifest(rootPath, invocation);
   const repository = invocation.payload.project.repositories.find(

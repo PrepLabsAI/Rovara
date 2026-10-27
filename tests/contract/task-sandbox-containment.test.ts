@@ -138,7 +138,7 @@ describe("task code on an EC2 worker without a devcontainer", () => {
     const marker = join(root, "checked-in-the-worker");
     const command: ProjectCommand = { cwd: ".", executable: "touch", args: [marker], timeoutSeconds: 60 };
     await expect(runners.runProjectCommand(command, new AbortController().signal)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-    await expect(runners.runAgentCommand(`touch ${marker}`, 5_000, new AbortController().signal)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    await expect(runners.runAgentCommand("npm test", 5_000, new AbortController().signal)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

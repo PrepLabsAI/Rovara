@@ -323,6 +323,29 @@ describe("the executor image on the worker", () => {
   });
 });
 
+describe("the task sandbox on the worker", () => {
+  it("tells the worker its own image as the task sandbox's and that it runs on EC2, so the local shell is refused there", () => {
+    const image = `registry.example.test/agentx/worker@sha256:${"c".repeat(64)}`;
+    const dir = mkdtempSync(join(tmpdir(), "boot-env-"));
+    const file = join(dir, "worker.env");
+    const base = { AGENTX_CONTROL_PLANE_URL: "https://c.example", AGENTX_MODEL_PROVIDER: "p", AGENTX_MODEL_ID: "m", PI_CACHE_RETENTION: "short", AGENTX_INVOKE_PUBLIC_KEY: "k", AGENTX_WORKSPACE_ID: runId, AGENTX_SESSION_GENERATION: "1", AGENTX_WORKER_IMAGE: image };
+    const replace: Array<[string, string]> = [
+      ['install -d -m 0700 "$(dirname "$WORKER_ENV_FILE")"', ":"],
+      ['install -m 0600 /dev/null "$WORKER_ENV_FILE"', ': >"$WORKER_ENV_FILE"'],
+    ];
+    const ran = runBootFunction("write_worker_environment", ["us-east-1"], { ...base, WORKER_ENV_FILE: file, MOUNT_PATH: "/mnt/workspace" }, replace);
+    expect(ran.status, ran.stderr).toBe(0);
+    const lines = readFileSync(file, "utf8").split("\n");
+    expect(lines).toContain(`AGENTX_SANDBOX_IMAGE=${image}`);
+    expect(lines).toContain("AGENTX_RUNTIME=ec2");
+    expect(lines.some((line) => line.startsWith("AGENTX_TASK_SHELL"))).toBe(false);
+  });
+
+  it("mounts the workspace inside the worker at the path it has on the host, so the sandbox's bind mount names the same files", () => {
+    expect(bootScript).toContain('--volume "$MOUNT_PATH:$MOUNT_PATH"');
+  });
+});
+
 describe("the opt-in TEST qualification hook", () => {
   it("renders the validated qualification settings into the boot config, only when asked for, and refuses a malformed role ID, profile or bucket", () => {
     const rendered = ec2WorkerBootScript({ ...config, e2eQualification: qualification }, bootScript);

@@ -7,10 +7,10 @@ import { workspaceProcessScope, type WorkspaceProcessScope } from "./workspace-p
 /**
  * Before a push token exists, every container other than the worker's own is removed (stopped and deleted).
  *
- * On EC2 workers, when a project has no dev container, the coding step currently runs with the worker's Docker access
- * (boot.sh gives the worker container the host's Docker, to run dev containers), and stopping the worker's processes
- * (workspace-processes.ts) does not reach a container. The instance serves this one workspace, and boot.sh starts exactly one container,
- * the worker (`agentx-worker`). So the only container allowed to stay is the worker's own, known by its container ID
+ * On EC2 workers task code runs in a container: the project's dev container, or the task sandbox (task-sandbox.ts)
+ * for a project without one. Stopping the worker's processes (workspace-processes.ts) does not reach a container. The
+ * sandbox is removed when its operation ends; this sweep is the backstop. The instance serves this one workspace, and
+ * boot.sh starts exactly one container, the worker (`agentx-worker`). So the only container allowed to stay is the worker's own, known by its container ID
  * as the worker itself reads it from /proc (never by a name or label, which any container can copy). Everything else
  * goes: the workspace's dev containers (the devcontainer CLI labels each with `devcontainer.local_folder`, the
  * repository folder in this workspace, and finds or recreates it on the next `devcontainer up`) and any other container,

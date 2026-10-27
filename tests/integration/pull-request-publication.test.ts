@@ -16,7 +16,8 @@ import type { PreparationManifest } from "../../packages/worker/src/prepare.js";
 import { createWorkerCallbackSinks, type PullRequestSink } from "../../packages/worker/src/callback-client.js";
 import { projectCheckKey, recordProjectOutcomes } from "../../packages/worker/src/verification/check-history.js";
 import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
-import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
+import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";
+import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
 
@@ -654,8 +655,10 @@ describe("PR feedback review after publication moved HEAD", () => {
     return { ref, bytes };
   };
 
-  const reviewer = (): PiSessionAdapter => ({
+  const reviewer = (seen: PiSessionInput[] = [], onCreate: () => void = () => undefined): PiSessionAdapter => ({
     async create(input) {
+      seen.push(input);
+      onCreate();
       let notify: ((event: unknown) => void) | undefined;
       const sessionFile = join(input.sessionDirectory, "feedback-review.json");
       return {
@@ -674,6 +677,7 @@ describe("PR feedback review after publication moved HEAD", () => {
   const review = async (
     state: Awaited<ReturnType<typeof published>>,
     bundle: { headTreeSha?: string | undefined; candidateDigest?: string } = {},
+    extra: Partial<Parameters<typeof runTaskInvocation>[1]> = {},
   ) => {
     const taskId = randomUUID();
     const { ref, bytes } = bundleFor(taskId, state.commit, "headTreeSha" in bundle ? bundle.headTreeSha : state.candidate.treeSha, bundle.candidateDigest ?? state.preDigest);
@@ -689,6 +693,7 @@ describe("PR feedback review after publication moved HEAD", () => {
       rootPath: state.fixture.root, model: FAUX_MODEL, piAdapter: reviewer(),
       eventSink: async () => undefined, artifactSink: async () => undefined,
       feedbackBundleReader: async () => ({ taskRequirements: "Update the README.", bundles: [{ ref, bytes }] }),
+      ...extra,
     });
   };
 
@@ -696,6 +701,31 @@ describe("PR feedback review after publication moved HEAD", () => {
     const state = await published();
     const result = await review(state);
     expect(result).toMatchObject({ workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult: { candidateDigest: state.preDigest, status: "COMPLETE" } });
+  });
+
+  it("starts the task sandbox before the review session and gives the session the sandbox's file tools", async () => {
+    const state = await published();
+    const order: string[] = [];
+    const calls: string[][] = [];
+    const docker: DockerCli = {
+      async run(args) {
+        calls.push([...args]);
+        if (args[0] === "run") order.push("sandbox started");
+        if (args[0] === "network" && args[1] === "inspect") return { exitCode: 0, stdout: "bridge {} false", stderr: "" };
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+      async execBytes() { return { exitCode: 0, stdout: Buffer.from('{"ok":true,"result":{"removed":0}}\n'), stderr: "" }; },
+    };
+    const seen: PiSessionInput[] = [];
+    await review(state, {}, {
+      piAdapter: reviewer(seen, () => order.push("review session")),
+      taskShell: { kind: "sandbox", docker, image: "registry.example/worker@sha256:" + "b".repeat(64) },
+    });
+    expect(order).toEqual(["sandbox started", "review session"]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.workflowMode).toBe("REVIEW");
+    expect(seen[0]?.fileTools).toMatchObject({ user: "1000:1000", node: "/usr/local/bin/node", helper: "/opt/agentx/packages/worker/dist/sandbox-file-ops.js" });
+    expect(seen[0]?.fileTools?.container).toMatch(/^agentx-task-/u);
   });
 
   it("refuses PR feedback review when a file changed after publication", async () => {

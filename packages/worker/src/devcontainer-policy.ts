@@ -16,6 +16,8 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /** Docker's data root on an EC2 worker: a folder of the workspace volume (boot.sh), skipped by the worker's walks. */
 export const DOCKER_DATA_DIRECTORY = ".docker";
+/** The verifier's private runtime on an EC2 worker's workspace volume (boot.sh): the worker's, never the project's. */
+export const RUNTIME_BACKING_DIRECTORY = ".agentx-runtime";
 /** The container problem a missing mask over the Docker data folder is reported as. */
 export const DOCKER_DATA_VISIBLE = "the workspace's Docker data folder (.docker) visible inside it";
 
