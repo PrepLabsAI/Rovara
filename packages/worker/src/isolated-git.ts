@@ -202,6 +202,9 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
   }
 }
 
+/** Leaves a file tool's leftover temporary file (`.agentx-file-ops-*`, from a write the helper was killed in) out of every snapshot. */
+export const CANDIDATE_EXCLUDE_PATHSPEC = ":(exclude,glob)**/.agentx-file-ops-*";
+
 /**
  * The tree of `commit` plus the work tree as it is now, computed in `git`'s temporary index (never the candidate's real one): `read-tree`, then `add --all`, then
  * `write-tree`, with the nested-repository and Git LFS refusals in between. Git runs in the throwaway repository, so no filter, driver or hook of the candidate's
@@ -228,10 +231,10 @@ export async function addWorkTree(git: IsolatedGit, index: IndexKind, gitlinks: 
       throw agentXError("CONFIG_INVALID", `the repository has a submodule at ${path} that is no longer a directory. AgentX tasks do not yet support changes to a project's submodules.`);
     }
   }
-  if (gitlinks.length === 0) await git.text(["add", "--all", "--", "."], { index, maxBuffer: 1024 * 1024 });
+  if (gitlinks.length === 0) await git.text(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PATHSPEC], { index, maxBuffer: 1024 * 1024 });
   else {
     const pathspecs = join(git.scratch, "pathspecs");
-    await writeFile(pathspecs, [".", ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
+    await writeFile(pathspecs, [".", CANDIDATE_EXCLUDE_PATHSPEC, ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
     await git.text(["add", "--all", `--pathspec-from-file=${pathspecs}`, "--pathspec-file-nul"], { index, maxBuffer: 1024 * 1024 });
   }
 }

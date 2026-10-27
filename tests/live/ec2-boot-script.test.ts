@@ -278,6 +278,9 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.envMode).toBe("600");
     expect(result.env).toContain(`AGENTX_WORKSPACE_ID=${bootConfig.workspaceId}`);
     expect(result.env).toContain("AGENTX_SESSION_GENERATION=1");
+    // the task sandbox starts from the worker's own image.
+    expect(result.env).toContain(`AGENTX_SANDBOX_IMAGE=${WORKER_IMAGE}`);
+    expect(result.env).toContain("AGENTX_RUNTIME=ec2");
     expect(result.env).toContain(`AGENTX_INVOKE_PUBLIC_KEY=${bootConfig.invokePublicKey}`);
     expect(result.env).toContain("AGENTX_WORKSPACE_ROOT=/mnt/workspace");
     expect(result.env).toContain("AWS_REGION=us-east-1");

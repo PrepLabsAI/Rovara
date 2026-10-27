@@ -19,6 +19,7 @@ import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRunt
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
 import { postWorkerTerminalResult } from "./terminal-callback.js";
 import { executeWorkerCancelInvocation } from "./cancel-invocation.js";
+import { removeLeftoverTaskSandboxes, taskShellSelection } from "./task-sandbox.js";
 import { createApplicationChecksFeatureMonitor, createWorkflowE2EApplicationRuntime } from "./workflow-e2e-application-runtime.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
@@ -31,6 +32,17 @@ const trustedRuntimeBackingOwner = CONTAINED_RUNTIME_PROFILE?.id === "linux-arm6
 
 // Read first, so a partly configured EC2 boot fails before the port opens.
 const invokeAuthentication = invokeAuthenticationFromEnvironment();
+// Pi installs no package for the worker: a settings file's `packages` would otherwise make it run `npmCommand` here.
+process.env.PI_OFFLINE = "1";
+// where a project without a devcontainer runs its commands comes from the environment (always the task sandbox on EC2),
+// so a bad AGENTX_TASK_SHELL, or a request for the local shell on EC2, stops the worker here, not on its first task.
+if (taskShellSelection().kind === "sandbox") {
+  // A crash or restart skips a sandbox's removal; none of this process's exists yet, so none found is in use.
+  await removeLeftoverTaskSandboxes(rootPath).then(
+    (removed) => { if (removed > 0) console.log(JSON.stringify({ component: "worker", event: "task-sandbox.leftovers.removed", removed })); },
+    (error: unknown) => { console.error(`could not remove leftover task sandboxes: ${error instanceof Error ? error.message : String(error)}`); },
+  );
+}
 const containedRuntimeReadiness: ContainedRuntimeReadiness = await inspectContainedRuntimeReadiness().catch((): ContainedRuntimeReadiness => ({ status: "unavailable", reason: "private-runtime-paths-unavailable" }));
 if (containedRuntimeReadiness.status !== "ready") {
   console.error(`project.setupSmoke unavailable: ${containedRuntimeReadiness.reason}`);

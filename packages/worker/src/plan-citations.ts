@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { runFileOp } from "./sandbox-file-ops.js";
 import { PLAN_DOCUMENT_INFO_STRING, lastFencedBlock, replaceLastFencedBlock, type PlanClaim, type PlanDocument } from "@agentx/contracts";
 
 /** A cited file is read whole only up to this size; a larger one is only counted, so its anchors are not checked. */
@@ -22,9 +23,15 @@ function textLines(text: string): string[] {
   return lines;
 }
 
-/** Reads a file inside `root`; a larger file than CITED_FILE_MAX_BYTES is counted while streaming, never held. */
-export function citedFileReader(root: string): CitedFileReader {
+/**
+ * Reads a file inside `root`; a larger file than CITED_FILE_MAX_BYTES is counted while streaming, never held. With the
+ * workspace's repositories, a file is read only from the repository that holds it. On Linux the read never lets the kernel
+ * follow a link (the file tools' own walk, rooted at that folder): the task controls these files, and in a devcontainer
+ * project its code can run while the plan is checked, flipping one between a real file and a link to a worker file.
+ */
+export function citedFileReader(root: string, repositories?: readonly CitationRepository[]): CitedFileReader {
   return async (path) => {
+    if (process.platform === "linux") return readConfined(root, repositories, path);
     let real: string;
     let size: number;
     try {
@@ -57,6 +64,37 @@ export function citedFileReader(root: string): CitedFileReader {
   };
 }
 
+async function readConfined(root: string, repositories: readonly CitationRepository[] | undefined, path: string): Promise<CitedFile | undefined> {
+  try {
+    const rootReal = await realpath(root);
+    const below = relative(resolve(root), resolve(path));
+    if (below === "" || below === ".." || below.startsWith(`..${sep}`) || isAbsolute(below)) return undefined;
+    const posixBelow = below.split(sep).join("/");
+    let folder = rootReal;
+    let inner = posixBelow;
+    if (repositories !== undefined) {
+      const repository = repositoryOf(posixBelow, repositories);
+      if (repository === undefined || posixBelow === repository.path) return undefined;
+      folder = await realpath(resolve(root, repository.path));
+      inner = posixBelow.slice(repository.path.length + 1);
+      // The repository folder must be where the workspace put it: a link the task made for it, to anywhere, is refused.
+      if (folder !== resolve(rootReal, repository.path)) return undefined;
+    }
+    const info = await runFileOp({ root: folder, op: "stat", path: inner });
+    if (!info.ok || (info.result as { type?: string }).type !== "file") return undefined;
+    if ((info.result as { size: number }).size > CITED_FILE_MAX_BYTES) {
+      const counted = await runFileOp({ root: folder, op: "countLines", path: inner });
+      return counted.ok ? { lineCount: (counted.result as { lineCount: number }).lineCount, lines: undefined } : undefined;
+    }
+    const read = await runFileOp({ root: folder, op: "readFile", path: inner });
+    if (!read.ok) return undefined;
+    const lines = textLines(Buffer.from((read.result as { contentBase64: string }).contentBase64, "base64").toString("utf8"));
+    return { lineCount: lines.length, lines };
+  } catch {
+    return undefined;
+  }
+}
+
 function repositoryOf(path: string, repositories: readonly CitationRepository[]): CitationRepository | undefined {
   return [...repositories]
     .sort((a, b) => b.path.length - a.path.length)
@@ -78,7 +116,7 @@ export async function checkCodeCitations(
   plan: PlanDocument,
   root: string,
   repositories: readonly CitationRepository[],
-  read: CitedFileReader = citedFileReader(root),
+  read: CitedFileReader = citedFileReader(root, repositories),
 ): Promise<{ plan: PlanDocument; issues: string[] }> {
   const issues: string[] = [];
   const files = new Map<string, Promise<CitedFile | undefined>>();

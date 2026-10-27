@@ -69,8 +69,10 @@ FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63
 # Python 3, pip and venv (Debian bookworm) so a Python repository's tests run; a project's
 # devcontainer (#121) is the route for anything else. tini, pinned, runs as PID 1 and reaps the
 # processes a command leaves behind: commands run in their own process group (#170).
+# This image is also the task sandbox a project without a devcontainer runs in, so it carries
+# the tools such a project's commands reach for: curl, git, python3, bash and a POSIX shell (dash).
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates git openssh-client python3 python3-pip python3-venv tini=0.19.0-1+b3 \
+    && apt-get install --yes --no-install-recommends ca-certificates curl git openssh-client python3 python3-pip python3-venv tini=0.19.0-1+b3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=tools /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose

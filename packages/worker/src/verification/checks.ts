@@ -14,11 +14,12 @@ import {
   type ProjectCommand,
   type PublicationCheckResult,
 } from "@agentx/contracts";
-import { createLocalBashOperations, type BashOperations } from "@earendil-works/pi-coding-agent";
+import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { MAX_COMMAND_OUTPUT_BYTES, redactedTail, tailCollector } from "../collected-process.js";
 import { devcontainerBashOperations, runDevcontainerCommand, type DevcontainerCli, type DevcontainerTarget } from "../devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../git.js";
 import { runProjectCommand } from "../prepare.js";
+import { localBashOperations, type TaskSandbox } from "../task-sandbox.js";
 import { projectBefore, type CheckHistory } from "./check-history.js";
 import type { CommandRecorder, RecordedCommand } from "./recorder.js";
 
@@ -289,15 +290,25 @@ export interface CheckRunnerOptions {
    * container). Defaults to the devcontainer's shell when there is one, and to the host's bash only when there is none.
    */
   bashOperations?: BashOperations;
+  /**
+   * The task sandbox, where a project without a devcontainer runs: the agent's replays and the project's commands
+   * both go through it. With none of this, nor a devcontainer, they run as children of this process, which is for tests and
+   * a developer's machine only: the EC2 runtime refuses (task-sandbox.ts).
+   */
+  sandbox?: TaskSandbox;
+  /** The caller was told to use the local shell (taskShell: local); otherwise AGENTX_TASK_SHELL=local must say so. */
+  local?: boolean;
 }
 
 /** The real runners: readiness as preparation runs it, and agent commands as the agent's own shell runs them. */
 export function createCheckRunners(options: CheckRunnerOptions): CheckRunners {
   const devcontainer = options.devcontainer;
   // Ruling K: a devcontainer session's replays run in the devcontainer, never on the host.
+  const sandbox = options.sandbox;
   const operations = options.bashOperations
-    ?? (devcontainer === undefined ? createLocalBashOperations() : devcontainerBashOperations(devcontainer.cli, devcontainer.target));
-  const inContainer = devcontainer !== undefined || options.bashOperations !== undefined;
+    ?? (devcontainer !== undefined ? devcontainerBashOperations(devcontainer.cli, devcontainer.target)
+      : sandbox !== undefined ? sandbox.bashOperations() : localBashOperations({ explicit: options.local === true }));
+  const inContainer = devcontainer !== undefined || sandbox !== undefined || options.bashOperations !== undefined;
   const canonicalRoot = realpath(resolve(options.rootPath));
   canonicalRoot.catch(() => undefined);
   return {
@@ -305,9 +316,11 @@ export function createCheckRunners(options: CheckRunnerOptions): CheckRunners {
       if (signal.aborted) throw new Error("aborted");
       const root = await canonicalRoot;
       try {
-        const result = devcontainer === undefined
-          ? await runProjectCommand(command, 0, root, signal)
-          : await runDevcontainerCommand(devcontainer.cli, devcontainer.target, command, signal);
+        const result = devcontainer !== undefined
+          ? await runDevcontainerCommand(devcontainer.cli, devcontainer.target, command, signal)
+          : sandbox !== undefined
+            ? await sandbox.runCommand(command, signal)
+            : await runProjectCommand(command, 0, root, signal, options.local === true);
         if (signal.aborted) throw new Error("aborted");
         return { exitCode: result.exitCode, timedOut: result.timedOut === true, stdout: result.stdout, stderr: result.stderr };
       } catch (error) {

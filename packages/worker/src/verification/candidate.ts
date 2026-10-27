@@ -3,13 +3,19 @@ import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, agentXError, createCandidateManifest, isSafeE2ESourcePath, type CandidateManifest } from "@agentx/contracts";
 import { commitLock, lockIn, openDirectory, readFileIn, releaseLock, type DirectoryLock, type HeldDirectory } from "../candidate-fs.js";
-import { snapshotTree, withIsolatedGit, type IsolatedGit } from "../isolated-git.js";
+import { CANDIDATE_EXCLUDE_PATHSPEC, snapshotTree, withIsolatedGit, type IsolatedGit } from "../isolated-git.js";
+export { CANDIDATE_EXCLUDE_PATHSPEC };
 
 const INDEX_BYTES = 512 * 1024 * 1024;
 
 export interface CandidateRepositoryInput {
   repositoryId: string;
   directory: string;
+  /**
+   * Removes the file tools' leftover temporary files in this repository's folder (inside the task's container). Called before
+   * every snapshot; a failure is not one, since the snapshot excludes those files anyway.
+   */
+  sweep?: () => Promise<void>;
   /** The commit the task started from; it must be an ancestor of HEAD. */
   baseCommitSha?: string;
 }
@@ -125,6 +131,7 @@ export async function readCandidateRepositories(
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}$/.test(input.repositoryId)
       || (input.baseCommitSha !== undefined && !/^[a-f0-9]{40}$/.test(input.baseCommitSha))) throw new Error("candidate repository identities are invalid");
     const directory = resolve(input.directory);
+    await input.sweep?.().catch(() => undefined);
     try {
       const identity = await withIsolatedGit(directory, "write", async (git) => {
         const commit = (await git.text(["rev-parse", "--verify", `${await git.headCommit()}^{commit}`], { index: "none" })).trim();
@@ -174,6 +181,7 @@ export async function commitCandidateWorktree(
   for (const input of [...inputs].sort((left, right) => left.repositoryId.localeCompare(right.repositoryId))) {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}$/.test(input.repositoryId)
       || (input.baseCommitSha !== undefined && !/^[a-f0-9]{40}$/.test(input.baseCommitSha))) throw new Error("candidate repository identities are invalid");
+    await input.sweep?.().catch(() => undefined);
     try {
       committed.push(await withIsolatedGit(resolve(input.directory), "write", (git) => commitRepository(git, input)));
     } catch (error) {

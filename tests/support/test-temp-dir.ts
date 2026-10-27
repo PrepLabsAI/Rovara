@@ -34,12 +34,22 @@ export default function setup(): () => void {
   createEmptyGitDirectories(emptyGitDirectories);
   const previousEmpty = process.env[EMPTY_GIT_DIRECTORY_ROOT_VARIABLE];
   process.env[EMPTY_GIT_DIRECTORY_ROOT_VARIABLE] = emptyGitDirectories;
+  // The worker runs a task's commands in a sandbox container unless told otherwise. Tests run them as children of
+  // the test process, which they must ask for, and keep the worker's private state in the run's directory, not in $HOME.
+  const previousShell = process.env.AGENTX_TASK_SHELL;
+  const previousState = process.env.AGENTX_WORKER_STATE_DIR;
+  process.env.AGENTX_TASK_SHELL = "local";
+  process.env.AGENTX_WORKER_STATE_DIR = join(runDir, "worker-state");
+  const restore = (name: string, value: string | undefined) => {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  };
   return () => {
-    if (previousEmpty === undefined) delete process.env[EMPTY_GIT_DIRECTORY_ROOT_VARIABLE];
-    else process.env[EMPTY_GIT_DIRECTORY_ROOT_VARIABLE] = previousEmpty;
+    restore(EMPTY_GIT_DIRECTORY_ROOT_VARIABLE, previousEmpty);
     removeEmptyGitDirectories(emptyGitDirectories);
-    if (previous === undefined) delete process.env.TMPDIR;
-    else process.env.TMPDIR = previous;
+    restore("TMPDIR", previous);
+    restore("AGENTX_TASK_SHELL", previousShell);
+    restore("AGENTX_WORKER_STATE_DIR", previousState);
     rmSync(runDir, { recursive: true, force: true });
   };
 }

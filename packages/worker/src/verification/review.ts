@@ -28,12 +28,18 @@ import { assistantText } from "./extension.js";
 import { readCandidateRepositories } from "./candidate.js";
 import { parseWorkflowReviewerResponse, reviewerFocus, reviewJsonShape, unfence } from "@agentx/contracts";
 import { candidateChanges, candidateDiff, type CandidateChange } from "./diff.js";
-import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
+import type { FileOpsTarget } from "../file-ops-exec.js";
+import { assertFileToolsContained, createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { withIsolatedGit } from "../isolated-git.js";
 import { isRuleFilesUnverified } from "../repository-context.js";
 import { isTestPath } from "./test-paths.js";
 
 export { isTestPath };
+
+/** The file-tool choice of a review's input, as a session takes it. */
+function fileToolSelection(input: { fileTools?: FileOpsTarget; localFileTools?: boolean }): { fileTools?: FileOpsTarget; localFileTools?: boolean } {
+  return { ...(input.fileTools === undefined ? {} : { fileTools: input.fileTools }), ...(input.localFileTools === true ? { localFileTools: true } : {}) };
+}
 
 const FEEDBACK_REVIEW_OUTPUT_MAX_BYTES = 2_000_000;
 const FEEDBACK_BUNDLE_MAX_BYTES = 5_000_000;
@@ -83,7 +89,7 @@ export async function runWorkflowFeedbackReview(input: {
   rootPath: string;
   model: WorkspaceModelConfiguration;
   candidate: readonly CandidateRepository[];
-  repositories: readonly { repositoryId: string; directory: string }[];
+  repositories: readonly { repositoryId: string; directory: string; sweep?: () => Promise<void> }[];
   bundles: readonly { ref: WorkflowFeedbackBundleRef; bytes: string | Uint8Array }[];
   /**
    * The task's checks, from a broker that sends them: the reviewer is shown them and may list the proposed ones its fix
@@ -94,11 +100,17 @@ export async function runWorkflowFeedbackReview(input: {
   /** The broker's base commit per repository, for the reviewer's rule files. Required: no caller can fall back to a base the agent could write. */
   ruleFileBaseCommits: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   piAdapter?: PiSessionAdapter;
+  /** Where the reviewer's file tools run: the task's container. An EC2 worker refuses a review without it. */
+  fileTools?: FileOpsTarget;
+  /** Explicitly Pi's own file tools, in the worker: a devcontainer project (as before), tests and a developer's machine. */
+  localFileTools?: boolean;
   signal?: AbortSignal;
   timeoutMs?: number;
   now?: () => string;
   onProgress?: (message: string) => void;
 }): Promise<WorkflowFeedbackReviewExecution> {
+  // Refused up front: the session's own refusal below would be reported as a failed review, not as a task that did not start.
+  assertFileToolsContained(fileToolSelection(input));
   const taskId = input.taskId;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)
     || !Number.isInteger(input.workflowRevision) || input.workflowRevision < 1
@@ -147,7 +159,8 @@ export async function runWorkflowFeedbackReview(input: {
       input.onProgress?.("AgentX is independently reviewing the current PR feedback.");
       session = await createWorkspacePiSession({ rootPath: input.rootPath, model: input.model,
         workflowMode: "REVIEW", conversationId: randomUUID(), contextFilesAt: "base-commit",
-        baseCommits: input.ruleFileBaseCommits }, input.piAdapter);
+        baseCommits: input.ruleFileBaseCommits,
+        ...fileToolSelection(input) }, input.piAdapter);
       const actualModel = session.getModel();
       provider = actualModel.provider;
       version = actualModel.modelId;
@@ -510,12 +523,16 @@ const REVIEW_DIFF_MAX_BYTES = 120_000;
 
 /** The repositories to re-read, each carrying the base commit the candidate recorded for it. */
 function withCandidateBase(
-  repositories: readonly { repositoryId: string; directory: string }[],
+  repositories: readonly { repositoryId: string; directory: string; sweep?: () => Promise<void> }[],
   candidate: readonly CandidateRepository[],
-): Array<{ repositoryId: string; directory: string; baseCommitSha?: string }> {
+): Array<{ repositoryId: string; directory: string; baseCommitSha?: string; sweep?: () => Promise<void> }> {
   return repositories.map((repository) => {
     const baseCommitSha = candidate.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha;
-    return { repositoryId: repository.repositoryId, directory: repository.directory, ...(baseCommitSha === undefined ? {} : { baseCommitSha }) };
+    return {
+      repositoryId: repository.repositoryId, directory: repository.directory,
+      ...(baseCommitSha === undefined ? {} : { baseCommitSha }),
+      ...(repository.sweep === undefined ? {} : { sweep: repository.sweep }),
+    };
   });
 }
 
@@ -623,7 +640,7 @@ export async function runWorkflowReviews(input: {
   rootPath: string;
   model: WorkspaceModelConfiguration;
   candidate: readonly CandidateRepository[];
-  repositories: readonly { repositoryId: string; directory: string }[];
+  repositories: readonly { repositoryId: string; directory: string; sweep?: () => Promise<void> }[];
   /** Which checks ran on the candidate, or that it is review only; absent from a broker that does not send it. */
   reviewChecks?: WorkflowReviewChecks;
   /** The coding plan the owner approved; absent from a broker that does not send it. */
@@ -635,12 +652,17 @@ export async function runWorkflowReviews(input: {
   /** The broker's base commit per repository, for the reviewers' rule files. Required: no caller can fall back to a base the agent could write. */
   ruleFileBaseCommits: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   piAdapter?: PiSessionAdapter;
+  /** Where the reviewer's file tools run: the task's container. An EC2 worker refuses a review without it. */
+  fileTools?: FileOpsTarget;
+  /** Explicitly Pi's own file tools, in the worker: a devcontainer project (as before), tests and a developer's machine. */
+  localFileTools?: boolean;
   signal?: AbortSignal;
   timeoutMs?: number;
   now?: () => string;
   onProgress?: (message: string) => void;
   onUsage?: (usage: { role: "CRITIC" | "SECURITY"; stats: ReturnType<PiSessionHandle["getSessionStats"]>; model: WorkspaceModelConfiguration; outcome: "SUCCEEDED" | "FAILED" }) => Promise<void>;
 }): Promise<Array<ReturnType<typeof WorkflowReviewReportSchema.parse>>> {
+  assertFileToolsContained(fileToolSelection(input));
   const manifest = createCandidateManifest(input.candidate);
   const reports: Array<ReturnType<typeof WorkflowReviewReportSchema.parse>> = [];
   const unavailable = (failureReason: "BASE_UNAVAILABLE" | "DIFF_UNAVAILABLE") => (["CRITIC", "SECURITY"] as const).map((role) => WorkflowReviewReportSchema.parse({
@@ -682,6 +704,7 @@ export async function runWorkflowReviews(input: {
         conversationId: randomUUID(),
         contextFilesAt: "base-commit",
         baseCommits: input.ruleFileBaseCommits,
+        ...fileToolSelection(input),
       }, input.piAdapter);
       const actualModel = session.getModel();
       provider = actualModel.provider;

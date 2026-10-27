@@ -407,21 +407,29 @@ it keeps the token away from code the agent or the project controls:
 - The published commit's parent is the base commit AgentX pinned for the task, never one the
   workspace reports. The broker checks the pull request's commit, its code and its parent on GitHub.
 
-Known limitation: on EC2 workers, when a project has no dev container, the coding step currently runs
-with the worker's Docker access. Before publishing, AgentX stops processes and containers started by
-the task and pushes from an isolated repository, but that does not undo anything done earlier in the
-task. With a dev container that follows the rules in "Dev container" above, the agent's shell and the
-project's commands run in that container, without Docker access. Running AI-written code as a
-separate user without Docker access is tracked in
-[#325](https://github.com/PrepLabsAI/Rovara/issues/325).
+On EC2 workers, task code never runs inside the worker's own process or user. With a dev container
+that follows the rules in "Dev container" above, the agent's shell and the project's commands run in
+that container. A project without a dev container gets a task sandbox instead: a container started
+from the worker's own image for the task, in which the task's commands run without host access. It
+has no Docker socket and no extra group, all capabilities dropped, `no-new-privileges`, user 1000,
+tini as its init, and only the workspace mounted (the worker's own folders in the workspace are
+hidden). It joins the `agentx-task` bridge network, so outbound internet works. The agent's shell
+and file tools, AgentX's checks, and the project's `setup` and `readiness` commands all run there,
+and the sandbox is removed when the task, the preparation or the publication step ends, on success
+or failure. The image carries `curl`, `git`, `python3`, `uv`, `bash` and a POSIX shell; a project
+that needs more tools should use a dev container. A sandbox that cannot start fails the task.
+AgentX never falls back to running the command in the worker. The sandbox is the default
+everywhere; running commands as children of the worker is for tests and a developer's machine,
+needs `AGENTX_TASK_SHELL=local`, and is refused on EC2 (the boot script sets `AGENTX_RUNTIME=ec2`).
 
 #### Security follow-ups
 
 Tracked in [#325](https://github.com/PrepLabsAI/Rovara/issues/325):
 
-1. Run agent and project code as a separate operating-system user with no Docker access.
-2. Dev-container-only Docker: only AgentX's own dev container launcher reaches Docker; projects
-   without a dev container get no Docker access.
+1. Done for projects without a dev container: they run in the task sandbox (above). Further
+   hardening of dev containers is tracked in the same issue.
+2. Dev-container-only Docker: only AgentX's own launcher reaches Docker; projects without a dev
+   container run in the task sandbox, which has none.
 3. Apply the same process and container stop before the credential of a pull request update.
 
 ## Checks: how Rovara verifies the agent's work (spec 051)

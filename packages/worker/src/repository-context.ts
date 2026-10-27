@@ -1,8 +1,9 @@
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AgentXNameSchema, RelativeWorkspacePathSchema, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, agentXError } from "@agentx/contracts";
 import { inertContextText } from "./context-text.js";
 import type { PreparationManifest } from "./prepare.js";
+import { runFileOp } from "./sandbox-file-ops.js";
 import { readVerifiedBaseRuleFile, type BaseRuleFile } from "./trusted-base-objects.js";
 
 // Pi discovers these names in its working directory, in the directories above it, and in the
@@ -230,6 +231,9 @@ async function readWorkingTreeRuleFile(
   directory: string,
   repository: WorkspaceRepositoryReference,
 ): Promise<RuleFileRead> {
+  // the task controls these files and can flip one between a real file and a link while this reads it, so on Linux the
+  // read is confined to the repository and never lets the kernel follow a link (the file tools' own walk).
+  if (process.platform === "linux") return readConfinedRuleFile(directory, repository);
   // Names exactly as the directory lists them: on a case-insensitive file system stat("AGENTS.md") also finds
   // "agents.md", which Git (and so the base-commit read) does not treat as the same file.
   const listed = new Set(await readdir(directory).catch(() => [] as string[]));
@@ -268,6 +272,42 @@ async function readWorkingTreeRuleFile(
 export function isRuleFilesUnverified(error: unknown): boolean {
   return error instanceof Error && error.message.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE);
 }
+
+/** The same checks as the portable path above, through the no-follow walk rooted at the repository's folder. */
+async function readConfinedRuleFile(
+  directory: string,
+  repository: WorkspaceRepositoryReference,
+): Promise<RuleFileRead> {
+  const outside = (candidate: string): RuleFileRead => ({ skipped: candidate, diagnostic: `skipped ${repository.path}/${candidate}: it resolves outside the repository` });
+  const tooBig = (candidate: string, detail: string): RuleFileRead => ({ skipped: candidate, diagnostic: `skipped ${repository.path}/${candidate}: ${detail}` });
+  for (const candidate of REPOSITORY_CONTEXT_FILE_CANDIDATES) {
+    const info = await runFileOp({ root: directory, op: "stat", path: candidate });
+    if (!info.ok) {
+      if (info.code === "OUTSIDE") return outside(candidate);
+      // Missing names and broken links are passed over, as Pi passes over them; anything else contributes no context.
+      if (info.code === "ENOENT" || info.code === "ENOTDIR") continue;
+      return {};
+    }
+    const metadata = info.result as { type?: string; size?: number };
+    if (metadata.type !== "file") continue;
+    if ((metadata.size ?? 0) > MAX_REPOSITORY_CONTEXT_FILE_BYTES) {
+      return tooBig(candidate, `${String(metadata.size)} bytes exceeds the ${MAX_REPOSITORY_CONTEXT_FILE_BYTES}-byte limit`);
+    }
+    const read = await runFileOp({ root: directory, op: "readFile", path: candidate });
+    if (!read.ok) {
+      if (read.code === "OUTSIDE") return outside(candidate);
+      if (read.code === "TOO_LARGE") return tooBig(candidate, `it exceeds the ${MAX_REPOSITORY_CONTEXT_FILE_BYTES}-byte limit`);
+      return {};
+    }
+    const content = Buffer.from((read.result as { contentBase64: string }).contentBase64, "base64").toString("utf8");
+    if (Buffer.byteLength(content, "utf8") > MAX_REPOSITORY_CONTEXT_FILE_BYTES) {
+      return tooBig(candidate, `it exceeds the ${MAX_REPOSITORY_CONTEXT_FILE_BYTES}-byte limit`);
+    }
+    return { raw: { candidate, path: join(directory, candidate), content } };
+  }
+  return {};
+}
+
 
 /**
  * The same candidate order, size cap and checks, read from `repository.baseCommit` through a verified copy of that commit's objects

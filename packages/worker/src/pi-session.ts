@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   createAgentSession,
   createBashToolDefinition,
@@ -25,6 +27,9 @@ import { createModelRuntimeWithFallback, type ChatGptFallback, type ChatGptFallb
 import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
+import type { FileOpsTarget } from "./file-ops-exec.js";
+import { sandboxFileTools } from "./sandbox-file-tools.js";
+import { isEc2WorkerRuntime, localBashOperations } from "./task-sandbox.js";
 import {
   appendRepositoryContextFiles,
   loadRepositoryContextFiles,
@@ -76,8 +81,15 @@ export interface PiSessionInput {
   contextFilesAt?: "working-tree" | "base-commit";
   /** Where the agent's shell runs instead of the worker: the project's devcontainer (#121). */
   bashOperations?: BashOperations;
-  /** The repository's folder in the devcontainer, which the file tools resolve to the host folder (#128). */
+  /** The repository's folder in the devcontainer, which the local file tools resolve to the host folder (#128). */
   devcontainerPaths?: DevcontainerPaths;
+  /**
+   * Where the agent's file tools run: the task sandbox or the devcontainer, through `docker exec` (sandbox-file-tools.ts).
+   * Without it, and without `localFileTools`, Pi's built-ins run in the worker, which an EC2 worker refuses.
+   */
+  fileTools?: FileOpsTarget;
+  /** Explicitly Pi's built-in file tools, in the worker: tests and a developer's machine, and the offline SWE-bench evaluation. */
+  localFileTools?: boolean;
   /** Inline Pi extensions for this session (spec 051), named so a report says which; file-path extensions stay disabled. */
   extensionFactories?: InlineExtension[];
   /** Where the session reports what it does not fail on, such as an extension handler's error. Messages arrive redacted. */
@@ -89,6 +101,36 @@ export interface PiSessionAdapter {
   open?(input: PiSessionInput & { conversationId: string; sessionFile: string }): Promise<PiSessionHandle>;
 }
 
+/** Where the worker keeps its own state that is not the workspace's: a folder of its home, or `AGENTX_WORKER_STATE_DIR`. */
+export const WORKER_STATE_DIRECTORY_ENVIRONMENT = "AGENTX_WORKER_STATE_DIR";
+
+/**
+ * Pi's agent directory for this workspace. Pi reads its settings from it, and a `packages` entry there makes
+ * the worker run `npmCommand` to install it. Task code writes the workspace (its sandbox or devcontainer mounts it), so the
+ * directory is in the worker's own private state, which no task container mounts, and never in the workspace.
+ */
+export function workerPiDirectory(rootPath: string, environment: NodeJS.ProcessEnv = process.env): string {
+  const state = resolve(environment[WORKER_STATE_DIRECTORY_ENVIRONMENT] || join(homedir(), ".agentx-worker"));
+  const workspace = resolve(rootPath);
+  const fromWorkspace = relative(workspace, state);
+  if (fromWorkspace === "" || (!fromWorkspace.startsWith("..") && !isAbsolute(fromWorkspace))) {
+    throw agentXError("CONFIG_INVALID", `${WORKER_STATE_DIRECTORY_ENVIRONMENT} must not be inside the workspace, which task code can write`);
+  }
+  return join(state, "pi", createHash("sha256").update(workspace).digest("hex").slice(0, 16));
+}
+
+/**
+ * on an EC2 worker the agent's file tools run in the task's container, never in the worker, where a link the task
+ * flips between a check and the open could read or write the worker's own files. A session that would have file tools and
+ * was given no container to run them in does not start. Every session of a task is covered: the main ones and the reviews.
+ */
+export const FILE_TOOLS_NEED_SANDBOX_MESSAGE = "AgentX did not start the agent: its file tools need the task sandbox";
+export function assertFileToolsContained(input: { fileTools?: FileOpsTarget; localFileTools?: boolean }, environment: NodeJS.ProcessEnv = process.env): void {
+  if (input.fileTools === undefined && input.localFileTools !== true && isEc2WorkerRuntime(environment)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", FILE_TOOLS_NEED_SANDBOX_MESSAGE);
+  }
+}
+
 export async function createWorkspacePiSession(
   input: {
     rootPath: string;
@@ -98,6 +140,8 @@ export async function createWorkspacePiSession(
     onDiagnostic?: (message: string) => void;
     bashOperations?: BashOperations;
     devcontainerPaths?: DevcontainerPaths;
+    fileTools?: FileOpsTarget;
+    localFileTools?: boolean;
     extensionFactories?: InlineExtension[];
     /**
      * Where each repository's rule file is read from: the working tree (the default, for coding sessions) or the commit the
@@ -112,9 +156,10 @@ export async function createWorkspacePiSession(
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
+  assertFileToolsContained(input);
   const rootPath = await realpath(resolve(input.rootPath));
   const sessionDirectory = resolve(rootPath, "agent-sessions");
-  const agentDirectory = resolve(rootPath, ".agentx/pi");
+  const agentDirectory = workerPiDirectory(rootPath);
   await Promise.all([
     mkdir(sessionDirectory, { recursive: true, mode: 0o700 }),
     mkdir(agentDirectory, { recursive: true, mode: 0o700 }),
@@ -131,6 +176,8 @@ export async function createWorkspacePiSession(
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
     ...(input.devcontainerPaths === undefined ? {} : { devcontainerPaths: input.devcontainerPaths }),
+    ...(input.fileTools === undefined ? {} : { fileTools: input.fileTools }),
+    ...(input.localFileTools === undefined ? {} : { localFileTools: input.localFileTools }),
     ...(input.extensionFactories === undefined ? {} : { extensionFactories: input.extensionFactories }),
     ...(input.onDiagnostic === undefined ? {} : { onDiagnostic: input.onDiagnostic }),
   });
@@ -148,6 +195,8 @@ export async function openRegisteredWorkspacePiSession(
     onDiagnostic?: (message: string) => void;
     bashOperations?: BashOperations;
     devcontainerPaths?: DevcontainerPaths;
+    fileTools?: FileOpsTarget;
+    localFileTools?: boolean;
     extensionFactories?: InlineExtension[];
     /** As for `createWorkspacePiSession`. */
     contextFilesAt?: "working-tree" | "base-commit";
@@ -155,9 +204,10 @@ export async function openRegisteredWorkspacePiSession(
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
+  assertFileToolsContained(input);
   const rootPath = await realpath(resolve(input.rootPath));
   const sessionDirectory = resolve(rootPath, "agent-sessions");
-  const agentDirectory = resolve(rootPath, ".agentx/pi");
+  const agentDirectory = workerPiDirectory(rootPath);
   const sessionFile = await realpath(resolve(input.sessionFile)).catch(() => {
     throw agentXError(
       "CONVERSATION_STATE_LOST",
@@ -179,6 +229,8 @@ export async function openRegisteredWorkspacePiSession(
     sessionFile,
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
     ...(input.devcontainerPaths === undefined ? {} : { devcontainerPaths: input.devcontainerPaths }),
+    ...(input.fileTools === undefined ? {} : { fileTools: input.fileTools }),
+    ...(input.localFileTools === undefined ? {} : { localFileTools: input.localFileTools }),
     ...(input.extensionFactories === undefined ? {} : { extensionFactories: input.extensionFactories }),
     ...(input.onDiagnostic === undefined ? {} : { onDiagnostic: input.onDiagnostic }),
   });
@@ -299,6 +351,8 @@ async function createDefaultSession(
       ));
     }
     const capabilities = piTaskToolCapabilities(input.workflowMode ?? "IMPLEMENT");
+    // The adapter can be reached without createWorkspacePiSession; the same refusal holds.
+    assertFileToolsContained(input);
     const { session } = await createAgentSession({
       cwd: input.cwd,
       agentDir: input.agentDirectory,
@@ -309,7 +363,10 @@ async function createDefaultSession(
       // A custom tool with a built-in's name replaces it.
       customTools: [
         ...(capabilities.shell ? [agentShellTool(input.cwd, input.bashOperations)] : []),
-        ...(!capabilities.customFileTools || input.devcontainerPaths === undefined ? [] : devcontainerFileTools(input.cwd, input.devcontainerPaths)),
+        // Every file tool the session exposes runs in the task's container when there is one; a tool with a built-in's name replaces it.
+        ...(input.fileTools !== undefined
+          ? sandboxFileTools({ target: input.fileTools, cwd: input.cwd, names: capabilities.tools })
+          : !capabilities.customFileTools || input.devcontainerPaths === undefined ? [] : devcontainerFileTools(input.cwd, input.devcontainerPaths)),
       ],
       resourceLoader,
       settingsManager,
@@ -406,10 +463,24 @@ function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]
 export async function createWorkerResources(
   input: Pick<PiSessionInput, "cwd" | "agentDirectory" | "contextFiles" | "extensionFactories"> & Pick<Partial<PiSessionInput>, "contextFilesAt">,
 ): Promise<{ resourceLoader: DefaultResourceLoader; settingsManager: SettingsManager }> {
+  // Pi never installs a package for the worker: the reload below would otherwise fetch every `packages` entry of the
+  // settings it reads, running `npmCommand`, in the worker. AgentX loads no package.
+  process.env.PI_OFFLINE = "1";
   const settingsManager = SettingsManager.create(input.cwd, input.agentDirectory, { projectTrusted: false });
   // Pi 0.86+ warms prompt caches with extra paid requests during long tool runs by default ("streaming"); 0.85.1 made
   // none. The mode is a global-only setting, so it is written to AgentX's own agent directory.
   settingsManager.setCacheWarmingMode("off");
+  // Defence in depth for a settings file the worker did not write: PI_OFFLINE stops installs, but Pi still runs `npmCommand`
+  // to find its global package root. AgentX loads no package, extension path, skill, prompt or theme from settings, and
+  // runs no configured shell or npm command, whatever the file says.
+  settingsManager.setNpmCommand(undefined);
+  settingsManager.setPackages([]);
+  settingsManager.setExtensionPaths([]);
+  settingsManager.setSkillPaths([]);
+  settingsManager.setPromptTemplatePaths([]);
+  settingsManager.setThemePaths([]);
+  settingsManager.setShellPath(undefined);
+  settingsManager.setShellCommandPrefix(undefined);
   const resourceLoader = new DefaultResourceLoader({
     cwd: input.cwd,
     agentDir: input.agentDirectory,
@@ -447,9 +518,10 @@ export function applyWorkerRetryBudget(settingsManager: SettingsManager): void {
 }
 
 export function agentShellTool(cwd: string, operations?: BashOperations): ToolDefinition {
-  // The typed definition's render callbacks are narrower than customTools' generic slot.
+  // The typed definition's render callbacks are narrower than customTools' generic slot. Without operations the shell is
+  // the local one, which a worker on EC2 refuses: its callers pass the sandbox's or the devcontainer's.
   return createBashToolDefinition(cwd, {
-    ...(operations === undefined ? {} : { operations }),
+    operations: operations ?? localBashOperations(),
     spawnHook: agentShellSpawn,
   }) as unknown as ToolDefinition;
 }
@@ -485,8 +557,9 @@ export function executionRoleBedrockProvider(): ReturnType<typeof amazonBedrockP
 }
 
 /**
- * pi's file tools, with a path under the devcontainer's repository folder resolved to the same file
- * in the worker (#128). The shell sees both folders; these tools run in the worker.
+ * Local runs only (a developer's machine, tests, the offline SWE-bench evaluation; an EC2 worker never reaches it, see
+ * assertFileToolsContained): pi's own file tools, with a path under the devcontainer's repository folder resolved to the
+ * same file in the worker (#128). On EC2 the file tools run in the container (sandbox-file-tools.ts).
  */
 export function devcontainerFileTools(cwd: string, paths: DevcontainerPaths): ToolDefinition[] {
   const tools = [

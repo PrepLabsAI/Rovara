@@ -15,6 +15,8 @@ import {
   type DevcontainerCli,
   type DevcontainerPaths,
 } from "./devcontainer.js";
+import type { FileOpsTarget } from "./file-ops-exec.js";
+import { sweepFileOps } from "./sandbox-file-tools.js";
 import { EventBatcher, redactCredentials, type EventAppendOptions, type EventBatchSink, type WorkerEvent } from "./events.js";
 import {
   CANCEL_FLUSH_MAX_MS, ModelCallMonitor, PLANNING_ABORT_CONFIRM_MS, PLANNING_STALL_MS, describeModelCallNote, expiryNote, logEventsRefused, logModelCallNote, modelFailureNextAction,
@@ -51,6 +53,7 @@ import {
 import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies } from "./workflow-dependencies.js";
 import { executeWorkflowE2EChecks, workflowE2EAdmissionIsApplication } from "./workflow-e2e-checks.js";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
+import { localBashOperations, taskSandboxFor, taskShellSelection, type TaskSandbox, type TaskShellSelection } from "./task-sandbox.js";
 
 export interface TaskInvocationResult {
   /** The broker-issued conversation ID, which stays the same for every turn of one conversation. */
@@ -75,49 +78,75 @@ export interface TaskInvocationResult {
   workflowFeedbackReviewResult?: { taskId: string; workflowRevision: number; candidateDigest: string; outputDigest: string; artifactName: string; status: WorkflowFeedbackReviewReport["status"] };
 }
 
+export interface TaskInvocationDependencies {
+  rootPath: string;
+  model: WorkspaceModelConfiguration;
+  eventSink: EventBatchSink;
+  artifactSink: ArtifactSink;
+  feedbackBundleReader?: FeedbackBundleReader;
+  workflowE2EAdmissionReader?: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
+  workflowE2EEvidenceSink?: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
+  workflowE2EEvidenceRoot?: string;
+  /** M1.4 Task 4.3a: the project's day budget callback, for a round whose admission has AI navigation steps. Only the worker's own wiring sets it. */
+  workflowE2EModelBudget?: (body: E2EModelDayBudgetRequest, signal?: AbortSignal) => Promise<unknown>;
+  /** Fixed worker installation root that contains the pinned public E2E CLI package. */
+  workflowE2ERuntimeRoot?: string;
+  /** The Docker application runtime application admissions run on (or how to build it once needed); only the worker's own wiring sets it. */
+  workflowE2EApplicationRuntime?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime);
+  /** Trusted host-only hook for observing the exact owned contained process; no invocation data can set it. */
+  workflowE2EOnOwnedContainerRunning?: (receipt: Readonly<{ containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }>) => Promise<void>;
+  authorizeFeedbackApproval?: FeedbackApprovalAuthorizer;
+  piAdapter?: PiSessionAdapter;
+  cancellationController?: WorkerCancellationController;
+  devcontainerCli?: DevcontainerCli;
+  /** The runners AgentX's checks use; tests supply fakes. Default: as preparation and the agent's shell run. */
+  checkRunners?: CheckRunners;
+  /** Each check round's budget; tests supply short ones. Default: CHECK_ROUND_BUDGET_MS (P-3). */
+  checkBudgetMs?: () => number;
+  /** D-16: the original code for before results; tests supply a fake. Default: each repository's preparation commit. */
+  originalCode?: OriginalCode;
+  /** TESTPROOF: how the original code with the new tests kept is shown for a CHECKS run; tests supply a fake. Default: gitOriginalCode. */
+  testProofOriginalCode?: Parameters<typeof runTestProof>[0]["originalCode"];
+  /** How long a review (each role) and a PR feedback review may take; tests supply short ones. Default: the reviews' own (5 minutes). */
+  timeouts?: { reviewMs?: number; feedbackReviewMs?: number };
+  /**
+   * PLANINC-3b: the limits on a model call; tests supply short ones. Defaults: the planning deadline (25 minutes, or AGENTX_PLAN_DEADLINE_MS), the stall limit (240 s),
+   * the abort confirmation (30 s), the heartbeat (60 s) and the clock's tick (5 s). Only a PLAN run has a deadline and a stall limit.
+   */
+  modelCallLimits?: { deadlineMs?: number; stallMs?: number; abortConfirmMs?: number; heartbeatMs?: number; tickMs?: number };
+  /** Where the worker's structured model-call lines go. Default: stdout, as the worker's other log lines. */
+  log?: WorkerLogSink;
+  /** PLANDRYRUN: how a coding plan's proposed checks are tried on the unchanged code; tests supply a fake. Default: `runPlanDryRun` (a sandbox container per check). */
+  planDryRun?: typeof runPlanDryRun;
+  /**
+   * Where a project without a devcontainer runs the agent's shell, its checks and its commands: the task sandbox, or the
+   * local shell for tests and a developer's machine. Default: chosen from the worker's environment, which is always the
+   * sandbox on EC2.
+   */
+  taskShell?: TaskShellSelection;
+}
+
 export async function runTaskInvocation(
   untrustedInvocation: WorkerInvocation,
-  dependencies: {
-    rootPath: string;
-    model: WorkspaceModelConfiguration;
-    eventSink: EventBatchSink;
-    artifactSink: ArtifactSink;
-    feedbackBundleReader?: FeedbackBundleReader;
-    workflowE2EAdmissionReader?: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
-    workflowE2EEvidenceSink?: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
-    workflowE2EEvidenceRoot?: string;
-    /** M1.4 Task 4.3a: the project's day budget callback, for a round whose admission has AI navigation steps. Only the worker's own wiring sets it. */
-    workflowE2EModelBudget?: (body: E2EModelDayBudgetRequest, signal?: AbortSignal) => Promise<unknown>;
-    /** Fixed worker installation root that contains the pinned public E2E CLI package. */
-    workflowE2ERuntimeRoot?: string;
-    /** The Docker application runtime application admissions run on (or how to build it once needed); only the worker's own wiring sets it. */
-    workflowE2EApplicationRuntime?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime);
-    /** Trusted host-only hook for observing the exact owned contained process; no invocation data can set it. */
-    workflowE2EOnOwnedContainerRunning?: (receipt: Readonly<{ containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }>) => Promise<void>;
-    authorizeFeedbackApproval?: FeedbackApprovalAuthorizer;
-    piAdapter?: PiSessionAdapter;
-    cancellationController?: WorkerCancellationController;
-    devcontainerCli?: DevcontainerCli;
-    /** The runners AgentX's checks use; tests supply fakes. Default: as preparation and the agent's shell run. */
-    checkRunners?: CheckRunners;
-    /** Each check round's budget; tests supply short ones. Default: CHECK_ROUND_BUDGET_MS (P-3). */
-    checkBudgetMs?: () => number;
-    /** D-16: the original code for before results; tests supply a fake. Default: each repository's preparation commit. */
-    originalCode?: OriginalCode;
-    /** TESTPROOF: how the original code with the new tests kept is shown for a CHECKS run; tests supply a fake. Default: gitOriginalCode. */
-    testProofOriginalCode?: Parameters<typeof runTestProof>[0]["originalCode"];
-    /** How long a review (each role) and a PR feedback review may take; tests supply short ones. Default: the reviews' own (5 minutes). */
-    timeouts?: { reviewMs?: number; feedbackReviewMs?: number };
-    /**
-     * PLANINC-3b: the limits on a model call; tests supply short ones. Defaults: the planning deadline (25 minutes, or AGENTX_PLAN_DEADLINE_MS), the stall limit (240 s),
-     * the abort confirmation (30 s), the heartbeat (60 s) and the clock's tick (5 s). Only a PLAN run has a deadline and a stall limit.
-     */
-    modelCallLimits?: { deadlineMs?: number; stallMs?: number; abortConfirmMs?: number; heartbeatMs?: number; tickMs?: number };
-    /** Where the worker's structured model-call lines go. Default: stdout, as the worker's other log lines. */
-    log?: WorkerLogSink;
-    /** PLANDRYRUN: how a coding plan's proposed checks are tried on the unchanged code; tests supply a fake. Default: `runPlanDryRun` (a sandbox container per check). */
-    planDryRun?: typeof runPlanDryRun;
-  },
+  dependencies: TaskInvocationDependencies,
+): Promise<TaskInvocationResult> {
+  // The task sandbox, when there is one, is removed when the task ends, whether it succeeded, failed or was cancelled.
+  const sandboxes: TaskSandbox[] = [];
+  try {
+    return await runTask(untrustedInvocation, dependencies, sandboxes);
+  } finally {
+    for (const sandbox of sandboxes) {
+      await sandbox.dispose().catch((error: unknown) => {
+        console.log(JSON.stringify({ component: "worker", event: "task-sandbox.remove.failed", container: sandbox.name, reason: error instanceof Error ? error.message : String(error) }));
+      });
+    }
+  }
+}
+
+async function runTask(
+  untrustedInvocation: WorkerInvocation,
+  dependencies: TaskInvocationDependencies,
+  sandboxes: TaskSandbox[],
 ): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
   if (invocation.kind !== "task") throw agentXError("CONFIG_INVALID", "runTaskInvocation requires a task");
@@ -145,10 +174,35 @@ export async function runTaskInvocation(
       throw agentXError("CONFIG_INVALID", "the approved work breakdown does not match the prepared repository or digest");
     }
   }
+  const canonicalRoot = await realpath(resolve(dependencies.rootPath));
+  const devcontainer = preparedDevcontainerTarget(canonicalRoot, manifest);
+  let bashOperations: BashOperations | undefined;
+  let containerPaths: DevcontainerPaths | undefined;
+  let devcontainerCli: DevcontainerCli | undefined;
+  // Without a devcontainer the agent's shell, its file tools, the checks and the project's commands run in the task sandbox,
+  // never as children of the worker. A sandbox that cannot start fails the task here, before the agent runs; it is not a
+  // reason to fall back to the local shell.
+  let sandbox: TaskSandbox | undefined;
+  let localShell = false;
+  let fileTools: FileOpsTarget | undefined;
+  if (devcontainer === undefined) {
+    sandbox = taskSandboxFor(dependencies.taskShell ?? taskShellSelection(), { rootPath: canonicalRoot, taskId: invocation.operationId });
+    if (sandbox !== undefined) {
+      sandboxes.push(sandbox);
+      await sandbox.start();
+      bashOperations = sandbox.bashOperations();
+      fileTools = sandbox.fileOpsTarget();
+    } else {
+      // The local shell, chosen explicitly (taskShell or AGENTX_TASK_SHELL=local): tests and a developer's machine.
+      localShell = true;
+    }
+  }
+  const candidateSweep = fileTools === undefined ? undefined : async (directory: string): Promise<void> => { await sweepFileOps(fileTools, canonicalRoot, directory); };
+
   if (invocation.payload.workflowMode === "FEEDBACK_REVIEW") {
     const binding = invocation.payload.workflowFeedbackReview!;
     if (dependencies.feedbackBundleReader === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot read the task's approved feedback bundles");
-    const root = await realpath(resolve(dependencies.rootPath));
+    const root = canonicalRoot;
     const stop = new AbortController();
     const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
     const events = new EventBatcher(dependencies.eventSink);
@@ -159,7 +213,7 @@ export async function runTaskInvocation(
       // pinned base stays an ancestor), not by the commit the candidate digest was made from. Only repositories that
       // have a pull request bundle are checked, and only those are readable by the critic.
       const bundledIds = new Set(collected.bundles.map(({ ref }) => ref.repositoryId));
-      const repositoryInputs = candidateInputs(manifest, root, invocation.payload.workflowBase).filter(input => bundledIds.has(input.repositoryId));
+      const repositoryInputs = candidateInputs(manifest, root, invocation.payload.workflowBase, candidateSweep).filter(input => bundledIds.has(input.repositoryId));
       const candidateRepositories = repositoryInputs.length === 0 ? [] : await readCandidateRepositories(repositoryInputs);
       const unchanged = collected.bundles.every(({ ref }) => {
         const identity = candidateRepositories.find(repository => repository.repositoryId === ref.repositoryId);
@@ -176,6 +230,7 @@ export async function runTaskInvocation(
         ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
         ...(dependencies.timeouts?.feedbackReviewMs === undefined ? {} : { timeoutMs: dependencies.timeouts.feedbackReviewMs }),
         ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
+        ...(fileTools !== undefined ? { fileTools } : { localFileTools: true }),
         onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
       });
       const workflowFeedbackReviewResult = {
@@ -196,11 +251,6 @@ export async function runTaskInvocation(
 
   // The agent's shell runs in the project's devcontainer (#121), started first: on a resumed
   // instance its containers are stopped.
-  const canonicalRoot = await realpath(resolve(dependencies.rootPath));
-  const devcontainer = preparedDevcontainerTarget(canonicalRoot, manifest);
-  let bashOperations: BashOperations | undefined;
-  let containerPaths: DevcontainerPaths | undefined;
-  let devcontainerCli: DevcontainerCli | undefined;
   if (devcontainer !== undefined) {
     devcontainerCli = dependencies.devcontainerCli ?? createDevcontainerCli();
     const started = await ensureDevcontainer(devcontainerCli, devcontainer);
@@ -224,7 +274,7 @@ export async function runTaskInvocation(
     // check; which kind it is is only known once the admission is read, which the broker allows after the operation is durably RUNNING (below).
     if (readiness.length === 0 && invocation.payload.workflowE2EAdmission === undefined) throw agentXError("CONFIG_INVALID", NO_PROJECT_CHECK);
     const events = new EventBatcher(dependencies.eventSink);
-    const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
+    const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep);
     const candidateBefore = await readCandidateRepositories(repositories);
     const recorder = new CommandRecorder({ fingerprint: (signal) => recorderFingerprint(repositories.map((repository) => ({ name: repository.repositoryId, directory: repository.directory })), signal) });
     const plan = planChecks(readiness, recorder, checkHistory);
@@ -250,6 +300,8 @@ export async function runTaskInvocation(
         rootPath: canonicalRoot,
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
         ...(bashOperations === undefined ? {} : { bashOperations }),
+        ...(sandbox === undefined ? {} : { sandbox }),
+        ...(localShell ? { local: true } : {}),
       });
       const roundBudgetMs = dependencies.checkBudgetMs?.() ?? CHECK_ROUND_BUDGET_MS;
       const roundStarted = Date.now();
@@ -403,6 +455,8 @@ export async function runTaskInvocation(
   const checkRunners = dependencies.checkRunners ?? createCheckRunners({
     rootPath: canonicalRoot,
     ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
+    ...(sandbox === undefined ? {} : { sandbox }),
+    ...(localShell ? { local: true } : {}),
   });
   const checkBudgetMs = dependencies.checkBudgetMs ?? (() => CHECK_ROUND_BUDGET_MS);
   let checkPlan: CheckPlan | undefined;
@@ -427,16 +481,16 @@ export async function runTaskInvocation(
       // for a review-only task, which still needs the code the round finished on.
       if (invocation.payload.workflowMode === "IMPLEMENT") {
         try {
-          reportedChecksCandidate = await readCandidateRepositories(candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase));
+          reportedChecksCandidate = await readCandidateRepositories(candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep));
         } catch { /* missing identity leaves the check result unbound and the workflow blocked */ }
       }
     },
     ...(invocation.payload.workflowMode !== "IMPLEMENT" ? {} : {
       prepareCandidate: async () => {
         candidateCheckDrift = false;
-        await commitCandidateWorktree(candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase));
+        await commitCandidateWorktree(candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep));
       },
-      candidateIdentity: async () => JSON.stringify(await readCandidateRepositories(candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase))),
+      candidateIdentity: async () => JSON.stringify(await readCandidateRepositories(candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep))),
       onCandidateDrift: () => { candidateCheckDrift = true; reportedChecksCandidate = undefined; },
     }),
     // I-3: an earlier settle's report is stale once the agent has a regression to fix.
@@ -445,6 +499,8 @@ export async function runTaskInvocation(
     ...(dependencies.originalCode === undefined ? defaultOriginalCode(manifest, canonicalRoot) : { originalCode: dependencies.originalCode }),
   });
 
+  // The agent's shell: the devcontainer's or the sandbox's, or the local one when it was chosen.
+  const agentShell = bashOperations ?? (localShell ? localBashOperations({ explicit: true }) : undefined);
   let session: PiSessionHandle;
   if (registered) {
     session = await openRegisteredWorkspacePiSession(
@@ -457,8 +513,9 @@ export async function runTaskInvocation(
         onDiagnostic,
         extensionFactories: planning || reviewing ? [] : [verification],
         ...(reviewing ? reviewerRuleBases : {}),
-        ...(bashOperations === undefined ? {} : { bashOperations }),
+        ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
+        ...(fileTools !== undefined ? { fileTools } : { localFileTools: true }),
       },
       dependencies.piAdapter,
     );
@@ -468,8 +525,9 @@ export async function runTaskInvocation(
         rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: invocation.payload.workflowMode ?? "IMPLEMENT", conversationId, onDiagnostic,
         extensionFactories: planning || reviewing ? [] : [verification],
         ...(reviewing ? reviewerRuleBases : {}),
-        ...(bashOperations === undefined ? {} : { bashOperations }),
+        ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
+        ...(fileTools !== undefined ? { fileTools } : { localFileTools: true }),
       },
       dependencies.piAdapter,
     );
@@ -756,7 +814,7 @@ export async function runTaskInvocation(
         await promptAndSettle(invocation.payload.prompt);
       } else {
         const graph = workflowDependencies.graph;
-        const repositoryInputs = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
+        const repositoryInputs = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep);
         const initialRepositories = await readCandidateRepositories(repositoryInputs);
         if (initialRepositories.length !== 1 || initialRepositories[0]?.repositoryId !== graph.items[0]?.repository) {
           throw agentXError("CONFIG_INVALID", "the approved work breakdown no longer matches the one prepared repository");
@@ -895,7 +953,7 @@ export async function runTaskInvocation(
         await emit("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN", ...(planGroundingSource === undefined ? {} : { workflowBaselineSource: planGroundingSource }) };
       } else if (reviewing) {
-        const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
+        const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep);
         const beforeReview = createCandidateManifest(await readCandidateRepositories(repositories));
         let reports = await runWorkflowReviews({
           operationId: invocation.operationId,
@@ -911,6 +969,7 @@ export async function runTaskInvocation(
           ...(dependencies.timeouts?.reviewMs === undefined ? {} : { timeoutMs: dependencies.timeouts.reviewMs }),
           signal: verificationStop.signal,
           ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
+          ...(fileTools !== undefined ? { fileTools } : { localFileTools: true }),
           onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
           onUsage: async ({ role, stats, model, outcome }) => {
             const usage = createTaskUsageTelemetry(stats, { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) }, outcome);
@@ -956,7 +1015,7 @@ export async function runTaskInvocation(
       if (warning !== undefined) await emit("progress", { message: warning });
       outcome = "SUCCEEDED";
       const checks = compactCheckReport(finalChecks());
-      const workflowRepositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
+      const workflowRepositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase, candidateSweep);
       const workflowCandidateRepositories = invocation.payload.workflowMode === "IMPLEMENT"
         ? await readCandidateRepositories(workflowRepositories)
         : undefined;
@@ -1376,11 +1435,17 @@ function candidateInputs(
   manifest: PreparationManifest,
   root: string,
   base?: ReadonlyArray<{ repositoryId: string; baseCommitSha: string }>,
+  sweep?: (directory: string) => Promise<void>,
 ): CandidateRepositoryInput[] {
   return manifest.repositories.map((repository) => {
     const baseCommitSha = base?.find((entry) => entry.repositoryId === repository.name)?.baseCommitSha
       ?? (/^[a-f0-9]{40}$/.test(repository.resolvedCommit ?? "") ? repository.resolvedCommit : undefined);
-    return { repositoryId: repository.name, directory: resolve(root, repository.path), ...(baseCommitSha === undefined ? {} : { baseCommitSha }) };
+    const directory = resolve(root, repository.path);
+    return {
+      repositoryId: repository.name, directory,
+      ...(baseCommitSha === undefined ? {} : { baseCommitSha }),
+      ...(sweep === undefined ? {} : { sweep: () => sweep(directory) }),
+    };
   });
 }
 
