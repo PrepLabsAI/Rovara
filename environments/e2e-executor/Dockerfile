@@ -47,5 +47,7 @@ RUN npx playwright-core@1.63.0 install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production
+# This image's model channel client syncs the browser's session values before every model call (MIDSTEPCOOKIE). The worker lists task.workflowE2EMidStepSync.v1 only while its image has this label.
+LABEL io.rovara.e2e.session-sync="v1"
 USER node
 CMD ["node", "/opt/agentx/packages/verifier/dist/executor/entry.js"]

@@ -14,6 +14,7 @@ import { E2EModelChannelError, createE2EModelChannelClient } from "../../package
 import { createE2EModelEvidenceCollector, openE2EModelChannelSession, type E2EModelChannelSession } from "../../packages/worker/src/e2e-model-channel-session.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { CASE_ID, RUN_ID, TOOLS, call, tapAnswer } from "../support/e2e-model-fixtures.js";
+import { acceptedSyncAnswer, noSessionValues } from "../support/e2e-session-sync.js";
 
 // Task 4.3a, test cases 12 (the guard against the AI SDK's default provider) and the executor client of the model channel.
 
@@ -26,19 +27,25 @@ const closers: Array<() => Promise<unknown>> = [];
 beforeEach(async () => { cleanRedirectingEnvironment(); dir = await mkdtemp(join(tmpdir(), "rc-")); socketPath = join(dir, "model.sock"); });
 afterEach(async () => { vi.restoreAllMocks(); for (const close of closers.splice(0)) await close().catch(() => undefined); await rm(dir, { recursive: true, force: true }); });
 
-const client = (extra: { timeoutMs?: number } = {}) => createE2EModelChannelClient({ socketPath, runId: RUN_ID, ...extra });
+const client = (extra: { timeoutMs?: number } = {}) => createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: noSessionValues, ...extra });
 const position = { caseId: CASE_ID, stepIndex: 0 };
 const request = (callIndex = 0) => ({ ...position, callIndex, call: call() });
 
 /** A server on the socket that counts what it is sent and answers as told: the "counted fake socket". */
 async function fakeSocket(answer: (req: IncomingMessage, res: ServerResponse, body: string) => void) {
   const seen: Array<{ method: string | undefined; url: string | undefined; body: string }> = [];
+  // The client syncs before each call (MIDSTEPCOOKIE): this fake accepts every sync itself and `seen` holds the other requests.
   // Each server has a socket of its own, so a closing one can never be mistaken for the next.
   socketPath = join(dir, `fake-${++sockets}.sock`);
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => { const body = Buffer.concat(chunks).toString("utf8"); seen.push({ method: req.method, url: req.url, body }); answer(req, res, body); });
+    req.on("end", () => {
+      const body = Buffer.concat(chunks).toString("utf8");
+      const synced = req.url === "/v1/sync" ? acceptedSyncAnswer(body) : null;
+      if (synced !== null) { send(res, 200, synced); return; }
+      seen.push({ method: req.method, url: req.url, body }); answer(req, res, body);
+    });
   });
   await new Promise<void>((resolve) => server.listen(socketPath, resolve));
   closers.push(() => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }));
@@ -109,7 +116,7 @@ describe("the client against a counted fake socket", () => {
     await fakeSocket((_req, res) => send(res, 500, "SECRETTOKEN prompt text /run/rovara/plan.json"));
     const failure = await client().generate(request()).catch((error: Error) => error);
     expect((failure as Error).message).not.toMatch(/SECRETTOKEN|prompt text|plan\.json/);
-    const missing = await createE2EModelChannelClient({ socketPath: join(dir, "nobody-listens.sock"), runId: RUN_ID }).generate(request()).catch((error: Error) => error);
+    const missing = await createE2EModelChannelClient({ socketPath: join(dir, "nobody-listens.sock"), runId: RUN_ID, sessionSync: noSessionValues }).generate(request()).catch((error: Error) => error);
     expect(missing).toMatchObject({ name: "E2EModelChannelError", code: "unavailable", isRetryable: false });
     expect((missing as Error).message).not.toMatch(/ENOENT|nobody-listens|connect/);
   });

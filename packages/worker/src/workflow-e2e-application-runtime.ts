@@ -1,9 +1,10 @@
 import { join } from "node:path";
-import { E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE } from "@agentx/contracts";
+import { E2E_AGENT_STEPS_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE } from "@agentx/contracts";
 import { assertE2EEnvironmentCannotRedirect, assertE2ESharedAwsConfigCannotRedirect, deriveE2EAgentRoute, e2eAgentInstallationFromEnvironment } from "@agentx/model-runtime";
 import { WEB_API_BUILD_IMAGE, containedRuntimeProfileForHost, createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHostDeps, type DockerCli } from "@agentx/verifier";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
 import { runnerHostEnvironment } from "./e2e-runtime-environment.js";
+import { executorImageSyncsSession } from "./e2e-session-sync-feature.js";
 
 /** What the worker's own configuration gives the Docker application host; nothing here comes from an invocation. */
 export type WorkflowE2EApplicationRuntimeConfig = Readonly<{ executorImage: string; buildImage: string; runRoot: string }>;
@@ -124,6 +125,8 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
   };
   // Judged with the check, never per ping: it reads two small files, and /ping is asked often. Until the first check answers, the checks are not known to run here.
   let agentSteps: AgentStepsAvailability = judgeAgentSteps(latest);
+  // MIDSTEPCOOKIE: whether the executor image on this host syncs session values before every model call. Unknown until the first check answers.
+  let sessionSyncImage = false;
   let running = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   const check = async (): Promise<void> => {
@@ -137,8 +140,11 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
         new Promise<WorkflowE2EApplicationChecksAvailability>((resolve) => { limit = setTimeout(() => resolve({ status: "unavailable", reason: "executor-image-not-on-host" }), AVAILABILITY_CHECK_LIMIT_MS); }),
       ]).finally(() => clearTimeout(limit));
       latest = answer;
+      sessionSyncImage = answer.status === "ready" && await executorImageSyncsSession(workflowE2EApplicationRuntimeConfig(input.environment ?? process.env, input.platform, input.arch).executorImage,
+        input.docker ?? createProcessDockerCli()).catch(() => false);
     } catch {
       latest = { status: "unavailable", reason: "executor-image-not-on-host" };
+      sessionSyncImage = false;
     } finally { running = false; }
     agentSteps = judgeAgentSteps(latest);
   };
@@ -156,13 +162,15 @@ export function createApplicationChecksFeatureMonitor(input: { environment?: Nod
     /** Why the agent step feature is on or off /ping now (Task 4.3a). */
     agentSteps: (): AgentStepsAvailability => agentSteps,
     executor: {
-      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE] as const,
+      withholdableInvocationFeatures: [APPLICATION_CHECKS_FEATURE, APPLICATION_CHECKS_V2_FEATURE, BASELINE_CHECKS_FEATURE, E2E_AGENT_STEPS_FEATURE, E2E_REPLAY_CHECKS_FEATURE, PLAN_DRY_RUN_FEATURE, E2E_MODEL_SESSION_SYNC_FEATURE] as const,
       withheldInvocationFeatures: () => ({
         // Running a replay needs exactly what an application round needs (the executor image on the host), so it is listed, and withheld, with the others (Task 4.6b).
         ...(latest.status === "ready" ? {} : { [APPLICATION_CHECKS_FEATURE]: latest, [APPLICATION_CHECKS_V2_FEATURE]: latest, [BASELINE_CHECKS_FEATURE]: latest, [E2E_REPLAY_CHECKS_FEATURE]: latest,
           // PLANDRYRUN tries the proposed checks in a throwaway container of the executor image, so it needs the same thing (T6).
           [PLAN_DRY_RUN_FEATURE]: latest }),
         ...(agentSteps.status === "available" ? {} : { [E2E_AGENT_STEPS_FEATURE]: agentSteps }),
+        // The sync needs the image to carry the label, and an image that has not been checked yet is not known to have it.
+        ...(latest.status === "ready" && sessionSyncImage ? {} : { [E2E_MODEL_SESSION_SYNC_FEATURE]: { status: "unavailable", reason: "executor-image-lacks-session-sync" } }),
       }),
     },
   };

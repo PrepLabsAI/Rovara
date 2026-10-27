@@ -57,7 +57,15 @@ async function open(overrides: Partial<OpenE2EModelChannelSessionOptions> = {}):
 }
 const exists = (path: string) => stat(path).then(() => true, () => false);
 
-function post(path: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+/** Every model call is made under a session sync (MIDSTEPCOOKIE): a call posted here is first preceded by its own sync, as the executor's client does. */
+async function post(path: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+  if (path === "/v1/generate" && typeof body === "object" && body !== null && !("syncToken" in body)) {
+    const synced = await rawPost("/v1/sync", { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, values: [] });
+    return rawPost(path, { ...body, syncToken: synced.body["syncToken"] });
+  }
+  return rawPost(path, body);
+}
+function rawPost(path: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
   const payload = JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const req = request({ socketPath, path, method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } }, (res) => {

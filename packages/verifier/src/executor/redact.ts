@@ -42,18 +42,20 @@ export const SESSION_REDACTION_LABEL = "<session>";
  */
 const MIN_SESSION_SECRET_LENGTH = 8;
 
-type Rule = { form: string; label: string; bytes: boolean; session: boolean };
+/** `model` is false for a value registered evidence-only: it is scrubbed from text and refused in evidence, but a prompt that shows it is not refused (a draft or a route is app data, not a credential). */
+type Rule = { form: string; label: string; bytes: boolean; session: boolean; model: boolean };
 
 export type CredentialRedactor = Readonly<{
   /** Replaces every credential in text with `<account:profileId>` (an account) or `<session>` (a registered session secret). */
   text(value: string): string;
   /**
    * True when the bytes contain an account email or password, or a registered session secret, in any known spelling, including base64 and base64url at any alignment.
-   * `scope` "accounts" leaves the session secrets out.
+   * `scope` "accounts" leaves the session secrets out; "model" is what a model-bound payload is checked with: accounts and the session secrets that are credentials, not the ones
+   * registered evidence-only.
    */
-  contains(bytes: Uint8Array, scope?: "accounts" | "all"): boolean;
+  contains(bytes: Uint8Array, scope?: "accounts" | "all" | "model"): boolean;
   /** Registers a secret the run created (the session cookie) so `text` redacts it and `contains` finds it. It never throws: a short or odd value is still redacted. */
-  addSessionSecret(value: string): void;
+  addSessionSecret(value: string, options?: { evidenceOnly?: boolean }): void;
 }>;
 
 /**
@@ -65,7 +67,7 @@ export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]
   // contracts' one rule (`e2eScannableEmailLocalPart`), shared with the worker's model-channel credential scan; a short one would be redacted from everything.
   const rules: Rule[] = accounts.flatMap((account) => [account.password, account.email, e2eScannableEmailLocalPart(account.email)]
     .flatMap((secret) => (secret === null ? [] : [secret]))
-    .flatMap((secret) => spellings(secret).map((form) => ({ form, label: `<account:${account.profileId}>`, bytes: true, session: false }))));
+    .flatMap((secret) => spellings(secret).map((form) => ({ form, label: `<account:${account.profileId}>`, bytes: true, session: false, model: true }))));
   rules.sort((a, b) => b.form.length - a.form.length);
   return Object.freeze({
     text(value: string): string {
@@ -73,19 +75,23 @@ export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]
       for (const rule of rules) result = result.split(rule.form).join(rule.label);
       return result;
     },
-    contains(bytes: Uint8Array, scope: "accounts" | "all" = "all"): boolean {
+    contains(bytes: Uint8Array, scope: "accounts" | "all" | "model" = "all"): boolean {
       const haystack = Buffer.from(bytes);
-      const active = rules.filter((rule) => rule.bytes && (scope === "all" || !rule.session));
+      const active = rules.filter((rule) => rule.bytes && (scope === "all" ? true : scope === "model" ? rule.model : !rule.session));
       if (active.some((rule) => haystack.includes(rule.form))) return true;
       // Base64 is often wrapped into lines (MIME, PEM-style bodies, a 20, 64 or 76 column wrap), which cuts a credential's spelling in two. The same bytes with the
       // whitespace between two base64 characters removed are looked at too.
       const unwrapped = unwrapBase64Lines(haystack);
       return unwrapped !== null && active.some((rule) => unwrapped.includes(rule.form));
     },
-    addSessionSecret(value: string): void {
+    addSessionSecret(value: string, options: { evidenceOnly?: boolean } = {}): void {
       if (typeof value !== "string" || value.length < MIN_SESSION_SECRET_LENGTH) return;
+      const model = options.evidenceOnly !== true;
       for (const form of spellings(value)) {
-        if (!rules.some((rule) => rule.form === form)) rules.push({ form, label: SESSION_REDACTION_LABEL, bytes: true, session: true });
+        const existing = rules.find((rule) => rule.form === form);
+        // A value first registered evidence-only becomes a credential if it is registered as one later; the other way round it stays one.
+        if (existing === undefined) rules.push({ form, label: SESSION_REDACTION_LABEL, bytes: true, session: true, model });
+        else if (model) existing.model = true;
       }
       rules.sort((a, b) => b.form.length - a.form.length);
     },
