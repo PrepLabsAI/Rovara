@@ -5,6 +5,7 @@
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only requalify-infra [--apply]   (adds the automatic test machine renewal: Add-only)
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only requalify-now [--apply]     (owner-run: starts one renewal)
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only requalify-schedule [--apply] (owner-run: enables the daily check, created disabled)
+//   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only requalify-drain-iam [--apply] (owner-run: narrows the renewal's DrainRead grant; the renewal's code must already be live)
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only model-fallback-settings [--apply]
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only e2e-agent-settings [--apply]
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --only e2e-agent-model --e2e-model <model id or default> [--apply]
@@ -104,7 +105,10 @@ import {
   REQUALIFY_DEPLOY_ORDER,
   REQUALIFY_NOW_PAYLOAD,
   REQUALIFY_SCHEDULE_LOGICAL_ID,
+  REQUALIFY_STEPS_POLICY_LOGICAL_ID,
+  drainReadIsNarrowed,
   enableScheduleTemplate,
+  narrowDrainReadTemplate,
   lockFact,
   lockHeldMessage,
   parseStartAnswer,
@@ -123,8 +127,8 @@ import { recordEnabledMarkerReport, scheduleStateOf, wantsScheduleEnabled } from
  * `control-plane-code` rebuilds every packaged control-plane Lambda (CONTROL_PLANE_LAMBDAS) in one change set; `broker` and
  * `dispatcher` rebuild just those two, and are contained in `control-plane-code`.
  */
-export type DeployUnit = "control-plane-code" | "broker" | "dispatcher" | "worker-image" | "executor-image" | "qualification-transport" | "e2e-agent-settings" | "e2e-agent-model" | "model-fallback-settings" | "requalify-infra" | "requalify-now" | "requalify-schedule";
-export const DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "broker", "dispatcher", "worker-image", "executor-image", "qualification-transport", "e2e-agent-settings", "e2e-agent-model", "model-fallback-settings", "requalify-infra", "requalify-now", "requalify-schedule"];
+export type DeployUnit = "control-plane-code" | "broker" | "dispatcher" | "worker-image" | "executor-image" | "qualification-transport" | "e2e-agent-settings" | "e2e-agent-model" | "model-fallback-settings" | "requalify-infra" | "requalify-now" | "requalify-schedule" | "requalify-drain-iam";
+export const DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "broker", "dispatcher", "worker-image", "executor-image", "qualification-transport", "e2e-agent-settings", "e2e-agent-model", "model-fallback-settings", "requalify-infra", "requalify-now", "requalify-schedule", "requalify-drain-iam"];
 /** What a normal TEST deploy changes: all control-plane code, so no function is left on old code, and the worker image. */
 export const DEFAULT_DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "worker-image"];
 const DEFAULT_REGION = "us-east-1";
@@ -196,6 +200,10 @@ export type TemplatePlan =
       /** The deployed template with the renewal's daily schedule set to ENABLED and nothing else changed (`requalify-schedule`). */
       source: "enable-schedule";
     }
+  | ({
+      /** The deployed template with only the Condition of the renewal steps policy's DrainRead statement replaced by head's (`requalify-drain-iam`). */
+      source: "narrow-drain-read";
+    } & LiftSynthPlan)
   | {
       source: "lift-resources";
       logicalIdPrefix: string;
@@ -248,6 +256,9 @@ export type DeployStep =
   | { id: string; kind: "verify-lambda-environment"; stack: string; logicalId: string; key: string; expected: { literal: string } }
   | { id: string; kind: "check-requalify-ready"; stack: string; identityMode: IdentityMode }
   | { id: string; kind: "check-requalify-lock"; stack: string }
+  /** Stops unless the deployed Lambda runs exactly the zip built from this revision (the precondition of an IAM narrowing: the code that sends projections must be live). */
+  | { id: string; kind: "check-lambda-code-current"; stack: string; logicalId: string; expectedSha256Base64: StepRef }
+  | { id: string; kind: "verify-requalify-drain-iam"; stack: string }
   | { id: string; kind: "verify-requalify-schedule"; stack: string; logicalId: string }
   | { id: string; kind: "record-requalify-enabled"; stack: string; /** After a code deploy: a record that cannot be written is said, not fatal (the renewal's daily check writes it too). */ optional?: true }
   | { id: string; kind: "start-requalify"; stack: string; logicalId: string };
@@ -429,7 +440,7 @@ export function planTestDeploy(
   for (const unit of ["e2e-agent-settings", "e2e-agent-model", "model-fallback-settings"] as const) {
     if (units.includes(unit) && units.length > 1) throw new Error(`${unit} changes a stack template or setting; run it on its own, apart from the other units`);
   }
-  for (const unit of ["requalify-infra", "requalify-now", "requalify-schedule"] as const) {
+  for (const unit of ["requalify-infra", "requalify-now", "requalify-schedule", "requalify-drain-iam"] as const) {
     if (units.includes(unit) && units.length > 1) throw new Error(`${unit} runs on its own, apart from the other units: ${unit === "requalify-infra" ? "it adds resources to the control-plane stack with an Add-only change set" : "an owner runs it alone"}`);
   }
   const requalifyIsInstalled = input.requalifyInstalled === true;
@@ -640,6 +651,29 @@ export function planTestDeploy(
       { id: "verify-requalify-schedule", kind: "verify-requalify-schedule", stack: stacks["control-plane"], logicalId: REQUALIFY_SCHEDULE_LOGICAL_ID },
       // Only after the schedule is verified ENABLED: from here on --check reports a schedule found off as an error (ARGUARD).
       { id: "record-requalify-enabled", kind: "record-requalify-enabled", stack: stacks["control-plane"] },
+    );
+  }
+
+  if (units.includes("requalify-drain-iam")) {
+    if (!requalifyIsInstalled) throw new Error("requalify-drain-iam needs the automatic renewal on this stack; deploy requalify-infra first");
+    const unit = REQUALIFY_LAMBDA.unit;
+    steps.push(
+      buildStepFor(unit, join(input.artifacts.outputDir, `${unit}-${revision}.zip`)),
+      // Step 1 must be live first: only code that names its attributes (Select + ProjectionExpression) works under the narrowed grant. Old code would be denied and the next renewal would fail.
+      { id: `check-${unit}-live`, kind: "check-lambda-code-current", stack: stacks["control-plane"], logicalId: REQUALIFY_LAMBDA.logicalId, expectedSha256Base64: { fromStep: `build-${unit}`, output: "sha256Base64" } },
+      {
+        id: "change-set-requalify-drain-iam",
+        kind: "create-change-set",
+        stack: stacks["control-plane"],
+        stackKind: "control-plane",
+        changeSetPrefix: `test-deploy-requalify-drain-iam-${revision.slice(0, 12)}`,
+        template: { source: "narrow-drain-read", construct: QUALIFICATION.construct, cdkContext: REQUALIFY_INFRA.context, identityMode },
+        parameters: usePrevious("control-plane"),
+        // One Modify of the steps role's policy, its PolicyDocument only, never a replacement: the guard refuses any other resource, attribute or Add.
+        expect: { action: "Modify", logicalIds: [REQUALIFY_STEPS_POLICY_LOGICAL_ID], allowedAttributes: ["Properties.PolicyDocument"] },
+      },
+      { id: "execute-requalify-drain-iam", kind: "execute-change-set", stack: stacks["control-plane"], createdBy: "change-set-requalify-drain-iam" },
+      { id: "verify-requalify-drain-iam", kind: "verify-requalify-drain-iam", stack: stacks["control-plane"] },
     );
   }
 
@@ -1140,6 +1174,7 @@ export function formatPlan(steps: readonly DeployStep[]): string {
         const template = step.template.source === "previous" ? "previous template"
           : step.template.source === "lambda-code" ? `deployed template with Code replaced for ${step.template.patches.map((patch) => patch.logicalId).join(", ")}`
           : step.template.source === "enable-schedule" ? `deployed template with only ${REQUALIFY_SCHEDULE_LOGICAL_ID} State set to ENABLED`
+          : step.template.source === "narrow-drain-read" ? `deployed template with only the Condition of the DrainRead statement in ${REQUALIFY_STEPS_POLICY_LOGICAL_ID} replaced by head's (a CDK synth of ${step.template.construct}, identity=${step.template.identityMode}); refuses unless head's statement is the same grant with a narrower condition`
           : step.template.source === "lift-declared"
             ? `deployed template plus only ${[...step.template.environment.map((entry) => `${entry.logicalId} environment variable ${entry.variable}`), ...step.template.grants.map((entry) => `the ssm:GetParameters grant for ${entry.parameterName} in ${entry.logicalId}`)].join(", ")}, taken from a CDK synth of ${step.template.construct} (identity=${step.template.identityMode}, ${Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`).join(", ")}); refuses if head differs from the deployed template by anything more`
           : `deployed template plus ${step.template.logicalIdPrefix}*${(step.template.parameterNames ?? []).length === 0 ? "" : ` and parameter ${(step.template.parameterNames ?? []).join(", ")}`}${(step.template.codePatches ?? []).length === 0 ? "" : ` (Code replaced for ${(step.template.codePatches ?? []).map((patch) => patch.logicalId).join(", ")} by the uploaded zip)`} from a CDK synth of ${step.template.construct} (${[`identity=${step.template.identityMode}`, ...Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`)].join(", ")})`;
@@ -1158,6 +1193,8 @@ export function formatPlan(steps: readonly DeployStep[]): string {
       case "check-requalify-lock": return `${head} read the renewal lock in ${step.stack}'s state table (read only) and stop if a renewal or a by-hand qualification holds it; this step does not take the lock, the renewal machine's first step does, so two starts cannot both run`;
       case "verify-requalify-schedule": return `${head} verify with scheduler get-schedule that ${step.logicalId} is ENABLED`;
       case "record-requalify-enabled": return `${head} record in ${step.stack}'s state table (one conditional put, never overwritten) that the daily schedule was enabled; from then on test-deploy --check reports it switched off as an error, and a head synth keeps it enabled`;
+      case "check-lambda-code-current": return `${head} stop unless ${step.logicalId} CodeSha256 equals ${describeRef(step.expectedSha256Base64)} (control-plane-code of this revision is live: the renewal's drain reads name their attributes); read only`;
+      case "verify-requalify-drain-iam": return `${head} read the deployed stack template back and verify the DrainRead statement of ${REQUALIFY_STEPS_POLICY_LOGICAL_ID} carries dynamodb:Attributes and dynamodb:Select=SPECIFIC_ATTRIBUTES`;
       case "start-requalify": return `${head} invoke ${step.logicalId} once with ${REQUALIFY_NOW_PAYLOAD}: it starts one renewal of the test machine (its first step takes the same lock); owner-run, never started by an agent`;
     }
   }).join("\n");
@@ -1312,6 +1349,8 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
       ? patchLambdaCode(deployed, step.template.patches.map(uploadedCode))
       : step.template.source === "enable-schedule"
         ? enableScheduleTemplate(deployed) as CfnTemplate
+      : step.template.source === "narrow-drain-read"
+        ? narrowDrainReadTemplate(deployed, synthesizeLiftSource(context, step.template)) as CfnTemplate
       : step.template.source === "lift-declared"
         ? liftDeclaredSettings(deployed, synthesizeLiftSource(context, step.template), { environment: step.template.environment, grants: step.template.grants })
         : patchLiftedCode(liftResources(deployed, synthesizeLiftSource(context, step.template), step.template.logicalIdPrefix, step.template.parameterNames), (step.template.codePatches ?? []).map(uploadedCode));
@@ -1523,6 +1562,24 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
     case "record-requalify-enabled": {
       const table = stackOutput(describeStack(context.runner, context.region, step.stack), "StateTableName");
       console.log(recordEnabledMarkerReport(context.runner, { table, region: context.region, now: new Date() }, step.optional === true));
+      return;
+    }
+    case "check-lambda-code-current": {
+      const resource = (await context.cloudFormation.send(new DescribeStackResourceCommand({ StackName: step.stack, LogicalResourceId: step.logicalId }))).StackResourceDetail;
+      const configuration = await context.lambda.send(new GetFunctionConfigurationCommand({ FunctionName: resource?.PhysicalResourceId }));
+      const expected = outputOf(context, step.expectedSha256Base64);
+      if (configuration.CodeSha256 !== expected) {
+        throw new Error(`${step.logicalId} does not run the code of this revision yet (CodeSha256 ${configuration.CodeSha256 ?? "unreadable"}, this build ${expected}). Deploy control-plane-code first: under the narrowed grant, older code (which does not name its attributes) is denied and the next renewal would fail. Nothing was changed.`);
+      }
+      console.log(`${step.logicalId} runs the code of this revision`);
+      return;
+    }
+    case "verify-requalify-drain-iam": {
+      const body = (await context.cloudFormation.send(new GetTemplateCommand({ StackName: step.stack, TemplateStage: "Original" }))).TemplateBody ?? "";
+      let deployed: CfnTemplate;
+      try { deployed = JSON.parse(body) as CfnTemplate; } catch { throw new Error(`the deployed template of ${step.stack} is not JSON; stop for review`); }
+      if (!drainReadIsNarrowed(deployed)) throw new Error(`the deployed DrainRead statement of ${REQUALIFY_STEPS_POLICY_LOGICAL_ID} is not narrowed`);
+      console.log("the DrainRead statement is narrowed (dynamodb:Attributes and dynamodb:Select); run requalify-now to prove a real renewal");
       return;
     }
     case "check-requalify-lock": {
@@ -2057,7 +2114,7 @@ export async function main(argv: readonly string[]): Promise<void> {
     runtime: needsRuntime ? currentParameters(runner, args.region, stacks.runtime) : {},
   };
   // Whether the stack already has the renewal's Lambda decides what these units plan; the deployed template is a read (get-template).
-  const renewalTemplate = args.only.some((unit) => unit === "control-plane-code" || unit === "requalify-infra" || unit === "requalify-now" || unit === "requalify-schedule")
+  const renewalTemplate = args.only.some((unit) => unit === "control-plane-code" || unit === "requalify-infra" || unit === "requalify-now" || unit === "requalify-schedule" || unit === "requalify-drain-iam")
     ? deployedTemplateOf(runner, args.region, stacks["control-plane"]) : undefined;
   const renewalInstalled = renewalTemplate !== undefined && requalifyInstalled(renewalTemplate);
   const scheduleOn = renewalInstalled && scheduleStateOf(renewalTemplate) === "ENABLED";

@@ -9,7 +9,7 @@ import {
   CONTROL_PLANE_LAMBDAS, assertCheckAllowsApply, assertOnlyExpectedChanges, liftResources, patchLiftedCode, plannedRequalifyGrants, type CfnTemplate, type ObservedChange,
 } from "../../scripts/test-deploy.js";
 import { evaluateIamDrift, tier3Request } from "../../scripts/test-deploy-check.js";
-import { REQUALIFY_INFRA, REQUALIFY_LAMBDA, REQUALIFY_SCHEDULE_LOGICAL_ID, enableScheduleTemplate, requalifyHeadContext } from "../../scripts/test-deploy-requalify.js";
+import { REQUALIFY_INFRA, REQUALIFY_LAMBDA, REQUALIFY_SCHEDULE_LOGICAL_ID, REQUALIFY_STEPS_POLICY_LOGICAL_ID, drainReadIsNarrowed, enableScheduleTemplate, narrowDrainReadTemplate, requalifyHeadContext } from "../../scripts/test-deploy-requalify.js";
 import { scheduleStateOf, wantsScheduleEnabled } from "../../scripts/test-deploy-requalify-schedule.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -148,6 +148,30 @@ describe("the renewal's deploy units against the synthesized control-plane stack
       document.Statement = document.Statement.filter((statement) => statement.Sid !== "DrainRead");
     }
     expect(evaluateIamDrift(head, gone).filter((finding) => finding.kind === "iam-missing-grant")).toHaveLength(1);
+  });
+
+  it("the requalify-drain-iam unit's template differs from the installed one in the DrainRead condition of the steps policy and nowhere else (DRAINREAD)", () => {
+    // The ID the unit's guard expects is CDK's own for the synthesized policy that holds DrainRead.
+    const holders = policiesOf(head).filter(([, policy]) => JSON.stringify(policy.Properties?.PolicyDocument).includes('"Sid":"DrainRead"')).map(([id]) => id);
+    expect(holders).toEqual([REQUALIFY_STEPS_POLICY_LOGICAL_ID]);
+    const installed = clone(head);
+    for (const [, policy] of policiesOf(installed)) {
+      for (const statement of (policy.Properties?.PolicyDocument as { Statement: Array<{ Sid?: string; Condition?: Record<string, unknown> }> }).Statement) {
+        if (statement.Sid === "DrainRead") statement.Condition = { "ForAllValues:StringLike": statement.Condition!["ForAllValues:StringLike"] };
+      }
+    }
+    // Head also differs elsewhere (a Lambda asset, say): that must not come along.
+    const lambda = Object.entries(head.Resources ?? {}).find(([, resource]) => resource.Type === "AWS::Lambda::Function")!;
+    const movedHead = clone(head);
+    (movedHead.Resources![lambda[0]]!.Properties as Record<string, unknown>)["Description"] = "moved in head only";
+    expect(drainReadIsNarrowed(installed)).toBe(false);
+    const prepared = narrowDrainReadTemplate(installed, movedHead);
+    expect(drainReadIsNarrowed(prepared)).toBe(true);
+    const changed = Object.keys(prepared.Resources ?? {}).filter((id) => JSON.stringify(prepared.Resources![id]) !== JSON.stringify(installed.Resources![id]));
+    expect(changed).toEqual([REQUALIFY_STEPS_POLICY_LOGICAL_ID]);
+    expect(Object.keys(prepared.Resources ?? {})).toEqual(Object.keys(installed.Resources ?? {}));
+    // And what it changes is the one statement: the prepared policy equals head's own.
+    expect(JSON.stringify(prepared.Resources![REQUALIFY_STEPS_POLICY_LOGICAL_ID])).toBe(JSON.stringify(head.Resources![REQUALIFY_STEPS_POLICY_LOGICAL_ID]));
   });
 
   it("prints the AR-3 DrainRead grant as the exact Tier 3 statement of the renewal's role, and the whole renewal role set before the unit is deployed", () => {
