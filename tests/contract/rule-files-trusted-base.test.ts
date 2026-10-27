@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -356,7 +356,11 @@ describe("the base rule file does not depend on the workspace's object store (C8
 
   it("the load leaves the workspace's git directory as it was", async () => {
     const subject = await fixture();
-    const listing = () => execFileSync("find", [join(subject.directory, ".git"), "-type", "f", "-exec", "stat", "-f", "%N %z %m", "{}", "+"], { encoding: "utf8" }).split("\n").sort().join("\n");
+    // Every file under .git with its size and modification time (Node's own calls, so it reads the same on every platform).
+    const listing = () => (readdirSync(join(subject.directory, ".git"), { recursive: true, withFileTypes: true }))
+      .filter((entry) => entry.isFile())
+      .map((entry) => { const path = join(entry.parentPath, entry.name); const stats = statSync(path); return `${path} ${stats.size} ${stats.mtimeMs}`; })
+      .sort().join("\n");
     const before = listing();
     await expectRealRule(subject);
     expect(listing()).toBe(before);
