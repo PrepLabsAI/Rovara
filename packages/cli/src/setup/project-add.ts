@@ -361,7 +361,7 @@ function differences(existing: ProjectDefinition, wanted: { repositoryUrl?: stri
 /** What the administrator is shown and asked about a source-backed setup plan: one confirmation that names the targets, the commands and the AI navigation route (D5). */
 async function confirmSetupPlan(input: { prompter: Prompter; write: (line: string) => void; proposal: E2ESetupProposal; aiNavigation: string | null; env?: string; aiNavigationUntested?: { sentence: string; modelId: string } | null; setup: ProjectDefinition["setup"]; readiness: ProjectDefinition["readiness"] }): Promise<boolean> {
   const { proposal } = input;
-  const targetSummary = proposal.targets.map((target) => target.kind + ":" + target.targetId).join(", ") || "no targets detected (browser and API checks need a Node 22 app with a package.json start script and an npm lockfile; see docs/e2e-onboarding.md, Supported stacks)";
+  const targetSummary = proposal.targets.map((target) => target.kind + ":" + target.targetId).join(", ") || "no targets detected (no package.json found; browser and API checks need a Node 22 app, see docs/e2e-onboarding.md, Supported stacks)";
   const mockSummary = proposal.missingInputs.filter((item) => item.disposition === "mock-substitutable").map((item) => item.kind).join(", ") || "none detected";
   const blockerSummary = proposal.missingInputs.filter((item) => item.disposition === "blocking").map((item) => item.reason).join("; ") || "none";
   input.write(proposal.missingInputs.length === 0 ? "Detected source-backed E2E setup." : "Detected source-backed E2E setup with unresolved inputs: " + blockerSummary);
