@@ -121,7 +121,7 @@ describe("a coding plan that fails the broker's own checks is not shown; the pla
     await finishPlanning(harness, workspaceId, covered());
     expect(planRuns(harness, workspaceId)).toHaveLength(1);
     expect(workflowOf(harness, taskId)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-    expect(storedQuality(harness, taskId)).toMatchObject({ findings: [], autoRevisions: 0, notes: [{ code: "checks-not-tried", ownerSentence: "Proposed checks were not tried on the current code." }] });
+    expect(storedQuality(harness, taskId)).toMatchObject({ findings: [], autoRevisions: 0, notes: [{ code: "checks-not-tried", ownerSentence: "None of the proposed checks were tried on the current code." }] });
     expect(taskOf(harness, taskId).planSelfCheck).toBeUndefined();
   });
 
@@ -191,7 +191,7 @@ describe("a coding plan that fails the broker's own checks is not shown; the pla
     const artifact = workflowOf(harness, taskId).artifacts.at(-1)!;
     expect(storedQuality(harness, taskId)).toEqual({
       schemaVersion: 1, status: "checked", artifactId: artifact.id, artifactSha256: artifact.sha256, checkedAt: expect.any(String) as string, findings: [],
-      notes: [{ code: "checks-not-tried", ownerSentence: "Proposed checks were not tried on the current code." }], autoRevisions: 0,
+      notes: [{ code: "checks-not-tried", ownerSentence: "None of the proposed checks were tried on the current code." }], autoRevisions: 0,
     });
   });
 
@@ -341,8 +341,8 @@ async function finishPlanningWithDryRun(harness: Harness, workspaceId: string, a
   await harness.artifact(workspaceId, String(active.id), "plan.md", answer);
   await harness.finish(workspaceId, String(active.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
 }
-const NOT_TRIED = "Proposed checks were not tried on the current code.";
-const SOME_NOT_TRIED = "Some proposed checks were not tried on the current code.";
+const NOT_TRIED = "None of the proposed checks were tried on the current code.";
+const SOME_NOT_TRIED = "1 of 2 proposed checks was not tried on the current code.";
 
 describe("the worker's dry run of the proposed checks reaches the self-check (T6 into T5)", () => {
   it("sends a plan back once when the dry run says a check cannot run on the unchanged code, with the finding line and nothing else of the report in the prompt", async () => {
@@ -401,7 +401,7 @@ describe("the worker's dry run of the proposed checks reaches the self-check (T6
     const answer = triedPlan({ expectOnBase: "pass" });
     await finishPlanningWithDryRun(harness, workspaceId, answer, dryRunReport(answer, "not-checked"));
     expect(planRuns(harness, workspaceId)).toHaveLength(1);
-    expect(storedQuality(harness, taskId)).toMatchObject({ findings: [], notes: [{ code: "checks-not-tried", ownerSentence: SOME_NOT_TRIED }] });
+    expect(storedQuality(harness, taskId)).toMatchObject({ findings: [], notes: [{ code: "checks-not-tried", ownerSentence: "2 of 2 proposed checks were not tried on the current code." }] });
   });
 
   it("treats a report for another plan, an unreadable report and no report as 'not tried', never as a result", async () => {

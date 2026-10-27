@@ -476,19 +476,28 @@ describe("the control plane reads the report", () => {
   it("keeps the duration out of what the control plane hands on (it is a free-form number the code under test can steer)", () => {
     const outcome = read(report([{ command: proposed[0]!.command, class: "passed" }]));
     expect(JSON.stringify(outcome)).not.toContain("durationMs");
-    expect(JSON.stringify([planDryRunFindings({ outcome }), planDryRunWarnings(outcome), planDryRunOriginalResults(outcome)])).not.toMatch(/duration|\b3\b/);
+    expect(JSON.stringify([planDryRunFindings({ outcome }), planDryRunOriginalResults(outcome)])).not.toMatch(/duration|\b3\b/);
+    expect(JSON.stringify(planDryRunWarnings(outcome))).not.toMatch(/duration|\dms/);
   });
 
   it("not-checked and not-run raise no finding and leave the original-code result unknown", () => {
     const outcome = read(report([{ command: proposed[0]!.command, class: "not-checked" }, { command: proposed[1]!.command, class: "not-run" }, { command: proposed[2]!.command, class: "passed" }]));
     expect(planDryRunFindings({ outcome, expectOnBase: { "proposed-1": "pass", "proposed-2": "fail" } })).toEqual([]);
     expect(planDryRunOriginalResults(outcome)).toEqual({ "proposed-3": "passed" });
-    expect(planDryRunWarnings(outcome)).toEqual(["Some proposed checks were not tried on the current code."]);
+    expect(planDryRunWarnings(outcome)).toEqual(["2 of 3 proposed checks were not tried on the current code."]);
   });
 
   it("a check that was only not-checked still says so in one fixed warning", () => {
     const outcome = read(report([{ command: proposed[0]!.command, class: "passed" }, { command: proposed[1]!.command, class: "passed" }, { command: proposed[2]!.command, class: "not-checked" }]));
-    expect(planDryRunWarnings(outcome)).toEqual(["Some proposed checks were not tried on the current code."]);
+    expect(planDryRunWarnings(outcome)).toEqual(["1 of 3 proposed checks was not tried on the current code."]);
+  });
+
+  it("counts the checks not tried against all the proposed checks, in the singular for one (SHOWMORE-style grammar, DRYMSG top line)", () => {
+    const one = readPlanDryRunOutcome({ events: eventsOf(report([{ command: proposed[0]!.command, class: "not-run" }])), planText: PLAN, proposed: [proposed[0]!], workerFeatures: [PLAN_DRY_RUN_FEATURE] });
+    expect(planDryRunWarnings(one)).toEqual(["1 of 1 proposed check was not tried on the current code."]);
+    const all = read(report([{ command: proposed[0]!.command, class: "not-run" }, { command: proposed[1]!.command, class: "not-checked" }, { command: proposed[2]!.command, class: "not-run" }]));
+    expect(planDryRunWarnings(all)).toEqual(["3 of 3 proposed checks were not tried on the current code."]);
+    expect(planDryRunWarnings(read(report([{ command: proposed[0]!.command, class: "passed" }, { command: proposed[1]!.command, class: "failed" }, { command: proposed[2]!.command, class: "broken" }])))).toEqual([]);
   });
 
   it("gives broken and mismatch findings with fixed sentences, from classes and expectations alone", () => {
@@ -514,7 +523,7 @@ describe("the control plane reads the report", () => {
     if (outcome.status !== "TRIED") throw new Error("expected a tried outcome");
     expect(outcome.results.map((entry) => [entry.checkId, entry.class])).toEqual([["proposed-1", "passed"], ["proposed-2", "not-run"], ["proposed-3", "broken"]]);
     // The check the report has no entry for was not tried: a warning, never a pass and never a finding.
-    expect(planDryRunWarnings(outcome)).toEqual(["Some proposed checks were not tried on the current code."]);
+    expect(planDryRunWarnings(outcome)).toEqual(["1 of 3 proposed checks was not tried on the current code."]);
     expect(planDryRunOriginalResults(outcome)).toEqual({ "proposed-1": "passed", "proposed-3": "cannot-run" });
   });
 
@@ -536,7 +545,7 @@ describe("the control plane reads the report", () => {
     const outcome = read({ schemaVersion: "workflow-plan-dry-run/v1", status: "UNAVAILABLE", planSha256: sha256(PLAN), reason: "sandbox-unavailable" });
     expect(outcome).toEqual({ status: "NOT_TRIED", reason: "worker-unavailable", workerReason: "sandbox-unavailable" });
     expect(planDryRunFindings({ outcome })).toEqual([]);
-    expect(planDryRunWarnings(outcome)).toEqual(["Proposed checks were not tried on the current code."]);
+    expect(planDryRunWarnings(outcome)).toEqual(["None of the proposed checks were tried on the current code."]);
     expect(planDryRunOriginalResults(outcome)).toEqual({});
   });
 });

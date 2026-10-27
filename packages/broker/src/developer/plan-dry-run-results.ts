@@ -86,8 +86,10 @@ export function planDryRunFindings(input: { outcome: PlanDryRunOutcome; expectOn
 
 /** The warnings the approval card and page show when checks were not (all) tried: fixed sentences, no detail from the worker. */
 export function planDryRunWarnings(outcome: PlanDryRunOutcome): string[] {
-  if (outcome.status === "NOT_TRIED") return outcome.reason === "no-proposed-checks" ? [] : ["Proposed checks were not tried on the current code."];
-  return outcome.results.some((result) => result.class === "not-run" || result.class === "not-checked") ? ["Some proposed checks were not tried on the current code."] : [];
+  if (outcome.status === "NOT_TRIED") return outcome.reason === "no-proposed-checks" ? [] : ["None of the proposed checks were tried on the current code."];
+  const untried = outcome.results.filter((result) => result.class === "not-run" || result.class === "not-checked").length;
+  const total = outcome.results.length;
+  return untried === 0 ? [] : [`${untried} of ${total} proposed ${total === 1 ? "check" : "checks"} ${untried === 1 ? "was" : "were"} not tried on the current code.`];
 }
 
 /**
