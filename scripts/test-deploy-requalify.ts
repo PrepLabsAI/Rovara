@@ -203,6 +203,69 @@ export function parseStartAnswer(text: string): { started: boolean; reason: stri
 // Readiness: what must be true before a renewal may start, by the owner's hand or by the schedule (AR-5 review I1)
 // ---------------------------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------------------------
+// requalify-drain-iam (DRAINREAD): the guarded narrowing of the steps role's DrainRead statement
+// ---------------------------------------------------------------------------------------------
+
+/** CDK's logical ID of the steps role's one inline policy (`RuntimeRequalify/Steps/ServiceRole/DefaultPolicy`); a contract test synthesizes the stack and requires this exact value. */
+export const REQUALIFY_STEPS_POLICY_LOGICAL_ID = "RuntimeRequalifyStepsServiceRoleDefaultPolicyEE5F0143";
+
+type PolicyStatementLike = { Sid?: string; Action?: unknown; Condition?: unknown; [key: string]: unknown };
+
+function sortedJson(node: unknown): string {
+  const sort = (value: unknown): unknown => Array.isArray(value) ? value.map(sort)
+    : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, inner]) => [key, sort(inner)])) : value;
+  return JSON.stringify(sort(node));
+}
+
+function stepsPolicyStatements(template: CheckTemplate, where: string): PolicyStatementLike[] {
+  const policy = template.Resources?.[REQUALIFY_STEPS_POLICY_LOGICAL_ID];
+  if (policy?.Type !== "AWS::IAM::Policy") throw new Error(`${where} has no ${REQUALIFY_STEPS_POLICY_LOGICAL_ID} policy; deploy requalify-infra first`);
+  const statements = (policy.Properties?.["PolicyDocument"] as { Statement?: unknown } | undefined)?.Statement;
+  if (!Array.isArray(statements)) throw new Error(`${where}: ${REQUALIFY_STEPS_POLICY_LOGICAL_ID} has no statement list`);
+  return statements as PolicyStatementLike[];
+}
+
+function drainReadOf(template: CheckTemplate, where: string): PolicyStatementLike {
+  const found = stepsPolicyStatements(template, where).filter((statement) => statement.Sid === "DrainRead");
+  if (found.length !== 1 || found[0] === undefined) throw new Error(`${where}: ${REQUALIFY_STEPS_POLICY_LOGICAL_ID} has ${found.length} DrainRead statements, expected exactly one`);
+  return found[0];
+}
+
+/** Whether every operator, key and value of `part` is also in `whole` (so `whole` restricts at least as much). */
+function conditionIsPartOf(part: unknown, whole: unknown): boolean {
+  if (part === undefined || part === null) return true;
+  if (typeof part !== "object" || whole === null || typeof whole !== "object") return false;
+  return Object.entries(part as Record<string, unknown>).every(([operator, keys]) => {
+    const other = (whole as Record<string, unknown>)[operator];
+    return keys !== null && typeof keys === "object" && other !== null && typeof other === "object"
+      && Object.entries(keys as Record<string, unknown>).every(([key, value]) => sortedJson((other as Record<string, unknown>)[key]) === sortedJson(value));
+  });
+}
+
+/** Whether the template's DrainRead statement already carries the attribute and Select conditions (the narrowing is applied). */
+export function drainReadIsNarrowed(template: CheckTemplate): boolean {
+  const condition = drainReadOf(template, "the template").Condition as Record<string, Record<string, unknown>> | undefined;
+  return condition?.["ForAllValues:StringEquals"]?.["dynamodb:Attributes"] !== undefined && condition["StringEqualsIfExists"]?.["dynamodb:Select"] === "SPECIFIC_ATTRIBUTES";
+}
+
+/**
+ * The deployed template with ONE thing changed: the Condition of the steps policy's DrainRead statement, taken from head. Everything else stays as deployed, byte for byte, so head's other
+ * differences (Lambda assets, other policies) cannot ride along. Refuses unless head's statement is the same grant (same Effect and Action, and its condition contains every part of the
+ * deployed one: a narrowing, never a widening or another grant). Already narrowed: returns the deployed template unchanged (the change set then has no changes).
+ */
+export function narrowDrainReadTemplate(deployed: CheckTemplate, head: CheckTemplate): CheckTemplate {
+  const have = drainReadOf(deployed, "the deployed stack");
+  const want = drainReadOf(head, "head");
+  if (have.Effect !== want.Effect || sortedJson(have.Action) !== sortedJson(want.Action)) throw new Error("head's DrainRead statement is not the deployed one with a narrower condition (Effect or Action differs); stop for review");
+  if (sortedJson(have.Condition) === sortedJson(want.Condition)) return deployed;
+  if (!conditionIsPartOf(have.Condition, want.Condition)) throw new Error("head's DrainRead condition does not contain every part of the deployed one, so it is not only a narrowing; stop for review");
+  const copy = JSON.parse(JSON.stringify(deployed)) as CheckTemplate;
+  const target = drainReadOf(copy, "the copy");
+  target.Condition = want.Condition;
+  return copy;
+}
+
 /** The deployed template with the schedule's State set to ENABLED, and every other byte as it is. Refuses unless the schedule is there as a schedule. */
 export function enableScheduleTemplate(deployed: CheckTemplate): CheckTemplate {
   const resource = deployed.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID];

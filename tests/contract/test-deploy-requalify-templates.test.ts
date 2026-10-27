@@ -9,7 +9,7 @@ import {
   CONTROL_PLANE_LAMBDAS, assertCheckAllowsApply, assertOnlyExpectedChanges, liftResources, patchLiftedCode, plannedRequalifyGrants, type CfnTemplate, type ObservedChange,
 } from "../../scripts/test-deploy.js";
 import { evaluateIamDrift, tier3Request } from "../../scripts/test-deploy-check.js";
-import { REQUALIFY_INFRA, REQUALIFY_LAMBDA, REQUALIFY_SCHEDULE_LOGICAL_ID, enableScheduleTemplate, requalifyHeadContext } from "../../scripts/test-deploy-requalify.js";
+import { REQUALIFY_INFRA, REQUALIFY_LAMBDA, REQUALIFY_SCHEDULE_LOGICAL_ID, REQUALIFY_STEPS_POLICY_LOGICAL_ID, drainReadIsNarrowed, enableScheduleTemplate, narrowDrainReadTemplate, requalifyHeadContext } from "../../scripts/test-deploy-requalify.js";
 import { scheduleStateOf, wantsScheduleEnabled } from "../../scripts/test-deploy-requalify-schedule.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -116,6 +116,64 @@ describe("the renewal's deploy units against the synthesized control-plane stack
     expect(() => assertCheckAllowsApply(findings, ["control-plane-code"], deployed)).toThrow(/iam-missing-grant SessionsReconciler/);
   });
 
+  it("lets the code deploy run before the DrainRead narrowing: the narrowed grant needs nothing the stack lacks, and the broad one shows as a warning until it is narrowed (DRAINREAD)", () => {
+    // The stack as installed before the narrowing: the same DrainRead statement without the attribute and Select conditions.
+    const installed = clone(head);
+    let narrowed = 0;
+    for (const [, policy] of policiesOf(installed)) {
+      for (const statement of (policy.Properties?.PolicyDocument as { Statement: Array<{ Sid?: string; Condition?: Record<string, unknown> }> }).Statement) {
+        if (statement.Sid !== "DrainRead") continue;
+        narrowed += 1;
+        statement.Condition = { "ForAllValues:StringLike": statement.Condition!["ForAllValues:StringLike"] };
+      }
+    }
+    expect(narrowed).toBe(1);
+    const findings = evaluateIamDrift(head, installed);
+    expect(findings.filter((finding) => finding.kind === "iam-missing-grant")).toEqual([]);
+    const extra = findings.filter((finding) => finding.kind === "iam-extra-grant");
+    expect(extra.map((finding) => [finding.severity, finding.roleLogicalId])).toEqual([["warning", expect.stringMatching(/^RuntimeRequalifyStepsServiceRole/)]]);
+    expect(JSON.stringify(extra[0]!.statements)).toContain("dynamodb:Query");
+    expect(() => assertCheckAllowsApply(findings, ["control-plane-code"], head, true)).not.toThrow();
+    // Not a loophole: a condition that is not a part of head's (a different LeadingKeys list) is still a gap, and so is a grant with no broader twin.
+    const other = clone(installed);
+    for (const [, policy] of policiesOf(other)) {
+      for (const statement of (policy.Properties?.PolicyDocument as { Statement: Array<{ Sid?: string; Condition?: Record<string, Record<string, unknown>> }> }).Statement) {
+        if (statement.Sid === "DrainRead") statement.Condition!["ForAllValues:StringLike"] = { "dynamodb:LeadingKeys": ["READY"] };
+      }
+    }
+    expect(evaluateIamDrift(head, other).filter((finding) => finding.kind === "iam-missing-grant")).toHaveLength(1);
+    const gone = clone(installed);
+    for (const [, policy] of policiesOf(gone)) {
+      const document = policy.Properties?.PolicyDocument as { Statement: Array<{ Sid?: string }> };
+      document.Statement = document.Statement.filter((statement) => statement.Sid !== "DrainRead");
+    }
+    expect(evaluateIamDrift(head, gone).filter((finding) => finding.kind === "iam-missing-grant")).toHaveLength(1);
+  });
+
+  it("the requalify-drain-iam unit's template differs from the installed one in the DrainRead condition of the steps policy and nowhere else (DRAINREAD)", () => {
+    // The ID the unit's guard expects is CDK's own for the synthesized policy that holds DrainRead.
+    const holders = policiesOf(head).filter(([, policy]) => JSON.stringify(policy.Properties?.PolicyDocument).includes('"Sid":"DrainRead"')).map(([id]) => id);
+    expect(holders).toEqual([REQUALIFY_STEPS_POLICY_LOGICAL_ID]);
+    const installed = clone(head);
+    for (const [, policy] of policiesOf(installed)) {
+      for (const statement of (policy.Properties?.PolicyDocument as { Statement: Array<{ Sid?: string; Condition?: Record<string, unknown> }> }).Statement) {
+        if (statement.Sid === "DrainRead") statement.Condition = { "ForAllValues:StringLike": statement.Condition!["ForAllValues:StringLike"] };
+      }
+    }
+    // Head also differs elsewhere (a Lambda asset, say): that must not come along.
+    const lambda = Object.entries(head.Resources ?? {}).find(([, resource]) => resource.Type === "AWS::Lambda::Function")!;
+    const movedHead = clone(head);
+    (movedHead.Resources![lambda[0]]!.Properties as Record<string, unknown>)["Description"] = "moved in head only";
+    expect(drainReadIsNarrowed(installed)).toBe(false);
+    const prepared = narrowDrainReadTemplate(installed, movedHead);
+    expect(drainReadIsNarrowed(prepared)).toBe(true);
+    const changed = Object.keys(prepared.Resources ?? {}).filter((id) => JSON.stringify(prepared.Resources![id]) !== JSON.stringify(installed.Resources![id]));
+    expect(changed).toEqual([REQUALIFY_STEPS_POLICY_LOGICAL_ID]);
+    expect(Object.keys(prepared.Resources ?? {})).toEqual(Object.keys(installed.Resources ?? {}));
+    // And what it changes is the one statement: the prepared policy equals head's own.
+    expect(JSON.stringify(prepared.Resources![REQUALIFY_STEPS_POLICY_LOGICAL_ID])).toBe(JSON.stringify(head.Resources![REQUALIFY_STEPS_POLICY_LOGICAL_ID]));
+  });
+
   it("prints the AR-3 DrainRead grant as the exact Tier 3 statement of the renewal's role, and the whole renewal role set before the unit is deployed", () => {
     const withoutDrain = clone(head);
     for (const [, policy] of policiesOf(withoutDrain)) {
@@ -126,7 +184,8 @@ describe("the renewal's deploy units against the synthesized control-plane stack
     expect(findings).toHaveLength(1);
     expect(findings[0]!.roleLogicalId).toMatch(/^RuntimeRequalifyStepsServiceRole/);
     const [statement] = findings[0]!.statements ?? [];
-    expect(statement).toMatchObject({ Effect: "Allow", Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] } } });
+    expect(statement).toMatchObject({ Effect: "Allow", Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] }, StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" } } });
+    expect((statement?.Condition as Record<string, unknown> | undefined)?.["ForAllValues:StringEquals"]).toEqual({ "dynamodb:Attributes": expect.arrayContaining(["workspaceId", "status", "state"]) as unknown });
     expect([statement?.Action].flat().sort()).toEqual(["dynamodb:GetItem", "dynamodb:Query"]);
     expect(JSON.stringify(findings[0]!.statements)).not.toMatch(/dynamodb:(Put|Update|Delete|Batch|Transact)/);
     expect(tier3Request(findings)).toContain("PROJECT_SETUP#*");

@@ -23,7 +23,10 @@ import {
   REQUALIFY_DEPLOY_ORDER,
   REQUALIFY_NOW_PAYLOAD,
   REQUALIFY_SCHEDULE_LOGICAL_ID,
+  REQUALIFY_STEPS_POLICY_LOGICAL_ID,
+  drainReadIsNarrowed,
   enableScheduleTemplate,
+  narrowDrainReadTemplate,
   lockFact,
   lockHeldMessage,
   parseStartAnswer,
@@ -530,5 +533,87 @@ describe("readiness before a renewal starts", () => {
       expect(readRunnerTags(reader({ pointer, instance: [], volumes: [] }).reader, input)).toMatchObject({ state: "unknown" });
       expect(readRunnerTags(reader({ pointer, instance: [{ state: "running", tags: [] }] }).reader, input)).toMatchObject({ state: "unknown" });
     });
+  });
+});
+
+describe("the requalify-drain-iam unit (DRAINREAD review I1)", () => {
+  const POLICY = REQUALIFY_STEPS_POLICY_LOGICAL_ID;
+  const broad = { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*"] } };
+  const narrow = { ...broad, "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "workspaceId"] }, StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" } };
+  const template = (condition: unknown, extra: Record<string, unknown> = {}): CfnTemplate => ({
+    Resources: {
+      [POLICY]: { Type: "AWS::IAM::Policy", Properties: { Roles: [{ Ref: "Role" }], PolicyDocument: { Statement: [
+        { Sid: "Other", Effect: "Allow", Action: "sns:Publish", Resource: "arn:topic" },
+        { Sid: "DrainRead", Effect: "Allow", Action: ["dynamodb:Query", "dynamodb:GetItem"], Resource: ["arn:table"], Condition: condition },
+      ] } } },
+      Lambda: { Type: "AWS::Lambda::Function", Properties: { Code: { S3Key: "old" } } },
+      ...extra,
+    },
+  });
+  const planIam = (installed?: boolean) => plan(["requalify-drain-iam"], installed);
+
+  it("plans: build the renewal zip, refuse unless it is live, then ONE guarded change set (Modify of the steps policy only) on the deployed template with every parameter UsePreviousValue, execute, verify", () => {
+    const steps = planIam(true);
+    expect(steps.map((step) => step.kind)).toEqual(["build-lambda-zip", "check-lambda-code-current", "create-change-set", "execute-change-set", "verify-requalify-drain-iam"]);
+    expect(steps[1]).toMatchObject({ kind: "check-lambda-code-current", stack: CONTROL_PLANE, logicalId: REQUALIFY_LAMBDA.logicalId, expectedSha256Base64: { fromStep: "build-requalify-steps", output: "sha256Base64" } });
+    const changeSet = steps[2] as Extract<DeployStep, { kind: "create-change-set" }>;
+    expect(changeSet).toMatchObject({
+      stack: CONTROL_PLANE, template: { source: "narrow-drain-read", identityMode: "cognito" },
+      expect: { action: "Modify", logicalIds: [POLICY], allowedAttributes: ["Properties.PolicyDocument"] },
+    });
+    // Every parameter of the stack is kept as it is (a missing one would fall back to its default and change other resources).
+    expect(changeSet.parameters.length).toBeGreaterThan(0);
+    expect(changeSet.parameters.every((parameter) => "usePreviousValue" in parameter)).toBe(true);
+    // The guard: the policy's PolicyDocument alone passes; another resource, another attribute, an Add or a replacement does not.
+    const modify = (logicalId: string, attributes: string[], replacement = "False"): ObservedChange => ({ action: "Modify", logicalId, type: "AWS::IAM::Policy", attributes, replacement });
+    expect(() => assertOnlyExpectedChanges([modify(POLICY, ["Properties.PolicyDocument"])], changeSet.expect)).not.toThrow();
+    expect(() => assertOnlyExpectedChanges([modify(POLICY, ["Properties.PolicyDocument", "Properties.Roles"])], changeSet.expect)).toThrow(/also changes Properties.Roles/);
+    expect(() => assertOnlyExpectedChanges([modify(POLICY, ["Properties.PolicyDocument"], "True")], changeSet.expect)).toThrow(/would replace/);
+    expect(() => assertOnlyExpectedChanges([modify(POLICY, ["Properties.PolicyDocument"]), modify("RuntimeRequalifyMachineRoleDefaultPolicyAAACD94F", ["Properties.PolicyDocument"])], changeSet.expect)).toThrow(/unexpected changes/);
+    expect(() => assertOnlyExpectedChanges([modify(POLICY, ["Properties.PolicyDocument"]), { action: "Add", logicalId: "RuntimeRequalifyStepsServiceRoleOverflowPolicy1", type: "AWS::IAM::ManagedPolicy" }], changeSet.expect)).toThrow(/unexpected changes/);
+    const text = formatPlan(steps);
+    expect(text).toContain("stop unless RuntimeRequalifyStepsAC5E645B CodeSha256 equals <build-requalify-steps.sha256Base64>");
+    expect(text).toContain(`only the Condition of the DrainRead statement in ${POLICY}`);
+    expect(text).toContain("all UsePreviousValue");
+  });
+
+  it("runs alone, only where the renewal is installed, and is not a default unit", () => {
+    expect(() => planIam(false)).toThrow(/deploy requalify-infra first/);
+    expect(() => planIam()).toThrow(/deploy requalify-infra first/);
+    expect(() => plan(["requalify-drain-iam", "control-plane-code"], true)).toThrow(/runs on its own/);
+    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "requalify-drain-iam"]).only).toEqual(["requalify-drain-iam"]);
+    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p"]).only).not.toContain("requalify-drain-iam");
+    expect(parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "requalify-drain-iam"]).apply).toBe(false);
+  });
+
+  it("changes only the DrainRead Condition of the deployed template, taking nothing else from head", () => {
+    const deployed = template(broad);
+    const head = template(narrow, { Lambda: { Type: "AWS::Lambda::Function", Properties: { Code: { S3Key: "new" } } } });
+    const result = narrowDrainReadTemplate(deployed, head);
+    expect(drainReadIsNarrowed(deployed)).toBe(false);
+    expect(drainReadIsNarrowed(result)).toBe(true);
+    // Head's Lambda asset did not ride along; the deployed one stays. The input is not changed.
+    expect(result.Resources?.["Lambda"]).toEqual(deployed.Resources?.["Lambda"]);
+    const statements = (result.Resources?.[POLICY]?.Properties?.["PolicyDocument"] as { Statement: Array<{ Sid: string; Condition?: unknown }> }).Statement;
+    expect(statements.map((statement) => statement.Sid)).toEqual(["Other", "DrainRead"]);
+    expect(statements[1]!.Condition).toEqual(narrow);
+    expect(statements[0]).toEqual((deployed.Resources?.[POLICY]?.Properties?.["PolicyDocument"] as { Statement: unknown[] }).Statement[0]);
+    expect(drainReadIsNarrowed(deployed)).toBe(false);
+    // Already narrowed: nothing to change.
+    expect(narrowDrainReadTemplate(result, head)).toBe(result);
+  });
+
+  it("refuses head's statement unless it is the same grant with a narrower condition, and a stack without the policy", () => {
+    const deployed = template(broad);
+    // A different LeadingKeys list is not a narrowing.
+    expect(() => narrowDrainReadTemplate(deployed, template({ ...narrow, "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY"] } }))).toThrow(/not only a narrowing/);
+    // A condition that drops a part of the deployed one is a widening.
+    expect(() => narrowDrainReadTemplate(template(narrow), template(broad))).toThrow(/not only a narrowing/);
+    // Another action is another grant.
+    const wider = template(narrow);
+    ((wider.Resources?.[POLICY]?.Properties?.["PolicyDocument"] as { Statement: Array<{ Sid: string; Action: unknown }> }).Statement[1]!).Action = ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:PutItem"];
+    expect(() => narrowDrainReadTemplate(deployed, wider)).toThrow(/Effect or Action differs/);
+    expect(() => narrowDrainReadTemplate({ Resources: {} }, template(narrow))).toThrow(/deploy requalify-infra first/);
+    expect(() => narrowDrainReadTemplate(deployed, { Resources: {} })).toThrow(/head has no/);
   });
 });
