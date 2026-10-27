@@ -1,7 +1,9 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdtempSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { EXECUTOR_RUN_LOCK_PATH, withExecutorRunLock } from "../support/executor-run-lock.js";
+import { createExecutorRunLock, withExecutorRunLock } from "../support/executor-run-lock.js";
 
 // F5: the real executor runs share the fixed forwarder port, so the files that run them take turns.
 describe("the executor run lock", () => {
@@ -21,8 +23,9 @@ describe("the executor run lock", () => {
   });
 
   it("takes over a lock whose owner is gone", async () => {
-    await mkdir(EXECUTOR_RUN_LOCK_PATH, { recursive: true });
-    await writeFile(join(EXECUTOR_RUN_LOCK_PATH, "owner"), "2147483646");
-    await expect(withExecutorRunLock(async () => "ran")).resolves.toBe("ran");
+    // A private lock path: planting a stale lock on the machine-wide path would break a real executor test holding it.
+    const path = join(mkdtempSync(join(tmpdir(), "run-lock-")), "lock");
+    await writeFile(path, "2147483646\nabcdef0123456789\n");
+    await expect(createExecutorRunLock({ path }).withLock(async () => "ran")).resolves.toBe("ran");
   });
 });
