@@ -133,6 +133,7 @@ export async function runTaskInvocation(
         taskRequirements: collected.taskRequirements, candidateDigest: binding.candidateDigest,
         rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
         repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
+        ruleFileBaseCommits: invocation.payload.workflowBase ?? [],
         ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
         ...(dependencies.timeouts?.feedbackReviewMs === undefined ? {} : { timeoutMs: dependencies.timeouts.feedbackReviewMs }),
         ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
@@ -280,6 +281,8 @@ export async function runTaskInvocation(
   const readiness = invocation.payload.readiness;
   const planning = invocation.payload.workflowMode === "PLAN";
   const reviewing = invocation.payload.workflowMode === "REVIEW";
+  /** Reviewers' rule files come from the broker's base alone, never from the manifest's commit, which the agent can write. */
+  const reviewerRuleBases = { contextFilesAt: "base-commit" as const, baseCommits: invocation.payload.workflowBase ?? [] };
   let graphFinalItemReady = workflowDependencies === undefined;
   const recorder = new CommandRecorder({
     fingerprint: (signal) => recorderFingerprint(
@@ -336,6 +339,7 @@ export async function runTaskInvocation(
         sessionFile: registered.sessionFile,
         onDiagnostic,
         extensionFactories: planning || reviewing ? [] : [verification],
+        ...(reviewing ? reviewerRuleBases : {}),
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
@@ -346,7 +350,7 @@ export async function runTaskInvocation(
       {
         rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: invocation.payload.workflowMode ?? "IMPLEMENT", conversationId, onDiagnostic,
         extensionFactories: planning || reviewing ? [] : [verification],
-        ...(reviewing ? { contextFilesAt: "base-commit" as const, baseCommits: invocation.payload.workflowBase ?? [] } : {}),
+        ...(reviewing ? reviewerRuleBases : {}),
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
@@ -660,6 +664,7 @@ export async function runTaskInvocation(
           model: session.getModel(),
           candidate: beforeReview.repositories,
           repositories,
+          ruleFileBaseCommits: invocation.payload.workflowBase ?? [],
           ...(invocation.payload.workflowReviewChecks === undefined ? {} : { reviewChecks: invocation.payload.workflowReviewChecks }),
           ...(invocation.payload.workflowReviewPlan === undefined ? {} : { reviewPlan: invocation.payload.workflowReviewPlan }),
           ...(invocation.payload.workflowReviewFeedback === undefined ? {} : { reviewFeedback: invocation.payload.workflowReviewFeedback }),

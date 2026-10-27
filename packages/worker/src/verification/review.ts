@@ -87,6 +87,8 @@ export async function runWorkflowFeedbackReview(input: {
    */
   taskChecks?: WorkflowFeedbackTaskChecks;
   artifactSink: ArtifactSink;
+  /** The broker's base commit per repository, for the reviewer's rule files; absent: the candidate's own base is used. */
+  ruleFileBaseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   piAdapter?: PiSessionAdapter;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -141,7 +143,7 @@ export async function runWorkflowFeedbackReview(input: {
       input.onProgress?.("AgentX is independently reviewing the current PR feedback.");
       session = await createWorkspacePiSession({ rootPath: input.rootPath, model: input.model,
         workflowMode: "REVIEW", conversationId: randomUUID(), contextFilesAt: "base-commit",
-        baseCommits: withCandidateBase(input.repositories, input.candidate) }, input.piAdapter);
+        baseCommits: input.ruleFileBaseCommits ?? withCandidateBase(input.repositories, input.candidate) }, input.piAdapter);
       const actualModel = session.getModel();
       provider = actualModel.provider;
       version = actualModel.modelId;
@@ -624,6 +626,8 @@ export async function runWorkflowReviews(input: {
   reviewPlan?: WorkflowReviewPlan;
   /** The fixes the owner approved from pull request feedback since the plan; absent when there are none, or from an older broker. */
   reviewFeedback?: WorkflowReviewFeedback;
+  /** The broker's base commit per repository, for the reviewers' rule files; absent: the candidate's own base is used. */
+  ruleFileBaseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   piAdapter?: PiSessionAdapter;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -671,7 +675,7 @@ export async function runWorkflowReviews(input: {
         workflowMode: "REVIEW",
         conversationId: randomUUID(),
         contextFilesAt: "base-commit",
-        baseCommits: repositories,
+        baseCommits: input.ruleFileBaseCommits ?? repositories,
       }, input.piAdapter);
       const actualModel = session.getModel();
       provider = actualModel.provider;

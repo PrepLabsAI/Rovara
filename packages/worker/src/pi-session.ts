@@ -149,6 +149,9 @@ export async function openRegisteredWorkspacePiSession(
     bashOperations?: BashOperations;
     devcontainerPaths?: DevcontainerPaths;
     extensionFactories?: InlineExtension[];
+    /** As for `createWorkspacePiSession`. */
+    contextFilesAt?: "working-tree" | "base-commit";
+    baseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -163,7 +166,7 @@ export async function openRegisteredWorkspacePiSession(
   });
   assertContained(sessionDirectory, sessionFile);
   if (!adapter.open) throw new Error("pi session adapter does not support saved-session reopen");
-  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths);
+  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths, input.contextFilesAt, input.baseCommits);
   const handle = await adapter.open({
     cwd: rootPath,
     sessionDirectory,
@@ -171,6 +174,7 @@ export async function openRegisteredWorkspacePiSession(
     model: input.model,
     ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     contextFiles,
+    ...(input.contextFilesAt === undefined ? {} : { contextFilesAt: input.contextFilesAt }),
     conversationId: input.conversationId,
     sessionFile,
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
