@@ -384,6 +384,10 @@ export interface WorkflowDispatchRecord {
   dispatchDueSk: string;
   /** TTL backstop (epoch seconds), in case a row is somehow never resolved. */
   indexExpiresAt: number;
+  /** AUTOFIX only (DISPATCHEXHAUST): how the block this row is for came about when no finished run wrote it. Rows from before carry none. */
+  autofixCause?: string;
+  /** AUTOFIX only (DISPATCHEXHAUST): the look must not happen before this time, the delay of the one automatic retry of an infrastructure fault. */
+  autofixNotBefore?: string;
 }
 
 /** Internal purpose binding for the one pre-admission compute warmup of a required feature E2E dispatch. */

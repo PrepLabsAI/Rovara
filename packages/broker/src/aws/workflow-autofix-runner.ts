@@ -1,7 +1,7 @@
 import { GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   AUTO_FIX_DEFAULT_CAP_USD, WORKFLOW_AUTO_ACTION_LIMIT, autoFixDecision, classifyBlockedWorkflow, wholeTaskSpendUsd, workflowAutoFixCounts, workflowAutoSpendRefusal,
-  type AutoFixAskReason, type AutoFixCode, type AutoFixDecision, type AutoFixFacts, type E2EScenarioResults, type GroupOriginalResult, type OriginalCodeResult, type WorkflowAutoSpend,
+  type AutoFixAskReason, type AutoFixBlockCause, type AutoFixCode, type AutoFixDecision, type AutoFixFacts, type E2EScenarioResults, type GroupOriginalResult, type OriginalCodeResult, type WorkflowAutoSpend,
 } from "@agentx/contracts";
 import { AUTOFIX_ASK_GROUPS_MAX, AutoFixAskSchema, autoFixRetryReason, autoFixSendBackReason, type AutoFixAsk } from "../developer/autofix-messages.js";
 import { loadPlanSelfCheck } from "../developer/plan-self-check.js";
@@ -152,7 +152,7 @@ export function autofixDayBudgetNeed(budgets: { maxModelCallsPerGroup: number; m
  * (the wait for the original-code round is bounded from it). Returns what happened; WAITING means the original-code round is not in yet and the caller should look again soon.
  * Never throws for a task that moved on; an error from a system move is rethrown when the task is still at the same blocked revision (the caller's bounded retry).
  */
-export async function runWorkflowAutofix(deps: AutofixDependencies, task: DeveloperTaskRecord, input: { expectedRevision: number; startedAt: string }): Promise<AutofixOutcome> {
+export async function runWorkflowAutofix(deps: AutofixDependencies, task: DeveloperTaskRecord, input: { expectedRevision: number; startedAt: string; /** DISPATCHEXHAUST: how a block no finished run wrote came about (the row's cause). */ cause?: AutoFixBlockCause | undefined }): Promise<AutofixOutcome> {
   const { config } = deps;
   if (!config.enabled) return "DISABLED";
   const workflow = task.workflow;
@@ -161,9 +161,11 @@ export async function runWorkflowAutofix(deps: AutofixDependencies, task: Develo
   if (config.since !== undefined && !(Date.parse(workflow.updatedAt) >= Date.parse(config.since))) return "STALE";
 
   // What the policy needs, read only where the classification says it matters.
-  const classes = classifyBlockedWorkflow(workflow);
+  // DISPATCHEXHAUST: a lost run is the owner's stop when a cancel targets that stage's latest run, whatever wrote the block: Rovara never starts again what the owner stopped.
+  const cause = input.cause === "run-lost" && await deps.ownerCancelledChecks(task) ? "owner-stopped" as const : input.cause;
+  const facts: AutoFixFacts = cause === undefined ? {} : { blockCause: cause };
+  const classes = classifyBlockedWorkflow(workflow, facts);
   const codes = new Set<AutoFixCode>(classes.map((entry) => entry.code));
-  const facts: AutoFixFacts = {};
   let baselineRequests = 0;
   let groups: Record<string, GroupOriginalResult> = {};
   let recordState: string | undefined;

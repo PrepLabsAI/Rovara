@@ -26,7 +26,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { CloudFormationClient, DescribeStackResourcesCommand, DescribeStacksCommand, GetTemplateCommand } from "@aws-sdk/client-cloudformation";
-import { AttachVolumeCommand, CreateVolumeCommand, DescribeInstancesCommand, DescribeLaunchTemplateVersionsCommand, DescribeVolumesCommand, EC2Client, RunInstancesCommand, type RunInstancesCommandInput } from "@aws-sdk/client-ec2";
+import { AttachVolumeCommand, CreateVolumeCommand, DescribeInstancesCommand, DescribeLaunchTemplateVersionsCommand, DescribeVolumesCommand, EC2Client, ModifyInstanceAttributeCommand, RunInstancesCommand, type RunInstancesCommandInput } from "@aws-sdk/client-ec2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
@@ -101,6 +101,7 @@ export type QualificationStep =
   | { id: string; kind: "create-volume"; clientToken: string }
   | { id: string; kind: "run-instance"; minCount: 1; maxCount: 1; clientToken: string; workspaceId: string; qualification: { profile: typeof E2E_QUALIFICATION_PROFILE_ID } }
   | { id: string; kind: "attach-volume"; device: string }
+  | { id: string; kind: "volume-delete-on-termination"; device: string }
   | { id: string; kind: "read-private-ip" }
   | { id: string; kind: "wait-ready"; object: string; statusObject: string; timeoutMs: number; intervalMs: number }
   | { id: string; kind: "issue-challenge"; profile: typeof E2E_QUALIFICATION_PROFILE_ID; generation: 1; transportCorrelationId: string; port: number }
@@ -134,6 +135,7 @@ export function planTestQualification(input: QualificationInput, allowlist: read
     { id: "create-volume", kind: "create-volume", clientToken: input.runId },
     { id: "run-instance", kind: "run-instance", minCount: 1, maxCount: 1, clientToken: input.runId, workspaceId: input.workspaceId, qualification: { profile: E2E_QUALIFICATION_PROFILE_ID } },
     { id: "attach-volume", kind: "attach-volume", device: VOLUME_DEVICE },
+    { id: "volume-delete-on-termination", kind: "volume-delete-on-termination", device: VOLUME_DEVICE },
     { id: "read-private-ip", kind: "read-private-ip" },
     { id: "wait-ready", kind: "wait-ready", object: "ready.json", statusObject: "status.json", timeoutMs: READY_TIMEOUT_MS, intervalMs: POLL_INTERVAL_MS },
     { id: "issue-challenge", kind: "issue-challenge", profile: E2E_QUALIFICATION_PROFILE_ID, generation: 1, transportCorrelationId: input.workspaceId, port: WORKER_PORT },
@@ -172,6 +174,7 @@ export function formatQualificationPlan(steps: readonly QualificationStep[], inp
       case "create-volume": return `create one new encrypted ${VOLUME_SIZE_GIB} GiB gp3 workspace volume (client token ${step.clientToken})`;
       case "run-instance": return `launch ONE ${INSTANCE_TYPE} instance (MinCount=MaxCount=1, client token ${step.clientToken}) from the environment's launch template, with the worker's normal boot plus the qualification hook (prefix ${PLAN_PREFIX}), tagged DeploymentMode=e2e-qualification so the session reconciler leaves it alone`;
       case "attach-volume": return `attach the volume to that instance at ${step.device}`;
+      case "volume-delete-on-termination": return `once the attachment is confirmed, set DeleteOnTermination=true on ${step.device} (ec2:ModifyInstanceAttribute, BlockDeviceMappings) so the volume goes when the owner terminates this runner; if that fails the run continues, says so and prints the delete-volume command to run by hand after the runner is retired`;
       case "read-private-ip": return "read the instance's private IP address";
       case "wait-ready": return `wait up to ${step.timeoutMs / 60_000} minutes for the worker to upload ${PLAN_PREFIX}${step.object} (it is healthy), so boot time does not use the challenge's lifetime`;
       case "issue-challenge": return `issue a ${step.profile} challenge (agentx admin runtime-installation challenge) for http://<private ip>:${step.port}, generation ${step.generation} or one past the registered runtime if that is higher, correlation ${step.transportCorrelationId}`;
@@ -189,7 +192,7 @@ export function formatQualificationPlan(steps: readonly QualificationStep[], inp
     ...steps.map((step, index) => `${index + 1}. [${step.id}] ${describe(step)}`),
     "",
     `Spend: one instance (${INSTANCE_TYPE}) and one ${VOLUME_SIZE_GIB} GiB gp3 volume, billed until you end them. Launching it needs the owner's explicit OK at run time.`,
-    "On any failure the instance is left running for diagnosis: this script never terminates an instance or deletes a volume (it deletes only its own preflight and challenge objects), and prints how.",
+    "On any failure the instance is left running for diagnosis: this script never terminates an instance or deletes a volume (it deletes only its own preflight and challenge objects), and prints how. It only marks the volume to be deleted when the owner terminates the runner.",
   ].join("\n");
 }
 
@@ -199,6 +202,8 @@ export interface QualificationEffects {
   createVolume(request: { availabilityZone: string; sizeGiB: number; clientToken: string; tags: Record<string, string> }): Promise<string>;
   runInstance(request: RunInstancesCommandInput): Promise<string>;
   attachVolume(request: { volumeId: string; instanceId: string; device: string }): Promise<void>;
+  /** Sets DeleteOnTermination=true on the attached volume's mapping (AttachVolume cannot); throws unless the attachment is confirmed and the flag is set. */
+  setVolumeDeleteOnTermination(request: { volumeId: string; instanceId: string; device: string }): Promise<void>;
   privateIpOf(instanceId: string): Promise<string>;
   issueChallenge(request: { binding: Ec2RuntimeBinding; endpoint: string; generation: number; transportCorrelationId: string; profile: string }): Promise<{ challengeId: string; file: string; expiresAt: string }>;
   putObject(key: string, file: string): Promise<void>;
@@ -290,6 +295,10 @@ interface RunState {
   /** The preflight object, from the moment it is put until it is deleted. */
   preflightKey?: string | undefined;
   volumeId?: string;
+  /** Set when DeleteOnTermination could not be set: the volume outlives the runner and the owner must delete it by hand. */
+  volumeKeptAfterTermination?: boolean;
+  /** Set once DeleteOnTermination is confirmed: terminating the instance deletes the volume too, so no delete-volume command is due. */
+  volumeGoesWithInstance?: boolean;
   /** The generation the runner is booted with and the challenge is issued with: read once, before the launch, under the lock. */
   generation?: number;
   instanceId?: string;
@@ -357,6 +366,20 @@ async function runSteps(steps: readonly QualificationStep[], effects: Qualificat
           break;
         }
         case "attach-volume": await effects.attachVolume({ volumeId: need(state.volumeId, "the volume"), instanceId: need(state.instanceId, "the instance"), device: step.device }); break;
+        case "volume-delete-on-termination": {
+          const request = { volumeId: need(state.volumeId, "the volume"), instanceId: need(state.instanceId, "the instance"), device: step.device };
+          try {
+            await effects.setVolumeDeleteOnTermination(request);
+            state.volumeGoesWithInstance = true;
+            effects.print(`volume ${request.volumeId} will be deleted when ${request.instanceId} is terminated`);
+          } catch (error) {
+            // The qualification itself is unaffected, so the run goes on; but the leak must not be silent: say it now and again in the closing summary.
+            state.volumeKeptAfterTermination = true;
+            effects.print(`WARNING: could not set DeleteOnTermination on volume ${request.volumeId} (${error instanceof Error ? error.message : String(error)}). It will NOT be deleted when the runner is terminated.`);
+            printVolumeDeleteByHand(request.volumeId, options, (line) => effects.print(line));
+          }
+          break;
+        }
         case "read-private-ip": state.privateIp = await effects.privateIpOf(need(state.instanceId, "the instance")); break;
         case "wait-ready": await waitReady(step, need(state.prefix, "the instance's key prefix"), effects); break;
         case "issue-challenge": {
@@ -405,6 +428,10 @@ async function runSteps(steps: readonly QualificationStep[], effects: Qualificat
         case "print-registered-rows": {
           const rows = describeRegisteredRows(need(state.registered, "the registration answer"));
           for (const row of rows.length > 0 ? rows : [`registered; the answer was not in the expected form: ${state.registered}`]) effects.print(row);
+          if (state.volumeKeptAfterTermination === true && state.volumeId !== undefined) {
+            effects.print(`\nReminder: DeleteOnTermination could not be set, so volume ${state.volumeId} stays after the runner is retired.`);
+            printVolumeDeleteByHand(state.volumeId, options, (line) => effects.print(line));
+          }
           break;
         }
       }
@@ -473,6 +500,12 @@ function reportObjectLeftovers(state: RunState, options: RunOptions, print: (lin
   }
 }
 
+/** The by-hand cleanup of a workspace volume that will not go with its runner. */
+function printVolumeDeleteByHand(volumeId: string, options: RunOptions, print: (line: string) => void): void {
+  print(`After you terminate the runner, delete volume ${volumeId} by hand:`);
+  print(`  aws ec2 delete-volume --volume-id ${volumeId} --profile ${options.profile} --region ${options.region}`);
+}
+
 function reportLeftovers(state: RunState, options: RunOptions, print: (line: string) => void): void {
   reportObjectLeftovers(state, options, print);
   if (state.launchRun !== undefined) {
@@ -483,7 +516,9 @@ function reportLeftovers(state: RunState, options: RunOptions, print: (line: str
     print(`\nThe qualification instance ${state.instanceId} is still running (${INSTANCE_TYPE}, billed until it is ended), left for diagnosis. End it with:`);
     print(`  aws ec2 terminate-instances --instance-ids ${state.instanceId} --profile ${options.profile} --region ${options.region}`);
   }
-  if (state.volumeId !== undefined) {
+  if (state.volumeId !== undefined && state.volumeGoesWithInstance === true) {
+    print(`\nThe workspace volume ${state.volumeId} is marked DeleteOnTermination: terminating the instance deletes it too, so there is no separate volume delete to run. Diagnose before you terminate.`);
+  } else if (state.volumeId !== undefined) {
     print(`${state.instanceId === undefined ? "\n" : ""}The workspace volume ${state.volumeId} stays until it is deleted${state.instanceId === undefined ? "" : ", once that instance is gone"}:`);
     print(`  aws ec2 delete-volume --volume-id ${state.volumeId} --profile ${options.profile} --region ${options.region}`);
   }
@@ -691,6 +726,21 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
         await sleep(5_000);
       }
       await ec2.send(new AttachVolumeCommand({ VolumeId: request.volumeId, InstanceId: request.instanceId, Device: request.device }));
+    },
+
+    async setVolumeDeleteOnTermination(request) {
+      // ModifyInstanceAttribute only sees the mapping once the attachment is done: wait for it, bounded.
+      let attached = false;
+      for (let attempt = 0; attempt < 60 && !attached; attempt += 1) {
+        const attachment = (await ec2.send(new DescribeVolumesCommand({ VolumeIds: [request.volumeId] }))).Volumes?.[0]?.Attachments?.find((entry) => entry.InstanceId === request.instanceId);
+        if (attachment?.State === "attached" && attachment.Device === request.device) attached = true;
+        else await sleep(2_000);
+      }
+      if (!attached) throw new Error(`volume ${request.volumeId} did not report attached to ${request.instanceId}`);
+      await ec2.send(new ModifyInstanceAttributeCommand({ InstanceId: request.instanceId, BlockDeviceMappings: [{ DeviceName: request.device, Ebs: { DeleteOnTermination: true } }] }));
+      // Read it back: a flag that was not set must not be reported as set.
+      const mapping = (await ec2.send(new DescribeInstancesCommand({ InstanceIds: [request.instanceId] }))).Reservations?.[0]?.Instances?.[0]?.BlockDeviceMappings?.find((entry) => entry.Ebs?.VolumeId === request.volumeId);
+      if (mapping?.Ebs?.DeleteOnTermination !== true) throw new Error(`DeleteOnTermination is not set on ${request.volumeId} after the change`);
     },
 
     async privateIpOf(instanceId) {
