@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -11,6 +11,7 @@ import { agentTraceFilePath, createE2EAgentCaptureStore, persistE2EAgentTrace } 
 import { readBrowserState, type BrowserContextLike, type BrowserFrameLike } from "../../packages/verifier/src/executor/browser-state-reader.js";
 import { BROWSER_STATE_MEMO_MAX, tellBrowserState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
 import { classifyStorageEntry } from "../../packages/verifier/src/executor/storage-entry-classifier.js";
+import { headerSecrets, urlSecrets } from "../../packages/verifier/src/executor/request-secrets.js";
 import { classifyString } from "../../packages/verifier/src/executor/credential-classifier.js";
 import type { FormLoginDriver, FormLoginStorageState, FormRequestContext } from "../../packages/verifier/src/executor/form-login.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
@@ -217,22 +218,54 @@ describe("fix round 3 (re-check 2)", () => {
     expect(classifyString("anything", token).map((item) => item.tier)).toContain("strong");
   });
 
-  it("N-7: random standard-base64 tokens with slashes stay strong (10 000 seeded tokens, with and without a leading slash; any miss must be a token without a digit)", () => {
-    let seed = 20_261_027;
-    const next = (): number => { seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0; return seed; };
-    let checked = 0;
-    const misses: string[] = [];
-    for (let index = 0; checked < 10_000 && index < 100_000; index += 1) {
-      const token = Buffer.from(Array.from({ length: 24 + (next() % 24) }, () => next() & 255)).toString("base64").replace(/=+$/, "");
-      if (!token.includes("/")) continue;
-      for (const value of [token, `/${token}`]) {
-        checked += 1;
-        if (!classifyString("anything", value).some((item) => item.tier === "strong" && item.value === value)) misses.push(value);
+  it("N-7 / M3-1: random standard-base64 tokens with slashes stay strong (crypto.randomBytes, 10 000+ distinct tokens at each of 24, 32 and 40 bytes, with and without a leading slash)", () => {
+    for (const bytes of [24, 32, 40]) {
+      const seen = new Set<string>();
+      const misses: string[] = [];
+      let checked = 0;
+      while (seen.size < 10_000) {
+        const token = randomBytes(bytes).toString("base64").replace(/=+$/, "");
+        if (!token.includes("/") || seen.has(token)) continue;
+        seen.add(token);
+        for (const value of [token, `/${token}`]) {
+          checked += 1;
+          if (!classifyString("anything", value).some((item) => item.tier === "strong" && item.value === value)) misses.push(value);
+        }
       }
+      // The only tokens that are not strong are the ones without a digit (an opaque run needs a letter and a digit, as it always did): measured 0.5% at 24 bytes, 0.1% at 32, 0.02% at 40.
+      expect(misses.filter((value) => /[0-9]/.test(value)), `${bytes} bytes`).toEqual([]);
+      expect(misses.length / checked, `${bytes} bytes`).toBeLessThan(0.02);
     }
-    expect(checked).toBeGreaterThanOrEqual(10_000);
-    expect(misses.filter((value) => /[0-9]/.test(value))).toEqual([]);
-    expect(misses.length / checked).toBeLessThan(0.01);
+  });
+
+  it("M3-1: one short or random-looking piece never makes a token a path (the re-check's examples, which the fix round 3 rule called paths)", () => {
+    for (const token of ["keuKworc/72N1kIkJ5mQjGuvL9k3e8RRxCORrdK7NZs", "4/f9EDeEMdOdCrluy3cor3zIui5R6gz9K1cB8DnegrU", "levZOQeFlMUeSw5bnSgCr4zKCjog2b/8", "/Ko/Xk3pQ9xW2mV7cL4nR8tYabcdEFGHijk12LM",
+      "caxso3/SCS1tjURjp5uz4keV0SldtQ4V5RrYQQzM/ac", "ve/Zbzio5/Z4ZGLOGCp24cHJf26hMPW7"]) {
+      expect(classifyString("anything", token).map((item) => item.tier), token).toContain("strong");
+    }
+  });
+
+  describe("M3-2 / M3-3: a credential context wins over every path or shape heuristic", () => {
+    const TOKEN_LIKE = ["/Ko/Xk3pQ9xW2mV7cL4nR8tYabcdEFGHijk12LM", "/Tokens/Xk3pQ9xW2mV7cL4nR8tYabcdEFGHijk12LM", ...MIXED_CASE_PATHS, "/users/8423/orders/12345/items/99882211"];
+    it.each(TOKEN_LIKE)("%s is strong under a credential key (top level, JSON leaf, parent-key inheritance), a credential URL parameter and a credential header", (value) => {
+      for (const name of ["token", "access_token", "auth", "session", "sid", "refresh_token", "apiKey", "password"]) {
+        expect(classifyString(name, value).map((item) => item.tier), `${name} ${value}`).toContain("strong");
+      }
+      expect(classifyStorageEntry({ name: "state", value: JSON.stringify({ access_token: value }) }).filter((item) => item.value === value && item.tier === "strong"), "leaf").toHaveLength(1);
+      expect(classifyStorageEntry({ name: "state", value: JSON.stringify({ session: { value } }) }).filter((item) => item.value === value && item.tier === "strong"), "generic leaf").toHaveLength(1);
+      expect(classifyStorageEntry({ name: "accessToken", value: JSON.stringify(value) }).filter((item) => item.value === value && item.tier === "strong"), "stored string").toHaveLength(1);
+      expect(urlSecrets(`https://app.test/cb?token=${encodeURIComponent(value)}`).filter((item) => item.value === value && item.tier === "strong"), "?token=").toHaveLength(1);
+      expect(urlSecrets(`https://app.test/cb#access_token=${encodeURIComponent(value)}&token_type=bearer`).filter((item) => item.value === value && item.tier === "strong"), "#access_token=").toHaveLength(1);
+      for (const header of ["X-Auth-Token", "X-API-Key", "Authorization", "X-Access-Token"]) {
+        expect(headerSecrets([{ name: header, value }]).filter((item) => item.value === value && item.tier === "strong"), header).toHaveLength(1);
+      }
+    });
+
+    it("under a neutral key and a neutral parameter or header the same values stay what they were: paths are nothing or weak, tokens strong", () => {
+      expect(classifyString("anything", MIXED_CASE_PATHS[0]!).filter((item) => item.tier === "strong")).toEqual([]);
+      expect(urlSecrets(`https://app.test/cb?next=${encodeURIComponent(MIXED_CASE_PATHS[0]!)}`)).toEqual([]);
+      expect(headerSecrets([{ name: "X-Request-Path", value: MIXED_CASE_PATHS[0]! }])).toEqual([]);
+    });
   });
 
   it("N-12: a page object without mainFrame still has its first frame treated as the main frame (fail closed)", async () => {

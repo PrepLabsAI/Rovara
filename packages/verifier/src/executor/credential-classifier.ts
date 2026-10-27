@@ -52,24 +52,33 @@ export function isOpaqueToken(value: string): boolean {
  * digits that are not words. Two parts or more, and at least 60% of them words.
  */
 function isSlugOrPath(value: string): boolean {
-  const parts = value.split(/[-_/]/).filter((part) => part.length > 0);
+  // In a mixed-case value a `/` is not a slug separator: such a value is a base64 token or a path with ids, and `isPathLike` tells which (random base64 pieces between slashes are sometimes word-like).
+  const separators = value.includes("/") && /[a-z]/.test(value) && /[A-Z]/.test(value) ? /[-_]/ : /[-_/]/;
+  const parts = value.split(separators).filter((part) => part.length > 0);
   if (parts.length < 2) return false;
   const words = parts.filter((part) => WORD_SEGMENT.test(part) && /[aeiouy]/i.test(part)).length;
   return words / parts.length >= 0.6;
 }
 
-/** One segment of a REST-style path: digits (an id), a long hex id, a word in any case (`orders`, `userProfiles`, `OrderItems`, with a short number after it), or a version (`v2`). */
-const CAMEL_WORD = /^[A-Za-z][a-z]+(?:[A-Z][a-z]+)*\d{0,4}$/;
+/**
+ * A segment that says "this is a path" (MIDSTEP-2 fix round 4): a real word of 3 letters or more in any case (`orders`, `userProfiles`, `OrderItems`; every camel part has 3+ letters and a vowel,
+ * with a short number after it allowed), a digit id of 3 digits or more, a hex id of 8 characters or more, or a version (`v2`). A short piece (`Ko`, `7`, `dl`) says nothing.
+ */
+const CAMEL_WORD = /^[A-Za-z][a-z]{2,}(?:[A-Z][a-z]{2,})*\d{0,4}$/;
 function isPathSegment(segment: string): boolean {
-  return /^\d+$/.test(segment) || /^[0-9a-fA-F]{8,}$/.test(segment) || /^[a-z]\d{1,3}$/.test(segment) || (CAMEL_WORD.test(segment) && /[aeiouy]/i.test(segment));
+  return /^\d{3,}$/.test(segment) || /^[0-9a-fA-F]{8,}$/.test(segment) || /^v\d{1,2}$/.test(segment)
+    || (CAMEL_WORD.test(segment) && (segment.match(/[A-Z]?[a-z]{2,}/g) ?? []).every((part) => /[aeiouy]/i.test(part)));
 }
 /**
- * A value with `/` in it whose segments are mostly ids and words in any case (`/api/userProfiles/8423/orderItems/12345`, `/Users/8423/Orders/12345`, `/files/<upper-case hex>`): a path, however
- * its case is mixed. A random standard-base64 token has a few random characters between its slashes; they are almost never digits only, hex only or a camelCase word.
+ * A value with `/` in it whose segments are recognisably ids and words (`/api/userProfiles/8423/orderItems/12345`, `/Users/8423/Orders/12345`, `/files/<upper-case hex>`): a path, however its case
+ * is mixed. A random standard-base64 token has a few random characters between its slashes; they are almost never a word, a digit id or a hex id. One short piece never decides: with two segments
+ * both must say "path"; with more, at least three and half of them.
  */
 function isPathLike(value: string): boolean {
   const segments = value.split("/").filter((segment) => segment.length > 0);
-  return segments.length >= 2 && segments.filter(isPathSegment).length / segments.length >= 0.5;
+  if (segments.length < 2) return false;
+  const meaningful = segments.filter(isPathSegment).length;
+  return segments.length === 2 ? meaningful === 2 : meaningful >= 3 && meaningful / segments.length >= 0.5;
 }
 
 /** A single long base64, base64url or hex run with a letter and a digit that is not a UUID, a path or a slug. */
@@ -99,7 +108,7 @@ const STRONGEST_WORDS = new Set(["token", "tokens", "jwt", "secret", "secrets", 
 /** After a credential word, these say the value is about the credential, not the credential itself (`tokenType`, `authUser`, `sessionExpiresAt`). */
 const METADATA_WORDS = new Set(["user", "username", "email", "name", "at", "time", "timestamp", "date", "expires", "expiry", "expiration", "expired", "exp", "ttl", "timeout", "url", "uri", "path",
   "redirect", "return", "route", "callback", "enabled", "disabled", "type", "status", "provider", "method", "count", "length", "version", "mode", "flag", "flags", "kind", "required", "valid",
-  "error", "message", "label", "title", "text", "hint", "domain", "scope", "scopes", "policy", "config", "settings", "consent", "preference", "preferences", "prefs", "banner", "notice", "dismissed"]);
+  "error", "message", "label", "title", "text", "hint", "domain", "scope", "scopes", "policy", "config", "settings", "consent", "preference", "preferences", "prefs", "banner", "notice", "dismissed", "start", "started", "end", "ended", "created", "updated", "modified"]);
 /** Anywhere in the key, these say the value is a route (`redirectAfterAuth`, `returnTo`, `next`). */
 const ROUTE_WORDS = new Set(["redirect", "return", "returnto", "callback", "next", "referrer", "referer", "origin"]);
 
@@ -169,13 +178,14 @@ export function classifyString(name: string, value: string, options: ClassifyOpt
         if (!options.leaf || key.credential || (mixed && !PURE_HEX.test(trimmed))) add(trimmed, "strong");
       }
     }
-    if (!exclusion && key.credential) {
+    // A credential key wins over every path or shape heuristic (a token that starts with `/` is a token); the key reading already took out the keys about a route or a date.
+    if (key.credential) {
       const floor = key.strongest ? MIN_STRONG_KEYED_LENGTH : (options.keyedFloor ?? MIN_WEAK_LENGTH);
       if (trimmed.length >= floor) add(trimmed, "strong");
     }
   }
   // Everything else that is long enough, or short under a credential key, is app data that may be secret: scrubbed, not refused.
-  const weakAllowed = options.leaf !== true || (key.credential && !isRouteOrDate(trimmed))
+  const weakAllowed = options.leaf !== true || key.credential
     || (isOpaqueToken(trimmed) && trimmed.length >= MIN_WEAK_LENGTH && !PURE_HEX.test(trimmed) && !UUID.test(trimmed));
   if (weakAllowed && !found.has(trimmed) && (trimmed.length >= MIN_WEAK_LENGTH || (key.credential && trimmed.length >= MIN_CREDENTIAL_LENGTH))) add(trimmed, "weak");
   if (weakAllowed && trimmed !== value && !found.has(value) && value.length >= MIN_WEAK_LENGTH) add(value, "weak");

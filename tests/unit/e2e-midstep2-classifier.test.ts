@@ -59,10 +59,11 @@ describe("tiers (gap 2)", () => {
     const uuid = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
     expect(tierOf(classifyString("lastWorkspaceId", uuid), uuid)).toBe("weak");
     expect(tierOf(classifyString("lastSessionAt", "2026-10-27T09:15:00.000Z"), "2026-10-27T09:15:00.000Z")).toBe("weak");
-    // A route, a URL or a date under a key that names a credential is still not one (the shape is checked before the key).
-    for (const [name, value] of [["session", "https://app.example.com/orders/overview"], ["auth", "/dashboard/overview"], ["sessionStart", "2026-10-27T09:15:00.000Z"], ["token", "maya@example.com"]] as const) {
-      expect(tierOf(classifyString(name, value), value), `${name}=${value}`).toBe("weak");
+    // A credential key wins over the path, URL and email shapes (fix round 4); only a key that is about a date or a route (`sessionStart`, `redirectAfterAuth`) takes the value out.
+    for (const [name, value] of [["session", "https://app.example.com/orders/overview"], ["auth", "/dashboard/overview"], ["token", "maya@example.com"]] as const) {
+      expect(tierOf(classifyString(name, value), value), `${name}=${value}`).toBe("strong");
     }
+    expect(tierOf(classifyString("sessionStart", "2026-10-27T09:15:00.000Z"), "2026-10-27T09:15:00.000Z")).toBe("weak");
     // A UUID kept as a session id IS a credential: the key says so.
     expect(tierOf(classifyString("sessionId", uuid), uuid)).toBe("strong");
   });
@@ -265,7 +266,8 @@ describe("fix round 1 (review of 334c7ced)", () => {
     expect(tierOf(classifyString("token", token), token)).toBe("strong");
     expect(tierOf(classifyString("anything", token), token)).toBe("strong");
     expect(tierOf(urlSecrets(`https://app.test/cb?access_token=${encodeURIComponent(token)}`), token)).toBe("strong");
-    expect(tierOf(classifyString("token", "/dashboard/overview/orders"), "/dashboard/overview/orders")).toBe("weak");
+    // A path under a neutral key stays weak; under a credential key the key wins.
+    expect(tierOf(classifyString("lastRoute", "/dashboard/overview/orders"), "/dashboard/overview/orders")).toBe("weak");
   });
 
   it("I-4: a token stored with JSON.stringify is classified bare as well as quoted", () => {
@@ -284,8 +286,9 @@ describe("fix round 1 (review of 334c7ced)", () => {
     expect(strong(classifyStorageEntry({ name: "state", value: JSON.stringify({ auth: { plan: "pro-annual-2026-plan" }, profile: { id: sid } }) }))).toEqual([]);
     // Only the short neutral keys inherit: an opaque value under `theme` beside the credential key does not.
     expect(strong(classifyStorageEntry({ name: "state", value: JSON.stringify({ auth: { theme: sid } }) }))).toEqual([]);
-    // A route under a credential key is still a route.
-    expect(classifyStorageEntry({ name: "state", value: JSON.stringify({ session: `/orders/${UUID}` }) })).toEqual([]);
+    // A path under a credential key is a credential (the key wins); under a neutral key it is nothing.
+    expect(tierOf(classifyStorageEntry({ name: "state", value: JSON.stringify({ session: `/orders/${UUID}` }) }), `/orders/${UUID}`)).toBe("strong");
+    expect(classifyStorageEntry({ name: "state", value: JSON.stringify({ href: `/orders/${UUID}` }) })).toEqual([]);
   });
 
   it("I-6: a pure hex id, an address, a git sha or a dashless UUID inside JSON is not registered under a neutral key, and is a credential under a credential key; a base64 mix is still strong", () => {
