@@ -161,7 +161,7 @@ describe("the renewal's deploy units against the synthesized control-plane stack
     expect(findings[0]!.roleLogicalId).toMatch(/^RuntimeRequalifyStepsServiceRole/);
     const [statement] = findings[0]!.statements ?? [];
     expect(statement).toMatchObject({ Effect: "Allow", Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] }, StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" } } });
-    expect(statement?.Condition?.["ForAllValues:StringEquals"]).toEqual({ "dynamodb:Attributes": expect.arrayContaining(["workspaceId", "status", "state"]) });
+    expect((statement?.Condition as Record<string, unknown> | undefined)?.["ForAllValues:StringEquals"]).toEqual({ "dynamodb:Attributes": expect.arrayContaining(["workspaceId", "status", "state"]) as unknown });
     expect([statement?.Action].flat().sort()).toEqual(["dynamodb:GetItem", "dynamodb:Query"]);
     expect(JSON.stringify(findings[0]!.statements)).not.toMatch(/dynamodb:(Put|Update|Delete|Batch|Transact)/);
     expect(tier3Request(findings)).toContain("PROJECT_SETUP#*");

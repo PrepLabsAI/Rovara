@@ -37,7 +37,7 @@ export function drainIamClient(items: readonly Item[], options: { allowed?: read
     if (attributes === undefined) throw denied("a read must name its attributes");
     for (const attribute of attributes) if (!allowed.includes(attribute)) throw denied(`attribute ${attribute} is not allowed`);
     if (options.deny?.(request) === true) throw denied("refused");
-    const project = (item: Item): Item => Object.fromEntries(attributes.map((attribute) => [attribute, item[attribute]]).filter(([, value]) => value !== undefined));
+    const project = (item: Item): Item => Object.fromEntries(attributes.flatMap((attribute): Array<[string, unknown]> => (item[attribute] === undefined ? [] : [[attribute, item[attribute]]])));
     if (name === "GetCommand") {
       const found = items.find((item) => item.pk === input.Key?.pk && item.sk === input.Key?.sk);
       return { Item: found === undefined ? undefined : project(found) };
