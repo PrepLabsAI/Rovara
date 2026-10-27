@@ -343,11 +343,12 @@ describe("sign-in capture reads the same things", () => {
 });
 
 describe("the host wires the new reads (static: the host is not started in unit tests)", () => {
-  it("attaches a reader that goes through readBrowserState, watches requests of a non-anonymous context, and reads the case's browser through the same classifier when it closes", () => {
+  it("attaches a reader that goes through readBrowserState, watches requests of every context (a signed-out visitor's too, with the visitor bar), and reads the case's browser through the same classifier when it closes", () => {
     const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
     expect(host).toMatch(/sessionSync\.attach\(sessionRef, \{ storageState: \(\) => readBrowserState\(browserContext\) \}, \{ anonymous \}\)/);
-    expect(host).toMatch(/if \(!anonymous\) watchBrowserRequests\(browserContext, \{ learn: \(items\) => sessionSync\.learn\(items\), track: \(pending\) => sessionSync\.track\(pending\) \}\)/);
-    expect(host).toMatch(/tellBrowserState\(await readBrowserState\(owned\), \(item\) => sessionSync\.learn\(\[item\]\)\)/);
+    expect(host).toMatch(/\n\s+watchBrowserRequests\(browserContext, \{ learn: \(items\) => sessionSync\.learn\(items\), track: \(pending\) => sessionSync\.track\(pending\) \}, \{ visitor: anonymous \}\)/);
+    expect(host).not.toMatch(/if \(!anonymous\) watchBrowserRequests/);
+    expect(host).toMatch(/tellBrowserState\(await readBrowserState\(owned\), \(item\) => sessionSync\.learn\(\[item\]\), undefined, \{ visitor: store\.isAnonymous\(sessionRef\) \}\)/);
   });
 });
 
@@ -389,7 +390,7 @@ describe("fix round 1 (review of 334c7ced)", () => {
     expect(await e.workerSays(`id ${JWT}`)).toMatchObject(REFUSED);
   });
 
-  it("I-2: registering thousands of values is close to linear, and weak registrations stop at the cap", { timeout: 30_000 }, () => {
+  it("I-2: registering thousands of values is close to linear, and evidence registrations stop at the cap (the rest go to the model's mask)", { timeout: 30_000 }, () => {
     const redactor = createCredentialRedactor([]);
     const started = Date.now();
     for (let index = 0; index < 12_000; index += 1) redactor.addSessionSecret(`opaque-session-value-${String(index).padStart(6, "0")}-abcdef`, { evidenceOnly: true });
@@ -397,9 +398,12 @@ describe("fix round 1 (review of 334c7ced)", () => {
     expect(redactor.contains(bytesOf("opaque-session-value-011999-abcdef"), "all")).toBe(true);
     expect(redactor.text("x opaque-session-value-000001-abcdef y")).toBe("x <session> y");
     const told: string[] = [];
-    const source = createE2ESessionSyncSource({ register: (value) => { told.push(value); }, known: () => [] });
+    const masked: string[] = [];
+    const source = createE2ESessionSyncSource({ register: (value, options) => { (options?.maskOnly === true ? masked : told).push(value); }, known: () => [] });
     source.learn(Array.from({ length: E2E_SESSION_SYNC_MAX_WEAK_VALUES + 500 }, (_unused, index) => ({ value: `weak-value-${String(index).padStart(6, "0")}-abcdef`, tier: "weak" as const })));
+    // The evidence scrub stops at the cap; the values after it are held for the model's mask (never dropped: MASKMAYBE F-2).
     expect(told).toHaveLength(E2E_SESSION_SYNC_MAX_WEAK_VALUES);
+    expect(masked).toHaveLength(500);
     // A strong value is never held back by the cap.
     source.learn([{ value: "strong-value-abcdef0123456789", tier: "strong" }]);
     expect(told).toHaveLength(E2E_SESSION_SYNC_MAX_WEAK_VALUES + 1);

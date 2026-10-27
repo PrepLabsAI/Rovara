@@ -10,8 +10,21 @@
  *
  * A pure module: no I/O, no browser.
  */
-export type CredentialTier = "strong" | "weak";
+/**
+ * - `strong`: a credential (told to the worker, refused in a model prompt).
+ * - `weak`: probably app data but token-shaped or under a secret-sounding name: scrubbed from evidence AND masked for the model (`<session>`).
+ * - `scrub`: an ordinary value (a sentence, a path, a URL, a host, an email, a date, a UUID, a slug, a word, hex) kept at the top level of storage: scrubbed from evidence only, never masked
+ *   for the model (masking an app's own base URL or a draft title would break the steps that read them).
+ * - `mask` and `overflow` are made by the registration caps, not by the classifier: `mask` is a weak value past the evidence cap (masked for the model, not written anywhere), `overflow` says
+ *   "some weak values could not be registered at all" (its `value` is empty); the model's view then fails closed.
+ */
+export type CredentialTier = "strong" | "weak" | "scrub" | "mask" | "overflow";
 export interface ClassifiedValue { value: string; tier: CredentialTier }
+const TIER_RANK: Record<CredentialTier, number> = { strong: 4, weak: 3, scrub: 2, mask: 1, overflow: 0 };
+/** Whether `next` replaces `before` as the tier of a value (the stronger tier wins; the same tier is not a change). */
+export function tierWins(next: CredentialTier, before: CredentialTier | undefined): boolean {
+  return before === undefined || TIER_RANK[next] > TIER_RANK[before];
+}
 
 /** Below this a value is never registered, whatever its key says: the redactor ignores anything shorter, and a handful of characters would match almost anything. */
 export const MIN_CREDENTIAL_LENGTH = 8;
@@ -82,7 +95,7 @@ function isPathLike(value: string): boolean {
 }
 
 /** A single long base64, base64url or hex run with a letter and a digit that is not a UUID, a path or a slug. */
-function isLongOpaqueRun(value: string): boolean {
+export function isLongOpaqueRun(value: string): boolean {
   if (!LONG_RUN.test(value) || !/[0-9]/.test(value) || !/[A-Za-z]/.test(value) || UUID.test(value) || isSlugOrPath(value)) return false;
   // A `/` in it is either a standard-base64 character or a path separator. A random base64 token of 32+ characters has both cases and segments that are not ids or words; a REST path
   // with numeric or hex ids (`/users/8423/orders/12345/items/99882211`, `/files/9f8a7b6c...`, `/api/userProfiles/8423/orderItems/12345`) does not.
@@ -179,6 +192,12 @@ export interface ClassifyOptions {
    * or slug is never registered: a cache of ordinary ids and paths must not be rewritten in reports or end a run at the final output scan).
    */
   leaf?: boolean;
+  /**
+   * The value is read from a signed-out visitor's browser (MASKMAYBE F-3). The application gives a visitor an id, a cart, a banner state; that is not a credential, and a page may print it. So only
+   * what names or shapes a login credential counts: a value under a credential key, a JWT, JWE or PASETO, a dotted or piped token, a value after a `Bearer`-style scheme. A long opaque run under
+   * an ordinary key (`visitor_id`) is not registered.
+   */
+  visitor?: boolean;
 }
 
 /**
@@ -186,10 +205,17 @@ export interface ClassifyOptions {
  * registering with its tier (a value under two reasons gets the stronger tier).
  */
 export function classifyString(name: string, value: string, options: ClassifyOptions = {}): ClassifiedValue[] {
+  const items = classifyStringAll(name, value, options);
+  if (options.visitor !== true) return items;
+  const keyed = credentialKey(name).credential || SCHEME.test(value.trim());
+  return items.filter((item) => keyed || isTokenShape(item.value) || hasOpaquePart(item.value) !== null);
+}
+
+function classifyStringAll(name: string, value: string, options: ClassifyOptions): ClassifiedValue[] {
   const found = new Map<string, CredentialTier>();
   const add = (candidate: string, tier: CredentialTier): void => {
     if (candidate.length < MIN_CREDENTIAL_LENGTH || COMMON.test(candidate)) return;
-    if (found.get(candidate) !== "strong") found.set(candidate, tier);
+    if (tierWins(tier, found.get(candidate))) found.set(candidate, tier);
   };
   const key = credentialKey(name);
   const trimmed = value.trim();
@@ -221,11 +247,15 @@ export function classifyString(name: string, value: string, options: ClassifyOpt
   }
   // A name that only sounds secret (`tokenEndpoint`, `sessionLastActive`) holding a date, URL, path, host or email: weak, whatever the position (it is shown on pages, so never refused; masked from the model).
   const shapedUnderLooseKey = key.loose && noSpace && trimmed.length >= MIN_WEAK_LENGTH && (isRouteOrDate(trimmed) || HOST_LIKE.test(trimmed));
-  // Everything else that is long enough, or short under a credential key, is app data that may be secret: scrubbed, not refused.
-  const weakAllowed = options.leaf !== true || key.credential || shapedUnderLooseKey || (noSpace && isDigitlessRandomToken(trimmed))
+  // Everything else that is long enough, or short under a credential key, is app data that may be secret. It is MASKED for the model (weak) only when it is what a JSON leaf would be registered for:
+  // a value under a credential-sounding name, a date/URL/host under a name that only sounds secret, a random-looking run, an opaque letters-and-digits token. Any other value is app data the
+  // model must be able to read (a path, a URL, an email, a date, a UUID, a slug, a sentence, a word, hex): scrubbed from evidence at the top level, and not registered at all as a leaf.
+  const maskable = key.credential || shapedUnderLooseKey || (noSpace && isDigitlessRandomToken(trimmed))
     || (isOpaqueToken(trimmed) && trimmed.length >= MIN_WEAK_LENGTH && !PURE_HEX.test(trimmed) && !UUID.test(trimmed));
-  if (weakAllowed && !found.has(trimmed) && (trimmed.length >= MIN_WEAK_LENGTH || (key.credential && trimmed.length >= MIN_CREDENTIAL_LENGTH))) add(trimmed, "weak");
-  if (weakAllowed && trimmed !== value && !found.has(value) && value.length >= MIN_WEAK_LENGTH) add(value, "weak");
+  const weakAllowed = options.leaf !== true || maskable;
+  const tier: CredentialTier = maskable ? "weak" : "scrub";
+  if (weakAllowed && !found.has(trimmed) && (trimmed.length >= MIN_WEAK_LENGTH || (key.credential && trimmed.length >= MIN_CREDENTIAL_LENGTH))) add(trimmed, tier);
+  if (weakAllowed && trimmed !== value && !found.has(value) && value.length >= MIN_WEAK_LENGTH) add(value, tier);
   return [...found].map(([text, tier]) => ({ value: text, tier }));
 }
 

@@ -19,6 +19,7 @@ import { MIDSTEP2_POSITION as POSITION, createMidstep2Harness } from "../support
 
 const WEAK = "Dk3pQ9xW2mV7cL4nR8tY";
 const ROUTE = "/projects/alpha/settings/notifications2";
+const SEEN = "2026-10-27T09:15:00.000Z";
 const STRONG = "Qe5rT8yU1iO4pA7sD0fG3hJ6kL9zXcVb";
 const OPAQUE = "Zk3pQ9xW2mV7cL4nR8tY1bH6jD5sA0gF";
 const tierOf = (items: readonly ClassifiedValue[], value: string) => items.find((item) => item.value === value)?.tier ?? null;
@@ -42,14 +43,14 @@ describe("change 1: a weak value is masked in every model-bound text, the step c
   }
 
   it("every kind of text in a call (system, page snapshot, URL, tool call, tool result, tool description) is masked; the weak value was learned by the sync inside the call; the call is answered", async () => {
-    const { e, stack } = await stackFor([{ name: "lastDocument", value: WEAK }, { name: "lastVisited", value: ROUTE }]);
+    const { e, stack } = await stackFor([{ name: "lastDocument", value: WEAK }, { name: "sessionLastActive", value: SEEN }, { name: "lastVisited", value: ROUTE }]);
     expect(e.registry.sessionSecrets).toEqual([]);
     const answer = await stack.adapter.doGenerate({
       prompt: [
         { role: "system", content: `You drive an app. The last document was ${WEAK}.` },
-        user(`#n1 text "Document ${WEAK}"\n#n2 link "Back" href="${ROUTE}"\nurl: http://app.test/open?next=${encodeURIComponent(ROUTE)}&doc=${WEAK}`),
+        user(`#n1 text "Document ${WEAK}"\n#n2 link "Back" href="${ROUTE}"\nurl: http://app.test/open?seen=${encodeURIComponent(SEEN)}&doc=${WEAK}`),
         { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "type", input: { target: "n2", value: WEAK } }] },
-        { role: "tool", content: [{ type: "tool-result", toolCallId: "c1", toolName: "type", output: { type: "text", value: `Typed ${WEAK} at ${ROUTE}` } }],
+        { role: "tool", content: [{ type: "tool-result", toolCallId: "c1", toolName: "type", output: { type: "text", value: `Typed ${WEAK} at ${SEEN}` } }],
         },
       ],
       tools: [{ type: "function", name: "tap", description: `Tap one node, for example the one that opens ${WEAK}`, inputSchema: TOOLS[0]!.inputSchema }],
@@ -59,9 +60,11 @@ describe("change 1: a weak value is masked in every model-bound text, the step c
     expect(e.run.seen).toHaveLength(1);
     const call = e.run.seen[0] as { prompt: Array<{ role: string; content: unknown }>; tools: Array<{ description: string }> };
     const wire = JSON.stringify(call);
-    for (const spelling of [WEAK, ROUTE, encodeURIComponent(ROUTE)]) expect(wire, spelling).not.toContain(spelling);
+    for (const spelling of [WEAK, SEEN, encodeURIComponent(SEEN)]) expect(wire, spelling).not.toContain(spelling);
+    // The route stored beside them is scrubbed from evidence but is ordinary app data: the model reads it.
+    expect(wire).toContain(ROUTE);
     expect(call.prompt[0]!.content).toBe("You drive an app. The last document was <session>.");
-    expect((call.prompt[1]!.content as Part[])[0]!.text).toBe('#n1 text "Document <session>"\n#n2 link "Back" href="<session>"\nurl: http://app.test/open?next=<session>&doc=<session>');
+    expect((call.prompt[1]!.content as Part[])[0]!.text).toBe(`#n1 text "Document <session>"\n#n2 link "Back" href="${ROUTE}"\nurl: http://app.test/open?seen=<session>&doc=<session>`);
     expect(JSON.stringify(call.prompt[2]!.content)).toContain('"value":"<session>"');
     expect(JSON.stringify(call.prompt[3]!.content)).toContain("Typed <session> at <session>");
     expect(call.tools[0]!.description).toBe("Tap one node, for example the one that opens <session>");
@@ -203,16 +206,21 @@ describe("R4-3: a digit-less random token that is not strong is weak (masked), a
   it.each([[24, 150], [32, 60], [40, 30]])("random %i-byte base64 and base64url tokens with no digit (%i of each): weak in at least 90%% of the sample, never strong, never unregistered at the top level", (bytes, count) => {
     // The sample is only the tokens with no digit (the rest are opaque runs and strong); 0.5% of 24-byte tokens are of this kind, so it is built by rejection.
     let weakLeaf = 0;
+    let weakTop = 0;
     let total = 0;
     for (const token of [...digitless(bytes, count, (raw) => raw.toString("base64")), ...digitless(bytes, count, (raw) => raw.toString("base64url")), ...digitless(bytes, count, (raw) => `/${raw.toString("base64")}`)]) {
       total += 1;
       expect(tierOf(classifyString("anything", token), token), `top ${token}`).not.toBe("strong");
-      expect(tierOf(classifyString("anything", token), token), `top ${token}`).toBe("weak");
+      // At the top level a token the random-looking test does not catch is scrub-only (still scrubbed from evidence), never unregistered.
+      const top = tierOf(classifyString("anything", token), token);
+      expect(["weak", "scrub"], `top ${token}`).toContain(top);
+      if (top === "weak") weakTop += 1;
       const leaf = tierOf(classifyStorageEntry({ name: "settings", value: JSON.stringify({ anything: token }) }), token);
       expect(leaf, `leaf ${token}`).not.toBe("strong");
       if (leaf === "weak") weakLeaf += 1;
     }
     expect(weakLeaf / total).toBeGreaterThanOrEqual(0.9);
+    expect(weakTop / total).toBeGreaterThanOrEqual(0.9);
   }, 120_000);
   it("a fixed digit-less token is weak as a JSON leaf under a neutral key and under a neutral URL-free entry", () => {
     const token = "kQwErTyUiOpAsDfGhJkLzXcVbNmQwErT";

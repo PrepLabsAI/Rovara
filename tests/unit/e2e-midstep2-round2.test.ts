@@ -100,7 +100,7 @@ describe("N-2: an evidence-only value learned after a trace is on disk scrubs or
   });
 
   it("the registry tells the child's file writer which values are evidence-only, and the host and the parent use the tagged file", () => {
-    const told: Array<{ value: string; evidenceOnly: boolean }> = [];
+    const told: Array<{ value: string; evidenceOnly: boolean; maskOnly: boolean }> = [];
     const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]), onRegister: (value, options) => { told.push({ value, evidenceOnly: options?.evidenceOnly === true }); } });
     registry.register("credential-value-0123456789");
     registry.register("evidence-value-0123456789", { evidenceOnly: true });
@@ -164,8 +164,8 @@ describe("N-6: survivors", () => {
   const applicationId = fixture.compiled.originByApplicationId[0]!.applicationId;
   const contract = readE2EApplicationProjectContract(fixture.compiled.runtimeAdmissionContext.selectionInput.sourceSnapshot, applicationId)!;
 
-  it("the sign-in registers at most the weak cap of evidence-only values, and never holds back a credential", async () => {
-    const told: Array<{ value: string; evidenceOnly: boolean }> = [];
+  it("the sign-in registers at most the weak cap of evidence-only values (the rest go to the mask), and never holds back a credential", async () => {
+    const told: Array<{ value: string; evidenceOnly: boolean; maskOnly: boolean }> = [];
     const weak = Array.from({ length: E2E_SESSION_SYNC_MAX_WEAK_VALUES + 300 }, (_unused, index) => ({ name: `k${index}`, value: `Abcdef0123456789x${String(index).padStart(6, "0")}` }));
     const driver: FormLoginDriver = {
       async signIn(input) {
@@ -179,12 +179,14 @@ describe("N-6: survivors", () => {
         }, async dispose() { /* nothing */ } };
       },
     };
-    const store = createExecutorSessionStore({ plan: fixture.plan, formLogin: driver, registerSecret: (value, options) => { told.push({ value, evidenceOnly: options?.evidenceOnly === true }); } });
+    const store = createExecutorSessionStore({ plan: fixture.plan, formLogin: driver, registerSecret: (value, options) => { told.push({ value, evidenceOnly: options?.evidenceOnly === true, maskOnly: options?.maskOnly === true }); } });
     const profileId = contract.accountProfiles.find((item) => item.roleRef === "owner")?.profileId ?? contract.accountProfiles[0]!.profileId;
     const ref = { applicationId, profileId, revision: 1, definitionDigest: "8".repeat(64) };
     await store.open({ binding: {}, applicationId, profileId, approvedAccountRef: ref, origin: E2E_EXECUTOR_COMPILED_ORIGIN }, new AbortController().signal);
     expect(told.filter((item) => item.evidenceOnly)).toHaveLength(E2E_SESSION_SYNC_MAX_WEAK_VALUES);
-    expect(told.filter((item) => !item.evidenceOnly).map((item) => item.value)).toContain(JWT);
+    // The 300 after the cap are held for the model's mask (MASKMAYBE F-2), not dropped.
+    expect(told.filter((item) => item.maskOnly)).toHaveLength(300);
+    expect(told.filter((item) => !item.evidenceOnly && !item.maskOnly).map((item) => item.value)).toEqual([JWT]);
   });
 
   it("the classify memo is cleared when it would pass its bound, and the new entries are remembered", () => {

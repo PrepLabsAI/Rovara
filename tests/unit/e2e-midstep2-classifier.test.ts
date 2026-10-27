@@ -48,16 +48,16 @@ describe("tiers (gap 2)", () => {
     expect(classifyString("theme", "dark")).toEqual([]);
   });
 
-  it("the known false positive: a 32+ character path or slug with a digit is NOT strong (it is weak: scrubbed, never refused)", () => {
+  it("the known false positive: a 32+ character path or slug with a digit is NOT strong (it is scrub-only at the top level: scrubbed from evidence, never refused, never masked for the model)", () => {
     for (const slug of ["/projects/alpha/settings/notifications2", "my-quarterly-report-for-the-board-2024-final", "projects/alpha/settings/notifications2/edit", "internationalization-and-localization-settings2"]) {
       expect(slug.length, slug).toBeGreaterThanOrEqual(32);
-      expect(tierOf(classifyString("lastVisited", slug), slug), slug).toBe("weak");
-      expect(tierOf(classifyString("anything", slug), slug), slug).toBe("weak");
+      expect(tierOf(classifyString("lastVisited", slug), slug), slug).toBe("scrub");
+      expect(tierOf(classifyString("anything", slug), slug), slug).toBe("scrub");
     }
     // ... also under a key the old rule matched ("redirectAfterAuth", "lastSessionAt", a UUID under a neutral key).
-    expect(tierOf(classifyString("redirectAfterAuth", "/dashboard/overview/orders"), "/dashboard/overview/orders")).toBe("weak");
+    expect(tierOf(classifyString("redirectAfterAuth", "/dashboard/overview/orders"), "/dashboard/overview/orders")).toBe("scrub");
     const uuid = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
-    expect(tierOf(classifyString("lastWorkspaceId", uuid), uuid)).toBe("weak");
+    expect(tierOf(classifyString("lastWorkspaceId", uuid), uuid)).toBe("scrub");
     expect(tierOf(classifyString("lastSessionAt", "2026-10-27T09:15:00.000Z"), "2026-10-27T09:15:00.000Z")).toBe("weak");
     // A credential key wins over the path, URL and email shapes (fix round 4); only a key that is about a date or a route (`sessionStart`, `redirectAfterAuth`) takes the value out.
     for (const [name, value] of [["session", "https://app.example.com/orders/overview"], ["auth", "/dashboard/overview"], ["token", "maya@example.com"]] as const) {
@@ -92,8 +92,8 @@ describe("tiers (gap 2)", () => {
     expect(tierOf(classifyString("anything", paseto), paseto)).toBe("strong");
   });
 
-  it("any other value of 16+ characters is weak (as before: scrubbed from evidence), and one under 16 is not registered", () => {
-    expect(tierOf(classifyString("draft", "Quarterly report for ACME"), "Quarterly report for ACME")).toBe("weak");
+  it("any other value of 16+ characters is scrub-only (scrubbed from evidence as before, not masked for the model), and one under 16 is not registered", () => {
+    expect(tierOf(classifyString("draft", "Quarterly report for ACME"), "Quarterly report for ACME")).toBe("scrub");
     expect(classifyString("locale", "en-US")).toEqual([]);
   });
 
@@ -155,7 +155,7 @@ describe("JSON leaves (gap 1)", () => {
   });
 
   it("text that merely starts with a brace is a plain value", () => {
-    expect(classifyStorageEntry({ name: "note", value: "{not json at all" })).toEqual([{ value: "{not json at all", tier: "weak" }]);
+    expect(classifyStorageEntry({ name: "note", value: "{not json at all" })).toEqual([{ value: "{not json at all", tier: "scrub" }]);
   });
 });
 
@@ -179,7 +179,9 @@ describe("URL parameters (gap 3)", () => {
     expect(tierOf(items, "4/0AbCdEf123456")).toBe("weak");
     expect(tierOf(items, OPAQUE)).toBe("weak");
     expect(tierOf(items, "abcdef123456")).toBe("weak");
-    expect(urlSecrets(`https://app.test/orders?id=${OPAQUE}&trace=${"a1".repeat(20)}`)).toEqual([]);
+    // A hex trace id is not registered; a neutral parameter whose value is an opaque token is weak (masked, never refused: MASKMAYBE F-4).
+    expect(urlSecrets(`https://app.test/orders?trace=${"a1".repeat(20)}`)).toEqual([]);
+    expect(urlSecrets(`https://app.test/orders?id=${OPAQUE}`)).toEqual([{ value: OPAQUE, tier: "weak" }]);
     expect(urlSecrets("https://app.test/?token=short")).toEqual([]);
   });
 
@@ -272,8 +274,8 @@ describe("fix round 1 (review of 334c7ced)", () => {
     expect(tierOf(classifyString("token", token), token)).toBe("strong");
     expect(tierOf(classifyString("anything", token), token)).toBe("strong");
     expect(tierOf(urlSecrets(`https://app.test/cb?access_token=${encodeURIComponent(token)}`), token)).toBe("strong");
-    // A path under a neutral key stays weak; under a credential key the key wins.
-    expect(tierOf(classifyString("lastRoute", "/dashboard/overview/orders"), "/dashboard/overview/orders")).toBe("weak");
+    // A path under a neutral key stays scrub-only; under a credential key the key wins.
+    expect(tierOf(classifyString("lastRoute", "/dashboard/overview/orders"), "/dashboard/overview/orders")).toBe("scrub");
   });
 
   it("I-4: a token stored with JSON.stringify is classified bare as well as quoted", () => {

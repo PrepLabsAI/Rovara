@@ -1,4 +1,4 @@
-import { classifyString, credentialKey, isOpaqueToken, tokenShapedSubstrings, type ClassifiedValue, type CredentialTier } from "./credential-classifier.js";
+import { classifyString, credentialKey, isOpaqueToken, tierWins, tokenShapedSubstrings, type ClassifiedValue, type CredentialTier } from "./credential-classifier.js";
 
 /**
  * Classifies what a storage entry holds (MIDSTEP-2): the whole value, and, when the value is JSON (compact or pretty, an object, an array, or a string that is itself JSON), every string
@@ -13,15 +13,21 @@ const MAX_PARSE_CHARS = 1_048_576;
 const MAX_NODES = 50_000;
 const MAX_DEPTH = 12;
 const MAX_NESTED_JSON = 4;
-/** A weak value longer than this is not registered (its spellings would cost more than the scrub is worth); a strong one is bounded by the sync. */
+/** A weak value longer than this is not registered (its spellings would cost more than the scrub is worth); the model's view then fails closed (`overflow`). A strong one is bounded by the sync. */
 const MAX_WEAK_CHARS = 65_536;
+/** Weak leaves of one entry that are written for the evidence scrub; the leaves after them are registered for the model's mask only (`mask`), up to MAX_MASK_LEAVES, then the view fails closed. */
 const MAX_WEAK_LEAVES = 200;
+const MAX_MASK_LEAVES = 5_000;
 
-interface Walk { out: Map<string, CredentialTier>; nodes: number; weakLeaves: number; overflow: boolean }
+interface Walk { visitor: boolean; out: Map<string, CredentialTier>; nodes: number; weakLeaves: number; maskLeaves: number; overflow: boolean; viewOverflow: boolean }
 
 function put(walk: Walk, item: ClassifiedValue): void {
-  if (item.tier === "weak" && item.value.length > MAX_WEAK_CHARS) return;
-  if (walk.out.get(item.value) !== "strong") walk.out.set(item.value, item.tier);
+  if ((item.tier === "weak" || item.tier === "scrub") && item.value.length > MAX_WEAK_CHARS) {
+    // A scrub-only value is never shown to the model as a mask, so only a value that would be masked fails the view closed.
+    if (item.tier === "weak") walk.viewOverflow = true;
+    return;
+  }
+  if (tierWins(item.tier, walk.out.get(item.value))) walk.out.set(item.value, item.tier);
 }
 
 /** The parsed value when the text is a JSON object or array within the parse limit, else undefined. `oversized` when it looks like one but is too large to parse. */
@@ -54,7 +60,7 @@ function visitString(walk: Walk, path: string, text: string, depth: number, nest
   const quoted = container === undefined && nested < MAX_NESTED_JSON ? parseQuoted(text) : undefined;
   if (quoted !== undefined) {
     // The quoted form is registered as it is stored, and the bare inner value is classified under the same key: a page shows the token, not its quotes.
-    for (const item of classifyString(path, text, top ? {} : { leaf: true })) put(walk, item);
+    for (const item of classifyString(path, text, { ...(top ? {} : { leaf: true }), visitor: walk.visitor })) put(walk, item);
     visitString(walk, path, quoted, depth + 1, nested + 1, false);
     return;
   }
@@ -64,10 +70,19 @@ function visitString(walk: Walk, path: string, text: string, depth: number, nest
     visitNode(walk, path, container.parsed, depth + 1, nested + 1);
     return;
   }
-  for (const item of classifyString(path, text, top ? {} : { leaf: true })) {
+  for (const item of classifyString(path, text, { ...(top ? {} : { leaf: true }), visitor: walk.visitor })) {
     // A sentence in a JSON leaf is text, not a token; only a top-level plain value is scrubbed on length alone, as it always was.
-    if (item.tier === "weak" && !top && (/\s/.test(item.value) || walk.weakLeaves >= MAX_WEAK_LEAVES)) continue;
-    if (item.tier === "weak" && !top) walk.weakLeaves += 1;
+    if (item.tier === "weak" && !top && /\s/.test(item.value)) continue;
+    if (item.tier === "weak" && !top) {
+      walk.weakLeaves += 1;
+      // Past the evidence cap a weak leaf is still masked for the model; only past the mask bound does the view fail closed.
+      if (walk.weakLeaves > MAX_WEAK_LEAVES) {
+        if (walk.maskLeaves >= MAX_MASK_LEAVES) { walk.viewOverflow = true; continue; }
+        walk.maskLeaves += 1;
+        put(walk, { value: item.value, tier: "mask" });
+        continue;
+      }
+    }
     put(walk, item);
   }
 }
@@ -93,19 +108,21 @@ function visitNode(walk: Walk, path: string, node: unknown, depth: number, neste
 
 function finish(walk: Walk, raw: string): ClassifiedValue[] {
   if (walk.overflow) for (const candidate of tokenShapedSubstrings(raw)) put(walk, { value: candidate, tier: "strong" });
-  return [...walk.out].map(([value, tier]) => ({ value, tier }));
+  const items = [...walk.out].map(([value, tier]) => ({ value, tier }));
+  if (walk.viewOverflow) items.push({ value: "", tier: "overflow" });
+  return items;
 }
 
 /** Every value worth registering in one local or session storage entry, each with its tier. */
-export function classifyStorageEntry(entry: { name: string; value: string }): ClassifiedValue[] {
-  const walk: Walk = { out: new Map(), nodes: 0, weakLeaves: 0, overflow: false };
+export function classifyStorageEntry(entry: { name: string; value: string }, options: { visitor?: boolean } = {}): ClassifiedValue[] {
+  const walk: Walk = { visitor: options.visitor === true, out: new Map(), nodes: 0, weakLeaves: 0, maskLeaves: 0, overflow: false, viewOverflow: false };
   visitString(walk, entry.name, entry.value, 0, 0, true);
   return finish(walk, entry.value);
 }
 
 /** The same for an already-decoded structure (an IndexedDB record): its string leaves by key path under `rootName`. */
-export function classifyStructure(rootName: string, node: unknown, rawForFallback: () => string): ClassifiedValue[] {
-  const walk: Walk = { out: new Map(), nodes: 0, weakLeaves: 0, overflow: false };
+export function classifyStructure(rootName: string, node: unknown, rawForFallback: () => string, options: { visitor?: boolean } = {}): ClassifiedValue[] {
+  const walk: Walk = { visitor: options.visitor === true, out: new Map(), nodes: 0, weakLeaves: 0, maskLeaves: 0, overflow: false, viewOverflow: false };
   visitNode(walk, rootName, node, 0, 0);
   return finish(walk, walk.overflow ? rawForFallback() : "");
 }

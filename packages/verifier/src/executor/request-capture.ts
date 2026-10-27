@@ -26,7 +26,7 @@ function bounded(read: Promise<unknown>): Promise<unknown> {
 /** `settle()` resolves when every header read started so far has finished (or hit its bound). The sign-in capture awaits it before it reads the browser. */
 export interface RequestWatcher { settle(): Promise<void> }
 
-export function watchBrowserRequests(context: BrowserContext, sink: RequestCaptureSink): RequestWatcher {
+export function watchBrowserRequests(context: BrowserContext, sink: RequestCaptureSink, options: { visitor?: boolean } = {}): RequestWatcher {
   const started = new Set<Promise<unknown>>();
   const watchedPages = new WeakSet<Page>();
   const watchPage = (page: Page): void => {
@@ -36,8 +36,8 @@ export function watchBrowserRequests(context: BrowserContext, sink: RequestCaptu
   };
   context.on("request", (request) => {
     sink.learn(urlSecrets(request.url()));
-    sink.learn(headerSecrets(Object.entries(request.headers()).map(([name, value]) => ({ name, value }))));
-    const read = bounded(request.headersArray().then((headers) => { sink.learn(headerSecrets(headers)); }, () => undefined));
+    sink.learn(headerSecrets(Object.entries(request.headers()).map(([name, value]) => ({ name, value })), options));
+    const read = bounded(request.headersArray().then((headers) => { sink.learn(headerSecrets(headers, options)); }, () => undefined));
     started.add(read);
     void read.then(() => { started.delete(read); });
     sink.track(read);

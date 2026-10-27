@@ -24,6 +24,7 @@ import { sessionSecretLine } from "./session-secrets-file.js";
 import { createSessionSecretRegistry } from "./session-secret-registry.js";
 import { readBrowserState } from "./browser-state-reader.js";
 import { tellBrowserState } from "./browser-state-secrets.js";
+import { isTokenShape } from "./credential-classifier.js";
 import { watchBrowserRequests } from "./request-capture.js";
 import { createE2ESessionSyncSource } from "./session-sync.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
@@ -239,11 +240,12 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       const owned = ownedContexts.get(sessionRef);
       ownedContexts.delete(sessionRef);
       sessionSync.detach(sessionRef);
-      // The signed-out visitor has no credential, and what an application sets for a visitor (a visitor id, a cart) is not a secret: nothing of it is registered.
-      if (owned && !store.isAnonymous(sessionRef)) {
+      // A signed-out visitor's context is read too (MASKMAYBE F-3): the application can issue a token to a visitor mid-step (a sign-up, a magic link). It is read with the visitor bar, so a visitor id
+      // or a cart registers nothing.
+      if (owned) {
         try {
           // The same read and the same classifier as the sync: cookies, local and session storage, IndexedDB, frame URLs (MIDSTEP-2).
-          tellBrowserState(await readBrowserState(owned), (item) => sessionSync.learn([item]));
+          tellBrowserState(await readBrowserState(owned), (item) => sessionSync.learn([item]), undefined, { visitor: store.isAnonymous(sessionRef) });
         } catch { /* the context is gone */ }
       }
       const result = await store.close(sessionRef, signal);
@@ -300,16 +302,16 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         await guard(browserContext);
         ownedContexts.set(sessionRef, browserContext);
         // A session cookie the application swaps in while the case runs is registered when its answer arrives.
+        // Signed-out visitors included (F-3): their requests, Set-Cookie answers and storage are watched and read too, with the visitor bar (a visitor id or a cart is not a secret; a token is).
         const anonymous = store.isAnonymous(sessionRef);
         sessionSync.attach(sessionRef, { storageState: () => readBrowserState(browserContext) }, { anonymous });
-        if (!anonymous) watchBrowserRequests(browserContext, { learn: (items) => sessionSync.learn(items), track: (pending) => sessionSync.track(pending) });
+        watchBrowserRequests(browserContext, { learn: (items) => sessionSync.learn(items), track: (pending) => sessionSync.track(pending) }, { visitor: anonymous });
         browserContext.on("response", (response) => {
-          if (anonymous) return;
           sessionSync.track(response.headersArray().then((headers) => {
             for (const header of headers) {
               if (header.name.toLowerCase() !== "set-cookie") continue;
               const issued = parseSetCookie(header.value);
-              if (issued !== null && isSessionCookieSecret(issued)) registerSecret(issued.value);
+              if (issued !== null && (anonymous ? isTokenShape(issued.value) || (issued.httpOnly && isSessionCookieSecret(issued)) : isSessionCookieSecret(issued))) registerSecret(issued.value);
             }
           }, () => undefined));
         });

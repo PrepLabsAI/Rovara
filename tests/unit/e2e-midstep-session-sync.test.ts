@@ -484,7 +484,7 @@ describe("the executor's session source reads the browser before each sync", () 
     expect(run.seen).toHaveLength(1);
   });
 
-  it("leaves out an anonymous visitor's context and a context that was detached", async () => {
+  it("reads an anonymous visitor's context with the visitor bar (a plain cookie id registers nothing) and leaves out a context that was detached", async () => {
     const registered: string[] = [];
     const source = createE2ESessionSyncSource({ register: (value) => registered.push(value), known: () => registered });
     source.attach("anon", reader({ cookies: [{ value: "visitor-id-1234567890123", httpOnly: false }], origins: [] }), { anonymous: true });

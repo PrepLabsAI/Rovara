@@ -4,6 +4,7 @@ import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_ANONYMOUS_SESSION_REF_PREFIX, E2E
 import type { E2EApplicationOwnedSubject } from "../application-result-adapter.js";
 import type { E2EApiRuntimeResponse } from "../api-runtime.js";
 import type { ExecutorSessionFacts } from "./case-ledger.js";
+import { registerOptionsFor, type SessionSecretRegisterOptions } from "./session-secret-registry.js";
 import { E2E_SESSION_SYNC_MAX_WEAK_VALUES } from "./session-sync.js";
 import { tellBrowserState } from "./browser-state-secrets.js";
 import type { ClassifiedValue } from "./credential-classifier.js";
@@ -102,7 +103,7 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
   /** The browser side of `rovara-form-login/v1`; without it an account that signs in through a form cannot be opened. */
   formLogin?: FormLoginDriver;
   /** Called with every secret a session creates (cookie values, token-like local storage values), before the session is used. */
-  registerSecret?: (value: string, options?: { evidenceOnly?: boolean }) => void;
+  registerSecret?: (value: string, options?: SessionSecretRegisterOptions) => void;
   /** Called with the profile of an account whose form login did not complete, whatever the cause. */
   onLoginFailed?: (profileId: string) => void }) {
   const resolved = resolveE2EExecutorSuite(input.plan);
@@ -113,16 +114,33 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
   const upstream = origin;
   const sessions = new Map<string, Session>();
   const registered = new Set<string>();
-  const registeredForEvidence = new Set<string>();
+  // Value -> whether it was registered scrub-only (a weak registration later upgrades it).
+  const registeredForEvidence = new Map<string, boolean>();
+  const registeredForMask = new Set<string>();
+  let overflowTold = false;
   /**
-   * A credential is told to the worker as well (it is a session value); an `evidenceOnly` one is only scrubbed from what the executor writes. A value first told as evidence-only is told again
-   * if it later turns out to be a credential.
+   * A credential is told to the worker as well (it is a session value); an `evidenceOnly` one is only scrubbed from what the executor writes (and masked for the model unless `scrubOnly`). A value first
+   * told as evidence-only is told again if it later turns out to be a credential. Past the evidence cap a weak value is still held for the model's mask (`maskOnly`), never dropped.
    */
-  const registerOnce = (value: string, options: { evidenceOnly?: boolean } = {}): void => {
+  const registerOnce = (value: string, options: SessionSecretRegisterOptions = {}): void => {
+    if (options.overflow === true) { if (!overflowTold) { overflowTold = true; input.registerSecret?.("", { overflow: true }); } return; }
+    if (options.maskOnly === true) {
+      if (registered.has(value) || registeredForEvidence.has(value) || registeredForMask.has(value)) return;
+      registeredForMask.add(value);
+      input.registerSecret?.(value, { maskOnly: true });
+      return;
+    }
     if (options.evidenceOnly === true) {
-      if (registered.has(value) || registeredForEvidence.has(value) || registeredForEvidence.size >= E2E_SESSION_SYNC_MAX_WEAK_VALUES) return;
-      registeredForEvidence.add(value);
-      input.registerSecret?.(value, { evidenceOnly: true });
+      const scrubOnly = options.scrubOnly === true;
+      if (registered.has(value)) return;
+      const before = registeredForEvidence.get(value);
+      if (before !== undefined && (before === scrubOnly || !before)) return;
+      if (before === undefined && registeredForEvidence.size >= E2E_SESSION_SYNC_MAX_WEAK_VALUES) {
+        if (!scrubOnly) registerOnce(value, { maskOnly: true });
+        return;
+      }
+      registeredForEvidence.set(value, scrubOnly);
+      input.registerSecret?.(value, options);
       return;
     }
     if (!registered.has(value)) { registered.add(value); input.registerSecret?.(value); }
@@ -207,7 +225,7 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     const operation = bounded(signal);
     let requests: FormRequestContext | null = null;
     try {
-      const learn = (item: ClassifiedValue): void => registerOnce(item.value, item.tier === "weak" ? { evidenceOnly: true } : {});
+      const learn = (item: ClassifiedValue): void => registerOnce(item.value, registerOptionsFor(item.tier) ?? {});
       const signedIn = await formLogin.signIn({ origin, login, email: account.email, password: account.password, signal: operation, observe: (items) => { for (const item of items) learn(item); } });
       // Told before anything else is done with them, so a failure further on cannot leave a cookie the executor does not know to scrub. Only what looks like a secret: a consent flag is not.
       // The same read and classifier as the mid-step sync (`tellBrowserState`: cookies, local and session storage, IndexedDB, URLs; key and value, JSON leaves): a credential is told to the worker; other

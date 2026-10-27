@@ -30,7 +30,7 @@ export interface Midstep2Executor {
 /** What the provider is asked: the call as the worker forwards it. A test that needs a model with a mind of its own passes one; the default taps the first node. */
 export type Midstep2Model = (call: unknown) => ReturnType<typeof tapAnswer>;
 
-export function createMidstep2Harness(input: { dir: () => string; closers: Array<() => Promise<unknown>> }): { startRun: (model?: Midstep2Model) => Promise<Midstep2Executor["run"]>; executor: (model?: Midstep2Model) => Promise<Midstep2Executor> } {
+export function createMidstep2Harness(input: { dir: () => string; closers: Array<() => Promise<unknown>> }): { startRun: (model?: Midstep2Model) => Promise<Midstep2Executor["run"]>; executor: (model?: Midstep2Model, redactorOptions?: { maskOnlyLimit?: number }) => Promise<Midstep2Executor> } {
   let socketCount = 0;
   async function startRun(model?: Midstep2Model) {
     const seen: unknown[] = [];
@@ -42,9 +42,9 @@ export function createMidstep2Harness(input: { dir: () => string; closers: Array
     input.closers.push(() => proxy.close());
     return { proxy, seen, socketPath };
   }
-  async function executor(model?: Midstep2Model): Promise<Midstep2Executor> {
+  async function executor(model?: Midstep2Model, redactorOptions?: { maskOnlyLimit?: number }): Promise<Midstep2Executor> {
     const run = await startRun(model);
-    const redactor = createCredentialRedactor([]);
+    const redactor = createCredentialRedactor([], redactorOptions);
     const registry = createSessionSecretRegistry({ redactor });
     const source = createE2ESessionSyncSource({ register: registry.register, known: () => registry.sessionSecrets });
     const state: { current: BrowserSecretState } = { current: { cookies: [], origins: [] } };

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isSessionCookieSecret } from "./cookie-secret.js";
-import { type ClassifiedValue } from "./credential-classifier.js";
+import { isTokenShape, type ClassifiedValue } from "./credential-classifier.js";
 import { urlSecrets } from "./request-secrets.js";
 import { classifyStorageEntry, classifyStructure } from "./storage-entry-classifier.js";
 
@@ -54,7 +54,7 @@ function decodeIndexedDbValue(node: unknown, depth = 0): unknown {
   return out;
 }
 
-function tellIndexedDb(indexedDB: unknown, learn: (item: ClassifiedValue) => void, fresh: (...parts: string[]) => boolean): void {
+function tellIndexedDb(indexedDB: unknown, learn: (item: ClassifiedValue) => void, fresh: (...parts: string[]) => boolean, visitor: boolean): void {
   if (!Array.isArray(indexedDB)) throw new BrowserStateCapError("indexeddb-shape");
   let records = 0;
   let bytes = 0;
@@ -69,11 +69,11 @@ function tellIndexedDb(indexedDB: unknown, learn: (item: ClassifiedValue) => voi
         const raw = JSON.stringify(record) ?? "";
         bytes += raw.length;
         if (bytes > BROWSER_STATE_IDB_MAX_BYTES) throw new BrowserStateCapError("indexeddb-bytes");
-        if (!fresh("i", path, raw)) continue;
+        if (!fresh(visitor ? "Vi" : "i", path, raw)) continue;
         const value = decodeIndexedDbValue(record.valueEncoded ?? record.value);
-        for (const item of classifyStructure(path, value, () => raw)) learn(item);
+        for (const item of classifyStructure(path, value, () => raw, { visitor })) learn(item);
         const key = decodeIndexedDbValue(record.keyEncoded ?? record.key);
-        if (typeof key === "string") for (const item of classifyStructure(`${path}.key`, key, () => raw)) learn(item);
+        if (typeof key === "string") for (const item of classifyStructure(`${path}.key`, key, () => raw, { visitor })) learn(item);
       }
     }
   }
@@ -84,7 +84,10 @@ function tellIndexedDb(indexedDB: unknown, learn: (item: ClassifiedValue) => voi
  * `memo` (the session sync keeps one): a storage entry or an IndexedDB record that was classified before, byte for byte, is not classified again. The sync reads the whole browser before every
  * model call, and a large JSON value must not be parsed on every one of them; a value that changed has a new digest, so it is classified.
  */
-export function tellBrowserState(state: BrowserSecretState, learn: (item: ClassifiedValue) => void, memo?: Set<string>): void {
+export function tellBrowserState(state: BrowserSecretState, learn: (item: ClassifiedValue) => void, memo?: Set<string>, options: { visitor?: boolean } = {}): void {
+  // A signed-out visitor's state is read with the visitor bar (see `ClassifyOptions.visitor`): the memo keys differ, because the same entry is judged differently there.
+  const visitor = options.visitor === true;
+  const mark = visitor ? "V" : "";
   // `fresh` says whether an item is new to the memo; the memo learns it only after the item was told (if `learn` throws, the next read tells it again).
   const pendingDigests: string[] = [];
   const fresh = (...parts: string[]): boolean => {
@@ -101,11 +104,12 @@ export function tellBrowserState(state: BrowserSecretState, learn: (item: Classi
     for (const digest of pendingDigests.splice(0)) if (memo.size < BROWSER_STATE_MEMO_MAX) memo.add(digest);
   };
   // Only what looks like a secret: a consent flag is not one (the cookie rule of the sign-in and the sync).
-  for (const cookie of state.cookies) if (isSessionCookieSecret(cookie)) learn({ value: cookie.value, tier: "strong" });
+  // A visitor's script-readable cookie is an id or a cart, not a secret; only a token-shaped one or an HttpOnly one (the application's session) counts.
+  for (const cookie of state.cookies) if (visitor ? isTokenShape(cookie.value) || (cookie.httpOnly && isSessionCookieSecret(cookie)) : isSessionCookieSecret(cookie)) learn({ value: cookie.value, tier: "strong" });
   for (const origin of state.origins) {
-    for (const entry of origin.localStorage) if (fresh("l", entry.name, entry.value)) for (const item of classifyStorageEntry(entry)) learn(item);
-    for (const entry of origin.sessionStorage ?? []) if (fresh("s", entry.name, entry.value)) for (const item of classifyStorageEntry(entry)) learn(item);
-    if (origin.indexedDB !== undefined) tellIndexedDb(origin.indexedDB, learn, fresh);
+    for (const entry of origin.localStorage) if (fresh(`${mark}l`, entry.name, entry.value)) for (const item of classifyStorageEntry(entry, { visitor })) learn(item);
+    for (const entry of origin.sessionStorage ?? []) if (fresh(`${mark}s`, entry.name, entry.value)) for (const item of classifyStorageEntry(entry, { visitor })) learn(item);
+    if (origin.indexedDB !== undefined) tellIndexedDb(origin.indexedDB, learn, fresh, visitor);
   }
   for (const url of state.urls ?? []) if (fresh("u", url)) for (const item of urlSecrets(url)) learn(item);
   commit();
