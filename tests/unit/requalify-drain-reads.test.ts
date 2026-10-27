@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { REQUALIFY_DRAIN_READS, REQUALIFY_DRAIN_READ_ATTRIBUTES, requalifyDrainProjection } from "../../packages/contracts/src/index.js";
+import { REQUALIFY_DRAIN_ALLOWED_ATTRIBUTES, REQUALIFY_DRAIN_KEY_ATTRIBUTES, REQUALIFY_DRAIN_READS, REQUALIFY_DRAIN_READ_ATTRIBUTES, requalifyDrainProjection } from "../../packages/contracts/src/index.js";
 import { requalifyDrainCount, requalifyDrainStatus } from "../../packages/broker/src/e2e/requalify-hold.js";
-import { drainFixtureRows as rows, drainIamClient, type DrainRequest } from "../support/drain-iam-client.js";
+import { DRAIN_TABLE_AND_INDEX_KEYS, drainFixtureRows as rows, drainIamClient, type DrainRequest } from "../support/drain-iam-client.js";
 
 import { DRAIN_FIXTURE_NOW as NOW } from "../support/drain-iam-client.js";
 const TABLE = "state";
@@ -47,8 +47,26 @@ describe("the drain reads only what the narrowed DrainRead statement allows (DRA
   });
 
   it("throws when the policy would allow fewer attributes than the code reads (the drift this guards)", async () => {
-    const narrower = REQUALIFY_DRAIN_READ_ATTRIBUTES.filter((attribute) => attribute !== "workflowMode");
+    const narrower = REQUALIFY_DRAIN_ALLOWED_ATTRIBUTES.filter((attribute) => attribute !== "workflowMode");
     const store = { documentClient: drainIamClient(rows(), { allowed: narrower }).documentClient, tableName: TABLE };
     await expect(requalifyDrainCount(store, NOW)).rejects.toThrow(/workflowMode is not allowed/);
+  });
+  it("also needs the table's and the index's key attributes in dynamodb:Attributes: a list of only the projected names is refused (B1)", async () => {
+    // The first list the policy had: projected names alone. DynamoDB cannot run the read without pk, sk and sessionState.
+    const store = { documentClient: drainIamClient(rows(), { allowed: REQUALIFY_DRAIN_READ_ATTRIBUTES }).documentClient, tableName: TABLE };
+    await expect(requalifyDrainCount(store, NOW)).rejects.toThrow(/key attributes pk, sk, sessionState/);
+    // The key list in the contracts is the four keys (the contract test ties it to the synthesized schemas); with it the drain runs.
+    expect([...REQUALIFY_DRAIN_KEY_ATTRIBUTES].sort()).toEqual([...DRAIN_TABLE_AND_INDEX_KEYS].sort());
+    expect(await requalifyDrainCount({ documentClient: drainIamClient(rows()).documentClient, tableName: TABLE }, NOW)).toBe(3);
+  });
+
+  it("makes a read of an attribute the code did not project fail loudly, not skip the item (a fail-open the count tests might miss)", async () => {
+    // The broker module reads the contracts package as built (dist), not the source file the rest of this test imports: mutate the object it really uses.
+    const reads = (await import("@agentx/contracts")).REQUALIFY_DRAIN_READS as unknown as { operations: string[] };
+    const original = reads.operations;
+    reads.operations = original.filter((attribute) => attribute !== "workflowMode");
+    try {
+      await expect(requalifyDrainCount({ documentClient: drainIamClient(rows()).documentClient, tableName: TABLE }, NOW)).rejects.toThrow(/read "workflowMode"/);
+    } finally { reads.operations = original; }
   });
 });

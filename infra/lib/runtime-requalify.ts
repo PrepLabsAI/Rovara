@@ -18,7 +18,7 @@ import {
   aws_stepfunctions as sfn,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { QUALIFIED_AMI_SETTING_NAME, REQUALIFY_AGE_METRIC, REQUALIFY_DRAIN_READ_ATTRIBUTES, REQUALIFY_STALE_AFTER_DAYS, REQUALIFY_TAGS, WORKER_SETTING_PARAMETERS, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { QUALIFIED_AMI_SETTING_NAME, REQUALIFY_AGE_METRIC, REQUALIFY_DRAIN_ALLOWED_ATTRIBUTES, REQUALIFY_STALE_AFTER_DAYS, REQUALIFY_TAGS, WORKER_SETTING_PARAMETERS, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { packagedFunction } from "./control-plane.js";
 import { EC2_WORKER_AMI_PARAMETER } from "./ec2-workers.js";
 import type { AgentXNaming } from "./naming.js";
@@ -223,13 +223,13 @@ export class RuntimeRequalify extends Construct {
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["E2E_FEATURE_VERIFIER#*", "RUNTIME_INSTALL_CHALLENGE#*", "RUNTIME_INSTALLATION_EVIDENCE#*", "RUNTIME_REQUALIFY*", "E2E_MODEL_ROUTES"] } },
     });
     // The drain (AR-3), read only: the READY sessions (index), their workspaces' operations, the setup-run markers and the setup executions' state.
-    // Only the attributes the drain reads (REQUALIFY_DRAIN_READS: each read names them in its ProjectionExpression) and only reads that name their attributes. `Select` is IfExists
+    // Only the attributes the drain reads (REQUALIFY_DRAIN_READS: each read names them in its ProjectionExpression) plus the table and index key attributes DynamoDB requires in the list, and only reads that name their attributes. `Select` is IfExists
     // because GetItem has no Select parameter; the drain's queries always send SPECIFIC_ATTRIBUTES. A refused read makes the drain throw, never count 0.
     grant({
       sid: "DrainRead", actions: ["dynamodb:Query", "dynamodb:GetItem"], resources: [props.state.tableArn, `${props.state.tableArn}/index/${WORKSPACE_SESSION_STATE_INDEX.name}`],
       conditions: {
         "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] },
-        "ForAllValues:StringEquals": { "dynamodb:Attributes": [...REQUALIFY_DRAIN_READ_ATTRIBUTES] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": [...REQUALIFY_DRAIN_ALLOWED_ATTRIBUTES] },
         StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
       },
     });

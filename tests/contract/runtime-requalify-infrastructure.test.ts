@@ -5,7 +5,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { REQUALIFY_LOGICAL_ID_PREFIX, requalifyDefinition } from "../../infra/lib/runtime-requalify.js";
-import { HEALTH_ALARM_CONDITIONAL_SUFFIXES, HEALTH_ALARM_SUFFIXES, REQUALIFY_AGE_METRIC, REQUALIFY_STALE_AFTER_DAYS } from "../../packages/contracts/src/index.js";
+import { HEALTH_ALARM_CONDITIONAL_SUFFIXES, HEALTH_ALARM_SUFFIXES, REQUALIFY_AGE_METRIC, REQUALIFY_DRAIN_KEY_ATTRIBUTES, REQUALIFY_STALE_AFTER_DAYS } from "../../packages/contracts/src/index.js";
 import { REQUALIFY_SCHEDULE_LOGICAL_ID } from "../../scripts/test-deploy-requalify.js";
 import { checkLambdaBundles } from "../../scripts/lambda-load-check.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -162,10 +162,17 @@ describe("the renewal's infrastructure", () => {
     await requalifyDrainStatus({ documentClient, tableName: "state" }, DRAIN_FIXTURE_NOW);
     expect(new Set(requests.map((request) => `${request.command} ${request.indexName ?? ""}`))).toEqual(new Set(["QueryCommand bySessionState", "QueryCommand ", "GetCommand "]));
     const asked = [...new Set(requests.flatMap((request) => request.attributes ?? []))].sort();
-    expect([...allowed].sort()).toEqual(asked);
-    // A query on the index can only project what the index has: it projects every attribute.
+    // The policy allows the projected attributes plus the key attributes DynamoDB requires in the list, and the key list is the synthesized table's and index's own key schema.
     const table = Object.values(off).find((resource) => resource.Type === "AWS::DynamoDB::Table" && JSON.stringify(resource.Properties["GlobalSecondaryIndexes"] ?? []).includes("bySessionState"))!;
-    const index = (table.Properties["GlobalSecondaryIndexes"] as Array<{ IndexName: string; Projection: { ProjectionType: string } }>).find((candidate) => candidate.IndexName === "bySessionState")!;
+    const schemaNames = (schema: unknown) => (schema as Array<{ AttributeName: string }>).map((key) => key.AttributeName);
+    const index = (table.Properties["GlobalSecondaryIndexes"] as Array<{ IndexName: string; KeySchema: unknown; Projection: { ProjectionType: string } }>).find((candidate) => candidate.IndexName === "bySessionState")!;
+    const keys = [...new Set([...schemaNames(table.Properties["KeySchema"]), ...schemaNames(index.KeySchema)])].sort();
+    expect(keys).toEqual(["pk", "sessionState", "sk", "workspaceId"]);
+    expect([...REQUALIFY_DRAIN_KEY_ATTRIBUTES].sort()).toEqual(keys);
+    expect([...allowed].sort()).toEqual([...new Set([...asked, ...keys])].sort());
+    // None of the keys is projected by the code (only what the drain reads is): the policy's extra names are exactly the keys the code does not already ask for.
+    expect([...allowed].filter((name) => !asked.includes(name)).sort()).toEqual(keys.filter((name) => !asked.includes(name)));
+    // A query on the index can only project what the index has: it projects every attribute.
     expect(index.Projection.ProjectionType).toBe("ALL");
   });
 
@@ -183,7 +190,7 @@ describe("the renewal's infrastructure", () => {
       Resource: [expect.anything(), expect.anything()],
       Condition: {
         "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] },
-        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["createdAt", "entityType", "setupExecutionId", "state", "status", "until", "updatedAt", "workflowE2EAdmission", "workflowMode", "workspaceId"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["createdAt", "entityType", "pk", "sessionState", "setupExecutionId", "sk", "state", "status", "until", "updatedAt", "workflowE2EAdmission", "workflowMode", "workspaceId"] },
         StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
       },
     });

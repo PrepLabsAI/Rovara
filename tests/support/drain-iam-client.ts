@@ -1,4 +1,4 @@
-import { REQUALIFY_DRAIN_READ_ATTRIBUTES } from "../../packages/contracts/src/index.js";
+import { REQUALIFY_DRAIN_ALLOWED_ATTRIBUTES } from "../../packages/contracts/src/index.js";
 import { requalifySetupWorkRow } from "../../packages/broker/src/e2e/requalify-hold.js";
 
 export const DRAIN_FIXTURE_NOW = Date.parse("2026-10-27T03:00:00.000Z");
@@ -13,15 +13,30 @@ type Input = {
 
 export interface DrainRequest { command: "GetCommand" | "QueryCommand"; select: string | undefined; attributes: string[] | undefined; indexName: string | undefined }
 
+/** The key attributes of the State table (pk, sk) and its bySessionState index (sessionState, workspaceId), spelled out here and not taken from the code under test. */
+export const DRAIN_TABLE_AND_INDEX_KEYS = ["pk", "sk", "sessionState", "workspaceId"] as const;
+
+/** An item as the service returns it under a ProjectionExpression: reading a property that was not projected throws, so code that depends on an attribute it never asked for cannot quietly skip the item. */
+function projectedItem(item: Item, attributes: readonly string[]): Item {
+  const present = Object.fromEntries(attributes.flatMap((attribute): Array<[string, unknown]> => (item[attribute] === undefined ? [] : [[attribute, item[attribute]]])));
+  return new Proxy(present, {
+    get(target, property, receiver) {
+      if (typeof property === "string" && !attributes.includes(property) && !(property in Object.prototype)) throw new Error(`the code read "${property}", which its ProjectionExpression did not ask for`);
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+}
+
 /**
  * A DynamoDB document client that behaves like the renewal role under its narrowed `DrainRead` statement and like DynamoDB for a projection:
- *  - it refuses (AccessDeniedException) a Query without Select=SPECIFIC_ATTRIBUTES, any read without a ProjectionExpression, and a read of an attribute outside `allowed`;
- *  - it returns only the projected attributes, so code that reads another attribute sees `undefined`;
+ *  - it refuses (AccessDeniedException) a Query without Select=SPECIFIC_ATTRIBUTES, any read without a ProjectionExpression, a read of an attribute outside `allowed`, and (DynamoDB's own rule
+ *    for dynamodb:Attributes) every read when `allowed` lacks a primary-key or index-key attribute of the table or the index;
+ *  - it returns only the projected attributes, and reading any other property of a returned item throws;
  *  - `deny` makes the n-th matching read fail as a refused read would.
  * Every request is recorded with the attribute names its ProjectionExpression resolves to.
  */
 export function drainIamClient(items: readonly Item[], options: { allowed?: readonly string[]; deny?: (request: DrainRequest) => boolean } = {}) {
-  const allowed = options.allowed ?? REQUALIFY_DRAIN_READ_ATTRIBUTES;
+  const allowed = options.allowed ?? REQUALIFY_DRAIN_ALLOWED_ATTRIBUTES;
   const requests: DrainRequest[] = [];
   const denied = (message: string) => Object.assign(new Error(message), { name: "AccessDeniedException" });
   const send = async (command: { constructor: { name: string }; input: Input }) => {
@@ -35,9 +50,11 @@ export function drainIamClient(items: readonly Item[], options: { allowed?: read
     requests.push(request);
     if (name === "QueryCommand" && input.Select !== "SPECIFIC_ATTRIBUTES") throw denied("Select must be SPECIFIC_ATTRIBUTES");
     if (attributes === undefined) throw denied("a read must name its attributes");
+    const missingKeys = DRAIN_TABLE_AND_INDEX_KEYS.filter((key) => !allowed.includes(key));
+    if (missingKeys.length > 0) throw denied(`dynamodb:Attributes must also list the key attributes ${missingKeys.join(", ")}`);
     for (const attribute of attributes) if (!allowed.includes(attribute)) throw denied(`attribute ${attribute} is not allowed`);
     if (options.deny?.(request) === true) throw denied("refused");
-    const project = (item: Item): Item => Object.fromEntries(attributes.flatMap((attribute): Array<[string, unknown]> => (item[attribute] === undefined ? [] : [[attribute, item[attribute]]])));
+    const project = (item: Item): Item => projectedItem(item, attributes);
     if (name === "GetCommand") {
       const found = items.find((item) => item.pk === input.Key?.pk && item.sk === input.Key?.sk);
       return { Item: found === undefined ? undefined : project(found) };

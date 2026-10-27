@@ -1,3 +1,5 @@
+import { WORKSPACE_SESSION_STATE_INDEX } from "./session.js";
+
 /**
  * The attributes the renewal's drain reads (AR-3), and nothing more. One list per read; `requalifyDrainStatus` builds each read's
  * ProjectionExpression from its list, and the renewal role's `DrainRead` statement (infra/lib/runtime-requalify.ts) allows exactly the union
@@ -30,3 +32,13 @@ export function requalifyDrainProjection(read: RequalifyDrainRead): { Projection
   REQUALIFY_DRAIN_READS[read].forEach((attribute, index) => { names[`#drain${index}`] = attribute; });
   return { ProjectionExpression: Object.keys(names).join(", "), ExpressionAttributeNames: names };
 }
+
+/**
+ * The key attributes of the State table and of its bySessionState index. DynamoDB requires every primary-key and index-key attribute of the table and the indexes named in the policy to
+ * be in `dynamodb:Attributes` whenever that condition is used, or it cannot run the read (the reads use all four: pk and sk in the key conditions and the GetItem's Key, sessionState in the
+ * sessions query). The code does not project them. A contract test ties this list to the synthesized table's and index's KeySchema, so a renamed key fails CI.
+ */
+export const REQUALIFY_DRAIN_KEY_ATTRIBUTES: readonly string[] = ["pk", "sk", WORKSPACE_SESSION_STATE_INDEX.partitionKey, WORKSPACE_SESSION_STATE_INDEX.sortKey];
+
+/** What the DrainRead statement allows in `dynamodb:Attributes`: the projected attributes plus the key attributes, sorted. */
+export const REQUALIFY_DRAIN_ALLOWED_ATTRIBUTES: readonly string[] = [...new Set([...REQUALIFY_DRAIN_READ_ATTRIBUTES, ...REQUALIFY_DRAIN_KEY_ATTRIBUTES])].sort();
