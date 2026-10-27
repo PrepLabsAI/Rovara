@@ -1,6 +1,7 @@
 import { E2E_AGENT_STOP_CODES, type E2EModelChannelClient } from "@agentx/contracts";
 import { AgentError, isAgentError } from "e2e/agent";
 import type { E2EWebAgentPorts } from "../web-runtime.js";
+import { beginMarkerSessionValues } from "./begin-marker-values.js";
 import { createE2EAgentLedgerWriter, type E2EAgentLedgerWriter } from "./agent-ledger.js";
 import type { E2EAgentModelAdapter } from "./agent-model-adapter.js";
 
@@ -48,7 +49,7 @@ export function createE2EAgentStepDriver(options: E2EAgentStepDriverOptions): E2
   return async (request) => {
     const position = { caseId: request.caseId, stepIndex: request.stepIndex };
     const ledger = ledgerOf(request.caseId);
-    const cookieValues = options.sessionSecrets().slice(-32);
+    const cookieValues = beginMarkerSessionValues(options.sessionSecrets());
     await options.client.beginStep({ ...position, ...(cookieValues.length === 0 ? {} : { cookieValues }) }, request.signal);
     let verdict: "concluded" | "failed" = "concluded";
     let stopCode: string | null = null;

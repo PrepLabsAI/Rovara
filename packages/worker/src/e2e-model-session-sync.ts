@@ -6,7 +6,7 @@ import {
   E2EModelSessionSyncSchema,
   type E2EModelSessionSyncRefusalCode,
 } from "@agentx/contracts";
-import { e2eSecretSpellings } from "./e2e-secret-spellings.js";
+import { e2eSecretSpellingsDetailed } from "./e2e-secret-spellings.js";
 
 /**
  * The worker's side of the session sync (MIDSTEPCOOKIE): the sync token and the set of session values the executor has taught the proxy.
@@ -33,6 +33,8 @@ export interface E2ESessionSyncLedger {
   useForCall(token: string | undefined): SessionSyncCallCheck;
   /** The spellings the guard scans for, for a value this ledger accepted. */
   spellingsOf(value: string): string[];
+  /** How many accepted values could not be given every spelling (a lone surrogate has no percent-encoded form). Their other forms, the raw one included, are scanned. */
+  readonly spellingGaps: number;
 }
 
 export function createE2ESessionSyncLedger(): E2ESessionSyncLedger {
@@ -42,14 +44,19 @@ export function createE2ESessionSyncLedger(): E2ESessionSyncLedger {
   const known = new Map<string, string[]>();
   let bytes = 0;
   let needleChars = 0;
+  let gaps = 0;
   return {
+    get spellingGaps() { return gaps; },
     accept(body, runId): SessionSyncOutcome {
+      // A refused sync leaves no token that could be used: whoever sent it does not call.
+      pending = null;
       const parsed = E2EModelSessionSyncSchema.safeParse(body);
       if (!parsed.success) return { ok: false, code: "invalid-sync" };
       const sync = parsed.data;
       if (sync.runId !== runId) return { ok: false, code: "other-run" };
       const fresh = [...new Set(sync.values)].filter((value) => !known.has(value));
-      const spellings = fresh.map((value) => e2eSecretSpellings(value));
+      const detailed = fresh.map((value) => e2eSecretSpellingsDetailed(value));
+      const spellings = detailed.map((item) => item.forms);
       const addedBytes = fresh.reduce((sum, value) => sum + Buffer.byteLength(value, "utf8"), 0);
       const addedChars = spellings.reduce((sum, forms) => sum + forms.reduce((inner, form) => inner + form.length, 0), 0);
       if (known.size + fresh.length > E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES || bytes + addedBytes > E2E_MODEL_SESSION_SYNC_MAX_TOTAL_BYTES
@@ -57,6 +64,7 @@ export function createE2ESessionSyncLedger(): E2ESessionSyncLedger {
       fresh.forEach((value, index) => known.set(value, spellings[index]!));
       bytes += addedBytes;
       needleChars += addedChars;
+      gaps += detailed.filter((item) => item.skipped.length > 0).length;
       pending = randomBytes(16).toString("hex");
       return { ok: true, added: fresh, syncToken: pending, epoch };
     },
@@ -68,6 +76,6 @@ export function createE2ESessionSyncLedger(): E2ESessionSyncLedger {
       if (token === undefined) return { ok: false, message: E2E_MODEL_SESSION_SYNC_CALL_REFUSALS.missing };
       return armed !== null && token === armed ? { ok: true } : { ok: false, message: E2E_MODEL_SESSION_SYNC_CALL_REFUSALS.stale };
     },
-    spellingsOf(value): string[] { return known.get(value) ?? e2eSecretSpellings(value); },
+    spellingsOf(value): string[] { return known.get(value) ?? e2eSecretSpellingsDetailed(value).forms; },
   };
 }

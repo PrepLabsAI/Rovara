@@ -4,6 +4,7 @@ import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_ANONYMOUS_SESSION_REF_PREFIX, E2E
 import type { E2EApplicationOwnedSubject } from "../application-result-adapter.js";
 import type { E2EApiRuntimeResponse } from "../api-runtime.js";
 import type { ExecutorSessionFacts } from "./case-ledger.js";
+import { isSessionStorageCredential } from "./session-storage-secret.js";
 import { FormLoginError, isSessionCookieSecret, isSessionStorageSecret, parseSetCookie, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
 import { resolveE2EExecutorSuite } from "./suite.js";
 
@@ -99,7 +100,7 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
   /** The browser side of `rovara-form-login/v1`; without it an account that signs in through a form cannot be opened. */
   formLogin?: FormLoginDriver;
   /** Called with every secret a session creates (cookie values, token-like local storage values), before the session is used. */
-  registerSecret?: (value: string) => void;
+  registerSecret?: (value: string, options?: { evidenceOnly?: boolean }) => void;
   /** Called with the profile of an account whose form login did not complete, whatever the cause. */
   onLoginFailed?: (profileId: string) => void }) {
   const resolved = resolveE2EExecutorSuite(input.plan);
@@ -110,7 +111,20 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
   const upstream = origin;
   const sessions = new Map<string, Session>();
   const registered = new Set<string>();
-  const registerOnce = (value: string): void => { if (!registered.has(value)) { registered.add(value); input.registerSecret?.(value); } };
+  const registeredForEvidence = new Set<string>();
+  /**
+   * A credential is told to the worker as well (it is a session value); an `evidenceOnly` one is only scrubbed from what the executor writes. A value first told as evidence-only is told again
+   * if it later turns out to be a credential.
+   */
+  const registerOnce = (value: string, options: { evidenceOnly?: boolean } = {}): void => {
+    if (options.evidenceOnly === true) {
+      if (registered.has(value) || registeredForEvidence.has(value)) return;
+      registeredForEvidence.add(value);
+      input.registerSecret?.(value, { evidenceOnly: true });
+      return;
+    }
+    if (!registered.has(value)) { registered.add(value); input.registerSecret?.(value); }
+  };
   const sourceSnapshot = resolved.suite.runtimeAdmissionContext.selectionInput.sourceSnapshot;
 
   const urlFor = (path: string): URL => {
@@ -194,7 +208,12 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
       const signedIn = await formLogin.signIn({ origin, login, email: account.email, password: account.password, signal: operation });
       // Told before anything else is done with them, so a failure further on cannot leave a cookie the executor does not know to scrub. Only what looks like a secret: a consent flag is not.
       for (const cookie of signedIn.state.cookies) if (isSessionCookieSecret(cookie)) registerOnce(cookie.value);
-      for (const item of signedIn.state.origins) for (const entry of item.localStorage) if (isSessionStorageSecret(entry.value)) registerOnce(entry.value);
+      // The same classifier as the mid-step sync (key and value): a credential is told to the worker; other long values (a draft, a route, a cache) are only scrubbed from what the executor writes,
+      // because the worker refuses a call whose prompt shows a value it was told.
+      for (const item of signedIn.state.origins) for (const entry of item.localStorage) {
+        if (isSessionStorageCredential(entry)) registerOnce(entry.value);
+        else if (isSessionStorageSecret(entry.value)) registerOnce(entry.value, { evidenceOnly: true });
+      }
       requests = await formLogin.requestContext({ origin, state: signedIn.state });
       const meResponse = await requests.request({ method: "GET", path: "/api/me", signal: operation });
       const me = parseJsonObject(meResponse.body, "identity response");

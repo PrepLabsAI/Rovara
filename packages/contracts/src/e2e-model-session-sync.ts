@@ -37,10 +37,27 @@ export const E2E_MODEL_SESSION_SYNC_MAX_BODY_BYTES = 200_000;
 export const E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES = 512;
 export const E2E_MODEL_SESSION_SYNC_MAX_TOTAL_BYTES = 65_536;
 
-/** What the executor sends for one value: the value, or for one over the bound its head and its tail (any prompt that shows the whole value shows both). */
+/**
+ * What the executor sends for one value: the value, or for one over the bound its head and its tail (any prompt that shows the whole value shows both). The cuts are on code point
+ * boundaries: a slice never starts with the second half of a surrogate pair or ends with the first half, so a slice of a well-formed value is well-formed (a lone surrogate cannot be
+ * percent-encoded). A value that already holds a lone surrogate keeps it; the worker's spelling builder does not throw on it.
+ */
 export function boundSessionValue(value: string): string[] {
   if (value.length <= E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS) return [value];
-  return [value.slice(0, E2E_MODEL_SESSION_SYNC_SLICE_CHARS), value.slice(-E2E_MODEL_SESSION_SYNC_SLICE_CHARS)];
+  let head = value.slice(0, E2E_MODEL_SESSION_SYNC_SLICE_CHARS);
+  let tail = value.slice(-E2E_MODEL_SESSION_SYNC_SLICE_CHARS);
+  const last = head.charCodeAt(head.length - 1);
+  // A high surrogate at the end of the head is the first half of a pair cut in two; keep it only if the value really has a lone high surrogate there (the next unit is not a low one).
+  if (last >= 0xd800 && last <= 0xdbff) {
+    const next = value.charCodeAt(head.length);
+    if (next >= 0xdc00 && next <= 0xdfff) head = head.slice(0, -1);
+  }
+  const first = tail.charCodeAt(0);
+  if (first >= 0xdc00 && first <= 0xdfff) {
+    const before = value.charCodeAt(value.length - tail.length - 1);
+    if (before >= 0xd800 && before <= 0xdbff) tail = tail.slice(1);
+  }
+  return [head, tail];
 }
 
 export const E2EModelSessionSyncSchema = z.object({
@@ -62,7 +79,7 @@ export const E2EModelSessionSyncReplySchema = z.object({
 export type E2EModelSessionSyncReply = z.infer<typeof E2EModelSessionSyncReplySchema>;
 
 /** Why the worker refused a sync. Fixed codes; the executor never learns more. */
-export const E2E_MODEL_SESSION_SYNC_REFUSAL_CODES = ["closing", "too-large", "unreadable", "not-json", "invalid-sync", "other-run", "too-many-values"] as const;
+export const E2E_MODEL_SESSION_SYNC_REFUSAL_CODES = ["closing", "too-large", "unreadable", "not-json", "invalid-sync", "other-run", "too-many-values", "internal"] as const;
 export type E2EModelSessionSyncRefusalCode = (typeof E2E_MODEL_SESSION_SYNC_REFUSAL_CODES)[number];
 
 /** Why the worker refused a model call for its sync. They are the receipt's `refused-protocol` outcome with these fixed sentences, and nothing the executor sent is in them. */

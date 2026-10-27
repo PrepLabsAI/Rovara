@@ -437,7 +437,10 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
       if (req.url === E2E_MODEL_CHANNEL_STEP_PATH || req.url === E2E_MODEL_CHANNEL_SYNC_PATH) {
         const marker = await readBody(req, MAX_MARKER_BYTES);
         if (res.writableEnded || res.destroyed) return;
-        const reply = req.url === E2E_MODEL_CHANNEL_SYNC_PATH ? serveSync(marker) : serveMarker(marker);
+        // Whatever goes wrong while a marker or a sync is served is a fixed refusal, never an unhandled rejection that would end the worker.
+        let reply: { status: number; body: unknown };
+        try { reply = req.url === E2E_MODEL_CHANNEL_SYNC_PATH ? serveSync(marker) : serveMarker(marker); }
+        catch { reply = { status: 500, body: { schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, status: "refused", code: "internal" } }; }
         send(res, reply.status, reply.body);
         return;
       }

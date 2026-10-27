@@ -18,20 +18,35 @@ function base64Fragments(value: string): string[] {
   return forms;
 }
 
-export function e2eSecretSpellings(value: string): string[] {
-  if (value === "") return [];
+export interface E2ESecretSpellingsResult {
+  forms: string[];
+  /** The spellings that could not be built for this value (the percent-encoded ones, for a value with a lone surrogate). The raw, JSON-escaped, base64 and hex forms are always built. */
+  skipped: Array<"percent-encoded">;
+}
+
+/**
+ * Never throws. A value that cannot be percent-encoded (`encodeURIComponent` throws on a lone surrogate) still gets every other spelling, and the result says which spelling was skipped
+ * so the caller can record the gap. The raw form is always among the forms, so the value itself is always scanned for.
+ */
+export function e2eSecretSpellingsDetailed(value: string): E2ESecretSpellingsResult {
+  if (value === "") return { forms: [], skipped: [] };
   const data = Buffer.from(value, "utf8");
   const standard = data.toString("base64");
   const url = standard.replace(/\+/g, "-").replace(/\//g, "_");
-  const once = encodeURIComponent(value);
-  const twice = encodeURIComponent(once);
+  let once: string | null = null;
+  try { once = encodeURIComponent(value); } catch { once = null; }
+  const twice = once === null ? null : encodeURIComponent(once);
   const lowerEscapes = (text: string) => text.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
   const forms = new Set<string>([
     value, JSON.stringify(value).slice(1, -1),
-    once, twice, lowerEscapes(once), lowerEscapes(twice),
+    ...(once === null || twice === null ? [] : [once, twice, lowerEscapes(once), lowerEscapes(twice)]),
     standard, standard.replace(/=+$/, ""), url, url.replace(/=+$/, ""),
     data.toString("hex"), data.toString("hex").toUpperCase(),
     ...base64Fragments(value),
   ]);
-  return [...forms].filter((form) => form.length > 0);
+  return { forms: [...forms].filter((form) => form.length > 0), skipped: once === null ? ["percent-encoded"] : [] };
+}
+
+export function e2eSecretSpellings(value: string): string[] {
+  return e2eSecretSpellingsDetailed(value).forms;
 }
