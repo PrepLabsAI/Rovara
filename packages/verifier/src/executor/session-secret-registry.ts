@@ -15,6 +15,11 @@ export interface SessionSecretRegistry {
   readonly sessionSecrets: string[];
   /** The executor's check of a model-bound payload: accounts and credentials, not evidence-only values. */
   readonly modelScan: (bytes: Uint8Array) => boolean;
+  /**
+   * The check for what the executor WRITES (an agent trace): the same scope as the parent's final output scan, evidence-only values included. A trace that shows one is dropped here, so a value
+   * that is allowed in a model prompt can never reach the out directory and end the run `credential-leak` at the final scan.
+   */
+  readonly evidenceScan: (bytes: Uint8Array) => boolean;
 }
 
 /**
@@ -35,5 +40,6 @@ export function createSessionSecretRegistry(input: { redactor: CredentialRedacto
       input.onRegister?.(value);
     },
     modelScan: (bytes) => input.redactor.contains(bytes, "model"),
+    evidenceScan: (bytes) => input.redactor.contains(bytes, "all"),
   };
 }

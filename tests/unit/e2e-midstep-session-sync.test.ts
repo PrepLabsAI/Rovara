@@ -449,7 +449,7 @@ describe("the executor's session source reads the browser before each sync", () 
     await source.read();
     expect(registered).toHaveLength(3);
     // The ordinary app data is scrubbed (weak), once each, and never told to the worker; `accepted` and the short cookies are not registered at all.
-    expect(evidenceOnly).toEqual(["Quarterly report for ACME", "https://app.example.com/settings?tab=billing", "{\"newCheckout\": true, \"darkMode\": false, \"beta\": \"yes please\"}"]);
+    expect(evidenceOnly).toEqual(["Quarterly report for ACME", "https://app.example.com/settings?tab=billing"]);
   });
 
   it("tells a credential in local storage from app data by its value and its key", () => {

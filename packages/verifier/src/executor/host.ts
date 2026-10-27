@@ -207,7 +207,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     const goals: string[] = [];
     const origin = declaration.originByApplicationId.find((item) => item.applicationId === launchContext.selectedTarget.applicationId)?.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN;
     const store = createE2EAgentCaptureStore({
-      scan: registry.modelScan,
+      // What is written to the out directory is held to the parent's final scan (all session values), not to the model's.
+      scan: registry.evidenceScan,
       persist: (keyHash, bytes) => persistE2EAgentTrace(context.outDir, keyHash, bytes),
       valueKey: channelPlan.valueKey, goals: () => goals, origin,
     });

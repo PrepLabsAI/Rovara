@@ -52,15 +52,19 @@ export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]
     .flatMap((secret) => (secret === null ? [] : [secret]))
     .flatMap((secret) => spellings(secret).map((form) => ({ form, label: `<account:${account.profileId}>`, bytes: true, session: false, model: true }))));
   rules.sort((a, b) => b.form.length - a.form.length);
+  // Registration is O(1) per form (a Map index; the longest-first order is rebuilt on the first read after a change), because the mid-step sync feeds this thousands of values.
+  const byForm = new Map<string, Rule>(rules.map((rule) => [rule.form, rule]));
+  let sorted = true;
+  const ordered = (): Rule[] => { if (!sorted) { rules.sort((a, b) => b.form.length - a.form.length); sorted = true; } return rules; };
   return Object.freeze({
     text(value: string): string {
       let result = value;
-      for (const rule of rules) result = result.split(rule.form).join(rule.label);
+      for (const rule of ordered()) result = result.split(rule.form).join(rule.label);
       return result;
     },
     contains(bytes: Uint8Array, scope: "accounts" | "all" | "model" = "all"): boolean {
       const haystack = Buffer.from(bytes);
-      const active = rules.filter((rule) => rule.bytes && (scope === "all" ? true : scope === "model" ? rule.model : !rule.session));
+      const active = ordered().filter((rule) => rule.bytes && (scope === "all" ? true : scope === "model" ? rule.model : !rule.session));
       if (active.some((rule) => haystack.includes(rule.form))) return true;
       // Base64 is often wrapped into lines (MIME, PEM-style bodies, a 20, 64 or 76 column wrap), which cuts a credential's spelling in two. The same bytes with the
       // whitespace between two base64 characters removed are looked at too.
@@ -71,12 +75,15 @@ export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]
       if (typeof value !== "string" || value.length < MIN_SESSION_SECRET_LENGTH) return;
       const model = options.evidenceOnly !== true;
       for (const form of spellings(value)) {
-        const existing = rules.find((rule) => rule.form === form);
+        const existing = byForm.get(form);
         // A value first registered evidence-only becomes a credential if it is registered as one later; the other way round it stays one.
-        if (existing === undefined) rules.push({ form, label: SESSION_REDACTION_LABEL, bytes: true, session: true, model });
-        else if (model) existing.model = true;
+        if (existing === undefined) {
+          const rule: Rule = { form, label: SESSION_REDACTION_LABEL, bytes: true, session: true, model };
+          rules.push(rule);
+          byForm.set(form, rule);
+          sorted = false;
+        } else if (model) existing.model = true;
       }
-      rules.sort((a, b) => b.form.length - a.form.length);
     },
   });
 }

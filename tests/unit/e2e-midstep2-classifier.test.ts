@@ -127,11 +127,11 @@ describe("JSON leaves (gap 1)", () => {
     expect(tierOf(items, "key-abcdef123456")).toBe("strong");
   });
 
-  it("the whole blob is only scrubbed (weak): a blob that shows no token is not a credential by being under a key like `auth`", () => {
+  it("the blob itself is not registered, and a blob that shows no token is not a credential by being under a key like `auth`", () => {
     const value = `{"name":"Maya Q","theme":"dark","plan":"professional-annual"}`;
     const items = classifyStorageEntry({ name: "auth_profile", value });
     expect(items.filter((item) => item.tier === "strong")).toEqual([]);
-    expect(tierOf(items, value)).toBe("weak");
+    expect(tierOf(items, value)).toBeNull();
   });
 
   it("metadata beside a token is not a credential (`tokenType`, `expiresAt`, `authUser`)", () => {
@@ -244,5 +244,54 @@ describe("browser state: session storage, IndexedDB and URLs (gap 5), with bound
     expect(() => told({ cookies: [], origins: [{ localStorage: [], indexedDB: "garbage" }] })).toThrow(expect.objectContaining({ code: "indexeddb-shape" }));
     // Exactly at the record bound is fine.
     expect(() => told({ cookies: [], origins: [{ localStorage: [], indexedDB: [{ name: "db", stores: [{ name: "s", records: manyRecords.slice(1) }] }] }] })).not.toThrow();
+  });
+});
+
+describe("fix round 1 (review of 334c7ced)", () => {
+  const UUID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+  const strong = (items: readonly ClassifiedValue[]) => items.filter((item) => item.tier === "strong").map((item) => item.value);
+
+  it("B-1: a cache of ordinary ids, paths, URLs, dates and emails registers nothing (no weak leaf that a page, a trace or a report would show)", () => {
+    const cache = { lastPage: "http://127.0.0.1:4173/dashboard", at: "2026-10-27T12:00:00.000Z", owner: "someone@example.com", id: UUID, path: "/projects/alpha/settings", href: `/orders/${UUID}`, slug: "my-quarterly-report-for-the-board-2024" };
+    expect(classifyStorageEntry({ name: "react-query-cache", value: JSON.stringify(cache) })).toEqual([]);
+    // An opaque token-like leaf is still scrubbed (weak), and anything under a credential key still counts.
+    const items = classifyStorageEntry({ name: "cache", value: JSON.stringify({ blob: "a1b2c3d4e5f6g7h8i9j0", authCookie: "plain-words-here" }) });
+    expect(tierOf(items, "a1b2c3d4e5f6g7h8i9j0")).toBe("weak");
+    expect(tierOf(items, "plain-words-here")).toBe("strong");
+  });
+
+  it("I-3: a standard-base64 token that starts with a slash is a credential under a credential key and by its shape; a real path is still not", () => {
+    const token = "/k3JqZ8vR2mT9wXyB4nL7pQ1sD6fH0gA5eC8uV3iO2Y=";
+    expect(tierOf(classifyString("token", token), token)).toBe("strong");
+    expect(tierOf(classifyString("anything", token), token)).toBe("strong");
+    expect(tierOf(urlSecrets(`https://app.test/cb?access_token=${encodeURIComponent(token)}`), token)).toBe("strong");
+    expect(tierOf(classifyString("token", "/dashboard/overview/orders"), "/dashboard/overview/orders")).toBe("weak");
+  });
+
+  it("I-4: a token stored with JSON.stringify is classified bare as well as quoted", () => {
+    const items = classifyStorageEntry({ name: "accessToken", value: JSON.stringify(JWT) });
+    expect(tierOf(items, JWT)).toBe("strong");
+    expect(tierOf(items, `"${JWT}"`)).toBe("strong");
+    // Inside a container too (a JSON-encoded string leaf).
+    expect(tierOf(classifyStorageEntry({ name: "store", value: JSON.stringify({ idToken: JSON.stringify(JWT) }) }), JWT)).toBe("strong");
+  });
+
+  it("I-5: a short neutral key under a credential key takes the parent's reading for an opaque value, and `plan` under `auth` does not", () => {
+    const sid = "a8Kd93mZp2Lq7xW4vB1n";
+    expect(tierOf(classifyStorageEntry({ name: "state", value: JSON.stringify({ session: { id: sid } }) }), sid)).toBe("strong");
+    expect(tierOf(classifyStorageEntry({ name: "state", value: JSON.stringify({ auth: { key: sid } }) }), sid)).toBe("strong");
+    expect(tierOf(classifyStorageEntry({ name: "state", value: JSON.stringify({ credentials: { id: sid } }) }), sid)).toBe("strong");
+    expect(strong(classifyStorageEntry({ name: "state", value: JSON.stringify({ auth: { plan: "pro-annual-2026-plan" }, profile: { id: sid } }) }))).toEqual([]);
+  });
+
+  it("I-6: a pure hex id, an address, a git sha or a dashless UUID inside JSON is not registered under a neutral key, and is a credential under a credential key; a base64 mix is still strong", () => {
+    const hexes = ["3f2504e04f8911d39a0c0305e82c3301", "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3", "0x5290AbCdEf1234567890aBcDeF1234567890Ee7f", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"];
+    for (const hex of hexes) {
+      expect(classifyStorageEntry({ name: "cache", value: JSON.stringify({ id: hex, commit: hex }) }), hex).toEqual([]);
+      expect(tierOf(classifyStorageEntry({ name: "cache", value: JSON.stringify({ sessionToken: hex }) }), hex), hex).toBe("strong");
+    }
+    expect(tierOf(classifyStorageEntry({ name: "cache", value: JSON.stringify({ blob: OPAQUE }) }), OPAQUE)).toBe("strong");
+    // A whole stored value (not a leaf) keeps the cookie fix's rule.
+    expect(tierOf(classifyStorageEntry({ name: "anything", value: hexes[1]! }), hexes[1]!)).toBe("strong");
   });
 });

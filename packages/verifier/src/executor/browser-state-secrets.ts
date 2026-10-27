@@ -23,6 +23,8 @@ export interface BrowserSecretState {
 /** IndexedDB is read whole by the browser driver; the executor accepts it only up to these bounds and otherwise fails closed (the caller's read rejects and no model call is made). */
 export const BROWSER_STATE_IDB_MAX_RECORDS = 5_000;
 export const BROWSER_STATE_IDB_MAX_BYTES = 4 * 1024 * 1024;
+/** The sync keeps a digest of every entry it classified, up to this many. */
+export const BROWSER_STATE_MEMO_MAX = 50_000;
 
 /** A bound of the browser state read was exceeded. Carries a fixed code only, never a value. */
 export class BrowserStateCapError extends Error {
@@ -83,12 +85,20 @@ function tellIndexedDb(indexedDB: unknown, learn: (item: ClassifiedValue) => voi
  * model call, and a large JSON value must not be parsed on every one of them; a value that changed has a new digest, so it is classified.
  */
 export function tellBrowserState(state: BrowserSecretState, learn: (item: ClassifiedValue) => void, memo?: Set<string>): void {
+  // `fresh` says whether an item is new to the memo; the memo learns it only after the item was told (if `learn` throws, the next read tells it again).
+  const pendingDigests: string[] = [];
   const fresh = (...parts: string[]): boolean => {
     if (memo === undefined) return true;
     const digest = createHash("sha256").update(parts.join("\u0000")).digest("hex");
     if (memo.has(digest)) return false;
-    memo.add(digest);
+    pendingDigests.push(digest);
     return true;
+  };
+  const commit = (): void => {
+    if (memo === undefined) return;
+    // Bounded: an app that rewrites a large store on every step must not grow it without end (a cleared memo only means classifying again).
+    if (memo.size + pendingDigests.length > BROWSER_STATE_MEMO_MAX) memo.clear();
+    for (const digest of pendingDigests.splice(0)) if (memo.size < BROWSER_STATE_MEMO_MAX) memo.add(digest);
   };
   // Only what looks like a secret: a consent flag is not one (the cookie rule of the sign-in and the sync).
   for (const cookie of state.cookies) if (isSessionCookieSecret(cookie)) learn({ value: cookie.value, tier: "strong" });
@@ -98,4 +108,5 @@ export function tellBrowserState(state: BrowserSecretState, learn: (item: Classi
     if (origin.indexedDB !== undefined) tellIndexedDb(origin.indexedDB, learn, fresh);
   }
   for (const url of state.urls ?? []) if (fresh("u", url)) for (const item of urlSecrets(url)) learn(item);
+  commit();
 }

@@ -34,7 +34,17 @@ const WORD_SEGMENT = /^[A-Za-z]?[a-z]{2,19}\d{0,4}$/;
 
 /** True for the value of a path, a URL, a date, an email: shapes that are never a credential on their own, whatever the key. */
 function isRouteOrDate(value: string): boolean {
-  return value.startsWith("/") || value.startsWith("./") || URL_LIKE.test(value) || ISO_DATE.test(value) || /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(value);
+  // A standard-base64 token can start with `/`: a leading slash makes a path only when the value is not an opaque run (a credential key must win over the path shape).
+  // Standard base64 has no `-` or `_`; a value that has them (`/orders/3f25-...`) is a path.
+  const path = (value.startsWith("/") || value.startsWith("./")) && !(isLongOpaqueRun(value) && !/[-_]/.test(value));
+  return path || URL_LIKE.test(value) || ISO_DATE.test(value) || /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(value);
+}
+
+/** A pure hex run (`0x` allowed): a git sha, a content hash, a dashless UUID, an address. Shown on pages and in URLs. */
+const PURE_HEX = /^(0x)?[0-9a-fA-F]+$/;
+/** One opaque piece: letters and digits (with a letter and a digit), no separator, no whitespace. */
+export function isOpaqueToken(value: string): boolean {
+  return /^[A-Za-z0-9]{8,}$/.test(value) && /[0-9]/.test(value) && /[A-Za-z]/.test(value);
 }
 
 /**
@@ -102,6 +112,12 @@ export function credentialKey(name: string): { credential: boolean; strongest: b
 export interface ClassifyOptions {
   /** The shortest value that counts as a credential under any credential key (the URL and header paths take 8 for every one). */
   keyedFloor?: number;
+  /**
+   * The value is a leaf of JSON or an IndexedDB record, not a whole stored value. Under a key that does not name a credential, such a leaf is strong only with a base64 character mix
+   * (a pure hex run, a `0x` address, a dashless UUID is an id the page shows, so it is not registered at all), and is weak only when it is an opaque token (a route, URL, date, email, UUID
+   * or slug is never registered: a cache of ordinary ids and paths must not be rewritten in reports or end a run at the final output scan).
+   */
+  leaf?: boolean;
 }
 
 /**
@@ -131,7 +147,10 @@ export function classifyString(name: string, value: string, options: ClassifyOpt
     else if (!exclusion) {
       const part = hasOpaquePart(trimmed);
       if (part !== null) { add(trimmed, "strong"); add(part, "strong"); }
-      else if (isLongOpaqueRun(trimmed)) add(trimmed, "strong");
+      else if (isLongOpaqueRun(trimmed)) {
+        const mixed = /[a-z]/.test(trimmed) && /[A-Z]/.test(trimmed) || /[+/=]/.test(trimmed);
+        if (!options.leaf || key.credential || (mixed && !PURE_HEX.test(trimmed))) add(trimmed, "strong");
+      }
     }
     if (!exclusion && key.credential) {
       const floor = key.strongest ? MIN_STRONG_KEYED_LENGTH : (options.keyedFloor ?? MIN_WEAK_LENGTH);
@@ -139,8 +158,10 @@ export function classifyString(name: string, value: string, options: ClassifyOpt
     }
   }
   // Everything else that is long enough, or short under a credential key, is app data that may be secret: scrubbed, not refused.
-  if (!found.has(trimmed) && (trimmed.length >= MIN_WEAK_LENGTH || (key.credential && trimmed.length >= MIN_CREDENTIAL_LENGTH))) add(trimmed, "weak");
-  if (trimmed !== value && !found.has(value) && value.length >= MIN_WEAK_LENGTH) add(value, "weak");
+  const weakAllowed = options.leaf !== true || (key.credential && !isRouteOrDate(trimmed))
+    || (isOpaqueToken(trimmed) && trimmed.length >= MIN_WEAK_LENGTH && !PURE_HEX.test(trimmed) && !UUID.test(trimmed));
+  if (weakAllowed && !found.has(trimmed) && (trimmed.length >= MIN_WEAK_LENGTH || (key.credential && trimmed.length >= MIN_CREDENTIAL_LENGTH))) add(trimmed, "weak");
+  if (weakAllowed && trimmed !== value && !found.has(value) && value.length >= MIN_WEAK_LENGTH) add(value, "weak");
   return [...found].map(([text, tier]) => ({ value: text, tier }));
 }
 

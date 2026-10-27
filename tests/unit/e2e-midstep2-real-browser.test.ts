@@ -83,6 +83,28 @@ describe.skipIf(!haveChromium)("the real browser", () => {
     }
   });
 
+  it("I-1: a page with a sandboxed iframe (opaque origin) and a navigating iframe does not make the read fail; the page's own session storage is still read", async () => {
+    const server: Server = createServer((request, response) => {
+      response.writeHead(200, { "content-type": "text/html" });
+      if (request.url === "/preview") { response.end("<html><body>preview <script>try { sessionStorage.getItem('x'); document.title = 'read'; } catch (e) { document.title = 'blocked'; }</script></body></html>"); return; }
+      response.end(`<html><body><script>sessionStorage.setItem("msal.idtoken", ${JSON.stringify(JWT)});</script><iframe sandbox="allow-scripts" src="/preview"></iframe></body></html>`);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    closers.push(() => new Promise((resolve) => { server.closeAllConnections(); server.close(() => resolve(undefined)); }));
+    const browser: Browser = await chromium.launch();
+    closers.push(() => browser.close());
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(`http://127.0.0.1:${(server.address() as { port: number }).port}/`);
+    await page.waitForFunction("document.querySelector('iframe') !== null");
+    await page.frames()[1]?.waitForLoadState("domcontentloaded");
+    expect(page.frames()).toHaveLength(2);
+    const state = await readBrowserState(context);
+    const told: string[] = [];
+    tellBrowserState(state, (item) => told.push(item.value));
+    expect(told).toContain(JWT);
+  });
+
   it("the form-login driver reports the sign-in's request headers and returns session storage, IndexedDB and the URLs", async () => {
     const userDir = mkdtempSync(join(tmpdir(), "m2cdp-"));
     const child: ChildProcess = spawn(chromium.executablePath(), ["--headless=new", "--remote-debugging-port=0", `--user-data-dir=${userDir}`, "--no-first-run", "--disable-gpu", "about:blank"], { stdio: "ignore" });

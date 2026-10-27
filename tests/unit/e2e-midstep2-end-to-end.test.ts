@@ -8,8 +8,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { E2E_EXECUTOR_COMPILED_ORIGIN, readE2EApplicationProjectContract } from "@agentx/contracts";
 import { createExecutorSessionStore } from "../../packages/verifier/src/executor/accounts.js";
 import { readBrowserState, type BrowserContextLike } from "../../packages/verifier/src/executor/browser-state-reader.js";
-import { BROWSER_STATE_IDB_MAX_RECORDS } from "../../packages/verifier/src/executor/browser-state-secrets.js";
+import { BROWSER_STATE_IDB_MAX_RECORDS, BROWSER_STATE_MEMO_MAX, tellBrowserState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
+import { E2E_SESSION_SYNC_MAX_WEAK_VALUES, createE2ESessionSyncSource } from "../../packages/verifier/src/executor/session-sync.js";
 import { REQUEST_HEADER_WAIT_MS, watchBrowserRequests } from "../../packages/verifier/src/executor/request-capture.js";
 import { createSessionSecretRegistry } from "../../packages/verifier/src/executor/session-secret-registry.js";
 import type { FormLoginDriver, FormLoginStorageState, FormRequestContext } from "../../packages/verifier/src/executor/form-login.js";
@@ -238,7 +239,7 @@ describe("gap 5: session storage and IndexedDB, through the real reader", () => 
     expect(e.run.seen).toHaveLength(0);
   });
 
-  it("a frame whose session storage cannot be read (twice) fails closed; a blank or data frame is not asked", async () => {
+  it("a frame that cannot be read and never held state (a sandboxed or still-loading iframe) is skipped; one that held state and can no longer be read fails closed; a blank or data frame is not asked", async () => {
     const e = await executor();
     const context = new FakeContext();
     let asked = 0;
@@ -246,10 +247,24 @@ describe("gap 5: session storage and IndexedDB, through the real reader", () => 
     e.source.attach("s2", { storageState: () => readBrowserState(context) }, { anonymous: false });
     expect((await e.workerSays("fine")).status).toBe("ok");
     expect(asked).toBe(0);
-    context.addPage([{ url: () => `${E2E_EXECUTOR_COMPILED_ORIGIN}/`, evaluate: async () => { asked += 1; throw new Error("Execution context was destroyed"); } }]);
-    await expect(e.workerOnly.generate({ ...POSITION, callIndex: 5, call: call() })).rejects.toMatchObject({ code: "session-sync" });
-    expect(asked).toBe(2);
-    expect(e.run.seen).toHaveLength(1);
+    // A navigating iframe that never answers: skipped (it is given a bounded settle and asked again, three times), the other frame's storage is still read.
+    let settled = 0;
+    context.addPage([{ url: () => `${E2E_EXECUTOR_COMPILED_ORIGIN}/preview`, evaluate: async () => { asked += 1; throw new Error("Execution context was destroyed"); },
+      waitForLoadState: async () => { settled += 1; } }, sessionFrame([{ name: "msal.idtoken", value: JWT }])]);
+    expect((await e.workerSays("still fine")).status).toBe("ok");
+    expect(asked).toBe(3);
+    expect(settled).toBe(2);
+    expect(await e.workerSays(`id ${JWT}`)).toMatchObject(REFUSED);
+    // A frame that held state and then cannot be read is a real loss: fail closed.
+    const e2 = await executor();
+    const second = new FakeContext();
+    let fail = false;
+    second.addPage([{ url: () => `${E2E_EXECUTOR_COMPILED_ORIGIN}/`, evaluate: async () => { if (fail) throw new Error("Execution context was destroyed"); return { over: false, origin: E2E_EXECUTOR_COMPILED_ORIGIN, entries: [{ name: "msal.idtoken", value: JWT }] }; } }]);
+    e2.source.attach("s2", { storageState: () => readBrowserState(second) }, { anonymous: false });
+    expect((await e2.workerSays("fine")).status).toBe("ok");
+    fail = true;
+    await expect(e2.workerOnly.generate({ ...POSITION, callIndex: 5, call: call() })).rejects.toMatchObject({ code: "session-sync" });
+    expect(e2.run.seen).toHaveLength(1);
   });
 
   it("session storage over its bound in the page fails closed", async () => {
@@ -335,3 +350,88 @@ describe("the host wires the new reads (static: the host is not started in unit 
     expect(host).toMatch(/tellBrowserState\(await readBrowserState\(owned\), \(item\) => sessionSync\.learn\(\[item\]\)\)/);
   });
 });
+
+describe("fix round 1 (review of 334c7ced)", () => {
+  const UUID = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+  const bytesOf = (text: string) => Buffer.from(text, "utf8");
+
+  it("B-1: an app with a persisted cache of ids and paths in IndexedDB: a trace that shows the path passes every scan, and a run built on it has nothing to remove at the final output scan", async () => {
+    const e = await executor();
+    const context = new FakeContext();
+    const records = Array.from({ length: 300 }, (_unused, index) => ({ valueEncoded: { o: [{ k: "id", v: `${UUID.slice(0, 30)}${String(index).padStart(6, "0")}` }, { k: "href", v: `/orders/${UUID}` }, { k: "createdAt", v: "2026-10-27T12:00:00.000Z" }] } }));
+    context.stored = { cookies: [], origins: [{ origin: E2E_EXECUTOR_COMPILED_ORIGIN, localStorage: [{ name: "cache", value: JSON.stringify({ lastPage: `${E2E_EXECUTOR_COMPILED_ORIGIN}/orders/${UUID}`, owner: "someone@example.com" }) }], indexedDB: [{ name: "db", stores: [{ name: "orders", records }] }] }] };
+    e.source.attach("s2", { storageState: () => readBrowserState(context) }, { anonymous: false });
+    expect((await e.workerSays(`Order page /orders/${UUID} for someone@example.com`)).status).toBe("ok");
+    const trace = bytesOf(JSON.stringify({ url: `${E2E_EXECUTOR_COMPILED_ORIGIN}/orders/${UUID}`, text: "Order for someone@example.com" }));
+    expect(e.registry.modelScan(trace)).toBe(false);
+    expect(e.registry.evidenceScan(trace)).toBe(false);
+    expect(e.redactor.contains(trace)).toBe(false);
+    expect(e.redactor.text(`/orders/${UUID}`)).toBe(`/orders/${UUID}`);
+  });
+
+  it("B-1: what the executor writes is held to the final scan: an evidence-only value is allowed in a model prompt but a trace showing it is dropped", () => {
+    const redactor = createCredentialRedactor([]);
+    const registry = createSessionSecretRegistry({ redactor });
+    registry.register("Quarterly report for ACME", { evidenceOnly: true });
+    const shown = bytesOf('{"text":"Quarterly report for ACME"}');
+    expect(registry.modelScan(shown)).toBe(false);
+    expect(registry.evidenceScan(shown)).toBe(true);
+    expect(redactor.contains(shown)).toBe(registry.evidenceScan(shown));
+  });
+
+  it("I-1: a sandboxed iframe does not refuse model calls (real reader, the page expression answers an opaque origin with no entries)", async () => {
+    const e = await executor();
+    const context = new FakeContext();
+    // What the in-page expression returns inside `<iframe sandbox="allow-scripts">`: no throw, no entries.
+    context.addPage([{ url: () => `${E2E_EXECUTOR_COMPILED_ORIGIN}/preview`, evaluate: async () => ({ over: false, origin: "null", entries: [] }) }, sessionFrameOf([{ name: "msal.idtoken", value: JWT }])]);
+    e.source.attach("s2", { storageState: () => readBrowserState(context) }, { anonymous: false });
+    expect((await e.workerSays("Preview shown")).status).toBe("ok");
+    expect(await e.workerSays(`id ${JWT}`)).toMatchObject(REFUSED);
+  });
+
+  it("I-2: registering thousands of values is close to linear, and weak registrations stop at the cap", () => {
+    const redactor = createCredentialRedactor([]);
+    const started = Date.now();
+    for (let index = 0; index < 4_000; index += 1) redactor.addSessionSecret(`opaque-session-value-${String(index).padStart(6, "0")}-abcdef`, { evidenceOnly: true });
+    expect(Date.now() - started).toBeLessThan(2_500);
+    expect(redactor.contains(bytesOf("opaque-session-value-003999-abcdef"), "all")).toBe(true);
+    expect(redactor.text("x opaque-session-value-000001-abcdef y")).toBe("x <session> y");
+    const told: string[] = [];
+    const source = createE2ESessionSyncSource({ register: (value) => { told.push(value); }, known: () => [] });
+    source.learn(Array.from({ length: E2E_SESSION_SYNC_MAX_WEAK_VALUES + 500 }, (_unused, index) => ({ value: `weak-value-${String(index).padStart(6, "0")}-abcdef`, tier: "weak" as const })));
+    expect(told).toHaveLength(E2E_SESSION_SYNC_MAX_WEAK_VALUES);
+    // A strong value is never held back by the cap.
+    source.learn([{ value: "strong-value-abcdef0123456789", tier: "strong" }]);
+    expect(told).toHaveLength(E2E_SESSION_SYNC_MAX_WEAK_VALUES + 1);
+  });
+
+  it("I-4: a token stored with JSON.stringify is refused bare, at the worker and at the executor's scan", async () => {
+    const e = await executor();
+    e.state.current = { cookies: [], origins: [{ localStorage: [{ name: "accessToken", value: JSON.stringify(JWT) }] }] };
+    expect((await e.workerSays("Nothing secret here")).status).toBe("ok");
+    expect(await e.workerSays(`token ${JWT}`)).toMatchObject(REFUSED);
+    expect(await e.executorSays(`token ${JWT}`)).toBe("credential-in-prompt");
+  });
+
+  it("M-1: a value whose registration failed is not remembered as registered; the next read tries again", async () => {
+    let fail = true;
+    const told: string[] = [];
+    const source = createE2ESessionSyncSource({ register: (value) => { if (fail) throw new Error("disk full"); told.push(value); }, known: () => told });
+    source.attach("s1", { storageState: async () => ({ cookies: [], origins: [{ localStorage: [{ name: "accessToken", value: JWT }] }] }) }, { anonymous: false });
+    await expect(source.read()).rejects.toThrow();
+    fail = false;
+    await source.read();
+    expect(told).toEqual([JWT]);
+  });
+
+  it("M-5: the classified-entry memo is bounded", () => {
+    const memo = new Set<string>();
+    const entries = Array.from({ length: BROWSER_STATE_MEMO_MAX + 10 }, (_unused, index) => ({ name: `k${index}`, value: `v${index}` }));
+    tellBrowserState({ cookies: [], origins: [{ localStorage: entries }] }, () => undefined, memo);
+    expect(memo.size).toBeLessThanOrEqual(BROWSER_STATE_MEMO_MAX);
+  });
+});
+
+function sessionFrameOf(entries: Array<{ name: string; value: string }>) {
+  return { url: () => `${E2E_EXECUTOR_COMPILED_ORIGIN}/`, evaluate: async () => ({ over: false, origin: E2E_EXECUTOR_COMPILED_ORIGIN, entries }) };
+}

@@ -194,9 +194,10 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
     expect((await bare.generate({ ...POSITION, callIndex: 1, call: call(`#n3 text "${JWT}"`) })).result).toMatchObject({ status: "error", code: "refused-credential-match" });
   });
 
-  it("the host wires its three model-bound scans (the channel client, the model adapter, the capture store) to the registry's model scan, not to the redactor's all-scope check", () => {
+  it("the host wires its two model-bound scans (the channel client, the model adapter) to the registry's model scan, and what it writes (the capture store) to the all-scope evidence scan (MIDSTEP-2 fix round 1)", () => {
     const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
-    expect(host.match(/scan: registry\.modelScan/g)).toHaveLength(3);
+    expect(host.match(/scan: registry\.modelScan/g)).toHaveLength(2);
+    expect(host.match(/scan: registry\.evidenceScan/g)).toHaveLength(1);
     expect(host).not.toMatch(/agentRedactor\.contains\(/);
     expect(host).toMatch(/createSessionSecretRegistry\(\{ redactor: agentRedactor/);
   });

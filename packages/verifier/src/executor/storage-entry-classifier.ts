@@ -1,9 +1,10 @@
-import { classifyString, tokenShapedSubstrings, type ClassifiedValue, type CredentialTier } from "./credential-classifier.js";
+import { classifyString, credentialKey, isOpaqueToken, tokenShapedSubstrings, type ClassifiedValue, type CredentialTier } from "./credential-classifier.js";
 
 /**
  * Classifies what a storage entry holds (MIDSTEP-2): the whole value, and, when the value is JSON (compact or pretty, an object, an array, or a string that is itself JSON), every string
  * leaf on its own, by the path of keys down to it and by its value. So a token inside `{"user":"maya","token":"..."}` is a strong credential, not just the whole blob; a draft inside the
- * same blob is not. A JSON blob as a whole is weak (scrubbed); its leaves carry the judgement.
+ * same blob is not. A JSON blob as a whole is not registered; its leaves carry the judgement. A leaf is weak only when it is an opaque token (never a route, URL, date, email, UUID or slug), and
+ * strong under a neutral key only with a base64 mix (a pure hex id is not registered): see `ClassifyOptions.leaf`. A stored JSON string (`JSON.stringify(token)`) is unwrapped and its inner value classified too.
  *
  * Bounded: a text over 1 MiB is not parsed, and a structure of more than 50 000 nodes or nested deeper than 12 levels stops the walk; both fall back to the token-shaped substrings of the raw
  * text (a JWT, a long opaque run), which is a cruder but still bounded cover.
@@ -35,21 +36,35 @@ function parseContainer(text: string): { parsed: unknown } | { oversized: true }
 }
 
 /** The key a JSON leaf is judged by: its own key, and its parent's when its own says nothing (`{"token":{"value":"..."}}`). A credential word higher up does not make every leaf below it one (`{"auth":{"plan":"pro-annual"}}`). */
+const SHORT_KEYS = new Set(["id", "key", "k", "at", "rt", "t", "sid", "ref"]);
 const GENERIC_KEYS = new Set(["value", "val", "v", "data", "raw", "string", "str", "content", "body", "item", "0", "1"]);
 function leafName(parent: string, key: string): string {
   return GENERIC_KEYS.has(key.toLowerCase()) ? `${parent} ${key}` : key;
 }
 
+/** A JSON string literal (`"eyJ..."`, what `JSON.stringify(token)` stores): the inner string, else undefined. */
+function parseQuoted(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (trimmed.length < 3 || trimmed.length > MAX_PARSE_CHARS || trimmed[0] !== '"' || trimmed[trimmed.length - 1] !== '"') return undefined;
+  try { const parsed: unknown = JSON.parse(trimmed); return typeof parsed === "string" ? parsed : undefined; } catch { return undefined; }
+}
+
 function visitString(walk: Walk, path: string, text: string, depth: number, nested: number, top: boolean): void {
   const container = nested < MAX_NESTED_JSON ? parseContainer(text) : undefined;
+  const quoted = container === undefined && nested < MAX_NESTED_JSON ? parseQuoted(text) : undefined;
+  if (quoted !== undefined) {
+    // The quoted form is registered as it is stored, and the bare inner value is classified under the same key: a page shows the token, not its quotes.
+    for (const item of classifyString(path, text, top ? {} : { leaf: true })) put(walk, item);
+    visitString(walk, path, quoted, depth + 1, nested + 1, false);
+    return;
+  }
   if (container !== undefined) {
-    // The blob itself is only scrubbed; what is secret inside it is judged leaf by leaf.
-    if (text.trim().length >= 16) put(walk, { value: text, tier: "weak" });
+    // What is secret inside the blob is judged leaf by leaf; the blob itself is not registered (its text is not in a page).
     if ("oversized" in container) { walk.overflow = true; return; }
     visitNode(walk, path, container.parsed, depth + 1, nested + 1);
     return;
   }
-  for (const item of classifyString(path, text)) {
+  for (const item of classifyString(path, text, top ? {} : { leaf: true })) {
     // A sentence in a JSON leaf is text, not a token; only a top-level plain value is scrubbed on length alone, as it always was.
     if (item.tier === "weak" && !top && (/\s/.test(item.value) || walk.weakLeaves >= MAX_WEAK_LEAVES)) continue;
     if (item.tier === "weak" && !top) walk.weakLeaves += 1;
@@ -63,7 +78,17 @@ function visitNode(walk: Walk, path: string, node: unknown, depth: number, neste
   if (walk.nodes > MAX_NODES || depth > MAX_DEPTH) { walk.overflow = true; return; }
   if (typeof node === "string") { visitString(walk, path, node, depth, nested, false); return; }
   if (Array.isArray(node)) { for (const item of node) visitNode(walk, path, item, depth + 1, nested); return; }
-  if (node !== null && typeof node === "object") for (const [key, child] of Object.entries(node)) visitNode(walk, leafName(path, key), child, depth + 1, nested);
+  if (node !== null && typeof node === "object") {
+    for (const [key, child] of Object.entries(node)) {
+      // A short neutral key under a credential key (`{"session":{"id":"..."}}`, `{"auth":{"key":"..."}}`) takes the parent's credential reading, for an opaque value; `{"auth":{"plan":..}}` does not.
+      if (typeof child === "string" && SHORT_KEYS.has(key.toLowerCase()) && isOpaqueToken(child.trim()) && credentialKey(path).credential) {
+        walk.nodes += 1;
+        visitString(walk, path, child, depth + 1, nested, false);
+        continue;
+      }
+      visitNode(walk, leafName(path, key), child, depth + 1, nested);
+    }
+  }
 }
 
 function finish(walk: Walk, raw: string): ClassifiedValue[] {

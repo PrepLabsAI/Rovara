@@ -4,6 +4,7 @@ import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_ANONYMOUS_SESSION_REF_PREFIX, E2E
 import type { E2EApplicationOwnedSubject } from "../application-result-adapter.js";
 import type { E2EApiRuntimeResponse } from "../api-runtime.js";
 import type { ExecutorSessionFacts } from "./case-ledger.js";
+import { E2E_SESSION_SYNC_MAX_WEAK_VALUES } from "./session-sync.js";
 import { tellBrowserState } from "./browser-state-secrets.js";
 import type { ClassifiedValue } from "./credential-classifier.js";
 import { FormLoginError, isSessionCookieSecret, parseSetCookie, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
@@ -119,7 +120,7 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
    */
   const registerOnce = (value: string, options: { evidenceOnly?: boolean } = {}): void => {
     if (options.evidenceOnly === true) {
-      if (registered.has(value) || registeredForEvidence.has(value)) return;
+      if (registered.has(value) || registeredForEvidence.has(value) || registeredForEvidence.size >= E2E_SESSION_SYNC_MAX_WEAK_VALUES) return;
       registeredForEvidence.add(value);
       input.registerSecret?.(value, { evidenceOnly: true });
       return;

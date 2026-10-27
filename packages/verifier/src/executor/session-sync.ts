@@ -29,6 +29,8 @@ export interface E2ESessionSyncSource {
 }
 
 export const E2E_SESSION_SYNC_PENDING_LIMIT_MS = 5_000;
+/** At most this many evidence-only values are registered per process. */
+export const E2E_SESSION_SYNC_MAX_WEAK_VALUES = 2_000;
 
 export function createE2ESessionSyncSource(options: {
   register(value: string, options?: { evidenceOnly?: boolean }): void;
@@ -38,12 +40,17 @@ export function createE2ESessionSyncSource(options: {
   const contexts = new Map<string, E2ESessionStateReader>();
   // A value read again on every call is registered once: registering writes to a file the parent reads. A weak value is registered again if it later turns out to be a credential.
   const seen = new Map<string, CredentialTier>();
+  let weakRegistered = 0;
   const register = (item: ClassifiedValue): void => {
     const before = seen.get(item.value);
     if (before === "strong" || (before === "weak" && item.tier === "weak")) return;
-    seen.set(item.value, item.tier);
+    // Weak values are only scrubbed, never refused: past the cap no more are added (the cost of registering one is paid by every later scan).
+    if (item.tier === "weak" && before === undefined) { if (weakRegistered >= E2E_SESSION_SYNC_MAX_WEAK_VALUES) return; }
+    // Remembered only once registered: if registering fails (the file the parent reads cannot be written), the call is refused and the value is tried again on the next one.
     if (item.tier === "weak") options.register(item.value, { evidenceOnly: true });
     else options.register(item.value);
+    if (item.tier === "weak" && before === undefined) weakRegistered += 1;
+    seen.set(item.value, item.tier);
   };
   // What the browser state held that was classified already: the whole browser is read before every model call.
   const classified = new Set<string>();

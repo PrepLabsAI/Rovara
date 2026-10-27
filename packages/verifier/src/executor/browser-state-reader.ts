@@ -7,7 +7,12 @@ import { BrowserStateCapError, type BrowserSecretState } from "./browser-state-s
  * Fail closed: a frame of the application's origin whose session storage cannot be read (twice), or that holds more than the bounds below, rejects the whole read. The caller (the session sync)
  * then makes no model call. IndexedDB is read whole by the driver and checked against its bounds by `tellBrowserState`.
  */
-export interface BrowserFrameLike { url(): string; evaluate(expression: string): Promise<unknown> }
+export interface BrowserFrameLike {
+  url(): string;
+  evaluate(expression: string): Promise<unknown>;
+  /** Playwright's `frame.waitForLoadState`; a frame in the middle of a navigation is given a short bounded wait before it is asked again. */
+  waitForLoadState?: (state: "domcontentloaded", options: { timeout: number }) => Promise<unknown>;
+}
 export interface BrowserContextLike<Cookie extends { value: string; httpOnly: boolean } = { value: string; httpOnly: boolean }> {
   storageState(options?: { indexedDB?: boolean }): Promise<{
     cookies: ReadonlyArray<Cookie>;
@@ -21,12 +26,16 @@ export const SESSION_STORAGE_MAX_CHARS = 4 * 1024 * 1024;
 
 // Runs in the page (a string: this package is compiled without the DOM types). Reads its own origin's session storage within the bounds, so a huge store is never copied out.
 const READ_SESSION_STORAGE = `(() => {
+  // A sandboxed iframe (HTML previews, embedded docs) has an opaque origin: it cannot hold the application's storage, and reading it throws SecurityError.
+  let store;
+  try { if (location.origin === "null") return { over: false, origin: location.origin, entries: [] }; store = sessionStorage; store.length; }
+  catch (error) { if (error && error.name === "SecurityError") return { over: false, origin: String(location.origin), entries: [] }; throw error; }
   const entries = [];
   let chars = 0;
-  for (let index = 0; index < sessionStorage.length; index += 1) {
-    const name = sessionStorage.key(index);
+  for (let index = 0; index < store.length; index += 1) {
+    const name = store.key(index);
     if (name === null) continue;
-    const value = sessionStorage.getItem(name) ?? "";
+    const value = store.getItem(name) ?? "";
     chars += name.length + value.length;
     if (entries.length >= ${SESSION_STORAGE_MAX_ENTRIES} || chars > ${SESSION_STORAGE_MAX_CHARS}) return { over: true, origin: location.origin, entries: [] };
     entries.push({ name, value });
@@ -42,14 +51,23 @@ function isAnswer(value: unknown): value is SessionStorageAnswer {
     && answer.entries.every((entry) => entry !== null && typeof entry === "object" && typeof entry.name === "string" && typeof entry.value === "string");
 }
 
-async function readFrameSessionStorage(frame: BrowserFrameLike): Promise<SessionStorageAnswer> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+const FRAME_RETRIES = 3;
+const FRAME_SETTLE_MS = 1_500;
+// Frames that were read once with session storage in them. A frame that cannot be read now but held app state before is a real loss and fails the read; a frame that never held any
+// (a sandboxed or cross-origin iframe, a frame that is still loading) is skipped, because it cannot refuse every model call of the case.
+const heldState = new WeakSet<object>();
+
+/** The frame's session storage, or null for a frame that cannot be read and never held any state. */
+async function readFrameSessionStorage(frame: BrowserFrameLike): Promise<SessionStorageAnswer | null> {
+  for (let attempt = 0; attempt < FRAME_RETRIES; attempt += 1) {
     try {
       const answer = await frame.evaluate(READ_SESSION_STORAGE);
-      if (isAnswer(answer)) return answer;
-    } catch { /* a frame in the middle of a navigation: tried once more */ }
+      if (isAnswer(answer)) { if (answer.entries.length > 0) heldState.add(frame); return answer; }
+    } catch { /* a frame in the middle of a navigation: given a moment, then asked again */ }
+    if (attempt < FRAME_RETRIES - 1) await frame.waitForLoadState?.("domcontentloaded", { timeout: FRAME_SETTLE_MS }).catch(() => undefined);
   }
-  throw new BrowserStateCapError("sessionstorage-unreadable");
+  if (heldState.has(frame)) throw new BrowserStateCapError("sessionstorage-unreadable");
+  return null;
 }
 
 /** The browser state with each cookie as the driver gave it (the sign-in keeps them whole) and each origin named. */
@@ -73,6 +91,7 @@ export async function readBrowserState<Cookie extends { value: string; httpOnly:
       // A blank, data or error frame has no origin of the application's; only an http(s) frame is asked.
       if (!/^https?:\/\//i.test(url)) continue;
       const answer = await readFrameSessionStorage(frame);
+      if (answer === null) continue;
       if (answer.over) throw new BrowserStateCapError("sessionstorage-size");
       const existing = origins.get(answer.origin) ?? { origin: answer.origin, localStorage: [], sessionStorage: [] };
       existing.sessionStorage.push(...answer.entries);
