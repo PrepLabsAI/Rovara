@@ -68,6 +68,12 @@ function stoppableCli(behaviour: {
 }
 
 /** A fake `devcontainer` CLI: `up` succeeds, and `exec` answers with `execResult`. */
+/** The per-start suffix of the mask volumes' names in the `up` call's arguments. */
+function maskToken(calls: readonly string[][]): string {
+  const mount = calls[0]!.find((arg) => arg.startsWith("type=volume,source=agentx-mask-agentx-"))!;
+  return /source=agentx-mask-agentx-([0-9a-f]{12}),/u.exec(mount)![1]!;
+}
+
 function fakeCli(execResult: (args: readonly string[]) => DevcontainerProcess = () => ({ exitCode: 0, stdout: "", stderr: "" })) {
   const calls: string[][] = [];
   const options: Array<Parameters<DevcontainerCli["run"]>[1]> = [];
@@ -358,9 +364,9 @@ describe("the devcontainer CLI seam", () => {
         "up", "--workspace-folder", target.workspaceFolder, "--config", target.configPath, "--frozen-lockfile",
         "--mount", `type=bind,source=${target.rootPath},target=${target.rootPath}`,
         // The worker's own state is hidden too: created if missing, then masked.
-        "--mount", `type=volume,source=agentx-mask-agentx,target=${join(target.rootPath, ".agentx")}`,
-        "--mount", `type=volume,source=agentx-mask-agent-sessions,target=${join(target.rootPath, "agent-sessions")}`,
-        "--mount", `type=volume,source=agentx-docker-data-mask,target=${join(target.rootPath, ".docker")}`,
+        "--mount", `type=volume,source=agentx-mask-agentx-${maskToken(calls)},target=${join(target.rootPath, ".agentx")}`,
+        "--mount", `type=volume,source=agentx-mask-agent-sessions-${maskToken(calls)},target=${join(target.rootPath, "agent-sessions")}`,
+        "--mount", `type=volume,source=agentx-docker-data-mask-${maskToken(calls)},target=${join(target.rootPath, ".docker")}`,
         "--log-format", "json",
       ]]);
       expect(removed).toEqual([]);

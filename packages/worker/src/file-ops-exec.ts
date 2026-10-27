@@ -34,6 +34,12 @@ export interface FileOpsTarget {
  */
 export const FILE_OPS_NODE_FLAGS = ["--enable-experimental-regexp-engine-on-excessive-backtracks"] as const;
 
+/**
+ * `docker exec` options that clear what a container's own environment could add to the helper's Node (extra options, extra
+ * module folders): the helper runs with the Node it was given and nothing the container sets.
+ */
+export const FILE_OPS_ENVIRONMENT_RESET = ["-e", "NODE_OPTIONS=", "-e", "NODE_PATH="] as const;
+
 /** How long one helper call may take, and how much of its reply is kept (larger is TOO_LARGE). */
 export const FILE_OPS_TIMEOUT_MS = 60_000;
 export const FILE_OPS_MAX_REPLY_BYTES = 16 * 1024 * 1024;
@@ -82,7 +88,7 @@ export async function fileOpsExec<Op extends SandboxFileRequest["op"]>(
   const docker = target.docker ?? defaultDocker();
   if (docker.execBytes === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX has no way to run the file tools in the task's container");
   const reply = await docker.execBytes(
-    ["exec", "-i", "--user", target.user, target.container, target.node, ...FILE_OPS_NODE_FLAGS, target.helper, argument],
+    ["exec", "-i", "--user", target.user, ...FILE_OPS_ENVIRONMENT_RESET, target.container, target.node, ...FILE_OPS_NODE_FLAGS, target.helper, argument],
     { ...(stdin === undefined ? {} : { stdin }), ...(signal === undefined ? {} : { signal }), timeoutMs: FILE_OPS_TIMEOUT_MS, maxStdoutBytes: FILE_OPS_MAX_REPLY_BYTES },
   );
   if (reply.aborted === true || signal?.aborted === true) throw new FileOpsInterruptedError("aborted");

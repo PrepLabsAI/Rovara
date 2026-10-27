@@ -69,10 +69,10 @@ export function devcontainerConfigRefusal(config: unknown, context: Devcontainer
   const build = settings.build !== null && typeof settings.build === "object" && !Array.isArray(settings.build)
     ? settings.build as Record<string, unknown>
     : {};
-  for (const [name, value] of [["build.dockerfile", build.dockerfile ?? settings.dockerFile], ["build.context", build.context ?? settings.context]] as const) {
+  for (const [name, value, within] of [["build.dockerfile", build.dockerfile ?? settings.dockerFile, "workspace"], ["build.context", build.context ?? settings.context, "repository folder"]] as const) {
     if (value === undefined) continue;
-    const outside = buildPathRefusal(value, context);
-    if (outside !== undefined) return `${name} outside the workspace (${outside})`;
+    const outside = buildPathRefusal(value, context, within);
+    if (outside !== undefined) return `${name} outside the ${within} (${outside})`;
   }
   if (build.options !== undefined) {
     if (!Array.isArray(build.options) || !build.options.every((arg) => typeof arg === "string")) return "build.options that are not a list of strings";
@@ -82,15 +82,21 @@ export function devcontainerConfigRefusal(config: unknown, context: Devcontainer
   return undefined;
 }
 
-/** A Dockerfile or build context path, relative to devcontainer.json's folder: allowed only inside the workspace. */
-function buildPathRefusal(value: unknown, context: DevcontainerPolicyContext): string | undefined {
+/**
+ * A Dockerfile or build context path, relative to devcontainer.json's folder. A Dockerfile is allowed anywhere inside the
+ * workspace; a build context only inside the repository folder, since the build sends the whole context into the image
+ * build, and the workspace holds more than the repository.
+ */
+function buildPathRefusal(value: unknown, context: DevcontainerPolicyContext, within: "workspace" | "repository folder"): string | undefined {
   if (typeof value !== "string") return String(value);
   const substituted = substituteLocal(value, context);
   if (substituted.includes("${")) return value;
   const folder = context.configFolder ?? join(context.workspaceFolder, ".devcontainer");
   const path = resolve(folder, substituted);
   const resolvePath = context.resolvePath ?? ((candidate: string) => resolve(candidate));
-  return hostPathAllowed(resolvePath(path), resolvePath(resolve(context.rootPath)), { allowRoot: true }) ? undefined : path;
+  if (within === "workspace") return hostPathAllowed(resolvePath(path), resolvePath(resolve(context.rootPath)), { allowRoot: true }) ? undefined : path;
+  const fromRepository = relative(resolvePath(resolve(context.workspaceFolder)), resolvePath(path));
+  return fromRepository.startsWith("..") || isAbsolute(fromRepository) ? path : undefined;
 }
 
 /**

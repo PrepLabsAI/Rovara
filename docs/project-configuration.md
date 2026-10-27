@@ -175,7 +175,7 @@ below is refused, with a message naming the setting, before any container starts
 | A bind mount (`mounts`, `workspaceMount`, or `-v`/`--volume`/`--mount` in `runArgs`) of `/`, `/var/run/docker.sock`, the workspace root itself, the worker's own folders in it (`.docker`, `.agentx`, `agent-sessions`, `.agentx-runtime`; AgentX hides them inside the container too), or any path outside the workspace, including through a link (whether or not its target exists), or a path AgentX cannot check | They expose host files or the Docker socket. |
 | A feature AgentX cannot pin to the content it checked (one fetched from a GitHub release) | Its content could change before the container is built. |
 | A volume with `volume-opt` or `volume-driver` options | Such a volume can be a bind mount of any host path. |
-| `build.context` or `build.dockerfile` outside the workspace | The build would read host files. |
+| `build.dockerfile` outside the workspace, or `build.context` outside the repository folder | The build would read host files, or the worker's own folders of the workspace. |
 | `build.options` with `--network=host` or `container:…`, `--output`/`-o`, `--iidfile`, `--metadata-file`, `--allow`, `--security-opt`, `--secret`, `--ssh`, `--build-context`, `--cache-to` or `--file`/`-f` | They reach the host's network, extra privileges, or files outside the build. |
 
 Everything else is allowed: `image` or `build` (with options such as `--build-arg`, `--target`,
@@ -200,7 +200,8 @@ same path, with the worker's own folders of it (`.docker`, which is Docker's own
 hid those folders is created again once. The agent's file tools (read, write, edit, grep, find and
 ls) run inside the dev container, as its user, so they only reach the repository folders it mounts.
 If the dev container cannot run them, they run in a separate sandbox container instead, and the
-task says so. Before each publication
+task says so. A review of pull request feedback does not start the dev container: its file tools run
+in the task sandbox. Before each publication
 AgentX removes the dev container (see the security notes below), so the next step creates it again;
 creating it reruns its creation commands, such as `onCreateCommand` and `postCreateCommand`.
 
@@ -425,6 +426,7 @@ that needs more tools should use a dev container. A sandbox that cannot start fa
 AgentX never falls back to running the command in the worker. The sandbox is the default
 everywhere; running commands as children of the worker is for tests and a developer's machine,
 needs `AGENTX_TASK_SHELL=local`, and is refused on EC2 (the boot script sets `AGENTX_RUNTIME=ec2`).
+The sandbox needs the worker's image (`AGENTX_SANDBOX_IMAGE`); on a developer's machine without it, the sandbox does not start unless `AGENTX_TASK_SHELL=local` is set.
 
 #### Security follow-ups
 

@@ -77,13 +77,25 @@ function taskInvocation(): Extract<WorkerInvocation, { kind: "task" }> {
   };
 }
 
+/**
+ * What `docker inspect` reports for a dev container as the worker starts it: the workspace bound at its own path, the
+ * repository folder where the dev container's config puts it, and an empty volume over each of the worker's own folders.
+ */
+function startedMounts(root: string, hostFolder: string): unknown[] {
+  return [
+    { Type: "bind", Source: root, Destination: root },
+    { Type: "bind", Source: hostFolder, Destination: CONTAINER_FOLDER },
+    ...[".agentx", "agent-sessions"].map((name) => ({ Type: "volume", Name: `agentx-mask-${name}`, Source: `/var/lib/docker/volumes/agentx-mask-${name}/_data`, Destination: join(root, name) })),
+  ];
+}
+
 interface ExecCall { request: SandboxFileRequest; stdin: Buffer | undefined }
 
 /**
  * A fake Docker for the file tools. `exec -i` answers like the helper over an in-memory filesystem of container paths, or,
  * with `hostFolder`, runs the real helper over that folder (the container folder is the host folder), which is Linux-only.
  */
-function fakeDocker(options: { hostFolder?: string; nodeFails?: boolean; runFails?: boolean; mountSource?: string } = {}) {
+function fakeDocker(options: { hostFolder?: string; nodeFails?: boolean; runFails?: boolean; mounts?: unknown[] } = {}) {
   const files = new Map<string, string>();
   const execs: ExecCall[] = [];
   const runs: string[][] = [];
@@ -104,8 +116,7 @@ function fakeDocker(options: { hostFolder?: string; nodeFails?: boolean; runFail
       runs.push([...args]);
       if (args[0] === "network" && args[1] === "inspect") return { exitCode: 0, stdout: "bridge {} false", stderr: "" };
       if (args[0] === "inspect") {
-        const source = options.mountSource ?? options.hostFolder;
-        return { exitCode: 0, stdout: JSON.stringify(source === undefined ? [] : [{ Type: "bind", Source: source, Destination: CONTAINER_FOLDER }]), stderr: "" };
+        return { exitCode: 0, stdout: JSON.stringify(options.mounts ?? []), stderr: "" };
       }
       if (options.runFails === true && args[0] === "run") return { exitCode: 1, stdout: "", stderr: "no" };
       if (options.nodeFails === true && args.includes("--version")) return { exitCode: 127, stdout: "", stderr: "exec format error" };
@@ -144,7 +155,8 @@ async function runTask(root: string, state: string, docker: DockerCli, script: F
 describe("a dev container's file tools, on an EC2 worker", () => {
   it("never write to a path the agent chose outside the repository in the worker; they go through the dev container or are refused", async () => {
     const { root, state, hostFolder } = await workspace();
-    const outsideTargets = [join(state, "worker-state.json"), join(root, ".agentx", "extra.json"), join(root, "agent-sessions", "extra.jsonl"), "/home/node/.docker/config.json"];
+    // Two paths outside the workspace (the worker's state folder, a system folder) and the two state folders of the workspace.
+    const outsideTargets = [join(state, "worker-state.json"), join(root, ".agentx", "extra.json"), join(root, "agent-sessions", "extra.jsonl"), "/etc/agentx-test-outside"];
     const results: Array<ReturnType<typeof lastResult>> = [];
     const turns: FauxResponseStep[] = [
       ...outsideTargets.map((path, index): FauxResponseStep => (context) => {
@@ -154,17 +166,24 @@ describe("a dev container's file tools, on an EC2 worker", () => {
       (context) => { results.push(lastResult(context)); return toolUse(fauxToolCall("write", { path: `${CONTAINER_FOLDER}/inside.txt`, content: "inside\n" }, { id: "w-in" })); },
       (context) => { results.push(lastResult(context)); return fauxAssistantMessage("AgentX result: done"); },
     ];
-    const fake = fakeDocker({ mountSource: hostFolder });
+    const fake = fakeDocker({ mounts: startedMounts(root, hostFolder) });
     const { outcome } = await runTask(root, state, fake.docker, turns);
 
     expect(outcome).toBeUndefined();
-    // The worker's own files are untouched.
-    for (const path of outsideTargets.slice(0, 3)) expect(existsSync(path), path).toBe(false);
-    // Whatever reached the container was inside the repository's folder; the four outside paths were refused there.
+    // The worker's own files are untouched, whatever the path.
+    for (const path of outsideTargets) expect(existsSync(path), path).toBe(false);
     const written = fake.execs.filter((call) => call.request.op === "writeFile").map((call) => (call.request as { path: string }).path);
-    expect(written.every((path) => path.startsWith(`${CONTAINER_FOLDER}/`))).toBe(true);
-    expect(results.slice(0, 4).every((result) => result.isError)).toBe(true);
-    // Positive control: a write inside the repository ran in the container, not in the worker.
+    // A path outside every mount is refused without reaching the container.
+    expect(written).not.toContain(outsideTargets[0]);
+    expect(written).not.toContain(outsideTargets[3]);
+    expect(results[0]?.isError).toBe(true);
+    expect(results[3]?.isError).toBe(true);
+    // The workspace's state folders are the container's own empty volumes: a write there lands in the container (the mask), not in the worker.
+    expect(written).toContain(outsideTargets[1]);
+    expect(written).toContain(outsideTargets[2]);
+    expect(results[1]?.isError).toBe(false);
+    expect(results[2]?.isError).toBe(false);
+    // Positive control: a write inside the repository ran in the container too.
     expect(written).toContain(`${CONTAINER_FOLDER}/inside.txt`);
     expect(results[4]?.isError).toBe(false);
   });
@@ -182,7 +201,7 @@ describe("a dev container's file tools, on an EC2 worker", () => {
       (context) => { results.push(lastResult(context)); return toolUse(fauxToolCall("read", { path: `${CONTAINER_FOLDER}/notes.txt` }, { id: "r2" })); },
       (context) => { results.push(lastResult(context)); return fauxAssistantMessage("AgentX result: done"); },
     ];
-    await runTask(root, state, fakeDocker({ hostFolder }).docker, turns);
+    await runTask(root, state, fakeDocker({ hostFolder, mounts: startedMounts(root, hostFolder) }).docker, turns);
 
     // Every write failed, so the task ends as one with no change; all three tool calls ran.
     expect(results).toHaveLength(3);
@@ -198,7 +217,7 @@ describe("a dev container's file tools, on an EC2 worker", () => {
   it("start no session when the dev container cannot run the helper and no sandbox can take its place", async () => {
     const { root, state, hostFolder } = await workspace();
     const inputs: unknown[] = [];
-    const fake = fakeDocker({ mountSource: hostFolder, nodeFails: true });
+    const fake = fakeDocker({ mounts: startedMounts(root, hostFolder), nodeFails: true });
     const { outcome } = await runTask(root, state, fake.docker, [fauxAssistantMessage("AgentX result: done")], {
       taskShell: { kind: "local" },
       piAdapter: { create: (input: unknown) => { inputs.push(input); return Promise.reject(new Error("must not be reached")); } },
@@ -209,7 +228,7 @@ describe("a dev container's file tools, on an EC2 worker", () => {
 
   it("start no task when the dev container cannot run the helper and the sandbox that should take its place cannot start", async () => {
     const { root, state, hostFolder } = await workspace();
-    const fake = fakeDocker({ mountSource: hostFolder, nodeFails: true, runFails: true });
+    const fake = fakeDocker({ mounts: startedMounts(root, hostFolder), nodeFails: true, runFails: true });
     const { outcome } = await runTask(root, state, fake.docker, [fauxAssistantMessage("AgentX result: done")], { taskShell: { kind: "sandbox", docker: fake.docker, image: IMAGE } });
     expect(outcome).toBeDefined();
     expect(fake.execs.filter((call) => call.request.op === "writeFile")).toEqual([]);
@@ -227,5 +246,19 @@ describe("the dev container's start", () => {
     for (const name of [".agentx", "agent-sessions", ".docker"]) {
       expect(mounts.some((mount) => mount.startsWith("type=volume,") && mount.endsWith(`,target=${join(root, name)}`)), name).toBe(true);
     }
+  });
+
+  it("gives each start its own mask volumes, so what one container writes in them is not seen by another", async () => {
+    const { root } = await workspace();
+    const target: DevcontainerTarget = { rootPath: root, workspaceFolder: join(root, "repo/sample"), configPath: join(root, "repo/sample/.devcontainer/devcontainer.json") };
+    const volumes = async () => {
+      const { cli, calls } = fakeCli();
+      await ensureDevcontainer(cli, target);
+      return calls[0]!.filter((arg) => arg.startsWith("type=volume,")).map((arg) => /source=([^,]+),/u.exec(arg)![1]!);
+    };
+    const first = await volumes();
+    const second = await volumes();
+    expect(first).toHaveLength(2);
+    expect(new Set([...first, ...second]).size).toBe(4);
   });
 });

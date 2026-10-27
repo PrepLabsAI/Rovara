@@ -70,8 +70,12 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
     ["build.options --secret", { build: { dockerfile: "Dockerfile", options: ["--secret", "id=x,src=/etc/hostname"] } }],
     ["build.options --build-context", { build: { dockerfile: "Dockerfile", options: ["--build-context", "x=/"] } }],
     ["build.options that are not a list of strings", { build: { dockerfile: "Dockerfile", options: "--network=host" } }],
-    ["build.context outside the workspace (/)", { build: { dockerfile: "Dockerfile", context: "/" } }],
-    ["build.context outside the workspace (/mnt)", { build: { dockerfile: "Dockerfile", context: "../../../.." } }],
+    ["build.context outside the repository folder (/)", { build: { dockerfile: "Dockerfile", context: "/" } }],
+    ["build.context outside the repository folder (/mnt)", { build: { dockerfile: "Dockerfile", context: "../../../.." } }],
+    ["build.context outside the repository folder (/mnt/workspace)", { build: { dockerfile: "Dockerfile", context: "../../.." } }],
+    ["build.context outside the repository folder (/mnt/workspace/repo)", { build: { dockerfile: "Dockerfile", context: "../.." } }],
+    ["build.context outside the repository folder (/mnt/workspace/.agentx)", { build: { dockerfile: "Dockerfile", context: "../../../.agentx" } }],
+    ["build.context outside the repository folder (/mnt/workspace/repo/other)", { context: "../../other" }],
     ["build.dockerfile outside the workspace (/etc/Dockerfile)", { build: { dockerfile: "/etc/Dockerfile" } }],
     ["build.dockerfile outside the workspace (${localEnv:HOME}/Dockerfile)", { build: { dockerfile: "${localEnv:HOME}/Dockerfile" } }],
     ["securityOpt", { securityOpt: ["apparmor=unconfined"] }],
@@ -87,6 +91,8 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
 
   it("allows an ordinary dev container: an image or a Dockerfile, features, harmless runArgs, and mounts inside the workspace or named volumes", () => {
     expect(refusal({})).toBeUndefined();
+    // A build context is the repository folder or below it.
+    for (const folder of ["..", ".", "../src", "${localWorkspaceFolder}/docker"]) expect(refusal({ build: { dockerfile: "Dockerfile", context: folder } }), folder).toBeUndefined();
     expect(devcontainerConfigRefusal({
       build: { dockerfile: "Dockerfile", context: "..", options: ["--add-host", "db:10.0.0.2", "--build-arg", "A=1", "--pull"] },
       features: { "ghcr.io/devcontainers/features/node:1": {} },

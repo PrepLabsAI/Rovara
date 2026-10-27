@@ -179,10 +179,14 @@ export interface DevcontainerChecks {
 /** The empty volume mounted over the workspace's Docker data folder in every dev container. */
 export const DOCKER_DATA_MASK_VOLUME = "agentx-docker-data-mask";
 
-/** The empty volume mounted over one of the workspace's hidden folders: the Docker data folder keeps its original name. */
-function maskVolume(path: string): string {
+/**
+ * The empty volume mounted over one of the workspace's hidden folders. Its name is the folder's and this start's own
+ * (`token`), so what a container writes into it is not seen by another container; the Docker data folder keeps its
+ * original name as the prefix.
+ */
+function maskVolume(path: string, token: string): string {
   const name = basename(path);
-  return name === DOCKER_DATA_DIRECTORY ? DOCKER_DATA_MASK_VOLUME : `agentx-mask-${name.replace(/^\./u, "")}`;
+  return `${name === DOCKER_DATA_DIRECTORY ? DOCKER_DATA_MASK_VOLUME : `agentx-mask-${name.replace(/^\./u, "")}`}-${token}`;
 }
 
 export function devcontainerTarget(rootPath: string, project: StoredProjectDefinition): DevcontainerTarget | undefined {
@@ -402,12 +406,13 @@ async function removeStartedContainer(containers: DevcontainerChecks, containerI
 }
 
 async function startDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget, hidden: readonly string[], frozenLockfile: boolean): Promise<DevcontainerUpResult> {
+  const token = randomUUID().replace(/-/gu, "").slice(0, 12);
   const result = await cli.run([
     "up",
     ...targetArgs(target),
     ...(frozenLockfile ? ["--frozen-lockfile"] : []),
     "--mount", `type=bind,source=${target.rootPath},target=${target.rootPath}`,
-    ...hidden.flatMap((path) => ["--mount", `type=volume,source=${maskVolume(path)},target=${path}`]),
+    ...hidden.flatMap((path) => ["--mount", `type=volume,source=${maskVolume(path, token)},target=${path}`]),
     "--log-format", "json",
   ], { timeoutMs: UP_TIMEOUT_MS });
   const outcome = lastJsonLine(result.stdout);
@@ -763,7 +768,12 @@ function contained(parent: string, path: string): string {
   return candidate;
 }
 
-/** Where the file-tool helper and a Node to run it live inside a devcontainer: root-owned, mode 0555, so task code cannot replace them. */
+/**
+ * Where the file-tool helper and a Node to run it live inside a devcontainer: installed root-owned and read-only (mode 0555),
+ * so the container's ordinary users cannot change them. What the tools guarantee is that their reads and writes are confined
+ * to the container's own mounts and never reach the worker; a container whose `remoteUser` is root can still change what
+ * runs inside that container.
+ */
 export const DEVCONTAINER_FILE_OPS_DIRECTORY = "/opt/agentx-file-ops";
 const WORKER_NODE_BINARY = "/usr/local/bin/node";
 
