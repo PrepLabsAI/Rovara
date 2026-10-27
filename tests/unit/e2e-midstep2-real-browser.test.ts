@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { chromium, type Browser } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPlaywrightFormLoginDriver } from "../../packages/verifier/src/executor/form-login.js";
-import { readBrowserState } from "../../packages/verifier/src/executor/browser-state-reader.js";
+import { READ_SESSION_STORAGE, readBrowserState } from "../../packages/verifier/src/executor/browser-state-reader.js";
 import { tellBrowserState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
 import type { ClassifiedValue } from "../../packages/verifier/src/executor/credential-classifier.js";
 import { watchBrowserRequests } from "../../packages/verifier/src/executor/request-capture.js";
@@ -99,6 +99,8 @@ describe.skipIf(!haveChromium)("the real browser", () => {
     await page.waitForFunction("document.querySelector('iframe') !== null");
     await page.frames()[1]?.waitForLoadState("domcontentloaded");
     expect(page.frames()).toHaveLength(2);
+    // The page expression itself answers inside the opaque-origin frame (no SecurityError, no entries); it does not rely on the frame being skipped.
+    expect(await page.frames()[1]!.evaluate(READ_SESSION_STORAGE)).toMatchObject({ over: false, entries: [] });
     const state = await readBrowserState(context);
     const told: string[] = [];
     tellBrowserState(state, (item) => told.push(item.value));

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { E2E_EXECUTOR_COMPILED_ORIGIN, readE2EApplicationProjectContract } from "@agentx/contracts";
 import { createExecutorSessionStore } from "../../packages/verifier/src/executor/accounts.js";
-import { readBrowserState, type BrowserContextLike } from "../../packages/verifier/src/executor/browser-state-reader.js";
+import { readBrowserState, type BrowserContextLike, type BrowserFrameLike } from "../../packages/verifier/src/executor/browser-state-reader.js";
 import { BROWSER_STATE_IDB_MAX_RECORDS, BROWSER_STATE_MEMO_MAX, tellBrowserState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { E2E_SESSION_SYNC_MAX_WEAK_VALUES, createE2ESessionSyncSource } from "../../packages/verifier/src/executor/session-sync.js";
@@ -99,7 +99,7 @@ describe("gap 2: tiers", () => {
 
 /** A stand-in for the Playwright pieces the capture and the reader use. */
 class FakeContext extends EventEmitter implements BrowserContextLike {
-  frames: Array<{ url: () => string; evaluate: (expression: string) => Promise<unknown> }> = [];
+  frames: Array<BrowserFrameLike> = [];
   stored: Awaited<ReturnType<BrowserContextLike["storageState"]>> = { cookies: [], origins: [] };
   pageList: Array<EventEmitter & { frames: () => unknown[] }> = [];
   async storageState() { return this.stored; }
@@ -389,12 +389,12 @@ describe("fix round 1 (review of 334c7ced)", () => {
     expect(await e.workerSays(`id ${JWT}`)).toMatchObject(REFUSED);
   });
 
-  it("I-2: registering thousands of values is close to linear, and weak registrations stop at the cap", () => {
+  it("I-2: registering thousands of values is close to linear, and weak registrations stop at the cap", { timeout: 30_000 }, () => {
     const redactor = createCredentialRedactor([]);
     const started = Date.now();
-    for (let index = 0; index < 4_000; index += 1) redactor.addSessionSecret(`opaque-session-value-${String(index).padStart(6, "0")}-abcdef`, { evidenceOnly: true });
-    expect(Date.now() - started).toBeLessThan(2_500);
-    expect(redactor.contains(bytesOf("opaque-session-value-003999-abcdef"), "all")).toBe(true);
+    for (let index = 0; index < 12_000; index += 1) redactor.addSessionSecret(`opaque-session-value-${String(index).padStart(6, "0")}-abcdef`, { evidenceOnly: true });
+    expect(Date.now() - started).toBeLessThan(4_000);
+    expect(redactor.contains(bytesOf("opaque-session-value-011999-abcdef"), "all")).toBe(true);
     expect(redactor.text("x opaque-session-value-000001-abcdef y")).toBe("x <session> y");
     const told: string[] = [];
     const source = createE2ESessionSyncSource({ register: (value) => { told.push(value); }, known: () => [] });

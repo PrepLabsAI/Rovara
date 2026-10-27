@@ -25,7 +25,7 @@ export const SESSION_STORAGE_MAX_ENTRIES = 2_000;
 export const SESSION_STORAGE_MAX_CHARS = 4 * 1024 * 1024;
 
 // Runs in the page (a string: this package is compiled without the DOM types). Reads its own origin's session storage within the bounds, so a huge store is never copied out.
-const READ_SESSION_STORAGE = `(() => {
+export const READ_SESSION_STORAGE = `(() => {
   // A sandboxed iframe (HTML previews, embedded docs) has an opaque origin: it cannot hold the application's storage, and reading it throws SecurityError.
   let store;
   try { if (location.origin === "null") return { over: false, origin: location.origin, entries: [] }; store = sessionStorage; store.length; }

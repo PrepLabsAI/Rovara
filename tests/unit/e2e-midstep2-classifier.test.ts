@@ -282,6 +282,10 @@ describe("fix round 1 (review of 334c7ced)", () => {
     expect(tierOf(classifyStorageEntry({ name: "state", value: JSON.stringify({ auth: { key: sid } }) }), sid)).toBe("strong");
     expect(tierOf(classifyStorageEntry({ name: "state", value: JSON.stringify({ credentials: { id: sid } }) }), sid)).toBe("strong");
     expect(strong(classifyStorageEntry({ name: "state", value: JSON.stringify({ auth: { plan: "pro-annual-2026-plan" }, profile: { id: sid } }) }))).toEqual([]);
+    // Only the short neutral keys inherit: an opaque value under `theme` beside the credential key does not.
+    expect(strong(classifyStorageEntry({ name: "state", value: JSON.stringify({ auth: { theme: sid } }) }))).toEqual([]);
+    // A route under a credential key is still a route.
+    expect(classifyStorageEntry({ name: "state", value: JSON.stringify({ session: `/orders/${UUID}` }) })).toEqual([]);
   });
 
   it("I-6: a pure hex id, an address, a git sha or a dashless UUID inside JSON is not registered under a neutral key, and is a credential under a credential key; a base64 mix is still strong", () => {
