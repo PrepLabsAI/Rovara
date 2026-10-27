@@ -131,7 +131,7 @@ describe("rule files at the base commit (A5)", () => {
   });
 
   it("does not follow a symbolic link in the commit", async () => {
-    const { rootPath, directory, base } = await preparedWorkspace({});
+    const { rootPath, directory } = await preparedWorkspace({});
     await writeFile(join(rootPath, "secret.md"), "workspace secret\n");
     await symlink("../../secret.md", join(directory, "AGENTS.md"));
     git(directory, "add", "AGENTS.md");
@@ -195,7 +195,7 @@ describe("rule files at the base commit (A5)", () => {
 
 describe("pi sessions and the rule file source (A5)", () => {
   it("a coding session (the default) still reads the working tree", async () => {
-    const { rootPath, directory, base } = await preparedWorkspace({ "AGENTS.md": BASE_RULE });
+    const { rootPath, directory } = await preparedWorkspace({ "AGENTS.md": BASE_RULE });
     await writeFile(join(directory, "AGENTS.md"), EDITED_RULE);
     const capture = capturingAdapter();
 
@@ -221,7 +221,7 @@ describe("pi sessions and the rule file source (A5)", () => {
   });
 
   it("a session asked for the base commit without a usable one gets no rule file, a diagnostic, and the workspace note", async () => {
-    const { rootPath, directory, base } = await preparedWorkspace({ "AGENTS.md": BASE_RULE });
+    const { rootPath, directory } = await preparedWorkspace({ "AGENTS.md": BASE_RULE });
     await writeFile(join(directory, "AGENTS.md"), EDITED_RULE);
     const capture = capturingAdapter();
     const diagnostics: string[] = [];
