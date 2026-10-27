@@ -18,7 +18,9 @@ const POLL_MS = 150;
 const GIVE_UP_MS = 20 * 60_000;
 
 /** `afterStaleOwnerRead` is a test seam: it runs between a waiter confirming the owner is dead and removing the lock (the window another waiter could race through). */
-type RunLockOptions = { path: string; pollMs?: number; giveUpMs?: number; afterStaleOwnerRead?: () => Promise<void> };
+type RunLockOptions = { path: string; pollMs?: number; giveUpMs?: number; afterStaleOwnerRead?: () => Promise<void>;
+  /** A test seam for the removal of a dead owner's lock (default: unlink), so a removal that fails can be tested. */
+  removeStaleLock?: (path: string) => Promise<void> };
 
 /** True only when the process is provably gone: ESRCH. EPERM (another user's live process) and anything else count as alive. */
 const provablyDead = (pid: number): boolean => {
@@ -56,7 +58,7 @@ async function releaseIfOurs(path: string, record: string): Promise<void> {
 }
 
 /** Removes the lock at `path` when, with the reaper lock held, its recorded owner is provably dead. Returns whether it removed one. */
-async function reapDeadOwner(path: string, afterStaleOwnerRead: (() => Promise<void>) | undefined): Promise<boolean> {
+async function reapDeadOwner(path: string, afterStaleOwnerRead: (() => Promise<void>) | undefined, removeStaleLock: (path: string) => Promise<void>): Promise<boolean> {
   const reaperPath = `${path}.reaper`;
   const reaper = await tryCreate(reaperPath);
   if (reaper === undefined) {
@@ -70,7 +72,8 @@ async function reapDeadOwner(path: string, afterStaleOwnerRead: (() => Promise<v
     const owner = ownerOf(await readFile(path, "utf8").catch(() => ""));
     if (owner === undefined || !provablyDead(owner)) return false;
     await afterStaleOwnerRead?.();
-    await unlink(path).catch(() => undefined);
+    // Gone (ENOENT) or removed: the lock is free to take. Any other failure (EPERM, EACCES, ...) leaves the dead lock in place, so the caller must not retry in a loop: it waits and gives up.
+    try { await removeStaleLock(path); } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
     return true;
   } finally {
     await releaseIfOurs(reaperPath, reaper);
@@ -79,14 +82,14 @@ async function reapDeadOwner(path: string, afterStaleOwnerRead: (() => Promise<v
 
 /** A lock on `options.path`: `withLock` runs work while holding it; two holders never overlap, in this process or another. */
 export function createExecutorRunLock(options: RunLockOptions): { withLock: <T>(work: () => Promise<T>) => Promise<T> } {
-  const { path, pollMs = POLL_MS, giveUpMs = GIVE_UP_MS, afterStaleOwnerRead } = options;
+  const { path, pollMs = POLL_MS, giveUpMs = GIVE_UP_MS, afterStaleOwnerRead, removeStaleLock = unlink } = options;
   async function acquire(): Promise<string> {
     const startedAt = Date.now();
     for (;;) {
       const record = await tryCreate(path);
       if (record !== undefined) return record;
-      if (await reapDeadOwner(path, afterStaleOwnerRead)) continue;
-      if (Date.now() - startedAt > giveUpMs) throw new Error("the executor forwarder port stayed locked by another test file");
+      if (await reapDeadOwner(path, afterStaleOwnerRead, removeStaleLock)) continue;
+      if (Date.now() - startedAt > giveUpMs) throw new Error(`the executor forwarder port stayed locked by another test file (lock: ${path}). A reused process id can leave a stale lock that looks alive; if no executor test is running, delete ${path} (and ${path}.reaper) and run again.`);
       await sleep(pollMs);
     }
   }

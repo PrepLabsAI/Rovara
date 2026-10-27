@@ -1,5 +1,5 @@
 import { mkdtempSync } from "node:fs";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -100,5 +100,32 @@ describe("the executor run lock's safety", () => {
     // Once the first is let go either may take the lock next, but never both at once.
     expect(events[0]!.endsWith(":in") && events[1] === events[0]!.replace(":in", ":out") && events[2]!.endsWith(":in") && events[3] === events[2]!.replace(":in", ":out")).toBe(true);
     expect(new Set(events).size).toBe(4);
+  });
+
+  it("gives up within its limit, naming the lock path, when a dead owner's lock cannot be removed (EPERM), instead of retrying without a pause", async () => {
+    const { path } = privateLock();
+    await writeFile(path, record(DEAD_PID));
+    let removals = 0;
+    const removeStaleLock = async () => { removals += 1; throw Object.assign(new Error("not permitted"), { code: "EPERM" }); };
+    const started = Date.now();
+    const outcome = await Promise.race([
+      createExecutorRunLock({ path, pollMs: 10, giveUpMs: 150, removeStaleLock }).withLock(async () => "ran").then(() => "ran", (error: Error) => error),
+      new Promise<"hung">((done) => setTimeout(() => done("hung"), 3_000)),
+    ]);
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toContain(path);
+    expect((outcome as Error).message).toMatch(/reused process id.*stale lock.*delete/);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // Tried now and then, paced by the poll interval: not a tight loop.
+    expect(removals).toBeGreaterThan(0);
+    expect(removals).toBeLessThan(60);
+    expect(await readFile(path, "utf8")).toBe(record(DEAD_PID));
+  });
+
+  it("treats a dead lock that is already gone (ENOENT) when it is removed as free to take", async () => {
+    const { path } = privateLock();
+    await writeFile(path, record(DEAD_PID));
+    const removeStaleLock = async (target: string) => { await unlink(target); throw Object.assign(new Error("gone"), { code: "ENOENT" }); };
+    await expect(createExecutorRunLock({ path, pollMs: 10, giveUpMs: 500, removeStaleLock }).withLock(async () => "ran")).resolves.toBe("ran");
   });
 });
