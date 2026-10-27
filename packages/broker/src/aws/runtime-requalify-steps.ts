@@ -452,7 +452,12 @@ async function deleteHold(deps: RequalifyStepsDependencies, runId: string): Prom
 
 async function awaitDrain(deps: RequalifyStepsDependencies, state: RequalifyState): Promise<NonNullable<RequalifyState["drain"]>> {
   // A read that was refused or failed is not a drain that ran out of time: it gets its own fixed reason (the AWS error text is never carried). It still throws, so nothing counts 0 and nothing switches.
-  const work = await deps.drain.activeWork().catch(() => { throw agentXError("FORBIDDEN", `${REQUALIFY_REFUSAL_PREFIX}drain-read-failed`); });
+  const work = await deps.drain.activeWork().catch((error: unknown) => {
+    // For diagnosis only the error's class name is logged (e.g. AccessDeniedException) under a fixed event: never its message, which can quote ARNs and request details.
+    const name = typeof error === "object" && error !== null && typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
+    console.error(JSON.stringify({ component: "broker", event: "requalify.drain_read_failed", errorName: /^[A-Za-z0-9_.]{1,64}$/.test(name) ? name : "unknown" }));
+    throw agentXError("FORBIDDEN", `${REQUALIFY_REFUSAL_PREFIX}drain-read-failed`);
+  });
   return { status: pollResult(deps, need(state.challenge, "challenge").drainDeadlineAt, work === 0) };
 }
 

@@ -350,7 +350,16 @@ describe("a failure before the switch", () => {
   it("when the drain's reads are refused it says drain-read-failed (not drain-timeout), with no AWS text, and does not switch or count the work as 0 (DRAINREAD)", async () => {
     const old = oldInstallation({ expiresInMs: 5 * 24 * HOUR });
     cloud.drainReadFails = true;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { run } = await renew();
+    // The error's class name is logged for diagnosis, under a fixed event, and nothing of its message.
+    const lines = logged.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("requalify.drain_read_failed"));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(JSON.parse(line)).toEqual({ component: "broker", event: "requalify.drain_read_failed", errorName: "AccessDeniedException" });
+      expect(line).not.toMatch(/not authorized|arn:aws|dynamodb:/);
+    }
+    logged.mockRestore();
     expect(run.status).toBe("Succeeded");
     expect(cloud.row("web")?.["generation"]).toBe(1);
     expect(cloud.instances.get(old.id)?.state).toBe("running");
