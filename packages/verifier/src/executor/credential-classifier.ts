@@ -58,12 +58,26 @@ function isSlugOrPath(value: string): boolean {
   return words / parts.length >= 0.6;
 }
 
+/** One segment of a REST-style path: digits (an id), a long hex id, a word in any case (`orders`, `userProfiles`, `OrderItems`, with a short number after it), or a version (`v2`). */
+const CAMEL_WORD = /^[A-Za-z][a-z]+(?:[A-Z][a-z]+)*\d{0,4}$/;
+function isPathSegment(segment: string): boolean {
+  return /^\d+$/.test(segment) || /^[0-9a-fA-F]{8,}$/.test(segment) || /^[a-z]\d{1,3}$/.test(segment) || (CAMEL_WORD.test(segment) && /[aeiouy]/i.test(segment));
+}
+/**
+ * A value with `/` in it whose segments are mostly ids and words in any case (`/api/userProfiles/8423/orderItems/12345`, `/Users/8423/Orders/12345`, `/files/<upper-case hex>`): a path, however
+ * its case is mixed. A random standard-base64 token has a few random characters between its slashes; they are almost never digits only, hex only or a camelCase word.
+ */
+function isPathLike(value: string): boolean {
+  const segments = value.split("/").filter((segment) => segment.length > 0);
+  return segments.length >= 2 && segments.filter(isPathSegment).length / segments.length >= 0.5;
+}
+
 /** A single long base64, base64url or hex run with a letter and a digit that is not a UUID, a path or a slug. */
 function isLongOpaqueRun(value: string): boolean {
   if (!LONG_RUN.test(value) || !/[0-9]/.test(value) || !/[A-Za-z]/.test(value) || UUID.test(value) || isSlugOrPath(value)) return false;
-  // A `/` in it is either a standard-base64 character or a path separator. A random base64 token of 32+ characters has both cases; a REST path with numeric or hex ids
-  // (`/users/8423/orders/12345/items/99882211`, `/files/9f8a7b6c...`) is single-case.
-  return !value.includes("/") || (/[a-z]/.test(value) && /[A-Z]/.test(value));
+  // A `/` in it is either a standard-base64 character or a path separator. A random base64 token of 32+ characters has both cases and segments that are not ids or words; a REST path
+  // with numeric or hex ids (`/users/8423/orders/12345/items/99882211`, `/files/9f8a7b6c...`, `/api/userProfiles/8423/orderItems/12345`) does not.
+  return !value.includes("/") || (/[a-z]/.test(value) && /[A-Z]/.test(value) && !isPathLike(value));
 }
 
 /** A token with dots, pipes or colons in it (a Sanctum `12|abcd...`, a JWE, a PASETO) whose parts include a long opaque run. */

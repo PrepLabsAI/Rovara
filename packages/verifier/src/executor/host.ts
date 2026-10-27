@@ -13,7 +13,7 @@ import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStatePro
 import { isPinnedRovaraHttpEngine } from "../rovara-http-engine-descriptor.js";
 import { createExecutorSessionStore } from "./accounts.js";
 import { createRovaraE2EAgentExecutor } from "./agent-executor.js";
-import { createE2EAgentCaptureStore, persistE2EAgentTrace } from "./agent-capture-store.js";
+import { createHostAgentCaptureStore } from "./host-capture-store.js";
 import type { E2EAgentLedgerWriter } from "./agent-ledger.js";
 import { createE2EAgentStepDriver } from "./agent-step-driver.js";
 import { createE2EAgentModelAdapter } from "./agent-model-adapter.js";
@@ -207,12 +207,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     // The goals of the steps run so far: a trace's typed value that is text of one stays as it is, the ledger's rule (the runner writes a trace after its step has ended).
     const goals: string[] = [];
     const origin = declaration.originByApplicationId.find((item) => item.applicationId === launchContext.selectedTarget.applicationId)?.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN;
-    const store = createE2EAgentCaptureStore({
-      // What is written to the out directory is held to the parent's final scan (all session values), not to the model's.
-      scan: registry.evidenceScan,
-      persist: (keyHash, bytes) => persistE2EAgentTrace(context.outDir, keyHash, bytes),
-      valueKey: channelPlan.valueKey, goals: () => goals, origin,
-    });
+    const store = createHostAgentCaptureStore({ registry, outDir: context.outDir, valueKey: channelPlan.valueKey, goals: () => goals, origin });
     const executor = createRovaraE2EAgentExecutor({ position: () => current.position, ledger: () => current.ledger, origin: () => origin });
     const driveStep = createE2EAgentStepDriver({ client, adapter, current, runId: plan.runId, valueKey: channelPlan.valueKey, outDir: context.outDir, sessionSecrets: () => sessionSecrets });
     const runStep: typeof driveStep = (request) => { if (!goals.includes(request.goal)) goals.push(request.goal); return driveStep(request); };

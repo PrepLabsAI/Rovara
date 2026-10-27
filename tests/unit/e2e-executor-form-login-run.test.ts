@@ -125,6 +125,16 @@ describe.runIf(runnable)("the executor against an app that signs in through its 
     expect(allOutputText(out)).not.toMatch(/\(owner\) [A-Za-z0-9_-]{30,}/);
   }, 300_000);
 
+  it("a value the page keeps and prints that is app data, not a credential (an opaque document id under a neutral key), is scrubbed or dropped but never ends the run credential-leak (MIDSTEP-2 N-8)", async () => {
+    const { out, result } = await runAccounts({ defect: "weak-echo.json", web: ["ownerIdentity"] });
+    // The case itself fails (the page prints text the assertion does not expect), which is exit 1; the point is that the run is not `credential-leak` (exit 2).
+    expect(result, executorLog(out)).toEqual({ exitCode: 1, reason: null });
+    // The files that carried it were removed and the log says why, in words that are not the credential sentence.
+    expect(executorLog(out)).toMatch(/removed an output file that carried a value only scrubbed from evidence \(not a credential\): /);
+    expect(executorLog(out)).not.toMatch(/carried an account credential or a session value/);
+    expect(allOutputText(out)).not.toMatch(/\bDoc[0-9a-f]{17}\b/);
+  }, 300_000);
+
   it("answers API cases of the same accounts through the cookies the form login kept: the viewer is refused (403), the owner is allowed (200)", async () => {
     const { fixture, out, result } = await runAccounts({ api: true });
     expect(result, executorLog(out)).toEqual({ exitCode: 0, reason: null });

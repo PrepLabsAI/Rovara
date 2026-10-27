@@ -15,6 +15,7 @@ import { classifyString } from "../../packages/verifier/src/executor/credential-
 import type { FormLoginDriver, FormLoginStorageState, FormRequestContext } from "../../packages/verifier/src/executor/form-login.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { createSessionSecretRegistry } from "../../packages/verifier/src/executor/session-secret-registry.js";
+import { createHostAgentCaptureStore } from "../../packages/verifier/src/executor/host-capture-store.js";
 import { readSessionSecretFile, scanOutputFile, sessionSecretLine } from "../../packages/verifier/src/executor/session-secrets-file.js";
 import { E2E_SESSION_SYNC_MAX_WEAK_VALUES } from "../../packages/verifier/src/executor/session-sync.js";
 import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
@@ -195,5 +196,56 @@ describe("N-6: survivors", () => {
     tellBrowserState({ cookies: [], origins: [{ localStorage: [{ name: "a", value: "A".repeat(20) }] }] }, (item) => told.push(item.value), memo);
     tellBrowserState({ cookies: [], origins: [{ localStorage: [{ name: "a", value: "A".repeat(20) }] }] }, (item) => told.push(item.value), memo);
     expect(told).toHaveLength(1);
+  });
+});
+
+describe("fix round 3 (re-check 2)", () => {
+  const MIXED_CASE_PATHS = ["/api/userProfiles/8423/orderItems/12345/lineItems/99882211", "/Users/8423/Orders/12345/Items/99882211", "/v2/Projects/8423/Tasks/9921/Comments/771122334455",
+    "/ProjectData/8423/TaskList/9921/CommentItems/771122334455", "/files/9F8A7B6C5D4E3F2A1B0C9D8E7F6A5B4C3D2E1F0A", "api/userProfiles/8423/orderItems/12345/lineItems/99882211"];
+  it.each(MIXED_CASE_PATHS)("N-7: %s is a path: not strong at the top level, as a JSON leaf, or as a stored JSON string", (path) => {
+    for (const name of ["lastRoute", "anything", "href"]) expect(classifyString(name, path).filter((item) => item.tier === "strong"), `${name} ${path}`).toEqual([]);
+    expect(classifyStorageEntry({ name: "cache", value: JSON.stringify({ href: path }) }).filter((item) => item.tier === "strong")).toEqual([]);
+    expect(classifyStorageEntry({ name: "lastRoute", value: JSON.stringify(path) }).filter((item) => item.tier === "strong")).toEqual([]);
+  });
+
+  it("N-7: random standard-base64 tokens with slashes stay strong (10 000 seeded tokens, with and without a leading slash; any miss must be a token without a digit)", () => {
+    let seed = 20_261_027;
+    const next = (): number => { seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0; return seed; };
+    let checked = 0;
+    const misses: string[] = [];
+    for (let index = 0; checked < 10_000 && index < 100_000; index += 1) {
+      const token = Buffer.from(Array.from({ length: 24 + (next() % 24) }, () => next() & 255)).toString("base64").replace(/=+$/, "");
+      if (!token.includes("/")) continue;
+      for (const value of [token, `/${token}`]) {
+        checked += 1;
+        if (!classifyString("anything", value).some((item) => item.tier === "strong" && item.value === value)) misses.push(value);
+      }
+    }
+    expect(checked).toBeGreaterThanOrEqual(10_000);
+    expect(misses.filter((value) => /[0-9]/.test(value))).toEqual([]);
+    expect(misses.length / checked).toBeLessThan(0.01);
+  });
+
+  it("N-12: a page object without mainFrame still has its first frame treated as the main frame (fail closed)", async () => {
+    const mainFrames = [brokenFrame(`${E2E_EXECUTOR_COMPILED_ORIGIN}/`), okFrame()];
+    const context: BrowserContextLike = { storageState: async () => ({ cookies: [], origins: [] }), pages: () => [{ frames: () => mainFrames }] };
+    await expect(readBrowserState(context)).rejects.toMatchObject({ code: "sessionstorage-unreadable" });
+    const childFrames = [okFrame(), brokenFrame()];
+    const child: BrowserContextLike = { storageState: async () => ({ cookies: [], origins: [] }), pages: () => [{ frames: () => childFrames }] };
+    await expect(readBrowserState(child)).resolves.toBeDefined();
+  });
+
+  it("N-9: the host's capture store drops a trace that shows an evidence-only value and keeps one that does not", async () => {
+    const outDir = mkdtempSync(join(tmpdir(), "m2r3-out-"));
+    closers.push(async () => rmSync(outDir, { recursive: true, force: true }));
+    const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
+    registry.register("Xk3pQ9xW2mV7cL4nR8tY", { evidenceOnly: true });
+    const store = createHostAgentCaptureStore({ registry, outDir, valueKey: "k".repeat(32), goals: () => ["export the orders"], origin: E2E_EXECUTOR_COMPILED_ORIGIN });
+    const trace = (id: string) => ({ actions: [{ name: "navigate", summary: "open", url: `/documents/${id}` }], executor: { name: "rovara-e2e-agent", version: "1" }, summary: "Done.",
+      recordedFor: { testId: ".agentx/e2e/generated-application.test.ts::case-orders-export", targetId: "account-target-1", instructionDigest: sha("export the orders"), callIndex: 0 } });
+    expect(await store.write("d".repeat(64), trace("Xk3pQ9xW2mV7cL4nR8tY"))).toBeUndefined();
+    expect(existsSync(agentTraceFilePath(outDir, "d".repeat(64)))).toBe(false);
+    expect(await store.write("e".repeat(64), trace("ordinary-id"))).toBeDefined();
+    expect(existsSync(agentTraceFilePath(outDir, "e".repeat(64)))).toBe(true);
   });
 });

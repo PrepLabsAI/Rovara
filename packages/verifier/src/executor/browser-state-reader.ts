@@ -94,7 +94,8 @@ export async function readBrowserState<Cookie extends { value: string; httpOnly:
   const urls: string[] = [];
   const budget = { leftMs: READ_SETTLE_BUDGET_MS };
   for (const page of context.pages()) {
-    const main = page.mainFrame?.();
+    // A page object without `mainFrame` is read with its first frame as the main one (real Playwright always has it): the fail-closed rule never depends on an optional member.
+    const main = page.mainFrame?.() ?? page.frames()[0];
     for (const frame of page.frames()) {
       const url = frame.url();
       urls.push(url);
