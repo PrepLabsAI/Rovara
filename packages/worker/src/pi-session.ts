@@ -28,6 +28,7 @@ import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import {
   appendRepositoryContextFiles,
   loadRepositoryContextFiles,
+  ruleFileEditNote,
   readPreparedRepositories,
   workspaceRepositoriesNote,
   type RepositoryContextFile,
@@ -71,6 +72,8 @@ export interface PiSessionInput {
   workflowMode?: PiWorkflowMode;
   /** AgentX's workspace note, then each prepared repository's own context file, which Pi cannot discover from the root. */
   contextFiles: RepositoryContextFile[];
+  /** "base-commit": a reviewer's session, whose rule files are AgentX's own alone; Pi's discovery in the working tree is left out (A5). */
+  contextFilesAt?: "working-tree" | "base-commit";
   /** Where the agent's shell runs instead of the worker: the project's devcontainer (#121). */
   bashOperations?: BashOperations;
   /** The repository's folder in the devcontainer, which the file tools resolve to the host folder (#128). */
@@ -96,6 +99,16 @@ export async function createWorkspacePiSession(
     bashOperations?: BashOperations;
     devcontainerPaths?: DevcontainerPaths;
     extensionFactories?: InlineExtension[];
+    /**
+     * Where each repository's rule file is read from: the working tree (the default, for coding sessions) or the commit the
+     * task started from (reviewers, so the change under review cannot rewrite its own reviewers' instructions).
+     */
+    contextFilesAt?: "working-tree" | "base-commit";
+    /**
+     * With `contextFilesAt: "base-commit"`: the broker's base commit for each repository (by name). A repository without one
+     * has no rule file and a diagnostic; the preparation manifest's commit is never used, because the agent can write it.
+     */
+    baseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -106,7 +119,7 @@ export async function createWorkspacePiSession(
     mkdir(sessionDirectory, { recursive: true, mode: 0o700 }),
     mkdir(agentDirectory, { recursive: true, mode: 0o700 }),
   ]);
-  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths);
+  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths, input.contextFilesAt, input.baseCommits);
   const handle = await adapter.create({
     cwd: rootPath,
     sessionDirectory,
@@ -114,6 +127,7 @@ export async function createWorkspacePiSession(
     model: input.model,
     ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     contextFiles,
+    ...(input.contextFilesAt === undefined ? {} : { contextFilesAt: input.contextFilesAt }),
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
     ...(input.devcontainerPaths === undefined ? {} : { devcontainerPaths: input.devcontainerPaths }),
@@ -135,6 +149,9 @@ export async function openRegisteredWorkspacePiSession(
     bashOperations?: BashOperations;
     devcontainerPaths?: DevcontainerPaths;
     extensionFactories?: InlineExtension[];
+    /** As for `createWorkspacePiSession`. */
+    contextFilesAt?: "working-tree" | "base-commit";
+    baseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -149,7 +166,7 @@ export async function openRegisteredWorkspacePiSession(
   });
   assertContained(sessionDirectory, sessionFile);
   if (!adapter.open) throw new Error("pi session adapter does not support saved-session reopen");
-  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths);
+  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths, input.contextFilesAt, input.baseCommits);
   const handle = await adapter.open({
     cwd: rootPath,
     sessionDirectory,
@@ -157,6 +174,7 @@ export async function openRegisteredWorkspacePiSession(
     model: input.model,
     ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     contextFiles,
+    ...(input.contextFilesAt === undefined ? {} : { contextFilesAt: input.contextFilesAt }),
     conversationId: input.conversationId,
     sessionFile,
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
@@ -386,7 +404,7 @@ function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]
  * it is given. One settings manager serves the loader and the session, which would otherwise make its own trusted one.
  */
 export async function createWorkerResources(
-  input: Pick<PiSessionInput, "cwd" | "agentDirectory" | "contextFiles" | "extensionFactories">,
+  input: Pick<PiSessionInput, "cwd" | "agentDirectory" | "contextFiles" | "extensionFactories"> & Pick<Partial<PiSessionInput>, "contextFilesAt">,
 ): Promise<{ resourceLoader: DefaultResourceLoader; settingsManager: SettingsManager }> {
   const settingsManager = SettingsManager.create(input.cwd, input.agentDirectory, { projectTrusted: false });
   // Pi 0.86+ warms prompt caches with extra paid requests during long tool runs by default ("streaming"); 0.85.1 made
@@ -402,7 +420,7 @@ export async function createWorkerResources(
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
-    agentsFilesOverride: appendRepositoryContextFiles(input.contextFiles),
+    agentsFilesOverride: appendRepositoryContextFiles(input.contextFiles, { onlyOurs: input.contextFilesAt === "base-commit" }),
     // AgentX's own prompt in place of Pi's, whatever a SYSTEM.md would have given. Pi then leaves out its tool list,
     // tool rules and documentation pointers; its addendum, project context and cwd sections are unchanged.
     systemPromptOverride: () => AGENTX_WORKER_PROMPT,
@@ -490,13 +508,22 @@ async function loadWorkspaceContextFiles(
   rootPath: string,
   onDiagnostic?: (message: string) => void,
   devcontainerPaths?: DevcontainerPaths,
+  at: "working-tree" | "base-commit" = "working-tree",
+  baseCommits: readonly { repositoryId: string; baseCommitSha?: string | undefined }[] = [],
 ): Promise<RepositoryContextFile[]> {
-  const repositories = await readPreparedRepositories(rootPath);
-  const { files, diagnostics } = await loadRepositoryContextFiles(rootPath, repositories);
+  const prepared = await readPreparedRepositories(rootPath);
+  const repositories = at === "base-commit"
+    ? prepared.map((repository) => {
+        const baseCommit = baseCommits.find((entry) => entry.repositoryId === repository.name)?.baseCommitSha;
+        return baseCommit === undefined ? repository : { ...repository, baseCommit };
+      })
+    : prepared;
+  const { files, diagnostics, notices } = await loadRepositoryContextFiles(rootPath, repositories, { at });
   for (const diagnostic of diagnostics) onDiagnostic?.(diagnostic);
   // AgentX's note comes first and is present with or without the repositories' own files.
   const note = workspaceRepositoriesNote(repositories);
-  const loaded = note === undefined ? files : [note, ...files];
+  const editNote = ruleFileEditNote(notices);
+  const loaded = [...(note === undefined ? [] : [note]), ...files, ...(editNote === undefined ? [] : [editNote])];
   return devcontainerPaths === undefined ? loaded : [...loaded, devcontainerContextFile(devcontainerPaths)];
 }
 

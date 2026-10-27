@@ -84,3 +84,4 @@ export * from "./e2e-runtime-expiry.js";
 export * from "./e2e-agent-models.js";
 export * from "./e2e-replay.js";
 export * from "./workflow-publication-context.js";
+export * from "./test-proof.js";
