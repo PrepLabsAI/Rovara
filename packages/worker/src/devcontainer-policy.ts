@@ -188,7 +188,7 @@ const ALWAYS_REFUSED = new Set(["--pid", "--security-opt", "--device", "--device
 /** Long flags refused when their value is `host` (and, for these three, another container's namespace). */
 const HOST_VALUE = new Map([["--ipc", true], ["--network", true], ["--net", true], ["--userns", false], ["--uts", false], ["--cgroupns", false]]);
 /** `docker run` short flags without a value; every other short flag takes one. */
-const SHORT_BOOLEAN = new Set(["d", "i", "t", "P"]);
+const SHORT_BOOLEAN = new Set(["d", "i", "t", "P", "q"]);
 
 function runArgsRefusal(args: readonly string[], context: DevcontainerPolicyContext): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
