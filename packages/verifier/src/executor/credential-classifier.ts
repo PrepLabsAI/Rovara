@@ -106,11 +106,12 @@ const RANDOM_VOWEL_SHARE_BELOW = 0.34;
 /**
  * A random-looking token with no digit in it (MIDSTEP-2 MASKMAYBE, R4-3): 20 characters or more of letters in both cases, with at most `+ / - _ =` between them. A letter-and-digit run is an
  * opaque token and is judged elsewhere; this is the digit-less rest (about 0.5% of 24-byte base64 tokens, 0.07% of 32-byte ones). It is never an ordinary word, a slug, a path, a URL, a host or an
- * email: those are not weak (that was B-1: ordinary values must not corrupt reports or fail runs).
+ * email (the last three never match the character set): those are not weak (that was B-1: ordinary values must not corrupt reports or fail runs).
  */
 export function isDigitlessRandomToken(value: string): boolean {
   if (value.length < 20 || value.length > 4_096 || !/^[A-Za-z+/_=-]+$/.test(value) || !/[a-z]/.test(value) || !/[A-Z]/.test(value)) return false;
-  if (URL_LIKE.test(value) || isSlugOrPath(value) || isPathLike(value) || HOST_LIKE.test(value) || /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(value)) return false;
+  // The character set above already leaves out URLs (`:`), hosts (`.`) and emails (`@`); a slug of word-like parts and a path of recognisable segments are left out here.
+  if (isSlugOrPath(value) || isPathLike(value)) return false;
   const letters = value.replace(/[^A-Za-z]/g, "");
   return wordLetterShare(value) < RANDOM_WORD_SHARE_BELOW && letters.replace(/[^aeiouAEIOU]/g, "").length / letters.length < RANDOM_VOWEL_SHARE_BELOW;
 }

@@ -6,11 +6,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { classifyString, credentialKey, isDigitlessRandomToken, type ClassifiedValue } from "../../packages/verifier/src/executor/credential-classifier.js";
 import { classifyStorageEntry } from "../../packages/verifier/src/executor/storage-entry-classifier.js";
 import { headerSecrets, urlSecrets } from "../../packages/verifier/src/executor/request-secrets.js";
+import { createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
 import { createHostModelStack } from "../../packages/verifier/src/executor/host-model-stack.js";
 import { maskModelCall, ModelMaskDepthError } from "../../packages/verifier/src/executor/model-mask.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
-import { RUN_ID, TOOLS } from "../support/e2e-model-fixtures.js";
+import { RUN_ID, TOOLS, call } from "../support/e2e-model-fixtures.js";
 import { MIDSTEP2_POSITION as POSITION, createMidstep2Harness } from "../support/e2e-midstep2-harness.js";
 
 // MIDSTEP-2 MASKMAYBE: a weak (evidence-only) value is replaced by `<session>` in everything sent to the model, the step goes on, a strong value still refuses; and the key reading / classifier changes
@@ -138,13 +139,27 @@ describe("the mask itself", () => {
   });
 });
 
+describe("the channel client's order of work around the mask", () => {
+  it("the credential scan runs again on the MASKED call (a mask that produced a credential is refused, nothing is sent), and a mask that breaks the call's shape is refused as an invalid request", async () => {
+    const e = await harness.executor();
+    e.registry.register(STRONG);
+    const withMask = (mask: (text: string) => string) => createE2EModelChannelClient({ socketPath: e.run.socketPath, runId: RUN_ID, sessionSync: e.source, scan: e.registry.modelScan, mask });
+    await expect(withMask((text) => text.replace("PLACEHOLDER", STRONG)).generate({ ...POSITION, callIndex: 0, call: call("#n1 text PLACEHOLDER") })).rejects.toMatchObject({ code: "credential-in-prompt" });
+    await expect(withMask((text) => (text === "user" ? "usr" : text)).generate({ ...POSITION, callIndex: 1, call: call("#n1 text hello") })).rejects.toMatchObject({ code: "invalid-request" });
+    expect(e.run.seen).toHaveLength(0);
+    // And an honest mask is sent: the same client shape with a mask that changes nothing reaches the model.
+    expect((await withMask((text) => text).generate({ ...POSITION, callIndex: 0, call: call("#n1 text hello") })).result.status).toBe("ok");
+    expect(e.run.seen).toHaveLength(1);
+  });
+});
+
 describe("R4-1: a clear secret word wins over a route word", () => {
   const SECRET_ROUTE_KEYS = ["callbackToken", "nextToken", "returnToken", "authRedirectToken", "nextAuthToken", "next-auth.session-token", "__Secure-next-auth.session-token", "oauthCallbackToken", "originToken", "redirectSecret", "returnPassword"];
   it.each(SECRET_ROUTE_KEYS)("%s is a credential key", (name) => {
     expect(credentialKey(name)).toMatchObject({ credential: true, strongest: true });
   });
   it("a route key without a secret word stays out, and so do secret-sounding route names (a token's callback URL is not the token)", () => {
-    for (const name of ["redirectAfterAuth", "returnTo", "next", "callbackUrl", "origin", "referrer", "nextPage", "authRedirect", "tokenCallback", "tokenOrigin", "sessionReturn"]) {
+    for (const name of ["redirectAfterAuth", "returnTo", "next", "callbackUrl", "origin", "referrer", "nextPage", "authRedirect", "tokenCallback", "tokenOrigin", "tokenReferrer", "tokenReferer", "tokenNext", "sessionReturn"]) {
       expect(credentialKey(name).credential, name).toBe(false);
     }
   });
@@ -160,7 +175,7 @@ describe("R4-1: a clear secret word wins over a route word", () => {
 });
 
 describe("R4-2: names that only sound secret hold dates, URLs, paths, hosts and emails WEAK (masked, never refused); an opaque token under them stays strong", () => {
-  const NAMES = ["tokenEndpoint", "authEndpoint", "authHost", "authIssuer", "authServer", "authLoginPage", "sessionEndpoint", "passwordResetLink", "secretsManagerRegion", "sessionLastActive", "tokenIssued", "sessionLastSeen", "sessionOpened", "sessionClosed", "tokenIssuer", "sessionEnded", "tokenExpires"];
+  const NAMES = ["tokenEndpoint", "authEndpoint", "authHost", "authIssuer", "authServer", "authLoginPage", "sessionEndpoint", "passwordResetLink", "secretsManagerRegion", "sessionLastActive", "tokenIssued", "sessionLastSeen", "sessionOpened", "sessionClosed", "tokenIssuer", "sessionEnded", "tokenExpires", "sessionSeen", "sessionActive", "sessionLast", "authHostname", "authEndpoints", "sessionCreated", "sessionUpdated", "sessionModified", "sessionEnd"];
   const VALUES = ["https://login.example.com/oauth2/token", "/oauth2/authorize/callback/handler", "2026-10-27T09:15:00Z", "login.example.com", "maya.rodriguez@example.com"];
   it.each(NAMES)("%s", (name) => {
     for (const value of VALUES) {
@@ -207,7 +222,9 @@ describe("R4-3: a digit-less random token that is not strong is weak (masked), a
   it("ordinary words, identifiers, slugs, paths, URLs, hosts and emails are NOT registered as JSON leaves (B-1: they must not corrupt reports or fail runs)", () => {
     const ordinary = ["userProfileSettingsManager", "NotificationPreferencesPanel", "internationalizationAndLocalization", "getUserProfileById", "SomeVeryLongComponentName", "BackgroundSyncServiceWorker",
       "Reports/Sales/Summary/Final/Report", "/Users/Shared/Documents/Projects", "my_quarterly_Report_for_Board", "this-is-an-ordinary-slug-of-many-words", "https://app.example.com/orders/overview",
-      "maya.rodriguez@example.com", "login.example.com", "UPPERCASELONGCONSTANTNAMEHERE", "alllowercaselongwordsrunningtogether", "Quarterly report for ACME"];
+      "maya.rodriguez@example.com", "login.example.com", "UPPERCASELONGCONSTANTNAMEHERE",
+      // Consonant-heavy pieces that the share and vowel lines alone would call random: the slug rule and the path rule are what keep them out.
+      "Qwe-Pqe-Dfa-Hje-Lzo-Cvu-Nmi-Wra-Xye-Rtz", "Pqe/Rta/Xwo/Zyl/Mnu/Cvb/Dfe/Ghi", "alllowercaselongwordsrunningtogether", "Quarterly report for ACME"];
     for (const value of ordinary) {
       expect(isDigitlessRandomToken(value), value).toBe(false);
       expect(tierOf(classifyStorageEntry({ name: "settings", value: JSON.stringify({ anything: value }) }), value), `leaf ${value}`).toBeNull();
