@@ -27,7 +27,7 @@ beforeEach(async () => { cleanRedirectingEnvironment(); dir = await mkdtemp(join
 afterEach(async () => { for (const close of closers.splice(0).reverse()) await close().catch(() => undefined); await rm(dir, { recursive: true, force: true }); });
 
 describe("F-1: the analytics names are whole names or delimited stems; an opaque value under one is weak", () => {
-  it.each([["_gateway_session"], ["_gallery_session"], ["_game_session"], ["_gamma_session"], ["_garage_auth"], ["_galaxy_token"], ["_gidget_session"], ["optimizely_login"], ["mp_session"], ["utm_session"], ["ajs_session"], ["amplitude_session"], ["_pk_sess"]])(
+  it.each([["_gateway_session"], ["_gallery_session"], ["_game_session"], ["_gamma_session"], ["_garage_auth"], ["_galaxy_token"], ["_gidget_session"], ["optimizely_login"], ["mp_session"], ["utm_session"], ["ajs_session"], ["amplitude_session"], ["_pk_sess"], ["_hj_session_token"]])(
     "%s is not an analytics name: a signed-in browser registers it strong, a visitor's too (it names a session or a token)", (name) => {
       expect(analyticsCookieName(name), name).toBe(false);
       for (const httpOnly of [true, false]) {
@@ -69,6 +69,7 @@ describe("F-1: the analytics names are whole names or delimited stems; an opaque
       expect(told, `state ${name}`).toEqual([{ value: OPAQUE, tier: "weak" }]);
       expect(headerSecrets([{ name: "cookie", value: `${name}=${OPAQUE}` }], { visitor }), `header ${name}`).toEqual([{ value: OPAQUE, tier: "weak" }]);
       expect(cookieTier({ name, value: "short", httpOnly: false }, visitor)).toBeNull();
+      expect(cookieTier({ name, value: "Ab3dEf9hJk12", httpOnly: false }, visitor), `12 characters under ${name}`).toBeNull();
       expect(cookieTier({ name, value: "GA1.2.3", httpOnly: true }, visitor)).toBeNull();
     }
   });
