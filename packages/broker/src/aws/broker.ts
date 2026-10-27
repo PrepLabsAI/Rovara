@@ -346,6 +346,7 @@ import { SessionManager } from "./sessions.js";
 import { STUCK_SETUP_MESSAGE } from "./stuck-setup.js";
 import { workflowRunEndedReason } from "./outbox-failure.js";
 import { WORKFLOW_STEP_STAGE, blockStoppedWorkflowRun, stopBlocksWorkflowStep } from "./workflow-cancel-reconcile.js";
+import { autofixBlockCauseOf, autofixBlockRows, autofixRowHeld, dispatchExhaustRows, ownerStopRows } from "./workflow-autofix-dispatch-exhaust.js";
 import {
   adaptHttpApiEvent,
   identityFromJwtClaims,
@@ -5411,6 +5412,7 @@ async function stopQueuedWorkflowE2EReadiness(
         ":now": now, ":revision": workflow.revision, ":verify": "VERIFY", ":waiting": "WAITING", ":required": true,
         ":candidate": workflow.candidate.digest,
       } } },
+    ...ownerStopRows(dependencies, workflow, now),
     ...extra(publicOperation(readiness)),
   ] }));
 }
@@ -5463,6 +5465,7 @@ async function cancelWorkflowE2EReadiness(
         ":workflow": blockWorkflow(workflow, "E2E compute readiness was cancelled; no feature round was admitted.", now),
         ":now": now, ":revision": marker.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": marker.candidateDigest,
       } } }] : []),
+    ...(taskMatches && workflow !== undefined ? ownerStopRows(dependencies, workflow, now) : []),
     ...extra(publicOperation({ ...operation, status: "CANCELLED", updatedAt: now,
       result: { status: "CANCELLED", reason: "E2E compute readiness was cancelled by an authorized owner." } })),
   ];
@@ -10456,7 +10459,7 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
       ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
       ExpressionAttributeValues: { ":workflow": updating === undefined ? blockWorkflow(workflow, reason, now) : blockWorkflowPullRequestUpdate(workflow, { numbers: [updating.number], now }), ":now": now,
         ":revision": item.workflowRevision, ":stage": stage, ":state": state },
-    } }] }));
+    } }, ...dispatchExhaustRows(dependencies, item, workflow, exhaustedReason, now)] }));
     console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_gave_up", taskId: item.taskId, kind: item.kind, attempts }));
   } catch (error) {
     // A row or task that changed meanwhile is the newer writer's; anything else is retried by the next sweep.
@@ -10913,6 +10916,7 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
   const config = dependencies.autofix;
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
   let task: DeveloperTaskRecord | undefined;
+  if (autofixRowHeld(item, Date.now())) return "RETRY"; // DISPATCHEXHAUST: the one automatic retry of an infrastructure fault waits out its delay; the sweep finds the row when it is due
   try {
     task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
     if (config?.enabled !== true || task === undefined || dependencies.developer === undefined) { await remove(); return "STALE"; }
@@ -10948,7 +10952,7 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
       now: Date.now,
       log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
     };
-    const outcome = await runWorkflowAutofix(deps, task, { expectedRevision: item.workflowRevision, startedAt: item.createdAt });
+    const outcome = await runWorkflowAutofix(deps, task, { expectedRevision: item.workflowRevision, startedAt: item.createdAt, cause: autofixBlockCauseOf(item.autofixCause) });
     if (outcome !== "WAITING") { await remove(); return outcome === "STALE" || outcome === "DISABLED" ? "STALE" : "DISPATCHED"; }
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "autofix.look_failed", taskId: item.taskId, attempt: (item.attempts ?? 0) + 1, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
@@ -12662,7 +12666,7 @@ async function completedWorkflowItems(
       ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, workflowPullRequestUpdateDue(next) ? "UPDATE" : "PUBLISH", next.candidate.digest, now)]
     // AUTOFIX: checks or reviews that just blocked are looked at once by the automatic-fix policy; the row commits with the block, the broker runs it right after, and the sweep runs it if that is lost.
     : dependencies.autofix?.enabled === true && next.state === "BLOCKED" && (next.stage === "VERIFY" || next.stage === "REVIEW") && task.workflow.state === "RUNNING"
-      ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "AUTOFIX", next.candidate?.digest ?? "0".repeat(64), now)]
+      ? autofixBlockRows(dependencies.tableName, next, terminalStatus === "CANCELLED" ? "owner-stopped" : undefined, now)
       : [];
   // A saved plan forgets the reasons an earlier answer was unreadable; an unreadable answer keeps its own for Retry planning.
   const forget = planUnreadable === null && task.planUnreadable !== undefined;
@@ -13172,8 +13176,9 @@ async function cancelledWorkflowStepItems(
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
   if (task === undefined || !stopBlocksWorkflowStep(task, target)) return [];
   const items = await completedWorkflowItems(dependencies, target, pointer, "CANCELLED", now, undefined, "operation was cancelled");
-  // Only the one conditional update of the step the target ran, exactly; anything else is left to the owner's Retry.
-  const update = items.length === 1 ? items[0]?.Update : undefined;
+  // Only the one conditional update of the step the target ran, exactly (and its AUTOFIX row, DISPATCHEXHAUST: with automatic fixing on, a stopped VERIFY or REVIEW step carries it, and without it being allowed here the cancel left the step RUNNING); anything else is left to the owner's Retry.
+  const rows = items.filter((item) => item.Put?.Item?.kind === "AUTOFIX").length;
+  const update = rows <= 1 && items.length === 1 + rows ? items.find((item) => item.Update !== undefined)?.Update : undefined;
   const values = update?.ExpressionAttributeValues;
   const key = taskKey(task.taskId);
   if (update === undefined || update.Key?.pk !== key.pk || update.Key?.sk !== key.sk

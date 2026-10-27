@@ -4,6 +4,7 @@ import { releaseFailedPreparation } from "./failed-preparation.js";
 import type { DurableOutboxRecord } from "./lambda.js";
 import { taskKey, taskPointerKey } from "../developer/task-records.js";
 import { markWorkflowE2EGroundingUnavailable } from "./workflow-e2e-grounding.js";
+import { endedRunRows } from "./workflow-autofix-dispatch-exhaust.js";
 
 /**
  * Fails an outbox record's operation for good: the operation becomes FAILED, the workspace is
@@ -123,13 +124,14 @@ async function blockFailedWorkflowRun(documentClient: Pick<DynamoDBDocumentClien
       return;
     }
     const now = new Date().toISOString();
-    await documentClient.send(new UpdateCommand({
+    // DISPATCHEXHAUST: a lost run in VERIFY or REVIEW commits its AUTOFIX row (cause run-lost) with the block, so the policy decides it: one automatic retry after a delay, then an ask.
+    await documentClient.send(new TransactWriteCommand({ TransactItems: [{ Update: {
       TableName: tableName, Key: taskKey(pointer.taskId),
       UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
       ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running AND attribute_not_exists(closedAt)",
       ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
       ExpressionAttributeValues: { ":workflow": blockWorkflow(workflow, reason, now), ":now": now, ":revision": workflow.revision, ":stage": workflow.stage, ":running": "RUNNING" },
-    }));
+    } }, ...endedRunRows(tableName, workflow, "FAILED", now)] }));
   } catch (failure) {
     console.log(JSON.stringify({ component: "broker", event: "workflow.lost_run_block_failed", operationId, error: failure instanceof Error ? failure.name : "unknown" }));
   }

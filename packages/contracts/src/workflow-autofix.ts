@@ -38,6 +38,9 @@ export const AUTO_FIX_CODES = [
   "runtime-expired", "runtime-environment-drifted", "model-environment-unsafe", "login-failed", "model-route-changed-reapprove", "agent-route-not-approved", "model-route-not-tested",
   "runtime-unusable", "selection-changed", "accounts-changed", "plan-not-approvable", "history-rewritten", "cancelled-by-owner", "check-broken", "fails-on-original-code",
   "review-unusable", "pull-request-open", "unknown-group-code", "unreadable",
+  // DISPATCHEXHAUST: why a block was written outside a finished run (see `AutoFixBlockCause`): the start was tried until its budget ran out and the run was lost (Rovara's side, transient),
+  // or the owner stopped the run (a person's choice, never retried).
+  "dispatch-exhausted", "run-lost", "owner-stopped",
   // Unclear fault.
   "e2e-evidence-unknown", "check-result-unknown", "check-failed-cause-unknown",
 ] as const;
@@ -52,7 +55,7 @@ export const AUTO_FIX_PERSON_GROUP_CODES = ["runtime-expired", "model-environmen
 
 /** Why Rovara asks instead of acting. The limit reasons name the limit the ask card tells the person about. */
 export const AUTO_FIX_ASK_REASONS = [
-  "needs-a-person", "original-code-also-fails", "unclear-fault",
+  "needs-a-person", "original-code-also-fails", "unclear-fault", "owner-stopped",
   "send-back-limit", "retry-limit", "total-limit", "spend-cap", "day-budget", "history-full", "inputs-missing",
 ] as const;
 export type AutoFixAskReason = (typeof AUTO_FIX_ASK_REASONS)[number];
@@ -62,6 +65,13 @@ export type OriginalCodeResult = "passed" | "failed" | "cannot-run";
 
 /** One UNKNOWN group's own result on the original code (see `AutoFixFacts.e2eUnknownGroups`). */
 export type GroupOriginalResult = OriginalCodeResult | "skipped" | "pending" | "not-run";
+
+/**
+ * DISPATCHEXHAUST: how a block that no finished run wrote came about, recorded on the block's AUTOFIX row in the same write as the block (the block text alone cannot tell a lost run from a failed one).
+ * `dispatch-exhausted` and `run-lost` are infrastructure faults (one automatic retry, then an ask, never a send back to coding); `owner-stopped` is the owner's choice (never retried).
+ */
+export const AUTO_FIX_BLOCK_CAUSES = ["dispatch-exhausted", "run-lost", "owner-stopped"] as const;
+export type AutoFixBlockCause = (typeof AUTO_FIX_BLOCK_CAUSES)[number];
 
 /** What the caller knows that the workflow does not store. Every member is optional: what is missing is unknown, and unknown never counts as a pass. */
 export interface AutoFixFacts {
@@ -82,6 +92,8 @@ export interface AutoFixFacts {
   runnerBusy?: boolean | undefined;
   /** The owner stopped the checks (a `cancelled` group is then the owner's doing, not an infrastructure fault). */
   ownerCancelled?: boolean | undefined;
+  /** DISPATCHEXHAUST: how this block came about when no finished run wrote it. When present it is the whole classification of the block: it can never be read as a fault of the code. */
+  blockCause?: AutoFixBlockCause | undefined;
 }
 
 /**
@@ -206,7 +218,7 @@ function reviewSignals(workflow: WorkflowSnapshot): Signal[] {
 }
 
 function blockSignals(workflow: WorkflowSnapshot, facts: AutoFixFacts): Signal[] {
-  const signals = workflow.stage === "REVIEW" ? reviewSignals(workflow) : workflow.stage === "VERIFY" ? verifySignals(workflow, facts) : [];
+  const signals = facts.blockCause !== undefined ? [facts.blockCause === "owner-stopped" ? person("owner-stopped") : transient(facts.blockCause)] : workflow.stage === "REVIEW" ? reviewSignals(workflow) : workflow.stage === "VERIFY" ? verifySignals(workflow, facts) : [];
   if (facts.providerOutage === true) signals.push(transient("provider-outage"));
   if (facts.runnerBusy === true) signals.push(transient("runner-busy"));
   if ((workflow.pullRequests?.length ?? 0) > 0) signals.push(person("pull-request-open"));
@@ -252,7 +264,7 @@ export function autoFixDecision(workflow: WorkflowSnapshot, facts: AutoFixFacts,
   const of = (kind: AutoFixClass): Signal[] => signals.filter((signal) => signal.class === kind);
 
   const people = of("person");
-  if (people.length > 0) return ask(people[0]?.code === "fails-on-original-code" ? "original-code-also-fails" : "needs-a-person");
+  if (people.length > 0) return ask(people[0]?.code === "fails-on-original-code" ? "original-code-also-fails" : people[0]?.code === "owner-stopped" ? "owner-stopped" : "needs-a-person");
   // Everything below acts or waits on money and counts: with an input missing, a person decides.
   if (inputsMissing(budget)) return ask("inputs-missing");
 

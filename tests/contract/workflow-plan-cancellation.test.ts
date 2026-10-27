@@ -22,6 +22,8 @@ const taskRow = (harness: Harness, taskId: string) => harness.db.get(`DEVTASK#${
 const taskWorkflow = (harness: Harness, taskId: string) => taskRow(harness, taskId).workflow;
 const workspaceRow = (harness: Harness, workspaceId: string) => harness.db.get(`WORKSPACE#${workspaceId}`, "META") as Row;
 const dispatchRows = (harness: Harness) => harness.db.find((item) => item.pk === "WORKFLOW_DISPATCH");
+/** The rows that would start a step. The AUTOFIX row of a blocked VERIFY or REVIEW step starts nothing: it has the policy look at the block. */
+const stepRows = (harness: Harness) => dispatchRows(harness).filter((item) => item.kind !== "AUTOFIX");
 const passingChecks = () => ({ status: "verified", source: "project", preambleVersion: "1", preambleSha256: "c".repeat(64), checks: [{ id: "readiness:0", label: "npm test", source: "project", before: "passed", after: "passed", class: "passing", output: "", durationMs: 12 }], extraTry: "not_needed", agentClaim: "success" });
 
 /** A Quick workflow task whose preparation finished: planning is running (the worker reported RUNNING). */
@@ -472,7 +474,7 @@ describe("PLANINC-2: every other workflow step", () => {
       expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: started.stage, state: "BLOCKED", blockReason: reasonFor(started, "interrupted"), revision: running.revision + 1 });
       expect(taskWorkflow(harness, taskId).decisions).toEqual(running.decisions);
       expect(workspaceRow(harness, workspaceId)).toMatchObject({ status: "READY" });
-      expect(dispatchRows(harness)).toEqual([]);
+      expect(stepRows(harness)).toEqual([]); // DISPATCHEXHAUST: no step is queued; the block of a VERIFY or REVIEW step carries its AUTOFIX row (workflow-autofix-dispatch-exhaust.test.ts)
       expect(operations(harness, workspaceId)).toHaveLength(operationsBefore + 1);
       if (started.retry !== undefined) expect((await started.retry(taskWorkflow(harness, taskId).revision)).status).toBe(200);
       // The sweep again changes nothing.
@@ -492,7 +494,7 @@ describe("PLANINC-2: every other workflow step", () => {
       expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: started.stage, state: "BLOCKED", blockReason: reasonFor(started, "failed"), revision: running.revision + 1 });
       expect(taskWorkflow(harness, taskId).decisions).toEqual(running.decisions);
       expect(workspaceRow(harness, workspaceId)).toMatchObject({ status: "READY" });
-      expect(dispatchRows(harness)).toEqual([]);
+      expect(stepRows(harness)).toEqual([]); // DISPATCHEXHAUST: no step is queued; the block of a VERIFY or REVIEW step carries its AUTOFIX row (workflow-autofix-dispatch-exhaust.test.ts)
       expect(operations(harness, workspaceId)).toHaveLength(operationsBefore + 1);
       if (started.retry !== undefined) expect((await started.retry(taskWorkflow(harness, taskId).revision)).status).toBe(200);
     });
