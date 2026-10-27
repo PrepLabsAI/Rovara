@@ -1,4 +1,4 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { AgentXNameSchema, RelativeWorkspacePathSchema } from "@agentx/contracts";
 import { inertContextText } from "./context-text.js";
@@ -21,8 +21,11 @@ export const MAX_REPOSITORY_CONTEXT_FILE_BYTES = 65_536;
 export interface WorkspaceRepositoryReference {
   name: string;
   path: string;
-  /** The commit the preparation manifest recorded; read only when the caller asks for it (`readPreparedRepositories` with `commits`). */
-  resolvedCommit?: string;
+  /**
+   * The commit a base-commit read uses. It comes from the caller (the broker's base for the task), never from the
+   * preparation manifest, which the agent can write; absent means the repository has no trusted base.
+   */
+  baseCommit?: string;
 }
 
 /** Where a repository's rule file is read from: the checked-out files, or the commit the task started from (A5). */
@@ -45,7 +48,6 @@ export interface RepositoryContextFiles {
 /** The prepared repositories, or none when the workspace has no readable manifest. */
 export async function readPreparedRepositories(
   rootPath: string,
-  options: { commits?: boolean } = {},
 ): Promise<WorkspaceRepositoryReference[]> {
   try {
     const manifest = JSON.parse(
@@ -54,11 +56,7 @@ export async function readPreparedRepositories(
     if (!Array.isArray(manifest.repositories)) return [];
     return manifest.repositories
       .filter((repository) => typeof repository?.name === "string" && typeof repository?.path === "string")
-      .map(({ name, path, resolvedCommit }) => ({
-        name,
-        path,
-        ...(options.commits === true && typeof resolvedCommit === "string" ? { resolvedCommit } : {}),
-      }));
+      .map(({ name, path }) => ({ name, path }));
   } catch {
     return [];
   }
@@ -82,8 +80,20 @@ export async function loadRepositoryContextFiles(
   const diagnostics: string[] = [];
   const notices: string[] = [];
   for (const repository of repositories) {
+    // The name and path reach the model (labels, the review note); an entry settings would refuse reaches nothing.
+    if (!AgentXNameSchema.safeParse(repository.name).success) {
+      diagnostics.push(INVALID_REPOSITORY_DIAGNOSTIC);
+      continue;
+    }
     const located = await locateRepository(canonicalRoot, repository);
-    if (located.diagnostic) diagnostics.push(located.diagnostic);
+    if (located.diagnostic) {
+      diagnostics.push(located.diagnostic);
+      continue;
+    }
+    if (!RelativeWorkspacePathSchema.safeParse(repository.path).success) {
+      diagnostics.push(INVALID_REPOSITORY_DIAGNOSTIC);
+      continue;
+    }
     if (!located.directory) continue;
     const read = atBase
       ? await readBaseCommitRuleFile(located.directory, repository)
@@ -101,12 +111,14 @@ export async function loadRepositoryContextFiles(
       const working = await readWorkingTreeRuleFile(located.directory, repository);
       if (ruleFileSignature(read) !== ruleFileSignature(working)) {
         const edited = working.raw?.candidate ?? working.skipped ?? read.raw?.candidate ?? read.skipped;
-        if (edited !== undefined) notices.push(`This change edits ${edited} of ${quoted(repository.name).slice(1, -1)}. Review that edit as code; the rules above are the ones from before the change.`);
+        if (edited !== undefined) notices.push(`This change edits ${edited} of ${inert(repository.name)}. Review that edit as code; the rules above are the ones from before the change.`);
       }
     }
   }
   return { files, diagnostics, notices };
 }
+
+const INVALID_REPOSITORY_DIAGNOSTIC = "skipped a repository context file: its name or path is not valid";
 
 /** Names the note that tells a reviewer its change edits a rule file; AgentX's own, never a file inside a repository. */
 export const REVIEW_NOTE_PATH = "AgentX review note";
@@ -155,11 +167,22 @@ function checkedOut({ name, path }: WorkspaceRepositoryReference): string {
   return `The repository ${quoted(name)} is checked out at ${quoted(path).slice(1, -1)} in this workspace.`;
 }
 
-/** Appends the repository context files to the ones Pi's resource loader already discovered. */
+/**
+ * Appends the repository context files to the ones Pi's resource loader already discovered (its agent directory, the
+ * working directory and the directories above it), which are kept without hidden characters. With `onlyOurs` they are
+ * left out instead: a reviewer reads only AgentX's own files, because Pi's discovery reads the working tree, where a
+ * coding session can write an AGENTS.md that no diff shows.
+ */
 export function appendRepositoryContextFiles(
   files: readonly RepositoryContextFile[],
+  options: { onlyOurs?: boolean } = {},
 ): (base: { agentsFiles: RepositoryContextFile[] }) => { agentsFiles: RepositoryContextFile[] } {
-  return (base) => ({ agentsFiles: [...base.agentsFiles, ...files] });
+  return (base) => ({
+    agentsFiles: [
+      ...(options.onlyOurs === true ? [] : base.agentsFiles.map((file) => ({ ...file, content: inertContextText(file.content).text }))),
+      ...files,
+    ],
+  });
 }
 
 /** A rule file as read, before hidden characters are removed. */
@@ -206,7 +229,11 @@ async function readWorkingTreeRuleFile(
   directory: string,
   repository: WorkspaceRepositoryReference,
 ): Promise<RuleFileRead> {
+  // Names exactly as the directory lists them: on a case-insensitive file system stat("AGENTS.md") also finds
+  // "agents.md", which Git (and so the base-commit read) does not treat as the same file.
+  const listed = new Set(await readdir(directory).catch(() => [] as string[]));
   for (const candidate of REPOSITORY_CONTEXT_FILE_CANDIDATES) {
+    if (!listed.has(candidate)) continue;
     const candidatePath = resolve(directory, candidate);
     const metadata = await stat(candidatePath).catch(() => undefined);
     // Missing names, broken symlinks and directories are passed over, as Pi passes over them.
@@ -240,7 +267,7 @@ const COMMIT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const GIT_TIMEOUT_MS = 60_000;
 
 /**
- * The same candidate order, size cap and checks, read from `repository.resolvedCommit` through the worker's
+ * The same candidate order, size cap and checks, read from `repository.baseCommit` through the worker's
  * isolated Git (a throwaway repository that never reads the repository's own config, hooks or attributes).
  * A commit that is missing, malformed or unreadable gives no file and a diagnostic: the working tree is never the fallback.
  */
@@ -249,7 +276,7 @@ async function readBaseCommitRuleFile(
   repository: WorkspaceRepositoryReference,
 ): Promise<RuleFileRead> {
   const unusable: RuleFileRead = { diagnostic: `skipped the context file of ${repository.name}: no usable base commit` };
-  const commit = repository.resolvedCommit;
+  const commit = repository.baseCommit;
   if (commit === undefined || !COMMIT_ID.test(commit)) return unusable;
   let listing: string;
   try {
@@ -306,7 +333,14 @@ function labelledContent(
   candidate: string,
   content: string,
 ): string {
-  return `${candidate} of the "${repository.name}" repository, checked out at ${repository.path} in this workspace. Its guidance applies to the files under ${repository.path}.\n\n${content}`;
+  const name = inert(repository.name);
+  const path = inert(repository.path);
+  return `${candidate} of the "${name}" repository, checked out at ${path} in this workspace. Its guidance applies to the files under ${path}.\n\n${content}`;
+}
+
+/** A name or path as one inert piece of text: no hidden characters, and the angle brackets that could close Pi's tag escaped. */
+function inert(value: string): string {
+  return quoted(inertContextText(value).text).slice(1, -1);
 }
 
 /**

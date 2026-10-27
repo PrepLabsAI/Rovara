@@ -140,7 +140,8 @@ export async function runWorkflowFeedbackReview(input: {
     if (status === "COMPLETE") {
       input.onProgress?.("AgentX is independently reviewing the current PR feedback.");
       session = await createWorkspacePiSession({ rootPath: input.rootPath, model: input.model,
-        workflowMode: "REVIEW", conversationId: randomUUID(), contextFilesAt: "base-commit" }, input.piAdapter);
+        workflowMode: "REVIEW", conversationId: randomUUID(), contextFilesAt: "base-commit",
+        baseCommits: withCandidateBase(input.repositories, input.candidate) }, input.piAdapter);
       const actualModel = session.getModel();
       provider = actualModel.provider;
       version = actualModel.modelId;
@@ -670,6 +671,7 @@ export async function runWorkflowReviews(input: {
         workflowMode: "REVIEW",
         conversationId: randomUUID(),
         contextFilesAt: "base-commit",
+        baseCommits: repositories,
       }, input.piAdapter);
       const actualModel = session.getModel();
       provider = actualModel.provider;
