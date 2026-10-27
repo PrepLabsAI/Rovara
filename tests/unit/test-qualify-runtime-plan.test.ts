@@ -75,6 +75,7 @@ describe("planTestQualification", () => {
       "create-volume",
       "run-instance",
       "attach-volume",
+      "volume-delete-on-termination",
       "read-private-ip",
       "wait-ready",
       "issue-challenge",
@@ -138,6 +139,9 @@ describe("planTestQualification", () => {
     expect(text).toContain(PREFLIGHT_KEY);
     expect(text).toMatch(/spend/i);
     expect(text).toMatch(/never terminates/);
+    expect(text).toContain("[volume-delete-on-termination]");
+    expect(text).toContain("DeleteOnTermination=true");
+    expect(text).toContain("ec2:ModifyInstanceAttribute");
   });
 });
 
@@ -326,6 +330,7 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
       return options.instanceId ?? INSTANCE_ID;
     },
     async attachVolume(request) { calls.push(`attachVolume ${request.volumeId} ${request.instanceId}`); maybeFail("attachVolume"); },
+    async setVolumeDeleteOnTermination(request) { calls.push(`setVolumeDeleteOnTermination ${request.volumeId} ${request.instanceId} ${request.device}`); maybeFail("setVolumeDeleteOnTermination"); },
     async privateIpOf(instanceId) { calls.push(`privateIpOf ${instanceId}`); maybeFail("privateIpOf"); return "10.42.128.17"; },
     async issueChallenge(request) { bindings.push(request.binding); calls.push(`issueChallenge ${request.endpoint} ${request.generation} ${request.transportCorrelationId} ${request.profile}`); maybeFail("issueChallenge"); return { challengeId: "c-1", file: "/tmp/challenge.json", expiresAt: "2026-10-19T13:00:00Z" }; },
     async putObject(key, file) { calls.push(`putObject ${key} ${file}`); maybeFail("putObject"); },
@@ -420,7 +425,7 @@ describe("runTestQualification", () => {
     await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
     const names = calls.map((call) => call.split(" ")[0]);
     expect(names).toEqual([
-      "checkAdminSession", "resolveFacts", "putBytes", "getObjectStrict", "deleteObject", "createVolume", "runInstance", "attachVolume", "privateIpOf", "getObject", "issueChallenge", "putObject",
+      "checkAdminSession", "resolveFacts", "putBytes", "getObjectStrict", "deleteObject", "createVolume", "runInstance", "attachVolume", "setVolumeDeleteOnTermination", "privateIpOf", "getObject", "issueChallenge", "putObject",
       "getObject", "getObject", "getObject", "getObject", "saveProposal", "register", "recordModelCheckRunner", "recordSuccess", "deleteObject",
     ]);
     // Task 4.10C: the runner that serves model checks is recorded after the registration, bound to its transport correlation, and never before a successful one.
@@ -525,6 +530,30 @@ describe("runTestQualification", () => {
     expect(calls.filter((call) => call.startsWith("runInstance"))).toHaveLength(1);
     expect(calls.some((call) => call.startsWith("register"))).toBe(false);
     expect(printed.join("\n")).toContain("aws ec2 terminate-instances --instance-ids i-0123456789abcdef0");
+  });
+
+  it("marks the attached volume DeleteOnTermination right after the attachment, before anything else uses the runner (QUALVOLDELETE)", async () => {
+    const { effects, calls, printed } = harness();
+    await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
+    const attach = calls.findIndex((call) => call.startsWith("attachVolume"));
+    expect(calls[attach + 1]).toBe(`setVolumeDeleteOnTermination vol-0123456789abcdef0 ${INSTANCE_ID} /dev/sdf`);
+    expect(printed.join("\n")).toContain("will be deleted when");
+    expect(printed.join("\n")).not.toContain("WARNING");
+  });
+
+  it("when DeleteOnTermination cannot be set it says so clearly, prints the by-hand delete, finishes the qualification and repeats the reminder at the end (QUALVOLDELETE)", async () => {
+    const { effects, calls, printed } = harness({ failAt: "setVolumeDeleteOnTermination" });
+    await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
+    // The qualification still registers: the volume is housekeeping, not part of the verdict.
+    expect(calls.some((call) => call.startsWith("register "))).toBe(true);
+    const text = printed.join("\n");
+    expect(text).toContain("WARNING: could not set DeleteOnTermination on volume vol-0123456789abcdef0");
+    expect(text).toContain("setVolumeDeleteOnTermination failed");
+    expect(text).toContain("NOT be deleted when the runner is terminated");
+    // Said at the time and again at the end, each with the command.
+    expect(text.match(/aws ec2 delete-volume --volume-id vol-0123456789abcdef0/g)).toHaveLength(2);
+    expect(text).toContain("Reminder: DeleteOnTermination could not be set");
+    expect(printed.lastIndexOf("  aws ec2 delete-volume --volume-id vol-0123456789abcdef0 --profile agentx-test --region us-east-1")).toBeGreaterThan(printed.findIndex((line) => line.startsWith("Reminder") || line.includes("Reminder")));
   });
 
   it("prints only the volume to delete when the launch itself fails", async () => {
