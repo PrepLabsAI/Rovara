@@ -204,10 +204,12 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
   // The provider key the route's invoke holds is a secret the model must never see.
   let credentials: E2ECredentialSet = {
     passwords: [...options.credentialSet.passwords, ...route.secretValues], emails: [...options.credentialSet.emails], cookieValues: [...options.credentialSet.cookieValues],
+    sessionValues: [...(options.credentialSet.sessionValues ?? [])],
   };
-  let guard: E2ECredentialGuard = createE2ECredentialGuard(credentials);
-  // MIDSTEPCOOKIE: a call is served only under the newest session sync (see e2e-model-session-sync.ts), whose values are in `guard` before the call is looked at.
+  // MIDSTEPCOOKIE: a call is served only under the sync that directly preceded it (see e2e-model-session-sync.ts), whose values are in `guard` before the call is looked at.
   const syncLedger = createE2ESessionSyncLedger();
+  const guardOptions = { spellings: (value: string) => syncLedger.spellingsOf(value) };
+  let guard: E2ECredentialGuard = createE2ECredentialGuard(credentials, guardOptions);
   const transcriptBudget = options.transcriptBudgetBytes ?? DEFAULT_TRANSCRIPT_BUDGET_BYTES;
   const stepCallLimit = budgets.maxActionsPerStep + budgets.extraModelCallsPerStep;
 
@@ -261,6 +263,8 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
   /** Everything up to the provider call is synchronous, so two requests can never both pass the same budget check. */
   async function serve(body: BodyRead): Promise<{ status: number; body: unknown }> {
     const startedAt = stamp();
+    // The newest sync token is spent by any generate request, so a request refused for another reason cannot leave it for a later one.
+    syncLedger.beginCall();
     const position = current?.position ?? last;
     if (position === null) {
       // No step has begun. There is no step to take a receipt, and an invented one would use up an agent step slot.
@@ -302,7 +306,7 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     const request: E2EModelChannelRequest = parsed.data;
     const promptSha256 = e2ePromptSha256(request.call);
     // The scan only knows what the executor has synced; a call that names no current sync is refused before anything is read from it, and its prompt is not kept (the scrub may not know its cookie).
-    const syncCheck = syncLedger.useForCall(request.syncSeq);
+    const syncCheck = syncLedger.useForCall(request.syncToken);
     if (!syncCheck.ok) return declined("refused-protocol", syncCheck.message, { promptSha256, omitted: "unparseable" });
     const redactedForEvidence = () => JSON.stringify(guard.scrubValue(request.call));
     if (request.runId !== runId || request.caseId !== identity.caseId || request.stepIndex !== identity.stepIndex || request.callIndex !== identity.callIndex) {
@@ -365,8 +369,9 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
       passwords: [...credentials.passwords, ...(values.passwords ?? [])],
       emails: [...credentials.emails, ...(values.emails ?? [])],
       cookieValues: [...credentials.cookieValues, ...(values.cookieValues ?? [])],
+      sessionValues: [...(credentials.sessionValues ?? []), ...(values.sessionValues ?? [])],
     };
-    guard = createE2ECredentialGuard(credentials, { onUnscannable: "latch" });
+    guard = createE2ECredentialGuard(credentials, { ...guardOptions, onUnscannable: "latch" });
   }
 
   /** `POST /v1/sync`: the executor's session values, sent before every model call. Accepted only in order for this run; the values join the credential scan at once. */
@@ -378,9 +383,9 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     let json: unknown;
     try { json = JSON.parse(body.bytes.toString("utf8")); } catch { return refuse(400, "not-json"); }
     const outcome = syncLedger.accept(json, runId);
-    if (!outcome.ok) return refuse(outcome.code === "other-run" ? 403 : outcome.code === "stale-sync" ? 409 : 400, outcome.code);
-    if (outcome.added.length > 0) doAddCredentialValues({ cookieValues: outcome.added });
-    return { status: 200, body: { schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, status: "ok", syncSeq: syncLedger.latestSeq } };
+    if (!outcome.ok) return refuse(outcome.code === "other-run" ? 403 : 400, outcome.code);
+    if (outcome.added.length > 0) doAddCredentialValues({ sessionValues: outcome.added });
+    return { status: 200, body: { schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, status: "ok", syncToken: outcome.syncToken, epoch: outcome.epoch } };
   }
 
   /** The size of a step marker the proxy reads: a marker is a position and at most 32 cookie values. */

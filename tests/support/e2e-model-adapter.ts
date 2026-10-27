@@ -55,7 +55,6 @@ function exchange(socketPath: string, body: unknown, signal: AbortSignal | undef
 
 export function createChannelLanguageModel(options: ChannelModelOptions) {
   let callIndex = 0;
-  let syncSeq = 0;
   return {
     specificationVersion: "v4" as const,
     provider: "agentx-e2e",
@@ -72,9 +71,8 @@ export function createChannelLanguageModel(options: ChannelModelOptions) {
       } as E2EModelChannelRequest;
       options.onCall?.(sent);
       // Every call is made under a session sync of its own (MIDSTEPCOOKIE), as the executor's client does; this stand-in knows no session values.
-      syncSeq += 1;
-      await exchange(options.socketPath, { schemaVersion: "rovara-e2e-model-channel/v1", runId: options.runId, syncSeq, values: [] }, call.abortSignal, "/v1/sync");
-      (sent as { syncSeq?: number }).syncSeq = syncSeq;
+      const synced = await exchange(options.socketPath, { schemaVersion: "rovara-e2e-model-channel/v1", runId: options.runId, values: [] }, call.abortSignal, "/v1/sync") as { syncToken: string };
+      (sent as { syncToken?: string }).syncToken = synced.syncToken;
       const parsed = E2EModelChannelResponseSchema.parse(await exchange(options.socketPath, sent, call.abortSignal));
       if (parsed.result.status === "error") throw new Error(`model channel refused the call: ${parsed.result.code}`);
       const { content, finishReason, usage } = parsed.result;

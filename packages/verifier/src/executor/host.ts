@@ -170,9 +170,10 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const agentRedactor = createCredentialRedactor(plan.accounts);
   const sessionSecrets: string[] = [];
   // A session value is told to the ledger (so evidence and captures that carry it are caught) and left for the parent (so the text it writes is scrubbed of it).
-  const registerSecret = (value: string): void => {
+  const registerSecret = (value: string, options: { evidenceOnly?: boolean } = {}): void => {
     agentRedactor.addSessionSecret(value);
-    if (typeof value === "string" && value.length >= 8 && !sessionSecrets.includes(value)) sessionSecrets.push(value);
+    // `sessionSecrets` is what the worker is told (begin marker and sync); an evidence-only value is scrubbed from what the executor writes and is not sent.
+    if (options.evidenceOnly !== true && typeof value === "string" && value.length >= 8 && !sessionSecrets.includes(value)) sessionSecrets.push(value);
     ledger?.registerSessionSecret(value);
     appendFileSync(join(context.projectDir, E2E_EXECUTOR_SESSION_SECRETS_FILE), `${JSON.stringify(value)}\n`, { mode: 0o600 });
   };
@@ -195,7 +196,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const replayPlan = plan.replay;
   if (channelPlan !== undefined || replayPlan !== undefined) installRefusingE2EDefaultProvider();
   const agent = channelPlan === undefined ? null : (() => {
-    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, sessionSync });
+    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, sessionSync, scan: (bytes) => agentRedactor.contains(bytes) });
     const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
     // The adapter's own scan is the executor's second check; the worker's scan is told the browser's session values before every call by the client's sync (MIDSTEPCOOKIE).
     const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position, scan: (bytes) => agentRedactor.contains(bytes) });
@@ -245,7 +246,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         try {
           const kept = await owned.storageState();
           for (const cookie of kept.cookies) if (isSessionCookieSecret(cookie)) registerSecret(cookie.value);
-          for (const item of kept.origins) for (const entry of item.localStorage) if (isSessionStorageSecret(entry.value)) registerSecret(entry.value);
+          for (const item of kept.origins) for (const entry of item.localStorage) if (isSessionStorageSecret(entry.value)) registerSecret(entry.value, { evidenceOnly: true });
         } catch { /* the context is gone */ }
       }
       const result = await store.close(sessionRef, signal);

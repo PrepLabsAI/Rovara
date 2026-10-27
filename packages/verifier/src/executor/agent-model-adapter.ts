@@ -126,6 +126,7 @@ export function createE2EAgentModelAdapter(options: E2EAgentModelAdapterOptions)
         answer = await options.client.generate({ caseId: position.caseId, stepIndex: position.stepIndex, callIndex, call: request }, call.abortSignal);
       } catch (error) {
         // The client's errors carry only a code of their own; whatever else was thrown is not repeated.
+        if ((error as { code?: unknown } | null)?.code === "credential-in-prompt") throw new E2EAgentModelError("credential-in-prompt");
         throw new E2EAgentModelError("channel-error", typeof (error as { code?: unknown } | null)?.code === "string" ? (error as { code: string }).code : null);
       }
       const held = receipts.get(slot) ?? [];

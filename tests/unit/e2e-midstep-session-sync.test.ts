@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { createServer as createHttpServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -5,16 +6,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  E2E_MODEL_SESSION_SYNC_FEATURE, E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES, E2E_MODEL_SESSION_SYNC_MAX_VALUES, E2EModelChannelRequestSchema, E2EModelChannelStepMarkerSchema,
-  E2EModelSessionSyncSchema, WORKER_INVOCATION_FEATURES,
+  E2E_MODEL_SESSION_SYNC_FEATURE, E2E_MODEL_SESSION_SYNC_MAX_TOTAL_BYTES, E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES, E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS, E2E_MODEL_SESSION_SYNC_MAX_VALUES,
+  E2EModelChannelRequestSchema, E2EModelChannelStepMarkerSchema, E2EModelSessionSyncSchema, WORKER_INVOCATION_FEATURES, boundSessionValue,
 } from "../../packages/contracts/src/index.js";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget, type E2EInvoke } from "../../packages/model-runtime/src/e2e-route.js";
 import { E2EModelChannelError, createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
 import { E2E_SESSION_SYNC_PENDING_LIMIT_MS, createE2ESessionSyncSource, type E2ESessionStateReader } from "../../packages/verifier/src/executor/session-sync.js";
+import { createE2EAgentModelAdapter } from "../../packages/verifier/src/executor/agent-model-adapter.js";
+import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { parseSetCookie } from "../../packages/verifier/src/executor/form-login.js";
+import { isSessionStorageCredential } from "../../packages/verifier/src/executor/session-storage-secret.js";
 import { createE2ECredentialGuard } from "../../packages/worker/src/e2e-model-credential-guard.js";
 import { e2eSecretSpellings } from "../../packages/worker/src/e2e-secret-spellings.js";
 import { startE2EModelProxy, type E2EModelEvidenceSink, type E2EModelProxy, type E2EModelTranscript } from "../../packages/worker/src/e2e-model-proxy.js";
+import { createE2ESessionSyncLedger } from "../../packages/worker/src/e2e-model-session-sync.js";
 import { createApplicationChecksFeatureMonitor } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
 import { OperationJournal, createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/index.js";
 import type { E2EModelReceipt } from "../../packages/contracts/src/e2e-model-channel.js";
@@ -77,8 +82,14 @@ function postJson(path: string, body: unknown, method = "POST"): Promise<{ statu
     req.end(payload);
   });
 }
-const syncBody = (syncSeq: number, values: string[] = [], runId = RUN_ID) => ({ schemaVersion: "rovara-e2e-model-channel/v1", runId, syncSeq, values });
-const callBody = (callIndex: number, syncSeq: number | undefined, observation?: string) => channelRequest({ callIndex, ...(syncSeq === undefined ? {} : { syncSeq }), ...(observation === undefined ? {} : { callOverride: call(observation) }) });
+const syncBody = (values: string[] = [], runId = RUN_ID) => ({ schemaVersion: "rovara-e2e-model-channel/v1", runId, values });
+const callBody = (callIndex: number, syncToken: string | undefined, observation?: string) => channelRequest({ callIndex, ...(syncToken === undefined ? {} : { syncToken }), ...(observation === undefined ? {} : { callOverride: call(observation) }) });
+/** A sync the worker accepted; returns the token it issued. */
+const syncToken = async (values: string[] = []): Promise<string> => {
+  const reply = await postJson("/v1/sync", syncBody(values));
+  expect(reply.status).toBe(200);
+  return reply.body["syncToken"] as string;
+};
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The real stack: a fake app sets a session cookie mid-step; the executor's source reads the browser; the worker's proxy scans.
@@ -98,7 +109,8 @@ async function fakeApp(cookieValue: string): Promise<{ port: number }> {
 /** A browser stand-in: a cookie jar fed from the app's answers, with the response-header read finishing a little later than the answer, as Playwright's does. */
 function fakeBrowser(port: number, onResponse: (setCookies: string[]) => void) {
   const jar: Array<{ name: string; value: string; httpOnly: boolean }> = [];
-  const reader: E2ESessionStateReader = { storageState: async () => ({ cookies: jar.map((cookie) => ({ ...cookie })), origins: [] }) };
+  const storage: Array<{ name: string; value: string }> = [];
+  const reader: E2ESessionStateReader = { storageState: async () => ({ cookies: jar.map((cookie) => ({ ...cookie })), origins: [{ localStorage: storage.map((entry) => ({ ...entry })) }] }) };
   const goto = (path: string) => new Promise<void>((resolve) => {
     httpRequest({ host: "127.0.0.1", port, path }, (res) => {
       const setCookies = res.headers["set-cookie"] ?? [];
@@ -108,7 +120,7 @@ function fakeBrowser(port: number, onResponse: (setCookies: string[]) => void) {
       res.on("end", resolve);
     }).end();
   });
-  return { reader, goto, jar };
+  return { reader, goto, jar, storage };
 }
 
 /** The executor's side, wired the way the host wires it: registered session values, the source, the response listener, the client. */
@@ -220,89 +232,249 @@ describe("the proxy refuses a model call whose sync is missing or stale, with a 
     expect(JSON.stringify([run.sink.receipts, run.sink.transcripts, reply.body])).not.toContain(unsynced);
   });
 
-  it("refuses a sync that is replayed, one that was never sent, and one a newer sync overtook; each call needs a sync of its own", async () => {
+  it("refuses a token that is replayed, one never issued, and one a newer sync replaced; each call needs the sync that directly preceded it", async () => {
     const run = await startRun();
-    expect((await postJson("/v1/sync", syncBody(1))).status).toBe(200);
-    expect((await postJson("/v1/generate", callBody(0, 1))).body.result?.status).toBe("ok");
+    const first = await syncToken();
+    expect((await postJson("/v1/generate", callBody(0, first))).body.result?.status).toBe("ok");
     expect(run.seen).toHaveLength(1);
-    // The same sync again: already used by the call above.
-    const replayed = await postJson("/v1/generate", callBody(1, 1));
+    // The same token again: it was spent by the call above.
+    const replayed = await postJson("/v1/generate", callBody(1, first));
     expect(replayed.body.result).toMatchObject({ status: "error", code: "refused-protocol" });
     expect(replayed.body.result?.message).toMatch(/^session-sync-stale:/);
-    // A sync the executor never sent.
-    expect((await postJson("/v1/generate", callBody(2, 99))).body.result?.message).toMatch(/^session-sync-stale:/);
-    // A sync that a newer one overtook.
-    expect((await postJson("/v1/sync", syncBody(2))).status).toBe(200);
-    expect((await postJson("/v1/sync", syncBody(3))).status).toBe(200);
-    expect((await postJson("/v1/generate", callBody(3, 2))).body.result?.message).toMatch(/^session-sync-stale:/);
+    // A token the worker never issued.
+    await syncToken();
+    expect((await postJson("/v1/generate", callBody(2, "f".repeat(32)))).body.result?.message).toMatch(/^session-sync-stale:/);
+    // A token that a newer sync replaced.
+    const older = await syncToken();
+    const newer = await syncToken();
+    expect((await postJson("/v1/generate", callBody(3, older))).body.result?.message).toMatch(/^session-sync-stale:/);
     expect(run.seen).toHaveLength(1);
-    // A fresh sync covers exactly one call.
-    expect((await postJson("/v1/sync", syncBody(4))).status).toBe(200);
-    expect((await postJson("/v1/generate", callBody(4, 4))).body.result?.status).toBe("ok");
-    expect((await postJson("/v1/generate", callBody(5, 4))).body.result?.message).toMatch(/^session-sync-stale:/);
+    // The newer one was spent by that refused call as well (any generate request spends it): the next call needs a sync of its own.
+    expect((await postJson("/v1/generate", callBody(4, newer))).body.result?.message).toMatch(/^session-sync-stale:/);
+    expect((await postJson("/v1/generate", callBody(5, await syncToken()))).body.result?.status).toBe("ok");
     expect(run.seen).toHaveLength(2);
-    expect(run.sink.receipts.map((receipt) => receipt.outcome)).toEqual(["ok", "refused-protocol", "refused-protocol", "refused-protocol", "ok", "refused-protocol"]);
   });
 
-  it("accepts a sync only in order, for this run, in the shape the protocol defines", async () => {
+  it("spends the sync on a request that is refused for another reason (not JSON, not a request, wrong position), so it cannot be kept for a later call", async () => {
+    const run = await startRun();
+    const token = await syncToken();
+    // A request of the wrong shape arrives first and is refused; the token it never named is spent all the same.
+    const garbage = await postJson("/v1/generate", { not: "a request" });
+    expect(garbage.body.result).toMatchObject({ status: "error", code: "refused-protocol" });
+    expect((await postJson("/v1/generate", callBody(1, token))).body.result?.message).toMatch(/^session-sync-stale:/);
+    expect(run.seen).toHaveLength(0);
+  });
+
+  it("issues unguessable tokens: 128 random bits each, never repeated", async () => {
     await startRun();
-    expect((await postJson("/v1/sync", syncBody(5))).status).toBe(200);
-    expect(await postJson("/v1/sync", syncBody(5))).toMatchObject({ status: 409, body: { status: "refused", code: "stale-sync" } });
-    expect(await postJson("/v1/sync", syncBody(4))).toMatchObject({ status: 409, body: { code: "stale-sync" } });
-    expect(await postJson("/v1/sync", syncBody(6, [], "11111111-2222-4333-8444-555555555555"))).toMatchObject({ status: 403, body: { code: "other-run" } });
-    expect(await postJson("/v1/sync", { ...syncBody(6), extra: true })).toMatchObject({ status: 400, body: { code: "invalid-sync" } });
-    expect(await postJson("/v1/sync", syncBody(0))).toMatchObject({ status: 400, body: { code: "invalid-sync" } });
-    expect(await postJson("/v1/sync", syncBody(6, Array.from({ length: E2E_MODEL_SESSION_SYNC_MAX_VALUES + 1 }, (_, index) => `value-number-${index}`)))).toMatchObject({ status: 400, body: { code: "invalid-sync" } });
-    expect(await postJson("/v1/sync", { not: "a sync" })).toMatchObject({ status: 400, body: { code: "invalid-sync" } });
-    expect(await postJson("/v1/sync", syncBody(6), "GET")).toMatchObject({ status: 405 });
-    // The refused syncs changed nothing: the next in order is accepted.
-    expect((await postJson("/v1/sync", syncBody(6))).status).toBe(200);
+    const tokens = new Set<string>();
+    for (let index = 0; index < 20; index += 1) tokens.add(await syncToken());
+    expect(tokens.size).toBe(20);
+    for (const token of tokens) expect(token).toMatch(/^[a-f0-9]{32}$/);
   });
 
-  it("learns the values of a sync before the call that names it is looked at, and refuses a later sync past the run's total", async () => {
+  it("accepts a sync only for this run, in the shape the protocol defines, within the caps", async () => {
+    await startRun();
+    expect(await postJson("/v1/sync", syncBody([], "11111111-2222-4333-8444-555555555555"))).toMatchObject({ status: 403, body: { code: "other-run" } });
+    expect(await postJson("/v1/sync", { ...syncBody(), extra: true })).toMatchObject({ status: 400, body: { code: "invalid-sync" } });
+    expect(await postJson("/v1/sync", { ...syncBody(), syncSeq: 1 })).toMatchObject({ status: 400, body: { code: "invalid-sync" } });
+    expect(await postJson("/v1/sync", syncBody(Array.from({ length: E2E_MODEL_SESSION_SYNC_MAX_VALUES + 1 }, (_, index) => `value-number-${index}`)))).toMatchObject({ status: 400, body: { code: "invalid-sync" } });
+    expect(await postJson("/v1/sync", syncBody(["x".repeat(E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS + 1)]))).toMatchObject({ status: 400, body: { code: "invalid-sync" } });
+    expect(await postJson("/v1/sync", { not: "a sync" })).toMatchObject({ status: 400, body: { code: "invalid-sync" } });
+    expect(await postJson("/v1/sync", syncBody(), "GET")).toMatchObject({ status: 405 });
+    // The refused syncs changed nothing.
+    expect((await postJson("/v1/sync", syncBody())).status).toBe(200);
+  });
+
+  it("learns the values of a sync before the call that names it is looked at", async () => {
     const run = await startRun();
     const value = "late-session-value-1a2b3c4d5e";
-    expect((await postJson("/v1/sync", syncBody(1, [value]))).body).toMatchObject({ status: "ok", syncSeq: 1 });
-    const reply = await postJson("/v1/generate", callBody(0, 1, `#n1 text "${value}"`));
+    const token = await syncToken([value]);
+    const reply = await postJson("/v1/generate", callBody(0, token, `#n1 text "${value}"`));
     expect(reply.body.result).toMatchObject({ status: "error", code: "refused-credential-match" });
     expect(run.seen).toHaveLength(0);
-    // The total a run may teach the worker is bounded; past it the sync is refused (and so is every call that would need it).
-    let seq = 2;
-    let refused: Awaited<ReturnType<typeof postJson>> | undefined;
-    for (let sent = 1; sent < E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES && refused === undefined; sent += E2E_MODEL_SESSION_SYNC_MAX_VALUES) {
-      const reply2 = await postJson("/v1/sync", syncBody(seq, Array.from({ length: E2E_MODEL_SESSION_SYNC_MAX_VALUES }, (_, index) => `bulk-session-value-${seq}-${index}`)));
-      seq += 1;
-      if (reply2.status !== 200) refused = reply2;
-    }
-    expect(refused).toMatchObject({ status: 400, body: { code: "too-many-values" } });
+  });
+
+  it("does not split a synced value at an `=`: a stored `theme=dark-high-contrast` is one value, so `dark-high-contrast` alone is ordinary text", async () => {
+    const run = await startRun();
+    const token = await syncToken(["theme=dark-high-contrast"]);
+    expect((await postJson("/v1/generate", callBody(0, token, '#n1 text "dark-high-contrast"'))).body.result?.status).toBe("ok");
+    expect(run.seen).toHaveLength(1);
+    const second = await syncToken();
+    expect((await postJson("/v1/generate", callBody(1, second, '#n1 text "theme=dark-high-contrast"'))).body.result).toMatchObject({ status: "error", code: "refused-credential-match" });
   });
 
   it("a value too short to scan for safely latches the proxy to refuse every later call (fail closed, as for the begin marker)", async () => {
     const run = await startRun();
-    expect((await postJson("/v1/sync", syncBody(1, ["abc"]))).status).toBe(200);
-    const reply = await postJson("/v1/generate", callBody(0, 1));
+    const token = await syncToken(["abc"]);
+    const reply = await postJson("/v1/generate", callBody(0, token));
     expect(reply.body.result).toMatchObject({ status: "error", code: "refused-credential-match" });
     expect(run.seen).toHaveLength(0);
   });
 });
 
-// ---------------------------------------------------------------------------------------------------------------------
-// The executor's source and client.
-// ---------------------------------------------------------------------------------------------------------------------
+describe("what a run may teach the worker is bounded: values, bytes, and the work of scanning every prompt for them", () => {
+  it("refuses a sync past the run's total number of values, and the calls after it are refused too (fail closed)", async () => {
+    const run = await startRun();
+    let refused: Awaited<ReturnType<typeof postJson>> | undefined;
+    for (let sent = 0; sent < E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES + E2E_MODEL_SESSION_SYNC_MAX_VALUES && refused === undefined; sent += E2E_MODEL_SESSION_SYNC_MAX_VALUES) {
+      const reply = await postJson("/v1/sync", syncBody(Array.from({ length: E2E_MODEL_SESSION_SYNC_MAX_VALUES }, (_, index) => `bulk-session-value-${sent}-${index}`)));
+      if (reply.status !== 200) refused = reply;
+    }
+    expect(refused).toMatchObject({ status: 400, body: { code: "too-many-values" } });
+    // The refused sync issued no token: a call cannot name one.
+    expect((await postJson("/v1/generate", callBody(0, "e".repeat(32)))).body.result?.message).toMatch(/^session-sync-stale:/);
+    expect(run.seen).toHaveLength(0);
+  });
+
+  it("refuses a sync past the run's total bytes", async () => {
+    await startRun();
+    let refused: Awaited<ReturnType<typeof postJson>> | undefined;
+    for (let sent = 0; sent < 40 && refused === undefined; sent += 1) {
+      const reply = await postJson("/v1/sync", syncBody(Array.from({ length: 2 }, (_, index) => `${String(sent)}-${String(index)}-`.padEnd(E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS, "q"))));
+      if (reply.status !== 200) refused = reply;
+    }
+    expect(refused).toMatchObject({ status: 400, body: { code: "too-many-values" } });
+  });
+
+  it("refuses a sync past the run's scan work (the characters of every spelling the guard scans each prompt for), well before the byte cap for values that spell long", async () => {
+    const ledger = createE2ESessionSyncLedger();
+    let refusedAt = -1;
+    // Values of `/` characters spell 23 times longer in the percent forms and the base64 forms.
+    for (let index = 0; index < 64 && refusedAt < 0; index += 1) {
+      const outcome = ledger.accept(syncBody([`${String(index).padStart(4, "0")}`.padEnd(E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS, "/")]), RUN_ID);
+      if (!outcome.ok) refusedAt = index;
+    }
+    expect(refusedAt).toBeGreaterThan(0);
+    const spent = refusedAt * E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS;
+    expect(spent).toBeLessThan(E2E_MODEL_SESSION_SYNC_MAX_TOTAL_BYTES);
+    // A value the cap leaves room for is still accepted (positive control).
+    expect(createE2ESessionSyncLedger().accept(syncBody(["a-normal-session-token-12345"]), RUN_ID)).toMatchObject({ ok: true });
+  });
+
+  it("does not encode a value again on every sync: the ledger computes the spellings once and the guard reuses them", async () => {
+    const ledger = createE2ESessionSyncLedger();
+    expect(ledger.accept(syncBody(["a-normal-session-token-12345"]), RUN_ID)).toMatchObject({ ok: true });
+    expect(ledger.spellingsOf("a-normal-session-token-12345")).toBe(ledger.spellingsOf("a-normal-session-token-12345"));
+  });
+
+  it("keeps a prompt scan with hundreds of synced values fast (a call is not held for seconds)", async () => {
+    const values = Array.from({ length: E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES }, (_, index) => `cookie-${String(index).padStart(4, "0")}-${"x7".repeat(24)}`);
+    const guard = createE2ECredentialGuard({ passwords: [], emails: [], cookieValues: [], sessionValues: values });
+    const started = performance.now();
+    const outcome = guard.inspect(call(`#n1 text "${"ordinary page text ".repeat(2_000)}"`));
+    expect(outcome).toMatchObject({ refuse: false });
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+});
+
+describe("several executor clients on one proxy (the shards of a group) each sync for themselves", () => {
+  function shard(app: { port: number }, tag: string) {
+    const executor = executorFor(app.port);
+    return { ...executor, tag };
+  }
+
+  it("two shards, one after the other on one proxy, each make their calls; both start from nothing and neither collides with the other", async () => {
+    const run = await startRun({ begin: false, allowedSteps: [POSITION, { caseId: CASE_ID, stepIndex: 1 }] });
+    const app = await fakeApp(COOKIE);
+    const a = shard(app, "a");
+    await a.client.beginStep(POSITION);
+    expect((await a.client.generate({ ...POSITION, callIndex: 0, call: call() })).result.status).toBe("ok");
+    expect((await a.client.generate({ ...POSITION, callIndex: 1, call: call() })).result.status).toBe("ok");
+    await a.client.endStep(POSITION);
+    // The second shard is a new client (a new process in production) with nothing of the first's state, on the same proxy.
+    const b = shard(app, "b");
+    const second = { caseId: CASE_ID, stepIndex: 1 };
+    await b.client.beginStep(second);
+    expect((await b.client.generate({ ...second, callIndex: 0, call: call() })).result.status).toBe("ok");
+    expect((await b.client.generate({ ...second, callIndex: 1, call: call() })).result.status).toBe("ok");
+    expect(run.seen).toHaveLength(4);
+    expect(run.sink.receipts.map((receipt) => receipt.outcome)).toEqual(["ok", "ok", "ok", "ok"]);
+  });
+
+  it("each shard learns the cookie its own browser gets mid-step, attributed to its own step; the cookie of the first shard stays scanned for the whole group", async () => {
+    const run = await startRun({ begin: false, allowedSteps: [POSITION, { caseId: CASE_ID, stepIndex: 1 }] });
+    const COOKIE_B = "second-shard-session-9f8e7d6c5b4a3921";
+    const a = shard(await fakeApp(COOKIE), "a");
+    const b = shard(await fakeApp(COOKIE_B), "b");
+    const second = { caseId: CASE_ID, stepIndex: 1 };
+    await a.client.beginStep(POSITION);
+    await a.browser.goto("/login");
+    expect((await a.client.generate({ ...POSITION, callIndex: 0, call: call(`#n1 text "${COOKIE}"`) })).result).toMatchObject({ status: "error", code: "refused-credential-match" });
+    await a.client.endStep(POSITION);
+    await b.client.beginStep(second);
+    expect((await b.client.generate({ ...second, callIndex: 0, call: call() })).result.status).toBe("ok");
+    await b.browser.goto("/login");
+    expect((await b.client.generate({ ...second, callIndex: 1, call: call(`#n1 text "${COOKIE_B}"`) })).result).toMatchObject({ status: "error", code: "refused-credential-match" });
+    expect(run.seen).toHaveLength(1);
+    expect(run.sink.receipts.map((receipt) => [receipt.caseId, receipt.stepIndex, receipt.outcome])).toEqual([[CASE_ID, 0, "refused-credential-match"], [CASE_ID, 1, "ok"], [CASE_ID, 1, "refused-credential-match"]]);
+    for (const value of [COOKIE, COOKIE_B]) for (const spelling of e2eSecretSpellings(value)) expect(JSON.stringify(run.seen), spelling).not.toContain(spelling);
+  });
+
+  it("a client that was left behind by a newer sync is refused (fail closed), not served", async () => {
+    const run = await startRun({ begin: false });
+    const app = await fakeApp(COOKIE);
+    const a = shard(app, "a");
+    await a.client.beginStep(POSITION);
+    // Another client syncs between a's sync and a's call (two shards at once on one proxy): a's token is replaced.
+    const stale = await syncToken();
+    await syncToken();
+    expect((await postJson("/v1/generate", callBody(0, stale))).body.result?.message).toMatch(/^session-sync-stale:/);
+    expect(run.seen).toHaveLength(0);
+  });
+});
 
 describe("the executor's session source reads the browser before each sync", () => {
   const reader = (state: Awaited<ReturnType<E2ESessionStateReader["storageState"]>> | Error): E2ESessionStateReader => ({ storageState: async () => { if (state instanceof Error) throw state; return state; } });
 
-  it("registers cookies and local storage values that look like secrets and leaves short or common values alone, once each", async () => {
+  it("registers cookies and local storage credentials and leaves short, common and ordinary-data values alone, once each", async () => {
     const registered: string[] = [];
     const source = createE2ESessionSyncSource({ register: (value) => registered.push(value), known: () => registered });
     source.attach("s1", reader({
       cookies: [{ value: "1", httpOnly: false }, { value: "true", httpOnly: false }, { value: "en-US", httpOnly: true }, { value: "a-long-session-cookie-value", httpOnly: false }, { value: "abc12345", httpOnly: true }],
-      origins: [{ localStorage: [{ value: "accepted" }, { value: "a-long-local-storage-access-token" }] }],
+      origins: [{ localStorage: [
+        { name: "cookieConsent", value: "accepted" },
+        { name: "draft", value: "Quarterly report for ACME" },
+        { name: "returnTo", value: "https://app.example.com/settings?tab=billing" },
+        { name: "flags", value: "{\"newCheckout\": true, \"darkMode\": false, \"beta\": \"yes please\"}" },
+        { name: "access_token", value: "a-long-local-storage-access-token" },
+      ] }],
     }), { anonymous: false });
     expect(await source.read()).toEqual(["a-long-session-cookie-value", "abc12345", "a-long-local-storage-access-token"]);
     await source.read();
     expect(registered).toHaveLength(3);
+  });
+
+  it("tells a credential in local storage from app data by its value and its key", () => {
+    const jwt = `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from('{"sub":"user-1234"}').toString("base64url")}.c2lnbmF0dXJlLWJ5dGVz`;
+    for (const entry of [
+      { name: "anything", value: jwt },
+      { name: "anything", value: "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c" },
+      { name: "sb-project-auth-token", value: "keyed-opaque-value-1234" },
+      { name: "ID_TOKEN", value: "keyed-opaque-value-1234" },
+    ]) expect(isSessionStorageCredential(entry), entry.name).toBe(true);
+    for (const entry of [
+      { name: "draft", value: "Quarterly report for ACME" },
+      { name: "returnTo", value: "https://app.example.com/settings" },
+      { name: "searchHistory", value: "orders,invoices,customers-with-open-balances" },
+      { name: "access_token", value: "short" },
+      { name: "access_token", value: "has whitespace in the value 1234" },
+      { name: "locale", value: "en-US" },
+      { name: "i18nextLng", value: "x".repeat(40) },
+      { name: "sessionDraft", value: "a draft that is text and has spaces" },
+    ]) expect(isSessionStorageCredential(entry), `${entry.name}=${entry.value}`).toBe(false);
+  });
+
+  it("an ordinary app-data value in local storage that the page shows does not fail the step (end to end)", async () => {
+    const run = await startRun({ begin: false });
+    const app = await fakeApp(COOKIE);
+    const executor = executorFor(app.port);
+    await executor.client.beginStep(POSITION);
+    const draft = "Quarterly report for ACME";
+    executor.browser.storage.push({ name: "draft", value: draft }, { name: "returnTo", value: "https://app.example.com/settings?next=%2Fhome" });
+    const answer = await executor.client.generate({ ...POSITION, callIndex: 0, call: call(`#n1 textbox "Title" value="${draft}"\n#n2 link "Back" href="https://app.example.com/settings?next=%2Fhome"`) });
+    expect(answer.result.status).toBe("ok");
+    expect(run.seen).toHaveLength(1);
   });
 
   it("leaves out an anonymous visitor's context and a context that was detached", async () => {
@@ -340,56 +512,146 @@ describe("the executor's channel client syncs before every call", () => {
     return seen;
   }
   const answer = (res: ServerResponse, status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
-  const okSync = (res: ServerResponse, body: string) => answer(res, 200, { schemaVersion: "rovara-e2e-model-channel/v1", status: "ok", syncSeq: (JSON.parse(body) as { syncSeq: number }).syncSeq });
+  let epoch = "0123456789abcdef";
+  let tokens = 0;
+  const okSync = (res: ServerResponse) => answer(res, 200, { schemaVersion: "rovara-e2e-model-channel/v1", status: "ok", syncToken: String(++tokens).padStart(32, "0"), epoch });
   const okCall = { schemaVersion: "rovara-e2e-model-channel/v1", receiptId: "r1", result: { status: "ok", content: [{ type: "tool-call", toolCallId: "c1", toolName: "tap", input: "{\"target\":\"n1\"}" }],
     finishReason: { unified: "tool-calls", raw: "x" }, usage: { inputTokens: 1, outputTokens: 1 } } };
+  beforeEach(() => { epoch = "0123456789abcdef"; tokens = 0; });
+  type SyncBody = { values: string[] };
+  type CallBody = { syncToken: string };
 
-  it("sends a sync, even an empty one, before each call and names the latest sequence on the call; sequences only go up", async () => {
-    const seen = await fakeWorker((req, res, body) => { if (req.url === "/v1/sync") okSync(res, body); else answer(res, 200, okCall); });
+  it("sends a sync, even an empty one, before each call and names the token the worker issued on the call", async () => {
+    const seen = await fakeWorker((req, res) => { if (req.url === "/v1/sync") okSync(res); else answer(res, 200, okCall); });
     const client = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => ["token-value-0000000001"] } });
     await client.generate({ ...POSITION, callIndex: 0, call: call() });
     await client.generate({ ...POSITION, callIndex: 1, call: call() });
     expect(seen.map((item) => item.url)).toEqual(["/v1/sync", "/v1/generate", "/v1/sync", "/v1/generate"]);
-    expect(seen.map((item) => (item.url === "/v1/sync" ? (JSON.parse(item.body) as { syncSeq: number; values: string[] }) : (JSON.parse(item.body) as { syncSeq: number }))))
-      .toMatchObject([{ syncSeq: 1, values: ["token-value-0000000001"] }, { syncSeq: 1 }, { syncSeq: 2, values: [] }, { syncSeq: 2 }]);
+    expect(seen.map((item) => JSON.parse(item.body) as SyncBody & CallBody)).toMatchObject([{ values: ["token-value-0000000001"] }, { syncToken: "1".padStart(32, "0") }, { values: [] }, { syncToken: "2".padStart(32, "0") }]);
   });
 
-  it("sends a long delta as several syncs and names the last; a value counts as told only once the worker accepted it", async () => {
+  it("keeps no counter of its own: a second client that starts from nothing syncs and calls like the first (the shards of a group)", async () => {
+    const seen = await fakeWorker((req, res) => { if (req.url === "/v1/sync") okSync(res); else answer(res, 200, okCall); });
+    for (const index of [0, 1]) {
+      const client = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => [] } });
+      await client.generate({ ...POSITION, callIndex: 0, call: call() });
+      expect(index).toBeGreaterThanOrEqual(0);
+    }
+    expect(seen.filter((item) => item.url === "/v1/sync")).toHaveLength(2);
+    // Nothing of a counter is on the wire.
+    expect(seen.every((item) => !("syncSeq" in (JSON.parse(item.body) as object)))).toBe(true);
+  });
+
+  it("sends a long delta as several syncs and names the last token; a value counts as told only once the worker accepted it", async () => {
     const values = Array.from({ length: 40 }, (_, index) => `session-value-${String(index).padStart(4, "0")}-xyz`);
-    let failNext = false;
-    const seen = await fakeWorker((req, res, body) => {
+    let syncs = 0;
+    let failSecond = true;
+    const seen = await fakeWorker((req, res) => {
       if (req.url !== "/v1/sync") { answer(res, 200, okCall); return; }
-      if (failNext && (JSON.parse(body) as { syncSeq: number }).syncSeq === 2) { answer(res, 409, { status: "refused", code: "stale-sync" }); return; }
-      okSync(res, body);
+      syncs += 1;
+      if (failSecond && syncs === 2) { answer(res, 400, { status: "refused", code: "too-many-values" }); return; }
+      okSync(res);
     });
     const client = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => values } });
-    failNext = true;
     // The second chunk is refused: the call is not made.
     await expect(client.generate({ ...POSITION, callIndex: 0, call: call() })).rejects.toMatchObject({ name: "E2EModelChannelError", code: "session-sync", isRetryable: false });
     expect(seen.map((item) => item.url)).toEqual(["/v1/sync", "/v1/sync"]);
-    failNext = false;
-    // Next time the chunk the worker never accepted is sent again, under a new sequence number.
+    failSecond = false;
+    // Next time the chunk the worker never accepted is sent again.
     await client.generate({ ...POSITION, callIndex: 0, call: call() });
-    const syncs = seen.filter((item) => item.url === "/v1/sync").map((item) => JSON.parse(item.body) as { syncSeq: number; values: string[] });
-    expect(syncs.map((item) => [item.syncSeq, item.values.length])).toEqual([[1, 32], [2, 8], [3, 8]]);
-    expect(syncs[2]!.values).toEqual(values.slice(32));
-    expect((JSON.parse(seen.at(-1)!.body) as { syncSeq: number }).syncSeq).toBe(3);
+    const sent = seen.filter((item) => item.url === "/v1/sync").map((item) => (JSON.parse(item.body) as SyncBody).values);
+    expect(sent.map((list) => list.length)).toEqual([32, 8, 8]);
+    expect(sent[2]).toEqual(values.slice(32));
+    expect((JSON.parse(seen.at(-1)!.body) as CallBody).syncToken).toBe(String(tokens).padStart(32, "0"));
   });
 
-  it("makes no call when the session cannot be read, or a value cannot be sent, and keeps a transport failure's own code", async () => {
-    const seen = await fakeWorker((req, res, body) => { if (req.url === "/v1/sync") okSync(res, body); else answer(res, 200, okCall); });
+  it("sends everything again when the proxy was replaced (its epoch changed)", async () => {
+    const seen = await fakeWorker((req, res) => { if (req.url === "/v1/sync") okSync(res); else answer(res, 200, okCall); });
+    const client = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => ["token-value-0000000001", "token-value-0000000002"] } });
+    await client.generate({ ...POSITION, callIndex: 0, call: call() });
+    await client.generate({ ...POSITION, callIndex: 1, call: call() });
+    expect(seen.filter((item) => item.url === "/v1/sync").map((item) => (JSON.parse(item.body) as SyncBody).values.length)).toEqual([2, 0]);
+    epoch = "fedcba9876543210";
+    await client.generate({ ...POSITION, callIndex: 2, call: call() });
+    expect(seen.filter((item) => item.url === "/v1/sync").map((item) => (JSON.parse(item.body) as SyncBody).values.length)).toEqual([2, 0, 0, 2]);
+  });
+
+  it("splits a sync that would be too large by bytes, not only by count", async () => {
+    const values = Array.from({ length: 30 }, (_, index) => `${String(index).padStart(3, "0")}${"\u65e5".repeat(E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS - 3)}`);
+    const seen = await fakeWorker((req, res) => { if (req.url === "/v1/sync") okSync(res); else answer(res, 200, okCall); });
+    const client = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => values } });
+    await client.generate({ ...POSITION, callIndex: 0, call: call() });
+    const syncs = seen.filter((item) => item.url === "/v1/sync");
+    expect(syncs.length).toBeGreaterThan(1);
+    for (const item of syncs) expect(Buffer.byteLength(item.body)).toBeLessThanOrEqual(200_000);
+    expect(syncs.flatMap((item) => (JSON.parse(item.body) as SyncBody).values)).toEqual(values);
+  });
+
+  it("does not stop the call for a value over the bound: it sends the value's head and tail, once", async () => {
+    const big = `T${randomBytes(6_000).toString("base64url")}Z`;
+    expect(big.length).toBeGreaterThan(E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS);
+    const seen = await fakeWorker((req, res) => { if (req.url === "/v1/sync") okSync(res); else answer(res, 200, okCall); });
+    const client = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => [big, "token-value-0000000001"] } });
+    await client.generate({ ...POSITION, callIndex: 0, call: call() });
+    await client.generate({ ...POSITION, callIndex: 1, call: call() });
+    const syncs = seen.filter((item) => item.url === "/v1/sync").map((item) => (JSON.parse(item.body) as SyncBody).values);
+    expect(syncs[0]).toEqual([...boundSessionValue(big), "token-value-0000000001"]);
+    expect(boundSessionValue(big).map((slice) => slice.length)).toEqual([1_024, 1_024]);
+    expect(syncs[1]).toEqual([]);
+    expect(seen.filter((item) => item.url === "/v1/generate")).toHaveLength(2);
+  });
+
+  it("covers an oversized value exactly so far: a prompt that shows the whole value, its first 1024 characters or its last 1024 is refused by the worker; one that shows less of either end, or only the middle, is not (the executor's own scan, which holds the whole value, is the second check)", async () => {
+    const big = `T${randomBytes(6_000).toString("base64url")}Z`;
+    const [head, tail] = boundSessionValue(big) as [string, string];
+    const cases: Array<[string, string, boolean]> = [
+      ["the whole value", big, true], ["the head slice", head, true], ["the tail slice", tail, true],
+      ["the first 64 characters", big.slice(0, 64), false], ["the last 64 characters", big.slice(-64), false], ["1000 characters of the middle", big.slice(2_000, 3_000), false],
+    ];
+    for (const [name, shown, refused] of cases) {
+      const run = await startRun({ begin: false });
+      const client = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => [big] } });
+      await client.beginStep(POSITION);
+      const answer = await client.generate({ ...POSITION, callIndex: 0, call: call(`#n1 text "${shown}"`) });
+      if (refused) expect(answer.result, name).toMatchObject({ status: "error", code: "refused-credential-match" });
+      else expect(answer.result.status, name).toBe("ok");
+      expect(run.seen, name).toHaveLength(refused ? 0 : 1);
+    }
+  });
+
+  it("makes no call when the session cannot be read, a sync is not accepted, or too many values are waiting, and keeps a transport failure's own code", async () => {
+    const seen = await fakeWorker((req, res) => { if (req.url === "/v1/sync") okSync(res); else answer(res, 200, okCall); });
     const unreadable = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => { throw new Error("SECRET /srv/path"); } } });
     const failure = await unreadable.generate({ ...POSITION, callIndex: 0, call: call() }).catch((error: Error) => error);
     expect(failure).toBeInstanceOf(E2EModelChannelError);
     expect(failure).toMatchObject({ code: "session-sync" });
     expect((failure as Error).message).not.toMatch(/SECRET|srv/);
-    const oversized = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => ["x".repeat(5_000)] } });
-    await expect(oversized.generate({ ...POSITION, callIndex: 0, call: call() })).rejects.toMatchObject({ code: "session-sync" });
     const flood = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => Array.from({ length: 300 }, (_, index) => `flood-value-${index}-abcdef`) } });
     await expect(flood.generate({ ...POSITION, callIndex: 0, call: call() })).rejects.toMatchObject({ code: "session-sync" });
     expect(seen).toHaveLength(0);
+    const refusing = await fakeWorker((_req, res) => answer(res, 400, { status: "refused", code: "too-many-values" }));
+    void refusing;
+    await expect(createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: { read: async () => [] } }).generate({ ...POSITION, callIndex: 0, call: call() })).rejects.toMatchObject({ code: "session-sync" });
     const nobody = createE2EModelChannelClient({ socketPath: join(dir, "nobody.sock"), runId: RUN_ID, sessionSync: { read: async () => [] } });
     await expect(nobody.generate({ ...POSITION, callIndex: 0, call: call() })).rejects.toMatchObject({ code: "unavailable" });
+  });
+
+  it("runs the executor's own scan AFTER the sync, so it knows what this call's sync read from the browser, and sends nothing when it flags the request", async () => {
+    const seen = await fakeWorker((req, res) => { if (req.url === "/v1/sync") okSync(res); else answer(res, 200, okCall); });
+    const redactor = createCredentialRedactor([]);
+    const learned = "jar-only-secret-9f8e7d6c5b4a";
+    // The value is in the redactor only once the source has been read, as the host's source registers what it reads.
+    const sessionSync = { read: async (): Promise<readonly string[]> => { redactor.addSessionSecret(learned); return [learned]; } };
+    const scan = (bytes: Uint8Array) => redactor.contains(bytes);
+    const prompt = call(`#n1 text "${learned}"`);
+    expect(scan(Buffer.from(JSON.stringify(prompt)))).toBe(false);
+    const client = createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync, scan });
+    await expect(client.generate({ ...POSITION, callIndex: 0, call: prompt })).rejects.toMatchObject({ code: "credential-in-prompt", isRetryable: false });
+    expect(seen.map((item) => item.url)).toEqual(["/v1/sync"]);
+    // Through the model adapter it is the adapter's own code.
+    const adapter = createE2EAgentModelAdapter({ client, routeId: "r", position: () => POSITION });
+    await expect(adapter.doGenerate({ prompt: [{ role: "user", content: [{ type: "text", text: `#n1 text "${learned}"` }] }] })).rejects.toMatchObject({ code: "credential-in-prompt" });
+    expect(seen.filter((item) => item.url === "/v1/generate")).toHaveLength(0);
   });
 
   it("is the only way to call the model: no code in the executor package posts to the generate path or calls the channel client outside the client and the model adapter", () => {
@@ -401,8 +663,13 @@ describe("the executor's channel client syncs before every call", () => {
     expect(mention(/E2E_MODEL_CHANNEL_GENERATE_PATH|["'`]\/v1\/generate["'`]/)).toEqual(["executor/model-channel.ts"]);
     expect(mention(/\bclient\.generate\(|options\.client\.generate\(/)).toEqual(["executor/agent-model-adapter.ts"]);
     expect(mention(/createE2EModelChannelClient\(/)).toEqual(["executor/host.ts", "executor/model-channel.ts"]);
+    expect(mention(/E2E_MODEL_CHANNEL_SYNC_PATH/)).toEqual(["executor/model-channel.ts"]);
+    // `sessionSync` is required by the client's options type: a client cannot be built without it.
+    // @ts-expect-error sessionSync is required
+    const missing: Parameters<typeof createE2EModelChannelClient>[0] = { socketPath: "/x", runId: RUN_ID };
+    void missing;
     // The host builds its one client with the browser-backed source.
-    expect(readFileSync(join(root, "executor/host.ts"), "utf8")).toMatch(/createE2EModelChannelClient\(\{[^}]*sessionSync \}\)/);
+    expect(readFileSync(join(root, "executor/host.ts"), "utf8")).toMatch(/createE2EModelChannelClient\(\{[^}]*sessionSync, scan:/);
   });
 });
 
@@ -441,13 +708,13 @@ describe("mixed fleets are refused cleanly, and nothing stored before this chang
   });
 
   it("a part from before the sync cannot take part: an older worker's strict schema refuses the new fields, and the newer worker refuses an older executor's call that names no sync", async () => {
-    // An older worker's request schema is strict, so it refuses a request that names `syncSeq`, and it does not serve `/v1/sync` (404): the new executor cannot make a call through it.
+    // An older worker's request schema is strict, so it refuses a request that names `syncToken`, and it does not serve `/v1/sync` (404): the new executor cannot make a call through it.
     // This pins the strictness that refusal rests on.
-    const newRequest = channelRequest({ syncSeq: 1 });
+    const newRequest = channelRequest({ syncToken: "a".repeat(32) });
     expect(E2EModelChannelRequestSchema.safeParse(newRequest).success).toBe(true);
     expect(E2EModelChannelRequestSchema.safeParse({ ...newRequest, unknownField: 1 }).success).toBe(false);
-    expect(E2EModelSessionSyncSchema.safeParse({ ...syncBody(1), unknownField: 1 }).success).toBe(false);
-    // An older executor's call (no `syncSeq`) is refused by the newer worker and never reaches the model.
+    expect(E2EModelSessionSyncSchema.safeParse({ ...syncBody(), unknownField: 1 }).success).toBe(false);
+    // An older executor's call (no `syncToken`) is refused by the newer worker and never reaches the model.
     const run = await startRun();
     const reply = await postJson("/v1/generate", channelRequest({ callIndex: 0 }));
     expect(reply.body.result).toMatchObject({ status: "error", code: "refused-protocol" });
@@ -464,17 +731,16 @@ describe("mixed fleets are refused cleanly, and nothing stored before this chang
     const oldEnd = { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "end", caseId: CASE_ID, stepIndex: 1 };
     expect(E2EModelChannelStepMarkerSchema.parse(oldEnd)).toEqual(oldEnd);
     // A request that names a sync is the same record plus one optional field; the sync itself is a new record, so nothing stored has to parse it.
-    expect(E2EModelChannelRequestSchema.parse({ ...oldRequest, syncSeq: 7 })).toMatchObject({ syncSeq: 7 });
-    expect(E2EModelChannelRequestSchema.safeParse({ ...oldRequest, syncSeq: 0 }).success).toBe(false);
-    expect(E2EModelSessionSyncSchema.safeParse({ schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, syncSeq: 1, values: [] }).success).toBe(true);
+    expect(E2EModelChannelRequestSchema.parse({ ...oldRequest, syncToken: "b".repeat(32) })).toMatchObject({ syncToken: "b".repeat(32) });
+    expect(E2EModelChannelRequestSchema.safeParse({ ...oldRequest, syncToken: "short" }).success).toBe(false);
+    expect(E2EModelSessionSyncSchema.safeParse({ schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, values: [] }).success).toBe(true);
   });
 
   it("writes receipts and transcripts a reader from before this change still parses (a refused sync is the existing `refused-protocol` outcome)", async () => {
     const { E2EModelReceiptSchema } = await import("../../packages/contracts/src/e2e-model-channel.js");
     const run = await startRun();
     await postJson("/v1/generate", callBody(0, undefined));
-    await postJson("/v1/sync", syncBody(1));
-    await postJson("/v1/generate", callBody(1, 1));
+    await postJson("/v1/generate", callBody(1, await syncToken()));
     const summary = await run.proxy.close();
     expect(summary.receipts.map((receipt) => receipt.outcome)).toEqual(["refused-protocol", "ok"]);
     for (const receipt of summary.receipts) expect(E2EModelReceiptSchema.parse(JSON.parse(JSON.stringify(receipt)))).toEqual(receipt);

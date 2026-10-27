@@ -559,7 +559,7 @@ describe("the model adapter (Task 4.3b, test case 4)", () => {
       let hits = 0;
       server = createServer((request, response) => {
         // The client syncs before the call (MIDSTEPCOOKIE); this socket accepts the sync and answers nothing useful to the call.
-        if (request.url === "/v1/sync") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ schemaVersion: "rovara-e2e-model-channel/v1", status: "ok", syncSeq: 1 })); return; }
+        if (request.url === "/v1/sync") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ schemaVersion: "rovara-e2e-model-channel/v1", status: "ok", syncToken: "a".repeat(32), epoch: "0123456789abcdef" })); return; }
         hits += 1; response.writeHead(502, { "content-type": "application/json" }); response.end("{}");
       });
       await new Promise<void>((resolve) => server!.listen(socketPath, resolve));

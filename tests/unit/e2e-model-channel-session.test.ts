@@ -24,7 +24,6 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "rs-"));
   socketPath = join(dir, "model", "model.sock");
   sessions = [];
-  syncSeq = 0;
 });
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -59,12 +58,10 @@ async function open(overrides: Partial<OpenE2EModelChannelSessionOptions> = {}):
 const exists = (path: string) => stat(path).then(() => true, () => false);
 
 /** Every model call is made under a session sync (MIDSTEPCOOKIE): a call posted here is first preceded by its own sync, as the executor's client does. */
-let syncSeq = 0;
 async function post(path: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
-  if (path === "/v1/generate" && typeof body === "object" && body !== null && !("syncSeq" in body)) {
-    syncSeq += 1;
-    await rawPost("/v1/sync", { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, syncSeq, values: [] });
-    return rawPost(path, { ...body, syncSeq });
+  if (path === "/v1/generate" && typeof body === "object" && body !== null && !("syncToken" in body)) {
+    const synced = await rawPost("/v1/sync", { schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, values: [] });
+    return rawPost(path, { ...body, syncToken: synced.body["syncToken"] });
   }
   return rawPost(path, body);
 }
