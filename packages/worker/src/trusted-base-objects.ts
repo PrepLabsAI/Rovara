@@ -1,7 +1,7 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { link, lstat, mkdir, mkdtemp, open, readdir, realpath, rm } from "node:fs/promises";
+import { access, link, lstat, mkdir, mkdtemp, open, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -19,9 +19,11 @@ const execFile = promisify(execFileCallback);
 // here: the base commit's id comes from the broker and is already trusted, and the check is against stored bytes that were changed after it was made.)
 //
 // Git never starts with the workspace's `.git` as its git directory and never follows the workspace's `objects/info` (alternates, pack lists,
-// commit graphs). It runs in an empty git directory this module makes in a worker-owned scratch directory, which holds only objects: the workspace's
-// pack files (and their indexes) are linked in, and a loose object is linked in only when it is one of the three that are read. The workspace's config,
-// hooks, `info/` files and refs are never copied.
+// commit graphs). Its git directory is an empty, read-only one that the worker image carries (EMPTY_GIT_DIRECTORY_ROOT, one per hash), so no process
+// that can write the workspace or the scratch directory can give git a config, a remote or a hook to run. Its objects directory (GIT_OBJECT_DIRECTORY) is
+// a scratch directory that holds only objects: the workspace's pack files (and their indexes) are linked in, and a loose object is linked in only when it is
+// one of the three that are read. A file planted in that directory can at most redirect where objects are read from, and the checks on the bytes catch that.
+// The workspace's config, hooks, `info/` files and refs are never copied.
 //
 // The scratch directory is made on the workspace's own file system, where a hard link works and nothing is copied. Every workspace file that is
 // linked or copied is opened without following a link, checked to be a regular file, and (when it has to be copied) copied from that open file under
@@ -53,6 +55,14 @@ const OVERALL_DEADLINE_MS = 120_000;
 /** The most that may be copied (not linked) into the scratch directory, in total, when the scratch directory is on another file system. */
 const COPY_LIMIT_BYTES = 2 * 1024 * 1024 * 1024;
 const COPY_CHUNK_BYTES = 1024 * 1024;
+/** The most pack files (and indexes) that are brought in; a workspace with more stops the read. */
+const MAX_PACK_FILES = 10_000;
+/** The most a blob whose bytes are hashed may hold; a larger one stops the read. */
+const MAX_BLOB_BYTES = 1024 * 1024 * 1024;
+/** Where the worker image keeps its empty, read-only git directories (`empty-sha1.git`, `empty-sha256.git`). */
+export const EMPTY_GIT_DIRECTORY_ROOT = "/usr/share/agentx";
+/** Names a different directory for local runs and tests; a worker image never sets it. */
+export const EMPTY_GIT_DIRECTORY_ROOT_VARIABLE = "AGENTX_EMPTY_GIT_DIRECTORY_ROOT";
 const SCRATCH_PREFIX = "agentx-base-rules-";
 const STALE_SCRATCH_MS = 60 * 60 * 1000;
 
@@ -109,6 +119,30 @@ export interface ReadOptions {
   copyLimitBytes?: number;
   /** Test seam: how a file is hard-linked. */
   linkFile?: (source: string, target: string) => Promise<void>;
+  /** Where the empty git directories are (default: {@link EMPTY_GIT_DIRECTORY_ROOT_VARIABLE}, else {@link EMPTY_GIT_DIRECTORY_ROOT}). */
+  emptyGitDirectoryRoot?: string;
+  /** The most pack files that are brought in. */
+  maxPackFiles?: number;
+  /** The most a blob whose bytes are hashed may hold. */
+  maxBlobBytes?: number;
+  /** Test seam: called once the scratch directory and its objects directory exist, before git runs. */
+  onScratchReady?: (paths: { scratch: string; objects: string }) => Promise<void>;
+}
+
+/** Refuses an entry (and, for a directory, everything below it) that is a link or that this process could write. */
+async function assertReadOnly(path: string): Promise<void> {
+  const stat = await lstat(path);
+  if (stat.isSymbolicLink() || (stat.mode & 0o222) !== 0) throw new BaseObjectsUnverified();
+  if (await access(path, fsConstants.W_OK).then(() => true, () => false)) throw new BaseObjectsUnverified();
+  if (stat.isDirectory()) for (const name of await readdir(path)) await assertReadOnly(join(path, name));
+}
+
+/** The image's empty git directory for `algorithm`; throws unless it exists, is not reached through a link and is read-only throughout. There is no other git directory to fall back to. */
+async function emptyGitDirectory(algorithm: Algorithm, configured: string | undefined): Promise<string> {
+  const root = configured ?? process.env[EMPTY_GIT_DIRECTORY_ROOT_VARIABLE] ?? EMPTY_GIT_DIRECTORY_ROOT;
+  const path = join(await realpath(root), `empty-${algorithm}.git`);
+  await assertReadOnly(path);
+  return path;
 }
 
 /**
@@ -225,15 +259,23 @@ export async function readVerifiedBaseRuleFile(directory: string, baseCommit: st
     const root = await chooseScratchRoot(options.workspaceRoot, (await lstat(layout.objects)).dev);
     await removeStaleScratch(root);
     scratch = await mkdtemp(join(root, SCRATCH_PREFIX));
-    const gitDir = join(scratch, "base.git");
-    await execFile("git", ["init", "--bare", "--quiet", "--template=", `--object-format=${algorithm}`, gitDir], { cwd: scratch, env: isolatedGitEnvironment(scratch), timeout: GIT_TIMEOUT_MS, signal });
-    const env = isolatedGitEnvironment(scratch, { GIT_DIR: gitDir, GIT_OPTIONAL_LOCKS: "0", GIT_NO_LAZY_FETCH: "1" });
+    const gitDir = await emptyGitDirectory(algorithm, options.emptyGitDirectoryRoot);
+    const objectsDirectory = join(scratch, "objects");
+    await mkdir(join(objectsDirectory, "pack"), { recursive: true, mode: 0o700 });
+    await options.onScratchReady?.({ scratch, objects: objectsDirectory });
+    // GIT_DIR is read-only and empty. GIT_NO_LAZY_FETCH is honoured by Git 2.45 and later (the image's 2.39 ignores it), and the protocol settings are command-line
+    // configuration, which Git does honour; `core.repositoryformatversion` and `extensions.*` are read only from the repository's own config file, so they cannot be set here.
+    const env = isolatedGitEnvironment(gitDir, { GIT_DIR: gitDir, GIT_OBJECT_DIRECTORY: objectsDirectory, GIT_OPTIONAL_LOCKS: "0", GIT_NO_LAZY_FETCH: "1" },
+      ["ext", "file", "git", "http", "https", "ssh"].map((name) => [`protocol.${name}.allow`, "never"] as const));
     const placement: Placement = { link: options.linkFile ?? link, signal, copyLimit: options.copyLimitBytes ?? COPY_LIMIT_BYTES, copied: 0 };
     // One link per pack file and index; the workspace's `objects/info` and everything else in its git directory is left out.
     const packs = join(layout.objects, "pack");
     if (await plainDirectory(packs)) {
-      for (const name of await readdir(packs)) {
-        if (PACK_FILE.test(name)) await place(join(packs, name), join(gitDir, "objects/pack", name), placement);
+      const names = (await readdir(packs)).filter((name) => PACK_FILE.test(name));
+      if (names.length > (options.maxPackFiles ?? MAX_PACK_FILES)) throw new BaseObjectsUnverified();
+      for (const name of names) {
+        if (signal.aborted) throw new BaseObjectsUnverified();
+        await place(join(packs, name), join(objectsDirectory, "pack", name), placement);
       }
     }
     const fetch = async (type: "commit" | "tree" | "blob", oid: string, maximum: number, keep: number): Promise<{ size: number; bytes: Buffer | undefined }> => {
@@ -241,8 +283,8 @@ export async function readVerifiedBaseRuleFile(directory: string, baseCommit: st
       let looseTarget: string | undefined;
       const loose = join(layout.objects, oid.slice(0, 2));
       if (await plainDirectory(loose)) {
-        await mkdir(join(gitDir, "objects", oid.slice(0, 2)), { recursive: true });
-        const target = join(gitDir, "objects", oid.slice(0, 2), oid.slice(2));
+        await mkdir(join(objectsDirectory, oid.slice(0, 2)), { recursive: true });
+        const target = join(objectsDirectory, oid.slice(0, 2), oid.slice(2));
         if (await place(join(loose, oid.slice(2)), target, placement)) looseTarget = target;
       }
       const attempt = async (): Promise<{ size: number; bytes: Buffer | undefined }> => {
@@ -272,7 +314,7 @@ export async function readVerifiedBaseRuleFile(directory: string, baseCommit: st
       // Directories and submodules are passed over, as the working-tree read passes over them.
       if (kind === 0o120000) return { kind: "symlink", candidate };
       if (kind !== 0o100000) continue;
-      const blob = await fetch("blob", entry.oid, Number.MAX_SAFE_INTEGER, limit);
+      const blob = await fetch("blob", entry.oid, options.maxBlobBytes ?? MAX_BLOB_BYTES, limit);
       if (blob.bytes === undefined) return { kind: "oversize", candidate, size: blob.size };
       return { kind: "file", candidate, content: blob.bytes };
     }

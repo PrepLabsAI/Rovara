@@ -28,6 +28,17 @@ describe("the worker image", () => {
     expect(toolsStage).toMatch(/echo "\$uv_sha {2}\/tmp\/uv\.tgz" \| sha256sum -c -/);
   });
 
+  it("carries an empty, root-owned, read-only git directory for each object format, made before the image drops to its user", () => {
+    const user = finalStage.indexOf("\nUSER node");
+    const block = finalStage.slice(finalStage.indexOf("for format in sha1 sha256"), finalStage.indexOf("\n\n", finalStage.indexOf("for format in sha1 sha256")));
+    expect(finalStage.indexOf("/usr/share/agentx/empty-$format.git")).toBeGreaterThan(0);
+    expect(finalStage.indexOf("/usr/share/agentx/empty-$format.git")).toBeLessThan(user);
+    expect(block).toContain('git init --bare --quiet --template= "--object-format=$format"');
+    expect(block).toContain("chown -R root:root /usr/share/agentx");
+    expect(block).toContain("find /usr/share/agentx -type d -exec chmod 0555 {} +");
+    expect(block).toContain("find /usr/share/agentx -type f -exec chmod 0444 {} +");
+  });
+
   it("copies uv and uvx into the final stage", () => {
     expect(finalStage).toContain("COPY --from=tools /usr/local/bin/uv /usr/local/bin/uv");
     expect(finalStage).toContain("COPY --from=tools /usr/local/bin/uvx /usr/local/bin/uvx");

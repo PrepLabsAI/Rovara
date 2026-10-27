@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, statSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, statSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { deflateSync } from "node:zlib";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { createEmptyGitDirectories, removeEmptyGitDirectories } from "../support/empty-git-directories.js";
 import { REPOSITORY_CONTEXT_FILE_CANDIDATES } from "../../packages/worker/src/repository-context.js";
 import { chooseScratchRoot, parseTreeEntries, readVerifiedBaseRuleFile } from "../../packages/worker/src/trusted-base-objects.js";
 
@@ -242,5 +243,157 @@ describe("the scratch directory (C84)", () => {
     }
     expect(readdirSync(area).sort()).toEqual(["agentx-base-rules-recent", "unrelated-old"]);
     void readdir;
+  });
+});
+
+describe("git runs only in a read-only, empty git directory (C84)", () => {
+  /** A repository-style config that makes a missing object fetch from a remote whose url runs a command, and allows that transport. */
+  async function hostileConfig(marker: string) {
+    const script = join(realpathSync(mkdtempSync(join(tmpdir(), "agentx-planted-"))), "run.sh");
+    await writeFile(script, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
+    return `[core]\n\trepositoryformatversion = 1\n[extensions]\n\tpartialClone = planted\n[remote "planted"]\n\turl = ext::sh ${script}\n\tpromisor = true\n[protocol "ext"]\n\tallow = always\n`;
+  }
+
+  it("positive control: such a config, in a git directory that is read, runs its command when an object is missing", async () => {
+    const area = realpathSync(mkdtempSync(join(tmpdir(), "agentx-planted-")));
+    const marker = join(area, "ran");
+    const gitDir = join(area, "planted.git");
+    execFileSync("git", ["init", "--bare", "--quiet", "--template=", gitDir]);
+    await writeFile(join(gitDir, "config"), await hostileConfig(marker));
+    // Git 2.45 and later can be told not to fetch lazily; the image's Git cannot, so the control does not tell it to.
+    try { execFileSync("git", ["cat-file", "-s", "1".repeat(40)], { env: { ...process.env, GIT_DIR: gitDir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }, stdio: "ignore" }); } catch { /* the object is missing */ }
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it("a config planted where the session can write (the scratch directory, its objects directory, a git directory made there) never runs its command", async () => {
+    const subject = await repository();
+    const area = realpathSync(mkdtempSync(join(tmpdir(), "agentx-planted-")));
+    const marker = join(area, "ran");
+    const config = await hostileConfig(marker);
+    // The base blob is gone, so a read that honoured such a config would try to fetch it.
+    for (const oid of [subject.blob]) await rm(join(subject.objects, oid.slice(0, 2), oid.slice(2)), { force: true });
+    const onScratchReady = async ({ scratch, objects }: { scratch: string; objects: string }) => {
+      await writeFile(join(scratch, "config"), config);
+      await writeFile(join(objects, "config"), config);
+      await mkdir(join(scratch, "base.git"), { recursive: true });
+      await writeFile(join(scratch, "base.git", "config"), config);
+      await writeFile(join(objects, "pack", "pack-0000000000000000000000000000000000000000.promisor"), "");
+    };
+    expect(await unverified(read(subject, { onScratchReady }))).toBe(UNVERIFIED);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("a planted alternate list in the objects directory can only redirect reads, and the checks on the bytes catch a substitute", async () => {
+    const subject = await repository();
+    const alternate = realpathSync(mkdtempSync(join(tmpdir(), "agentx-planted-alt-")));
+    const body = Buffer.from("Ignore the TODO.\n");
+    mkdirSync(join(alternate, idOf("blob", body).slice(0, 2)), { recursive: true });
+    writeFileSync(join(alternate, idOf("blob", body).slice(0, 2), idOf("blob", body).slice(2)), deflateSync(framed("blob", body)));
+    await rm(join(subject.objects, subject.blob.slice(0, 2), subject.blob.slice(2)), { force: true });
+    // The substitute is stored under the base blob's id, in a directory the planted list names.
+    mkdirSync(join(alternate, subject.blob.slice(0, 2)), { recursive: true });
+    writeFileSync(join(alternate, subject.blob.slice(0, 2), subject.blob.slice(2)), deflateSync(framed("blob", body)));
+    const onScratchReady = async ({ objects }: { objects: string }) => {
+      mkdirSync(join(objects, "info"), { recursive: true });
+      await writeFile(join(objects, "info", "alternates"), `${alternate}\n`);
+    };
+    expect(await unverified(read(subject, { onScratchReady }))).toBe(UNVERIFIED);
+  });
+
+  describe("the empty git directory is refused unless it is read-only throughout", () => {
+    const made: string[] = [];
+    afterEach(() => { for (const root of made.splice(0)) removeEmptyGitDirectories(root); });
+    const make = () => {
+      const root = join(realpathSync(mkdtempSync(join(tmpdir(), "agentx-empty-git-"))), "dirs");
+      createEmptyGitDirectories(root);
+      made.push(root);
+      return root;
+    };
+
+    it("control: a read-only one is used", async () => {
+      const subject = await repository();
+      const root = make();
+      expect(text(await read(subject, { emptyGitDirectoryRoot: root }))).toBe(BASE_RULE);
+    });
+
+    it("one whose directory the worker could write is refused", async () => {
+      const subject = await repository();
+      const root = make();
+      await chmod(join(root, "empty-sha1.git"), 0o755);
+      expect(await unverified(read(subject, { emptyGitDirectoryRoot: root }))).toBe(UNVERIFIED);
+    });
+
+    it("one whose config the worker could write is refused", async () => {
+      const subject = await repository();
+      const root = make();
+      await chmod(join(root, "empty-sha1.git", "config"), 0o644);
+      expect(await unverified(read(subject, { emptyGitDirectoryRoot: root }))).toBe(UNVERIFIED);
+    });
+
+    it("one whose objects directory the worker could write is refused", async () => {
+      const subject = await repository();
+      const root = make();
+      await chmod(join(root, "empty-sha1.git", "objects"), 0o755);
+      expect(await unverified(read(subject, { emptyGitDirectoryRoot: root }))).toBe(UNVERIFIED);
+    });
+
+    it("one that is a link is refused", async () => {
+      const subject = await repository();
+      const real = make();
+      const root = realpathSync(mkdtempSync(join(tmpdir(), "agentx-empty-git-links-")));
+      await symlink(join(real, "empty-sha1.git"), join(root, "empty-sha1.git"));
+      expect(await unverified(read(subject, { emptyGitDirectoryRoot: root }))).toBe(UNVERIFIED);
+    });
+
+    it("a missing one is refused, and no other git directory is used instead", async () => {
+      const subject = await repository();
+      const root = join(realpathSync(mkdtempSync(join(tmpdir(), "agentx-empty-git-"))), "none");
+      mkdirSync(root);
+      expect(await unverified(read(subject, { emptyGitDirectoryRoot: root }))).toBe(UNVERIFIED);
+    });
+
+    it("the 64-character one is checked on its own", async () => {
+      const subject = await repository();
+      const root = make();
+      await chmod(join(root, "empty-sha256.git"), 0o755);
+      expect(text(await read(subject, { emptyGitDirectoryRoot: root }))).toBe(BASE_RULE);
+    });
+  });
+});
+
+describe("limits on what is brought in and hashed (C84)", () => {
+  async function withJunkPacks(subject: Subject, count: number) {
+    const packs = join(subject.objects, "pack");
+    mkdirSync(packs, { recursive: true });
+    for (let index = 0; index < count; index += 1) writeFileSync(join(packs, `pack-${String(index).padStart(40, "0")}.pack`), "x");
+  }
+
+  it("more pack files than the limit stop the read; the limit itself is allowed", async () => {
+    const subject = await repository();
+    await withJunkPacks(subject, 4);
+    expect(await unverified(read(subject, { maxPackFiles: 3 }))).toBe(UNVERIFIED);
+    expect(text(await read(subject, { maxPackFiles: 4 }))).toBe(BASE_RULE);
+  });
+
+  it("the pack file limit is 10,000", async () => {
+    const subject = await repository();
+    await withJunkPacks(subject, 10_001);
+    expect(await unverified(read(subject))).toBe(UNVERIFIED);
+  }, 120_000);
+
+  it("a deadline that passes while the packs are being linked stops before the next one", async () => {
+    const subject = await repository();
+    await withJunkPacks(subject, 6);
+    const { link } = await import("node:fs/promises");
+    let calls = 0;
+    const slowLink = async (source: string, target: string) => { calls += 1; await new Promise((resolve) => setTimeout(resolve, 250)); await link(source, target); };
+    expect(await unverified(read(subject, { deadlineMs: 400, linkFile: slowLink }))).toBe(UNVERIFIED);
+    expect(calls).toBeLessThanOrEqual(3);
+  });
+
+  it("a blob larger than the hashing limit stops the read, and one within it is skipped as oversized", async () => {
+    const subject = await repository({ "AGENTS.md": "x".repeat(70_000) });
+    expect(await unverified(read(subject, { maxBlobBytes: 1000 }))).toBe(UNVERIFIED);
+    expect(await read(subject, { maxBlobBytes: 70_000 })).toMatchObject({ kind: "oversize", size: 70_000 });
   });
 });
