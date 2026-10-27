@@ -297,6 +297,8 @@ interface RunState {
   volumeId?: string;
   /** Set when DeleteOnTermination could not be set: the volume outlives the runner and the owner must delete it by hand. */
   volumeKeptAfterTermination?: boolean;
+  /** Set once DeleteOnTermination is confirmed: terminating the instance deletes the volume too, so no delete-volume command is due. */
+  volumeGoesWithInstance?: boolean;
   /** The generation the runner is booted with and the challenge is issued with: read once, before the launch, under the lock. */
   generation?: number;
   instanceId?: string;
@@ -368,6 +370,7 @@ async function runSteps(steps: readonly QualificationStep[], effects: Qualificat
           const request = { volumeId: need(state.volumeId, "the volume"), instanceId: need(state.instanceId, "the instance"), device: step.device };
           try {
             await effects.setVolumeDeleteOnTermination(request);
+            state.volumeGoesWithInstance = true;
             effects.print(`volume ${request.volumeId} will be deleted when ${request.instanceId} is terminated`);
           } catch (error) {
             // The qualification itself is unaffected, so the run goes on; but the leak must not be silent: say it now and again in the closing summary.
@@ -513,7 +516,9 @@ function reportLeftovers(state: RunState, options: RunOptions, print: (line: str
     print(`\nThe qualification instance ${state.instanceId} is still running (${INSTANCE_TYPE}, billed until it is ended), left for diagnosis. End it with:`);
     print(`  aws ec2 terminate-instances --instance-ids ${state.instanceId} --profile ${options.profile} --region ${options.region}`);
   }
-  if (state.volumeId !== undefined) {
+  if (state.volumeId !== undefined && state.volumeGoesWithInstance === true) {
+    print(`\nThe workspace volume ${state.volumeId} is marked DeleteOnTermination: terminating the instance deletes it too, so there is no separate volume delete to run. Diagnose before you terminate.`);
+  } else if (state.volumeId !== undefined) {
     print(`${state.instanceId === undefined ? "\n" : ""}The workspace volume ${state.volumeId} stays until it is deleted${state.instanceId === undefined ? "" : ", once that instance is gone"}:`);
     print(`  aws ec2 delete-volume --volume-id ${state.volumeId} --profile ${options.profile} --region ${options.region}`);
   }
@@ -728,7 +733,7 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
       let attached = false;
       for (let attempt = 0; attempt < 60 && !attached; attempt += 1) {
         const attachment = (await ec2.send(new DescribeVolumesCommand({ VolumeIds: [request.volumeId] }))).Volumes?.[0]?.Attachments?.find((entry) => entry.InstanceId === request.instanceId);
-        if (attachment?.State === "attached") attached = true;
+        if (attachment?.State === "attached" && attachment.Device === request.device) attached = true;
         else await sleep(2_000);
       }
       if (!attached) throw new Error(`volume ${request.volumeId} did not report attached to ${request.instanceId}`);

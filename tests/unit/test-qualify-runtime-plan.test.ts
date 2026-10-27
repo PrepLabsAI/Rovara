@@ -556,6 +556,20 @@ describe("runTestQualification", () => {
     expect(printed.lastIndexOf("  aws ec2 delete-volume --volume-id vol-0123456789abcdef0 --profile agentx-test --region us-east-1")).toBeGreaterThan(printed.findIndex((line) => line.startsWith("Reminder") || line.includes("Reminder")));
   });
 
+  it("after a failure later in the run, says the flagged volume goes with the instance and prints no delete-volume for it; when the flag could not be set it still prints it (QUALVOLDELETE)", async () => {
+    const flagged = harness({ failAt: "privateIpOf" });
+    await expect(runTestQualification(plan(), flagged.effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" })).rejects.toThrow("privateIpOf failed");
+    const text = flagged.printed.join("\n");
+    expect(text).toContain("terminate-instances --instance-ids i-0123456789abcdef0");
+    expect(text).toContain("marked DeleteOnTermination");
+    expect(text).not.toContain("delete-volume");
+    const unflagged = harness({ failAt: "privateIpOf" });
+    unflagged.effects.setVolumeDeleteOnTermination = async () => { throw new Error("modify refused"); };
+    await expect(runTestQualification(plan(), unflagged.effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" })).rejects.toThrow("privateIpOf failed");
+    expect(unflagged.printed.join("\n")).toContain("aws ec2 delete-volume --volume-id vol-0123456789abcdef0");
+    expect(unflagged.printed.join("\n")).not.toContain("marked DeleteOnTermination");
+  });
+
   it("prints only the volume to delete when the launch itself fails", async () => {
     const { effects, printed } = harness({ failAt: "runInstance" });
     await expect(runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" })).rejects.toThrow("runInstance failed");
