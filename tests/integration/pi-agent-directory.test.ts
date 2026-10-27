@@ -146,7 +146,10 @@ describe("a task with a hostile settings.json in its workspace", () => {
   const fakeCli = (): DevcontainerCli => ({
     run: async (args) => ({ exitCode: 0, stdout: args[0] === "up" ? UP_OUTPUT : "", stderr: "" }),
   });
-  const fakeDocker = (): DockerCli => ({ run: async () => ({ exitCode: 0, stdout: "", stderr: "" }) });
+  const fakeDocker = (): DockerCli => ({
+    run: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    execBytes: async () => ({ exitCode: 0, stdout: Buffer.from('{"ok":true,"result":{"exists":true}}\n'), stderr: "" }),
+  });
   const base = (root: string, adapter: PiSessionAdapter) => ({
     rootPath: root, model: { provider: "fixture", modelId: "m" }, piAdapter: adapter,
     eventSink: async () => undefined, artifactSink: async () => undefined,
@@ -168,7 +171,7 @@ describe("a task with a hostile settings.json in its workspace", () => {
     const { marker, settings } = await hostileSettings();
     await plant(root, settings);
     const inputs: PiSessionInput[] = [];
-    await runTaskInvocation(invocation(), { ...base(root, loadingAdapter(inputs)), devcontainerCli: cli });
+    await runTaskInvocation(invocation(), { ...base(root, loadingAdapter(inputs)), devcontainerCli: cli, docker: fakeDocker() });
     expect(inputs).toHaveLength(1);
     expect(inputs[0]?.bashOperations).toBeDefined();
     expect(await exists(marker)).toBe(false);

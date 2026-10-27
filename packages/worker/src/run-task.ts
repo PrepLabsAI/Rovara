@@ -10,13 +10,17 @@ import {
   devcontainerBashOperations,
   devcontainerPaths,
   ensureDevcontainer,
+  installFileOpsHelper,
   preparedDevcontainerTarget,
   workspaceRelativeCdTarget,
   type DevcontainerCli,
   type DevcontainerPaths,
+  type DevcontainerUpResult,
 } from "./devcontainer.js";
+import { devcontainerMounts } from "./devcontainer-file-paths.js";
 import type { FileOpsTarget } from "./file-ops-exec.js";
 import { sweepFileOps } from "./sandbox-file-tools.js";
+import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { EventBatcher, redactCredentials, type EventAppendOptions, type EventBatchSink, type WorkerEvent } from "./events.js";
 import {
   CANCEL_FLUSH_MAX_MS, ModelCallMonitor, PLANNING_ABORT_CONFIRM_MS, PLANNING_STALL_MS, describeModelCallNote, expiryNote, logEventsRefused, logModelCallNote, modelFailureNextAction,
@@ -124,6 +128,8 @@ export interface TaskInvocationDependencies {
    * sandbox on EC2.
    */
   taskShell?: TaskShellSelection;
+  /** The Docker CLI the file tools and the devcontainer's helper install use; tests supply a fake. Default: the sandbox selection's, or the host's. */
+  docker?: DockerCli;
 }
 
 export async function runTaskInvocation(
@@ -175,26 +181,72 @@ async function runTask(
     }
   }
   const canonicalRoot = await realpath(resolve(dependencies.rootPath));
-  const devcontainer = preparedDevcontainerTarget(canonicalRoot, manifest);
+  // A feedback review only reads (read, grep, find, ls) and runs no project command, so it does not start the project's
+  // devcontainer, whose creation commands are the repository's: its file tools run in a task sandbox over the workspace.
+  const feedbackReview = invocation.payload.workflowMode === "FEEDBACK_REVIEW";
+  const devcontainer = feedbackReview ? undefined : preparedDevcontainerTarget(canonicalRoot, manifest);
   let bashOperations: BashOperations | undefined;
   let containerPaths: DevcontainerPaths | undefined;
   let devcontainerCli: DevcontainerCli | undefined;
+  let startedDevcontainer: DevcontainerUpResult | undefined;
+  // The agent's shell runs in the project's devcontainer (#121), started first: on a resumed
+  // instance its containers are stopped.
+  if (devcontainer !== undefined) {
+    devcontainerCli = dependencies.devcontainerCli ?? createDevcontainerCli();
+    const started = await ensureDevcontainer(devcontainerCli, devcontainer);
+    startedDevcontainer = started;
+    bashOperations = devcontainerBashOperations(devcontainerCli, devcontainer);
+    containerPaths = devcontainerPaths(devcontainer, started);
+  }
+  const reportFeedbackReviewStartFailure = async (error: unknown): Promise<never> => {
+    // The review's own error handling starts after this; a start that fails still reports as the review does.
+    if (feedbackReview) {
+      const events = new EventBatcher(dependencies.eventSink);
+      await events.append("error", { message: redactText(error instanceof Error ? error.message : "feedback review failed") }).catch(() => undefined);
+      await events.flush().catch(() => undefined);
+    }
+    throw error;
+  };
   // Without a devcontainer the agent's shell, its file tools, the checks and the project's commands run in the task sandbox,
   // never as children of the worker. A sandbox that cannot start fails the task here, before the agent runs; it is not a
   // reason to fall back to the local shell.
   let sandbox: TaskSandbox | undefined;
   let localShell = false;
-  let fileTools: FileOpsTarget | undefined;
   if (devcontainer === undefined) {
     sandbox = taskSandboxFor(dependencies.taskShell ?? taskShellSelection(), { rootPath: canonicalRoot, taskId: invocation.operationId });
     if (sandbox !== undefined) {
       sandboxes.push(sandbox);
-      await sandbox.start();
+      await sandbox.start().catch((error: unknown) => reportFeedbackReviewStartFailure(error));
       bashOperations = sandbox.bashOperations();
-      fileTools = sandbox.fileOpsTarget();
     } else {
       // The local shell, chosen explicitly (taskShell or AGENTX_TASK_SHELL=local): tests and a developer's machine.
       localShell = true;
+    }
+  }
+  // The agent's file tools run in the same container as its shell, never in the worker (sandbox-file-tools.ts), for every
+  // Pi session of this task: the main ones, the feedback review and the critic and security reviews. A devcontainer's tools
+  // run in the devcontainer, as its user, through the helper copied into it.
+  let fileToolsDocker: DockerCli | undefined;
+  const dockerForFileTools = (): DockerCli => fileToolsDocker ??= dependencies.docker ?? (dependencies.taskShell?.kind === "sandbox" ? dependencies.taskShell.docker : undefined) ?? createDockerCli();
+  let fileTools: FileOpsTarget | undefined;
+  let fileToolsNote: string | undefined;
+  if (sandbox !== undefined) {
+    fileTools = sandbox.fileOpsTarget();
+  } else if (devcontainer !== undefined && startedDevcontainer !== undefined) {
+    const installed = await installFileOpsHelper(dockerForFileTools(), {
+      containerId: startedDevcontainer.containerId, user: startedDevcontainer.remoteUser, workspaceFolder: startedDevcontainer.remoteWorkspaceFolder,
+    });
+    if ("target" in installed) {
+      fileTools = { ...installed.target, mounts: await devcontainerMounts(dockerForFileTools(), startedDevcontainer.containerId, canonicalRoot, containerPaths) };
+    } else {
+      // The devcontainer cannot run the bundled Node (a musl image, say): the tools keep the boundary in a sandbox of their own.
+      const fileSandbox = taskSandboxFor(dependencies.taskShell ?? taskShellSelection(), { rootPath: canonicalRoot, taskId: invocation.operationId });
+      if (fileSandbox !== undefined) {
+        sandboxes.push(fileSandbox);
+        await fileSandbox.start();
+        fileTools = { ...fileSandbox.fileOpsTarget(), ...(containerPaths === undefined ? {} : { paths: containerPaths }) };
+        fileToolsNote = "Rovara's file tools run in a separate sandbox for this devcontainer, so they may not be able to change files your devcontainer's user created.";
+      }
     }
   }
   const candidateSweep = fileTools === undefined ? undefined : async (directory: string): Promise<void> => { await sweepFileOps(fileTools, canonicalRoot, directory); };
@@ -208,6 +260,7 @@ async function runTask(
     const events = new EventBatcher(dependencies.eventSink);
     try {
       await events.append("progress", { message: "AgentX is reviewing the latest feedback on the linked pull requests." });
+      if (fileToolsNote !== undefined) await events.append("progress", { message: fileToolsNote });
       const collected = await dependencies.feedbackBundleReader(binding);
       // Publication moved HEAD to a new commit with the reviewed tree, so the code is identified by that tree (and the
       // pinned base stays an ancestor), not by the commit the candidate digest was made from. Only repositories that
@@ -230,7 +283,7 @@ async function runTask(
         ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
         ...(dependencies.timeouts?.feedbackReviewMs === undefined ? {} : { timeoutMs: dependencies.timeouts.feedbackReviewMs }),
         ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
-        ...(fileTools !== undefined ? { fileTools } : { localFileTools: true }),
+        ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
         onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
       });
       const workflowFeedbackReviewResult = {
@@ -249,14 +302,6 @@ async function runTask(
     }
   }
 
-  // The agent's shell runs in the project's devcontainer (#121), started first: on a resumed
-  // instance its containers are stopped.
-  if (devcontainer !== undefined) {
-    devcontainerCli = dependencies.devcontainerCli ?? createDevcontainerCli();
-    const started = await ensureDevcontainer(devcontainerCli, devcontainer);
-    bashOperations = devcontainerBashOperations(devcontainerCli, devcontainer);
-    containerPaths = devcontainerPaths(devcontainer, started);
-  }
   // Spec 051 Ruling L: the check history as it was before the agent ran. The agent can write to .agentx, so every
   // round plans from this snapshot, and the final round's outcomes are merged over it.
   const checkHistory = await readCheckHistory(canonicalRoot, manifest);
@@ -421,6 +466,7 @@ async function runTask(
   if (invocation.payload.modelSelectionDiagnostic !== undefined) {
     onDiagnostic(invocation.payload.modelSelectionDiagnostic);
   }
+  if (fileToolsNote !== undefined) onDiagnostic(fileToolsNote);
   for (const message of modelChangeDiagnostics(registered, dependencies.model)) onDiagnostic(message);
 
   // D-16 (#290): files an earlier task left while AgentX ran the original code (its worker stopped mid-check) go back
@@ -515,7 +561,7 @@ async function runTask(
         ...(reviewing ? reviewerRuleBases : {}),
         ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
-        ...(fileTools !== undefined ? { fileTools } : { localFileTools: true }),
+        ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
       },
       dependencies.piAdapter,
     );
@@ -527,7 +573,7 @@ async function runTask(
         ...(reviewing ? reviewerRuleBases : {}),
         ...(agentShell === undefined ? {} : { bashOperations: agentShell }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
-        ...(fileTools !== undefined ? { fileTools } : { localFileTools: true }),
+        ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
       },
       dependencies.piAdapter,
     );
@@ -969,7 +1015,7 @@ async function runTask(
           ...(dependencies.timeouts?.reviewMs === undefined ? {} : { timeoutMs: dependencies.timeouts.reviewMs }),
           signal: verificationStop.signal,
           ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
-          ...(fileTools !== undefined ? { fileTools } : { localFileTools: true }),
+          ...(fileTools !== undefined ? { fileTools } : localShell ? { localFileTools: true } : {}),
           onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
           onUsage: async ({ role, stats, model, outcome }) => {
             const usage = createTaskUsageTelemetry(stats, { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) }, outcome);

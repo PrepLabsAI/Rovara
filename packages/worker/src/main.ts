@@ -19,6 +19,7 @@ import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRunt
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
 import { postWorkerTerminalResult } from "./terminal-callback.js";
 import { executeWorkerCancelInvocation } from "./cancel-invocation.js";
+import { removeLeftoverMaskVolumes } from "./devcontainer.js";
 import { removeLeftoverTaskSandboxes, taskShellSelection } from "./task-sandbox.js";
 import { createApplicationChecksFeatureMonitor, createWorkflowE2EApplicationRuntime } from "./workflow-e2e-application-runtime.js";
 
@@ -41,6 +42,11 @@ if (taskShellSelection().kind === "sandbox") {
   await removeLeftoverTaskSandboxes(rootPath).then(
     (removed) => { if (removed > 0) console.log(JSON.stringify({ component: "worker", event: "task-sandbox.leftovers.removed", removed })); },
     (error: unknown) => { console.error(`could not remove leftover task sandboxes: ${error instanceof Error ? error.message : String(error)}`); },
+  );
+  // The empty volumes a dev container's start mounted over the worker's folders go with their container; any no container uses are removed.
+  await removeLeftoverMaskVolumes().then(
+    (removed) => { if (removed > 0) console.log(JSON.stringify({ component: "worker", event: "mask-volumes.leftovers.removed", removed })); },
+    (error: unknown) => { console.error(`could not remove leftover mask volumes: ${error instanceof Error ? error.message : String(error)}`); },
   );
 }
 const containedRuntimeReadiness: ContainedRuntimeReadiness = await inspectContainedRuntimeReadiness().catch((): ContainedRuntimeReadiness => ({ status: "unavailable", reason: "private-runtime-paths-unavailable" }));
