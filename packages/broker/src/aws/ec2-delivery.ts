@@ -1,6 +1,7 @@
 import {
   E2E_AGENT_MODEL_CHOICE_FEATURE,
   E2E_AGENT_STEPS_FEATURE,
+  E2E_MODEL_SESSION_SYNC_FEATURE,
   E2E_AGENT_UNAVAILABLE_REASONS,
   E2E_MODEL_FREE_LIMITS_FEATURE,
   E2E_REPLAY_CHECKS_FEATURE,
@@ -362,6 +363,11 @@ async function forWorkerFeatures(
     let needs: boolean | undefined;
     try { needs = await modelChoice(); } catch { needs = undefined; }
     if (needs !== false) throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: this worker is too old for the chosen AI navigation model`);
+  }
+  // MIDSTEPCOOKIE: the worker's credential scan must be told the browser's session values before every model call. A worker (or its executor image) without that would call the model
+  // with a scan that is a step old, or refuse every call after compute was spent, so a round with AI navigation steps is not sent to it.
+  if (carriesAgentSteps && !features.includes(E2E_MODEL_SESSION_SYNC_FEATURE)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "This worker can't protect session values during AI navigation steps yet; retry once it restarts on the new image");
   }
   // M1.3 Task 3.4: a version 2 admission keys its runtime rows by profile and kind, which a worker built before it cannot read. It is refused here, before compute is spent, with a sentence the
   // owner can act on (the worker lists the feature again once it restarts on the new image).

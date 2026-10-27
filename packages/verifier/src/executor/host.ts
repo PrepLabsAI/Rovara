@@ -21,8 +21,10 @@ import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
 import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, createRovaraE2EReplayExecutor } from "./agent-replay.js";
 import { createE2EModelChannelClient } from "./model-channel.js";
 import { createCredentialRedactor } from "./redact.js";
+import { createSessionSecretRegistry, registerStorageEntry } from "./session-secret-registry.js";
+import { createE2ESessionSyncSource } from "./session-sync.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
-import { createPlaywrightFormLoginDriver, isSessionCookieSecret, isSessionStorageSecret, parseSetCookie } from "./form-login.js";
+import { createPlaywrightFormLoginDriver, isSessionCookieSecret, parseSetCookie } from "./form-login.js";
 import { casePlanFor, resolveE2EExecutorSuite } from "./suite.js";
 
 export const E2E_EXECUTOR_CONTEXT_ENV = "ROVARA_E2E_EXECUTOR_CONTEXT" as const;
@@ -167,14 +169,16 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   };
   // The credentials an agent step's trace is held to: the run's accounts, and every session value this process learned (the same ones the model channel's scan is told at a step's start).
   const agentRedactor = createCredentialRedactor(plan.accounts);
-  const sessionSecrets: string[] = [];
-  // A session value is told to the ledger (so evidence and captures that carry it are caught) and left for the parent (so the text it writes is scrubbed of it).
-  const registerSecret = (value: string): void => {
-    agentRedactor.addSessionSecret(value);
-    if (typeof value === "string" && value.length >= 8 && !sessionSecrets.includes(value)) sessionSecrets.push(value);
+  // A session value is told to the ledger (so evidence and captures that carry it are caught) and left for the parent (so the text it writes is scrubbed of it). Only a credential is told to the
+  // worker and makes a model-bound payload refused; an evidence-only value (a draft, a route) does neither (see session-secret-registry.ts).
+  const registry = createSessionSecretRegistry({ redactor: agentRedactor, onRegister: (value) => {
     ledger?.registerSessionSecret(value);
     appendFileSync(join(context.projectDir, E2E_EXECUTOR_SESSION_SECRETS_FILE), `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  };
+  } });
+  const { sessionSecrets } = registry;
+  const registerSecret = registry.register;
+  // Before every model call the channel client reads the browser's session values from this and tells the worker (MIDSTEPCOOKIE).
+  const sessionSync = createE2ESessionSyncSource({ register: registerSecret, known: () => sessionSecrets });
   const store = createExecutorSessionStore({ plan, registerSecret,
     onLoginFailed: (profileId) => appendFileSync(join(context.projectDir, E2E_EXECUTOR_LOGIN_FAILED_FILE), `${JSON.stringify(profileId)}\n`, { mode: 0o600 }),
     ...(context.cdpEndpoint ? { formLogin: createPlaywrightFormLoginDriver({ cdpEndpoint: context.cdpEndpoint, guard }) } : {}) });
@@ -192,15 +196,15 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const replayPlan = plan.replay;
   if (channelPlan !== undefined || replayPlan !== undefined) installRefusingE2EDefaultProvider();
   const agent = channelPlan === undefined ? null : (() => {
-    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId });
+    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, sessionSync, scan: registry.modelScan });
     const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
-    // The adapter's own scan covers what the worker's cannot: a session value learned during a step (the begin marker, sent once per step, carries only what was known then).
-    const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position, scan: (bytes) => agentRedactor.contains(bytes) });
+    // The adapter's own scan is the executor's second check; the worker's scan is told the browser's session values before every call by the client's sync (MIDSTEPCOOKIE).
+    const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position, scan: registry.modelScan });
     // The goals of the steps run so far: a trace's typed value that is text of one stays as it is, the ledger's rule (the runner writes a trace after its step has ended).
     const goals: string[] = [];
     const origin = declaration.originByApplicationId.find((item) => item.applicationId === launchContext.selectedTarget.applicationId)?.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN;
     const store = createE2EAgentCaptureStore({
-      scan: (bytes) => agentRedactor.contains(bytes),
+      scan: registry.modelScan,
       persist: (keyHash, bytes) => persistE2EAgentTrace(context.outDir, keyHash, bytes),
       valueKey: channelPlan.valueKey, goals: () => goals, origin,
     });
@@ -236,12 +240,13 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       // caught by the out scan. Best effort: a closed page has nothing to ask.
       const owned = ownedContexts.get(sessionRef);
       ownedContexts.delete(sessionRef);
+      sessionSync.detach(sessionRef);
       // The signed-out visitor has no credential, and what an application sets for a visitor (a visitor id, a cart) is not a secret: nothing of it is registered.
       if (owned && !store.isAnonymous(sessionRef)) {
         try {
           const kept = await owned.storageState();
           for (const cookie of kept.cookies) if (isSessionCookieSecret(cookie)) registerSecret(cookie.value);
-          for (const item of kept.origins) for (const entry of item.localStorage) if (isSessionStorageSecret(entry.value)) registerSecret(entry.value);
+          for (const item of kept.origins) for (const entry of item.localStorage) registerStorageEntry(registerSecret, entry);
         } catch { /* the context is gone */ }
       }
       const result = await store.close(sessionRef, signal);
@@ -299,15 +304,16 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         ownedContexts.set(sessionRef, browserContext);
         // A session cookie the application swaps in while the case runs is registered when its answer arrives.
         const anonymous = store.isAnonymous(sessionRef);
+        sessionSync.attach(sessionRef, browserContext, { anonymous });
         browserContext.on("response", (response) => {
           if (anonymous) return;
-          void response.headersArray().then((headers) => {
+          sessionSync.track(response.headersArray().then((headers) => {
             for (const header of headers) {
               if (header.name.toLowerCase() !== "set-cookie") continue;
               const issued = parseSetCookie(header.value);
               if (issued !== null && isSessionCookieSecret(issued)) registerSecret(issued.value);
             }
-          }, () => undefined);
+          }, () => undefined));
         });
         const page = browserContext.pages()[0];
         if (!page) throw new Error("the owned browser context has no page to identify");

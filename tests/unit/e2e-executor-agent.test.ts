@@ -14,6 +14,7 @@ import { agentTraceFilePath, createE2EAgentCaptureStore, persistE2EAgentTrace } 
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { createE2EAgentModelAdapter, E2EAgentModelError } from "../../packages/verifier/src/executor/agent-model-adapter.js";
 import { createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
+import { noSessionValues } from "../support/e2e-session-sync.js";
 import { createScriptedE2EInvoke } from "../../packages/worker/src/e2e-model-scripted.js";
 
 const RUN_ID = "7f1c2a4e-5b6d-4c8e-9f01-23456789abcd";
@@ -556,9 +557,13 @@ describe("the model adapter (Task 4.3b, test case 4)", () => {
       socketDir = mkdtempSync(join("/tmp", "rva-")); dirs.push(socketDir);
       const socketPath = join(socketDir, "m.sock");
       let hits = 0;
-      server = createServer((_request, response) => { hits += 1; response.writeHead(502, { "content-type": "application/json" }); response.end("{}"); });
+      server = createServer((request, response) => {
+        // The client syncs before the call (MIDSTEPCOOKIE); this socket accepts the sync and answers nothing useful to the call.
+        if (request.url === "/v1/sync") { response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify({ schemaVersion: "rovara-e2e-model-channel/v1", status: "ok", syncToken: "a".repeat(32), epoch: "0123456789abcdef" })); return; }
+        hits += 1; response.writeHead(502, { "content-type": "application/json" }); response.end("{}");
+      });
       await new Promise<void>((resolve) => server!.listen(socketPath, resolve));
-      const adapter = createE2EAgentModelAdapter({ client: createE2EModelChannelClient({ socketPath, runId: RUN_ID }), routeId: "r", position: () => ({ caseId: CASE_ID, stepIndex: 0 }) });
+      const adapter = createE2EAgentModelAdapter({ client: createE2EModelChannelClient({ socketPath, runId: RUN_ID, sessionSync: noSessionValues }), routeId: "r", position: () => ({ caseId: CASE_ID, stepIndex: 0 }) });
       const error = await adapter.doGenerate({ prompt: [{ role: "user", content: [{ type: "text", text: "Goal: x" }] }] }).catch((e: unknown) => e);
       expect(error).toMatchObject({ code: "channel-error", channelCode: "refused" });
       expect((error as { isRetryable?: unknown }).isRetryable).not.toBe(true);

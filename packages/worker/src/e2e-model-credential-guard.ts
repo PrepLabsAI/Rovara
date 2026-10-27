@@ -1,5 +1,6 @@
 import type { E2EModelChannelRequest } from "@agentx/contracts";
 import { e2eScannableEmailLocalPart, redactText } from "@agentx/contracts";
+import { e2eSecretSpellings } from "./e2e-secret-spellings.js";
 
 /**
  * The credential scan of the e2e model proxy (M1.4 Task 4.1). It runs on the prompt bytes before every provider call.
@@ -22,6 +23,11 @@ export interface E2ECredentialSet {
   emails: readonly string[];
   /** `Set-Cookie` values (or whole `name=value` lines) the executor reported for the run. */
   cookieValues: readonly string[];
+  /**
+   * Values the executor's session sync told the proxy (cookie values, tokens kept in storage), exactly as the browser holds them. Unlike `cookieValues` they are not split at an `=`:
+   * a stored value such as `theme=dark-high-contrast` is one value, not a `Set-Cookie` line.
+   */
+  sessionValues?: readonly string[];
 }
 
 export const MIN_SCANNABLE_SECRET_LENGTH = 6;
@@ -50,6 +56,8 @@ export interface E2ECredentialGuardOptions {
    * every later call instead.
    */
   onUnscannable?: "throw" | "latch";
+  /** The spellings of a value to scan for. Defaults to `e2eSecretSpellings`; the proxy passes the ones its sync ledger already computed, so a rebuild does not encode every value again. */
+  spellings?: (value: string) => readonly string[];
 }
 
 export interface E2ECredentialGuard {
@@ -65,14 +73,12 @@ export interface E2ECredentialGuard {
 
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-function secretVariants(values: readonly string[], label: string): string[] {
+function secretVariants(values: readonly string[], label: string, spellings: (value: string) => readonly string[]): string[] {
   const out = new Set<string>();
   for (const value of values) {
     if (value === "") continue;
     if (value.length < MIN_SCANNABLE_SECRET_LENGTH) throw new Error(`a ${label} is too short to scan for safely (under ${MIN_SCANNABLE_SECRET_LENGTH} characters)`);
-    out.add(value);
-    out.add(encodeURIComponent(value));
-    out.add(Buffer.from(value, "utf8").toString("base64"));
+    for (const form of spellings(value)) out.add(form);
   }
   return [...out];
 }
@@ -84,14 +90,16 @@ export function createE2ECredentialGuard(set: E2ECredentialSet, guardOptions: E2
     // A value that cannot be scanned is dropped here and, in latch mode, refuses every call; in throw mode it fails the start.
     const kept = latch ? values.filter((value) => value === "" || value.length >= MIN_SCANNABLE_SECRET_LENGTH) : values;
     if (latch && kept.length !== values.length) unscannable = true;
-    return secretVariants(kept, label);
+    return secretVariants(kept, label, guardOptions.spellings ?? e2eSecretSpellings);
   };
   const passwords = scanned(set.passwords, "password");
   const cookieSeeds = set.cookieValues.flatMap((line) => {
     const afterName = /^[^=;\s]+=([^;]+)/.exec(line)?.[1];
     return afterName !== undefined && afterName.length >= MIN_SCANNABLE_SECRET_LENGTH ? [line, afterName] : [line];
   });
-  const cookies = scanned(cookieSeeds, "cookie value");
+  const cookies = [...new Set([...scanned(cookieSeeds, "cookie value"), ...scanned(set.sessionValues ?? [], "session value")])];
+  // Longest first, so a longer spelling is replaced before a piece of it can be.
+  const scrubNeedles = [...passwords, ...cookies].sort((a, b) => b.length - a.length);
   const emails = [...new Set(set.emails.filter((email) => email !== ""))];
   // The same rule as the executor's redactor (`e2eScannableEmailLocalPart`): a short or word-like local part is ordinary page text and is not looked for on its own.
   const localParts = [...new Set(emails.flatMap((email) => e2eScannableEmailLocalPart(email) ?? []))];
@@ -119,7 +127,7 @@ export function createE2ECredentialGuard(set: E2ECredentialSet, guardOptions: E2
 
   function scrubText(text: string): string {
     let out = text;
-    for (const needle of [...passwords, ...cookies]) out = out.split(needle).join(PLACEHOLDER_SECRET);
+    for (const needle of scrubNeedles) out = out.split(needle).join(PLACEHOLDER_SECRET);
     for (const shape of SHAPES) out = out.replace(shape, PLACEHOLDER_SECRET);
     return redactText(redactIdentity(out).text);
   }
