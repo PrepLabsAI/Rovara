@@ -30,7 +30,7 @@ describe("faux workflow scripts", () => {
     const repositories = [{ repositoryId: "demo", directory }];
     const baseCommitSha = (await git("rev-parse", "HEAD")).stdout.trim();
     const candidate = await readCandidateRepositories([{ ...repositories[0]!, baseCommitSha }]);
-    const reports = await runWorkflowReviews({ operationId: "11111111-1111-4111-8111-111111111111", rootPath, model: FAUX_MODEL, candidate, repositories, piAdapter });
+    const reports = await runWorkflowReviews({ ruleFileBaseCommits: [], operationId: "11111111-1111-4111-8111-111111111111", rootPath, model: FAUX_MODEL, candidate, repositories, piAdapter });
     expect(reports.map((report) => [report.role, report.status])).toEqual([["CRITIC", "PASS"], ["SECURITY", "PASS"]]);
     expect(prompts).toHaveLength(2);
     const codeTurns = turns.filter((turn) => turn.role === "CODE");

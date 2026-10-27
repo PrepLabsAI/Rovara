@@ -538,7 +538,7 @@ function implementFinding(bundleDigest: string, fixProposal: Record<string, unkn
 }
 
 async function reviewWith(fixture: Awaited<ReturnType<typeof feedbackReviewFixture>>, responses: string[], prompts: string[] = [], artifacts: WorkerArtifact[] = []) {
-  return runWorkflowFeedbackReview({
+  return runWorkflowFeedbackReview({ ruleFileBaseCommits: [],
     operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
     taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
     candidate: fixture.candidate, repositories: fixture.repositories, bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],
@@ -569,7 +569,7 @@ describe("AI-generated PR feedback advisory", () => {
     const adapter: PiSessionAdapter = {
       create: async (input) => { sessionMode = input.workflowMode; return base.create(input); },
     };
-    const review = await runWorkflowFeedbackReview({
+    const review = await runWorkflowFeedbackReview({ ruleFileBaseCommits: [],
       operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
       taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest,
       rootPath: fixture.rootPath, model: FAUX_MODEL, candidate: fixture.candidate, repositories: fixture.repositories,
@@ -606,7 +606,7 @@ describe("AI-generated PR feedback advisory", () => {
         fileChanges: [{ repositoryId: "app", path: "missing.ts", operation: "MODIFY", change: "Add the missing guard." }],
         tests: [{ repositoryId: "app", path: "src.test.ts", operation: "ADD", behavior: "Check empty input." }] },
     };
-    const review = await runWorkflowFeedbackReview({
+    const review = await runWorkflowFeedbackReview({ ruleFileBaseCommits: [],
       operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
       taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
       candidate: fixture.candidate, repositories: fixture.repositories,
@@ -732,7 +732,7 @@ describe("AI-generated PR feedback advisory", () => {
         };
       },
     };
-    const review = await runWorkflowFeedbackReview({
+    const review = await runWorkflowFeedbackReview({ ruleFileBaseCommits: [],
       operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7, timeoutMs: 400,
       taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
       candidate: fixture.candidate, repositories: fixture.repositories, bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],
@@ -893,7 +893,7 @@ describe("checks a PR feedback fix makes wrong (0.2.12 live test)", () => {
     summary: `Replace the sentence with "${NEW}"`, fileChanges: [{ repositoryId: "app", path: "README.md", operation: "MODIFY", change: `Replace the sentence with "${NEW}"` }],
     tests: [], ...checks })] });
   async function review(fixture: Awaited<ReturnType<typeof readmeFixture>>, responses: string[], prompts: string[], checks: Parameters<typeof runWorkflowFeedbackReview>[0]["taskChecks"] | null = taskChecks) {
-    return runWorkflowFeedbackReview({
+    return runWorkflowFeedbackReview({ ruleFileBaseCommits: [],
       operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
       taskRequirements: "Add the Code of Conduct sentence to README.md.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
       candidate: fixture.candidate, repositories: fixture.repositories, bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],

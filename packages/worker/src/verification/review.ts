@@ -90,8 +90,8 @@ export async function runWorkflowFeedbackReview(input: {
    */
   taskChecks?: WorkflowFeedbackTaskChecks;
   artifactSink: ArtifactSink;
-  /** The broker's base commit per repository, for the reviewer's rule files; absent: the candidate's own base is used. */
-  ruleFileBaseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
+  /** The broker's base commit per repository, for the reviewer's rule files. Required: no caller can fall back to a base the agent could write. */
+  ruleFileBaseCommits: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   piAdapter?: PiSessionAdapter;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -146,7 +146,7 @@ export async function runWorkflowFeedbackReview(input: {
       input.onProgress?.("AgentX is independently reviewing the current PR feedback.");
       session = await createWorkspacePiSession({ rootPath: input.rootPath, model: input.model,
         workflowMode: "REVIEW", conversationId: randomUUID(), contextFilesAt: "base-commit",
-        baseCommits: input.ruleFileBaseCommits ?? withCandidateBase(input.repositories, input.candidate) }, input.piAdapter);
+        baseCommits: input.ruleFileBaseCommits }, input.piAdapter);
       const actualModel = session.getModel();
       provider = actualModel.provider;
       version = actualModel.modelId;
@@ -629,8 +629,8 @@ export async function runWorkflowReviews(input: {
   reviewFeedback?: WorkflowReviewFeedback;
   /** The exact review request note; absent from older broker invocations. Shown only as untrusted reviewer context. */
   reviewNote?: string;
-  /** The broker's base commit per repository, for the reviewers' rule files; absent: the candidate's own base is used. */
-  ruleFileBaseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
+  /** The broker's base commit per repository, for the reviewers' rule files. Required: no caller can fall back to a base the agent could write. */
+  ruleFileBaseCommits: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
   piAdapter?: PiSessionAdapter;
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -678,7 +678,7 @@ export async function runWorkflowReviews(input: {
         workflowMode: "REVIEW",
         conversationId: randomUUID(),
         contextFilesAt: "base-commit",
-        baseCommits: input.ruleFileBaseCommits ?? repositories,
+        baseCommits: input.ruleFileBaseCommits,
       }, input.piAdapter);
       const actualModel = session.getModel();
       provider = actualModel.provider;

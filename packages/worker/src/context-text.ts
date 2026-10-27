@@ -13,11 +13,11 @@ const HIDDEN_CHARACTERS = /[\p{Cf}\p{Cc}\p{Co}\p{Cn}\p{Cs}\p{Default_Ignorable_C
 
 /**
  * `text` without hidden characters, and how many were removed. Visible text, newlines and tabs are unchanged. A leading
- * byte-order mark and the carriage return of a CRLF line ending are plain file conventions: they are dropped, not counted.
+ * byte-order mark is dropped, and CRLF and a lone CR become a newline: file conventions, not counted.
  */
 export function inertContextText(text: string): { text: string; removed: number } {
   let removed = 0;
-  const cleaned = (text.startsWith("\uFEFF") ? text.slice(1) : text).replace(/\r\n/gu, "\n").replace(HIDDEN_CHARACTERS, (character) => {
+  const cleaned = (text.startsWith("\uFEFF") ? text.slice(1) : text).replace(/\r\n?/gu, "\n").replace(HIDDEN_CHARACTERS, (character) => {
     if (character === "\n" || character === "\t") return character;
     removed += 1;
     return "";
