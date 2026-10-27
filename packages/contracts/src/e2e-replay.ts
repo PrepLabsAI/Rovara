@@ -80,7 +80,7 @@ export type E2EReplayReason = (typeof E2E_REPLAY_REASONS)[number];
 export const E2E_REPLAY_STOP_CODES = ["typed-value-not-replayable", "replay-needs-model"] as const;
 
 /** The reasons the operator's request is refused before anything is started or recorded. */
-export const E2E_REPLAY_REFUSALS = ["replay-not-qualified", "replay-source-not-pass", "replay-no-recording", "replay-source-unavailable", "replay-in-progress", "replay-attempts-exhausted", "replay-task-closed"] as const;
+export const E2E_REPLAY_REFUSALS = ["replay-not-qualified", "replay-source-not-pass", "replay-no-recording", "replay-source-unavailable", "replay-in-progress", "replay-attempts-exhausted", "replay-task-closed", "replay-runtime-renewed"] as const;
 export type E2EReplayRefusal = (typeof E2E_REPLAY_REFUSALS)[number];
 
 /** The record of a replay: apart from the task, the broker's own verification of the replay's evidence and never a row a caller supplied. */

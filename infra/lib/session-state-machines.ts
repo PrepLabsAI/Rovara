@@ -15,6 +15,11 @@ export interface SessionStateMachineProps {
   /** Named install environment; absent for legacy deployments, as in app-level tagging. */
   env?: string;
   resourcePrefix: string;
+  /**
+   * AUTOREQUALIFY AR-4: the SSM parameter holding the AMI the test machine was qualified on. Workers
+   * launch from it once it exists (`/agentx/<env>/worker-qualified-ami`, broker/src/aws/worker-ami.ts).
+   */
+  workerAmiParameterName: string;
 }
 
 /** Health probes every 10 seconds, for up to 10 minutes. */
@@ -25,10 +30,18 @@ const STATE_WAIT_CHECKS = 60;
 /** Block device name the workspace volume attaches under; the boot script finds it by volume ID. */
 export const WORKSPACE_DEVICE = "/dev/sdf";
 
+/**
+ * An EC2 AMI ID, the pattern of WORKER_AMI_ID_PATTERN in packages/broker/src/aws/worker-ami.ts
+ * (infra does not import the broker; tests/contract/session-state-machines.test.ts keeps them equal).
+ */
+export const AMI_ID_PATTERN_SOURCE = "^ami-[0-9a-f]{8}([0-9a-f]{9})?$";
+const PARAMETER_NOT_FOUND = "Ssm.ParameterNotFoundException";
+
 /** Retries an idempotent call on any error: throttling and brief EC2 inconsistency are common. */
 const RETRY_IDEMPOTENT = [{ ErrorEquals: ["States.ALL"], IntervalSeconds: 2, MaxAttempts: 3, BackoffRate: 2 }];
 
 const ec2 = (action: string) => `arn:aws:states:::aws-sdk:ec2:${action}`;
+const ssm = (action: string) => `arn:aws:states:::aws-sdk:ssm:${action}`;
 
 function tags(props: SessionStateMachineProps, name: string, extra: Array<{ Key: string; Value: string }>) {
   return [
@@ -54,6 +67,35 @@ function step(props: SessionStateMachineProps, payload: Record<string, unknown>,
 /** Records the failure text for the cleanup path. */
 const toCleanup = { ErrorEquals: ["States.ALL"], Next: "Cleanup", Assign: { failure: "{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}" } };
 
+/** Launches the worker from the launch template; `pinned` also overrides its AMI with the qualified one. */
+function runInstance(props: SessionStateMachineProps, workspaceTags: Array<{ Key: string; Value: string }>, pinned: boolean): State {
+  return {
+    Type: "Task",
+    Resource: ec2("runInstances"),
+    Arguments: {
+      LaunchTemplate: { LaunchTemplateId: "{% $launchTemplateId %}", Version: "$Default" },
+      ...(pinned ? { ImageId: "{% $qualifiedAmi %}" } : {}),
+      MinCount: 1,
+      MaxCount: 1,
+      SubnetId: "{% $subnetId %}",
+      UserData: "{% $userData %}",
+      ClientToken: "{% $clientToken %}",
+      TagSpecifications: [{
+        ResourceType: "instance",
+        Tags: tags(props, `${props.resourcePrefix}-worker`, [...workspaceTags, { Key: "agentx:generation", Value: "{% $string($generation) %}" }]),
+      }],
+    },
+    Assign: {
+      instanceId: "{% $states.result.Instances[0].InstanceId %}",
+      privateIp: "{% $states.result.Instances[0].PrivateIpAddress %}",
+      waits: 0,
+    },
+    Retry: RETRY_IDEMPOTENT,
+    Catch: [toCleanup],
+    Next: "RecordInstance",
+  };
+}
+
 export function provisionerDefinition(props: SessionStateMachineProps): State {
   const workspaceTags = [{ Key: "agentx:workspace", Value: "{% $workspaceId %}" }];
   return {
@@ -72,6 +114,8 @@ export function provisionerDefinition(props: SessionStateMachineProps): State {
           volumeId: "{% $states.input.volumeId %}",
           volumeSizeGiB: "{% $states.input.volumeSizeGiB %}",
           volumeType: "{% $states.input.volumeType %}",
+          qualifiedAmi: null,
+          pinFallback: null,
           // The execution name: CreateVolume and RunInstances are idempotent per generation.
           clientToken: "{% 'ws-' & $states.input.workspaceId & '-gen-' & $string($states.input.generation) %}",
           expectNewVolume: false,
@@ -135,32 +179,31 @@ export function provisionerDefinition(props: SessionStateMachineProps): State {
       }, {
         Assign: { userData: "{% $states.result.Payload.userData %}" },
         Catch: [toCleanup],
-        Next: "RunInstance",
+        Next: "ReadQualifiedAmi",
       }),
-      RunInstance: {
+      // AUTOREQUALIFY AR-4: workers boot from the AMI the test machine was qualified on, so a renewal
+      // causes no kernel drift. The pin must never stop a worker from starting: no parameter yet (before
+      // the first automatic requalification), any read fault whatever its error name, and a value that is
+      // not an AMI ID all launch from the launch template's AMI as before. The last two record a fixed
+      // reason (pinFallback) in the execution, and the reconciler reports an unreadable pin.
+      ReadQualifiedAmi: {
         Type: "Task",
-        Resource: ec2("runInstances"),
-        Arguments: {
-          LaunchTemplate: { LaunchTemplateId: "{% $launchTemplateId %}", Version: "$Default" },
-          MinCount: 1,
-          MaxCount: 1,
-          SubnetId: "{% $subnetId %}",
-          UserData: "{% $userData %}",
-          ClientToken: "{% $clientToken %}",
-          TagSpecifications: [{
-            ResourceType: "instance",
-            Tags: tags(props, `${props.resourcePrefix}-worker`, [...workspaceTags, { Key: "agentx:generation", Value: "{% $string($generation) %}" }]),
-          }],
-        },
-        Assign: {
-          instanceId: "{% $states.result.Instances[0].InstanceId %}",
-          privateIp: "{% $states.result.Instances[0].PrivateIpAddress %}",
-          waits: 0,
-        },
-        Retry: RETRY_IDEMPOTENT,
-        Catch: [toCleanup],
-        Next: "RecordInstance",
+        Resource: ssm("getParameter"),
+        Arguments: { Name: props.workerAmiParameterName },
+        Assign: { qualifiedAmi: "{% $states.result.Parameter.Value %}" },
+        Retry: [{ ErrorEquals: [PARAMETER_NOT_FOUND], MaxAttempts: 0 }, ...RETRY_IDEMPOTENT],
+        Catch: [{ ErrorEquals: [PARAMETER_NOT_FOUND], Next: "RunInstance" }, { ErrorEquals: ["States.ALL"], Next: "QualifiedAmiReadFailed" }],
+        Next: "QualifiedAmiWellFormed",
       },
+      QualifiedAmiWellFormed: {
+        Type: "Choice",
+        Choices: [{ Condition: `{% $count($match($qualifiedAmi, /${AMI_ID_PATTERN_SOURCE}/)) > 0 %}`, Next: "RunInstancePinned" }],
+        Default: "QualifiedAmiMalformed",
+      },
+      QualifiedAmiReadFailed: { Type: "Pass", Assign: { qualifiedAmi: null, pinFallback: "qualified-ami-read-failed" }, Next: "RunInstance" },
+      QualifiedAmiMalformed: { Type: "Pass", Assign: { qualifiedAmi: null, pinFallback: "qualified-ami-malformed" }, Next: "RunInstance" },
+      RunInstance: runInstance(props, workspaceTags, false),
+      RunInstancePinned: runInstance(props, workspaceTags, true),
       RecordInstance: step(props, {
         action: "recordInstance",
         workspaceId: "{% $workspaceId %}",

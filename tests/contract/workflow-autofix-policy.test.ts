@@ -450,3 +450,17 @@ describe("AUTOFIX: the AGENTX actor", () => {
     expect(workflowAutoFixCounts(workflow.decisions)).toMatchObject({ sendBacksSincePlanApproval: 0, actions: 0 });
   });
 });
+
+describe("AUTOREQUALIFY: a worker on another kernel than the test machine is retried once, on a fresh worker", () => {
+  const drifted = (decisions: WorkflowDecision[] = [approval(1)]): WorkflowSnapshot => verify(incomplete("g1: runtime-environment-drifted"), { decisions });
+
+  it("retries once, then asks (the retry limit), instead of asking an administrator at once", () => {
+    expect(decide(drifted())).toEqual({ action: "RETRY", stage: "VERIFY", codes: ["runtime-environment-drifted"] });
+    expect(decide(drifted([approval(1), automatic(2, "AUTO_RETRY")]))).toEqual({ action: "ASK", reason: "retry-limit", codes: ["runtime-environment-drifted"] });
+  });
+
+  it("still asks for the codes only a person can fix", () => {
+    expect(decide(verify(incomplete("g1: runtime-expired")))).toMatchObject({ action: "ASK", reason: "needs-a-person" });
+    expect(decide(verify(incomplete("g1: model-environment-unsafe")))).toMatchObject({ action: "ASK", reason: "needs-a-person" });
+  });
+});

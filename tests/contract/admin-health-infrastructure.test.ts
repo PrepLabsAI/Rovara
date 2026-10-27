@@ -43,10 +43,13 @@ describe("the health route's grants (A13)", () => {
   // Issue 206: a DescribeAlarms call by name prefix is authorized against *, so the probe asks for
   // the environment's alarms by exact name (HEALTH_ALARM_SUFFIXES), authorized against each alarm's ARN.
   it("names every alarm a named app creates in the probe's list, and lists no alarm the app never creates (issue 206)", () => {
-    const stacks = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child));
-    const alarmNames = stacks.flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>))
+    const alarmNamesOf = (context: Record<string, unknown>) => buildAgentXApp({ agentxEnv: "live25d", ...context }).node.children.filter((child): child is Stack => Stack.isStack(child))
+      .flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>))
       .map((alarm) => alarm.Properties.AlarmName);
-    expect([...alarmNames].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.map((suffix) => `agentx-live25d-${suffix}`).sort());
+    const stacks = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child));
+    // The automatic renewal's alarms exist only where its CDK context is on (AR-2).
+    expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify")).map((suffix) => `agentx-live25d-${suffix}`).sort());
+    expect([...alarmNamesOf({ "agentx:autoRequalify": "enabled" })].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.map((suffix) => `agentx-live25d-${suffix}`).sort());
     expect(stacks.flatMap((stack) => Object.keys(Template.fromStack(stack).findResources("AWS::CloudWatch::CompositeAlarm")))).toEqual([]);
   }, 120_000);
 
@@ -122,6 +125,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/aws/workflow-e2e-grounding.ts",
       // The audit replay's record (M1.4 Task 4.6b) has the baseline record's expiry: 30 days after it was last written.
       "packages/broker/src/aws/workflow-e2e-replay.ts",
+      // The marker a project setup run leaves for the test machine renewal's drain (AUTOREQUALIFY AR-3) ends at the run's deadline and expires on it a day later.
+      "packages/broker/src/e2e/requalify-hold.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

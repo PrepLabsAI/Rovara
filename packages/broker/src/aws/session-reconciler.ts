@@ -9,6 +9,7 @@ import {
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
@@ -19,6 +20,8 @@ import { sweepStuckSetups } from "./stuck-setup.js";
 import { stuckCancelRetrier, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult, type StuckCancelWorker } from "./stuck-cancels.js";
 import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, type SlackThreadPlace, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
+import { isStaleWorkerAmi, readQualifiedWorkerAmi } from "./worker-ami.js";
+import { renewalAgeMetrics, readRenewalAgeDays } from "./reconciler-renewal-age.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
 export const GRACE_MS = 15 * 60_000;
@@ -26,11 +29,18 @@ export const GRACE_MS = 15 * 60_000;
 export const CLOSED_VOLUME_MS = 60 * 60_000;
 /** Consecutive failed /ping probes before a READY worker is replaced. */
 export const UNRESPONSIVE_PROBES = 3;
+/**
+ * AUTOREQUALIFY AR-4: a worker on another AMI than the pinned one is recycled only after it has been
+ * idle this long (the idle reaper's threshold), and at most this many per run (every 10 minutes), so a
+ * renewal rolls through the warm workers gradually instead of cold-starting them all at once.
+ */
+export const STALE_AMI_IDLE_MS = 5 * 60_000;
+export const MAX_STALE_AMI_RECYCLES_PER_RUN = 2;
 export const QUARANTINE_TAG = "agentx:quarantined";
 const WORKER_PORT = 8080;
 const PING_TIMEOUT_MS = 2_000;
 
-export interface InstanceView { instanceId: string; state: string; workspaceId?: string; launchedAt: string }
+export interface InstanceView { instanceId: string; state: string; workspaceId?: string; launchedAt: string; /** The AMI the instance runs. */ imageId?: string }
 export interface VolumeView { volumeId: string; state: string; workspaceId?: string; createdAt: string; quarantined: boolean }
 export type ExecutionStatus = "RUNNING" | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "ABORTED" | "PENDING_REDRIVE";
 
@@ -50,10 +60,12 @@ export interface ReconcilerReport {
   stuckCancels?: StuckCancelSweepResult;
   /** Issue 173: idle Slack tasks cancelled with nobody waiting; present only where the backstop is wired. */
   unwaitedTasks?: UnwaitedTaskSweepResult;
+  /** AUTOREQUALIFY AR-4: workspaces whose idle worker ran another AMI than the pinned one and was stopped; present only where the pin is wired. */
+  recycledStaleAmi?: string[];
 }
 
 export interface ReconcilerDependencies {
-  sessions: Pick<SessionManager, "get" | "listByState" | "markLost" | "recordPingFailure" | "clearPingFailures" | "requeueParked" | "markFailed" | "markDeleted" | "ensureSession">;
+  sessions: Pick<SessionManager, "get" | "listByState" | "markLost" | "recordPingFailure" | "clearPingFailures" | "requeueParked" | "claimStop" | "markFailed" | "markDeleted" | "ensureSession">;
   /** This environment's ec2-ebs instances that are not yet terminated. */
   instances: () => Promise<InstanceView[]>;
   /** This environment's ec2-ebs workspace volumes. */
@@ -78,6 +90,14 @@ export interface ReconcilerDependencies {
    * workspaces. Named environments only; absent in the legacy deployment and in tests that do not need it.
    */
   sweepUnwaitedTasks?: (workspaceIds: Iterable<string>, now: Date) => Promise<UnwaitedTaskSweepResult>;
+  /**
+   * AUTOREQUALIFY AR-4: the AMI the test machine was last qualified on (undefined before the first
+   * automatic requalification); rejects when the setting is unreadable. Workers idle on any other
+   * AMI are stopped, so the next dispatch provisions the pinned one. Absent in tests that do not need it.
+   */
+  qualifiedWorkerAmi?: () => Promise<string | undefined>;
+  /** ARGUARD: days since the last successful renewal of the test machine (undefined until its schedule was enabled once); absent where the renewal is not wired. */
+  renewalAgeDays?: (now: Date) => Promise<number | undefined>;
   /** Spec 025 A6: deletes failure and usage index days older than 30 days; absent in tests that do not need it. */
   expireIndexDays?: (now: Date) => Promise<{ deleted: number }>;
   now?: () => Date;
@@ -102,6 +122,19 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       orphanInstances: [], lostInstances: [], unresponsiveInstances: [], stuckProvisioning: [], restartedProvisioning: [],
       stuckDeleting: [], requeued: [], closedVolumesDeleted: [], quarantinedVolumes: [], stuckSetups: [],
     };
+    // AUTOREQUALIFY AR-4: read once per run. An unreadable setting recycles nothing this run and is
+    // counted; every other repair goes on.
+    let qualifiedAmi: string | undefined;
+    let qualifiedAmiReadFailed = false;
+    if (dependencies.qualifiedWorkerAmi !== undefined) {
+      report.recycledStaleAmi = [];
+      try {
+        qualifiedAmi = await dependencies.qualifiedWorkerAmi();
+      } catch (error) {
+        qualifiedAmiReadFailed = true;
+        log({ event: "reconciler.qualified_ami_unreadable", errorName: error instanceof Error ? error.name : "unknown" });
+      }
+    }
     const sessions = new Map<string, WorkspaceSession>();
     for (const state of LIVE_STATES) {
       for (const session of await dependencies.sessions.listByState(state)) sessions.set(session.workspaceId, session);
@@ -125,7 +158,7 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
     for (const session of sessions.values()) {
       switch (session.state) {
         case "READY": {
-          const worker = await reconcileReady(dependencies, session, instanceById, report, log);
+          const worker = await reconcileReady(dependencies, session, instanceById, report, log, now, qualifiedAmi);
           if (worker !== undefined) workers.set(session.workspaceId, worker);
           break;
         }
@@ -213,6 +246,7 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       }
     }
 
+    const renewalAge = await renewalAgeMetrics(dependencies.renewalAgeDays, new Date(now), log);
     dependencies.emit({
       ReconcilerOrphanInstances: report.orphanInstances.length,
       ReconcilerLostInstances: report.lostInstances.length,
@@ -224,8 +258,13 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       ReconcilerQuarantinedVolumes: report.quarantinedVolumes.length,
       ReconcilerStuckSetups: report.stuckSetups.length,
       ReconcilerStuckSetupErrors: sweepError === undefined ? 0 : 1,
+      ...(dependencies.qualifiedWorkerAmi === undefined ? {} : {
+        ReconcilerRecycledStaleAmi: report.recycledStaleAmi?.length ?? 0,
+        ReconcilerQualifiedAmiReadFailures: qualifiedAmiReadFailed ? 1 : 0,
+      }),
       ...stuckCancelMetrics,
       ...unwaitedMetrics,
+      ...renewalAge,
     });
     if (sweepError !== undefined) throw sweepError;
     return report;
@@ -293,6 +332,8 @@ async function reconcileReady(
   instances: Map<string, InstanceView>,
   report: ReconcilerReport,
   log: (entry: Record<string, unknown>) => void,
+  now: number,
+  qualifiedAmi?: string,
 ): Promise<StuckCancelWorker | undefined> {
   const instance = instances.get(session.instanceId!);
   if (instance === undefined || instance.state !== "running") {
@@ -321,6 +362,20 @@ async function reconcileReady(
   if ((session.waitingOutboxIds ?? []).length > 0) {
     const { requeued } = await dependencies.sessions.requeueParked(session.workspaceId);
     report.requeued.push(...requeued);
+  } else if (
+    status === "Healthy" && isStaleWorkerAmi(instance.imageId, qualifiedAmi)
+    && (report.recycledStaleAmi?.length ?? 0) < MAX_STALE_AMI_RECYCLES_PER_RUN
+    && now - Date.parse(session.lastActivityAt!) > STALE_AMI_IDLE_MS
+  ) {
+    // AUTOREQUALIFY AR-4: the recycle mark. The same READY -> STOPPING claim the idle reaper makes,
+    // so it holds only if nothing touched the session since it was read and the workspace has no
+    // operation in progress (a dispatch racing it always wins). The reaper terminates the instance
+    // and finishes the stop; the next dispatch provisions the pinned AMI. A busy or unprobed worker
+    // is left to finish, and is judged again on the next run.
+    if (await dependencies.sessions.claimStop(session)) {
+      report.recycledStaleAmi?.push(session.workspaceId);
+      log({ event: "reconciler.stale_ami_recycled", workspaceId: session.workspaceId, generation: session.generation, instanceId: instance.instanceId, imageId: instance.imageId, qualifiedAmi });
+    }
   }
   return status === "Healthy" ? "idle" : status === "HealthyBusy" ? "busy" : undefined;
 }
@@ -391,6 +446,7 @@ async function reconcileDeleting(
 const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration));
 const ec2 = new EC2Client(awsClientConfiguration);
+const ssm = new SSMClient(awsClientConfiguration);
 const sfn = new SFNClient(awsClientConfiguration);
 const tableName = process.env.STATE_TABLE_NAME ?? "";
 const ownFilters = () => [
@@ -486,6 +542,7 @@ export const handler = createReconcilerHandler({
             state: instance.State?.Name ?? "unknown",
             launchedAt: (instance.LaunchTime ?? new Date()).toISOString(),
             ...(workspaceId === undefined ? {} : { workspaceId }),
+            ...(instance.ImageId === undefined ? {} : { imageId: instance.ImageId }),
           });
         }
       }
@@ -543,6 +600,9 @@ export const handler = createReconcilerHandler({
   binding: (workspaceId) => workspaceBinding(documentClient, tableName, workspaceId),
   sweepStuckCancels: stuckCancelSweep(),
   sweepStuckSetups: (now) => sweepStuckSetups(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))),
+  // AUTOREQUALIFY AR-4: wired where the stack names the pin; a deployment without it behaves as before.
+  ...(process.env.WORKER_QUALIFIED_AMI_PARAMETER === undefined ? {} : { qualifiedWorkerAmi: () => readQualifiedWorkerAmi(ssm, process.env.WORKER_QUALIFIED_AMI_PARAMETER!) }),
+  renewalAgeDays: (now) => readRenewalAgeDays(documentClient, tableName, now),
   ...(backstop.state === "on" ? { sweepUnwaitedTasks: unwaitedTaskSweep() } : {}),
   ...(indexSweepWanted(process.env) ? { expireIndexDays: (now: Date) => expireIndexDays(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))) } : {}),
   emit(metrics) {

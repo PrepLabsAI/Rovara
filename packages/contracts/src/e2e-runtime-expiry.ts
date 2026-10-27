@@ -3,9 +3,12 @@ import { z } from "zod";
 /**
  * When a qualified browser and API runtime registration stops being good, and what an operator does about it (evaluation fix RUN-3).
  *
- * A registration lives at most seven days (`min(challenge + 30 d, qualifiedAt + 7 d)`) and is not good any more once the executor or worker image changes, and only an operator
- * running the qualification script renews it. Nothing renewed it on a schedule, so every project's browser and API checks stopped at once. `agentx doctor` and the TEST deploy check
- * now say so ahead of time, in these words, naming the expiry time and the exact command.
+ * A registration lives at most seven days (`min(challenge + 30 d, qualifiedAt + 7 d)`) and is not good any more once the executor or worker image changes. It used to be renewed only
+ * when an operator ran the qualification script, so every project's browser and API checks stopped at once when nobody did. `agentx doctor` and the TEST deploy check say so ahead of
+ * time, in these words, naming the expiry time and the exact command.
+ *
+ * AUTOREQUALIFY (AR-5): an installation with the automatic renewal (CDK context `agentx:autoRequalify`, deployed by the `requalify-infra` unit) renews the registration itself, starting
+ * 72 hours before it ends and checking daily, so a notice from an installation that has it means the renewal did not succeed. The script stays as the by-hand path.
  */
 
 /** A registration that expires within this long is warned about (a warning never fails a check). */
@@ -17,6 +20,12 @@ export const E2E_RUNTIME_EXPIRY_ERROR_MS = 24 * 3_600_000;
 export function e2eRuntimeRenewCommand(input: { env: string; profile: string }): string {
   return `npx tsx scripts/test-qualify-runtime.ts --env ${input.env} --profile ${input.profile} --apply`;
 }
+/** The owner's command that starts one automatic renewal now (TEST deploy tooling, `requalify-now` unit; the automatic renewal must be installed). */
+export function e2eRuntimeRequalifyNowCommand(input: { env: string; profile: string }): string {
+  return `npx tsx scripts/test-deploy.ts --env ${input.env} --profile ${input.profile} --only requalify-now --apply`;
+}
+/** Added to the full message by a caller that knows the automatic renewal is installed (the TEST deploy check); nobody else names its alarms. */
+export const E2E_RUNTIME_AUTO_RENEWAL_NOTE = "The automatic renewal is installed here and starts 72 hours before expiry, so this notice means it did not succeed: check the RuntimeRequalify alarms and the last renewal in this check.";
 /** The same command with the two values this caller cannot know left for the reader to fill in. */
 export const E2E_RUNTIME_GENERIC_RENEW_COMMAND = e2eRuntimeRenewCommand({ env: "<env>", profile: "<aws-profile>" });
 
@@ -28,9 +37,9 @@ export type E2ERuntimeExpiryNotice = { severity: "error" | "warning"; problem: s
  * `the web runtime`). Already expired and under 24 hours are `error` (the TEST deploy check fails on them; `agentx doctor` shows every notice as a warning); under 48 hours is `warning`.
  * An expiry that cannot be read is an error, never silence.
  */
-export function e2eRuntimeExpiryNotice(input: { subject: string; expiresAt: string; now: number; renewCommand?: string | undefined }): E2ERuntimeExpiryNotice | undefined {
+export function e2eRuntimeExpiryNotice(input: { subject: string; expiresAt: string; now: number; renewCommand?: string | undefined; note?: string | undefined }): E2ERuntimeExpiryNotice | undefined {
   const renewCommand = input.renewCommand ?? E2E_RUNTIME_GENERIC_RENEW_COMMAND;
-  const notice = (severity: "error" | "warning", problem: string): E2ERuntimeExpiryNotice => ({ severity, problem, renewCommand, message: `${problem}; renew it with: ${renewCommand}` });
+  const notice = (severity: "error" | "warning", problem: string): E2ERuntimeExpiryNotice => ({ severity, problem, renewCommand, message: `${problem}; renew it with: ${renewCommand}${input.note === undefined ? "" : `. ${input.note}`}` });
   const expiry = Date.parse(input.expiresAt);
   if (Number.isNaN(expiry)) return notice("error", `${input.subject} has an unreadable expiry ${input.expiresAt}`);
   const left = expiry - input.now;

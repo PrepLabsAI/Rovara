@@ -5,6 +5,7 @@ import { WorkflowSnapshotSchema, createWorkflowSnapshot, planQualityFinding, WOR
 import {
   NOT_CHECKED_SENTENCE, PlanSelfCheckRecordSchema, loadPlanSelfCheck, planSelfCheckKeyOf, readPlanSelfCheck,
 } from "../../packages/broker/src/developer/plan-self-check.js";
+import { NOT_TRIED_SENTENCES } from "../../packages/broker/src/developer/plan-check-tried.js";
 import { planCheckSummary } from "../../packages/broker/src/developer/plan-check-summary.js";
 import { structuredExtraLines, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { renderPlanDocument } from "../../packages/broker/src/aws/plan-page/render-plan.js";
@@ -48,11 +49,11 @@ describe("reading the stored self-check record (T5's contract)", () => {
   });
 
   it("is 'checked' with nothing to say for a checked plan with no findings and no notes", () => {
-    expect(readPlanSelfCheck(json(), SHA)).toEqual({ checked: true, sentences: [], tried: {} });
+    expect(readPlanSelfCheck(json(), SHA)).toEqual({ checked: true, sentences: [], tried: {}, notTried: {} });
   });
 
   it("reads no object, unparsable text, a record of another document and a not-checked record as 'not checked', never as 'no problems'", () => {
-    const notChecked = { checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {} };
+    const notChecked = { checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {}, notTried: {} };
     expect(NOT_CHECKED_SENTENCE).toBe("Not checked by AgentX's plan check.");
     expect(readPlanSelfCheck(undefined, SHA)).toEqual(notChecked);
     expect(readPlanSelfCheck("", SHA)).toEqual(notChecked);
@@ -107,6 +108,72 @@ describe("the direction of a check on the unchanged code", () => {
     const html = await renderPlanDocument({ anchor: "coding-plan", kind: "plan", version: 1, approved: false, current: true, plan, openWhatChanged: false });
     expect(html).toContain("should pass now and after the change");
     expect(html).toContain("should fail now and pass after the change");
+  });
+});
+
+describe("DRYMSG: what the card says of a check the dry run did not try, or tried with no expectation", () => {
+  const three = (expectOnBase?: Record<string, "pass" | "fail">) => backwardsPlan({
+    checks: { proposed: [
+      { id: "proposed-1", label: "Text is gone", command: { cwd: "repo/demo", executable: "grep", args: ["retry", "src/pay.ts"], timeoutSeconds: 60 } },
+      { id: "proposed-2", label: "Exits with 1", command: { cwd: "repo/demo", executable: "node", args: ["--eval", "process.exit(1)"], timeoutSeconds: 60 } },
+      { id: "proposed-3", label: "Unit tests", command: { cwd: "repo/demo", executable: "npx", args: ["vitest"], timeoutSeconds: 60 } },
+    ], proves: { "proposed-1": ["1"], "proposed-2": ["1"], "proposed-3": ["2"] }, ...(expectOnBase === undefined ? {} : { expectOnBase }) },
+  });
+
+  it("keeps the checks the dry run did not try, by class, apart from the ones it tried", () => {
+    const tried = [{ checkId: "proposed-1", class: "not-checked" }, { checkId: "proposed-2", class: "not-run" }, { checkId: "proposed-3", class: "failed" }];
+    const view = readPlanSelfCheck(json({ tried }), SHA);
+    expect(view.notTried).toEqual({ "proposed-1": "not-checked", "proposed-2": "not-run" });
+    expect(view.tried).toEqual({ "proposed-3": "failed" });
+    // A record that is not this document's, and one with nothing tried, give nothing.
+    expect(readPlanSelfCheck(json({ tried }), "b".repeat(64)).notTried).toEqual({});
+    expect(readPlanSelfCheck(json(), SHA).notTried).toEqual({});
+  });
+
+  it("names each untried check with its own fixed reason, and says nothing of one that was tried", () => {
+    const view = readPlanSelfCheck(json({ tried: [{ checkId: "proposed-1", class: "failed" }, { checkId: "proposed-2", class: "not-checked" }, { checkId: "proposed-3", class: "not-run" }] }), SHA);
+    const summary = planCheckSummary(three({ "proposed-1": "fail" }), { selfCheck: view });
+    expect(summary.checks[1]!.tried).toBe("not tried on current code: it needs tools the sandbox does not run");
+    expect(summary.checks[1]!.tried).toBe(NOT_TRIED_SENTENCES["not-checked"]);
+    expect(summary.checks[2]!.tried).toBe("not tried on current code: it ran out of time, was cancelled, or the sandbox could not start it");
+    expect(summary.checks[1]!.line).toContain('Check "Exits with 1" runs node --eval process.exit(1); proves claim 1; not tried on current code: it needs tools the sandbox does not run');
+    expect(summary.checks[2]!.line).toContain("; not tried on current code: it ran out of time");
+    expect(summary.checks[0]!.line).toContain("tried on current code: failed as expected");
+    expect(summary.checks[0]!.line).not.toContain("not tried");
+    // The card's lines carry them, so the owner can tell which check and why.
+    expect(summary.lines.filter((line) => line.includes("not tried on current code"))).toHaveLength(2);
+  });
+
+  it("says nothing of a try for a check with no record entry, and a result from the caller wins over a not-tried class", () => {
+    const view = readPlanSelfCheck(json({ tried: [{ checkId: "proposed-2", class: "not-checked" }] }), SHA);
+    const summary = planCheckSummary(three(), { selfCheck: view });
+    expect(summary.checks[0]).not.toHaveProperty("tried");
+    expect(planCheckSummary(three(), { selfCheck: view, triedOnCurrentCode: { "proposed-2": "failed" } }).checks[1]!.tried).toBe("tried on current code: failed, no expectation given");
+  });
+
+  it("says 'no expectation given' for a tried check whose plan has no expectOnBase, and keeps 'as expected' when it has one", () => {
+    const view = readPlanSelfCheck(json({ tried: [{ checkId: "proposed-1", class: "failed" }, { checkId: "proposed-2", class: "passed" }, { checkId: "proposed-3", class: "broken" }] }), SHA);
+    const without = planCheckSummary(three(), { selfCheck: view });
+    expect(without.checks[0]!.tried).toBe("tried on current code: failed, no expectation given");
+    expect(without.checks[1]!.tried).toBe("tried on current code: passed, no expectation given");
+    expect(without.checks[2]!.tried).toBe("tried on current code: could not run");
+    const withIt = planCheckSummary(three({ "proposed-1": "fail", "proposed-2": "fail" }), { selfCheck: view });
+    expect(withIt.checks[0]!.tried).toBe("tried on current code: failed as expected");
+    expect(withIt.checks[1]!.tried).toBe("tried on current code: passed, not as expected");
+  });
+
+  it("builds every sentence from the class alone: text a worker could put in the record reaches no line", () => {
+    // The record schema only takes the fixed classes, so a free-text class is not a record at all.
+    expect(readPlanSelfCheck(json({ tried: [{ checkId: "proposed-1", class: "node: command not found /secret/path" }] }), SHA)).toEqual({ checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {}, notTried: {} });
+    const view = readPlanSelfCheck(json({ tried: [{ checkId: "proposed-2", class: "not-checked" }, { checkId: "proposed-3", class: "not-run" }] }), SHA);
+    const text = JSON.stringify(planCheckSummary(three(), { selfCheck: view }).checks.map((check) => check.tried));
+    expect(text).toBe(JSON.stringify([null, NOT_TRIED_SENTENCES["not-checked"], NOT_TRIED_SENTENCES["not-run"]]));
+  });
+
+  it("shows an untried check on the task page too", async () => {
+    const view = readPlanSelfCheck(json({ tried: [{ checkId: "proposed-2", class: "not-checked" }] }), SHA);
+    const html = await renderPlanDocument({ anchor: "coding-plan", kind: "plan", version: 1, approved: false, current: true, plan: three(), openWhatChanged: false, selfCheck: view });
+    expect(html).toContain("not tried on current code: it needs tools the sandbox does not run");
   });
 });
 
@@ -180,7 +247,7 @@ describe("what the self-check found, on the task page", () => {
     for (const sentence of [uncovered.ownerSentence, waived.ownerSentence, "Proposed checks were not tried on the current code."]) expect(html).toContain(sentence);
     expect(html.indexOf(waived.ownerSentence)).toBeLessThan(html.indexOf(uncovered.ownerSentence));
     // A sentence is escaped, not trusted.
-    expect(await page({ checked: true, sentences: ["<script>alert(1)</script> found"], tried: {} })).not.toContain("<script>alert(1)</script>");
+    expect(await page({ checked: true, sentences: ["<script>alert(1)</script> found"], tried: {}, notTried: {} })).not.toContain("<script>alert(1)</script>");
   });
 
   it("says 'Not checked by AgentX's plan check.' for a plan that was not checked, and when the page was given no record at all", async () => {
@@ -226,7 +293,7 @@ describe("the loaded task page and the full-plan route read the record beside th
     expect(plans.find((entry) => entry.version === first.version)!.selfCheck).toMatchObject({ checked: true, sentences: [uncovered.ownerSentence] });
     // The second version has no record: not checked.
     expect(second.version).toBe(2);
-    expect(plans.find((entry) => entry.version === 2)!.selfCheck).toEqual({ checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {} });
+    expect(plans.find((entry) => entry.version === 2)!.selfCheck).toEqual({ checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {}, notTried: {} });
   });
 
   it("returns the same lines from the full-plan route, with the dry run's classes against the checks", async () => {

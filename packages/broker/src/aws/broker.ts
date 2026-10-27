@@ -306,6 +306,8 @@ import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from 
 import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
 import { applicationIntentDigest, applicationIntentWithAccountRefs, applicationRoundIntent, evaluateApplicationPlanApproval, type ApplicationAccountsInput, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
+import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
+import { ApplicationRuntimeRenewed, assertNoRequalifyHold, recycleDriftedWorker, rethrowAsDeferredIfHeld, requalifyHoldFence, replayPredatesRenewal, requalifyHoldActive, requalifySetupWorkRow, selectionChangedRefusal } from "../e2e/requalify-hold.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationAccountsRefusal, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationGroundingAdmission, buildApplicationReplayAdmission, groundingPlanDigest } from "../e2e/application-admission.js";
 import {
@@ -2016,6 +2018,7 @@ async function registerProject(
       }
       return respond(withoutKeys(record), false, preflight);
     } catch (error) {
+      await rethrowAsDeferredIfHeld(dependencies, error, Date.now()); // AUTOREQUALIFY: the start fence refused the setup run: say so, not "catalog conflict"
       if (!isConditional(error)) throw error;
       // A same-revision registration may have won concurrently. Validate the immutable record and
       // catalog before returning duplicate success; otherwise retry only a catalog/history advance.
@@ -2252,6 +2255,7 @@ async function createProjectSetupAdmissionRows(
       transportCorrelationId, endpoint: runtime.endpoint, expiresAt: runtime.expiresAt },
     ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}),
   };
+  await assertNoRequalifyHold(dependencies, Date.now()); // AUTOREQUALIFY: no new setup run while the test machine is being switched
   const executionBytes = Buffer.from(canonicalJson(executionObject), "utf8");
   const executionDigest = createHash("sha256").update(executionBytes).digest("hex");
   const executionRef = { key: `project-setup-executions/sha256/${executionDigest}.json`, sha256: executionDigest, byteLength: executionBytes.byteLength };
@@ -2287,7 +2291,8 @@ async function createProjectSetupAdmissionRows(
     workspaceId: transportCorrelationId, deploymentMode: "ec2-ebs", invocation, createdAt: now.toISOString() };
   const put = (item: Record<string, unknown>) => ({ Put: { TableName: dependencies.tableName, Item: item, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } });
   return { transactionItems: [put({ ...projectSetupExecutionKey(setupExecutionId), entityType: "PROJECT_SETUP_EXECUTION", ...execution }),
-    put({ ...projectSetupSessionKey(setupExecutionId), entityType: "PROJECT_SETUP_SESSION", ...session }), put(operation), put(outbox)] };
+    put({ ...projectSetupSessionKey(setupExecutionId), entityType: "PROJECT_SETUP_SESSION", ...session }), put(operation), put(outbox),
+    put(requalifySetupWorkRow(setupExecutionId, execution.deadlineAt)), requalifyHoldFence(dependencies.tableName, Date.now())] };
 }
 
 async function retryProjectSetupAsAdministrator(
@@ -2413,6 +2418,7 @@ async function retryProjectSetupAsAdministrator(
       && typeof duplicate.setupExecutionId === "string" && typeof duplicate.operationId === "string") {
       return { setupExecutionId: duplicate.setupExecutionId, operationId: duplicate.operationId, status: "QUEUED", duplicate: true };
     }
+    await rethrowAsDeferredIfHeld(dependencies, error, Date.now()); // AUTOREQUALIFY: the start fence refused the retry
     throw error;
   }
   return { setupExecutionId: String(nextExecution.setupExecutionId), operationId: String(nextOperation.operationId), status: "QUEUED", duplicate: false };
@@ -10748,12 +10754,14 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     // A fix for the pull requests already open is pushed to them by the same start, which sees they exist.
     let outcome: "STARTED" | "DUPLICATE" | "STALE" | "WAITING";
     if (item.kind === "CHECKS") {
+      if (await requalifyHoldActive(dependencies, Date.now())) return "DISPATCHED"; // AUTOREQUALIFY: a switch is in progress; the row stays due
       const readiness = await ensureWorkflowE2EComputeReadiness(dependencies, routeDependencies, item);
       if (readiness.status === "WAITING") return "DISPATCHED";
       if (readiness.status === "STALE") {
         await remove();
         return "STALE";
       }
+      if (await requalifyHoldActive(dependencies, Date.now())) return "DISPATCHED"; // checked again right before the round starts
       outcome = await startWorkflowE2EChecksDispatch(dependencies, routeDependencies, readiness.task, expected, caller);
       // The baseline round holds the workspace: the row stays, and the next pass (or the baseline's own result) tries again.
       if (outcome === "WAITING") return "DISPATCHED";
@@ -10773,6 +10781,8 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     await remove();
     return outcome === "STALE" ? "STALE" : "DISPATCHED";
   } catch (error) {
+    // AUTOREQUALIFY: a start refused by the hold fence inside its transaction surfaces as a busy workspace; while the hold stands that is a deferral, not a failure.
+    if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY" && await requalifyHoldActive(dependencies, Date.now()).catch(() => false)) return "DISPATCHED";
     if (error instanceof ApplicationPlanDefect) {
       // The approved plan can no longer run as written, which only a corrected plan fixes: the task goes back to plan review, where Request changes is the way on.
       try {
@@ -10913,6 +10923,8 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
       refreshTaskFeedback: (taskId) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
       workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
       workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+      // AUTOREQUALIFY: the one automatic retry that approves the plan again after a mere renewal of the test machine needs the plan check (the retry itself refuses any other re-approval).
+      validateWorkflowE2EApplicationPlan: workflowApplicationRouteDependencies(dependencies).validateWorkflowE2EApplicationPlan,
     }, caller, undefined, null);
     const deps: AutofixDependencies = {
       config, route, store: { documentClient: dependencies.documentClient, tableName: dependencies.tableName },
@@ -10932,6 +10944,7 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
         return exported.success && exported.data.status === "READY";
       },
       readArtifactText: async (key) => { const bytes = await readStoredBytes(dependencies, key, 64 * 1024 + 1); return bytes?.toString("utf8"); },
+      recycleWorker: (current) => recycleDriftedWorker(ec2Sessions, current.workspaceId),
       now: Date.now,
       log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
     };
@@ -10986,7 +10999,7 @@ async function requireApplicationSelectionStillCurrent(dependencies: AwsBrokerDe
     throw new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}${current.reason}`);
   }
   const unchanged = applicationSelectionStillCurrent(recorded.data, current.selection);
-  if (!unchanged.ok) throw new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}${unchanged.reason}`);
+  if (!unchanged.ok) throw selectionChangedRefusal(recorded.data, current.selection, unchanged.reason, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX);
   return current;
 }
 
@@ -11315,6 +11328,8 @@ async function startBaselineApplicationRound(
   } catch (error) {
     // The candidate goes on: its own dispatch makes the same checks and, for a plan that cannot run, blocks the workflow with the reason. The baseline only says it could not be checked.
     // A plan that is only AI navigation scenarios has nothing to run on the unchanged code (Ruling DD): that is said as its own reason, and it gates nothing.
+    // AUTOREQUALIFY: a start refused by the hold fence is a deferral (the dispatch row stays due), not a baseline that could not be checked.
+    if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY") && await requalifyHoldActive(dependencies, Date.now()).catch(() => false)) throw error;
     const reason = baselineStartFailureReason(error);
     console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_not_started", taskId: task.taskId, reason, errorName: error instanceof Error ? error.name : "unknown" }));
     return unavailable(reason);
@@ -11425,6 +11440,7 @@ async function startReplayApplicationRound(
   const refuse = (code: E2EReplayRefusal, detail: string) => agentXError(code === "replay-in-progress" ? "TASK_BUSY" : "CONFIG_INVALID", `${code}: ${detail}`);
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
   if (task.closedAt !== undefined) throw refuse("replay-task-closed", "the task is closed");
+  await assertNoRequalifyHold(store, Date.now()); // AUTOREQUALIFY: no replay starts while the test machine is being switched (the start transaction holds the same fence)
   const workflow = task.workflow;
   const qualified = workflow?.e2e?.required === true ? workflow.e2e.qualifiedRound : undefined;
   if (workflow === undefined || qualified === undefined || qualified.roundId !== sourceRoundId) throw refuse("replay-not-qualified", "that round is not the task's qualified round");
@@ -11466,6 +11482,7 @@ async function startReplayApplicationRound(
     if (canonicalApproval === undefined) throw applicationRoundRefusal("the approved plan's approval cannot be read");
     const intent = approved.plan.e2e;
     const current = await requireApplicationSelectionStillCurrent(dependencies, task, intent, artifact);
+    if (replayPredatesRenewal(source.admittedRuntimes, current.inputs.rows)) throw refuse("replay-runtime-renewed", E2E_OWNER_SENTENCES.replayRuntimeRenewed);
     const sourceOperation = await candidateSourceOperation(dependencies, task, candidate.digest);
     if (sourceOperation === undefined) throw applicationRoundRefusal(NO_COMMITTED_EXPORT_REASON);
     const stored = readyCandidateBuildSource(sourceOperation, candidate.digest);
@@ -11490,6 +11507,7 @@ async function startReplayApplicationRound(
         traces: source.traces.map((trace) => ({ caseId: trace.caseId, stepIndex: trace.stepIndex, keyHash: trace.keyHash, traceBase64: Buffer.from(trace.bytes).toString("base64"), binding: trace.binding })) } });
   } catch (error) {
     // The admission could not be built from what the task holds now: nothing was started or recorded. A fault that a later attempt can get past is the operator's to retry.
+    if (error instanceof ApplicationRuntimeRenewed) throw refuse("replay-runtime-renewed", E2E_OWNER_SENTENCES.replayRuntimeRenewed);
     if (error instanceof ApplicationDispatchRefusal || error instanceof ApplicationPlanDefect) throw refuse("replay-source-unavailable", error.message.replace(/\p{Cc}+/gu, " ").slice(0, 300));
     throw error;
   }
@@ -11527,7 +11545,7 @@ const REPLAY_REQUEST_GRACE_MS = 10 * 60_000;
  * definition of the round's route, and takes what the replay needs from that: the recordings its review kept and what each case showed. A refusal names the first thing that fails.
  */
 async function reverifyQualifiedRound(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, qualified: NonNullable<NonNullable<NonNullable<DeveloperTaskRecord["workflow"]>["e2e"]>["qualifiedRound"]>):
-  Promise<{ sourceCases: E2EReplaySourceCase[]; traces: readonly VerifiedAgentTrace[] } | { refusal: E2EReplayRefusal; detail: string }> {
+  Promise<{ sourceCases: E2EReplaySourceCase[]; traces: readonly VerifiedAgentTrace[]; admittedRuntimes: readonly E2ERegisteredRuntime[] } | { refusal: E2EReplayRefusal; detail: string }> {
   const unavailable = (detail: string) => ({ refusal: "replay-source-unavailable" as const, detail });
   try {
     const operation = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
@@ -11554,7 +11572,7 @@ async function reverifyQualifiedRound(dependencies: AwsBrokerDependencies, task:
     if (verified.verdict !== "PASS") return { refusal: "replay-source-not-pass" as const, detail: "the qualified round does not verify as PASS now" };
     const traces = verified.agentTraces ?? [];
     if (traces.length === 0) return { refusal: "replay-no-recording" as const, detail: "the qualified round left no recording to replay" };
-    return { sourceCases: replaySourceCasesOf(verified), traces };
+    return { sourceCases: replaySourceCasesOf(verified), traces, admittedRuntimes: admission.runtimeBindings.map((item) => item.value) };
   } catch (error) {
     if (error instanceof ApplicationDispatchRefusal) return unavailable(error.message.slice(0, 300));
     if (isTransientAwsFault(error)) throw error;

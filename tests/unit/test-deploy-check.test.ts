@@ -1141,7 +1141,7 @@ describe("the read-only reader (F6)", () => {
     expect([...CHECK_READ_VERBS].sort()).toEqual([
       "bedrock get-foundation-model-availability", "bedrock get-inference-profile",
       "cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources",
-      "dynamodb query", "dynamodb scan", "ec2 describe-instances", "iam get-role", "lambda get-function", "s3api get-object", "service-quotas list-service-quotas", "ssm get-parameter",
+      "dynamodb query", "dynamodb scan", "ec2 describe-instances", "ec2 describe-volumes", "iam get-role", "lambda get-function", "s3api get-object", "service-quotas list-service-quotas", "ssm get-parameter",
     ]);
   });
 
@@ -1817,5 +1817,143 @@ describe("gatherCheckFacts", () => {
     const original = fake.runner.aws.bind(fake.runner);
     fake.runner.aws = (args: readonly string[]) => (args[1] === "get-template" ? ok(template()) : original(args));
     await expect(gather(fake)).rejects.toThrow(/AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID/);
+  });
+  describe("the automatic renewal (AUTOREQUALIFY, AR-5)", () => {
+    const RENEWAL = "RuntimeRequalifyStepsAC5E645B";
+    const RUN = "0b6f2c3e-8f0e-4c55-9d2e-1a2b3c4d5e6f";
+    const runner = { instanceId: "i-0fcff78d50c71bc57", roleId: "AROAEXAMPLEROLE1234", transportCorrelationId: "6f9c0d3a-2b7e-4c41-8e0a-5d1f3b2a4c6d" };
+    const dynamoText = (value: unknown): unknown => typeof value === "string" ? { S: value } : typeof value === "number" ? { N: String(value) } : value === null ? { NULL: true }
+      : { M: Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, inner]) => [key, dynamoText(inner)])) };
+    const row = (fields: Record<string, unknown>) => (dynamoText(fields) as { M: unknown }).M;
+    const record = row({
+      pk: `RUNTIME_REQUALIFY_RUN#${RUN}`, sk: "RECORD", schemaVersion: 1, entityType: "RUNTIME_REQUALIFY_RUN", runId: RUN, environment: ENV, profileId: "linux-arm64-web-api-v1", requestedBySubject: `runtime-requalifier/${ENV}`,
+      switchedAt: "2026-10-26T06:30:00.000Z", generation: 3, featureRevisions: { web: 4, api: 4 }, proposalSha256: "a".repeat(64), challengeId: "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+      newRunner: runner, previousRunner: null, amiId: "ami-0123456789abcdef0", images: { worker: "w@sha256:1", executor: null },
+    });
+    const pointer = row({ pk: "E2E_MODEL_ROUTES", sk: "E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1", instanceId: runner.instanceId, requalifyRunId: RUN });
+    /** The fake with the renewal's Lambda in the deployed stack (and its renewal rows), or without it. */
+    function withRenewal(installed: boolean, rows: Record<string, unknown> = {}, scheduleState?: string) {
+      const fake = fakeAws();
+      const original = fake.runner.aws.bind(fake.runner);
+      fake.runner.aws = (args: readonly string[]): CommandResult => {
+        if (installed && args[0] === "cloudformation" && args[1] === "get-template" && args[args.indexOf("--stack-name") + 1] === `agentx-${ENV}-control-plane`) {
+          const deployed = brokerTemplate();
+          return ok({ ...deployed, Resources: {
+            ...deployed.Resources, [RENEWAL]: lambda("BrokerServiceRole1938BCC9"),
+            ...(scheduleState === undefined ? {} : { RuntimeRequalifyDailyCheckFBF4C861: { Type: "AWS::Scheduler::Schedule", Properties: { State: scheduleState } } }),
+          } });
+        }
+        if (installed && args[0] === "cloudformation" && args[1] === "list-stack-resources") return ok([["BrokerE1355FD6", "fn-broker"], [NOTIFIER, "fn-notifier"], ["SessionsSteps3B98DD2B", "fn-sessions"], [RENEWAL, "fn-renewal"]]);
+        if (args[0] === "dynamodb" && args[1] === "query") {
+          const values = JSON.parse(args[args.indexOf("--expression-attribute-values") + 1] ?? "{}") as { ":pk"?: { S?: string }; ":sk"?: { S?: string } };
+          const key = `${values[":pk"]?.S}|${values[":sk"]?.S}`;
+          if (key in rows) { fake.calls.push([...args]); return rows[key] === "DENIED" ? failed("AccessDeniedException: not authorized to perform: dynamodb:Query") : ok({ Items: rows[key] === undefined ? [] : [rows[key]] }); }
+          if (key.startsWith("RUNTIME_REQUALIFY")) throw new Error(`unexpected renewal read: ${key}`);
+        }
+        return original(args);
+      };
+      return fake;
+    }
+    const gatherRenewal = (fake: ReturnType<typeof fakeAws>) => gatherCheckFacts({
+      runner: fake.runner, region: "us-east-1", env: ENV,
+      headTemplate: () => template(),
+      builtZips: async (options) => ({ shas: { BrokerE1355FD6: "b", ...(options?.requalify === true ? { [RENEWAL]: "r" } : {}) }, sources: {} }),
+      headRevision: HEAD_REVISION,
+      changedSince: () => false,
+    });
+
+    it("reports a stack without the renewal as not installed, reads none of its rows, and does not look for its Lambda", async () => {
+      const fake = withRenewal(false);
+      const { facts } = await gatherRenewal(fake);
+      expect(facts.requalify).toEqual({ state: "not-installed", plannedGrants: [] });
+      expect(facts.builtZipShas).toEqual({ BrokerE1355FD6: "b" });
+      expect(facts.lambdaCodeShas).not.toHaveProperty(RENEWAL);
+      expect(evaluateTestDeployCheck({ ...facts, runnerFacts: { ...GOOD_RUNNER, deployedExecutorImage: ACCOUNT_IMAGE, executorImage: ACCOUNT_IMAGE }, now: NOW }).findings.filter((finding) => finding.kind === "stale-lambda" && finding.subject === RENEWAL)).toEqual([]);
+    });
+
+    it("reads the lock, the hold and the last renewal of an installed stack with query only, and counts the renewal's Lambda among those it compares", async () => {
+      const fake = withRenewal(true, {
+        "RUNTIME_REQUALIFY#linux-arm64-web-api-v1|LOCK": undefined,
+        "RUNTIME_REQUALIFY#linux-arm64-web-api-v1|HOLD": undefined,
+        "RUNTIME_REQUALIFY#linux-arm64-web-api-v1|SCHEDULE_ENABLED": undefined,
+        "E2E_MODEL_ROUTES|E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1": pointer,
+        [`RUNTIME_REQUALIFY_RUN#${RUN}|RECORD`]: record,
+      });
+      const { facts } = await gatherRenewal(fake);
+      expect(facts.requalify).toMatchObject({ state: "installed", lock: { state: "free" }, hold: "none", lastRun: { state: "found", runId: RUN, generation: 3, newRunner: runner.instanceId } });
+      expect(facts.lambdaCodeShas[RENEWAL]).toBe("sha-of-fn-renewal");
+      expect(facts.builtZipShas[RENEWAL]).toBe("r");
+      for (const call of fake.calls) expect(["cloudformation describe-stacks", "cloudformation get-template", "cloudformation list-stack-resources", "lambda get-function", "dynamodb query", "dynamodb scan", "ec2 describe-instances", "iam get-role", "s3api get-object", "bedrock get-inference-profile", "bedrock get-foundation-model-availability", "ssm get-parameter", "service-quotas list-service-quotas"], call.join(" ")).toContain(`${call[0]} ${call[1]}`);
+    });
+
+    describe("the daily schedule (ARGUARD)", () => {
+      const KEYS = { lock: "RUNTIME_REQUALIFY#linux-arm64-web-api-v1|LOCK", hold: "RUNTIME_REQUALIFY#linux-arm64-web-api-v1|HOLD", marker: "RUNTIME_REQUALIFY#linux-arm64-web-api-v1|SCHEDULE_ENABLED", pointer: "E2E_MODEL_ROUTES|E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1" };
+      const enabledRow = row({ pk: "RUNTIME_REQUALIFY#linux-arm64-web-api-v1", sk: "SCHEDULE_ENABLED", entityType: "RUNTIME_REQUALIFY_SCHEDULE_ENABLED", at: "2026-10-20T06:00:00.000Z" });
+      const gatherWith = async (fake: ReturnType<typeof fakeAws>) => {
+        const heads: unknown[] = [];
+        const result = await gatherCheckFacts({
+          runner: fake.runner, region: "us-east-1", env: ENV,
+          headTemplate: (options) => { heads.push(options); return template(); },
+          builtZips: async (options) => ({ shas: { BrokerE1355FD6: "b", ...(options?.requalify === true ? { [RENEWAL]: "r" } : {}) }, sources: {} }),
+          headRevision: HEAD_REVISION, changedSince: () => false,
+        });
+        const check = evaluateTestDeployCheck({ ...result.facts, runnerFacts: { ...GOOD_RUNNER, deployedExecutorImage: ACCOUNT_IMAGE, executorImage: ACCOUNT_IMAGE }, now: NOW });
+        return { ...result, heads, errors: check.findings.filter((finding) => finding.severity === "error" && finding.kind.startsWith("requalify")) };
+      };
+
+      it("is an error when the deployed schedule is DISABLED after it was enabled, and the head synth then keeps the schedule enabled", async () => {
+        const { facts, heads, errors } = await gatherWith(withRenewal(true, { [KEYS.lock]: undefined, [KEYS.hold]: undefined, [KEYS.pointer]: undefined, [KEYS.marker]: enabledRow }, "DISABLED"));
+        expect(facts.requalify).toMatchObject({ state: "installed", schedule: { deployed: "DISABLED", enabledOnce: { state: "yes", at: "2026-10-20T06:00:00.000Z" } } });
+        expect(errors).toEqual([expect.objectContaining({ kind: "requalify-schedule-off" })]);
+        expect(heads).toEqual([{ requalify: true, scheduleEnabled: true }]);
+      });
+
+      it("is quiet before the first enable, and the head synth leaves the schedule disabled", async () => {
+        const { facts, heads, errors } = await gatherWith(withRenewal(true, { [KEYS.lock]: undefined, [KEYS.hold]: undefined, [KEYS.pointer]: undefined, [KEYS.marker]: undefined }, "DISABLED"));
+        expect(facts.requalify).toMatchObject({ schedule: { deployed: "DISABLED", enabledOnce: { state: "no" } } });
+        expect(errors).toEqual([]);
+        expect(heads).toEqual([{ requalify: true }]);
+      });
+
+      it("is quiet while the schedule is enabled, and the head synth keeps it enabled even without the record (read from the deployed state)", async () => {
+        const { heads, errors } = await gatherWith(withRenewal(true, { [KEYS.lock]: undefined, [KEYS.hold]: undefined, [KEYS.pointer]: undefined, [KEYS.marker]: undefined }, "ENABLED"));
+        expect(errors).toEqual([]);
+        expect(heads).toEqual([{ requalify: true, scheduleEnabled: true }]);
+      });
+
+      it("warns, never stays quiet, when the schedule is off and its record cannot be read", async () => {
+        const { errors, facts } = await gatherWith(withRenewal(true, { [KEYS.lock]: undefined, [KEYS.hold]: undefined, [KEYS.pointer]: undefined, [KEYS.marker]: "DENIED" }, "DISABLED"));
+        expect(errors).toEqual([]);
+        expect((facts.requalify as { schedule: { enabledOnce: { state: string } } }).schedule.enabledOnce.state).toBe("unreadable");
+      });
+
+      it("reads nothing about the schedule where the renewal is not installed", async () => {
+        const { facts } = await gatherWith(withRenewal(false));
+        expect(facts.requalify).toEqual({ state: "not-installed", plannedGrants: [] });
+      });
+    });
+
+    it("adds the automatic-renewal note to an expiry finding only where the renewal is installed (M3)", () => {
+      const base = { headTemplate: {}, deployedTemplate: {}, lambdaCodeShas: {}, builtZipShas: {}, runnerFacts: undefined, now: NOW, catalogRows: [{ sk: "PROFILE#linux-arm64-web-api-v1#web", state: "READY", expiresAt: hoursFromNow(30) }] };
+      const expiring = (requalify?: Parameters<typeof evaluateTestDeployCheck>[0]["requalify"]) =>
+        evaluateTestDeployCheck({ ...base, ...(requalify === undefined ? {} : { requalify }) }).findings.find((finding) => finding.kind === "catalog-expiring")!.message;
+      expect(expiring()).not.toContain("RuntimeRequalify");
+      expect(expiring({ state: "not-installed" })).not.toContain("RuntimeRequalify");
+      expect(expiring({ state: "installed", lock: { state: "free" }, hold: "none", lastRun: { state: "none" } })).toContain("RuntimeRequalify");
+    });
+
+    it("reports an unreadable last renewal as a warning in the check, never as healthy", async () => {
+      const fake = withRenewal(true, {
+        "RUNTIME_REQUALIFY#linux-arm64-web-api-v1|LOCK": undefined,
+        "RUNTIME_REQUALIFY#linux-arm64-web-api-v1|HOLD": undefined,
+        "RUNTIME_REQUALIFY#linux-arm64-web-api-v1|SCHEDULE_ENABLED": undefined,
+        "E2E_MODEL_ROUTES|E2E_MODEL_CHECK_RUNNER#linux-arm64-web-api-v1": pointer,
+        [`RUNTIME_REQUALIFY_RUN#${RUN}|RECORD`]: "DENIED",
+      });
+      const { facts } = await gatherRenewal(fake);
+      const result = evaluateTestDeployCheck({ ...facts, runnerFacts: { ...GOOD_RUNNER, deployedExecutorImage: ACCOUNT_IMAGE, executorImage: ACCOUNT_IMAGE }, now: NOW });
+      expect(result.findings.filter((finding) => finding.kind.startsWith("requalify"))).toEqual([expect.objectContaining({ kind: "requalify-unreadable", severity: "warning" })]);
+      expect(result.findings.filter((finding) => finding.severity === "error" && finding.kind.startsWith("requalify"))).toEqual([]);
+    });
   });
 });

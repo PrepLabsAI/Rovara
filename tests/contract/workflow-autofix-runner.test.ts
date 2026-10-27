@@ -28,7 +28,7 @@ const task = (): DeveloperTaskRecord => ({
 } as unknown as DeveloperTaskRecord);
 
 type Baseline = { state: string; baseline?: unknown; reason?: string; deadlineAt?: string } | undefined;
-function deps(input: { baseline: Baseline; unknown: string[]; spent?: number; now?: number; sourceReady?: boolean }): { deps: AutofixDependencies; writes: Array<Record<string, unknown>> } {
+function deps(input: { baseline: Baseline; unknown: string[]; spent?: number; now?: number; sourceReady?: boolean; recycle?: (task: DeveloperTaskRecord) => Promise<unknown> }): { deps: AutofixDependencies; writes: Array<Record<string, unknown>> } {
   const writes: Array<Record<string, unknown>> = [];
   const record = input.baseline === undefined ? undefined : { pk: `DEVTASK#${TASK}`, sk: `E2E_BASELINE#${CONTRACT}`, entityType: "WORKFLOW_E2E_BASELINE", taskId: TASK, contractDigest: CONTRACT, purpose: "baseline",
     attempt: 1, requestedAt: "2026-10-25T09:00:00.000Z", ...input.baseline };
@@ -46,6 +46,7 @@ function deps(input: { baseline: Baseline; unknown: string[]; spent?: number; no
     ownerCancelledChecks: async () => false,
     baselineSourceReady: async () => input.sourceReady === true,
     readArtifactText: async () => undefined,
+    ...(input.recycle === undefined ? {} : { recycleWorker: input.recycle }),
     now: () => input.now ?? Date.parse("2026-10-25T10:05:00.000Z"),
     log: () => undefined,
   } };
@@ -179,5 +180,26 @@ describe("an unclear browser and API fault is settled by each UNKNOWN scenario's
     const stage: WorkflowSnapshot["stage"] = "PLAN_REVIEW";
     const other = { ...task(), workflow: { ...task().workflow!, stage } } as DeveloperTaskRecord;
     expect(await runWorkflowAutofix(d, other, { expectedRevision: 9, startedAt: "2026-10-25T10:00:00.000Z" })).toBe("STALE");
+  });
+});
+
+describe("AUTOREQUALIFY: the worker is recycled before the one retry of a kernel mismatch", () => {
+  const drifted = (t: DeveloperTaskRecord) => ({ ...t, workflow: { ...t.workflow!, blockReason: "admitted E2E evidence is incomplete or unknown (g1: runtime-environment-drifted)" } } as unknown as DeveloperTaskRecord);
+
+  it("stops the worker first, then retries the checks, in that order", async () => {
+    moves.retryChecks.mockClear();
+    const order: string[] = [];
+    moves.retryChecks.mockImplementationOnce(async () => { order.push("retry"); return "STARTED" as const; });
+    const { deps: d } = deps({ baseline: undefined, unknown: [], recycle: async () => { order.push("recycle"); } });
+    expect(await run(d, drifted)).toBe("RETRIED");
+    expect(order).toEqual(["recycle", "retry"]);
+  });
+
+  it("does not recycle for any other retry", async () => {
+    moves.retryChecks.mockClear();
+    const recycle = vi.fn(async () => undefined);
+    const { deps: d } = deps({ baseline: { state: "REQUESTED" }, unknown: ["a"], sourceReady: true, recycle });
+    expect(await run(d)).toBe("RETRIED");
+    expect(recycle).not.toHaveBeenCalled();
   });
 });

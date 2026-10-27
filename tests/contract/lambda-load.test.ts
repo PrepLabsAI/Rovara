@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { IMPORT_META_ALLOWLIST, checkLambdaBundles, classifyLoad, importMetaProblems, lambdaLoadError } from "../../scripts/lambda-load-check.js";
 import { CONTROL_PLANE_LAMBDAS } from "../../scripts/test-deploy.js";
+import { REQUALIFY_LAMBDA } from "../../scripts/test-deploy-requalify.js";
 
 const repoRoot = join(import.meta.dirname, "..", "..");
 const handlerSource = "export const handler = async () => ({ statusCode: 200 });\n";
@@ -39,6 +40,15 @@ describe("the real control-plane Lambdas (I-1 LAMBDALOAD gate)", () => {
     expect(report.ok).toBe(true);
   }, 300_000);
 
+  it("the automatic renewal's bundle (requalify-infra, and control-plane-code once installed) loads too (AR-5)", async () => {
+    const report = await checkLambdaBundles({ root: repoRoot, entries: [{ name: REQUALIFY_LAMBDA.unit, entry: REQUALIFY_LAMBDA.entry }] });
+    expect(report.results.map((result) => result.name)).toEqual([REQUALIFY_LAMBDA.unit]);
+    expect(report.problems).toEqual([]);
+    expect(report.ok).toBe(true);
+    const source = readFileSync(join(repoRoot, "scripts", "test-deploy.ts"), "utf8");
+    expect(source.slice(source.indexOf("export async function assertLambdasLoad"))).toContain('units.includes("requalify-infra") ? [REQUALIFY_LAMBDA.unit] : []');
+  }, 120_000);
+
   it("keeps the import.meta allow-list exact: the broker's sites are all listed, and no listed site is gone", async () => {
     // With an empty allow-list the broker's own warnings become the problems, so this proves both that detection works on a real bundle
     // and that the list names exactly those files with exactly those counts (a fixed site must leave the list).
@@ -56,7 +66,8 @@ describe("the real control-plane Lambdas (I-1 LAMBDALOAD gate)", () => {
     const zip = source.slice(source.indexOf("async function buildLambdaZip"));
     expect(zip.slice(0, zip.indexOf("deterministicZip"))).toContain("...LAMBDA_BUNDLE_OPTIONS");
     const main = source.slice(source.indexOf("export async function main"));
-    const gate = main.indexOf("await assertLambdasLoad(context, args.only)");
+    // The renewal's Lambda is part of the gate once the stack has it, and for the unit that adds it (requalify-infra).
+    const gate = main.indexOf("await assertLambdasLoad(context, args.only, renewalInstalled)");
     expect(gate).toBeGreaterThan(-1);
     expect(gate).toBeLessThan(main.indexOf("for (const step of steps) await applyStep(context, step)"));
   });

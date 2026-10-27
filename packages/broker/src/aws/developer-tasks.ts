@@ -220,6 +220,7 @@ import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeoplePropos
   submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
+import { isRuntimeRenewedBlock, requalifyHoldFence, requireRenewalOnlyReapproval } from "../e2e/requalify-hold.js";
 import { AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
 import {
   commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
@@ -2361,8 +2362,8 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       let reapproved: { selection: E2EApplicationSelectionRecord; conditions: TransactItems } | undefined;
       let reapproval: E2EApplicationReapproval | undefined;
       if (workflow.e2e.applicationSelection !== undefined && workflowApplicationRetryOffered(workflow)) {
-        // Approving the plan again against the runtime that is ready now is the owner's authority: Rovara's own retry never does it.
-        if (automatic !== undefined) throw agentXError("CONFIG_INVALID", "this block needs the owner to approve the plan again; it is not retried automatically");
+        // Approving the plan again against the runtime that is ready now is the owner's authority: Rovara's own retry never does it, except after a mere renewal of the test machine (AUTOREQUALIFY).
+        if (automatic !== undefined && !isRuntimeRenewedBlock(workflow.blockReason)) throw agentXError("CONFIG_INVALID", "this block needs the owner to approve the plan again; it is not retried automatically");
         const planArtifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
         const intent = (await approvedCodingPlan(deps, workflow)).e2eIntent;
         if (planArtifact === undefined || workflow.e2e.contractDigest !== planArtifact.sha256 || intent?.schemaVersion !== 2) {
@@ -2372,8 +2373,9 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
           throw agentXError("RUNTIME_UNAVAILABLE", "the plan cannot be approved again here: the check against the approved setup and the ready runtimes is not installed");
         }
         reapproved = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: planArtifact.id, sha256: planArtifact.sha256 }, reapproval: true });
+        if (automatic !== undefined) requireRenewalOnlyReapproval(workflow.e2e.applicationSelection, reapproved.selection);
         const accountChanges = e2eApplicationAccountChanges(workflow.e2e.applicationSelection, reapproved.selection);
-        reapproval = { requestId: request.requestId, actorId: access.actorId, reason: request.instructions.slice(0, 500), at: receivedAt,
+        reapproval = { requestId: request.requestId, actorId: retryActorId, reason: request.instructions.slice(0, 500), at: receivedAt,
           previous: e2eApplicationSelectionFingerprint(workflow.e2e.applicationSelection), current: e2eApplicationSelectionFingerprint(reapproved.selection),
           ...(accountChanges.length === 0 ? {} : { accounts: accountChanges }) };
       }
@@ -3345,6 +3347,7 @@ export async function startTaskWorkflowE2EChecksFromSystem(
       receivedAt, finishedAt: iso(deps), request: "Run admitted E2E verification", response: `Broker-admitted E2E CHECKS started as operation ${operation.id}.`, operationId: operation.id,
     })),
     ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+    requalifyHoldFence(deps.tableName, deps.now()), // AUTOREQUALIFY: no round starts once the test machine is being switched
   ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission,
     readiness: workflowSelectedChecks(workflow.checkPolicy).map((check) => check.command), ...taskBaseOption(task, next) });
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
@@ -3394,6 +3397,7 @@ export async function startTaskWorkflowE2EBaselineFromSystem(
     })),
     ...extra,
     ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+    requalifyHoldFence(deps.tableName, deps.now()), // AUTOREQUALIFY: no round starts once the test machine is being switched
   ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission, readiness: [] });
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
@@ -3443,6 +3447,7 @@ export async function startTaskWorkflowE2EGroundingFromSystem(
     })),
     ...extra,
     ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+    requalifyHoldFence(deps.tableName, deps.now()), // AUTOREQUALIFY: no round starts once the test machine is being switched
   ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission, readiness: [] });
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
@@ -3492,6 +3497,7 @@ export async function startTaskWorkflowE2EReplayFromSystem(
     })),
     ...extra,
     ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+    requalifyHoldFence(deps.tableName, deps.now()), // AUTOREQUALIFY: no round starts once the test machine is being switched
   ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission, readiness: [] });
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
@@ -3537,6 +3543,9 @@ export function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: bo
       // A block of a browser and API round names its own way on: new code does not fix a runtime that needs qualifying or a selection that needs approving again.
       if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true) {
         return { status: "The browser and API checks can't run on the runtime as it is now", nextStep: `An administrator must qualify the runtime again; then retry the checks, or close the task ${inSlack}.` };
+      }
+      if (isRuntimeRenewedBlock(workflow.blockReason)) {
+        return { status: "The test machine was renewed; the approved browser and API checks need approving again", nextStep: `Retry the checks to approve the plan again against the renewed machine, or close the task ${inSlack}.` };
       }
       if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) === true) {
         return { status: "The approved browser and API checks no longer match the test accounts", nextStep: `The test accounts changed; approve the checks again by retrying them, or close the task ${inSlack}.` };

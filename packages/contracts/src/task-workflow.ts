@@ -123,6 +123,12 @@ function evidenceCandidateCodes(blockReason: string | undefined): string[] {
 }
 /** The approved plan itself can no longer be approved (portable criteria, a target with no source-owned identity): the task goes back to plan review, where Request changes is the way on. */
 export const WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX = "The approved browser and API plan can no longer run as written. Request changes and submit a corrected plan before coding resumes. Why: ";
+/**
+ * AUTOREQUALIFY (AR-3): the approved selection differs from the runtime rows READY now only because the test machine was renewed (the same profile, binding and capabilities at a newer
+ * generation), with the plan, setup, targets and test accounts unchanged. Unlike the other selection changes, Rovara's own retry (AUTOFIX, once) approves the plan again against the renewed
+ * rows; the owner's retry does the same. It is a block reason prefix so that the policy and the page can tell it apart from a change that needs a person.
+ */
+export const WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX = "The test machine was renewed, so the approved browser and API checks need approving again against it. Retry the checks to do that. What changed: ";
 export const WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX = "The approved browser and API checks can no longer run as approved. Retry the checks to approve the plan again against what is ready now. What changed: ";
 /**
  * A test account the plan was approved with has a newer registered definition (the setup was approved again, or the definition expired and was written again). The way on is
@@ -188,7 +194,7 @@ export const WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED = "pushing a reviewed 
 export function workflowApplicationRetryOffered(workflow: { stage: string; state: string; blockReason?: string | undefined;
   e2e?: { required?: boolean | undefined; applicationSelection?: unknown } | undefined }): boolean {
   return workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined
-    && [WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX]
+    && [WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX]
       .some((prefix) => workflow.blockReason?.startsWith(prefix) === true);
 }
 
@@ -1893,7 +1899,7 @@ export function workflowSendBackOffered(workflow: {
     if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.regressionFound) return true;
     // Blocks that only an administrator qualifying the runtime, or approving the plan again, can fix: new code cannot, even for a task with no checks.
     if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true
-      || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) === true) return false;
+      || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) === true || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX) === true) return false;
     // A required browser and API round that could not be admitted from this candidate (its build source or inputs are unusable): only new code can fix that.
     if (workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX) === true) return true;
     // A required round whose groups ended with codes: new code fixes it when at least one group ended with a code the candidate causes (it did not build, stopped at start, never
@@ -2038,7 +2044,8 @@ export function returnWorkflowToImplementationAutomatically(
     throw new WorkflowTransitionError("only blocked checks or reviews are sent back to coding automatically");
   }
   if ((current.pullRequests?.length ?? 0) > 0) throw new WorkflowTransitionError("a pull request is already open for part of this change; a person decides what happens next");
-  if (personOnlyBlock(current.blockReason)) throw new WorkflowTransitionError("this block needs a person; new code does not fix it");
+  // A renewed test machine is fixed by approving the plan again (a retry), never by new code.
+  if (personOnlyBlock(current.blockReason) || current.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX) === true) throw new WorkflowTransitionError("this block needs a person; new code does not fix it");
   if (current.decisions.length >= 100) throw new WorkflowTransitionError("workflow decision history is full");
   const counts = workflowAutoFixCounts(current.decisions);
   if (counts.sendBacksSincePlanApproval >= WORKFLOW_AUTO_SEND_BACK_LIMIT) throw new WorkflowTransitionError("the automatic send back limit for this plan is reached");

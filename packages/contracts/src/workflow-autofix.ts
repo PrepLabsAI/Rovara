@@ -1,7 +1,7 @@
 import { E2E_PROJECT_CHECK_ID } from "./e2e.js";
 import {
   E2E_APPLICATION_SEND_BACK_CODES, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX, WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX,
-  WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_AUTO_ACTION_LIMIT,
+  WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_AUTO_ACTION_LIMIT,
   WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_AUTO_RETRY_LIMIT, WORKFLOW_AUTO_SEND_BACK_LIMIT, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
   WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, blockingFindings, workflowApplicationEvidenceCodes, workflowAutoFixCounts, workflowAutoSpendRefusal, workflowCheckResultBroken,
   type WorkflowAutoSpend, type WorkflowSnapshot,
@@ -32,6 +32,8 @@ export const AUTO_FIX_CODES = [
   // Transient: Rovara's side or the environment's, which a retry may fix.
   "deadline-exceeded", "executor-failed", "executor-result-mismatch", "mock-unavailable", "model-channel-unavailable", "cancelled", "evidence too large",
   "check-runner-failed", "check-not-started", "review-not-run", "review-run-failed", "provider-outage", "runner-busy",
+  // AUTOREQUALIFY: the test machine was renewed, which only moves the approved selection to the new rows (one automatic retry approves it again).
+  "runtime-renewed",
   // A person must act.
   "runtime-expired", "runtime-environment-drifted", "model-environment-unsafe", "login-failed", "model-route-changed-reapprove", "agent-route-not-approved", "model-route-not-tested",
   "runtime-unusable", "selection-changed", "accounts-changed", "plan-not-approvable", "history-rewritten", "cancelled-by-owner", "check-broken", "fails-on-original-code",
@@ -42,9 +44,11 @@ export const AUTO_FIX_CODES = [
 export type AutoFixCode = (typeof AUTO_FIX_CODES)[number];
 
 /** Group codes that are Rovara's or the environment's, and that a retry may fix. `cancelled` is only transient when the owner did not cancel (facts). */
-export const AUTO_FIX_TRANSIENT_GROUP_CODES = ["deadline-exceeded", "executor-failed", "executor-result-mismatch", "mock-unavailable", "model-channel-unavailable", "cancelled", "evidence too large"] as const;
+export const AUTO_FIX_TRANSIENT_GROUP_CODES = ["deadline-exceeded", "executor-failed", "executor-result-mismatch", "mock-unavailable", "model-channel-unavailable", "cancelled", "evidence too large",
+  // AUTOREQUALIFY (AR-3): the task worker and the test machine were on different kernels. Rovara recycles the worker (it comes back on the qualified image) and retries once; a second time asks.
+  "runtime-environment-drifted"] as const;
 /** Group codes only a person (an administrator, the project's setup) can fix. */
-export const AUTO_FIX_PERSON_GROUP_CODES = ["runtime-expired", "runtime-environment-drifted", "model-environment-unsafe", "login-failed", "model-route-changed-reapprove", "agent-route-not-approved", "model-route-not-tested"] as const;
+export const AUTO_FIX_PERSON_GROUP_CODES = ["runtime-expired", "model-environment-unsafe", "login-failed", "model-route-changed-reapprove", "agent-route-not-approved", "model-route-not-tested"] as const;
 
 /** Why Rovara asks instead of acting. The limit reasons name the limit the ask card tells the person about. */
 export const AUTO_FIX_ASK_REASONS = [
@@ -152,6 +156,7 @@ function verifySignals(workflow: WorkflowSnapshot, facts: AutoFixFacts): Signal[
   const current = workflow.candidate?.digest;
   if (reason === WORKFLOW_HISTORY_REWRITTEN_MESSAGE) signals.push(person("history-rewritten"));
   else if (reason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true) signals.push(person("runtime-unusable"));
+  else if (reason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX) === true) signals.push(workflow.e2e?.required === true ? transient("runtime-renewed") : person("unreadable"));
   else if (reason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true) signals.push(person("selection-changed"));
   else if (reason?.startsWith(WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX) === true) signals.push(person("accounts-changed"));
   else if (reason?.startsWith(WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX) === true) signals.push(person("plan-not-approvable"));

@@ -7,10 +7,11 @@ import {
   runtimeInstallationProposalSha256, type RuntimeInstallChallenge, type RuntimeInstallationProposal,
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_RUNTIME_PROFILE_ID, WebApiRuntimeInstallProposalSchema, webApiRuntimeInstallProposalSha256, type WebApiRuntimeInstallProposal,
-  agentXError,
+  agentXError, REQUALIFIER_ISSUER,
 } from "@agentx/contracts";
 import { parseE2EReport, verifyWebApiProbeRecord } from "@agentx/verifier";
 import type { AuthenticatedIdentity } from "../auth.js";
+import type { TransactItems } from "./developer-task-actions.js";
 import { projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
 import { e2eFeatureVerifierKey, e2eWebApiRuntimeRecords, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, E2EFeatureVerifierRecordSchema } from "./e2e-feature-verifier-catalog.js";
 import { e2eRegisteredRuntimeKey } from "./e2e-runtime-readiness.js";
@@ -53,12 +54,37 @@ function challengeKey(challengeId: string): { pk: string; sk: string } { return 
 function evidenceKey(proposalSha256: string): { pk: string; sk: string } { return { pk: `RUNTIME_INSTALLATION_EVIDENCE#${proposalSha256}`, sk: "EVIDENCE" }; }
 function runtimeEvidenceObjectKey(proposalSha256: string): string { return `runtime-installations/sha256/${proposalSha256}.json`; }
 
+/**
+ * The seams below are exported for the AUTOREQUALIFY wrapper, so they judge authority themselves: an administrator claim, or the internal
+ * service identity (`rovara:internal`, which the JWT authenticator cannot produce because it pins the configured issuer) when the caller
+ * brings the narrowing the wrapper adds (`scoped`). Anything else, including the service identity without that narrowing, is refused.
+ */
+function assertSeamAuthority(identity: AuthenticatedIdentity, scoped: boolean): void {
+  if (identity.isAdministrator) return;
+  if (identity.issuer === REQUALIFIER_ISSUER && scoped) return;
+  throw agentXError("FORBIDDEN", "administrator claim is required");
+}
+
 export async function issueRuntimeInstallChallenge(
   deps: RuntimeInstallationDependencies,
   identity: AuthenticatedIdentity,
   requestInput: unknown,
 ): Promise<RuntimeInstallChallenge> {
   assertAdmin(identity);
+  return issueChallengeAs(deps, identity, requestInput);
+}
+
+/**
+ * Issues a challenge for an identity whose authority the caller has already established (the administrator claim above, or the narrow
+ * AUTOREQUALIFY wrapper in `runtime-requalify.ts`). `rowExtras` are stored on the challenge row only; they are not part of the challenge digest.
+ */
+export async function issueChallengeAs(
+  deps: RuntimeInstallationDependencies,
+  identity: AuthenticatedIdentity,
+  requestInput: unknown,
+  rowExtras: Readonly<Record<string, string>> = {},
+): Promise<RuntimeInstallChallenge> {
+  assertSeamAuthority(identity, Object.keys(rowExtras).length > 0);
   const request = RuntimeInstallChallengeRequestSchema.parse(requestInput);
   if (!knownProfile(request.profileId)) throw agentXError("CONFIG_INVALID", "runtime profile is not enabled for this catalog");
   const issuedAtMs = nowFor(deps);
@@ -73,7 +99,7 @@ export async function issueRuntimeInstallChallenge(
   });
   const digest = runtimeInstallChallengeDigest(challenge);
   await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: {
-    ...challengeKey(id), entityType: "RUNTIME_INSTALL_CHALLENGE", state: "ISSUED", challengeDigest: digest,
+    ...rowExtras, ...challengeKey(id), entityType: "RUNTIME_INSTALL_CHALLENGE", state: "ISSUED", challengeDigest: digest,
     secretSha256: sha(Buffer.from(challenge.challengeSecret, "base64")), issuedAt: challenge.issuedAt, expiresAt: challenge.expiresAt,
     issuedByOwnerKey: identity.ownerKey, issuedBySubject: identity.subject,
     ttl: Math.ceil(Date.parse(challenge.expiresAt) / 1000),
@@ -242,7 +268,7 @@ function isWebApiProposal(proposal: unknown): boolean {
 }
 
 /** Reads an existing per-kind row's revision and the worker generation it was qualified on. */
-async function readWebApiCatalogRow(deps: RuntimeInstallationDependencies, key: { pk: string; sk: string }): Promise<{ revision: number; generation: number } | undefined> {
+export async function readWebApiCatalogRow(deps: Pick<RuntimeInstallationDependencies, "documentClient" | "tableName">, key: { pk: string; sk: string }): Promise<{ revision: number; generation: number } | undefined> {
   const result = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }));
   const item = result.Item as Record<string, unknown> | undefined;
   if (item === undefined) return undefined;
@@ -283,11 +309,22 @@ function evidenceRefusal(proposal: unknown, issues: readonly { path: readonly Pr
  * alone registers nothing. The two per-kind v2 rows, the evidence pointer and the one-use challenge are one conditional transaction,
  * and neither row may move to an older worker generation than the one already registered.
  */
-async function registerWebApiRuntimeInstallation(
+/** What a caller that has already established its own authority may add to the web/API registration; the human path passes nothing. */
+export type WebApiRegistrationHooks = {
+  /** Called after the proposal, its evidence and the challenge have been judged and before anything is written; throw to refuse. */
+  authorize?: (context: { proposal: WebApiRuntimeInstallProposal; before: { web: { revision: number; generation: number } | undefined; api: { revision: number; generation: number } | undefined };
+    challengeRow: Readonly<Record<string, unknown>> }) => void | Promise<void>;
+  /** Extra writes that commit or fail with the paired rows, the evidence pointer and the challenge consumption. */
+  extraWrites?: (context: { proposal: WebApiRuntimeInstallProposal; proposalSha256: string; revisions: { web: number; api: number }; transactAt: number }) => TransactItems;
+};
+
+export async function registerWebApiRuntimeInstallation(
   deps: RuntimeInstallationDependencies,
   identity: AuthenticatedIdentity,
   request: { proposal: unknown; proposalSha256: string },
+  hooks: WebApiRegistrationHooks = {},
 ): Promise<WebApiRuntimeRegistrationResult> {
+  assertSeamAuthority(identity, hooks.authorize !== undefined);
   const parsed = WebApiRuntimeInstallProposalSchema.safeParse(request.proposal);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", `runtime proposal is not a READY web/API qualification: ${evidenceRefusal(request.proposal, parsed.error.issues) ?? parsed.error.issues[0]?.message ?? "invalid proposal"}`);
   const proposal = parsed.data;
@@ -301,6 +338,7 @@ async function registerWebApiRuntimeInstallation(
   const [webBefore, apiBefore] = await Promise.all([readWebApiCatalogRow(deps, keys.web), readWebApiCatalogRow(deps, keys.api)]);
   const generation = proposal.challenge.generation;
   if ([webBefore, apiBefore].some((row) => row !== undefined && row.generation > generation)) throw agentXError("CONFIG_INVALID", "runtime proposal is for an older worker generation than the registered runtime");
+  await hooks.authorize?.({ proposal, before: { web: webBefore, api: apiBefore }, challengeRow: issued.challengeRow });
   const { evidence, evidencePointer } = await prepareEvidence(deps, proposal, proposalSha256, issued, identity, WEB_API_PROBE_PROPOSAL_MAX_BYTES);
   const revisions = { web: (webBefore?.revision ?? 0) + 1, api: (apiBefore?.revision ?? 0) + 1 };
   const rows = e2eWebApiRuntimeRecords({ proposal, revisions, qualifiedAt: new Date(nowFor(deps)).toISOString(), evidence });
@@ -313,6 +351,7 @@ async function registerWebApiRuntimeInstallation(
     { Put: { TableName: deps.tableName, Item: { ...keys.web, ...rows.web }, ...rowCondition(webBefore) } },
     { Put: { TableName: deps.tableName, Item: { ...keys.api, ...rows.api }, ...rowCondition(apiBefore) } },
     ...challengeAndEvidenceWrites(deps, issued, identity, proposalSha256, evidencePointer, transactAt),
+    ...(hooks.extraWrites?.({ proposal, proposalSha256, revisions, transactAt }) ?? []),
   ];
   try { await deps.documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
   catch { throw agentXError("PROJECT_REVISION_MISMATCH", "runtime challenge, catalog revision, or evidence pointer changed before registration"); }
