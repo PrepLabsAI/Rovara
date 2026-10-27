@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ import { createAccountsExecutorPlan } from "../support/e2e-accounts-fixture.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { CASE_ID, call } from "../support/e2e-model-fixtures.js";
 import { createMidstep2Harness } from "../support/e2e-midstep2-harness.js";
+import type { ClassifiedValue } from "../../packages/verifier/src/executor/credential-classifier.js";
 
 // MIDSTEP-2, end to end through the real pieces: the real classifier, source, registry and redactor, the real channel client, the real worker proxy. Only the browser is a stand-in here
 // (the real Chromium is in e2e-midstep2-real-browser.test.ts).
@@ -34,6 +36,19 @@ afterEach(async () => { for (const close of closers.splice(0).reverse()) await c
 
 const harness = createMidstep2Harness({ dir: () => dir, closers });
 const executor = harness.executor;
+type Executor = Awaited<ReturnType<typeof executor>>;
+
+/**
+ * What the worker answers to a prompt that shows `secret`, in a step of its own. A refusal latches the step (every later call of it is refused too), so a second secret checked in the same
+ * step would prove nothing: each gets a fresh step, after a call that shows nothing secret and must pass (so the sync ran and the refusal is the secret's).
+ */
+async function refusedAlone(secret: string, prepare: (e: Executor) => void | Promise<void>): Promise<{ status: string; code?: string }> {
+  const e = await executor();
+  await prepare(e);
+  expect((await e.workerSays("Nothing secret here")).status).toBe("ok");
+  return e.workerSays(`Shown: ${secret}`);
+}
+const REFUSED = { status: "error", code: "refused-credential-match" };
 
 describe("gap 1: JSON leaves", () => {
   it.each([
@@ -66,8 +81,9 @@ describe("gap 2: tiers", () => {
     expect(e.redactor.text(`saw ${SLUG}`)).toBe("saw <session>");
     expect(e.redactor.contains(Buffer.from(SLUG), "all")).toBe(true);
     expect(e.redactor.contains(Buffer.from(SLUG), "model")).toBe(false);
-    expect(await e.workerSays(`Seen ${OPAQUE}`)).toMatchObject({ status: "error", code: "refused-credential-match" });
-    expect(await e.workerSays("The password is hunter2222")).toMatchObject({ status: "error", code: "refused-credential-match" });
+    const prepare = (fresh: Executor) => { fresh.state.current = e.state.current; };
+    expect(await refusedAlone(OPAQUE, prepare)).toMatchObject(REFUSED);
+    expect(await refusedAlone("hunter2222", prepare)).toMatchObject(REFUSED);
   });
 
   it("a weak value that later turns out to be a credential (the same text under a key that says so) becomes one", async () => {
@@ -96,20 +112,36 @@ const request = (url: string, headers: Record<string, string>, later: Array<{ na
 
 describe("gaps 3 and 4: URL tokens and request headers (the real capture on a stand-in context)", () => {
   it("registers the Authorization value, a Cookie and an API key header, and a token in the query of a request, before the next model call", async () => {
+    const context = new FakeContext();
+    const learned: ClassifiedValue[] = [];
+    const pending: Array<Promise<unknown>> = [];
+    watchBrowserRequests(context as never, { learn: (items) => learned.push(...items), track: (read) => pending.push(read) });
+    const apiKey = "key-abcdef0123456789";
+    const sid = "0123456789abcdef0123456789";
+    const basic = Buffer.from("maya:hunter2222").toString("base64");
+    // The app calls its API; the browser's own headers (the cookie) arrive a little later than the request event.
+    context.emit("request", request(`${E2E_EXECUTOR_COMPILED_ORIGIN}/api/orders?id_token=${JWT}`, { authorization: `Bearer ${OPAQUE}`, "x-api-key": apiKey }, [{ name: "Cookie", value: `theme=dark; sid=${sid}` }]));
+    context.emit("request", request(`${E2E_EXECUTOR_COMPILED_ORIGIN}/api/me`, { authorization: `Basic ${basic}` }));
+    await Promise.all(pending);
+    for (const secret of [JWT, OPAQUE, apiKey, sid, basic]) expect(await refusedAlone(secret, (e) => { e.source.learn(learned); }), secret).toMatchObject(REFUSED);
+  });
+
+  it("the source waits for a header read that is still running before it reads the browser (the cookie arrives after the request event)", async () => {
     const e = await executor();
     const context = new FakeContext();
     watchBrowserRequests(context as never, { learn: (items) => e.source.learn(items), track: (pending) => e.source.track(pending) });
-    const apiKey = "key-abcdef0123456789";
     const sid = "0123456789abcdef0123456789";
-    // The app calls its API; the browser's own headers (the cookie) arrive a little later than the request event.
-    context.emit("request", request(`${E2E_EXECUTOR_COMPILED_ORIGIN}/api/orders?id_token=${JWT}`, { authorization: `Bearer ${OPAQUE}`, "x-api-key": apiKey }, [{ name: "Cookie", value: `theme=dark; sid=${sid}` }]));
+    context.emit("request", request(`${E2E_EXECUTOR_COMPILED_ORIGIN}/api/orders`, {}, [{ name: "Cookie", value: `sid=${sid}` }], 150));
     expect((await e.workerSays("Nothing secret here")).status).toBe("ok");
-    for (const secret of [JWT, OPAQUE, apiKey, sid]) expect(await e.workerSays(`Shown: ${secret}`), secret).toMatchObject({ status: "error", code: "refused-credential-match" });
-    expect(e.run.seen).toHaveLength(1);
-    // Basic: the base64 value is the credential.
-    const basic = Buffer.from("maya:hunter2222").toString("base64");
-    context.emit("request", request(`${E2E_EXECUTOR_COMPILED_ORIGIN}/api/me`, { authorization: `Basic ${basic}` }));
-    expect(await e.workerSays(`Shown: ${basic}`)).toMatchObject({ status: "error", code: "refused-credential-match" });
+    expect(await e.workerSays(`Shown: ${sid}`)).toMatchObject(REFUSED);
+  });
+
+  it("the headers the page set are read at once: a header read that fails, or never finishes, does not lose the Authorization value", async () => {
+    const e = await executor();
+    const context = new FakeContext();
+    watchBrowserRequests(context as never, { learn: (items) => e.source.learn(items), track: (pending) => e.source.track(pending) });
+    context.emit("request", { url: () => `${E2E_EXECUTOR_COMPILED_ORIGIN}/api/a`, headers: () => ({ authorization: `Bearer ${OPAQUE}` }), headersArray: () => Promise.reject(new Error("request is gone")) });
+    expect(await e.workerSays(`Shown: ${OPAQUE}`)).toMatchObject({ status: "error", code: "refused-credential-match" });
   });
 
   it("registers the fragment of a page URL (which no request carries) from the navigation event, and from the frame URLs the sync reads", async () => {
@@ -125,6 +157,19 @@ describe("gaps 3 and 4: URL tokens and request headers (the real capture on a st
     second.addPage([{ url: () => `${E2E_EXECUTOR_COMPILED_ORIGIN}/cb?session_id=${OPAQUE}`, evaluate: async () => ({ over: false, origin: E2E_EXECUTOR_COMPILED_ORIGIN, entries: [] }) }]);
     e2.source.attach("s2", { storageState: () => readBrowserState(second) }, { anonymous: false });
     expect(await e2.workerSays(`URL ${OPAQUE}`)).toMatchObject({ status: "error", code: "refused-credential-match" });
+  });
+
+  it("settle() waits for the header reads started so far (the sign-in capture awaits it before it reads the browser), and the driver does", async () => {
+    const context = new FakeContext();
+    const learned: string[] = [];
+    const watcher = watchBrowserRequests(context as never, { learn: (items) => { for (const item of items) learned.push(item.value); }, track: () => undefined });
+    context.emit("request", request(`${E2E_EXECUTOR_COMPILED_ORIGIN}/api/a`, {}, [{ name: "X-Auth-Token", value: OPAQUE }], 150));
+    expect(learned).toEqual([]);
+    await watcher.settle();
+    expect(learned).toContain(OPAQUE);
+    const driver = readFileSync(new URL("../../packages/verifier/src/executor/form-login.ts", import.meta.url), "utf8");
+    expect(driver.indexOf("await watcher?.settle()")).toBeGreaterThan(0);
+    expect(driver.indexOf("await watcher?.settle()")).toBeLessThan(driver.indexOf("await readBrowserState(context)"));
   });
 
   it("an OAuth code in the URL is scrubbed from evidence and does not refuse the page that shows it; a header read that never finishes delays the call by the bound only", async () => {
@@ -147,14 +192,40 @@ describe("gap 5: session storage and IndexedDB, through the real reader", () => 
     { valueEncoded: { o: [{ k: "fbase_key", v: "firebase:authUser:KEY" }, { k: "value", v: { o: Object.entries(value).map(([k, v]) => ({ k, v })), id: 2 } }], id: 1 } }] }] }];
 
   it("a token in session storage (MSAL's default) and one in IndexedDB (Firebase's default) are refused if a prompt shows them; the draft beside them is not", async () => {
+    const prepare = (e: Executor) => {
+      const context = new FakeContext();
+      context.stored = { cookies: [], origins: [{ origin: E2E_EXECUTOR_COMPILED_ORIGIN, localStorage: [], indexedDB: idb({ accessToken: OPAQUE, displayName: "Maya Q Draft Report" }) }] };
+      context.addPage([sessionFrame([{ name: "msal.idtoken", value: JWT }, { name: "draftTitle", value: "Quarterly report for ACME" }])]);
+      e.source.attach("s2", { storageState: () => readBrowserState(context) }, { anonymous: false });
+    };
+    expect(await refusedAlone(JWT, prepare)).toMatchObject(REFUSED);
+    expect(await refusedAlone(OPAQUE, prepare)).toMatchObject(REFUSED);
     const e = await executor();
-    const context = new FakeContext();
-    context.stored = { cookies: [], origins: [{ origin: E2E_EXECUTOR_COMPILED_ORIGIN, localStorage: [], indexedDB: idb({ accessToken: OPAQUE, displayName: "Maya Q Draft Report" }) }] };
-    context.addPage([sessionFrame([{ name: "msal.idtoken", value: JWT }, { name: "draftTitle", value: "Quarterly report for ACME" }])]);
-    e.source.attach("s2", { storageState: () => readBrowserState(context) }, { anonymous: false });
+    prepare(e);
     expect((await e.workerSays("Quarterly report for ACME by Maya Q Draft Report")).status).toBe("ok");
-    expect(await e.workerSays(`id ${JWT}`)).toMatchObject({ status: "error", code: "refused-credential-match" });
-    expect(await e.workerSays(`access ${OPAQUE}`)).toMatchObject({ status: "error", code: "refused-credential-match" });
+  });
+
+  it("an IndexedDB value is read in the driver's encoded form: a short token under a key that names it, and a record key, are told", async () => {
+    const context = new FakeContext();
+    context.stored = { cookies: [], origins: [{ origin: E2E_EXECUTOR_COMPILED_ORIGIN, localStorage: [], indexedDB: [{ name: "db", stores: [{ name: "s", records: [
+      { keyEncoded: OPAQUE, valueEncoded: { o: [{ k: "refreshToken", v: "rt-0123456789" }], id: 1 } }] }] }] }] };
+    const prepare = (fresh: Executor) => { fresh.source.attach("s2", { storageState: () => readBrowserState(context) }, { anonymous: false }); };
+    expect(await refusedAlone("rt-0123456789", prepare)).toMatchObject(REFUSED);
+    expect(await refusedAlone(OPAQUE, prepare)).toMatchObject(REFUSED);
+  });
+
+  it("the source classifies a storage entry once, not on every model call (the whole browser is read before each one)", async () => {
+    const e = await executor();
+    let reads = 0;
+    const entry = { name: "persist:root", get value() { reads += 1; return `{"user":"maya","token":"${TOKEN}"}`; } };
+    const context = new FakeContext();
+    context.stored = { cookies: [], origins: [{ origin: E2E_EXECUTOR_COMPILED_ORIGIN, localStorage: [entry] }] };
+    e.source.attach("s2", { storageState: () => readBrowserState(context) }, { anonymous: false });
+    await e.source.read();
+    const afterFirst = reads;
+    await e.source.read();
+    expect(afterFirst).toBeGreaterThan(1);
+    expect(reads - afterFirst).toBe(1);
   });
 
   it("IndexedDB over the record bound fails closed: the sync is not made and no model call goes out", async () => {
@@ -253,5 +324,14 @@ describe("sign-in capture reads the same things", () => {
     expect(told.filter((item) => item.evidenceOnly).map((item) => item.value)).toContain(SLUG);
     expect(registry.modelScan(Buffer.from(SLUG))).toBe(false);
     expect(registry.modelScan(Buffer.from(TOKEN))).toBe(true);
+  });
+});
+
+describe("the host wires the new reads (static: the host is not started in unit tests)", () => {
+  it("attaches a reader that goes through readBrowserState, watches requests of a non-anonymous context, and reads the case's browser through the same classifier when it closes", () => {
+    const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
+    expect(host).toMatch(/sessionSync\.attach\(sessionRef, \{ storageState: \(\) => readBrowserState\(browserContext\) \}, \{ anonymous \}\)/);
+    expect(host).toMatch(/if \(!anonymous\) watchBrowserRequests\(browserContext, \{ learn: \(items\) => sessionSync\.learn\(items\), track: \(pending\) => sessionSync\.track\(pending\) \}\)/);
+    expect(host).toMatch(/tellBrowserState\(await readBrowserState\(owned\), \(item\) => sessionSync\.learn\(\[item\]\)\)/);
   });
 });

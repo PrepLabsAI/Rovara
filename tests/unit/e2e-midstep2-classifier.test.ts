@@ -59,6 +59,10 @@ describe("tiers (gap 2)", () => {
     const uuid = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
     expect(tierOf(classifyString("lastWorkspaceId", uuid), uuid)).toBe("weak");
     expect(tierOf(classifyString("lastSessionAt", "2026-10-27T09:15:00.000Z"), "2026-10-27T09:15:00.000Z")).toBe("weak");
+    // A route, a URL or a date under a key that names a credential is still not one (the shape is checked before the key).
+    for (const [name, value] of [["session", "https://app.example.com/orders/overview"], ["auth", "/dashboard/overview"], ["sessionStart", "2026-10-27T09:15:00.000Z"], ["token", "maya@example.com"]] as const) {
+      expect(tierOf(classifyString(name, value), value), `${name}=${value}`).toBe("weak");
+    }
     // A UUID kept as a session id IS a credential: the key says so.
     expect(tierOf(classifyString("sessionId", uuid), uuid)).toBe("strong");
   });
@@ -194,6 +198,10 @@ describe("request headers (gap 4)", () => {
     expect(tierOf(items, "key-abcdef123456")).toBe("strong");
     expect(tierOf(items, JWT)).toBe("strong");
     expect(tierOf(items, "csrf-abcdef123456789")).toBe("weak");
+    // Another scheme than Bearer or Basic: everything after the scheme is the credential. A bare token with no scheme too.
+    const hawk = 'id="dh37fgj492je", ts="1353832234", mac="Zk3pQ9xW2mV7cL4nR8tY1bH6jD5sA0gF"';
+    expect(tierOf(headerSecrets([{ name: "Authorization", value: `Hawk ${hawk}` }]), hawk)).toBe("strong");
+    expect(tierOf(headerSecrets([{ name: "Authorization", value: OPAQUE }]), OPAQUE)).toBe("strong");
     // Not credentials: a user agent, a trace id, a theme cookie.
     expect(items.map((item) => item.value).filter((value) => /Mozilla|4bf92f|dark|json/.test(value))).toEqual([]);
   });
@@ -210,6 +218,22 @@ describe("browser state: session storage, IndexedDB and URLs (gap 5), with bound
     expect(tierOf(items, OPAQUE)).toBe("strong");
     expect(tierOf(items, "Ab1".repeat(8))).toBe("strong");
     expect(tierOf(items, "Maya Q")).toBeNull();
+  });
+
+  it("with a memo, an entry classified before is not classified again, and a changed one is (the sync reads the whole browser before every model call)", () => {
+    const memo = new Set<string>();
+    const state = (token: string): BrowserSecretState => ({ cookies: [], origins: [{ localStorage: [{ name: "persist:root", value: `{"token":"${token}"}` }], sessionStorage: [{ name: "msal.idtoken", value: JWT }], indexedDB: [{ name: "db", stores: [{ name: "s", records: [{ valueEncoded: OPAQUE }] }] }] }], urls: [`https://app.test/#access_token=${OPAQUE}`] });
+    const learn = (): string[] => { const out: string[] = []; tellBrowserState(state("tok_live_9f8e7d6c5b4a3928"), (item) => out.push(item.value), memo); return out; };
+    expect(learn().length).toBeGreaterThan(0);
+    expect(learn()).toEqual([]);
+    const changed: string[] = [];
+    tellBrowserState(state("tok_live_aaaaaaaaaaaaaaaa"), (item) => changed.push(item.value), memo);
+    expect(changed).toContain("tok_live_aaaaaaaaaaaaaaaa");
+    expect(changed).not.toContain(JWT);
+    // Without a memo every read classifies everything.
+    const twice: string[][] = [[], []];
+    for (const out of twice) tellBrowserState(state("tok_live_9f8e7d6c5b4a3928"), (item) => out.push(item.value));
+    expect(twice[1]!.length).toBe(twice[0]!.length);
   });
 
   it("fails closed when IndexedDB holds more records or bytes than the bounds, or is not in the shape the driver gives", () => {

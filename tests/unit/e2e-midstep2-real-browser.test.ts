@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPlaywrightFormLoginDriver } from "../../packages/verifier/src/executor/form-login.js";
 import { readBrowserState } from "../../packages/verifier/src/executor/browser-state-reader.js";
 import { tellBrowserState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
+import type { ClassifiedValue } from "../../packages/verifier/src/executor/credential-classifier.js";
 import { watchBrowserRequests } from "../../packages/verifier/src/executor/request-capture.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { createMidstep2Harness } from "../support/e2e-midstep2-harness.js";
@@ -62,20 +63,24 @@ describe.skipIf(!haveChromium)("the real browser", () => {
     const browser: Browser = await chromium.launch();
     closers.push(() => browser.close());
     const context = await browser.newContext();
-    const e = await harness.executor();
-    watchBrowserRequests(context, { learn: (items) => e.source.learn(items), track: (pending) => e.source.track(pending) });
-    e.source.attach("s2", { storageState: () => readBrowserState(context) }, { anonymous: false });
+    const learned: ClassifiedValue[] = [];
+    const pending: Array<Promise<unknown>> = [];
+    watchBrowserRequests(context, { learn: (items) => learned.push(...items), track: (read) => pending.push(read) });
     const page = await context.newPage();
     await page.goto(origin + "/");
     await page.waitForFunction("window.__done === true");
     await page.goto(`${origin}/callback#access_token=${FRAGMENT}&token_type=bearer`);
-    // Positive control: nothing the page shows is secret, and the call reaches the model.
-    expect((await e.workerSays("Orders for Maya, Quarterly report for ACME")).status).toBe("ok");
-    expect(e.run.seen).toHaveLength(1);
+    await Promise.all(pending);
+    // Each secret gets a step of its own (a refusal latches a step). Positive control first: nothing the page shows is secret, and the call reaches the model.
     for (const [where, secret] of [["session storage", JWT], ["IndexedDB", IDB_TOKEN], ["a token inside local JSON", JSON_TOKEN], ["the Authorization header", BEARER], ["the X-API-Key header", API_KEY], ["the URL fragment", FRAGMENT]]) {
+      const e = await harness.executor();
+      e.source.learn(learned);
+      e.source.attach("s2", { storageState: () => readBrowserState(context) }, { anonymous: false });
+      expect((await e.workerSays("Orders for Maya, Quarterly report for ACME")).status, where).toBe("ok");
+      expect(e.run.seen, where).toHaveLength(1);
       expect(await e.workerSays(`Shown: ${secret}`), where).toMatchObject({ status: "error", code: "refused-credential-match" });
+      expect(e.run.seen, where).toHaveLength(1);
     }
-    expect(e.run.seen).toHaveLength(1);
   });
 
   it("the form-login driver reports the sign-in's request headers and returns session storage, IndexedDB and the URLs", async () => {

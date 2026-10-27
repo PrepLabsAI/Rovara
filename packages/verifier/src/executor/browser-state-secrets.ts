@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isSessionCookieSecret } from "./cookie-secret.js";
 import { type ClassifiedValue } from "./credential-classifier.js";
 import { urlSecrets } from "./request-secrets.js";
@@ -51,7 +52,7 @@ function decodeIndexedDbValue(node: unknown, depth = 0): unknown {
   return out;
 }
 
-function tellIndexedDb(indexedDB: unknown, learn: (item: ClassifiedValue) => void): void {
+function tellIndexedDb(indexedDB: unknown, learn: (item: ClassifiedValue) => void, fresh: (...parts: string[]) => boolean): void {
   if (!Array.isArray(indexedDB)) throw new BrowserStateCapError("indexeddb-shape");
   let records = 0;
   let bytes = 0;
@@ -66,6 +67,7 @@ function tellIndexedDb(indexedDB: unknown, learn: (item: ClassifiedValue) => voi
         const raw = JSON.stringify(record) ?? "";
         bytes += raw.length;
         if (bytes > BROWSER_STATE_IDB_MAX_BYTES) throw new BrowserStateCapError("indexeddb-bytes");
+        if (!fresh("i", path, raw)) continue;
         const value = decodeIndexedDbValue(record.valueEncoded ?? record.value);
         for (const item of classifyStructure(path, value, () => raw)) learn(item);
         const key = decodeIndexedDbValue(record.keyEncoded ?? record.key);
@@ -75,14 +77,25 @@ function tellIndexedDb(indexedDB: unknown, learn: (item: ClassifiedValue) => voi
   }
 }
 
-/** Tells `learn` every value of the browser state that is worth registering, with its tier. Throws `BrowserStateCapError` when IndexedDB is over its bounds or unreadable in shape. */
-export function tellBrowserState(state: BrowserSecretState, learn: (item: ClassifiedValue) => void): void {
+/**
+ * Tells `learn` every value of the browser state that is worth registering, with its tier. Throws `BrowserStateCapError` when IndexedDB is over its bounds or unreadable in shape.
+ * `memo` (the session sync keeps one): a storage entry or an IndexedDB record that was classified before, byte for byte, is not classified again. The sync reads the whole browser before every
+ * model call, and a large JSON value must not be parsed on every one of them; a value that changed has a new digest, so it is classified.
+ */
+export function tellBrowserState(state: BrowserSecretState, learn: (item: ClassifiedValue) => void, memo?: Set<string>): void {
+  const fresh = (...parts: string[]): boolean => {
+    if (memo === undefined) return true;
+    const digest = createHash("sha256").update(parts.join("\u0000")).digest("hex");
+    if (memo.has(digest)) return false;
+    memo.add(digest);
+    return true;
+  };
   // Only what looks like a secret: a consent flag is not one (the cookie rule of the sign-in and the sync).
   for (const cookie of state.cookies) if (isSessionCookieSecret(cookie)) learn({ value: cookie.value, tier: "strong" });
   for (const origin of state.origins) {
-    for (const entry of origin.localStorage) for (const item of classifyStorageEntry(entry)) learn(item);
-    for (const entry of origin.sessionStorage ?? []) for (const item of classifyStorageEntry(entry)) learn(item);
-    if (origin.indexedDB !== undefined) tellIndexedDb(origin.indexedDB, learn);
+    for (const entry of origin.localStorage) if (fresh("l", entry.name, entry.value)) for (const item of classifyStorageEntry(entry)) learn(item);
+    for (const entry of origin.sessionStorage ?? []) if (fresh("s", entry.name, entry.value)) for (const item of classifyStorageEntry(entry)) learn(item);
+    if (origin.indexedDB !== undefined) tellIndexedDb(origin.indexedDB, learn, fresh);
   }
-  for (const url of state.urls ?? []) for (const item of urlSecrets(url)) learn(item);
+  for (const url of state.urls ?? []) if (fresh("u", url)) for (const item of urlSecrets(url)) learn(item);
 }

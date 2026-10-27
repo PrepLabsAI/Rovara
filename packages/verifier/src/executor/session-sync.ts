@@ -45,6 +45,8 @@ export function createE2ESessionSyncSource(options: {
     if (item.tier === "weak") options.register(item.value, { evidenceOnly: true });
     else options.register(item.value);
   };
+  // What the browser state held that was classified already: the whole browser is read before every model call.
+  const classified = new Set<string>();
   const pending = new Set<Promise<unknown>>();
   return {
     track(promise: Promise<unknown>): void {
@@ -68,7 +70,7 @@ export function createE2ESessionSyncSource(options: {
       }
       for (const context of [...contexts.values()]) {
         const state = await context.storageState();
-        tellBrowserState(state, register);
+        tellBrowserState(state, register, classified);
       }
       return options.known();
     },

@@ -23,7 +23,11 @@ function bounded(read: Promise<unknown>): Promise<unknown> {
   return Promise.race([read, wait]).finally(() => clearTimeout(timer));
 }
 
-export function watchBrowserRequests(context: BrowserContext, sink: RequestCaptureSink): void {
+/** `settle()` resolves when every header read started so far has finished (or hit its bound). The sign-in capture awaits it before it reads the browser. */
+export interface RequestWatcher { settle(): Promise<void> }
+
+export function watchBrowserRequests(context: BrowserContext, sink: RequestCaptureSink): RequestWatcher {
+  const started = new Set<Promise<unknown>>();
   const watchedPages = new WeakSet<Page>();
   const watchPage = (page: Page): void => {
     if (watchedPages.has(page)) return;
@@ -33,8 +37,12 @@ export function watchBrowserRequests(context: BrowserContext, sink: RequestCaptu
   context.on("request", (request) => {
     sink.learn(urlSecrets(request.url()));
     sink.learn(headerSecrets(Object.entries(request.headers()).map(([name, value]) => ({ name, value }))));
-    sink.track(bounded(request.headersArray().then((headers) => { sink.learn(headerSecrets(headers)); }, () => undefined)));
+    const read = bounded(request.headersArray().then((headers) => { sink.learn(headerSecrets(headers)); }, () => undefined));
+    started.add(read);
+    void read.then(() => { started.delete(read); });
+    sink.track(read);
   });
   context.on("page", watchPage);
   for (const page of context.pages()) watchPage(page);
+  return { settle: async () => { await Promise.allSettled([...started]); } };
 }

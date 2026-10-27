@@ -64,8 +64,7 @@ export function createPlaywrightFormLoginDriver(input: { cdpEndpoint: string; gu
         const context = await browser.newContext({ acceptDownloads: false, serviceWorkers: "block" });
         try {
           await input.guard(context);
-          const pending: Array<Promise<unknown>> = [];
-          if (observe !== undefined) watchBrowserRequests(context, { learn: observe, track: (read) => { pending.push(read); } });
+          const watcher = observe === undefined ? null : watchBrowserRequests(context, { learn: observe, track: () => undefined });
           const page = await context.newPage();
           page.setDefaultTimeout(E2E_FORM_LOGIN_SUCCESS_TIMEOUT_MS);
           page.setDefaultNavigationTimeout(LOGIN_NAVIGATION_TIMEOUT_MS);
@@ -81,7 +80,7 @@ export function createPlaywrightFormLoginDriver(input: { cdpEndpoint: string; gu
             await page.getByTestId(login.passwordTestId).fill(password);
             await page.getByTestId(login.submitTestId).click();
             await page.getByTestId(login.successTestId).waitFor({ state: "visible", timeout: E2E_FORM_LOGIN_SUCCESS_TIMEOUT_MS });
-            await Promise.allSettled(pending);
+            await watcher?.settle();
             // Cookies and local storage as before, plus session storage, IndexedDB and the frames' URLs, for the executor to classify.
             const read = await readBrowserState(context);
             return { state: { cookies: read.cookies, origins: read.origins, urls: read.urls }, status: status ?? 200 };

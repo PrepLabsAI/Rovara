@@ -2,9 +2,9 @@ import { join } from "node:path";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget, type E2EInvoke } from "../../packages/model-runtime/src/e2e-route.js";
 import type { BrowserSecretState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
 import { createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
-import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
-import { createSessionSecretRegistry } from "../../packages/verifier/src/executor/session-secret-registry.js";
-import { createE2ESessionSyncSource } from "../../packages/verifier/src/executor/session-sync.js";
+import { createCredentialRedactor, type CredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
+import { createSessionSecretRegistry, type SessionSecretRegistry } from "../../packages/verifier/src/executor/session-secret-registry.js";
+import { createE2ESessionSyncSource, type E2ESessionSyncSource } from "../../packages/verifier/src/executor/session-sync.js";
 import { startE2EModelProxy, type E2EModelEvidenceSink, type E2EModelProxy } from "../../packages/worker/src/e2e-model-proxy.js";
 import { CASE_ID, RUN_ID, bedrockRoute, call, tapAnswer } from "./e2e-model-fixtures.js";
 
@@ -13,7 +13,21 @@ export const MIDSTEP2_POSITION = { caseId: CASE_ID, stepIndex: 0 };
 
 class Sink implements E2EModelEvidenceSink { writeReceipt() { /* not needed */ } writeTranscript() { /* not needed */ } }
 
-export function createMidstep2Harness(input: { dir: () => string; closers: Array<() => Promise<unknown>> }) {
+type Client = ReturnType<typeof createE2EModelChannelClient>;
+type CallResult = Awaited<ReturnType<Client["generate"]>>["result"];
+export interface Midstep2Executor {
+  run: { proxy: E2EModelProxy; seen: unknown[]; socketPath: string };
+  redactor: CredentialRedactor;
+  registry: SessionSecretRegistry;
+  source: E2ESessionSyncSource;
+  state: { current: BrowserSecretState };
+  workerSays: (text: string) => Promise<CallResult>;
+  executorSays: (text: string) => Promise<string | undefined>;
+  workerOnly: Client;
+  scanning: Client;
+}
+
+export function createMidstep2Harness(input: { dir: () => string; closers: Array<() => Promise<unknown>> }): { startRun: () => Promise<Midstep2Executor["run"]>; executor: () => Promise<Midstep2Executor> } {
   let socketCount = 0;
   async function startRun() {
     const seen: unknown[] = [];
@@ -25,7 +39,7 @@ export function createMidstep2Harness(input: { dir: () => string; closers: Array
     input.closers.push(() => proxy.close());
     return { proxy, seen, socketPath };
   }
-  async function executor() {
+  async function executor(): Promise<Midstep2Executor> {
     const run = await startRun();
     const redactor = createCredentialRedactor([]);
     const registry = createSessionSecretRegistry({ redactor });
