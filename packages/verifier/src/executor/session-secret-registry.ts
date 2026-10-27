@@ -9,11 +9,11 @@ import type { CredentialRedactor } from "./redact.js";
  *   does it make a model-bound payload refused: the worker refuses a call that shows a value it was told, so the executor's own check must agree with it.
  */
 export interface SessionSecretRegistry {
-  register(value: string, options?: { evidenceOnly?: boolean }): void;
+  readonly register: (value: string, options?: { evidenceOnly?: boolean }) => void;
   /** What the worker is told. */
   readonly sessionSecrets: string[];
   /** The executor's check of a model-bound payload: accounts and credentials, not evidence-only values. */
-  modelScan(bytes: Uint8Array): boolean;
+  readonly modelScan: (bytes: Uint8Array) => boolean;
 }
 
 export function createSessionSecretRegistry(input: { redactor: CredentialRedactor; onRegister?: (value: string) => void }): SessionSecretRegistry {
