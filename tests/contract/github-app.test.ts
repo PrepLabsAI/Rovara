@@ -6,6 +6,7 @@ import {
   GithubMergeRateLimitError,
   appIdFromSecret,
   createGitHubAppJwt,
+  parseGitHubRepository,
   pullRequestBodyWithDraftNote,
   privateKeyFromSecret,
   webhookSecretFromSecret,
@@ -1299,5 +1300,35 @@ describe("current PR feedback API reads", () => {
     const { provider } = fixture({ changedHead: true });
     expect(typeof provider.getPullRequestFeedback).toBe("function");
     await expect(provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42)).rejects.toThrow(/changed/);
+  });
+});
+
+describe("repository URL refusals say github.com only when the host is another host (INTG3)", () => {
+  const refusal = (url: string): { code: string; message: string } => {
+    try { parseGitHubRepository(url); } catch (error) { return error as { code: string; message: string }; }
+    throw new Error("expected a refusal");
+  };
+  it("names the github.com limit for an address on another host that is not a URL, keeping CONFIG_INVALID", () => {
+    for (const url of ["git@gitlab.com:org/repo.git", "gitlab.com/org/repo", "git@git.example.corp:org/repo"]) {
+      const error = refusal(url);
+      expect(error.code, url).toBe("CONFIG_INVALID");
+      expect(error.message, url).toBe("CONFIG_INVALID: GitHub repository URL is invalid: only github.com repositories are supported");
+    }
+  });
+  it("does not blame the host when the host is github.com or none can be read", () => {
+    for (const url of ["git@github.com:org/repo", "github.com/org/repo", "", "not a url", "https://", "org/repo"]) {
+      const error = refusal(url);
+      expect(error.code, url).toBe("CONFIG_INVALID");
+      expect(error.message, url).toBe("CONFIG_INVALID: GitHub repository URL is invalid");
+    }
+  });
+  it("names the limit for a parsed URL on another host and not for a wrong path on github.com", () => {
+    const other = refusal("https://ghe.example.corp/org/repo");
+    expect(other.code).toBe("CONFIG_INVALID");
+    expect(other.message).toBe("CONFIG_INVALID: credentialed repository must be a canonical GitHub HTTPS URL: only github.com repositories are supported");
+    expect(refusal("https://gitlab.com/another/private.git").message).toMatch(/only github\.com repositories are supported/);
+    expect(refusal("https://github.com/another/private/tree/main").message).toBe("CONFIG_INVALID: credentialed repository must be a canonical GitHub HTTPS URL");
+    // `github.com:org/repo` parses as a scheme with an empty host: it names github.com, so no "only github.com" blame.
+    expect(refusal("github.com:org/repo").message).toBe("CONFIG_INVALID: credentialed repository must be a canonical GitHub HTTPS URL");
   });
 });

@@ -22,7 +22,9 @@ You need:
 - **From a terminal only: Node 22.19 or newer (Node 22 LTS recommended).** AWS CloudShell comes with Node 20; see
   [Node 22 in AWS CloudShell](#node-22-in-aws-cloudshell). With an older Node, `agentx` stops
   before it does anything and says what to install.
-- **A GitHub organization or personal account** that will own the Rovara GitHub App.
+- **A GitHub organization or personal account** that will own the Rovara GitHub App. Only repositories on
+  github.com (including GitHub Enterprise Cloud) are supported. GitHub Enterprise Server, GitLab, Bitbucket and
+  Azure DevOps are not; Rovara refuses their addresses.
 - **A Slack workspace where you can create apps.** If new apps need an admin's approval, `init`
   waits for it.
 - **An email address for alerts**, or a PagerDuty or Opsgenie integration address.
