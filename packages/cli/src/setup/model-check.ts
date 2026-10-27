@@ -44,7 +44,7 @@ async function wait(input: ModelCheckInput, checkId: string): Promise<ModelCheck
   for (;;) {
     const view = await send(input, "GET", `/${encodeURIComponent(checkId)}`) as unknown as ModelCheckView;
     if (view.status !== "pending") return view;
-    if (input.now() >= deadline) throw agentXError("RUNTIME_UNAVAILABLE", `the runner did not answer within ${MODEL_CHECK_WAIT_MS / 60_000} minutes. It may be busy or gone, or it may be missing a permission: reading the check request from the artifacts bucket (s3:GetObject), or calling the model (the account's model access). Check the runner's status and those two permissions, then ask again`);
+    if (input.now() >= deadline) throw agentXError("RUNTIME_UNAVAILABLE", `the runner did not answer within ${MODEL_CHECK_WAIT_MS / 60_000} minutes. It may be busy, or gone, or it may be missing a permission on the artifacts bucket: reading the check request (s3:GetObject) or writing its result (s3:PutObject). Check the runner's status and those two permissions, then ask again`);
     await input.sleep(POLL_MS);
   }
 }

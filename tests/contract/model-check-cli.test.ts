@@ -110,7 +110,7 @@ describe("test", () => {
 
   it("gives up after ten minutes without an answer", async () => {
     const p = plane([{ checkId: "c5" }, ...Array.from({ length: 80 }, () => ({ status: "pending" }))]);
-    await expect(testModelCheck({ ...p.input, prompter: scriptedPrompter([]), model: MODEL, assumeYes: true })).rejects.toThrow(/did not answer within 10 minutes\. It may be busy or gone, or it may be missing a permission: .*s3:GetObject.*model access.*ask again/);
+    await expect(testModelCheck({ ...p.input, prompter: scriptedPrompter([]), model: MODEL, assumeYes: true })).rejects.toThrow(/did not answer within 10 minutes\. It may be busy, or gone, or it may be missing a permission on the artifacts bucket: reading the check request \(s3:GetObject\) or writing its result \(s3:PutObject\)\. Check the runner's status.*ask again/);
     expect(p.clock()).toBeGreaterThanOrEqual(10 * 60_000);
     expect(p.clock()).toBeLessThan(11 * 60_000);
   });
