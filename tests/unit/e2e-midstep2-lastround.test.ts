@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium, type Browser } from "playwright-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { tellBrowserState, type BrowserSecretState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
+import { tellBrowserState } from "../../packages/verifier/src/executor/browser-state-secrets.js";
 import { classifyString, isTokenShape, type ClassifiedValue } from "../../packages/verifier/src/executor/credential-classifier.js";
 import { MASK_BUCKET_CAP, createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { headerSecrets, oversizedTokens, urlSecrets } from "../../packages/verifier/src/executor/request-secrets.js";
