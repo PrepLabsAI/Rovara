@@ -21,6 +21,7 @@ import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
 import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, createRovaraE2EReplayExecutor } from "./agent-replay.js";
 import { createE2EModelChannelClient } from "./model-channel.js";
 import { createCredentialRedactor } from "./redact.js";
+import { createSessionSecretRegistry } from "./session-secret-registry.js";
 import { createE2ESessionSyncSource } from "./session-sync.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
 import { createPlaywrightFormLoginDriver, isSessionCookieSecret, isSessionStorageSecret, parseSetCookie } from "./form-login.js";
@@ -168,15 +169,14 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   };
   // The credentials an agent step's trace is held to: the run's accounts, and every session value this process learned (the same ones the model channel's scan is told at a step's start).
   const agentRedactor = createCredentialRedactor(plan.accounts);
-  const sessionSecrets: string[] = [];
-  // A session value is told to the ledger (so evidence and captures that carry it are caught) and left for the parent (so the text it writes is scrubbed of it).
-  const registerSecret = (value: string, options: { evidenceOnly?: boolean } = {}): void => {
-    agentRedactor.addSessionSecret(value);
-    // `sessionSecrets` is what the worker is told (begin marker and sync); an evidence-only value is scrubbed from what the executor writes and is not sent.
-    if (options.evidenceOnly !== true && typeof value === "string" && value.length >= 8 && !sessionSecrets.includes(value)) sessionSecrets.push(value);
+  // A session value is told to the ledger (so evidence and captures that carry it are caught) and left for the parent (so the text it writes is scrubbed of it). Only a credential is told to the
+  // worker and makes a model-bound payload refused; an evidence-only value (a draft, a route) does neither (see session-secret-registry.ts).
+  const registry = createSessionSecretRegistry({ redactor: agentRedactor, onRegister: (value) => {
     ledger?.registerSessionSecret(value);
     appendFileSync(join(context.projectDir, E2E_EXECUTOR_SESSION_SECRETS_FILE), `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  };
+  } });
+  const { sessionSecrets } = registry;
+  const registerSecret = registry.register;
   // Before every model call the channel client reads the browser's session values from this and tells the worker (MIDSTEPCOOKIE).
   const sessionSync = createE2ESessionSyncSource({ register: registerSecret, known: () => sessionSecrets });
   const store = createExecutorSessionStore({ plan, registerSecret,
@@ -196,15 +196,15 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const replayPlan = plan.replay;
   if (channelPlan !== undefined || replayPlan !== undefined) installRefusingE2EDefaultProvider();
   const agent = channelPlan === undefined ? null : (() => {
-    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, sessionSync, scan: (bytes) => agentRedactor.contains(bytes) });
+    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, sessionSync, scan: registry.modelScan });
     const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
     // The adapter's own scan is the executor's second check; the worker's scan is told the browser's session values before every call by the client's sync (MIDSTEPCOOKIE).
-    const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position, scan: (bytes) => agentRedactor.contains(bytes) });
+    const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position, scan: registry.modelScan });
     // The goals of the steps run so far: a trace's typed value that is text of one stays as it is, the ledger's rule (the runner writes a trace after its step has ended).
     const goals: string[] = [];
     const origin = declaration.originByApplicationId.find((item) => item.applicationId === launchContext.selectedTarget.applicationId)?.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN;
     const store = createE2EAgentCaptureStore({
-      scan: (bytes) => agentRedactor.contains(bytes),
+      scan: registry.modelScan,
       persist: (keyHash, bytes) => persistE2EAgentTrace(context.outDir, keyHash, bytes),
       valueKey: channelPlan.valueKey, goals: () => goals, origin,
     });

@@ -25,8 +25,12 @@ export type SessionSyncCallCheck = { ok: true } | { ok: false; message: string }
 export const E2E_SESSION_SYNC_MAX_NEEDLE_CHARS = 1_000_000;
 
 export interface E2ESessionSyncLedger {
-  /** Validates a sync body (already parsed JSON) and, if it is for this run and within the caps, records it and issues the token the next call must name. A refused sync changes nothing. */
-  accept(body: unknown, runId: string): SessionSyncOutcome;
+  /**
+   * Validates a sync body (already parsed JSON) and, if it is for this run and within the caps, records it and issues the token the next call must name. A refused sync changes nothing.
+   * `apply` is given the values that are new, BEFORE anything is recorded: it is where the caller updates its scan. If it throws, nothing was recorded, so the same values are new again
+   * on the executor's retry and the scan is rebuilt then (a failure between the two cannot leave a value recorded but not scanned for).
+   */
+  accept(body: unknown, runId: string, apply?: (added: string[]) => void): SessionSyncOutcome;
   /** A `/v1/generate` request arrived: the newest token is spent now, whatever the request turns out to be. */
   beginCall(): void;
   /** Whether the call that names `token` is covered by the sync that directly preceded it. */
@@ -45,9 +49,10 @@ export function createE2ESessionSyncLedger(): E2ESessionSyncLedger {
   let bytes = 0;
   let needleChars = 0;
   let gaps = 0;
+  let staged: Map<string, string[]> | null = null;
   return {
     get spellingGaps() { return gaps; },
-    accept(body, runId): SessionSyncOutcome {
+    accept(body, runId, apply): SessionSyncOutcome {
       // A refused sync leaves no token that could be used: whoever sent it does not call.
       pending = null;
       const parsed = E2EModelSessionSyncSchema.safeParse(body);
@@ -61,6 +66,9 @@ export function createE2ESessionSyncLedger(): E2ESessionSyncLedger {
       const addedChars = spellings.reduce((sum, forms) => sum + forms.reduce((inner, form) => inner + form.length, 0), 0);
       if (known.size + fresh.length > E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES || bytes + addedBytes > E2E_MODEL_SESSION_SYNC_MAX_TOTAL_BYTES
         || needleChars + addedChars > E2E_SESSION_SYNC_MAX_NEEDLE_CHARS) return { ok: false, code: "too-many-values" };
+      // The scan is updated first; the spellings it asks for are the ones just computed.
+      staged = new Map(fresh.map((value, index) => [value, spellings[index]!]));
+      try { if (fresh.length > 0) apply?.(fresh); } finally { staged = null; }
       fresh.forEach((value, index) => known.set(value, spellings[index]!));
       bytes += addedBytes;
       needleChars += addedChars;
@@ -76,6 +84,6 @@ export function createE2ESessionSyncLedger(): E2ESessionSyncLedger {
       if (token === undefined) return { ok: false, message: E2E_MODEL_SESSION_SYNC_CALL_REFUSALS.missing };
       return armed !== null && token === armed ? { ok: true } : { ok: false, message: E2E_MODEL_SESSION_SYNC_CALL_REFUSALS.stale };
     },
-    spellingsOf(value): string[] { return known.get(value) ?? e2eSecretSpellingsDetailed(value).forms; },
+    spellingsOf(value): string[] { return known.get(value) ?? staged?.get(value) ?? e2eSecretSpellingsDetailed(value).forms; },
   };
 }

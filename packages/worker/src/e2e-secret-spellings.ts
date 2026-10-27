@@ -28,13 +28,20 @@ export interface E2ESecretSpellingsResult {
  * Never throws. A value that cannot be percent-encoded (`encodeURIComponent` throws on a lone surrogate) still gets every other spelling, and the result says which spelling was skipped
  * so the caller can record the gap. The raw form is always among the forms, so the value itself is always scanned for.
  */
+/** `String.prototype.toWellFormed` (ES2024, not in this build's lib): every lone surrogate becomes U+FFFD. */
+function toWellFormed(text: string): string {
+  return text.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, "\ufffd");
+}
+
 export function e2eSecretSpellingsDetailed(value: string): E2ESecretSpellingsResult {
   if (value === "") return { forms: [], skipped: [] };
   const data = Buffer.from(value, "utf8");
   const standard = data.toString("base64");
   const url = standard.replace(/\+/g, "-").replace(/\//g, "_");
+  // Percent-encoded from the well-formed text (a lone surrogate becomes U+FFFD, `%EF%BF%BD`, as `URL` and `URLSearchParams` write it), so a value with a lone surrogate still has its percent
+  // forms. `skipped` is only for an encoder that fails all the same.
   let once: string | null;
-  try { once = encodeURIComponent(value); } catch { once = null; }
+  try { once = encodeURIComponent(toWellFormed(value)); } catch { once = null; }
   const twice = once === null ? null : encodeURIComponent(once);
   const lowerEscapes = (text: string) => text.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
   const forms = new Set<string>([

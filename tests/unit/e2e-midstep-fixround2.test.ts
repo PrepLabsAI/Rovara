@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,9 @@ import { createExecutorSessionStore } from "../../packages/verifier/src/executor
 import { beginMarkerSessionValues } from "../../packages/verifier/src/executor/begin-marker-values.js";
 import { createE2EAgentStepDriver } from "../../packages/verifier/src/executor/agent-step-driver.js";
 import { generateE2EAgentValueKey } from "../../packages/contracts/src/e2e-model-channel.js";
+import { createE2EAgentModelAdapter } from "../../packages/verifier/src/executor/agent-model-adapter.js";
+import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
+import { createSessionSecretRegistry } from "../../packages/verifier/src/executor/session-secret-registry.js";
 import { createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
 import { createE2ESessionSyncSource } from "../../packages/verifier/src/executor/session-sync.js";
 import type { FormLoginDriver, FormLoginStorageState, FormRequestContext } from "../../packages/verifier/src/executor/form-login.js";
@@ -74,20 +77,23 @@ describe("N-1: a value cut for the sync never splits a surrogate pair, and nothi
     expect(boundSessionValue("\ud83d-short")).toEqual(["\ud83d-short"]);
   });
 
-  it("builds every other spelling of a value with a lone surrogate, never throws, and says which one it skipped", () => {
+  it("builds every spelling of a value with a lone surrogate, the percent-encoded ones from its well-formed text, and never throws", () => {
     const lone = `token-${"x".repeat(20)}\ud83d`;
     const result = e2eSecretSpellingsDetailed(lone);
-    expect(result.skipped).toEqual(["percent-encoded"]);
+    expect(result.skipped).toEqual([]);
     expect(result.forms).toContain(lone);
     expect(result.forms).toContain(Buffer.from(lone, "utf8").toString("hex"));
+    // `%EF%BF%BD` is U+FFFD, as `URL` and `URLSearchParams` write a lone surrogate.
+    expect(result.forms).toContain(`token-${"x".repeat(20)}%EF%BF%BD`);
+    expect(result.forms).toContain(encodeURIComponent(`token-${"x".repeat(20)}%EF%BF%BD`));
     expect(e2eSecretSpellingsDetailed("a-well-formed-session-token").skipped).toEqual([]);
   });
 
-  it("the ledger accepts a value with a lone surrogate (its other spellings are scanned), records the gap, and a refused sync leaves no token", () => {
+  it("the ledger accepts a value with a lone surrogate (every spelling is scanned, no gap), and a refused sync leaves no token", () => {
     const ledger = createE2ESessionSyncLedger();
     const outcome = ledger.accept({ schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, values: [`token-${"x".repeat(20)}\ud83d`] }, RUN_ID);
     expect(outcome).toMatchObject({ ok: true });
-    expect(ledger.spellingGaps).toBe(1);
+    expect(ledger.spellingGaps).toBe(0);
     const token = (outcome as { syncToken: string }).syncToken;
     // A refused sync clears the token that was waiting: whoever sent it cannot call under it.
     expect(ledger.accept({ not: "a sync" }, RUN_ID)).toMatchObject({ ok: false, code: "invalid-sync" });
@@ -122,6 +128,9 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
   /** A form login that leaves the given local storage behind, as an app does right after sign-in. */
   function storeWith(localStorage: Array<{ name: string; value: string }>) {
     const told: Array<{ value: string; evidenceOnly: boolean }> = [];
+    // The executor's real register of session values and its real redactor, as the host builds them.
+    const redactor = createCredentialRedactor([]);
+    const registry = createSessionSecretRegistry({ redactor });
     const driver: FormLoginDriver = {
       async signIn(input) {
         const account = fixture.plan.accounts.find((item) => item.email === input.email && item.password === input.password)!;
@@ -137,11 +146,11 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
         }, async dispose() { /* nothing */ } };
       },
     };
-    const store = createExecutorSessionStore({ plan: fixture.plan, formLogin: driver, registerSecret: (value, options) => told.push({ value, evidenceOnly: options?.evidenceOnly === true }) });
+    const store = createExecutorSessionStore({ plan: fixture.plan, formLogin: driver, registerSecret: (value, options) => { told.push({ value, evidenceOnly: options?.evidenceOnly === true }); registry.register(value, options); } });
     const profileId = contract.accountProfiles.find((item) => item.roleRef === "owner")?.profileId ?? contract.accountProfiles[0]!.profileId;
     const ref = { applicationId, profileId, revision: 1, definitionDigest: "8".repeat(64) };
     const open = () => store.open({ binding: {}, applicationId, profileId, approvedAccountRef: ref, origin: E2E_EXECUTOR_COMPILED_ORIGIN }, signal);
-    return { open, told };
+    return { open, told, registry, redactor };
   }
 
   it("tells the worker only a credential found in sign-in storage; a draft, a route and other app data are scrubbed from evidence only", async () => {
@@ -157,24 +166,59 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
     expect(t.told.map((item) => item.value)).not.toContain("dark");
   });
 
-  it("a sign-in draft that the page shows does not refuse the call; a sign-in credential that it shows does (end to end)", async () => {
+  it("a sign-in draft or route that the page shows does not refuse the call at the executor's own scan or at the worker; a sign-in credential that it shows does (real redactor and scans, end to end)", async () => {
     const t = storeWith([{ name: "draft", value: DRAFT }, { name: "returnTo", value: ROUTE }, { name: "jwt", value: JWT }]);
     await t.open();
-    // The host's rule: what is not evidence-only is what the worker is told.
-    const sessionSecrets: string[] = [];
-    for (const item of t.told) if (!item.evidenceOnly && !sessionSecrets.includes(item.value)) sessionSecrets.push(item.value);
+    const prompt = (text: string) => call(text);
+    const bytesOf = (text: string) => Buffer.from(JSON.stringify(prompt(text)), "utf8");
+    // The executor's model-bound scan, from the real redactor the host uses.
+    expect(t.registry.modelScan(bytesOf(`#n1 textbox "Title" value="${DRAFT}"\n#n2 link "Back" href="${ROUTE}"`))).toBe(false);
+    expect(t.registry.modelScan(bytesOf(`#n3 text "${JWT}"`))).toBe(true);
+    // Evidence is still refused for the draft (the "all" scope the out-directory check uses), and scrubbed from text.
+    expect(t.redactor.contains(Buffer.from(DRAFT), "all")).toBe(true);
+    expect(t.redactor.text(`value ${DRAFT}`)).not.toContain(DRAFT);
     const run = await startRun();
-    const source = createE2ESessionSyncSource({ register: () => undefined, known: () => sessionSecrets });
-    const client = createE2EModelChannelClient({ socketPath: run.socketPath, runId: RUN_ID, sessionSync: source });
-    await client.beginStep({ ...POSITION, cookieValues: beginMarkerSessionValues(sessionSecrets) });
-    expect((await client.generate({ ...POSITION, callIndex: 0, call: call(`#n1 textbox "Title" value="${DRAFT}"\n#n2 link "Back" href="${ROUTE}"`) })).result.status).toBe("ok");
-    expect((await client.generate({ ...POSITION, callIndex: 1, call: call(`#n3 text "${JWT}"`) })).result).toMatchObject({ status: "error", code: "refused-credential-match" });
+    const source = createE2ESessionSyncSource({ register: () => undefined, known: () => t.registry.sessionSecrets });
+    const client = createE2EModelChannelClient({ socketPath: run.socketPath, runId: RUN_ID, sessionSync: source, scan: t.registry.modelScan });
+    const adapter = createE2EAgentModelAdapter({ client, routeId: "r", position: () => POSITION, scan: t.registry.modelScan });
+    await client.beginStep({ ...POSITION, cookieValues: beginMarkerSessionValues(t.registry.sessionSecrets) });
+    // Through the client's scan and the worker's: the draft and the route go through.
+    const shown = await client.generate({ ...POSITION, callIndex: 0, call: prompt(`#n1 textbox "Title" value="${DRAFT}"\n#n2 link "Back" href="${ROUTE}"`) });
+    expect(shown.result.status).toBe("ok");
+    expect(run.seen).toHaveLength(1);
+    // The credential is refused by the executor's scan (the adapter's, then the client's) before anything is sent.
+    await expect(adapter.doGenerate({ prompt: [{ role: "user", content: [{ type: "text", text: `#n3 text "${JWT}"` }] }] })).rejects.toMatchObject({ code: "credential-in-prompt" });
+    expect(run.seen).toHaveLength(1);
+    // And if the executor's scan did not know it, the worker's still would (it was told).
+    const bare = createE2EModelChannelClient({ socketPath: run.socketPath, runId: RUN_ID, sessionSync: source });
+    expect((await bare.generate({ ...POSITION, callIndex: 1, call: call(`#n3 text "${JWT}"`) })).result).toMatchObject({ status: "error", code: "refused-credential-match" });
   });
 
-  it("an oversized value at sign-in is bounded in the begin marker and does not fail beginStep or the steps after it (end to end)", async () => {
+  it("the host wires its three model-bound scans (the channel client, the model adapter, the capture store) to the registry's model scan, not to the redactor's all-scope check", () => {
+    const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
+    expect(host.match(/scan: registry\.modelScan/g)).toHaveLength(3);
+    expect(host).not.toMatch(/agentRedactor\.contains\(/);
+    expect(host).toMatch(/createSessionSecretRegistry\(\{ redactor: agentRedactor/);
+  });
+
+  it("registering a value evidence-only and then as a credential makes it a credential; the other way round it stays one", () => {
+    const redactor = createCredentialRedactor([]);
+    const registry = createSessionSecretRegistry({ redactor });
+    const seen = (value: string) => redactor.contains(Buffer.from(value), "model");
+    registry.register("evidence-only-value-1234567", { evidenceOnly: true });
+    expect(seen("evidence-only-value-1234567")).toBe(false);
+    expect(registry.sessionSecrets).toEqual([]);
+    registry.register("evidence-only-value-1234567");
+    expect(seen("evidence-only-value-1234567")).toBe(true);
+    expect(registry.sessionSecrets).toEqual(["evidence-only-value-1234567"]);
+    registry.register("evidence-only-value-1234567", { evidenceOnly: true });
+    expect(seen("evidence-only-value-1234567")).toBe(true);
+  });
+
+  it("an oversized value at sign-in is bounded in the begin marker and does not fail beginStep or the steps after it (real redactor and scans, end to end)", async () => {
     const t = storeWith([{ name: "persist", value: OVERSIZED }, { name: "jwt", value: JWT }]);
     await t.open();
-    const sessionSecrets = t.told.filter((item) => !item.evidenceOnly).map((item) => item.value);
+    const sessionSecrets = t.registry.sessionSecrets;
     expect(sessionSecrets).toContain(OVERSIZED);
     const values = beginMarkerSessionValues(sessionSecrets);
     expect(values.every((value) => value.length <= E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS)).toBe(true);
@@ -182,11 +226,11 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
     expect(E2EModelChannelStepMarkerSchema.safeParse({ schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "begin", caseId: CASE_ID, stepIndex: 0, cookieValues: values }).success).toBe(true);
     const run = await startRun();
     const source = createE2ESessionSyncSource({ register: () => undefined, known: () => sessionSecrets });
-    const client = createE2EModelChannelClient({ socketPath: run.socketPath, runId: RUN_ID, sessionSync: source });
+    const client = createE2EModelChannelClient({ socketPath: run.socketPath, runId: RUN_ID, sessionSync: source, scan: t.registry.modelScan });
     await client.beginStep({ ...POSITION, cookieValues: values });
     expect((await client.generate({ ...POSITION, callIndex: 0, call: call() })).result.status).toBe("ok");
-    // The whole value, shown by the page, is refused.
-    expect((await client.generate({ ...POSITION, callIndex: 1, call: call(`#n1 text "${OVERSIZED}"`) })).result).toMatchObject({ status: "error", code: "refused-credential-match" });
+    // The whole value, shown by the page, is refused (here by the executor's scan, which holds it whole).
+    await expect(client.generate({ ...POSITION, callIndex: 1, call: call(`#n1 text "${OVERSIZED}"`) })).rejects.toMatchObject({ code: "credential-in-prompt" });
   });
 
   it("the step driver sends a begin marker that the schema accepts when a session value is oversized, and keeps the newest values within the marker's count and bytes", async () => {
@@ -216,6 +260,11 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
     expect(withWide.at(-1)).toBe(wide.at(-1));
     expect(withWide.length).toBeLessThan(wide.length);
     expect(E2EModelChannelStepMarkerSchema.safeParse(marker(withWide)).success).toBe(true);
+    // More small values than the marker may carry: exactly the newest 32 forms are sent (the schema allows 32), and the marker is valid.
+    const forty = Array.from({ length: 40 }, (_, index) => `session-value-${String(index).padStart(3, "0")}`);
+    const withForty = await run(forty);
+    expect(withForty).toEqual(forty.slice(-32));
+    expect(E2EModelChannelStepMarkerSchema.safeParse(marker(withForty)).success).toBe(true);
     // Few small values are all sent, in order.
     expect(await run(["session-value-a-1234", "session-value-b-1234"])).toEqual(["session-value-a-1234", "session-value-b-1234"]);
   });

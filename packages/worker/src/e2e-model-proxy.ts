@@ -365,13 +365,15 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
   function doBeginStep(position: Position): void { current = { position: { caseId: position.caseId, stepIndex: position.stepIndex }, startedMs: now() }; last = current.position; }
   function doEndStep(): void { current = null; }
   function doAddCredentialValues(values: Partial<E2ECredentialSet>): void {
-    credentials = {
+    // Both are replaced together, after the new guard exists: a guard that cannot be built leaves the credentials and the guard as they were.
+    const next: E2ECredentialSet = {
       passwords: [...credentials.passwords, ...(values.passwords ?? [])],
       emails: [...credentials.emails, ...(values.emails ?? [])],
       cookieValues: [...credentials.cookieValues, ...(values.cookieValues ?? [])],
       sessionValues: [...(credentials.sessionValues ?? []), ...(values.sessionValues ?? [])],
     };
-    guard = createE2ECredentialGuard(credentials, { ...guardOptions, onUnscannable: "latch" });
+    guard = createE2ECredentialGuard(next, { ...guardOptions, onUnscannable: "latch" });
+    credentials = next;
   }
 
   /** `POST /v1/sync`: the executor's session values, sent before every model call. Accepted only in order for this run; the values join the credential scan at once. */
@@ -382,9 +384,9 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     if (body.kind === "failed") return refuse(400, "unreadable");
     let json: unknown;
     try { json = JSON.parse(body.bytes.toString("utf8")); } catch { return refuse(400, "not-json"); }
-    const outcome = syncLedger.accept(json, runId);
+    // The scan is rebuilt with the new values before the ledger records them (see `accept`).
+    const outcome = syncLedger.accept(json, runId, (added) => doAddCredentialValues({ sessionValues: added }));
     if (!outcome.ok) return refuse(outcome.code === "other-run" ? 403 : 400, outcome.code);
-    if (outcome.added.length > 0) doAddCredentialValues({ sessionValues: outcome.added });
     return { status: 200, body: { schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, status: "ok", syncToken: outcome.syncToken, epoch: outcome.epoch } };
   }
 
