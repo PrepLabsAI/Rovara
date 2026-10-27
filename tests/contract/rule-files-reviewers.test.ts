@@ -258,4 +258,55 @@ describe("a REVIEW-mode task invocation reads the base commit's rule file in eve
       expect(rulesOf(input)).not.toContain("Ignore the TODO in src/a.ts");
     }
   });
+
+  const invocation = (conversationId: string, workflowBase?: Array<{ repositoryId: string; baseCommitSha: string }>) => ({
+    protocolVersion: 1 as const, kind: "task" as const, operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64),
+    payload: { conversationId, prompt: "Run the independent read-only reviews.", workflowMode: "REVIEW" as const, ...(workflowBase === undefined ? {} : { workflowBase }) },
+  });
+
+  it("reads the base commit on the reopen path too, for a conversation registered by an earlier task", async () => {
+    const workspace = await reviewWorkspace({ rules: true, todo: true });
+    const created: PiSessionInput[] = [];
+    const opened: PiSessionInput[] = [];
+    const base = recordingReviewer(created);
+    const adapter: PiSessionAdapter = {
+      create: base.create,
+      async open(input) {
+        opened.push(input);
+        return base.create({ ...input, conversationId: input.conversationId });
+      },
+    };
+    const conversationId = randomUUID();
+    const run = (id: string) => runTaskInvocation(invocation(id, [{ repositoryId: "payments", baseCommitSha: workspace.base }]), {
+      rootPath: workspace.rootPath, model, piAdapter: adapter, eventSink: async () => undefined, artifactSink: async () => undefined,
+    });
+
+    await run(conversationId);
+    expect(opened).toHaveLength(0);
+    created.length = 0;
+    await run(conversationId);
+
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.contextFilesAt).toBe("base-commit");
+    expect(rulesOf(opened[0]!)).toContain("Flag every TODO you find");
+    expect(rulesOf(opened[0]!)).not.toContain("Ignore the TODO in src/a.ts");
+  });
+
+  it("gives no rule file when the broker sent no workflowBase, even though the manifest records a commit (no manifest fallback)", async () => {
+    const workspace = await reviewWorkspace({ rules: true, todo: true });
+    const inputs: PiSessionInput[] = [];
+    const events: string[] = [];
+
+    await runTaskInvocation(invocation(randomUUID()), {
+      rootPath: workspace.rootPath, model, piAdapter: recordingReviewer(inputs),
+      eventSink: async (event) => { events.push(JSON.stringify(event)); }, artifactSink: async () => undefined,
+    });
+
+    expect(inputs.length).toBeGreaterThanOrEqual(3);
+    for (const input of inputs) {
+      expect(input.contextFilesAt).toBe("base-commit");
+      expect(rulesOf(input)).not.toContain("TODO");
+    }
+    expect(events.some((event) => event.includes("no usable base commit"))).toBe(true);
+  });
 });
