@@ -6,11 +6,12 @@
 // - the cancel's own terminal transaction (broker.ts builds the item with `completedWorkflowItems`; the predicate is here);
 // - the stuck-cancel release, when the INTERRUPTED task's own late result arrives (`blockStoppedWorkflowRun`);
 // - the owner's Retry planning on a row an earlier release already stranded (`strandedPlanningRun`, `recoverStrandedPlanning`).
-// Nothing here adds an approval, queues a dispatch row, or starts an operation: the only change is RUNNING to BLOCKED.
+// Nothing here adds an approval or starts an operation: the only change is RUNNING to BLOCKED, and for a VERIFY or REVIEW step the AUTOFIX row (DISPATCHEXHAUST) that has the policy look at the block.
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, blockWorkflow, type WorkflowSnapshot } from "@agentx/contracts";
 import { taskKey, taskPointerKey, type DeveloperTaskRecord } from "../developer/task-records.js";
 import { workflowRunEndedReason } from "./outbox-failure.js";
+import { endedRunRows } from "./workflow-autofix-dispatch-exhaust.js";
 
 type WorkflowMode = "PLAN" | "IMPLEMENT" | "CHECKS" | "REVIEW" | "FEEDBACK_REVIEW";
 type Client = Pick<DynamoDBDocumentClient, "send">;
@@ -105,6 +106,8 @@ export async function blockStoppedWorkflowRun(client: Client, tableName: string,
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":ready": "READY" },
       } },
+      // DISPATCHEXHAUST: a VERIFY or REVIEW step this block stops commits its AUTOFIX row with it: every caller here ends a run the owner asked to stop (a cancel, or a failed stop released, even when its compute is gone): explained, never retried (`endedAs` only words the reason).
+      ...endedRunRows(tableName, workflow, "owner-stopped", now),
     ] }));
     log({ component: "broker", event: "workflow.released_run_blocked", operationId: run.id, workflowMode: mode });
     return true;
