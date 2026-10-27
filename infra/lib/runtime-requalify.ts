@@ -18,7 +18,7 @@ import {
   aws_stepfunctions as sfn,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { QUALIFIED_AMI_SETTING_NAME, REQUALIFY_AGE_METRIC, REQUALIFY_STALE_AFTER_DAYS, REQUALIFY_TAGS, WORKER_SETTING_PARAMETERS, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { QUALIFIED_AMI_SETTING_NAME, REQUALIFY_AGE_METRIC, REQUALIFY_DRAIN_READ_ATTRIBUTES, REQUALIFY_STALE_AFTER_DAYS, REQUALIFY_TAGS, WORKER_SETTING_PARAMETERS, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { packagedFunction } from "./control-plane.js";
 import { EC2_WORKER_AMI_PARAMETER } from "./ec2-workers.js";
 import type { AgentXNaming } from "./naming.js";
@@ -148,6 +148,10 @@ export class RuntimeRequalify extends Construct {
 
   constructor(scope: Construct, id: string, props: RuntimeRequalifyProps) {
     super(scope, id);
+    // The steps role's one inline policy is close to CDK's 10,000 estimate limit, and CDK splits any policy over it into a second managed policy (an Add, which the renewal's guarded Modify
+    // change set must not contain). The estimate counts every ARN token as 150 characters; ours render at about 100 (an SSM parameter ARN is the longest). This lowers the estimate for this
+    // construct's roles only; it changes no policy. The real size is far under IAM's 10,240 (a contract test holds the template's own length under a margin).
+    this.node.setContext("@aws-cdk/aws-iam.arnSizeEstimate", 100);
     const stack = Stack.of(this);
     const { naming, foundation } = props;
     const environment = naming.environmentTagValue;
@@ -219,9 +223,15 @@ export class RuntimeRequalify extends Construct {
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["E2E_FEATURE_VERIFIER#*", "RUNTIME_INSTALL_CHALLENGE#*", "RUNTIME_INSTALLATION_EVIDENCE#*", "RUNTIME_REQUALIFY*", "E2E_MODEL_ROUTES"] } },
     });
     // The drain (AR-3), read only: the READY sessions (index), their workspaces' operations, the setup-run markers and the setup executions' state.
+    // Only the attributes the drain reads (REQUALIFY_DRAIN_READS: each read names them in its ProjectionExpression) and only reads that name their attributes. `Select` is IfExists
+    // because GetItem has no Select parameter; the drain's queries always send SPECIFIC_ATTRIBUTES. A refused read makes the drain throw, never count 0.
     grant({
       sid: "DrainRead", actions: ["dynamodb:Query", "dynamodb:GetItem"], resources: [props.state.tableArn, `${props.state.tableArn}/index/${WORKSPACE_SESSION_STATE_INDEX.name}`],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] } },
+      conditions: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": [...REQUALIFY_DRAIN_READ_ATTRIBUTES] },
+        StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
     });
     grant({ sid: "AlertOperator", actions: ["sns:Publish"], resources: [props.operatorTopic.topicArn] });
     grant({ sid: "Metrics", actions: ["cloudwatch:PutMetricData"], resources: ["*"], conditions: { StringEquals: { "cloudwatch:namespace": naming.metricsNamespace } } });

@@ -9,6 +9,8 @@ import { HEALTH_ALARM_CONDITIONAL_SUFFIXES, HEALTH_ALARM_SUFFIXES, REQUALIFY_AGE
 import { REQUALIFY_SCHEDULE_LOGICAL_ID } from "../../scripts/test-deploy-requalify.js";
 import { checkLambdaBundles } from "../../scripts/lambda-load-check.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { requalifyDrainStatus } from "../../packages/broker/src/e2e/requalify-hold.js";
+import { drainFixtureRows, drainIamClient, DRAIN_FIXTURE_NOW } from "../support/drain-iam-client.js";
 
 skipLambdaBundling();
 
@@ -144,6 +146,29 @@ describe("the renewal's infrastructure", () => {
     expect(all).not.toContain("ssm:GetParameterHistory");
   });
 
+  it("keeps the steps role's policy in ONE inline policy, so narrowing DrainRead is a Modify of that policy and adds no resource (DRAINREAD)", () => {
+    const policies = Object.entries(on).filter(([, resource]) => (resource.Type === "AWS::IAM::Policy" || resource.Type === "AWS::IAM::ManagedPolicy") && JSON.stringify(resource.Properties["Roles"]).includes(roleId()));
+    expect(policies.map(([id, resource]) => `${id} ${resource.Type}`)).toEqual([`RuntimeRequalifyStepsServiceRoleDefaultPolicyEE5F0143 AWS::IAM::Policy`]);
+    expect(Object.keys(on).filter((id) => id.startsWith(REQUALIFY_LOGICAL_ID_PREFIX) && id.includes("Overflow"))).toEqual([]);
+    // IAM allows 10,240 characters of inline policy per role; the template's own text (ARNs not yet rendered, so longer than the real thing) stays well under it.
+    expect(JSON.stringify(policies[0]![1].Properties["PolicyDocument"]).length).toBeLessThan(10_000);
+  });
+
+  it("allows the drain exactly the attributes the code asks for: the policy's list equals the union of the ProjectionExpressions of its real reads, and the index projects them (DRAINREAD)", async () => {
+    const [drain] = withAction("dynamodb:Query");
+    const allowed = drain!.Condition!["ForAllValues:StringEquals"]!["dynamodb:Attributes"] as string[];
+    // Run the real drain over a table with a READY workspace, operations and setup runs, so that every one of its reads happens; collect what each one asks for.
+    const { documentClient, requests } = drainIamClient(drainFixtureRows(), { allowed });
+    await requalifyDrainStatus({ documentClient, tableName: "state" }, DRAIN_FIXTURE_NOW);
+    expect(new Set(requests.map((request) => `${request.command} ${request.indexName ?? ""}`))).toEqual(new Set(["QueryCommand bySessionState", "QueryCommand ", "GetCommand "]));
+    const asked = [...new Set(requests.flatMap((request) => request.attributes ?? []))].sort();
+    expect([...allowed].sort()).toEqual(asked);
+    // A query on the index can only project what the index has: it projects every attribute.
+    const table = Object.values(off).find((resource) => resource.Type === "AWS::DynamoDB::Table" && JSON.stringify(resource.Properties["GlobalSecondaryIndexes"] ?? []).includes("bySessionState"))!;
+    const index = (table.Properties["GlobalSecondaryIndexes"] as Array<{ IndexName: string; Projection: { ProjectionType: string } }>).find((candidate) => candidate.IndexName === "bySessionState")!;
+    expect(index.Projection.ProjectionType).toBe("ALL");
+  });
+
   it("reads and writes the State table only under the renewal's key prefixes", () => {
     const state = withAction("dynamodb:PutItem");
     expect(state).toHaveLength(1);
@@ -152,7 +177,16 @@ describe("the renewal's infrastructure", () => {
     const drain = withAction("dynamodb:Query");
     expect(drain).toHaveLength(1);
     expect([drain[0]!.Action].flat().sort()).toEqual(["dynamodb:GetItem", "dynamodb:Query"]);
-    expect(drain[0]!.Condition!["ForAllValues:StringLike"]).toEqual({ "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] });
+    // The whole statement, exactly: narrowed to the attributes the drain reads (DRAINREAD), and only reads that name their attributes. Spelled out here, not taken from the code's constants.
+    expect(drain[0]).toEqual({
+      Sid: "DrainRead", Effect: "Allow", Action: ["dynamodb:Query", "dynamodb:GetItem"],
+      Resource: [expect.anything(), expect.anything()],
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["READY", "WORKSPACE#*", "RUNTIME_REQUALIFY_WORK#*", "PROJECT_SETUP#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["createdAt", "entityType", "setupExecutionId", "state", "status", "until", "updatedAt", "workflowE2EAdmission", "workflowMode", "workspaceId"] },
+        StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
+    });
     expect(JSON.stringify(drain[0]!.Resource)).toContain("/index/bySessionState");
     // Objects: the runner's prefix and the content-addressed evidence, nothing else; listing only under the runner prefix.
     const objects = withAction("s3:PutObject").flatMap((statement) => JSON.stringify(statement.Resource));
