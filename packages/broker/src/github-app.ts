@@ -1195,7 +1195,11 @@ export function parseGitHubRepository(repositoryUrl: string): { owner: string; n
   try {
     url = new URL(repositoryUrl);
   } catch {
-    throw agentXError("CONFIG_INVALID", "GitHub repository URL is invalid");
+    // An address that is not a URL at all (for example `git@gitlab.com:org/repo`): say "github.com only" when it names another host.
+    const named = /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:[^@\s/]+@)?([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)[:/]/.exec(repositoryUrl.trim())?.[1];
+    throw agentXError("CONFIG_INVALID", named !== undefined && named.toLowerCase() !== "github.com"
+      ? "GitHub repository URL is invalid: only github.com repositories are supported"
+      : "GitHub repository URL is invalid");
   }
   const segments = url.pathname.split("/").filter(Boolean);
   if (
@@ -1209,7 +1213,9 @@ export function parseGitHubRepository(repositoryUrl: string): { owner: string; n
     segments.length !== 2 ||
     segments.some((segment) => segment.includes("%"))
   ) {
-    throw agentXError("CONFIG_INVALID", "credentialed repository must be a canonical GitHub HTTPS URL");
+    throw agentXError("CONFIG_INVALID", url.hostname.toLowerCase() === "github.com"
+      ? "credentialed repository must be a canonical GitHub HTTPS URL"
+      : "credentialed repository must be a canonical GitHub HTTPS URL: only github.com repositories are supported");
   }
   const [owner, rawName] = segments;
   const name = rawName?.endsWith(".git") ? rawName.slice(0, -4) : rawName;
