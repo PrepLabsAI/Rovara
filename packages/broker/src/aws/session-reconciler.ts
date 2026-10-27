@@ -21,6 +21,7 @@ import { stuckCancelRetrier, sweepStuckCancels, type StuckCancelCandidate, type 
 import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, type SlackThreadPlace, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
 import { isStaleWorkerAmi, readQualifiedWorkerAmi } from "./worker-ami.js";
+import { renewalAgeMetrics, readRenewalAgeDays } from "./reconciler-renewal-age.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
 export const GRACE_MS = 15 * 60_000;
@@ -95,6 +96,8 @@ export interface ReconcilerDependencies {
    * AMI are stopped, so the next dispatch provisions the pinned one. Absent in tests that do not need it.
    */
   qualifiedWorkerAmi?: () => Promise<string | undefined>;
+  /** ARGUARD: days since the last successful renewal of the test machine (undefined until its schedule was enabled once); absent where the renewal is not wired. */
+  renewalAgeDays?: (now: Date) => Promise<number | undefined>;
   /** Spec 025 A6: deletes failure and usage index days older than 30 days; absent in tests that do not need it. */
   expireIndexDays?: (now: Date) => Promise<{ deleted: number }>;
   now?: () => Date;
@@ -243,6 +246,7 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       }
     }
 
+    const renewalAge = await renewalAgeMetrics(dependencies.renewalAgeDays, new Date(now), log);
     dependencies.emit({
       ReconcilerOrphanInstances: report.orphanInstances.length,
       ReconcilerLostInstances: report.lostInstances.length,
@@ -260,6 +264,7 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       }),
       ...stuckCancelMetrics,
       ...unwaitedMetrics,
+      ...renewalAge,
     });
     if (sweepError !== undefined) throw sweepError;
     return report;
@@ -597,6 +602,7 @@ export const handler = createReconcilerHandler({
   sweepStuckSetups: (now) => sweepStuckSetups(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))),
   // AUTOREQUALIFY AR-4: wired where the stack names the pin; a deployment without it behaves as before.
   ...(process.env.WORKER_QUALIFIED_AMI_PARAMETER === undefined ? {} : { qualifiedWorkerAmi: () => readQualifiedWorkerAmi(ssm, process.env.WORKER_QUALIFIED_AMI_PARAMETER!) }),
+  renewalAgeDays: (now) => readRenewalAgeDays(documentClient, tableName, now),
   ...(backstop.state === "on" ? { sweepUnwaitedTasks: unwaitedTaskSweep() } : {}),
   ...(indexSweepWanted(process.env) ? { expireIndexDays: (now: Date) => expireIndexDays(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))) } : {}),
   emit(metrics) {

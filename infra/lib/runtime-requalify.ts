@@ -259,9 +259,9 @@ export class RuntimeRequalify extends Construct {
     alarm("MachineFailuresAlarm", "RuntimeRequalifyMachineFailures", "A test machine renewal execution failed or timed out without cleaning up. Open it in Step Functions.",
       new cloudwatch.MathExpression({ expression: "FILL(failed, 0) + FILL(timedOut, 0)", usingMetrics: { failed: this.machine.metricFailed({ period: Duration.minutes(5) }), timedOut: this.machine.metricTimedOut({ period: Duration.minutes(5) }) }, period: Duration.minutes(5) }),
       1, cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD, 1, cloudwatch.TreatMissingData.NOT_BREACHING);
-    // No successful renewal for six days. The daily check reports the age of the last success every run (ARGUARD), so once the schedule is enabled the alarm has a number to breach on.
-    // Missing data is NOT breaching: until the owner enables the schedule the metric does not exist and must not mail anyone; a schedule switched off afterwards is an error in test-deploy --check
-    // (it records that the schedule was enabled once), and a renewal nobody started is covered by the runtime-expiry notice.
+    // No successful renewal for six days. The daily check reports the age of the last success every run (ARGUARD), so once the schedule is enabled the alarm has a number to breach on. The sessions reconciler (every 10 minutes, independent of this schedule) emits the same number once the schedule was enabled, so a schedule switched off later still ends in this alarm after six days.
+    // Missing data is NOT breaching: until the owner enables the schedule the metric does not exist and must not mail anyone; a schedule switched off afterwards keeps getting the number from the reconciler and is also an error in
+    // test-deploy --check (it records that the schedule was enabled once); a renewal nobody started is covered by the runtime-expiry notice.
     alarm("StaleAlarm", "RuntimeRequalifyStale", "The browser and API test machine has not been renewed for six days; its registration expires after seven. Run test-deploy --only requalify-now or qualify by hand.",
       new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName: REQUALIFY_AGE_METRIC, statistic: "Maximum", period: Duration.days(1) }), 1, cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD, REQUALIFY_STALE_AFTER_DAYS, cloudwatch.TreatMissingData.NOT_BREACHING);
   }

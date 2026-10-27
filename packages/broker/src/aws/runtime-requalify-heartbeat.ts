@@ -1,5 +1,5 @@
 import { PutMetricDataCommand } from "@aws-sdk/client-cloudwatch";
-import { GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
   REQUALIFY_AGE_METRIC, REQUALIFY_PROFILE_ID, RequalifyLastSuccessSchema, RequalifyScheduleEnabledSchema, requalifyLastSuccessKey, requalifyScheduleEnabledKey,
 } from "@agentx/contracts";
@@ -16,14 +16,27 @@ export type HeartbeatDependencies = Pick<RequalifyStepsDependencies, "documentCl
 const DAY_MS = 24 * 3_600_000;
 const nowOf = (deps: HeartbeatDependencies): number => deps.now?.() ?? Date.now();
 
-async function readAt(deps: HeartbeatDependencies, key: { pk: string; sk: string }, kind: "enabled" | "success"): Promise<number | undefined> {
-  const item = (await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }))).Item;
+type Store = { documentClient: Pick<DynamoDBDocumentClient, "send">; tableName: string };
+
+async function readAt(store: Store, key: { pk: string; sk: string }, kind: "enabled" | "success"): Promise<number | undefined> {
+  const item = (await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: key, ConsistentRead: true }))).Item;
   if (item === undefined) return undefined;
   const { pk: _pk, sk: _sk, ...fields } = item;
   void _pk; void _sk;
   const parsed = kind === "enabled" ? RequalifyScheduleEnabledSchema.safeParse(fields) : RequalifyLastSuccessSchema.safeParse(fields);
   if (!parsed.success) throw new Error("the schedule row is not as written by the renewal");
   return Date.parse(parsed.data.at);
+}
+
+/**
+ * Days since the last successful renewal (since the first enable until there is one); undefined while the schedule was never enabled. Two reads by key. Used by the daily check and, so the
+ * number keeps arriving when the schedule is off, by the sessions reconciler.
+ */
+export async function renewalAgeDays(store: Store, now: number): Promise<number | undefined> {
+  const enabledAt = await readAt(store, requalifyScheduleEnabledKey(REQUALIFY_PROFILE_ID), "enabled");
+  if (enabledAt === undefined) return undefined;
+  const since = (await readAt(store, requalifyLastSuccessKey(REQUALIFY_PROFILE_ID), "success")) ?? enabledAt;
+  return Math.max(0, Math.round(((now - since) / DAY_MS) * 100) / 100);
 }
 
 /** Records, once, that the daily schedule ran (so it was enabled). A later call never moves the time. */
@@ -49,9 +62,7 @@ export async function recordRenewalSuccess(deps: HeartbeatDependencies, runId: s
 export async function dailyHeartbeat(deps: HeartbeatDependencies): Promise<void> {
   try {
     await markScheduleEnabled(deps);
-    const now = nowOf(deps);
-    const since = (await readAt(deps, requalifyLastSuccessKey(REQUALIFY_PROFILE_ID), "success")) ?? (await readAt(deps, requalifyScheduleEnabledKey(REQUALIFY_PROFILE_ID), "enabled")) ?? now;
-    const days = Math.max(0, Math.round(((now - since) / DAY_MS) * 100) / 100);
+    const days = (await renewalAgeDays(deps, nowOf(deps))) ?? 0;
     await deps.cloudwatch.send(new PutMetricDataCommand({ Namespace: deps.config.metricsNamespace, MetricData: [{ MetricName: REQUALIFY_AGE_METRIC, Value: days, Unit: "None" }] }));
   } catch {
     console.error("requalify-heartbeat-failed");
