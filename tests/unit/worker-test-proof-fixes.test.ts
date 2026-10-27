@@ -248,4 +248,33 @@ describe("TESTPROOF review fixes", () => {
     expect(await readFile(join(second.directory, "src/bug.ts"), "utf8")).toBe(SOURCE_2);
     expect(git(second.directory, "status", "--porcelain")).toBe("");
   });
+
+  // review round 2
+  it("shows the original code in a repository with no changed test too, so old and new code are never mixed", async () => {
+    const withTest = await repository({ "src/bug.ts": SOURCE_1 }, { "src/bug.test.ts": 'import { value } from "./bug.js";\nexpect(value).toBe(2);\n' });
+    const otherRepo = await repository({ "src/bug.ts": SOURCE_1 }, { "src/bug.ts": SOURCE_2 });
+    // The new test (repository one) passes only with the change made in repository two.
+    const runner: CheckRunners = { ...fakeTestRunner(withTest.directory), runProjectCommand: async () => {
+      const value = (await readFile(join(otherRepo.directory, "src/bug.ts"), "utf8")).includes("= 2") ? 2 : 1;
+      return value === 2 ? { exitCode: 0, timedOut: false, stdout: "ok", stderr: "" } : { exitCode: 1, timedOut: false, stdout: "AssertionError: expected 1 to be 2", stderr: "" };
+    } };
+    const proof = await runTestProof(options(withTest, { runners: runner, repositories: [
+      { repositoryId: "one", directory: withTest.directory, startCommit: withTest.startCommit, candidateTreeSha: withTest.candidateTreeSha },
+      { repositoryId: "two", directory: otherRepo.directory, startCommit: otherRepo.startCommit, candidateTreeSha: otherRepo.candidateTreeSha },
+    ] }));
+    expect(proof.items).toEqual([expect.objectContaining({ verdict: "proves_change" })]);
+    expect(await readFile(join(otherRepo.directory, "src/bug.ts"), "utf8")).toBe(SOURCE_2);
+  });
+
+  it("does not take a lint check for a test check because its output names a changed test file's basename", async () => {
+    const made = await repository({ "src/bug.ts": SOURCE_1 }, fixed);
+    const lint: ProjectCommand = { cwd: ".", executable: "npm", args: ["run", "lint"], timeoutSeconds: 60 };
+    const calls: ProjectCommand[] = [];
+    const proof = await runTestProof(options(made, {
+      plan: planOf(lint), runners: fakeTestRunner(made.directory, calls),
+      newEntries: [{ ...passedEntry("readiness:0", "npm run lint"), output: "lint: ignoring bug.test.ts" }],
+    }));
+    expect(calls).toEqual([]);
+    expect(proof.items).toEqual([expect.objectContaining({ verdict: "not_applicable" })]);
+  });
 });

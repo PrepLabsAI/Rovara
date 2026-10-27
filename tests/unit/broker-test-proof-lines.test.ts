@@ -54,6 +54,13 @@ describe("test proof lines for the pull request", () => {
     expect(text).not.toContain(secret);
   });
 
+  it("cannot be made to rebuild a comment opener or a backtick by nesting", () => {
+    for (const nasty of ["a <!<!<!------ b", "a <!<!<!<!--------", "a ``<<!-`-- b"]) {
+      const text = testProofPullRequestLines(proof([item("does_not_prove", nasty)]), DIGEST, (line) => line).join("\n");
+      expect(text.replace(/^Warning[^(]*\(/u, "")).not.toMatch(/[<>`]/u);
+    }
+  });
+
   it("is silent when no test changed", () => {
     expect(testProofPullRequestLines({ ...proof([]), status: "no_changed_tests", note: "no_changed_tests" }, DIGEST, inert)).toEqual([]);
   });

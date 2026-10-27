@@ -4,16 +4,22 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CheckReportSchema, TestProofSchema, createCandidateManifest, type ProjectCommand, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import type { WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
+import * as e2eChecks from "../../packages/worker/src/workflow-e2e-checks.js";
 import { AgentFilesRestoreError } from "../../packages/worker/src/verification/original-code.js";
 import { runTaskInvocation, type TaskInvocationResult } from "../../packages/worker/src/run-task.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
 import { fakeTestRunner, git } from "../support/test-proof-fixture.js";
+
+vi.mock("../../packages/worker/src/workflow-e2e-checks.js", async (importOriginal) => {
+  const original: typeof e2eChecks = await importOriginal();
+  return { ...original, executeWorkflowE2EChecks: vi.fn(original.executeWorkflowE2EChecks) };
+});
 
 const check: ProjectCommand = { cwd: "app", executable: "npm", args: ["test"], timeoutSeconds: 60 };
 
@@ -36,16 +42,20 @@ async function workspace(files: Record<string, string>): Promise<string> {
   return rootPath;
 }
 
-async function checksRun(rootPath: string, extra: { runProjectCommand?: ProjectCommand[]; fixedOutput?: string; testProofOriginalCode?: Parameters<typeof runTaskInvocation>[1]["testProofOriginalCode"] } = {}) {
+async function checksRun(rootPath: string, extra: { runProjectCommand?: ProjectCommand[]; fixedOutput?: string; e2e?: boolean; testProofOriginalCode?: Parameters<typeof runTaskInvocation>[1]["testProofOriginalCode"] } = {}) {
   const invocation: Extract<WorkerInvocation, { kind: "task" }> = {
     protocolVersion: 1, kind: "task", operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64),
-    payload: { conversationId: randomUUID(), prompt: "check it", readiness: [check], workflowMode: "CHECKS" },
+    payload: { conversationId: randomUUID(), prompt: "check it", readiness: [check], workflowMode: "CHECKS", ...(extra.e2e !== true ? {} : { workflowE2EAdmission: {
+      schemaVersion: 1, taskId: randomUUID(), workflowRevision: 1, candidateDigest: "a".repeat(64), roundId: randomUUID(), groupRunIds: [randomUUID()],
+      admissionRef: { key: `workflow-e2e-admissions/sha256/${"b".repeat(64)}.json`, sha256: "b".repeat(64), byteLength: 10 },
+    } }) },
   };
   const events: WorkerEvent[] = [];
   const artifacts: WorkerArtifact[] = [];
   const calls: ProjectCommand[] = extra.runProjectCommand ?? [];
   const result: TaskInvocationResult = await runTaskInvocation(invocation, {
     rootPath, model: FAUX_MODEL, checkRunners: fakeTestRunner(rootPath, calls, undefined, extra.fixedOutput),
+    ...(extra.e2e !== true ? {} : { workflowE2EAdmissionReader: async () => { throw new Error("not read"); }, workflowE2EEvidenceSink: async () => { throw new Error("not used"); }, workflowE2EEvidenceRoot: rootPath }),
     ...(extra.testProofOriginalCode === undefined ? {} : { testProofOriginalCode: extra.testProofOriginalCode }),
     eventSink: async (batch) => { events.push(...batch); },
     artifactSink: async (artifact) => { artifacts.push(artifact); },
@@ -116,5 +126,20 @@ describe("TESTPROOF in the CHECKS run", () => {
     expect(withTest.artifacts.some((artifact) => artifact.name === "test-proof.json")).toBe(true);
     const normalised = (run: typeof withTest) => run.artifacts.find((artifact) => artifact.name === "checks.json")!.content.replace(/"durationMs": *\d+/g, '"durationMs": 0');
     expect(normalised(withTest)).toBe(normalised(without));
+  });
+
+  it("runs the proof after the browser and API checks, and takes the after-snapshot after the proof", async () => {
+    const order: string[] = [];
+    vi.mocked(e2eChecks.executeWorkflowE2EChecks).mockImplementationOnce(async () => { order.push("e2e"); return { evidenceRef: undefined } as never; });
+    const rootPath = await workspace({ "src/bug.ts": "export const value = 2;\n", "src/bug.test.ts": 'import { value } from "./bug.js";\nexpect(value).toBe(2);\n' });
+    const run = await checksRun(rootPath, { e2e: true, testProofOriginalCode: () => ({ run: async (work) => {
+      order.push("proof");
+      const value = await work();
+      await writeFile(join(rootPath, "app/left-behind.txt"), "left by the run on the original code\n");
+      return value;
+    } }) });
+    expect(order).toEqual(["e2e", "proof"]);
+    // The file the proof left is in the after-snapshot (so the broker sees it as drift) and not in the before one.
+    expect(run.result.workflowCheckCandidateRepositories).not.toEqual(run.result.workflowCandidateRepositories);
   });
 });
