@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, autoFixDecision, classifyBlockedWorkflow, createCandidateManifest, wholeTaskSpendUsd, workflowAutoActionRequestId,
+  WORKFLOW_AGENTX_ACTOR_ID, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, autoFixDecision, classifyBlockedWorkflow, createCandidateManifest, WorkflowDecisionRecordSchema, WorkflowSnapshotSchema, createWorkflowSnapshot, wholeTaskSpendUsd, workflowAutoActionRequestId, workflowAutomaticRetryDecision,
   type AutoFixBudget, type AutoFixFacts, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { AUTOFIX_ROUND_ESTIMATE_USD, autofixConfigFromEnvironment } from "../../packages/broker/src/aws/workflow-autofix-runner.js";
@@ -13,6 +13,7 @@ import {
 } from "../../packages/broker/src/aws/workflow-autofix-dispatch-exhaust.js";
 import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
 import { failActiveOperation } from "../../packages/broker/src/aws/outbox-failure.js";
+import { sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
 import { AutoFixAskSchema, autoFixCardLines } from "../../packages/broker/src/developer/autofix-messages.js";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
@@ -154,6 +155,13 @@ describe("DISPATCHEXHAUST 1: the dispatch budget is spent (a start that fails te
     await sweep(harness);
     expect(reviewRuns(harness, ctx.workspaceId)).toHaveLength(1);
     expect(automatic(harness, ctx.taskId)).toHaveLength(1);
+    // The nested look that ran just before the sweep left its row behind (a lost delete): the row for the block that was already handled changes nothing and goes away.
+    const [leftover] = autofixBlockRows("state", { ...blocked, revision: blocked.revision - 1 }, "dispatch-exhausted", new Date(Date.now() - 4 * 60_000).toISOString());
+    harness.db.set((leftover as { Put: { Item: Record<string, unknown> } }).Put.Item);
+    await Promise.all([sweep(harness), sweep(harness)]);
+    expect(reviewRuns(harness, ctx.workspaceId)).toHaveLength(1);
+    expect(automatic(harness, ctx.taskId)).toHaveLength(1);
+    expect(dispatchRows(harness)).toEqual([]);
   });
 
   it("asks after the one retry (what failed, what Rovara tried, the limit), never retrying twice and never sending back to coding", async () => {
@@ -497,6 +505,48 @@ describe("DISPATCHEXHAUST 3: the owner stopped the task", () => {
     expect(card(harness, ctx.taskId).text).toContain("You stopped this, so I did not retry it by myself.");
   });
 
+  /** The reviews are running and the owner asks to stop them; the stop is requested, and the worker's cancel result is what the caller decides. */
+  async function stopRequested(harness: Harness, ctx: Awaited<ReturnType<typeof workflowAtVerification>>) {
+    await ctx.finishImplementation();
+    const run = reviewRuns(harness, ctx.workspaceId)[0]!;
+    await harness.events(ctx.workspaceId, String(run.id), [{ type: "lifecycle", payload: { status: "RUNNING" } }]);
+    expect((await harness.dev(MAYA, "POST", `/v1/dev/tasks/${ctx.taskId}/cancel`, { requestId: randomUUID() })).status).toBe(200);
+    return { run, cancel: operations(harness, ctx.workspaceId).find((item) => item.kind === "cancel" && item.targetOperationId === run.id)! };
+  }
+  const sweepStuck = (harness: Harness, workspaceId: string, at: Date = new Date()) => sweepStuckCancels({ client: harness.db, tableName: "state" }, [{ workspaceId, compute: "gone" }], at);
+
+  it("a stop whose cancel failed and was released by the reconciler (the owner asked to stop) is explained and never retried", async () => {
+    const harness = await broker();
+    const ctx = await workflowAtVerification(harness);
+    const { run, cancel } = await stopRequested(harness, ctx);
+    await harness.finish(ctx.workspaceId, String(cancel.id), "FAILED");
+    expect((await sweepStuck(harness, ctx.workspaceId)).interrupted).toEqual([run.id]);
+    const blocked = workflowOf(harness, ctx.taskId);
+    expect(blocked).toMatchObject({ stage: "REVIEW", state: "BLOCKED", blockReason: "independent review operation ended interrupted" });
+    expect(dispatchRows(harness)).toHaveLength(1);
+    expect(dispatchRows(harness)[0]).toMatchObject({ kind: "AUTOFIX", workflowRevision: blocked.revision, autofixCause: "owner-stopped" });
+    expect(dispatchRows(harness)[0]).not.toHaveProperty("autofixNotBefore");
+    await sweep(harness);
+    expect(automatic(harness, ctx.taskId)).toEqual([]);
+    expect(reviewRuns(harness, ctx.workspaceId)).toHaveLength(1);
+    expect(ask(harness, ctx.taskId)).toMatchObject({ reason: "owner-stopped", codes: ["owner-stopped"] });
+  });
+
+  it("a stop that never answered because the compute is gone is a LOST run: one retry after the delay", async () => {
+    const harness = await broker();
+    const ctx = await workflowAtVerification(harness);
+    const { run } = await stopRequested(harness, ctx);
+    expect((await sweepStuck(harness, ctx.workspaceId, new Date(Date.now() + 31 * 60_000))).ended).toEqual([run.id]);
+    const blocked = workflowOf(harness, ctx.taskId);
+    expect(blocked).toMatchObject({ stage: "REVIEW", state: "BLOCKED", blockReason: "independent review operation ended failed" });
+    expect(dispatchRows(harness)[0]).toMatchObject({ kind: "AUTOFIX", workflowRevision: blocked.revision, autofixCause: "run-lost" });
+    expect(Date.parse(String(dispatchRows(harness)[0]!.autofixNotBefore))).toBeGreaterThan(Date.now());
+    elapse(harness, dispatchRows(harness)[0]!);
+    await sweep(harness);
+    expect(automatic(harness, ctx.taskId)).toHaveLength(1);
+    expect(reviewRuns(harness, ctx.workspaceId)).toHaveLength(2);
+  });
+
   it("without automatic fixing the stop leaves no row and no ask", async () => {
     const harness = await broker(null);
     const ctx = await workflowAtVerification(harness);
@@ -569,6 +619,17 @@ describe("DISPATCHEXHAUST policy: a cause is the whole classification of the blo
       expect(autoFixDecision(blockedWorkflow(stage, { pullRequests: [{}] }), facts, budget()).action).toBe("ASK");
     });
   }
+
+  it("the system move holds the same limits again by itself (a second line of defence behind the policy)", () => {
+    const candidate = blockedWorkflow("REVIEW").candidate!;
+    const workflow = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-10-27T00:00:00.000Z" }),
+      revision: 9, stage: "REVIEW", state: "BLOCKED", blockReason: WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, candidate });
+    const input = { expectedRevision: 9, stage: "REVIEW" as const, reason: "Rovara retried the reviews by itself.", spend: spend(1), now: "2026-10-27T00:00:00.000Z" };
+    expect(workflowAutomaticRetryDecision(workflow, input)).toMatchObject({ source: "AUTO_RETRY", actorRole: "AGENTX", auto: { stage: "REVIEW" } });
+    expect(() => workflowAutomaticRetryDecision({ ...workflow, decisions: [WorkflowDecisionRecordSchema.parse({ ...retryDecision("REVIEW", candidate.digest), requestId: randomUUID() })] }, input)).toThrow(/already retried/);
+    expect(() => workflowAutomaticRetryDecision(workflow, { ...input, spend: spend(14) })).toThrow(/spend/);
+    expect(() => workflowAutomaticRetryDecision(workflow, { ...input, spend: spend(Number.NaN) })).toThrow(/spend/);
+  });
 
   it("a row written by the old code (no cause) is decided as it always was, and a cause this code does not know reads as none", () => {
     const old = (workflowDispatchItem("state", "t", 9, "AUTOFIX", "d".repeat(64), "2026-10-27T00:00:00.000Z") as { Put: { Item: Record<string, unknown> } }).Put.Item;

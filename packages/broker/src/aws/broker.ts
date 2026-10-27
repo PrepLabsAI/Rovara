@@ -13176,7 +13176,8 @@ async function cancelledWorkflowStepItems(
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
   if (task === undefined || !stopBlocksWorkflowStep(task, target)) return [];
   const items = await completedWorkflowItems(dependencies, target, pointer, "CANCELLED", now, undefined, "operation was cancelled");
-  // Only the one conditional update of the step the target ran, exactly (and its AUTOFIX row, DISPATCHEXHAUST: with automatic fixing on, a stopped VERIFY or REVIEW step carries it, and without it being allowed here the cancel left the step RUNNING); anything else is left to the owner's Retry.
+  // Only the one conditional update of the step the target ran, exactly, and the AUTOFIX row that rides with a block of VERIFY or REVIEW when automatic fixing is on (DISPATCHEXHAUST: refusing
+  // it left the stopped step RUNNING); anything else is left to the owner's Retry.
   const rows = items.filter((item) => item.Put?.Item?.kind === "AUTOFIX").length;
   const update = rows <= 1 && items.length === 1 + rows ? items.find((item) => item.Update !== undefined)?.Update : undefined;
   const values = update?.ExpressionAttributeValues;
