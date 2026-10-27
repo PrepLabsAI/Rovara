@@ -81,8 +81,8 @@ export interface E2EAgentModelAdapterOptions {
   position: () => { caseId: string; stepIndex: number } | null;
   /**
    * Whether the bytes of a request carry a credential this process knows (the run's accounts, and every session value it has learned, a cookie the application set during the
-   * step included). The worker scans each request against the values the begin marker gave it, and a marker is sent once per step (Task 4.3a), so a value learned later reaches only
-   * this scan: a request it flags is refused here and never sent.
+   * step included). The worker scans each request against the values it was told, and the channel client tells it the browser's current values before every call
+   * (MIDSTEPCOOKIE), so this scan is a second check: a request it flags is refused here and never sent.
    */
   scan?: (bytes: Uint8Array) => boolean;
 }

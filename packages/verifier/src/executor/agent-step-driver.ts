@@ -7,9 +7,9 @@ import type { E2EAgentModelAdapter } from "./agent-model-adapter.js";
 /**
  * The agent step driver's step lifecycle (Task 4.3b): what happens around one `agent.act` call.
  *
- * 1. The worker is told the step begins (the begin marker, with the session values the browser holds, so a page that shows one is refused before a model sees it). A marker is sent
- *    once per step, so a value the application sets during the step reaches the worker only at the next step's begin; the model adapter's own scan (`scan`, the host's redactor,
- *    which learns every session value as it arrives) refuses a request that carries one in the meantime. A marker the worker
+ * 1. The worker is told the step begins (the begin marker, with the session values the browser holds, so a page that shows one is refused before a model sees it). A value the application sets
+ *    during the step reaches the worker not through this marker but through the session sync the channel client sends before every model call (`session-sync.ts`); the model adapter's
+ *    own scan (`scan`, the host's redactor) is a second check on the executor's side. A marker the worker
  *    refuses ends the step here: no model call may be made for a step the worker does not know.
  * 2. The step's ledger is opened and the step is made current, so the adapter and the executor can attribute calls and actions to it.
  * 3. `act` runs. An `AgentError` is an outcome (`failed`, with its stop code), not a throw; anything else is recorded as a failed step and thrown again, because it is the executor's own

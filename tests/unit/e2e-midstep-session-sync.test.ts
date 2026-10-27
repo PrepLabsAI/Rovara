@@ -12,6 +12,7 @@ import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget, type E2EInvoke
 import { E2EModelChannelError, createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
 import { E2E_SESSION_SYNC_PENDING_LIMIT_MS, createE2ESessionSyncSource, type E2ESessionStateReader } from "../../packages/verifier/src/executor/session-sync.js";
 import { parseSetCookie } from "../../packages/verifier/src/executor/form-login.js";
+import { createE2ECredentialGuard } from "../../packages/worker/src/e2e-model-credential-guard.js";
 import { e2eSecretSpellings } from "../../packages/worker/src/e2e-secret-spellings.js";
 import { startE2EModelProxy, type E2EModelEvidenceSink, type E2EModelProxy, type E2EModelTranscript } from "../../packages/worker/src/e2e-model-proxy.js";
 import { createApplicationChecksFeatureMonitor } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
@@ -22,8 +23,8 @@ import { CASE_ID, RUN_ID, bedrockRoute, call, channelRequest, tapAnswer } from "
 
 // MIDSTEPCOOKIE: the redaction set is current before EVERY model call, and a call without a current sync is refused.
 
-/** Contains a quote and a backslash, so its JSON-escaped spelling differs from the raw one. */
-const COOKIE = 's3ss"on\\id/AB12+Z9x8y7w6v5u4';
+/** Contains a quote and a backslash (so its JSON-escaped spelling differs from the raw one) and `>>` (so its base64url spelling differs from its base64 one). */
+const COOKIE = 's3ss"on\\id/AB12+Z9x8y7w6v5u4>>??~~';
 const POSITION = { caseId: CASE_ID, stepIndex: 0 };
 
 class Sink implements E2EModelEvidenceSink {
@@ -129,6 +130,11 @@ function executorFor(port: number, options: { learnFromBrowser?: boolean } = {})
 }
 
 describe("a session cookie set mid-step is redacted from the next model call of the same step, in every encoding", () => {
+  it("uses a cookie whose spellings all differ (otherwise an encoding case would test the raw form twice)", () => {
+    const spellings = ENCODINGS.map(([, encode]) => encode(COOKIE));
+    expect(new Set(spellings).size).toBe(ENCODINGS.length);
+  });
+
   it.each(ENCODINGS)("%s", async (_name, encode) => {
     const run = await startRun({ begin: false });
     const app = await fakeApp(COOKIE);
@@ -148,6 +154,18 @@ describe("a session cookie set mid-step is redacted from the next model call of 
     // Nor did it reach the stored evidence of the refused call.
     for (const spelling of e2eSecretSpellings(COOKIE)) expect(JSON.stringify([run.sink.receipts, run.sink.transcripts]), spelling).not.toContain(spelling);
     expect(run.sink.receipts.map((receipt) => receipt.outcome)).toEqual(["ok", "refused-credential-match"]);
+  });
+
+  it("finds the cookie inside longer base64 and base64url text at every alignment (a Basic header, a token payload), and ignores the same text without it", () => {
+    const guard = createE2ECredentialGuard({ passwords: [], emails: [], cookieValues: [COOKIE] });
+    for (const prefix of ["", "a:", "ab:", "abc:", "user-name:"]) {
+      for (const encoding of ["base64", "base64url"] as const) {
+        const text = `#n1 text "Authorization: Basic ${Buffer.from(`${prefix}${COOKIE}:tail`, "utf8").toString(encoding)}"`;
+        expect(guard.inspect(call(text)), `${prefix} ${encoding}`).toMatchObject({ refuse: true, category: "cookie" });
+      }
+    }
+    const innocent = `#n1 text "Authorization: Basic ${Buffer.from("user-name:not-the-cookie:tail", "utf8").toString("base64")}"`;
+    expect(guard.inspect(call(innocent))).toMatchObject({ refuse: false });
   });
 
   it.each(ENCODINGS)("positive control, %s: an executor that does not read the browser lets the same call reach the model, so the leak path is real", async (_name, encode) => {

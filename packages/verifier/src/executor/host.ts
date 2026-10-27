@@ -197,7 +197,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const agent = channelPlan === undefined ? null : (() => {
     const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, sessionSync });
     const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
-    // The adapter's own scan covers what the worker's cannot: a session value learned during a step (the begin marker, sent once per step, carries only what was known then).
+    // The adapter's own scan is the executor's second check; the worker's scan is told the browser's session values before every call by the client's sync (MIDSTEPCOOKIE).
     const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position, scan: (bytes) => agentRedactor.contains(bytes) });
     // The goals of the steps run so far: a trace's typed value that is text of one stays as it is, the ledger's rule (the runner writes a trace after its step has ended).
     const goals: string[] = [];
