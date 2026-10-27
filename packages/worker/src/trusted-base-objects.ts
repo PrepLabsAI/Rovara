@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { access, link, lstat, mkdir, mkdtemp, open, readdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -25,7 +25,8 @@ const execFile = promisify(execFileCallback);
 // one of the three that are read. A file planted in that directory can at most redirect where objects are read from, and the checks on the bytes catch that.
 // The workspace's config, hooks, `info/` files and refs are never copied.
 //
-// The scratch directory is made on the workspace's own file system, where a hard link works and nothing is copied. Every workspace file that is
+// The scratch directory is made where a hard link from the workspace works (decided by a test link, not by the device number, since a bind mount
+// shares its device with the directory it shows and a link between the two fails), so nothing is copied. Every workspace file that is
 // linked or copied is opened without following a link, checked to be a regular file, and (when it has to be copied) copied from that open file under
 // a size limit and the overall deadline. The whole read has one deadline, and every git process is stopped when it passes.
 
@@ -152,10 +153,14 @@ async function emptyGitDirectory(algorithm: Algorithm, configured: string | unde
 }
 
 /**
- * Where the scratch directory goes: the temporary directory when it is on the workspace's file system (hard links then work), else a directory the
- * worker owns (mode 0700, not a link) on that file system under the workspace root, else the temporary directory (files are then copied, under limits).
+ * Where the scratch directory goes: the first of these where a hard link from the workspace works. (1) The worker's own directory under the workspace
+ * root (`.agentx-runtime/tmp`, where it exists, mode 0700, not a link): it is on the workspace's mount. (2) The temporary directory, when it is on the
+ * workspace's file system. (3) A directory the worker owns under the workspace root (`.agentx/scratch`, made when missing). Two paths that report the
+ * same device can still be different mounts (a bind mount is one), and a hard link between mounts fails with EXDEV, so a candidate is decided by
+ * `canLink` (one test link from the workspace into it), not by its device alone. When none takes a link the temporary directory is used and files are
+ * copied, under limits.
  */
-export async function chooseScratchRoot(workspaceRoot: string | undefined, device: number, base: string = tmpdir()): Promise<string> {
+export async function chooseScratchRoot(workspaceRoot: string | undefined, device: number, base: string = tmpdir(), canLink: (root: string) => Promise<boolean> = async () => true): Promise<string> {
   const owner = typeof process.getuid === "function" ? process.getuid() : undefined;
   /** The directory's own path when it can be used as a scratch root. The temporary directory may be reached through a link (as /tmp is on some systems); a directory under the workspace may not. */
   const usable = async (path: string, create: boolean, mayBeLinked: boolean): Promise<string | undefined> => {
@@ -165,20 +170,66 @@ export async function chooseScratchRoot(workspaceRoot: string | undefined, devic
       if (!mayBeLinked && real !== path) return undefined;
       const stat = await lstat(real);
       if (!stat.isDirectory() || stat.dev !== device) return undefined;
-      return mayBeLinked || (stat.uid === owner && (stat.mode & 0o777) === 0o700) ? real : undefined;
+      if (!mayBeLinked && !(stat.uid === owner && (stat.mode & 0o777) === 0o700)) return undefined;
+      return (await canLink(real)) ? real : undefined;
     } catch {
       return undefined;
     }
   };
-  const temporary = await usable(base, false, true);
-  if (temporary !== undefined) return temporary;
   if (workspaceRoot !== undefined) {
     const runtime = await usable(join(workspaceRoot, ".agentx-runtime", "tmp"), false, false);
     if (runtime !== undefined) return runtime;
+  }
+  const temporary = await usable(base, false, true);
+  if (temporary !== undefined) return temporary;
+  if (workspaceRoot !== undefined) {
     const own = await usable(join(workspaceRoot, ".agentx", "scratch"), true, false);
     if (own !== undefined) return own;
   }
   return base;
+}
+
+/**
+ * The scratch root for a read: {@link chooseScratchRoot}, deciding each candidate by one test link from the workspace's object store: the first pack file
+ * is linked in (or, when there is none, a small file made for the purpose in the object store and removed afterwards) under a name of its own, which
+ * is checked to be that file and removed. Any failure of the test means that candidate does not take a link.
+ */
+async function scratchRootFor(objects: string, workspaceRoot: string | undefined, link: (source: string, target: string) => Promise<void>): Promise<string> {
+  const packs = join(objects, "pack");
+  let source: string | undefined;
+  let made: string | undefined;
+  try {
+    if (await plainDirectory(packs)) {
+      for (const name of (await readdir(packs)).filter((entry) => PACK_FILE.test(entry)).sort()) {
+        if ((await lstat(join(packs, name)).catch(() => undefined))?.isFile() === true) { source = join(packs, name); break; }
+      }
+    }
+    if (source === undefined) {
+      const path = join(objects, `agentx-link-probe-${String(process.pid)}-${randomBytes(6).toString("hex")}`);
+      try {
+        await (await open(path, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600)).close();
+        made = path;
+        source = path;
+      } catch { /* no test source: no candidate takes a link, and files are copied */ }
+    }
+    const canLink = async (root: string): Promise<boolean> => {
+      if (source === undefined) return false;
+      const target = join(root, `agentx-link-probe-${String(process.pid)}-${randomBytes(6).toString("hex")}`);
+      try {
+        const before = await lstat(source);
+        await link(source, target);
+        const after = await lstat(target);
+        return after.isFile() && after.ino === before.ino && after.dev === before.dev;
+      } catch {
+        return false;
+      } finally {
+        await rm(target, { force: true }).catch(() => undefined);
+      }
+    };
+    return await chooseScratchRoot(workspaceRoot, (await lstat(objects)).dev, tmpdir(), canLink);
+  } finally {
+    if (made !== undefined) await rm(made, { force: true }).catch(() => undefined);
+  }
 }
 
 /** Removes scratch directories an earlier read left behind (a killed worker), so they cannot pile up. Best effort. */
@@ -262,7 +313,7 @@ export async function readVerifiedBaseRuleFile(directory: string, baseCommit: st
   let scratch: string | undefined;
   try {
     const layout = await candidateLayout(directory);
-    const root = await chooseScratchRoot(options.workspaceRoot, (await lstat(layout.objects)).dev);
+    const root = await scratchRootFor(layout.objects, options.workspaceRoot, options.linkFile ?? link);
     await removeStaleScratch(root);
     scratch = await mkdtemp(join(root, SCRATCH_PREFIX));
     const objectsDirectory = join(scratch, "objects");
