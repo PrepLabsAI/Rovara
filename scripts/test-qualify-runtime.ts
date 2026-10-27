@@ -33,6 +33,7 @@ import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { nextGeneration } from "../packages/broker/src/aws/runtime-requalify.js";
 import { acquireRequalifyLock, releaseRequalifyLock } from "../packages/broker/src/aws/runtime-requalify-lock.js";
+import { recordRenewalSuccess } from "../packages/broker/src/aws/runtime-requalify-heartbeat.js";
 import { e2eModelCheckRunnerKey } from "../packages/broker/src/e2e/model-route-registry.js";
 import { ec2Binding } from "../packages/cli/src/setup/project-add.js";
 import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
@@ -211,6 +212,8 @@ export interface QualificationEffects {
   register(proposalFile: string): Promise<string>;
   /** Records the runner that serves model checks (`E2E_MODEL_CHECK_RUNNER#<profile>`), with the registration's transport correlation, so a check is only ever sent to the runner that was qualified. */
   recordModelCheckRunner(runner: { roleId: string; instanceId: string; transportCorrelationId: string }): Promise<void>;
+  /** Records the time of this successful qualification as the renewal's last success, so the six-day stale alarm counts a by-hand qualification like an automatic one. */
+  recordSuccess(runId: string): Promise<void>;
   /** The generation the next challenge needs: one past the newest registered runtime, read the way the automatic renewal reads it (1 when nothing is registered). */
   nextGeneration(): Promise<number>;
   /** How many qualification runners of this environment are not yet terminated; the automatic renewal refuses to start a third, and so does this script. */
@@ -382,6 +385,8 @@ async function runSteps(steps: readonly QualificationStep[], effects: Qualificat
         case "register": state.registered = await effects.register(need(state.proposalFile, "the proposal file")); break;
         case "record-model-check-runner":
           await effects.recordModelCheckRunner({ roleId: need(state.facts, "the stack facts").workerRoleId, instanceId: need(state.instanceId, "the instance"), transportCorrelationId: step.transportCorrelationId });
+          // The qualification succeeded and is registered: failing to note the time must not fail it. The next automatic renewal sets the right time again.
+          try { await effects.recordSuccess(need(state.launchRun, "the run")); } catch { effects.print("Warning: could not record the success time for the renewal's stale alarm; it may mail once before the next automatic renewal."); }
           break;
         case "delete-challenge": {
           const key = `${need(state.prefix, "the instance's key prefix")}${step.object}`;
@@ -750,6 +755,11 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
       const table = requireOutput(outputsOf(await stack(environmentStackName(args.env, "control-plane"))), "StateTableName", environmentStackName(args.env, "control-plane"));
       await documents.send(new PutCommand({ TableName: table, Item: { ...e2eModelCheckRunnerKey(WEB_API_RUNTIME_PROFILE_ID), entityType: "E2E_MODEL_CHECK_RUNNER", roleId: runner.roleId, instanceId: runner.instanceId,
         transportCorrelationId: runner.transportCorrelationId, recordedAt: new Date().toISOString() } }));
+    },
+
+    async recordSuccess(runId) {
+      const { table } = await liveFacts();
+      await recordRenewalSuccess({ documentClient: documents, tableName: table }, runId);
     },
 
     async countActiveRunners() {

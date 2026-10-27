@@ -42,7 +42,7 @@ export function scheduleFindings(fact: ScheduleFact, renewNow: string): Finding[
   if (fact.deployed === "ENABLED") return [];
   if (fact.enabledOnce.state === "yes") {
     return [finding("requalify-schedule-off", "error",
-      `the daily renewal schedule is ${fact.deployed === "DISABLED" ? "DISABLED" : "missing from the stack"}, but it was enabled on ${fact.enabledOnce.at}: something switched it off (a stack update made without the schedule's context, or by hand), so the test machine is no longer renewed by itself. Switch it on again with: ${scheduleCommand(renewNow)}`)];
+      `the daily renewal schedule ${fact.deployed === "DISABLED" ? "is DISABLED" : "is not a schedule with a plain ENABLED or DISABLED State in the stack (it is gone, or its State is not a literal)"}, but it was enabled on ${fact.enabledOnce.at}: something switched it off (a stack update made without the schedule's context, or by hand), so the test machine is no longer renewed by itself. Switch it on again with: ${scheduleCommand(renewNow)}`)];
   }
   if (fact.enabledOnce.state === "unreadable") return [finding("requalify-unreadable", "warning", `the daily renewal schedule is off and the record of whether it was ever enabled cannot be read: ${fact.enabledOnce.reason}`)];
   return [];
@@ -56,4 +56,15 @@ export function enabledMarkerPutArgs(input: { table: string; region: string; now
     "--item", JSON.stringify({ pk: { S: key.pk }, sk: { S: key.sk }, entityType: { S: "RUNTIME_REQUALIFY_SCHEDULE_ENABLED" }, at: { S: input.now.toISOString() } }),
     "--condition-expression", "attribute_not_exists(pk)",
   ];
+}
+
+/**
+ * Writes the record that the schedule was enabled (the `requalify-schedule` unit's last step). "Already recorded" is the normal case on a second run. Any other refusal stops the unit with the
+ * owner's next step; the CLI's own error text is never echoed (it can carry account details).
+ */
+export function recordEnabledMarker(runner: { aws(args: readonly string[], allowFailure?: boolean): { status: number | null; stderr: string } }, input: { table: string; region: string; now: Date }): "written" | "already-recorded" {
+  const result = runner.aws(enabledMarkerPutArgs(input), true);
+  if (result.status === 0) return "written";
+  if (result.stderr.includes("ConditionalCheckFailedException")) return "already-recorded";
+  throw new Error("the schedule is ENABLED, but the record that it was enabled could not be written (the renewal's daily check writes it on its first run); check the profile's DynamoDB write access, then run requalify-schedule again");
 }

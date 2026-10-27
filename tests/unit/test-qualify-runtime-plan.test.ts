@@ -335,6 +335,7 @@ function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Arra
     },
     async deleteObject(key) { calls.push(`deleteObject ${key}`); maybeFail(key === PREFLIGHT_KEY ? "deletePreflight" : "deleteObject"); },
     saveProposal(bytes) { calls.push(`saveProposal ${bytes.toString()}`); return "/tmp/proposal.json"; },
+    async recordSuccess(runId) { calls.push(`recordSuccess ${runId}`); maybeFail("recordSuccess"); },
     async recordModelCheckRunner(runner) { calls.push(`recordModelCheckRunner ${runner.roleId} ${runner.instanceId} ${runner.transportCorrelationId}`); maybeFail("recordModelCheckRunner"); },
     async register(file) { calls.push(`register ${file}`); maybeFail("register"); return JSON.stringify({ profileId: "linux-arm64-web-api-v1", featureCatalogId: "catalog-1", featureRevisions: { web: 1, api: 1 } }); },
     async nextGeneration() { return options.registeredGeneration === undefined ? 1 : options.registeredGeneration + 1; },
@@ -407,7 +408,7 @@ describe("runTestQualification", () => {
     const names = calls.map((call) => call.split(" ")[0]);
     expect(names).toEqual([
       "checkAdminSession", "resolveFacts", "putBytes", "getObjectStrict", "deleteObject", "createVolume", "runInstance", "attachVolume", "privateIpOf", "getObject", "issueChallenge", "putObject",
-      "getObject", "getObject", "getObject", "getObject", "saveProposal", "register", "recordModelCheckRunner", "deleteObject",
+      "getObject", "getObject", "getObject", "getObject", "saveProposal", "register", "recordModelCheckRunner", "recordSuccess", "deleteObject",
     ]);
     // Task 4.10C: the runner that serves model checks is recorded after the registration, bound to its transport correlation, and never before a successful one.
     expect(calls).toContain(`recordModelCheckRunner ${facts.workerRoleId} ${INSTANCE_ID} ${WORKSPACE_ID}`);
@@ -428,6 +429,26 @@ describe("runTestQualification", () => {
     expect(calls.filter((call) => call.startsWith("runInstance"))).toHaveLength(1);
     expect(printed.join("\n")).toContain("PROFILE#linux-arm64-web-api-v1#web revision 1");
     expect(printed.join("\n")).toContain("PROFILE#linux-arm64-web-api-v1#api revision 1");
+  });
+
+  it("counts a successful by-hand qualification as a renewal for the stale alarm, after the registration and the pointer, with this run's ID (ARGUARD)", async () => {
+    const { effects, calls } = harness({ statuses: [undefined, undefined, succeeded] });
+    await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
+    expect(calls).toContain(`recordSuccess ${RUN_ID}`);
+    expect(calls.findIndex((call) => call.startsWith("recordSuccess"))).toBeGreaterThan(calls.findIndex((call) => call.startsWith("recordModelCheckRunner")));
+  });
+
+  it("does not record a success, and does not register, when the qualification failed", async () => {
+    const { effects, calls } = harness({ statuses: [failed("qualification-failed-exit-3")] });
+    await expect(runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" })).rejects.toThrow();
+    expect(calls.some((call) => call.startsWith("recordSuccess"))).toBe(false);
+  });
+
+  it("a success that cannot be recorded is a warning, never a failure of the qualification that already succeeded", async () => {
+    const { effects, calls, printed } = harness({ statuses: [undefined, undefined, succeeded], failAt: "recordSuccess" });
+    await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
+    expect(calls.some((call) => call.startsWith("deleteObject") && call.includes("challenge"))).toBe(true);
+    expect(printed.join("\n")).toMatch(/could not record the success/);
   });
 
   it("never registers when the status says FAILED, and leaves the instance for diagnosis with the way to end it", async () => {

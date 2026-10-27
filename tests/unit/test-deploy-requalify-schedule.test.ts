@@ -6,7 +6,7 @@ import { evaluateTestDeployCheck } from "../../scripts/test-deploy-check.js";
 import { planTestDeploy, type DeployStep } from "../../scripts/test-deploy.js";
 import { REQUALIFY_INFRA, readScheduleFact, requalifyFindings, requalifyHeadContext, type RequalifyFacts } from "../../scripts/test-deploy-requalify.js";
 import {
-  REQUALIFY_SCHEDULE_CONTEXT_KEY, REQUALIFY_SCHEDULE_LOGICAL_ID, enabledMarkerPutArgs, scheduleFindings, scheduleStateOf, wantsScheduleEnabled, type ScheduleFact,
+  REQUALIFY_SCHEDULE_CONTEXT_KEY, REQUALIFY_SCHEDULE_LOGICAL_ID, enabledMarkerPutArgs, recordEnabledMarker, scheduleFindings, scheduleStateOf, wantsScheduleEnabled, type ScheduleFact,
 } from "../../scripts/test-deploy-requalify-schedule.js";
 
 const AT = "2026-10-20T06:00:00.000Z";
@@ -36,6 +36,13 @@ describe("the schedule findings", () => {
       expect(finding!.message).toContain("--only requalify-schedule --apply");
       expect(finding!.message).not.toContain("--only requalify-now");
     }
+  });
+
+  it("says what is wrong in words that fit: a schedule that is gone or whose State is not a plain ENABLED/DISABLED is not called 'missing' when it may only be unreadable", () => {
+    const text = (deployed: "DISABLED" | "unknown") => scheduleFindings({ deployed, enabledOnce: { state: "yes", at: AT } }, NOW_COMMAND)[0]!.message;
+    expect(text("DISABLED")).toContain("is DISABLED");
+    expect(text("unknown")).toContain("is not a schedule with a plain ENABLED or DISABLED State");
+    expect(text("unknown")).not.toContain("missing from the stack");
   });
 
   it("says nothing before the first enable (the schedule is created disabled on purpose), and nothing while it is on", () => {
@@ -129,5 +136,31 @@ describe("the requalify-schedule unit records that the schedule was enabled", ()
     expect(JSON.parse(args[args.indexOf("--item") + 1]!)).toEqual({
       pk: { S: requalifyScheduleEnabledKey(REQUALIFY_PROFILE_ID).pk }, sk: { S: "SCHEDULE_ENABLED" }, entityType: { S: "RUNTIME_REQUALIFY_SCHEDULE_ENABLED" }, at: { S: AT },
     });
+  });
+});
+
+describe("recordEnabledMarker (the requalify-schedule unit's last step)", () => {
+  const run = (answer: { status: number; stderr?: string }) => {
+    const calls: string[][] = [];
+    return { calls, runner: { aws: (args: readonly string[]) => { calls.push([...args]); return { status: answer.status, stdout: "", stderr: answer.stderr ?? "" }; } } };
+  };
+  const input = { table: "state", region: "us-east-1", now: new Date(AT) };
+
+  it("puts the conditional row once", () => {
+    const { runner, calls } = run({ status: 0 });
+    expect(recordEnabledMarker(runner, input)).toBe("written");
+    expect(calls).toEqual([enabledMarkerPutArgs(input)]);
+  });
+
+  it("treats 'already recorded' as success (a second run of the unit), so the first-enabled time is never moved", () => {
+    expect(recordEnabledMarker(run({ status: 254, stderr: "An error occurred (ConditionalCheckFailedException) when calling the PutItem operation" }).runner, input)).toBe("already-recorded");
+  });
+
+  it("stops with the owner's next step when the write is refused (a denied profile), naming that the daily check will write it", () => {
+    expect(() => recordEnabledMarker(run({ status: 254, stderr: "AccessDeniedException: not authorized to perform: dynamodb:PutItem" }).runner, input)).toThrow(/schedule is ENABLED.*daily check writes it/);
+  });
+
+  it("never echoes the CLI's error text", () => {
+    try { recordEnabledMarker(run({ status: 254, stderr: "AccessDeniedException arn:aws:iam::123456789012:user/someone" }).runner, input); } catch (error) { expect((error as Error).message).not.toContain("123456789012"); }
   });
 });

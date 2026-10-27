@@ -14,7 +14,7 @@ import type { RequalifyStepsDependencies } from "./runtime-requalify-steps.js";
 export type HeartbeatDependencies = Pick<RequalifyStepsDependencies, "documentClient" | "tableName" | "cloudwatch" | "config" | "now">;
 
 const DAY_MS = 24 * 3_600_000;
-const nowOf = (deps: HeartbeatDependencies): number => deps.now?.() ?? Date.now();
+const nowOf = (deps: Pick<HeartbeatDependencies, "now">): number => deps.now?.() ?? Date.now();
 
 type Store = { documentClient: Pick<DynamoDBDocumentClient, "send">; tableName: string };
 
@@ -50,7 +50,7 @@ export async function markScheduleEnabled(deps: HeartbeatDependencies): Promise<
 }
 
 /** The time of the last successful renewal, for the age. Called as a run completes. */
-export async function recordRenewalSuccess(deps: HeartbeatDependencies, runId: string): Promise<void> {
+export async function recordRenewalSuccess(deps: Pick<HeartbeatDependencies, "documentClient" | "tableName" | "now">, runId: string): Promise<void> {
   const item = RequalifyLastSuccessSchema.parse({ entityType: "RUNTIME_REQUALIFY_LAST_SUCCESS", at: new Date(nowOf(deps)).toISOString(), runId });
   await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...requalifyLastSuccessKey(REQUALIFY_PROFILE_ID), ...item } }));
 }

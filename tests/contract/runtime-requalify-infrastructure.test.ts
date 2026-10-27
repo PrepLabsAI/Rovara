@@ -5,7 +5,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { REQUALIFY_LOGICAL_ID_PREFIX, requalifyDefinition } from "../../infra/lib/runtime-requalify.js";
-import { REQUALIFY_AGE_METRIC, REQUALIFY_STALE_AFTER_DAYS } from "../../packages/contracts/src/index.js";
+import { HEALTH_ALARM_CONDITIONAL_SUFFIXES, HEALTH_ALARM_SUFFIXES, REQUALIFY_AGE_METRIC, REQUALIFY_STALE_AFTER_DAYS } from "../../packages/contracts/src/index.js";
 import { REQUALIFY_SCHEDULE_LOGICAL_ID } from "../../scripts/test-deploy-requalify.js";
 import { checkLambdaBundles } from "../../scripts/lambda-load-check.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -178,6 +178,12 @@ describe("the renewal's infrastructure", () => {
       MetricName: REQUALIFY_AGE_METRIC, Statistic: "Maximum", EvaluationPeriods: 1, Period: 86400, ComparisonOperator: "GreaterThanOrEqualToThreshold", Threshold: REQUALIFY_STALE_AFTER_DAYS, TreatMissingData: "notBreaching",
     });
     expect(REQUALIFY_STALE_AFTER_DAYS).toBe(6);
+    // The guard's own failure is not silent: a bad row or a denied read makes the reconciler count a failure, and that has an alarm (several hours in a row, so one throttled read does not mail).
+    const unreadable = Object.values(on).find((resource) => resource.Type === "AWS::CloudWatch::Alarm" && JSON.stringify(resource.Properties).includes("RuntimeRequalifyAgeUnreadable"));
+    // Listed for the health route, as an alarm that exists only with the renewal.
+    expect(HEALTH_ALARM_SUFFIXES).toContain("RuntimeRequalifyAgeUnreadable");
+    expect(HEALTH_ALARM_CONDITIONAL_SUFFIXES).toContain("RuntimeRequalifyAgeUnreadable");
+    expect(unreadable?.Properties).toMatchObject({ MetricName: "ReconcilerRenewalAgeReadFailures", Statistic: "Maximum", Period: 3600, EvaluationPeriods: 3, ComparisonOperator: "GreaterThanOrEqualToThreshold", Threshold: 1, TreatMissingData: "notBreaching" });
     // Missing data is not breaching: before the schedule is first enabled the metric does not exist and the owner must not be mailed for that. Once it runs the number arrives daily; a schedule
     // switched off afterwards is caught by test-deploy --check (an error once it was enabled), and a renewal nobody started by the runtime-expiry notice.
     // The Lambda may start only the renewal machine.

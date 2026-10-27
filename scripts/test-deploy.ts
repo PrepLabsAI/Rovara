@@ -117,7 +117,7 @@ import {
   requalifyInstalled,
   type RequalifyFacts,
 } from "./test-deploy-requalify.js";
-import { enabledMarkerPutArgs, wantsScheduleEnabled } from "./test-deploy-requalify-schedule.js";
+import { recordEnabledMarker, wantsScheduleEnabled } from "./test-deploy-requalify-schedule.js";
 
 /**
  * `control-plane-code` rebuilds every packaged control-plane Lambda (CONTROL_PLANE_LAMBDAS) in one change set; `broker` and
@@ -1515,12 +1515,7 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
     }
     case "record-requalify-enabled": {
       const table = stackOutput(describeStack(context.runner, context.region, step.stack), "StateTableName");
-      const result = context.runner.aws(enabledMarkerPutArgs({ table, region: context.region, now: new Date() }), true);
-      // Already recorded is the normal case on a second run. Any other failure leaves the schedule on without its record: the daily check writes it on its first run, so say so and stop for the owner.
-      if (result.status !== 0 && !result.stderr.includes("ConditionalCheckFailedException")) {
-        throw new Error("the schedule is ENABLED, but the record that it was enabled could not be written (the renewal's daily check writes it on its first run); check the profile's DynamoDB write access");
-      }
-      console.log("recorded that the daily schedule was enabled");
+      console.log(recordEnabledMarker(context.runner, { table, region: context.region, now: new Date() }) === "written" ? "recorded that the daily schedule was enabled" : "the daily schedule was already recorded as enabled");
       return;
     }
     case "check-requalify-lock": {
