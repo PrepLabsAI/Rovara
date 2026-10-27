@@ -20,6 +20,7 @@ import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/wo
 import { createScriptedE2EInvoke, type ScriptedTurn } from "../../packages/worker/src/e2e-model-scripted.js";
 import { workflowE2EApplicationHostDeps, type WorkflowE2EApplicationRuntimeConfig } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
 import { ciImage } from "../support/ci-images.js";
+import { publicationFencesOf, sendBackOfferedAfter } from "../support/m1-4-journey-gates.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { AGENT_GOAL, FIXED_RUNTIME_AT, ORDERS_M14_APP_FILES, ORDERS_M14_ROOT, createOrdersM14AgentPlan, sha256Hex } from "../support/orders-m14-agent.js";
 import { replaySourceCasesOf, verifyReplayEvidence } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
@@ -165,7 +166,11 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
         aggregate: JSON.parse(aggregateSaved.bytes.toString("utf8")) as unknown, groupEvidence: new Map([[runId, group]]),
         receivedAt: new Map([[runId, group.groupRun.actual?.collection.receivedAt ?? new Date().toISOString()]]), terminalStatus: "SUCCEEDED", replay: admission.replay })?.replay;
     };
-    return { fixture, result, closed, sent, caseId, ledger, agentModel, saved, runId, why, verdict, replayResult, steps: e2eApplicationGroupAgentSteps(fixture.compiled), runRoot };
+    /** Whether Send back to coding is offered for a round with this verdict: the workflow the broker would leave, over the references this journey's evidence has. */
+    const sendBackOffered = (verdictOfRound: ReturnType<typeof verdict>) => sendBackOfferedAfter({ verdict: verdictOfRound.verdict, candidateDigest: admission.candidateDigest, roundId: admission.round.roundId,
+      groupRunIds: [runId], admissionSha256: admissionSha, evidenceSha256: aggregateSaved === undefined ? "" : sha(aggregateSaved.bytes) });
+    const publicationFences = (verdictOfRound: ReturnType<typeof verdict>) => publicationFencesOf(admission, verdictOfRound.verdict);
+    return { fixture, result, closed, sent, caseId, ledger, agentModel, saved, runId, why, verdict, replayResult, sendBackOffered, publicationFences, steps: e2eApplicationGroupAgentSteps(fixture.compiled), runRoot };
   }
 
   it("agent-renamed-export: the worker opens the channel, the goal finds 'Download orders', the executor captures one download and the ledger and receipts agree", async () => {
@@ -193,6 +198,9 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     expect(verdict.results[0]!.status).toBe("passed");
     expect(verdict.results[0]!.modelReceiptIds).toEqual(step.receiptIds.slice().sort());
     expect(verdict.display?.scenarios).toHaveLength(1);
+    // The PASS is what lets the task on to publication: it has runtime rows to fence (an empty list would leave publication STALE), and it offers no send-back.
+    expect(j.publicationFences(verdict), "publication checks of the passing round").not.toHaveLength(0);
+    expect(j.sendBackOffered(verdict)).toBe(false);
     // Task 4.4b: the row says how the AI navigated, from the ledger the broker verified, and the page and Slack say it in the owner's words.
     expect(verdict.display!.scenarios[0]).toMatchObject({ status: "PASSED", agentNavigation: { steps: [{ stop: "concluded", actedOn: [{ role: "button", name: "Download orders" }] }], modelCalls: 2, decidedBy: ["csv"] } });
     expect(pageText(verdict.display!.scenarios)).toContain("AI-navigated: the model clicked 'Download orders'; the CSV check decided");
@@ -212,6 +220,9 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     expect(verdict.verdict, `${verdict.reason}\n${j.why}`).toBe("FAILED");
     expect(verdict.results[0]!.cases[0]).toMatchObject({ status: "failed", reason: "observed-application-assertion-failure" });
     expect(verdict.display!.scenarios[0]).toMatchObject({ status: "FAILED", failedAssertion: { kind: "csv", expected: "orders.csv", actual: "invoices.csv" } });
+    // D3: the failure is the candidate's, so the task is sent back to coding with the failed round recorded, and nothing is offered for publication.
+    expect(j.sendBackOffered(verdict), "Send back to coding is offered").toBe(true);
+    expect(j.publicationFences(verdict), "no publication checks for a failed round").toEqual([]);
     // The row names the button the model took, so the owner can see it was the wrong one.
     expect(verdict.display!.scenarios[0]!.agentNavigation?.steps[0]?.actedOn).toEqual([{ role: "button", name: "Download invoices", did: "tap" }]);
     expect(pageText(verdict.display!.scenarios)).toContain("AI-navigated: the model clicked 'Download invoices'; the CSV check decided");
