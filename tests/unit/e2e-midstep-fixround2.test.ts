@@ -222,7 +222,7 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
   it("the host registers what it reads at case close through the classifier (the sync's read and tier), not as evidence-only wholesale", () => {
     const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
     const wiring = readFileSync(new URL("../../packages/verifier/src/executor/session-context-wiring.ts", import.meta.url), "utf8");
-    expect(host).toContain("readCaseContextAtClose(");
+    expect(host).toContain("closeCaseContext(");
     expect(wiring).toMatch(/tellBrowserState\(await readBrowserState\(input\.browserContext\), \(item\) => input\.sessionSync\.learn\(\[item\]\), undefined, \{ visitor: input\.anonymous \}\)/);
     expect(host).not.toMatch(/evidenceOnly: true/);
     expect(wiring).not.toMatch(/evidenceOnly: true/);

@@ -342,13 +342,12 @@ describe("sign-in capture reads the same things", () => {
   });
 });
 
-describe("the host wires the new reads (static: the host is not started in unit tests; the behaviour is in e2e-midstep2-round2fix.test.ts)", () => {
+describe("the host wires the new reads (static: the host is not started in unit tests; the behaviour is in e2e-midstep2-minifix.test.ts)", () => {
   it("hands every case context, a signed-out visitor's too, to the wiring (attach, request watch, Set-Cookie) and reads it at case close through it", () => {
     const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
-    expect(host).toMatch(/wireCaseContext\(\{ browserContext, sessionRef, isAnonymous: store\.isAnonymous, sessionSync, registerSecret \}\)/);
-    expect(host).toMatch(/readCaseContextAtClose\(\{ browserContext: owned, sessionRef, isAnonymous: store\.isAnonymous, sessionSync \}\)/);
-    // The calls are statements of their own: nothing decides in the host whether a context (a visitor's or any) is wired or read (the behaviour is in e2e-midstep2-lastround.test.ts).
-    for (const line of host.split("\n").filter((item) => item.includes("wireCaseContext(") || item.includes("readCaseContextAtClose("))) expect(line.trim().startsWith("wireCaseContext(") || line.trim().startsWith("await readCaseContextAtClose("), line).toBe(true);
+    // The sequences are exported functions with behaviour tests, and the host's two statements are checked on the syntax tree (e2e-midstep2-minifix.test.ts).
+    expect(host).toContain("adoptCaseContext({");
+    expect(host).toContain("closeCaseContext({");
     expect(host).not.toMatch(/if \(anonymous\) return;/);
   });
 });

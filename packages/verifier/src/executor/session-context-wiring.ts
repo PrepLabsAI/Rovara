@@ -58,3 +58,19 @@ export async function readCaseContextAtClose(input: { browserContext: BrowserCon
   if (input.browserContext === undefined) return;
   await readSessionContextAtClose({ browserContext: input.browserContext, anonymous: input.isAnonymous(input.sessionRef), sessionSync: input.sessionSync });
 }
+
+/**
+ * The host's two sequences, whole (MASKMAYBE mini-fix F-2), so that each can be tested without the host and the host holds one plain statement for each:
+ * - `adoptCaseContext`: the case's browser context is remembered (`contexts`, so that the close read can find it) and then wired. Every case context, a signed-out visitor's included.
+ * - `closeCaseContext`: the context is taken out of `contexts`, detached from the sync, and read for what it holds at the end. A visitor's too (with the visitor bar).
+ */
+export function adoptCaseContext(input: { contexts: Map<string, BrowserContext>; sessionRef: string; browserContext: BrowserContext; isAnonymous: (sessionRef: string) => boolean; sessionSync: E2ESessionSyncSource; registerSecret: (value: string) => void }): void {
+  input.contexts.set(input.sessionRef, input.browserContext);
+  wireCaseContext({ browserContext: input.browserContext, sessionRef: input.sessionRef, isAnonymous: input.isAnonymous, sessionSync: input.sessionSync, registerSecret: input.registerSecret });
+}
+export async function closeCaseContext(input: { contexts: Map<string, BrowserContext>; sessionRef: string; isAnonymous: (sessionRef: string) => boolean; sessionSync: E2ESessionSyncSource }): Promise<void> {
+  const browserContext = input.contexts.get(input.sessionRef);
+  input.contexts.delete(input.sessionRef);
+  input.sessionSync.detach(input.sessionRef);
+  await readCaseContextAtClose({ browserContext, sessionRef: input.sessionRef, isAnonymous: input.isAnonymous, sessionSync: input.sessionSync });
+}

@@ -22,7 +22,7 @@ import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, 
 import { createCredentialRedactor } from "./redact.js";
 import { sessionSecretLine } from "./session-secrets-file.js";
 import { createSessionSecretRegistry } from "./session-secret-registry.js";
-import { readCaseContextAtClose, wireCaseContext } from "./session-context-wiring.js";
+import { adoptCaseContext, closeCaseContext } from "./session-context-wiring.js";
 import { createE2ESessionSyncSource } from "./session-sync.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
 import { createPlaywrightFormLoginDriver } from "./form-login.js";
@@ -234,12 +234,9 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       // What the case's browser holds at the end, whoever put it there (the application's headers, or its scripts): any cookie, and any local storage value, that looks like a secret
       // (the same rules the sign-in's were held to) is registered, so a value the application replaced or wrote after the sign-in is scrubbed from what the parent writes and is
       // caught by the out scan. Best effort: a closed page has nothing to ask.
-      const owned = ownedContexts.get(sessionRef);
-      ownedContexts.delete(sessionRef);
-      sessionSync.detach(sessionRef);
       // A signed-out visitor's context is read too (MASKMAYBE F-3): the application can issue a token to a visitor mid-step (a sign-up, a magic link). It is read with the visitor bar, so a visitor id
       // or a cart registers nothing.
-      await readCaseContextAtClose({ browserContext: owned, sessionRef, isAnonymous: store.isAnonymous, sessionSync });
+      await closeCaseContext({ contexts: ownedContexts, sessionRef, isAnonymous: store.isAnonymous, sessionSync });
       const result = await store.close(sessionRef, signal);
       if (result.confirmed && activeSessionRef === sessionRef) { activeSessionRef = null; activeCaseId = null; }
       return result;
@@ -292,9 +289,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
           }, { origin: item.origin, entries: item.entries.map((entry) => ({ ...entry })) });
         }
         await guard(browserContext);
-        ownedContexts.set(sessionRef, browserContext);
-        // Signed-out visitors included (F-3): attached, watched (requests, Set-Cookie answers) and read like any other context, with the visitor bar (a visitor id or a cart is not a secret; a session is).
-        wireCaseContext({ browserContext, sessionRef, isAnonymous: store.isAnonymous, sessionSync, registerSecret });
+        // Signed-out visitors included (F-3): remembered, attached, watched (requests, Set-Cookie answers) and read at close like any other context, with the visitor bar (a visitor id or a cart is not a secret; a session is).
+        adoptCaseContext({ contexts: ownedContexts, sessionRef, browserContext, isAnonymous: store.isAnonymous, sessionSync, registerSecret });
         const page = browserContext.pages()[0];
         if (!page) throw new Error("the owned browser context has no page to identify");
         const session = await browserContext.newCDPSession(page);
