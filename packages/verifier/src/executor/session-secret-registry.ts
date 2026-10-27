@@ -1,4 +1,6 @@
+import { isSessionStorageSecret } from "./form-login.js";
 import type { CredentialRedactor } from "./redact.js";
+import { isSessionStorageCredential } from "./session-storage-secret.js";
 
 /**
  * The executor's register of session values (MIDSTEPCOOKIE): what each value is told to, by whether it is a credential.
@@ -14,6 +16,15 @@ export interface SessionSecretRegistry {
   readonly sessionSecrets: string[];
   /** The executor's check of a model-bound payload: accounts and credentials, not evidence-only values. */
   readonly modelScan: (bytes: Uint8Array) => boolean;
+}
+
+/**
+ * Registers one local storage entry the way sign-in and the mid-step sync classify it: a credential (key and value, `isSessionStorageCredential`) is a session secret; any other long value is
+ * evidence-only; a short or common one is not registered. Used where the case's browser state is read when the case closes.
+ */
+export function registerStorageEntry(register: SessionSecretRegistry["register"], entry: { name: string; value: string }): void {
+  if (isSessionStorageCredential(entry)) register(entry.value);
+  else if (isSessionStorageSecret(entry.value)) register(entry.value, { evidenceOnly: true });
 }
 
 export function createSessionSecretRegistry(input: { redactor: CredentialRedactor; onRegister?: (value: string) => void }): SessionSecretRegistry {

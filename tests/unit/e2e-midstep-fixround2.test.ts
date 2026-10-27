@@ -15,7 +15,7 @@ import { createE2EAgentStepDriver } from "../../packages/verifier/src/executor/a
 import { generateE2EAgentValueKey } from "../../packages/contracts/src/e2e-model-channel.js";
 import { createE2EAgentModelAdapter } from "../../packages/verifier/src/executor/agent-model-adapter.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
-import { createSessionSecretRegistry } from "../../packages/verifier/src/executor/session-secret-registry.js";
+import { createSessionSecretRegistry, registerStorageEntry } from "../../packages/verifier/src/executor/session-secret-registry.js";
 import { createE2EModelChannelClient } from "../../packages/verifier/src/executor/model-channel.js";
 import { createE2ESessionSyncSource } from "../../packages/verifier/src/executor/session-sync.js";
 import type { FormLoginDriver, FormLoginStorageState, FormRequestContext } from "../../packages/verifier/src/executor/form-login.js";
@@ -199,6 +199,25 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
     expect(host.match(/scan: registry\.modelScan/g)).toHaveLength(3);
     expect(host).not.toMatch(/agentRedactor\.contains\(/);
     expect(host).toMatch(/createSessionSecretRegistry\(\{ redactor: agentRedactor/);
+  });
+
+  it("at case close, a credential left in storage stays a credential (the executor's scan refuses it, the worker is told it) and app data stays evidence-only (real redactor and registry)", () => {
+    const redactor = createCredentialRedactor([]);
+    const registry = createSessionSecretRegistry({ redactor });
+    for (const entry of [{ name: "sb-project-auth-token", value: "keyed-opaque-value-1234" }, { name: "jwt", value: JWT }, { name: "draft", value: DRAFT }, { name: "returnTo", value: ROUTE }, { name: "theme", value: "dark" }]) registerStorageEntry(registry.register, entry);
+    const bytesOf = (text: string) => Buffer.from(JSON.stringify(call(text)), "utf8");
+    expect(registry.modelScan(bytesOf(`#n1 text "${JWT}"`))).toBe(true);
+    expect(registry.modelScan(bytesOf('#n1 text "keyed-opaque-value-1234"'))).toBe(true);
+    expect(registry.modelScan(bytesOf(`#n1 textbox "Title" value="${DRAFT}" href="${ROUTE}"`))).toBe(false);
+    expect(registry.sessionSecrets).toEqual(["keyed-opaque-value-1234", JWT]);
+    expect(redactor.contains(Buffer.from(DRAFT), "all")).toBe(true);
+    expect(redactor.contains(Buffer.from("dark"), "all")).toBe(false);
+  });
+
+  it("the host registers the storage it reads at case close through that classifier, not as evidence-only wholesale", () => {
+    const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
+    expect(host).toMatch(/registerStorageEntry\(registerSecret, entry\)/);
+    expect(host).not.toMatch(/evidenceOnly: true/);
   });
 
   it("registering a value evidence-only and then as a credential makes it a credential; the other way round it stays one", () => {

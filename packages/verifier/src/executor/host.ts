@@ -21,10 +21,10 @@ import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
 import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, createRovaraE2EReplayExecutor } from "./agent-replay.js";
 import { createE2EModelChannelClient } from "./model-channel.js";
 import { createCredentialRedactor } from "./redact.js";
-import { createSessionSecretRegistry } from "./session-secret-registry.js";
+import { createSessionSecretRegistry, registerStorageEntry } from "./session-secret-registry.js";
 import { createE2ESessionSyncSource } from "./session-sync.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
-import { createPlaywrightFormLoginDriver, isSessionCookieSecret, isSessionStorageSecret, parseSetCookie } from "./form-login.js";
+import { createPlaywrightFormLoginDriver, isSessionCookieSecret, parseSetCookie } from "./form-login.js";
 import { casePlanFor, resolveE2EExecutorSuite } from "./suite.js";
 
 export const E2E_EXECUTOR_CONTEXT_ENV = "ROVARA_E2E_EXECUTOR_CONTEXT" as const;
@@ -246,7 +246,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         try {
           const kept = await owned.storageState();
           for (const cookie of kept.cookies) if (isSessionCookieSecret(cookie)) registerSecret(cookie.value);
-          for (const item of kept.origins) for (const entry of item.localStorage) if (isSessionStorageSecret(entry.value)) registerSecret(entry.value, { evidenceOnly: true });
+          for (const item of kept.origins) for (const entry of item.localStorage) registerStorageEntry(registerSecret, entry);
         } catch { /* the context is gone */ }
       }
       const result = await store.close(sessionRef, signal);
