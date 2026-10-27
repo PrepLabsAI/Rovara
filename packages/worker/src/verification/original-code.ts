@@ -24,6 +24,11 @@ export interface OriginalCodeRepository {
   directory: string;
   /** The commit the task started from: the preparation commit, or an eval's base commit. */
   commit: string;
+  /**
+   * TESTPROOF: paths (relative to the repository's top level) that keep the agent's version while the rest shows the original code: a file the agent
+   * added or changed is shown as the agent left it, and one the agent deleted stays deleted. Absent or empty: the whole original tree, as before.
+   */
+  overlay?: readonly string[];
 }
 
 export interface OriginalCode {
@@ -50,11 +55,13 @@ export function gitOriginalCode(repositories: readonly OriginalCodeRepository[])
           const directory = await git(repository.directory, ["rev-parse", "--show-toplevel"]);
           const agentTree = await workingTree(directory);
           const originalTree = await git(directory, ["rev-parse", "--verify", `${repository.commit}^{tree}`]);
-          if (agentTree === originalTree) continue;
+          const shownTree = repository.overlay === undefined || repository.overlay.length === 0
+            ? originalTree : await overlayTree(directory, originalTree, agentTree, repository.overlay);
+          if (agentTree === shownTree) continue;
           // The agent's files are safe in the object store before any of them is changed.
           await git(directory, ["update-ref", ORIGINAL_CODE_REF, agentTree]);
           swapped.push({ directory, agentTree });
-          await writeTree(directory, agentTree, originalTree);
+          await writeTree(directory, agentTree, shownTree);
         }
         result = { value: await work() };
       } catch (error) {
@@ -118,6 +125,33 @@ async function workingTree(directory: string): Promise<string> {
     const gitlinks = await assertNoEmbeddedRepositories(repository.layout.workTree, repository.env("work"), repository.location, repository.workTreeCwd);
     await addWorkTree(repository, "work", gitlinks);
     return (await repository.text(["write-tree"], { index: "work", maxBuffer: MAX_GIT_OUTPUT_BYTES })).trim();
+  });
+}
+
+/**
+ * The original tree with `paths` taken from the agent's tree: a path the agent's tree has (a file, in any directory) is set to the agent's version,
+ * and one it lacks is removed. Built in a throwaway index, so the repository's own index is never touched. A submodule (gitlink) path is left as it is.
+ */
+async function overlayTree(directory: string, originalTree: string, agentTree: string, paths: readonly string[]): Promise<string> {
+  const entries: string[] = [];
+  for (const path of paths) {
+    const listed = (await git(directory, ["ls-tree", "-z", agentTree, "--", path], {}, false)).split("\0").filter((entry) => entry !== "");
+    // `ls-tree <tree> -- <path>` lists the path itself (a file), or the entries directly under it when it is a directory: only an exact file path counts.
+    const entry = listed.find((line) => line.slice(line.indexOf("\t") + 1) === path);
+    if (entry === undefined) {
+      entries.push(`0 ${"0".repeat(originalTree.length)}\t${path}`);
+      continue;
+    }
+    const [mode, type, oid] = entry.slice(0, entry.indexOf("\t")).split(" ");
+    if (type !== "blob" || mode === GITLINK_MODE || oid === undefined) continue;
+    entries.push(`${mode} ${oid}\t${path}`);
+  }
+  return withIsolatedRepository(directory, "write", {}, async (repository) => {
+    await repository.text(["read-tree", originalTree], { index: "temporary", maxBuffer: MAX_GIT_OUTPUT_BYTES });
+    if (entries.length > 0) {
+      await repository.text(["update-index", "-z", "--index-info"], { index: "temporary", maxBuffer: MAX_GIT_OUTPUT_BYTES, input: `${entries.join("\0")}\0` });
+    }
+    return (await repository.text(["write-tree"], { index: "temporary", maxBuffer: MAX_GIT_OUTPUT_BYTES })).trim();
   });
 }
 

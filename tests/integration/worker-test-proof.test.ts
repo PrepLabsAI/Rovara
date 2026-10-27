@@ -1,7 +1,6 @@
 // TESTPROOF through the worker's CHECKS path: a verification retry runs the selected project checks on the candidate, then (when tests
 // changed) once more on the original code with the new tests kept. test-proof.json is the only new output; the checks.json artifact,
 // the CHECKS result and its status are what they are today. Fake runners over a real git workspace; offline.
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";

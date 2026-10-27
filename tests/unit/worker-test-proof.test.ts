@@ -1,11 +1,11 @@
 // TESTPROOF: AgentX shows the original code with the agent's new or changed tests kept, runs the same project checks there, and says
 // whether each new test really fails without the change. Real git repositories in temp directories; the "test runner" is a fake that reads
 // the workspace files it finds (tests/support/test-proof-fixture.ts), so a run on the original code really sees the original code.
-import { readFile, rm, stat } from "node:fs/promises";
+import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TestProofSchema, type CheckEntry, type ProjectCommand } from "../../packages/contracts/src/index.js";
-import { CheckNotRunError, type CheckPlan } from "../../packages/worker/src/verification/checks.js";
+import { CheckNotRunError, type CheckPlan, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { AgentFilesRestoreError, gitOriginalCode, ORIGINAL_CODE_REF } from "../../packages/worker/src/verification/original-code.js";
 import { runTestProof } from "../../packages/worker/src/verification/test-proof.js";
 import { FAKE_TEST_COMMAND, fakeTestRunner, git, passedEntry, repositoryWithCandidate } from "../support/test-proof-fixture.js";
@@ -31,7 +31,8 @@ describe("TESTPROOF", () => {
   const plan: CheckPlan = { source: "project", readiness: [FAKE_TEST_COMMAND], projectBefore: ["unknown"] };
   function proofOptions(made: Awaited<ReturnType<typeof repository>>, extra: Partial<Parameters<typeof runTestProof>[0]> & { calls?: ProjectCommand[] } = {}) {
     const calls = extra.calls ?? [];
-    const { calls: _calls, ...rest } = extra;
+    const rest: Partial<Parameters<typeof runTestProof>[0]> = { ...extra };
+    delete (rest as { calls?: unknown }).calls;
     return {
       plan, newEntries: [passedEntry()] as CheckEntry[], runners: fakeTestRunner(made.directory, calls),
       repositories: [{ repositoryId: "app", directory: made.directory, startCommit: made.startCommit, candidateTreeSha: made.candidateTreeSha }],
@@ -120,6 +121,30 @@ describe("TESTPROOF", () => {
     const broken = { run: async () => { throw new Error("git failed"); } };
     const proof = await runTestProof(proofOptions(made, { originalCode: () => broken }));
     expect(proof).toMatchObject({ status: "not_checked", note: "original_code_unavailable" });
+  });
+
+  it("gives a verdict per test, for the changed files only, when the check's own command writes a JSON report; and puts the report file back", async () => {
+    const made = await repository({ "src/bug.ts": SOURCE_1, "src/old.test.ts": "an old test\n" }, { "src/bug.ts": SOURCE_2, "src/bug.test.ts": TEST_EXPECTS(2) });
+    const command: ProjectCommand = { ...FAKE_TEST_COMMAND, args: ["--reporter=json", "--outputFile=report.json"] };
+    const base = fakeTestRunner(made.directory);
+    // A vitest-like runner: the fake's result for src/bug.test.ts, an always-passing old test, and the report written where the arguments name it.
+    const runner: CheckRunners = {
+      ...base,
+      runProjectCommand: async (given, signal) => {
+        const run = await base.runProjectCommand(given, signal);
+        const report = { testResults: [
+          { name: join(made.directory, "src/bug.test.ts"), assertionResults: [{ fullName: "bug is fixed", status: run.exitCode === 0 ? "passed" : "failed", failureMessages: [run.stdout] }] },
+          { name: join(made.directory, "src/old.test.ts"), assertionResults: [{ fullName: "an old test", status: "passed", failureMessages: [] }] },
+        ] };
+        await writeFile(join(made.directory, "report.json"), JSON.stringify(report));
+        return run;
+      },
+    };
+    await runner.runProjectCommand(command, new AbortController().signal);
+    const reportOfNewRun = await readFile(join(made.directory, "report.json"), "utf8");
+    const proof = await runTestProof(proofOptions(made, { runners: runner, plan: { source: "project", readiness: [command], projectBefore: ["unknown"] } }));
+    expect(proof.items).toEqual([expect.objectContaining({ checkId: "readiness:0", granularity: "test", test: "bug is fixed", verdict: "proves_change", reason: "assertion_failed_on_old" })]);
+    expect(await readFile(join(made.directory, "report.json"), "utf8")).toBe(reportOfNewRun);
   });
 
   it("does not run a check on the original code that did not pass on the new code", async () => {

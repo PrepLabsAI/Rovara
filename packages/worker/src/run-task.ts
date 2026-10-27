@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, groundingScenarioIds, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EModelDayBudgetRequest, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, TEST_PROOF_ARTIFACT, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, groundingScenarioIds, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EModelDayBudgetRequest, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -40,7 +40,8 @@ import { proposedChecksOfPlan, runPlanDryRun } from "./plan-dry-run.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
-import { gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
+import { AgentFilesRestoreError, gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
+import { runTestProof } from "./verification/test-proof.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
@@ -247,7 +248,9 @@ export async function runTaskInvocation(
         ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
         ...(bashOperations === undefined ? {} : { bashOperations }),
       });
-      const round = await runChecks(plan, runners, { budgetMs: dependencies.checkBudgetMs?.() ?? CHECK_ROUND_BUDGET_MS, signal: stop.signal });
+      const roundBudgetMs = dependencies.checkBudgetMs?.() ?? CHECK_ROUND_BUDGET_MS;
+      const roundStarted = Date.now();
+      const round = await runChecks(plan, runners, { budgetMs: roundBudgetMs, signal: stop.signal });
       const status = round.stopped ? "not_verified" : reportStatus(round.entries);
       const checks: CheckReport = {
         status,
@@ -266,8 +269,14 @@ export async function runTaskInvocation(
       } catch {
         await events.append("progress", { message: "AgentX could not safely update the workspace check history." });
       }
+      // TESTPROOF: informational only. It changes no check result and no artifact below; only a failure to put the agent's files back stops the task.
+      const testProof = status === "verified" && plan.source === "project" && !stop.signal.aborted
+        ? await runTestProofStep({ plan, round: round.entries, runners, repositories, candidateBefore, rootPath: canonicalRoot, signal: stop.signal,
+          budgetMs: roundBudgetMs - (Date.now() - roundStarted), events })
+        : undefined;
       const candidateAfter = await readCandidateRepositories(repositories);
       await dependencies.artifactSink({ name: "checks.json", mediaType: "application/json", content: checksArtifactContent(checks) });
+      if (testProof !== undefined) await saveTestProof(dependencies.artifactSink, testProof, events);
       const compact = compactCheckReport(checks);
       let workflowE2EEvidence: Awaited<ReturnType<typeof executeWorkflowE2EChecks>> | undefined;
       if (invocation.payload.workflowE2EAdmission !== undefined) {
@@ -1309,6 +1318,41 @@ function eventType(event: unknown): "progress" | "tool_start" | "tool_end" {
  * Every workflow stage reads its candidate through this, so IMPLEMENT, CHECKS, REVIEW and FEEDBACK_REVIEW digests
  * all include the base.
  */
+/** TESTPROOF: the check round's new or changed tests run on the original code. Never throws, except for AgentFilesRestoreError. */
+async function runTestProofStep(input: {
+  plan: CheckPlan; round: Parameters<typeof runTestProof>[0]["newEntries"]; runners: CheckRunners; repositories: readonly CandidateRepositoryInput[];
+  candidateBefore: ReadonlyArray<CandidateRepository>; rootPath: string; signal: AbortSignal; budgetMs: number; events: EventBatcher;
+}): Promise<Awaited<ReturnType<typeof runTestProof>> | undefined> {
+  try {
+    const proofRepositories = input.repositories.flatMap((repository) => {
+      const identity = input.candidateBefore.find((entry) => entry.repositoryId === repository.repositoryId);
+      return identity === undefined || repository.baseCommitSha === undefined ? []
+        : [{ repositoryId: repository.repositoryId, directory: repository.directory, startCommit: repository.baseCommitSha, candidateTreeSha: identity.treeSha }];
+    });
+    // Bound to the candidate the checks ran on (the broker rejects a round whose candidate moved while it ran).
+    const proof = await runTestProof({ plan: input.plan, newEntries: input.round, runners: input.runners, repositories: proofRepositories,
+      candidateDigest: createCandidateManifest(input.candidateBefore).digest, rootPath: input.rootPath, signal: input.signal, budgetMs: input.budgetMs });
+    if (proof.status === "checked") {
+      const count = (verdict: string) => proof.items.filter((item) => item.verdict === verdict).length;
+      await input.events.append("progress", { message: `AgentX ran the new or changed tests on the original code: ${count("proves_change")} fail there and pass now, ${count("does_not_prove")} pass there too, ${count("could_not_run_on_old")} could not run there.` });
+    }
+    return proof;
+  } catch (error) {
+    if (error instanceof AgentFilesRestoreError) throw error;
+    await input.events.append("progress", { message: "AgentX could not check the new tests against the original code." }).catch(() => undefined);
+    return undefined;
+  }
+}
+
+/** Saves the proof. A failed save is only a missing note, never a failed round. */
+async function saveTestProof(sink: ArtifactSink, proof: NonNullable<Awaited<ReturnType<typeof runTestProofStep>>>, events: EventBatcher): Promise<void> {
+  try {
+    await sink({ name: TEST_PROOF_ARTIFACT, mediaType: "application/json", content: JSON.stringify(proof) });
+  } catch {
+    await events.append("progress", { message: "AgentX could not save its check of the new tests against the original code." }).catch(() => undefined);
+  }
+}
+
 function candidateInputs(
   manifest: PreparationManifest,
   root: string,
