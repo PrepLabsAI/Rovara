@@ -28,6 +28,7 @@ import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import {
   appendRepositoryContextFiles,
   loadRepositoryContextFiles,
+  ruleFileEditNote,
   readPreparedRepositories,
   workspaceRepositoriesNote,
   type RepositoryContextFile,
@@ -96,6 +97,11 @@ export async function createWorkspacePiSession(
     bashOperations?: BashOperations;
     devcontainerPaths?: DevcontainerPaths;
     extensionFactories?: InlineExtension[];
+    /**
+     * Where each repository's rule file is read from: the working tree (the default, for coding sessions) or the commit the
+     * task started from (reviewers, so the change under review cannot rewrite its own reviewers' instructions).
+     */
+    contextFilesAt?: "working-tree" | "base-commit";
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -106,7 +112,7 @@ export async function createWorkspacePiSession(
     mkdir(sessionDirectory, { recursive: true, mode: 0o700 }),
     mkdir(agentDirectory, { recursive: true, mode: 0o700 }),
   ]);
-  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths);
+  const contextFiles = await loadWorkspaceContextFiles(rootPath, input.onDiagnostic, input.devcontainerPaths, input.contextFilesAt);
   const handle = await adapter.create({
     cwd: rootPath,
     sessionDirectory,
@@ -468,13 +474,15 @@ async function loadWorkspaceContextFiles(
   rootPath: string,
   onDiagnostic?: (message: string) => void,
   devcontainerPaths?: DevcontainerPaths,
+  at: "working-tree" | "base-commit" = "working-tree",
 ): Promise<RepositoryContextFile[]> {
-  const repositories = await readPreparedRepositories(rootPath);
-  const { files, diagnostics } = await loadRepositoryContextFiles(rootPath, repositories);
+  const repositories = await readPreparedRepositories(rootPath, { commits: at === "base-commit" });
+  const { files, diagnostics, notices } = await loadRepositoryContextFiles(rootPath, repositories, { at });
   for (const diagnostic of diagnostics) onDiagnostic?.(diagnostic);
   // AgentX's note comes first and is present with or without the repositories' own files.
   const note = workspaceRepositoriesNote(repositories);
-  const loaded = note === undefined ? files : [note, ...files];
+  const editNote = ruleFileEditNote(notices);
+  const loaded = [...(note === undefined ? [] : [note]), ...files, ...(editNote === undefined ? [] : [editNote])];
   return devcontainerPaths === undefined ? loaded : [...loaded, devcontainerContextFile(devcontainerPaths)];
 }
 
