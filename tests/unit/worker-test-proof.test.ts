@@ -22,8 +22,8 @@ describe("TESTPROOF", () => {
     await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
   });
 
-  async function repository(start: Record<string, string>, candidate: Record<string, string | null>) {
-    const made = await repositoryWithCandidate(start, candidate);
+  async function repository(start: Record<string, string>, candidate: Record<string, string | null>, prepare?: (directory: string) => Promise<void>) {
+    const made = await repositoryWithCandidate(start, candidate, prepare);
     cleanup.push(made.directory);
     return made;
   }

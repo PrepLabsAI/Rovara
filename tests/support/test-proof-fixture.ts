@@ -12,7 +12,7 @@ const IDENTITY = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_
 export const git = (directory: string, ...args: string[]): string =>
   execFileSync("git", ["-C", directory, ...args], { env: { ...process.env, ...IDENTITY }, encoding: "utf8" }).trim();
 
-export const FAKE_TEST_COMMAND: ProjectCommand = { cwd: ".", executable: "fake-test", args: [], timeoutSeconds: 60 };
+export const FAKE_TEST_COMMAND: ProjectCommand = { cwd: ".", executable: "npm", args: ["test"], timeoutSeconds: 60 };
 
 async function writeAll(directory: string, files: Record<string, string | null>): Promise<void> {
   for (const [path, content] of Object.entries(files)) {
@@ -29,7 +29,12 @@ async function writeAll(directory: string, files: Record<string, string | null>)
  * A repository with a start commit and a candidate commit on top of it (CHECKS runs on a committed candidate). `candidate` maps a path to its
  * new content, or null to delete it. macOS: the temp directory is canonicalised, as /var is a link to /private/var.
  */
-export async function repositoryWithCandidate(start: Record<string, string>, candidate: Record<string, string | null>) {
+export async function repositoryWithCandidate(
+  start: Record<string, string>,
+  candidate: Record<string, string | null>,
+  /** Runs after the candidate's files are written (an executable bit, a symlink, a directory in place of a file) and before they are committed. */
+  prepare?: (directory: string) => Promise<void>,
+) {
   const directory = realpathSync(await mkdtemp(join(tmpdir(), "agentx-testproof-")));
   git(directory, "init", "-q", "-b", "main");
   await writeAll(directory, start);
@@ -37,6 +42,7 @@ export async function repositoryWithCandidate(start: Record<string, string>, can
   git(directory, "commit", "-q", "-m", "start");
   const startCommit = git(directory, "rev-parse", "HEAD");
   await writeAll(directory, candidate);
+  await prepare?.(directory);
   git(directory, "add", "-A");
   git(directory, "commit", "-q", "-m", "candidate");
   return { directory, startCommit, candidateTreeSha: git(directory, "rev-parse", "HEAD^{tree}"), candidateCommit: git(directory, "rev-parse", "HEAD") };
@@ -47,7 +53,7 @@ export async function repositoryWithCandidate(start: Record<string, string>, can
  * and `expect(<symbol>).toBe(<number>);`; the source file `src/<name>.ts` holds `export const <symbol> = <number>;`. It prints what vitest
  * prints for a missing export or a wrong value, and exits 1 for either, or 0 when every test passes.
  */
-export function fakeTestRunner(root: string, calls: ProjectCommand[] = [], onRun?: () => void): CheckRunners {
+export function fakeTestRunner(root: string, calls: ProjectCommand[] = [], onRun?: () => void, fixedOutput?: string): CheckRunners {
   return {
     async runProjectCommand(command) {
       calls.push(command);
@@ -67,7 +73,7 @@ export function fakeTestRunner(root: string, calls: ProjectCommand[] = [], onRun
       }
       return failures.length > 0
         ? { exitCode: 1, timedOut: false, stdout: failures.join("\n"), stderr: "" }
-        : { exitCode: 0, timedOut: false, stdout: `${names.length} test files passed\n`, stderr: "" };
+        : { exitCode: 0, timedOut: false, stdout: fixedOutput ?? `${names.length} test files passed\n`, stderr: "" };
     },
     async runAgentCommand() {
       throw new Error("no agent commands in a project-check proof");
@@ -75,6 +81,6 @@ export function fakeTestRunner(root: string, calls: ProjectCommand[] = [], onRun
   };
 }
 
-export function passedEntry(id = "readiness:0", label = "fake-test"): CheckEntry {
+export function passedEntry(id = "readiness:0", label = "npm test"): CheckEntry {
   return { id, label, source: "project", before: "unknown", after: "passed", class: classifyCheck("unknown", "passed"), output: "ok", durationMs: 5, exitCode: 0 };
 }

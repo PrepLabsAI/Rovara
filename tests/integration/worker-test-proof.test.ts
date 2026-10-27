@@ -8,13 +8,14 @@ import { describe, expect, it } from "vitest";
 import { CheckReportSchema, TestProofSchema, createCandidateManifest, type ProjectCommand, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import type { WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
+import { AgentFilesRestoreError } from "../../packages/worker/src/verification/original-code.js";
 import { runTaskInvocation, type TaskInvocationResult } from "../../packages/worker/src/run-task.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
 import { fakeTestRunner, git } from "../support/test-proof-fixture.js";
 
-const check: ProjectCommand = { cwd: "app", executable: "fake-test", args: [], timeoutSeconds: 60 };
+const check: ProjectCommand = { cwd: "app", executable: "npm", args: ["test"], timeoutSeconds: 60 };
 
 /** A workspace root whose manifest names one committed repository `app` (src/bug.ts = 1), with `files` then written on top, uncommitted. */
 async function workspace(files: Record<string, string>): Promise<string> {
@@ -35,7 +36,7 @@ async function workspace(files: Record<string, string>): Promise<string> {
   return rootPath;
 }
 
-async function checksRun(rootPath: string, extra: { runProjectCommand?: ProjectCommand[] } = {}) {
+async function checksRun(rootPath: string, extra: { runProjectCommand?: ProjectCommand[]; fixedOutput?: string; testProofOriginalCode?: Parameters<typeof runTaskInvocation>[1]["testProofOriginalCode"] } = {}) {
   const invocation: Extract<WorkerInvocation, { kind: "task" }> = {
     protocolVersion: 1, kind: "task", operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64),
     payload: { conversationId: randomUUID(), prompt: "check it", readiness: [check], workflowMode: "CHECKS" },
@@ -44,7 +45,8 @@ async function checksRun(rootPath: string, extra: { runProjectCommand?: ProjectC
   const artifacts: WorkerArtifact[] = [];
   const calls: ProjectCommand[] = extra.runProjectCommand ?? [];
   const result: TaskInvocationResult = await runTaskInvocation(invocation, {
-    rootPath, model: FAUX_MODEL, checkRunners: fakeTestRunner(rootPath, calls),
+    rootPath, model: FAUX_MODEL, checkRunners: fakeTestRunner(rootPath, calls, undefined, extra.fixedOutput),
+    ...(extra.testProofOriginalCode === undefined ? {} : { testProofOriginalCode: extra.testProofOriginalCode }),
     eventSink: async (batch) => { events.push(...batch); },
     artifactSink: async (artifact) => { artifacts.push(artifact); },
   });
@@ -91,5 +93,28 @@ describe("TESTPROOF in the CHECKS run", () => {
     expect(run.result.checks).toMatchObject({ status: "verified" });
     const proof = TestProofSchema.parse(JSON.parse(run.artifacts.find((artifact) => artifact.name === "test-proof.json")!.content));
     expect(proof.items).toEqual([expect.objectContaining({ verdict: "does_not_prove" })]);
+  });
+
+  // 7
+  it("fails the task when the agent's files cannot be restored after the run on the original code", async () => {
+    const rootPath = await workspace({ "src/bug.ts": "export const value = 2;\n", "src/bug.test.ts": 'import { value } from "./bug.js";\nexpect(value).toBe(2);\n' });
+    await expect(checksRun(rootPath, { testProofOriginalCode: () => ({ run: async () => { throw new AgentFilesRestoreError("could not restore"); } }) })).rejects.toBeInstanceOf(AgentFilesRestoreError);
+  });
+
+  // 13
+  it("says in a progress line that no test changed", async () => {
+    const run = await checksRun(await workspace({ "src/bug.ts": "export const value = 3; // no test\n" }));
+    const messages = run.events.filter((event) => event.type === "progress").map((event) => JSON.stringify(event.data ?? event));
+    expect(messages.some((message) => message.includes("no new or changed tests"))).toBe(true);
+  });
+
+  // 12
+  it("leaves checks.json byte-identical, durations aside, with and without the proof", async () => {
+    const files = { "src/bug.ts": "export const value = 2;\n" };
+    const withTest = await checksRun(await workspace({ ...files, "src/bug.test.ts": 'import { value } from "./bug.js";\nexpect(value).toBe(2);\n' }), { fixedOutput: "ok\n" });
+    const without = await checksRun(await workspace(files), { fixedOutput: "ok\n" });
+    expect(withTest.artifacts.some((artifact) => artifact.name === "test-proof.json")).toBe(true);
+    const normalised = (run: typeof withTest) => run.artifacts.find((artifact) => artifact.name === "checks.json")!.content.replace(/"durationMs":\d+/g, '"durationMs":0');
+    expect(normalised(withTest)).toBe(normalised(without));
   });
 });

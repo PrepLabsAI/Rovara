@@ -13,17 +13,30 @@ const proof = (items: TestProof["items"], digest = DIGEST): TestProof => ({
 });
 const item = (verdict: TestProof["items"][number]["verdict"], label = "npm test", extra: Partial<TestProof["items"][number]> = {}): TestProof["items"][number] => ({
   checkId: "readiness:0", label, granularity: "check", verdict,
-  reason: verdict === "proves_change" ? "assertion_failed_on_old" : verdict === "does_not_prove" ? "passed_on_old" : verdict === "could_not_run_on_old" ? "load_failure_on_old" : "timed_out", ...extra,
+  reason: verdict === "not_applicable" ? "not_a_test_check" : verdict === "proves_change" ? "assertion_failed_on_old" : verdict === "does_not_prove" ? "passed_on_old" : verdict === "could_not_run_on_old" ? "load_failure_on_old" : "timed_out", ...extra,
 });
 
 describe("test proof lines for the pull request", () => {
   // 8
   it("says which new tests fail on the original code, and warns about one that passes there too", () => {
-    const lines = testProofPullRequestLines(proof([item("proves_change"), item("does_not_prove", "npm run lint")]), DIGEST, inert);
+    const lines = testProofPullRequestLines(proof([item("proves_change"), item("does_not_prove", "npm test -- unit")]), DIGEST, inert);
     expect(lines).toHaveLength(2);
     expect(lines[0]).toBe("Test proof: 1 check fails on the original code and passes now");
     expect(lines[1]).toContain("Warning");
-    expect(lines[1]).toContain("npm run lint");
+    expect(lines[1]).toContain("npm test -- unit");
+  });
+
+  it("never counts or warns about a check that is not a test runner (lint)", () => {
+    const lines = testProofPullRequestLines(proof([item("proves_change"), item("not_applicable", "npm run lint")]), DIGEST, inert);
+    expect(lines).toEqual(["Test proof: 1 check fails on the original code and passes now"]);
+    expect(testProofPullRequestLines(proof([item("not_applicable", "npm run lint")]), DIGEST, inert)).toEqual([]);
+  });
+
+  it("strips an unclosed HTML comment opener and backticks from a quoted name", () => {
+    const text = testProofPullRequestLines(proof([item("does_not_prove", "npm test <!-- hide the rest `code`")]), DIGEST, inert).join("\n");
+    expect(text).not.toContain("<!--");
+    expect(text).not.toContain("`");
+    expect(text).toContain("npm test");
   });
 
   it("ignores a proof bound to an older candidate, and one that does not parse", () => {
