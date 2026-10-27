@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { request as httpRequest } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,7 +27,7 @@ import { CASE_ID, RUN_ID, bedrockRoute, call, tapAnswer } from "../support/e2e-m
 
 const POSITION = { caseId: CASE_ID, stepIndex: 0 };
 const EMOJI = "\u{1F600}";
-const wellFormed = (text: string) => text === text.toWellFormed();
+const wellFormed = (text: string) => !Array.from(text).some((character) => character.length === 1 && character.charCodeAt(0) >= 0xd800 && character.charCodeAt(0) <= 0xdfff);
 
 let dir: string;
 const closers: Array<() => Promise<unknown>> = [];
@@ -47,19 +46,6 @@ async function startRun() {
   closers.push(() => proxy.close());
   return { proxy, seen, socketPath };
 }
-function postJson(socketPath: string, path: string, body: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
-  const payload = JSON.stringify(body);
-  return new Promise((resolve, reject) => {
-    const req = httpRequest({ socketPath, path, method: "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk: Buffer) => chunks.push(chunk));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown> }));
-    });
-    req.on("error", reject);
-    req.end(payload);
-  });
-}
-
 describe("N-1: a value cut for the sync never splits a surrogate pair, and nothing here can end the worker", () => {
   // Hostile values: an astral character astride each cut, a lone surrogate at each cut, and an all-emoji value.
   const hostile: Array<[string, string]> = [
@@ -154,7 +140,7 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
     const store = createExecutorSessionStore({ plan: fixture.plan, formLogin: driver, registerSecret: (value, options) => told.push({ value, evidenceOnly: options?.evidenceOnly === true }) });
     const profileId = contract.accountProfiles.find((item) => item.roleRef === "owner")?.profileId ?? contract.accountProfiles[0]!.profileId;
     const ref = { applicationId, profileId, revision: 1, definitionDigest: "8".repeat(64) };
-    const open = () => store.open({ binding: {}, applicationId, profileId, approvedAccountRef: ref, origin: E2E_EXECUTOR_COMPILED_ORIGIN } as never, signal);
+    const open = () => store.open({ binding: {}, applicationId, profileId, approvedAccountRef: ref, origin: E2E_EXECUTOR_COMPILED_ORIGIN }, signal);
     return { open, told };
   }
 

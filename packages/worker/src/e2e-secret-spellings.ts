@@ -33,7 +33,7 @@ export function e2eSecretSpellingsDetailed(value: string): E2ESecretSpellingsRes
   const data = Buffer.from(value, "utf8");
   const standard = data.toString("base64");
   const url = standard.replace(/\+/g, "-").replace(/\//g, "_");
-  let once: string | null = null;
+  let once: string | null;
   try { once = encodeURIComponent(value); } catch { once = null; }
   const twice = once === null ? null : encodeURIComponent(once);
   const lowerEscapes = (text: string) => text.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());

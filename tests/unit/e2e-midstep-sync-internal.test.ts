@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import type * as Spellings from "../../packages/worker/src/e2e-secret-spellings.js";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +12,7 @@ import { CASE_ID, RUN_ID, bedrockRoute, call, channelRequest, tapAnswer } from "
 // MIDSTEPCOOKIE fix round 2, N-1: whatever fails while a sync is served is a fixed refusal. The spelling builder is made to throw for one marker value (it cannot throw on a real one any more),
 // so this is the proof that the handler itself does not let an error end the worker.
 vi.mock("../../packages/worker/src/e2e-secret-spellings.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../../packages/worker/src/e2e-secret-spellings.js")>();
+  const original = await importOriginal<typeof Spellings>();
   return { ...original, e2eSecretSpellingsDetailed: (value: string) => { if (value.includes("THROW-HERE")) throw new Error("the builder failed"); return original.e2eSecretSpellingsDetailed(value); } };
 });
 
