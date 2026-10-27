@@ -97,8 +97,15 @@ describe("R-2: an oversized ordinary parameter or header does not fail the view 
     expect(e.registry.maskOverflowed()).toBe(false);
     expect(await shown(`order ${fresh} /orders/12345/items/99882211 https://app.example.com/orders/12345`)).toBe(`order ${fresh} /orders/12345/items/99882211 https://app.example.com/orders/12345`);
   });
-  it("a header list of 300 ordinary headers leaves the view open", () => {
-    expect(headerSecrets(Array.from({ length: 300 }, (_unused, index) => ({ name: `x-h${index}`, value: "short-value-here" }))).some((item) => item.tier === "overflow")).toBe(false);
+  it("a header list of 300 ordinary headers leaves the view open, and a credential header at the end of it is still found", () => {
+    const headers = [...Array.from({ length: 299 }, (_unused, index) => ({ name: `x-h${index}`, value: "short-value-here" })), { name: "x-api-key", value: "Ab3dEf9hJk" }];
+    const items = headerSecrets(headers);
+    expect(items.some((item) => item.tier === "overflow")).toBe(false);
+    expect(tierOf(items, "Ab3dEf9hJk")).toBe("strong");
+  });
+  it("a credential-named parameter or header that is too large still fails the view closed (the one case that must)", () => {
+    expect(urlSecrets(`https://app.test/?access_token=${"x".repeat(20_000)}`).some((item) => item.tier === "overflow")).toBe(true);
+    expect(headerSecrets([{ name: "cookie", value: `a=${"y".repeat(20_000)}` }]).some((item) => item.tier === "overflow")).toBe(true);
   });
 });
 
