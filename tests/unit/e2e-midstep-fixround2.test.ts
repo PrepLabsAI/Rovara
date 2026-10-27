@@ -212,17 +212,26 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
       async endStep() { /* nothing */ },
       async generate() { throw new Error("no model call"); },
     };
-    const many = Array.from({ length: 40 }, (_, index) => `session-value-${String(index).padStart(3, "0")}`);
-    const secrets = [OVERSIZED, ...many, "日".repeat(4_096)];
-    const driver = createE2EAgentStepDriver({ client, adapter: { takeReceiptIds: () => [] }, current: { position: null, ledger: null }, runId: RUN_ID, valueKey: generateE2EAgentValueKey(), outDir, sessionSecrets: () => secrets });
-    await driver({ caseId: CASE_ID, stepIndex: 0, goal: "g", maxActions: 2, timeoutMs: 10_000, signal: new AbortController().signal, act: async () => undefined });
-    const sent = markers[0]!;
-    expect(sent.length).toBeLessThanOrEqual(32);
-    expect(sent.every((value) => value.length <= E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS)).toBe(true);
-    expect(E2EModelChannelStepMarkerSchema.safeParse({ schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "begin", caseId: CASE_ID, stepIndex: 0, cookieValues: sent }).success).toBe(true);
-    expect(Buffer.byteLength(JSON.stringify({ cookieValues: sent }))).toBeLessThan(262_144);
-    // The newest values are the ones kept.
-    expect(sent.at(-1)).toBe(boundSessionValue("日".repeat(4_096)).at(-1) ?? "日".repeat(4_096));
+    const run = async (secrets: string[]) => {
+      const driver = createE2EAgentStepDriver({ client, adapter: { takeReceiptIds: () => [] }, current: { position: null, ledger: null }, runId: RUN_ID, valueKey: generateE2EAgentValueKey(), outDir, sessionSecrets: () => secrets });
+      await driver({ caseId: CASE_ID, stepIndex: 0, goal: "g", maxActions: 2, timeoutMs: 10_000, signal: new AbortController().signal, act: async () => undefined });
+      return markers.at(-1)!;
+    };
+    const marker = (cookieValues: readonly string[]) => ({ schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, marker: "begin", caseId: CASE_ID, stepIndex: 0, cookieValues });
+    // An oversized value among the newest: bounded, not rejected by the marker schema (4096 characters a value).
+    const withOversized = await run([...Array.from({ length: 5 }, (_, index) => `session-value-${String(index).padStart(3, "0")}`), OVERSIZED]);
+    expect(withOversized.every((value) => value.length <= E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS)).toBe(true);
+    expect(withOversized.slice(-2)).toEqual(boundSessionValue(OVERSIZED));
+    expect(E2EModelChannelStepMarkerSchema.safeParse(marker(withOversized)).success).toBe(true);
+    // Many large multi-byte values: the marker stays within its byte limit (the proxy refuses a marker over 262 144 bytes), keeping the newest.
+    const wide = Array.from({ length: 31 }, (_, index) => `${String(index).padStart(3, "0")}${"\u65e5".repeat(4_090)}`);
+    const withWide = await run(wide);
+    expect(Buffer.byteLength(JSON.stringify(marker(withWide)))).toBeLessThan(262_144);
+    expect(withWide.at(-1)).toBe(wide.at(-1));
+    expect(withWide.length).toBeLessThan(wide.length);
+    expect(E2EModelChannelStepMarkerSchema.safeParse(marker(withWide)).success).toBe(true);
+    // Few small values are all sent, in order.
+    expect(await run(["session-value-a-1234", "session-value-b-1234"])).toEqual(["session-value-a-1234", "session-value-b-1234"]);
   });
 });
 
