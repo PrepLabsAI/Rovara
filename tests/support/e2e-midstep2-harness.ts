@@ -27,11 +27,14 @@ export interface Midstep2Executor {
   scanning: Client;
 }
 
-export function createMidstep2Harness(input: { dir: () => string; closers: Array<() => Promise<unknown>> }): { startRun: () => Promise<Midstep2Executor["run"]>; executor: () => Promise<Midstep2Executor> } {
+/** What the provider is asked: the call as the worker forwards it. A test that needs a model with a mind of its own passes one; the default taps the first node. */
+export type Midstep2Model = (call: unknown) => ReturnType<typeof tapAnswer>;
+
+export function createMidstep2Harness(input: { dir: () => string; closers: Array<() => Promise<unknown>> }): { startRun: (model?: Midstep2Model) => Promise<Midstep2Executor["run"]>; executor: (model?: Midstep2Model) => Promise<Midstep2Executor> } {
   let socketCount = 0;
-  async function startRun() {
+  async function startRun(model?: Midstep2Model) {
     const seen: unknown[] = [];
-    const invoke: E2EInvoke = async (request) => { seen.push(request.call); return tapAnswer(); };
+    const invoke: E2EInvoke = async (request) => { seen.push(request.call); return model === undefined ? tapAnswer() : model(request.call); };
     const route = createGovernedE2EModelRoute(bedrockRoute(), { invoke, now: Date.now, dayBudget: createInMemoryE2EDayBudget() });
     const socketPath = join(input.dir(), `m${++socketCount}.sock`);
     const proxy: E2EModelProxy = await startE2EModelProxy({ socketPath, runId: RUN_ID, route, credentialSet: { passwords: [], emails: [], cookieValues: [] }, evidence: new Sink(),
@@ -39,8 +42,8 @@ export function createMidstep2Harness(input: { dir: () => string; closers: Array
     input.closers.push(() => proxy.close());
     return { proxy, seen, socketPath };
   }
-  async function executor(): Promise<Midstep2Executor> {
-    const run = await startRun();
+  async function executor(model?: Midstep2Model): Promise<Midstep2Executor> {
+    const run = await startRun(model);
     const redactor = createCredentialRedactor([]);
     const registry = createSessionSecretRegistry({ redactor });
     const source = createE2ESessionSyncSource({ register: registry.register, known: () => registry.sessionSecrets });

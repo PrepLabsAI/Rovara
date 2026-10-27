@@ -52,7 +52,7 @@ describe("change 1: a weak value is masked in every model-bound text, the step c
         },
       ],
       tools: [{ type: "function", name: "tap", description: `Tap one node, for example the one that opens ${WEAK}`, inputSchema: TOOLS[0]!.inputSchema }],
-    } as never) as { content: unknown[] };
+    }) as { content: unknown[] };
     // The step went on: the model answered.
     expect(answer.content).toHaveLength(1);
     expect(e.run.seen).toHaveLength(1);
@@ -79,13 +79,13 @@ describe("change 1: a weak value is masked in every model-bound text, the step c
   it("a call that shows nothing registered is forwarded exactly as built (ordinary text, a 6-digit code, words)", async () => {
     const { e, stack } = await stackFor([{ name: "lastDocument", value: WEAK }]);
     const text = '#n1 textbox "Code"\n#n2 text "Your code is 482915 and the report is Quarterly report for ACME, order 1234"';
-    await stack.adapter.doGenerate({ prompt: [user(text)], tools: TOOLS_V4 } as never);
+    await stack.adapter.doGenerate({ prompt: [user(text)], tools: TOOLS_V4 });
     expect((e.run.seen[0] as { prompt: Array<{ content: Part[] }> }).prompt[0]!.content[0]!.text).toBe(text);
   });
 
   it("a strong value still refuses the call, with the weak value beside it (the step is not continued, nothing reaches the model)", async () => {
     const { e, stack } = await stackFor([{ name: "lastDocument", value: WEAK }, { name: "access_token", value: STRONG }]);
-    await expect(stack.adapter.doGenerate({ prompt: [user(`Document ${WEAK}, key ${STRONG}`)], tools: TOOLS_V4 } as never)).rejects.toMatchObject({ code: "credential-in-prompt" });
+    await expect(stack.adapter.doGenerate({ prompt: [user(`Document ${WEAK}, key ${STRONG}`)], tools: TOOLS_V4 })).rejects.toMatchObject({ code: "credential-in-prompt" });
     await expect(stack.client.generate({ ...POSITION, callIndex: 5, call: { prompt: [{ role: "user", content: [{ type: "text", text: `Document ${WEAK}, key ${STRONG}` }] }] } as never })).rejects.toMatchObject({ code: "credential-in-prompt" });
     expect(e.run.seen).toHaveLength(0);
     expect(e.registry.sessionSecrets).toContain(STRONG);
@@ -103,16 +103,16 @@ describe("change 1: a weak value is masked in every model-bound text, the step c
 
   it("R4-2 end to end: a date, URL or host under a secret-sounding name is masked for the model and the call is NOT refused (it was strong, and refused, before)", async () => {
     const { e, stack } = await stackFor([{ name: "tokenEndpoint", value: "https://login.example.com/oauth2/token" }, { name: "sessionLastActive", value: "2026-10-27T09:15:00.000Z" }, { name: "authHost", value: "login.example.com" }]);
-    await stack.adapter.doGenerate({ prompt: [user("Endpoint https://login.example.com/oauth2/token host login.example.com last active 2026-10-27T09:15:00.000Z")], tools: TOOLS_V4 } as never);
+    await stack.adapter.doGenerate({ prompt: [user("Endpoint https://login.example.com/oauth2/token host login.example.com last active 2026-10-27T09:15:00.000Z")], tools: TOOLS_V4 });
     expect((e.run.seen[0] as { prompt: Array<{ content: Part[] }> }).prompt[0]!.content[0]!.text).toBe("Endpoint <session> host <session> last active <session>");
     expect(e.registry.sessionSecrets).toEqual([]);
   });
 
   it("a value registered weak and later as a credential is refused, not masked (the stronger tier wins)", async () => {
     const { e, stack } = await stackFor([{ name: "lastDocument", value: WEAK }]);
-    await stack.adapter.doGenerate({ prompt: [user(`Document ${WEAK}`)], tools: TOOLS_V4 } as never);
+    await stack.adapter.doGenerate({ prompt: [user(`Document ${WEAK}`)], tools: TOOLS_V4 });
     e.registry.register(WEAK);
-    await expect(stack.adapter.doGenerate({ prompt: [user(`Document ${WEAK}`)], tools: TOOLS_V4 } as never)).rejects.toMatchObject({ code: "credential-in-prompt" });
+    await expect(stack.adapter.doGenerate({ prompt: [user(`Document ${WEAK}`)], tools: TOOLS_V4 })).rejects.toMatchObject({ code: "credential-in-prompt" });
   });
 });
 
@@ -128,7 +128,7 @@ describe("the mask itself", () => {
   });
 
   it("the redactor masks only evidence-only values: an account password and a credential are left for the scan to refuse", () => {
-    const redactor = createCredentialRedactor([{ profileId: "maya", email: "maya@example.com", password: "hunter2222-long" } as never]);
+    const redactor = createCredentialRedactor([{ profileId: "maya", email: "maya@example.com", password: "hunter2222-long" }]);
     redactor.addSessionSecret(STRONG);
     redactor.addSessionSecret(WEAK, { evidenceOnly: true });
     expect(redactor.maskEvidenceOnly(`a ${WEAK} b ${STRONG} c hunter2222-long`)).toBe(`a <session> b ${STRONG} c hunter2222-long`);
