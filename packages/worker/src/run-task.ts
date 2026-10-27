@@ -463,6 +463,7 @@ export async function runTaskInvocation(
       {
         rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: invocation.payload.workflowMode ?? "IMPLEMENT", conversationId, onDiagnostic,
         extensionFactories: planning || reviewing ? [] : [verification],
+        ...(reviewing ? { contextFilesAt: "base-commit" as const, baseCommits: invocation.payload.workflowBase ?? [] } : {}),
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
