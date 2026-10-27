@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DOCKER_DATA_VISIBLE,
+  WORKER_STATE_VISIBLE,
   containerProblems,
   devcontainerConfigRefusal,
   hostPathResolver,
@@ -46,6 +47,9 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
     ["a bind mount of /var/run/docker.sock", ["-itv/var/run/docker.sock:/s"]],
     ["a bind mount of /etc", ["--mount", "type=bind,source=/etc,target=/host-etc"]],
     ["a bind mount of /mnt/workspace/.docker", ["--mount=type=bind,src=/mnt/workspace/.docker,dst=/d"]],
+    ["a bind mount of /mnt/workspace/.agentx", ["--mount=type=bind,src=/mnt/workspace/.agentx,dst=/d"]],
+    ["a bind mount of /mnt/workspace/agent-sessions", ["-v", "/mnt/workspace/agent-sessions:/d"]],
+    ["a bind mount of /mnt/workspace/.agentx-runtime/state", ["--mount=type=bind,src=/mnt/workspace/.agentx-runtime/state,dst=/d"]],
     ["a bind mount of /mnt/workspace", ["-v", "/mnt/workspace:/w"]],
     ["a bind mount of ${localEnv:HOME}", ["-v", "${localEnv:HOME}:/home"]],
     ["a volume with driver options", ["--mount", "type=volume,source=x,target=/x,volume-opt=type=none,volume-opt=o=bind,volume-opt=device=/"]],
@@ -167,6 +171,11 @@ describe("the started dev container, checked as Docker ran it (docker containmen
     expect(containerProblems(granted, checks)).toEqual([
       "privileged", "--cap-add", "--pid", "--network=host", "--cgroupns=host", "--device", "--gpus", "a bind mount of /var/run/docker.sock", DOCKER_DATA_VISIBLE,
     ]);
+    // The worker's own folders of the workspace must be hidden too, or task code could write what the worker trusts.
+    const hidden = { rootPath: "/mnt/workspace", dockerDataPath: "/mnt/workspace/.docker", maskedPaths: ["/mnt/workspace/.agentx", "/mnt/workspace/agent-sessions"] };
+    expect(containerProblems(ordinary, hidden)).toEqual([WORKER_STATE_VISIBLE]);
+    const maskedState: ContainerInspection = { ...ordinary, Mounts: [...ordinary.Mounts!, ...["/mnt/workspace/.agentx", "/mnt/workspace/agent-sessions"].map((Destination) => ({ Type: "tmpfs", Destination }))] };
+    expect(containerProblems(maskedState, hidden)).toEqual([]);
     // A workspace without a Docker data folder (a developer machine) has nothing to hide.
     expect(containerProblems({ ...ordinary, Mounts: [ordinary.Mounts![0]!] }, { rootPath: "/mnt/workspace" })).toEqual([]);
   });

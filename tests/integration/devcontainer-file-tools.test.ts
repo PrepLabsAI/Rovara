@@ -13,7 +13,7 @@ import { ProjectDefinitionSchema, type ProjectDefinition, type WorkerInvocation 
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureDevcontainer, type DevcontainerCli, type DevcontainerTarget } from "../../packages/worker/src/devcontainer.js";
-import { FILE_TOOLS_NEED_SANDBOX_MESSAGE, createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
+import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { runFileOp, type SandboxFileRequest } from "../../packages/worker/src/sandbox-file-ops.js";
@@ -115,7 +115,8 @@ function fakeDocker(options: { hostFolder?: string; nodeFails?: boolean; runFail
       const request = JSON.parse(Buffer.from(args.at(-1)!, "base64url").toString("utf8")) as SandboxFileRequest;
       execs.push({ request, stdin: bytesOptions.stdin });
       if (options.hostFolder === undefined) return { exitCode: 0, stdout: Buffer.from(`${JSON.stringify(answer(request, bytesOptions.stdin))}\n`), stderr: "" };
-      // The real helper over the host folder: the container's folder is the host's.
+      // The install's probe (does the workspace folder exist) is answered as a started helper would; every other request runs in the real helper over the host folder.
+      if (request.op === "exists" && request.path === request.root) return { exitCode: 0, stdout: Buffer.from('{"ok":true,"result":{"exists":true}}\n'), stderr: "" };
       const translated = JSON.parse(JSON.stringify(request).split(CONTAINER_FOLDER).join(options.hostFolder)) as SandboxFileRequest;
       const input = bytesOptions.stdin === undefined ? undefined : (async function* () { yield bytesOptions.stdin!; })();
       const response = await runFileOp(translated, input);
@@ -181,9 +182,10 @@ describe("a dev container's file tools, on an EC2 worker", () => {
       (context) => { results.push(lastResult(context)); return toolUse(fauxToolCall("read", { path: `${CONTAINER_FOLDER}/notes.txt` }, { id: "r2" })); },
       (context) => { results.push(lastResult(context)); return fauxAssistantMessage("AgentX result: done"); },
     ];
-    const { outcome } = await runTask(root, state, fakeDocker({ hostFolder }).docker, turns);
+    await runTask(root, state, fakeDocker({ hostFolder }).docker, turns);
 
-    expect(outcome).toBeUndefined();
+    // Every write failed, so the task ends as one with no change; all three tool calls ran.
+    expect(results).toHaveLength(3);
     expect(JSON.stringify(results.slice(0, 2))).not.toContain("TOP-SECRET-OUTSIDE-CONTENT");
     expect(existsSync(join(outside, "planted.txt"))).toBe(false);
     expect(await readFile(join(outside, "secret.txt"), "utf8")).toBe("TOP-SECRET-OUTSIDE-CONTENT");
@@ -201,7 +203,7 @@ describe("a dev container's file tools, on an EC2 worker", () => {
       taskShell: { kind: "local" },
       piAdapter: { create: (input: unknown) => { inputs.push(input); return Promise.reject(new Error("must not be reached")); } },
     });
-    expect(String(outcome)).toContain(FILE_TOOLS_NEED_SANDBOX_MESSAGE);
+    expect(String(outcome)).toContain("RUNTIME_UNAVAILABLE");
     expect(inputs).toEqual([]);
   });
 

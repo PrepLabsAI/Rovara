@@ -1,7 +1,8 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstat, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -15,6 +16,7 @@ import { runCollected, TIMEOUT_KILL_GRACE_MS } from "./collected-process.js";
 import {
   DOCKER_DATA_DIRECTORY,
   DOCKER_DATA_VISIBLE,
+  WORKER_STATE_VISIBLE,
   containerProblems,
   devcontainerConfigRefusal,
   parseJsonc,
@@ -23,7 +25,10 @@ import {
 } from "./devcontainer-policy.js";
 import { inertContextText } from "./context-text.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
+import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
 import type { CommandResult } from "./readiness.js";
+import type { DockerCli } from "./swebench/containers.js";
+import { hiddenWorkspaceDirectories } from "./workspace-state.js";
 
 const execFile = promisify(execFileCallback);
 const UP_TIMEOUT_MS = 20 * 60_000;
@@ -174,6 +179,12 @@ export interface DevcontainerChecks {
 /** The empty volume mounted over the workspace's Docker data folder in every dev container. */
 export const DOCKER_DATA_MASK_VOLUME = "agentx-docker-data-mask";
 
+/** The empty volume mounted over one of the workspace's hidden folders: the Docker data folder keeps its original name. */
+function maskVolume(path: string): string {
+  const name = basename(path);
+  return name === DOCKER_DATA_DIRECTORY ? DOCKER_DATA_MASK_VOLUME : `agentx-mask-${name.replace(/^\./u, "")}`;
+}
+
 export function devcontainerTarget(rootPath: string, project: StoredProjectDefinition): DevcontainerTarget | undefined {
   const devcontainer = project.devcontainer;
   if (devcontainer === undefined) return undefined;
@@ -211,22 +222,22 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
   const lockfile = cli.checks === undefined ? undefined : await assertFullConfigurationAllowed(cli.checks, target);
   // `up` fetches remote features again. With a lockfile of the digests just checked, and --frozen-lockfile, it uses
   // exactly that content or fails before it builds anything.
-  const start = (data: string | undefined) => lockfile === undefined
-    ? startDevcontainer(cli, target, data, false)
-    : withFeatureLockfile(target, lockfile, () => startDevcontainer(cli, target, data, true));
-  // On an EC2 worker the workspace volume also holds Docker's data root, which is not the project's: a volume
-  // mounted over it inside the dev container hides it there.
-  const dockerDataPath = join(target.rootPath, DOCKER_DATA_DIRECTORY);
-  const hasDockerData = (await stat(dockerDataPath).catch(() => undefined))?.isDirectory() === true;
-  const started = await start(hasDockerData ? dockerDataPath : undefined);
+  const start = (hidden: readonly string[]) => lockfile === undefined
+    ? startDevcontainer(cli, target, hidden, false)
+    : withFeatureLockfile(target, lockfile, () => startDevcontainer(cli, target, hidden, true));
+  // On an EC2 worker the workspace volume also holds Docker's data root, the verifier's runtime and the worker's own state,
+  // none of them the project's: a volume mounted over each inside the dev container hides it there.
+  let hidden = await hiddenWorkspaceDirectories(target.rootPath);
+  const started = await start(hidden);
   if (cli.checks === undefined) return started;
-  let problems = await startedContainerProblems(cli.checks, started.containerId, target, hasDockerData ? dockerDataPath : undefined);
+  let problems = await startedContainerProblems(cli.checks, started.containerId, target, hidden);
   let current = started;
-  if (problems.length === 1 && problems[0] === DOCKER_DATA_VISIBLE) {
-    // A container created before AgentX hid the Docker data folder: created again, with it hidden.
+  if (problems.length > 0 && problems.every((problem) => problem === DOCKER_DATA_VISIBLE || problem === WORKER_STATE_VISIBLE)) {
+    // A container created before AgentX hid these folders: created again, with them hidden.
     await removeStartedContainer(cli.checks, current.containerId);
-    current = await start(dockerDataPath);
-    problems = await startedContainerProblems(cli.checks, current.containerId, target, dockerDataPath);
+    hidden = await hiddenWorkspaceDirectories(target.rootPath);
+    current = await start(hidden);
+    problems = await startedContainerProblems(cli.checks, current.containerId, target, hidden);
   }
   if (problems.length > 0) {
     await removeStartedContainer(cli.checks, current.containerId);
@@ -362,7 +373,7 @@ async function startedContainerProblems(
   containers: DevcontainerChecks,
   containerId: string,
   target: DevcontainerTarget,
-  dockerDataPath: string | undefined,
+  hidden: readonly string[],
 ): Promise<string[]> {
   let inspection: ContainerInspection;
   try {
@@ -371,7 +382,14 @@ async function startedContainerProblems(
     await removeStartedContainer(containers, containerId);
     throw new Error(`AgentX could not check the dev container it started, so it removed it: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512), { cause: error });
   }
-  return containerProblems(inspection, { rootPath: target.rootPath, resolvePath: hostPathResolver(target.rootPath), ...(dockerDataPath === undefined ? {} : { dockerDataPath }) });
+  const dockerDataPath = hidden.find((path) => basename(path) === DOCKER_DATA_DIRECTORY);
+  const maskedPaths = hidden.filter((path) => path !== dockerDataPath);
+  return containerProblems(inspection, {
+    rootPath: target.rootPath,
+    resolvePath: hostPathResolver(target.rootPath),
+    ...(dockerDataPath === undefined ? {} : { dockerDataPath }),
+    maskedPaths,
+  });
 }
 
 async function removeStartedContainer(containers: DevcontainerChecks, containerId: string): Promise<void> {
@@ -383,13 +401,13 @@ async function removeStartedContainer(containers: DevcontainerChecks, containerI
   }
 }
 
-async function startDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget, dockerDataPath: string | undefined, frozenLockfile: boolean): Promise<DevcontainerUpResult> {
+async function startDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget, hidden: readonly string[], frozenLockfile: boolean): Promise<DevcontainerUpResult> {
   const result = await cli.run([
     "up",
     ...targetArgs(target),
     ...(frozenLockfile ? ["--frozen-lockfile"] : []),
     "--mount", `type=bind,source=${target.rootPath},target=${target.rootPath}`,
-    ...(dockerDataPath === undefined ? [] : ["--mount", `type=volume,source=${DOCKER_DATA_MASK_VOLUME},target=${dockerDataPath}`]),
+    ...hidden.flatMap((path) => ["--mount", `type=volume,source=${maskVolume(path)},target=${path}`]),
     "--log-format", "json",
   ], { timeoutMs: UP_TIMEOUT_MS });
   const outcome = lastJsonLine(result.stdout);
@@ -743,4 +761,47 @@ function contained(parent: string, path: string): string {
     throw new Error("devcontainer path escapes its workspace");
   }
   return candidate;
+}
+
+/** Where the file-tool helper and a Node to run it live inside a devcontainer: root-owned, mode 0555, so task code cannot replace them. */
+export const DEVCONTAINER_FILE_OPS_DIRECTORY = "/opt/agentx-file-ops";
+const WORKER_NODE_BINARY = "/usr/local/bin/node";
+
+/**
+ * Copies the worker's Node and the compiled file-tool helper into the devcontainer (`docker cp`, root-owned, mode 0555), so the
+ * agent's file tools can run there as its `remoteUser` (sandbox-file-tools.ts). Then it probes, as that user, that the bundled
+ * Node starts (a musl image cannot run it) and that the helper loads and reaches the workspace folder. Idempotent. A refusal
+ * is not an error: the file tools use a task sandbox of their own for this devcontainer, and the reason says why.
+ */
+export async function installFileOpsHelper(
+  docker: DockerCli,
+  input: { containerId: string; user: string; workspaceFolder: string; nodeSource?: string; helperSource?: string },
+): Promise<{ target: FileOpsTarget } | { refused: string }> {
+  const directory = DEVCONTAINER_FILE_OPS_DIRECTORY;
+  const node = `${directory}/node`;
+  const helper = `${directory}/sandbox-file-ops.js`;
+  const nodeSource = input.nodeSource ?? WORKER_NODE_BINARY;
+  const helperSource = input.helperSource ?? fileURLToPath(new URL("./sandbox-file-ops.js", import.meta.url));
+  const step = async (what: string, args: readonly string[]): Promise<string | undefined> => {
+    const result = await docker.run(args, { timeoutMs: DOCKER_CALL_TIMEOUT_MS }).catch((error: unknown) => ({
+      exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : String(error),
+    }));
+    if (result.exitCode === 0) return undefined;
+    return `${what}: ${(result.stderr || result.stdout).trim().split("\n").slice(-2).join(" ").slice(0, 200) || `exit ${String(result.exitCode)}`}`;
+  };
+  const target: FileOpsTarget = { container: input.containerId, user: input.user, node, helper, root: input.workspaceFolder, docker };
+  const failure = await step("making the helper folder", ["exec", "--user", "0", input.containerId, "mkdir", "-p", directory])
+    ?? await step("copying Node", ["cp", nodeSource, `${input.containerId}:${node}`])
+    ?? await step("copying the helper", ["cp", helperSource, `${input.containerId}:${helper}`])
+    ?? await step("locking the helper folder", ["exec", "--user", "0", input.containerId, "chmod", "0555", directory, node, helper])
+    ?? await step("starting the copied Node", ["exec", "--user", input.user, input.containerId, node, "--version"]);
+  if (failure !== undefined) return { refused: failure };
+  // The copied Node runs; the helper must load too, and reach the workspace, as the user the tools run as.
+  try {
+    const probe = await fileOpsExec(target, { root: input.workspaceFolder, op: "exists", path: input.workspaceFolder });
+    if (!probe.ok) return { refused: `running the helper: ${probe.message.slice(0, 200)}` };
+  } catch (error) {
+    return { refused: `running the helper: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}` };
+  }
+  return { target };
 }

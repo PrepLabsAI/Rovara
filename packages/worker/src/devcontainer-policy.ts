@@ -20,6 +20,10 @@ export const DOCKER_DATA_DIRECTORY = ".docker";
 export const RUNTIME_BACKING_DIRECTORY = ".agentx-runtime";
 /** The container problem a missing mask over the Docker data folder is reported as. */
 export const DOCKER_DATA_VISIBLE = "the workspace's Docker data folder (.docker) visible inside it";
+/** The problem a missing mask over one of the worker's own folders of the workspace is reported as (workspace-state.ts). */
+export const WORKER_STATE_VISIBLE = "the worker's own folders of the workspace (.agentx, agent-sessions, .agentx-runtime) visible inside it";
+/** Folders of the workspace volume that are the worker's: no bind mount may reach into one. */
+const WORKER_FOLDERS = [DOCKER_DATA_DIRECTORY, ".agentx", "agent-sessions", RUNTIME_BACKING_DIRECTORY];
 
 export interface DevcontainerPolicyContext {
   /** The AgentX workspace (canonical). */
@@ -233,8 +237,10 @@ function hostPathAllowed(path: string, root: string, options: { allowRoot: boole
   const fromRoot = relative(root, path);
   if (fromRoot === "") return options.allowRoot;
   if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) return false;
-  const fromData = relative(join(root, DOCKER_DATA_DIRECTORY), path);
-  return fromData.startsWith("..") || isAbsolute(fromData);
+  return WORKER_FOLDERS.every((folder) => {
+    const fromFolder = relative(join(root, folder), path);
+    return fromFolder.startsWith("..") || isAbsolute(fromFolder);
+  });
 }
 
 /** The parts of `docker inspect` that say what a container was given. */
@@ -259,11 +265,12 @@ export interface ContainerInspection {
 /**
  * What a started dev container was given that AgentX does not allow, as Docker reports it. Binds of the workspace
  * itself are AgentX's own; where the Docker data folder exists, each must have it hidden by a volume (or tmpfs) mounted
- * over the same place inside, since Docker's own data is not the project's.
+ * over the same place inside, since Docker's own data is not the project's. The worker's own folders of the workspace
+ * (`maskedPaths`, workspace-state.ts) must be hidden the same way: task code in the container must not write them.
  */
 export function containerProblems(
   inspection: ContainerInspection,
-  context: { rootPath: string; dockerDataPath?: string; resolvePath?: (path: string) => string },
+  context: { rootPath: string; dockerDataPath?: string; maskedPaths?: readonly string[]; resolvePath?: (path: string) => string },
 ): string[] {
   const host = inspection.HostConfig ?? {};
   const problems: string[] = [];
@@ -283,6 +290,7 @@ export function containerProblems(
   const root = resolvePath(resolve(context.rootPath));
   const mounts = inspection.Mounts ?? [];
   let dataVisible = false;
+  let stateVisible = false;
   for (const mount of mounts) {
     if (mount.Type !== "bind") continue;
     const source = mount.Source === undefined ? undefined : resolvePath(resolve(mount.Source));
@@ -290,14 +298,19 @@ export function containerProblems(
       problems.push(`a bind mount of ${mount.Source ?? "an unknown path"}`);
       continue;
     }
-    if (context.dockerDataPath === undefined || mount.Destination === undefined) continue;
-    const toData = relative(source, resolvePath(resolve(context.dockerDataPath)));
-    if (toData.startsWith("..") || isAbsolute(toData)) continue;
-    const hiddenAt = join(mount.Destination, toData);
-    const hidden = mounts.some((other) => (other.Type === "volume" || other.Type === "tmpfs") && other.Destination === hiddenAt);
-    if (!hidden) dataVisible = true;
+    if (mount.Destination === undefined) continue;
+    // Each folder the worker hides must be hidden by a volume (or tmpfs) mounted over the same place inside.
+    for (const [hide, isData] of [...(context.dockerDataPath === undefined ? [] : [[context.dockerDataPath, true] as const]), ...(context.maskedPaths ?? []).map((path) => [path, false] as const)]) {
+      const toHidden = relative(source, resolvePath(resolve(hide)));
+      if (toHidden.startsWith("..") || isAbsolute(toHidden)) continue;
+      const hiddenAt = join(mount.Destination, toHidden);
+      if (mounts.some((other) => (other.Type === "volume" || other.Type === "tmpfs") && other.Destination === hiddenAt)) continue;
+      if (isData) dataVisible = true;
+      else stateVisible = true;
+    }
   }
   if (dataVisible) problems.push(DOCKER_DATA_VISIBLE);
+  if (stateVisible) problems.push(WORKER_STATE_VISIBLE);
   return problems;
 }
 

@@ -26,6 +26,8 @@ import { TIMEOUT_KILL_GRACE_MS, runCollected, tailCollector } from "../../packag
 import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
+import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { TaskShellSelection } from "../../packages/worker/src/task-sandbox.js";
 
 const run = promisify(execFile);
 const UP_OUTPUT = [
@@ -341,6 +343,8 @@ describe("the devcontainer CLI seam", () => {
       }] };
       const { cli, calls, removed, lockfiles } = dockerCli([() => ({ ...ordinary, Mounts: [
         { Type: "bind", Source: target.rootPath, Destination: target.rootPath },
+        { Type: "volume", Source: "/var/lib/docker/volumes/agentx-mask-agentx/_data", Destination: join(target.rootPath, ".agentx") },
+        { Type: "volume", Source: "/var/lib/docker/volumes/agentx-mask-agent-sessions/_data", Destination: join(target.rootPath, "agent-sessions") },
         { Type: "volume", Source: "/var/lib/docker/volumes/agentx-docker-data-mask/_data", Destination: join(target.rootPath, ".docker") },
       ] })], { configuration: {}, mergedConfiguration: {}, featuresConfiguration });
       await writeFile(join(target.workspaceFolder, ".devcontainer/devcontainer-lock.json"), "the project's own lockfile\n", "utf8");
@@ -353,6 +357,9 @@ describe("the devcontainer CLI seam", () => {
       expect(calls).toEqual([[
         "up", "--workspace-folder", target.workspaceFolder, "--config", target.configPath, "--frozen-lockfile",
         "--mount", `type=bind,source=${target.rootPath},target=${target.rootPath}`,
+        // The worker's own state is hidden too: created if missing, then masked.
+        "--mount", `type=volume,source=agentx-mask-agentx,target=${join(target.rootPath, ".agentx")}`,
+        "--mount", `type=volume,source=agentx-mask-agent-sessions,target=${join(target.rootPath, "agent-sessions")}`,
         "--mount", `type=volume,source=agentx-docker-data-mask,target=${join(target.rootPath, ".docker")}`,
         "--log-format", "json",
       ]]);
@@ -362,11 +369,22 @@ describe("the devcontainer CLI seam", () => {
     it("creates again a container made before the Docker data folder was hidden (a resumed workspace)", async () => {
       const target = await workspaceWith('{ "image": "node:22" }', { dockerData: true });
       const unmasked = { ...ordinary, Mounts: [{ Type: "bind", Source: target.rootPath, Destination: target.rootPath }] };
-      const masked = { ...ordinary, Mounts: [...unmasked.Mounts, { Type: "volume", Destination: join(target.rootPath, ".docker") }] };
+      const masked = { ...ordinary, Mounts: [...unmasked.Mounts, ...[".agentx", "agent-sessions", ".docker"].map((name) => ({ Type: "volume", Destination: join(target.rootPath, name) }))] };
       const { cli, calls, removed } = dockerCli([() => unmasked, () => masked]);
       await expect(ensureDevcontainer(cli, target)).resolves.toMatchObject({ containerId: "id-2" });
       expect(removed).toEqual(["id-1"]);
       expect(calls).toHaveLength(2);
+    });
+
+    it("creates again a container that shows the worker's own state, and refuses one that still does", async () => {
+      const target = await workspaceWith('{ "image": "node:22" }');
+      const unmasked = { ...ordinary, Mounts: [{ Type: "bind", Source: target.rootPath, Destination: target.rootPath }] };
+      const { cli, removed } = dockerCli([() => unmasked, () => unmasked]);
+      await expect(ensureDevcontainer(cli, target)).rejects.toMatchObject({
+        code: "CONFIG_INVALID",
+        message: expect.stringContaining("the worker's own folders of the workspace (.agentx, agent-sessions, .agentx-runtime) visible inside it") as unknown,
+      });
+      expect(removed).toEqual(["id-1", "id-2"]);
     });
 
     it("removes and refuses a container a feature or the image's metadata made privileged", async () => {
@@ -829,8 +847,9 @@ describe("a task in a workspace with a devcontainer", () => {
         };
       },
     };
+    const files = fileToolsDocker(join(await realpath(root), "repo/sample"));
     await runTaskInvocation(taskInvocation(), {
-      rootPath: root, model: { provider: "fixture", modelId: "m" }, piAdapter: adapter, devcontainerCli: cli,
+      rootPath: root, model: { provider: "fixture", modelId: "m" }, piAdapter: adapter, devcontainerCli: cli, docker: files.docker,
       eventSink: async () => undefined, artifactSink: async () => undefined,
     });
 
@@ -841,6 +860,59 @@ describe("a task in a workspace with a devcontainer", () => {
     expect(inputs[0]?.contextFiles.map((file) => file.path)).toContain("AgentX devcontainer");
     await inputs[0]!.bashOperations!.exec("npm test", join(await realpath(root), "repo/sample"), { onData: () => undefined });
     expect(calls.at(-1)).toEqual(expect.arrayContaining(["exec", "npm test"]));
+  });
+
+  /** Runs a task in the prepared workspace and returns the Pi session inputs and the progress messages. */
+  async function taskWithFileTools(docker: DockerCli, taskShell?: TaskShellSelection) {
+    const { root, project, materializer } = await fixture();
+    await prepareWorkspace({ rootPath: root, project, materializer, devcontainerCli: fakeCli().cli });
+    const inputs: PiSessionInput[] = [];
+    const adapter: PiSessionAdapter = {
+      async create(input) {
+        inputs.push(input);
+        const sessionFile = join(input.sessionDirectory, "session.jsonl");
+        await writeFile(sessionFile, "");
+        return {
+          conversationId: "c", sessionFile,
+          prompt: async () => undefined, abort: async () => undefined,
+          getModel: () => ({ provider: "fixture", modelId: "m" }),
+          getSessionStats: () => ({ sessionFile, sessionId: "c", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
+          subscribe: () => () => undefined, dispose: () => undefined,
+        };
+      },
+    };
+    const progress: string[] = [];
+    await runTaskInvocation(taskInvocation(), {
+      rootPath: root, model: { provider: "fixture", modelId: "m" }, piAdapter: adapter, devcontainerCli: fakeCli().cli, docker,
+      ...(taskShell === undefined ? {} : { taskShell }),
+      eventSink: async (events) => { for (const event of events) if (event.type === "progress") progress.push(String((event.payload as { message?: unknown }).message)); },
+      artifactSink: async () => undefined,
+    });
+    return { inputs, progress, hostFolder: join(await realpath(root), "repo/sample") };
+  }
+
+  it("copies the file-tool helper into the devcontainer and runs the file tools there, starting no task sandbox", async () => {
+    const files = fileToolsDocker();
+    const { inputs, hostFolder } = await taskWithFileTools(files.docker);
+    expect(inputs[0]?.fileTools).toEqual({
+      container: "f832494aef96", user: "node", node: "/opt/agentx-file-ops/node", helper: "/opt/agentx-file-ops/sandbox-file-ops.js",
+      root: "/workspaces/sample", mounts: [{ hostPath: hostFolder, containerPath: "/workspaces/sample" }], docker: files.docker,
+    });
+    expect(files.runs.map((args) => args.slice(0, 2).join(" "))).toEqual(expect.arrayContaining(["cp /usr/local/bin/node"]));
+    expect(files.runs.some((args) => args[0] === "cp" && args[2] === "f832494aef96:/opt/agentx-file-ops/sandbox-file-ops.js")).toBe(true);
+    expect(files.runs.some((args) => args[0] === "run")).toBe(false);
+  });
+
+  it("gives the file tools a sandbox of their own when the devcontainer cannot run the bundled Node, and says so", async () => {
+    const files = fileToolsDocker(undefined, { nodeFails: true });
+    const { inputs, progress } = await taskWithFileTools(files.docker, { kind: "sandbox", docker: files.docker, image: "registry.example/worker@sha256:" + "b".repeat(64) });
+    const target = inputs[0]?.fileTools;
+    expect(target?.container).toMatch(/^agentx-task-/u);
+    expect(target).toMatchObject({ user: "1000:1000", node: "/usr/local/bin/node", helper: "/opt/agentx/packages/worker/dist/sandbox-file-ops.js", paths: { containerFolder: "/workspaces/sample" } });
+    expect(files.runs.filter((args) => args[0] === "run")).toHaveLength(1);
+    expect(progress).toContain("Rovara's file tools run in a separate sandbox for this devcontainer, so they may not be able to change files your devcontainer's user created.");
+    // The agent's shell is still the devcontainer's, not the sandbox's.
+    expect(inputs[0]?.bashOperations).toBeDefined();
   });
 });
 
@@ -940,6 +1012,22 @@ async function fixture() {
   };
   expect(await readFile(join(source, ".devcontainer/devcontainer.json"), "utf8")).toContain("node:22");
   return { root, project, materializer };
+}
+
+/** A fake Docker for the file tools: every command succeeds, `inspect` reports the repository mount, and the helper's probe answers. */
+function fileToolsDocker(hostFolder?: string, options: { nodeFails?: boolean } = {}) {
+  const runs: string[][] = [];
+  const docker: DockerCli = {
+    async run(args) {
+      runs.push([...args]);
+      if (args[0] === "network" && args[1] === "inspect") return { exitCode: 0, stdout: "bridge {} false", stderr: "" };
+      if (args[0] === "inspect") return { exitCode: 0, stdout: JSON.stringify(hostFolder === undefined ? [] : [{ Type: "bind", Source: hostFolder, Destination: "/workspaces/sample" }]), stderr: "" };
+      if (options.nodeFails === true && args.includes("--version")) return { exitCode: 127, stdout: "", stderr: "exec format error" };
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    async execBytes() { return { exitCode: 0, stdout: Buffer.from('{"ok":true,"result":{"exists":true}}\n'), stderr: "" }; },
+  };
+  return { docker, runs };
 }
 
 function taskInvocation(): Extract<WorkerInvocation, { kind: "task" }> {

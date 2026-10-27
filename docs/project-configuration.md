@@ -172,7 +172,7 @@ below is refused, with a message naming the setting, before any container starts
 | `dockerComposeFile` | The Compose services' settings cannot be checked. |
 | `privileged: true`, `securityOpt`, or any `capAdd` other than `SYS_PTRACE` | They grant powers over the host. |
 | `runArgs` with `--privileged`, `--pid`, `--ipc=host` or `container:…`, `--network=host` (or `--net`) or `container:…`, `--userns=host`, `--uts=host`, `--cgroupns=host`, `--cap-add` (other than `SYS_PTRACE`), `--security-opt`, `--device`, `--device-cgroup-rule`, `--gpus` or `--volumes-from` | They share the host's (or the worker's) processes, network, devices or files. |
-| A bind mount (`mounts`, `workspaceMount`, or `-v`/`--volume`/`--mount` in `runArgs`) of `/`, `/var/run/docker.sock`, the workspace root itself, its `.docker` folder, or any path outside the workspace, including through a link (whether or not its target exists), or a path AgentX cannot check | They expose host files or the Docker socket. |
+| A bind mount (`mounts`, `workspaceMount`, or `-v`/`--volume`/`--mount` in `runArgs`) of `/`, `/var/run/docker.sock`, the workspace root itself, the worker's own folders in it (`.docker`, `.agentx`, `agent-sessions`, `.agentx-runtime`; AgentX hides them inside the container too), or any path outside the workspace, including through a link (whether or not its target exists), or a path AgentX cannot check | They expose host files or the Docker socket. |
 | A feature AgentX cannot pin to the content it checked (one fetched from a GitHub release) | Its content could change before the container is built. |
 | A volume with `volume-opt` or `volume-driver` options | Such a volume can be a bind mount of any host path. |
 | `build.context` or `build.dockerfile` outside the workspace | The build would read host files. |
@@ -195,8 +195,12 @@ the version available when the check runs, not to the repository's lockfile.
 
 After the container starts, AgentX checks it again as Docker ran it; a container that breaks the
 rules is removed and the step fails. AgentX mounts the whole workspace into the container at the
-same path, with the workspace's `.docker` folder (Docker's own data) hidden by an empty volume. A
-container created before AgentX hid that folder is created again once. Before each publication
+same path, with the worker's own folders of it (`.docker`, which is Docker's own data, `.agentx`,
+`agent-sessions` and `.agentx-runtime`) hidden by empty volumes. A container created before AgentX
+hid those folders is created again once. The agent's file tools (read, write, edit, grep, find and
+ls) run inside the dev container, as its user, so they only reach the repository folders it mounts.
+If the dev container cannot run them, they run in a separate sandbox container instead, and the
+task says so. Before each publication
 AgentX removes the dev container (see the security notes below), so the next step creates it again;
 creating it reruns its creation commands, such as `onCreateCommand` and `postCreateCommand`.
 
