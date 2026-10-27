@@ -97,7 +97,7 @@ export async function loadRepositoryContextFiles(
     }
     if (!located.directory) continue;
     const read = atBase
-      ? await readBaseCommitRuleFile(located.directory, repository)
+      ? await readBaseCommitRuleFile(located.directory, repository, canonicalRoot)
       : await readWorkingTreeRuleFile(located.directory, repository);
     if (read.diagnostic) diagnostics.push(read.diagnostic);
     if (read.raw) {
@@ -279,12 +279,13 @@ export function isRuleFilesUnverified(error: unknown): boolean {
 async function readBaseCommitRuleFile(
   directory: string,
   repository: WorkspaceRepositoryReference,
+  workspaceRoot: string,
 ): Promise<RuleFileRead> {
   const commit = repository.baseCommit;
   if (commit === undefined) return { diagnostic: `skipped the context file of ${repository.name}: no usable base commit` };
   let found: BaseRuleFile;
   try {
-    found = await readVerifiedBaseRuleFile(directory, commit, REPOSITORY_CONTEXT_FILE_CANDIDATES, MAX_REPOSITORY_CONTEXT_FILE_BYTES);
+    found = await readVerifiedBaseRuleFile(directory, commit, REPOSITORY_CONTEXT_FILE_CANDIDATES, MAX_REPOSITORY_CONTEXT_FILE_BYTES, { workspaceRoot });
   } catch {
     throw agentXError("CONFIG_INVALID", WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE);
   }
