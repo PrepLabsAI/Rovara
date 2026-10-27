@@ -10,6 +10,7 @@ import { readBrowserState } from "../../packages/verifier/src/executor/browser-s
 import { classifyString, type ClassifiedValue } from "../../packages/verifier/src/executor/credential-classifier.js";
 import { createHostModelStack } from "../../packages/verifier/src/executor/host-model-stack.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
+import { createSessionSecretRegistry } from "../../packages/verifier/src/executor/session-secret-registry.js";
 import { headerSecrets, urlSecrets } from "../../packages/verifier/src/executor/request-secrets.js";
 import { createE2ESessionSyncSource } from "../../packages/verifier/src/executor/session-sync.js";
 import { classifyStorageEntry } from "../../packages/verifier/src/executor/storage-entry-classifier.js";
@@ -108,17 +109,18 @@ describe("F-2: the caps do not stop the mask", () => {
     expect(classifyStorageEntry({ name: "session", value: "word ".repeat(20_000) }).some((item) => item.tier === "overflow")).toBe(true);
     expect(classifyStorageEntry({ name: "blob", value: "plain words ".repeat(8_000) }).some((item) => item.tier === "overflow")).toBe(false);
   });
-  it("one combined matcher: 20,000 values that share a start (JWT-like) and a 200 KB text full of that start are masked in well under two seconds", () => {
-    const redactor = createCredentialRedactor([]);
+  it("one combined matcher: 20,000 values that share a start (JWT-like) and a 200 KB text full of that start are masked in well under two seconds, the view failing closed past the bucket bound", () => {
+    const registry = createSessionSecretRegistry({ redactor: createCredentialRedactor([]) });
     const head = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.";
-    for (let index = 0; index < 20_000; index += 1) redactor.addMaskOnly(`${head}${String(index).padStart(8, "0")}.sig${String(index * 7).padStart(8, "0")}`);
+    const started = Date.now();
+    for (let index = 0; index < 20_000; index += 1) registry.register(`${head}${String(index).padStart(8, "0")}.sig${String(index * 7).padStart(8, "0")}`, { maskOnly: true });
     const target = `${head}${String(12_345).padStart(8, "0")}.sig${String(12_345 * 7).padStart(8, "0")}`;
     const text = `${`${head}unregistered `.repeat(1_500)}${target} end`;
-    const started = Date.now();
-    const out = redactor.maskEvidenceOnly(text);
+    const out = registry.maskForModel(text);
     expect(Date.now() - started).toBeLessThan(2_000);
-    expect(out.endsWith("<session> end")).toBe(true);
+    expect(out.endsWith(" end")).toBe(true);
     expect(out).not.toContain(target);
+    expect(registry.maskOverflowed()).toBe(true);
   }, 60_000);
 });
 

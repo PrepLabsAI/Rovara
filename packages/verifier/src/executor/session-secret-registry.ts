@@ -74,6 +74,11 @@ const TOKEN_RUN = /[A-Za-z0-9+/_=-]{16,}/g;
 function opaqueRun(run: string): boolean {
   return !isSlugOrPath(run) && !isPathLike(run);
 }
+/** A text the mask could not finish reading is masked as above, and also every run of 8 to 15 that has a letter and a digit (a weak URL `code` or `state` value). */
+const SHORT_TOKEN_RUN = /[A-Za-z0-9+/_=-]{8,}/g;
+function shortOpaqueRun(run: string): boolean {
+  return run.length >= 16 ? opaqueRun(run) : /[0-9]/.test(run) && /[A-Za-z]/.test(run);
+}
 
 export function createSessionSecretRegistry(input: { redactor: CredentialRedactor; onRegister?: (value: string, options?: SessionSecretRegisterOptions) => void }): SessionSecretRegistry {
   const sessionSecrets: string[] = [];
@@ -94,9 +99,11 @@ export function createSessionSecretRegistry(input: { redactor: CredentialRedacto
     modelScan: (bytes) => input.redactor.contains(bytes, "model"),
     evidenceScan: (bytes) => input.redactor.contains(bytes, "all"),
     maskForModel: (text) => {
-      const masked = input.redactor.maskEvidenceOnly(text);
-      return overflowed ? masked.replace(TOKEN_RUN, (run) => (opaqueRun(run) ? SESSION_REDACTION_LABEL : run)) : masked;
+      const { text: masked, exceeded } = input.redactor.maskEvidenceOnlyBounded(text);
+      // Fail closed: the view as a whole (a value could not be registered), or this text alone (the mask hit its work bound and left the rest of the text unread).
+      if (overflowed && !input.redactor.maskDegraded()) return masked.replace(TOKEN_RUN, (run) => (opaqueRun(run) ? SESSION_REDACTION_LABEL : run));
+      return exceeded || input.redactor.maskDegraded() ? masked.replace(SHORT_TOKEN_RUN, (run) => (shortOpaqueRun(run) ? SESSION_REDACTION_LABEL : run)) : masked;
     },
-    maskOverflowed: () => overflowed,
+    maskOverflowed: () => overflowed || input.redactor.maskDegraded(),
   };
 }

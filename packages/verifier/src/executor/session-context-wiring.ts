@@ -1,10 +1,10 @@
 import type { BrowserContext } from "playwright-core";
 import { readBrowserState } from "./browser-state-reader.js";
 import { tellBrowserState } from "./browser-state-secrets.js";
-import { isSessionCookieSecret, parseSetCookie } from "./cookie-secret.js";
+import { parseSetCookie } from "./cookie-secret.js";
 import { watchBrowserRequests } from "./request-capture.js";
 import type { E2ESessionSyncSource } from "./session-sync.js";
-import { visitorCookieSecret } from "./visitor-cookie.js";
+import { cookieTier } from "./visitor-cookie.js";
 
 /**
  * What the executor does with one case's browser context to learn its login secrets (MIDSTEP-2, MASKMAYBE round 2 R-6). One place for the host and the tests: the context is attached to the session
@@ -28,7 +28,10 @@ export function wireSessionContext(input: {
       for (const header of headers) {
         if (header.name.toLowerCase() !== "set-cookie") continue;
         const issued = parseSetCookie(header.value);
-        if (issued !== null && (anonymous ? visitorCookieSecret(issued) : isSessionCookieSecret(issued))) input.registerSecret(issued.value);
+        if (issued === null) continue;
+        const tier = cookieTier(issued, anonymous);
+        if (tier === "strong") input.registerSecret(issued.value);
+        else if (tier !== null) sessionSync.learn([{ value: issued.value, tier }]);
       }
     }, () => undefined));
   });
@@ -42,4 +45,16 @@ export async function readSessionContextAtClose(input: { browserContext: Browser
   try {
     tellBrowserState(await readBrowserState(input.browserContext), (item) => input.sessionSync.learn([item]), undefined, { visitor: input.anonymous });
   } catch { /* the context is gone */ }
+}
+
+/**
+ * The host's two calls, with the choice of bar held here so that it can be tested without the host: whether a case's session is a signed-out visitor's (`isAnonymous`) decides the bar, never whether
+ * the context is wired. Every case context is wired and read at close.
+ */
+export function wireCaseContext(input: { browserContext: BrowserContext; sessionRef: string; isAnonymous: (sessionRef: string) => boolean; sessionSync: E2ESessionSyncSource; registerSecret: (value: string) => void }): void {
+  wireSessionContext({ browserContext: input.browserContext, sessionRef: input.sessionRef, anonymous: input.isAnonymous(input.sessionRef), sessionSync: input.sessionSync, registerSecret: input.registerSecret });
+}
+export async function readCaseContextAtClose(input: { browserContext: BrowserContext | undefined; sessionRef: string; isAnonymous: (sessionRef: string) => boolean; sessionSync: E2ESessionSyncSource }): Promise<void> {
+  if (input.browserContext === undefined) return;
+  await readSessionContextAtClose({ browserContext: input.browserContext, anonymous: input.isAnonymous(input.sessionRef), sessionSync: input.sessionSync });
 }

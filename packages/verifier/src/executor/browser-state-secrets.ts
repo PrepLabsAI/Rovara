@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
-import { isSessionCookieSecret } from "./cookie-secret.js";
 import { type ClassifiedValue } from "./credential-classifier.js";
-import { visitorCookieSecret } from "./visitor-cookie.js";
+import { cookieTier } from "./visitor-cookie.js";
 import { urlSecrets } from "./request-secrets.js";
 import { classifyStorageEntry, classifyStructure } from "./storage-entry-classifier.js";
 
@@ -106,7 +105,7 @@ export function tellBrowserState(state: BrowserSecretState, learn: (item: Classi
   };
   // Only what looks like a secret: a consent flag is not one (the cookie rule of the sign-in and the sync).
   // A visitor's cookie is judged by its name and value (`visitorCookieSecret`): an id or a cart is not a secret, a session is.
-  for (const cookie of state.cookies) if (visitor ? visitorCookieSecret(cookie) : isSessionCookieSecret(cookie)) learn({ value: cookie.value, tier: "strong" });
+  for (const cookie of state.cookies) { const tier = cookieTier(cookie, visitor); if (tier !== null) learn({ value: cookie.value, tier }); }
   for (const origin of state.origins) {
     for (const entry of origin.localStorage) if (fresh(`${mark}l`, entry.name, entry.value)) for (const item of classifyStorageEntry(entry, { visitor })) learn(item);
     for (const entry of origin.sessionStorage ?? []) if (fresh(`${mark}s`, entry.name, entry.value)) for (const item of classifyStorageEntry(entry, { visitor })) learn(item);

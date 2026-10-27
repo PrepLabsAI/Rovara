@@ -22,7 +22,7 @@ import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, 
 import { createCredentialRedactor } from "./redact.js";
 import { sessionSecretLine } from "./session-secrets-file.js";
 import { createSessionSecretRegistry } from "./session-secret-registry.js";
-import { readSessionContextAtClose, wireSessionContext } from "./session-context-wiring.js";
+import { readCaseContextAtClose, wireCaseContext } from "./session-context-wiring.js";
 import { createE2ESessionSyncSource } from "./session-sync.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
 import { createPlaywrightFormLoginDriver } from "./form-login.js";
@@ -239,7 +239,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       sessionSync.detach(sessionRef);
       // A signed-out visitor's context is read too (MASKMAYBE F-3): the application can issue a token to a visitor mid-step (a sign-up, a magic link). It is read with the visitor bar, so a visitor id
       // or a cart registers nothing.
-      if (owned) await readSessionContextAtClose({ browserContext: owned, anonymous: store.isAnonymous(sessionRef), sessionSync });
+      await readCaseContextAtClose({ browserContext: owned, sessionRef, isAnonymous: store.isAnonymous, sessionSync });
       const result = await store.close(sessionRef, signal);
       if (result.confirmed && activeSessionRef === sessionRef) { activeSessionRef = null; activeCaseId = null; }
       return result;
@@ -294,7 +294,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         await guard(browserContext);
         ownedContexts.set(sessionRef, browserContext);
         // Signed-out visitors included (F-3): attached, watched (requests, Set-Cookie answers) and read like any other context, with the visitor bar (a visitor id or a cart is not a secret; a session is).
-        wireSessionContext({ browserContext, sessionRef, anonymous: store.isAnonymous(sessionRef), sessionSync, registerSecret });
+        wireCaseContext({ browserContext, sessionRef, isAnonymous: store.isAnonymous, sessionSync, registerSecret });
         const page = browserContext.pages()[0];
         if (!page) throw new Error("the owned browser context has no page to identify");
         const session = await browserContext.newCDPSession(page);

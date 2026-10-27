@@ -14,7 +14,7 @@ import { headerSecrets, urlSecrets } from "../../packages/verifier/src/executor/
 import { readSessionContextAtClose, wireSessionContext } from "../../packages/verifier/src/executor/session-context-wiring.js";
 import type { E2ESessionSyncSource } from "../../packages/verifier/src/executor/session-sync.js";
 import { classifyStorageEntry } from "../../packages/verifier/src/executor/storage-entry-classifier.js";
-import { visitorCookieSecret } from "../../packages/verifier/src/executor/visitor-cookie.js";
+import { cookieTier, visitorCookieSecret } from "../../packages/verifier/src/executor/visitor-cookie.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
 import { RUN_ID, TOOLS } from "../support/e2e-model-fixtures.js";
 import { MIDSTEP2_POSITION as POSITION, createMidstep2Harness } from "../support/e2e-midstep2-harness.js";
@@ -125,15 +125,6 @@ describe("R-5: the fail-closed mask and the matcher", () => {
     for (const value of values.slice(0, 3)) expect(() => redactor.addMaskOnly(`${value}x`)).not.toThrow();
     expect(redactor.maskEvidenceOnly(`a ${values[7]!} b`)).toBe("a <session> b");
   });
-  it("20,000 values of 10 characters that share their first 6, and a 200 KB text made of that start, are registered and masked in a few seconds (the unsplit tree took 17 s)", () => {
-    const redactor = createCredentialRedactor([]);
-    const started = Date.now();
-    for (let index = 0; index < 20_000; index += 1) redactor.addMaskOnly(`Zq8LmW${String(index).padStart(4, "0")}`);
-    const text = `${"Zq8LmWxxxx ".repeat(40_000)}Zq8LmW${String(12_345).padStart(4, "0")} end`;
-    const out = redactor.maskEvidenceOnly(text);
-    expect(Date.now() - started).toBeLessThan(3_000);
-    expect(out.endsWith("<session> end")).toBe(true);
-  }, 60_000);
 });
 
 describe("R-3: a signed-out visitor's session cookie is registered by its name and value; its id and cart are not", () => {
@@ -144,10 +135,14 @@ describe("R-3: a signed-out visitor's session cookie is registered by its name a
   });
   it.each([
     ["sb-abcdefgh-auth-token", SUPABASE, true], ["sb-abcdefgh-auth-token", "plainvalueplainvalue", true], ["sid", "a1b2c3d4e5f6a7b8", true], ["session", "Qx7Lm2Vb9Tz4Wk8P", true], ["connect.sid", "s%3AQx7Lm2Vb9Tz4Wk8P.abc", true],
-    ["appstate", "Qx7Lm2Vb9Tz4Wk8PzN3", true], ["visitor", "visitor-3f2504e0-4f89-11d3-9a0c-0305e82c3301", false], ["visitor_id", "Qx7Lm2Vb9Tz4Wk8PzN3", false], ["cart", "3-items-blue-shirt-red-hat", false],
+    ["visitor", "visitor-3f2504e0-4f89-11d3-9a0c-0305e82c3301", false], ["visitor_id", "Qx7Lm2Vb9Tz4Wk8PzN3", false], ["cart", "3-items-blue-shirt-red-hat", false],
     ["anon_id", "Qx7Lm2Vb9Tz4Wk8PzN3", false], ["_ga", "GA1.2.123456789.1730000000", false], ["theme", "dark", false], ["lang", "en-US", false], ["foo", "short", false], ["token", "Ab3dEf9hJk", true], ["secret", "Ab3dEf9hJk", true], ["auth", "Ab3dEf9hJk", false], ["foo", "Ab3dEf9hJk12", false],
   ])("cookie %s=%s: %s", (name, value, secret) => {
     expect(visitorCookieSecret({ name, value, httpOnly: false })).toBe(secret);
+  });
+  it("an opaque value under an unknown name is weak (masked, never refused); under a session or login name it is strong", () => {
+    expect(cookieTier({ name: "appstate", value: "Qx7Lm2Vb9Tz4Wk8PzN3", httpOnly: false }, true)).toBe("weak");
+    for (const name of ["PHPSESSID", "JSESSIONID", ".ASPXAUTH", "SESS1a2b3c4d5e", "login_state"]) expect(cookieTier({ name, value: "Qx7Lm2Vb9Tz4Wk8PzN3", httpOnly: false }, true), name).toBe("strong");
   });
   it("an HttpOnly cookie and a JWT count under any name; with no name the old rule stands", () => {
     expect(visitorCookieSecret({ name: "foo", value: "Qx7Lm2Vb9Tz4", httpOnly: true })).toBe(true);

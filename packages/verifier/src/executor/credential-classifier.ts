@@ -33,9 +33,10 @@ const MIN_WEAK_LENGTH = 16;
 /** Under a key that names a credential, a value counts from this length (a password or a token can be short); under a looser credential word it counts from MIN_WEAK_LENGTH. */
 const MIN_STRONG_KEYED_LENGTH = 8;
 
-const JWT = /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*$/;
+// A JWS or JWE header is base64url of `{"`, which always starts `eyJ`: a dotted word (`navigation.breadcrumbs.dashboard`, `dashboard.mycompany.com`) is not a token.
+const JWT = /^eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*$/;
 /** A JWE (five dot parts) or a PASETO (`v2.local.<payload>`): dotted tokens that are not a JWT but are as secret. */
-const JWE = /^[A-Za-z0-9_-]{8,}(\.[A-Za-z0-9_-]*){4}$/;
+const JWE = /^eyJ[A-Za-z0-9_-]{5,}(\.[A-Za-z0-9_-]*){4}$/;
 const PASETO = /^v[1-4]\.(local|public)\.[A-Za-z0-9_-]{16,}/;
 const LONG_RUN = /^[A-Za-z0-9+/_-]{32,}={0,2}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -160,8 +161,8 @@ function hasOpaquePart(value: string): string | null {
   return null;
 }
 
-/** A Supabase SSR session cookie: `base64-` and the base64url of a JSON session. */
-const BASE64_PREFIXED = /^base64-[A-Za-z0-9_-]{16,}={0,2}$/;
+/** A Supabase SSR session cookie: `base64-` and the base64url of a JSON object (`eyJ`). A hyphenated phrase such as `base64-encoded-image-data` is not one. */
+const BASE64_PREFIXED = /^base64-eyJ[A-Za-z0-9_-]{12,}={0,2}$/;
 
 /** A JWT, a JWE, a PASETO or a `base64-` prefixed session. */
 export function isTokenShape(value: string): boolean {

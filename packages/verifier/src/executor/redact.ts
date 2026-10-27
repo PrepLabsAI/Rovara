@@ -42,7 +42,14 @@ const MASK_PREFIX = 6;
  */
 const MASK_SPLIT = 16;
 const MASK_CHUNK = 4;
-interface MaskNode { at: number; list: Rule[]; kids?: Map<string, MaskNode> }
+interface MaskNode { at: number; list: Rule[]; kids?: Map<string, MaskNode>; count?: number }
+/**
+ * Hard bounds of the mask (MASKMAYBE last scoped round). SIZE: a bucket (the forms that share their first 6 characters) holds at most MASK_BUCKET_CAP forms; past that a value is not indexed and the
+ * model's view fails closed. TIME: one text costs at most MASK_BUDGET_BASE plus MASK_BUDGET_PER_CHAR per character of character comparisons; past that the scan stops and the view fails closed for that text.
+ */
+export const MASK_BUCKET_CAP = 4_096;
+export const MASK_BUDGET_BASE = 1_000_000;
+export const MASK_BUDGET_PER_CHAR = 8;
 function maskInsert(root: MaskNode, rule: Rule): void {
   // The work list holds the nodes a split still has to place; a plain insert is one pass down the tree.
   const pending: Array<[MaskNode, Rule]> = [[root, rule]];
@@ -64,11 +71,26 @@ function maskInsert(root: MaskNode, rule: Rule): void {
     }
   }
 }
-/** The longest registered form that starts at `start` in `value` and is maskable. */
-function maskFind(root: MaskNode, value: string, start: number): Rule | undefined {
+/** Whether `form` is at `start` in `value`, charging the comparisons to `budget` (a mismatch costs what it read; a match its length). */
+function formAt(value: string, form: string, start: number, budget: { left: number }): boolean {
+  const length = form.length;
+  if (start + length > value.length) { budget.left -= 1; return false; }
+  for (let index = 0; index < length; index += 1) {
+    if (value.charCodeAt(start + index) !== form.charCodeAt(index)) { budget.left -= index + 1; return false; }
+  }
+  budget.left -= length;
+  return true;
+}
+/** The longest registered form that starts at `start` in `value` and is maskable; stops as soon as the budget is spent. */
+function maskFind(root: MaskNode, value: string, start: number, budget: { left: number }): Rule | undefined {
   let best: Rule | undefined;
-  for (let node: MaskNode | undefined = root; node !== undefined; node = node.kids?.get(value.slice(start + node.at, start + node.at + MASK_CHUNK))) {
-    for (const rule of node.list) if (rule.mask && !rule.model && (best === undefined || rule.form.length > best.form.length) && value.startsWith(rule.form, start)) best = rule;
+  for (let node: MaskNode | undefined = root; node !== undefined && budget.left > 0; node = node.kids?.get(value.slice(start + node.at, start + node.at + MASK_CHUNK))) {
+    // Walking one level of a deep tree (values that share a long start) costs, like a comparison.
+    budget.left -= MASK_CHUNK;
+    for (const rule of node.list) {
+      if (budget.left <= 0) break;
+      if (rule.mask && !rule.model && (best === undefined || rule.form.length > best.form.length) && formAt(value, rule.form, start, budget)) best = rule;
+    }
   }
   return best;
 }
@@ -87,6 +109,10 @@ export type CredentialRedactor = Readonly<{
    * refused by `contains(..., "model")`. This is what the model is shown instead of a weak value (MIDSTEP-2 MASKMAYBE).
    */
   maskEvidenceOnly(value: string): string;
+  /** The same, and whether the work bound was reached (the text is then only partly masked and the caller must fail the view closed for it). */
+  maskEvidenceOnlyBounded(value: string): { text: string; exceeded: boolean };
+  /** Whether a value could not be indexed for the mask because its bucket is full (the view must fail closed from now on). */
+  maskDegraded(): boolean;
   /**
    * Registers a secret the run created (the session cookie) so `text` redacts it and `contains` finds it. It never throws: a short or odd value is still redacted. `evidenceOnly` values are
    * scrubbed and refused in evidence but not in a prompt; they are also masked for the model unless `scrubOnly` (an ordinary value that the model must be able to read).
@@ -120,37 +146,48 @@ export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]
   const maskOnly = new Map<string, Rule>();
   const maskOnlyValues = new Set<string>();
   const maskOnlyLimit = limits.maskOnlyLimit ?? MASK_ONLY_LIMIT;
-  const indexMask = (rule: Rule): void => {
+  let degraded = false;
+  /** False when the form's bucket is full: nothing is indexed and the mask is degraded. */
+  const indexMask = (rule: Rule): boolean => {
     const prefix = rule.form.slice(0, MASK_PREFIX);
     let node = maskIndex.get(prefix);
-    if (node === undefined) { node = { at: MASK_PREFIX, list: [] }; maskIndex.set(prefix, node); }
+    if (node === undefined) { node = { at: MASK_PREFIX, list: [], count: 0 }; maskIndex.set(prefix, node); }
+    if ((node.count ?? 0) >= MASK_BUCKET_CAP) { degraded = true; return false; }
+    node.count = (node.count ?? 0) + 1;
     maskInsert(node, rule);
     maskFirst.add(rule.form.charCodeAt(0));
+    return true;
   };
+  const maskBounded = (value: string): { text: string; exceeded: boolean } => {
+    if (maskIndex.size === 0) return { text: value, exceeded: false };
+    const budget = { left: MASK_BUDGET_BASE + MASK_BUDGET_PER_CHAR * value.length };
+    const parts: string[] = [];
+    let last = 0;
+    let at = 0;
+    let exceeded = false;
+    const end = value.length - MASK_PREFIX;
+    while (at <= end) {
+      if (maskFirst.has(value.charCodeAt(at))) {
+        const bucket = maskIndex.get(value.slice(at, at + MASK_PREFIX));
+        const hit = bucket === undefined ? undefined : maskFind(bucket, value, at, budget);
+        if (budget.left <= 0) { exceeded = true; break; }
+        if (hit !== undefined) { parts.push(value.slice(last, at), hit.label); at += hit.form.length; last = at; continue; }
+      }
+      at += 1;
+    }
+    if (last === 0) return { text: value, exceeded };
+    parts.push(value.slice(last));
+    return { text: parts.join(""), exceeded };
+    };
   return Object.freeze({
     text(value: string): string {
       let result = value;
       for (const rule of ordered()) result = result.split(rule.form).join(rule.label);
       return result;
     },
-    maskEvidenceOnly(value: string): string {
-      if (maskIndex.size === 0) return value;
-      const parts: string[] = [];
-      let last = 0;
-      let at = 0;
-      const end = value.length - MASK_PREFIX;
-      while (at <= end) {
-        if (maskFirst.has(value.charCodeAt(at))) {
-          const bucket = maskIndex.get(value.slice(at, at + MASK_PREFIX));
-          const hit = bucket === undefined ? undefined : maskFind(bucket, value, at);
-          if (hit !== undefined) { parts.push(value.slice(last, at), hit.label); at += hit.form.length; last = at; continue; }
-        }
-        at += 1;
-      }
-      if (last === 0) return value;
-      parts.push(value.slice(last));
-      return parts.join("");
-    },
+    maskEvidenceOnly: (value) => maskBounded(value).text,
+    maskDegraded: () => degraded,
+    maskEvidenceOnlyBounded: maskBounded,
     contains(bytes: Uint8Array, scope: "accounts" | "all" | "model" = "all"): boolean {
       const haystack = Buffer.from(bytes);
       const active = ordered().filter((rule) => rule.bytes && (scope === "all" ? true : scope === "model" ? rule.model : !rule.session));
@@ -199,11 +236,11 @@ export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]
       }
       for (const form of spellings(value)) {
         const existing = byForm.get(form);
-        if (existing !== undefined) { if (!existing.mask) { existing.mask = true; indexMask(existing); } continue; }
+        if (existing !== undefined) { if (!existing.mask) { existing.mask = true; if (!indexMask(existing)) return false; } continue; }
         if (maskOnly.has(form)) continue;
         const rule: Rule = { form, label: SESSION_REDACTION_LABEL, bytes: true, session: true, model: false, mask: true };
+        if (!indexMask(rule)) return false;
         maskOnly.set(form, rule);
-        indexMask(rule);
       }
       return true;
     },

@@ -5,10 +5,11 @@ import type { E2EApplicationOwnedSubject } from "../application-result-adapter.j
 import type { E2EApiRuntimeResponse } from "../api-runtime.js";
 import type { ExecutorSessionFacts } from "./case-ledger.js";
 import { registerOptionsFor, type SessionSecretRegisterOptions } from "./session-secret-registry.js";
+import { cookieTier } from "./visitor-cookie.js";
 import { E2E_SESSION_SYNC_MAX_WEAK_VALUES } from "./session-sync.js";
 import { tellBrowserState } from "./browser-state-secrets.js";
 import type { ClassifiedValue } from "./credential-classifier.js";
-import { FormLoginError, isSessionCookieSecret, parseSetCookie, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
+import { FormLoginError, parseSetCookie, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
 import { resolveE2EExecutorSuite } from "./suite.js";
 
 const MAX_BODY_BYTES = 1_048_576;
@@ -286,7 +287,7 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
       urlFor(raw.path);
       const answered = await session.form.requests.request({ method: raw.method, path: raw.path, ...(raw.body === undefined ? {} : { body: raw.body }), signal: bounded(signal) });
       // A value the application issued to replace a cookie is a session secret from then on, like the one it replaced.
-      for (const line of answered.setCookies) { const issued = parseSetCookie(line); if (issued !== null && isSessionCookieSecret(issued)) registerOnce(issued.value); }
+      for (const line of answered.setCookies) { const issued = parseSetCookie(line); if (issued !== null) { const tier = cookieTier(issued, false); if (tier === "strong") registerOnce(issued.value); } }
       return { requestId: raw.requestId ?? `req-${randomUUID()}`, responseId: `res-${randomUUID()}`, method: raw.method, path: raw.path, status: answered.status,
         body: answered.body, contentType: answered.contentType, origin, observedAt: new Date().toISOString() };
     }

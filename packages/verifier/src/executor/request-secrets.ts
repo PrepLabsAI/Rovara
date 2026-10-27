@@ -1,5 +1,4 @@
-import { isSessionCookieSecret } from "./cookie-secret.js";
-import { visitorCookieSecret } from "./visitor-cookie.js";
+import { cookieTier } from "./visitor-cookie.js";
 import { classifyString, credentialKey, isDigitlessRandomToken, isLongOpaqueRun, isOpaqueToken, isRandomLikeRun, isTokenShape, MIN_CREDENTIAL_LENGTH, tierWins, type ClassifiedValue } from "./credential-classifier.js";
 
 /**
@@ -24,6 +23,23 @@ function tokenLike(value: string): boolean {
   if (/^(0x)?[0-9a-fA-F]+$/.test(value) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return false;
   return (isOpaqueToken(value) && value.length >= 16) || isLongOpaqueRun(value) || isDigitlessRandomToken(value);
 }
+/**
+ * Token shapes inside a value too large to classify (a whole app state kept in the URL, MASKMAYBE last scoped round): one linear pass over its first 1 MiB, cutting at every character a token cannot
+ * contain, and keeping the pieces that are JWTs, JWEs, PASETOs or `base64-eyJ` sessions. At most 100, none longer than 64 KiB.
+ */
+const OVERSIZE_SCAN_CHARS = 1_048_576;
+const OVERSIZE_MAX_RUN = 65_536;
+const OVERSIZE_MAX_TOKENS = 100;
+export function oversizedTokens(value: string): string[] {
+  const out = new Set<string>();
+  const text = value.length > OVERSIZE_SCAN_CHARS ? value.slice(0, OVERSIZE_SCAN_CHARS) : value;
+  for (const match of text.matchAll(/[A-Za-z0-9_.-]{20,}/g)) {
+    if (match[0].length <= OVERSIZE_MAX_RUN && isTokenShape(match[0])) out.add(match[0]);
+    if (out.size >= OVERSIZE_MAX_TOKENS) break;
+  }
+  return [...out];
+}
+
 /** The value of a one-time parameter must look like a token: a state word (`required`, `accepted`, `sent-already`) is not one. A URL (a magic link) counts when a piece of it is opaque. */
 function oneTimeValue(value: string): boolean {
   if (isTokenShape(value) || tokenLike(value) || isRandomLikeRun(value)) return true;
@@ -68,6 +84,7 @@ export function urlSecrets(rawUrl: string): ClassifiedValue[] {
     if (value.length > MAX_VALUE_CHARS) {
       // An oversized value (a diagram or a search kept in the URL) is skipped. Only one under a credential name fails the view closed: that is a credential too large to register.
       if (credentialKey(name).credential || ONE_TIME_PARAMETERS.has(name.toLowerCase().replace(NORMALISE, ""))) found.set("", { value: "", tier: "overflow" });
+      else for (const token of oversizedTokens(value)) found.set(token, { value: token, tier: "strong" });
       continue;
     }
     // Strong parameters are the ones the key reading of `credential-classifier.ts` calls credentials (`token`, `access_token`, `id_token`, `refresh_token`, `session_id`, `api_key`, `password`, ...), the
@@ -111,13 +128,13 @@ export function headerSecrets(headers: ReadonlyArray<{ name: string; value: stri
     if (value.length > MAX_VALUE_CHARS) {
       // An oversized header (a long Referer, a big cookie jar of ordinary cookies) is skipped. Only one that carries a credential fails the view closed.
       if (name === "authorization" || name === "proxy-authorization" || credentialKey(name).credential) add({ value: "", tier: "overflow" });
+      else for (const token of oversizedTokens(value)) add({ value: token, tier: "strong" });
       continue;
     }
     if (value.length < MIN_CREDENTIAL_LENGTH) continue;
     if (name === "cookie") {
       // A signed-out visitor's cookies are judged by name and value (`visitorCookieSecret`): its id and cart are not secrets, a session is.
-      if (options.visitor === true) { for (const [cookieName, cookieValue] of cookiePairs(value)) if (visitorCookieSecret({ name: cookieName, value: cookieValue, httpOnly: false })) add({ value: cookieValue, tier: "strong" }); continue; }
-      for (const [, cookieValue] of cookiePairs(value)) if (isSessionCookieSecret({ value: cookieValue, httpOnly: false })) add({ value: cookieValue, tier: "strong" });
+      for (const [cookieName, cookieValue] of cookiePairs(value)) { const tier = cookieTier({ name: cookieName, value: cookieValue, httpOnly: false }, options.visitor === true); if (tier !== null) add({ value: cookieValue, tier }); }
       continue;
     }
     if (name === "authorization" || name === "proxy-authorization") {
