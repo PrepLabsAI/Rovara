@@ -114,8 +114,8 @@ describe("R-5: the fail-closed mask and the matcher", () => {
     const { e, shown } = await stackFor([]);
     e.source.learn([{ value: "", tier: "overflow" }]);
     const long = "Qk".repeat(2_600);
-    const out = await shown(`a kjhsdfqwpoiuzxcmvbnq b ABCDEFGHIJKLMNOPQRSTUVWXYZ c ${long} d /projects/alpha/settings e my-quarterly-report-final f Quarterly Report`);
-    expect(out).toBe("a <session> b <session> c <session> d /projects/alpha/settings e my-quarterly-report-final f Quarterly Report");
+    const out = await shown(`a kjhsdfqwpoiuzxcmvbnq b ABCDEFGHIJKLMNOPQRSTUVWXYZ c ${long} d /projects/alpha/settings e my-quarterly-report-final f Quarterly Report g /Api/userProfiles/orderItems`);
+    expect(out).toBe("a <session> b <session> c <session> d /projects/alpha/settings e my-quarterly-report-final f Quarterly Report g /Api/userProfiles/orderItems");
   });
   it("no recursion: 40 values that share 60,000 characters register and are masked without a stack overflow, and are never thrown out of addSessionSecret", () => {
     const redactor = createCredentialRedactor([]);
@@ -129,9 +129,9 @@ describe("R-5: the fail-closed mask and the matcher", () => {
     const redactor = createCredentialRedactor([]);
     const started = Date.now();
     for (let index = 0; index < 20_000; index += 1) redactor.addMaskOnly(`Zq8LmW${String(index).padStart(4, "0")}`);
-    const text = `${"Zq8LmWxxxx ".repeat(18_000)}Zq8LmW${String(12_345).padStart(4, "0")} end`;
+    const text = `${"Zq8LmWxxxx ".repeat(40_000)}Zq8LmW${String(12_345).padStart(4, "0")} end`;
     const out = redactor.maskEvidenceOnly(text);
-    expect(Date.now() - started).toBeLessThan(6_000);
+    expect(Date.now() - started).toBeLessThan(3_000);
     expect(out.endsWith("<session> end")).toBe(true);
   }, 60_000);
 });
@@ -145,7 +145,7 @@ describe("R-3: a signed-out visitor's session cookie is registered by its name a
   it.each([
     ["sb-abcdefgh-auth-token", SUPABASE, true], ["sb-abcdefgh-auth-token", "plainvalueplainvalue", true], ["sid", "a1b2c3d4e5f6a7b8", true], ["session", "Qx7Lm2Vb9Tz4Wk8P", true], ["connect.sid", "s%3AQx7Lm2Vb9Tz4Wk8P.abc", true],
     ["appstate", "Qx7Lm2Vb9Tz4Wk8PzN3", true], ["visitor", "visitor-3f2504e0-4f89-11d3-9a0c-0305e82c3301", false], ["visitor_id", "Qx7Lm2Vb9Tz4Wk8PzN3", false], ["cart", "3-items-blue-shirt-red-hat", false],
-    ["anon_id", "Qx7Lm2Vb9Tz4Wk8PzN3", false], ["_ga", "GA1.2.123456789.1730000000", false], ["theme", "dark", false], ["lang", "en-US", false], ["foo", "short", false],
+    ["anon_id", "Qx7Lm2Vb9Tz4Wk8PzN3", false], ["_ga", "GA1.2.123456789.1730000000", false], ["theme", "dark", false], ["lang", "en-US", false], ["foo", "short", false], ["token", "Ab3dEf9hJk", true], ["secret", "Ab3dEf9hJk", true], ["auth", "Ab3dEf9hJk", false], ["foo", "Ab3dEf9hJk12", false],
   ])("cookie %s=%s: %s", (name, value, secret) => {
     expect(visitorCookieSecret({ name, value, httpOnly: false })).toBe(secret);
   });
@@ -161,6 +161,7 @@ describe("R-3: a signed-out visitor's session cookie is registered by its name a
     expect(told).toEqual([{ value: SUPABASE, tier: "strong" }]);
     const header = [{ name: "cookie", value: `visitor=visitor-3f2504e0-4f89-11d3-9a0c-0305e82c3301; sb-abcdefgh-auth-token=${SUPABASE}` }];
     expect(headerSecrets(header, { visitor: true }).map((item) => item.value)).toEqual([SUPABASE]);
+    expect(headerSecrets([{ name: "cookie", value: "visitor=visitor-1234567890123; session=Qx7Lm2Vb9Tz4Wk8P" }], { visitor: true }).map((item) => item.value)).toEqual(["Qx7Lm2Vb9Tz4Wk8P"]);
   });
 });
 
@@ -176,6 +177,9 @@ describe("R-4: a one-time parameter needs a token-like value", () => {
   });
   it.each([["otc"], ["magic_code"], ["invite"], ["verify_code"], ["signin_code"], ["login_code"], ["login_link"], ["signin_link"], ["onetime_code"], ["email_code"], ["magic_token"], ["passwordless_token"]])("?%s= with a token-like value is strong", (name) => {
     expect(tierOf(urlSecrets(`https://app.test/auth?${name}=Qx7Lm2Vb9Tz4`), "Qx7Lm2Vb9Tz4")).toBe("strong");
+  });
+  it("a digit-less random value and a hex value are token-like too", () => {
+    for (const value of ["kQwErTyUiOpAsDfGhJkLzXcVbNmQwErT", "9f86d081884c7d659f86d081884c7d65"]) expect(tierOf(urlSecrets(`https://app.test/auth?oobCode=${value}`), value), value).toBe("strong");
   });
   it("a magic link URL counts when a piece of it is opaque", () => {
     const link = "https://app.test/magic/b9Gk2Lx7Qw4Zp1Vm6Rt3";

@@ -48,7 +48,7 @@ async function stackFor(storage: Array<{ name: string; value: string }>, redacto
 describe("F-1: ordinary values at the top level of storage are scrub-only, never masked for the model", () => {
   const ORDINARY: Array<[string, string]> = [["apiBase", "https://app.example.com"], ["lastProject", "Quarterly Report"], ["lastRoute", "/projects/alpha/settings"], ["returnUrl", "https://app.example.com/orders/12345"],
     ["userEmail", "maya.rodriguez@example.com"], ["selectedWorkspace", "acme-engineering-team"], ["draft:42", "Meeting notes for Monday standup"], ["lastSeen", "2026-10-27T09:15:00.000Z"],
-    ["workspaceId", "3f2504e0-4f89-11d3-9a0c-0305e82c3301"], ["tz", "America/Los_Angeles"], ["apiHost", "login.example.com"], ["searchQuery", "internationalization settings"], ["lastSlug", "my-quarterly-report-2024-final"], ["lastPath", "projects/alpha/settings2"]];
+    ["workspaceId", "3f2504e0-4f89-11d3-9a0c-0305e82c3301"], ["tz", "America/Los_Angeles"], ["apiHost", "login.example.com"], ["searchQuery", "internationalization settings"], ["lastSlug", "my-quarterly-report-2024-final"], ["lastPath", "projects/alpha/settings2"], ["lastPath2", "Pqe/Rta/Xwo/Zyl/Mnu/Cvb/Dfe/Ghi"], ["cdnHost", "cdn-static.xyz-sprl.zrkq.tech"], ["word", "internationalization"]];
   it.each(ORDINARY)("%s=%s is scrub at the top level and not registered as a JSON leaf", (name, value) => {
     expect(tierOf(classifyStorageEntry({ name, value }), value)).toBe("scrub");
     expect(tierOf(classifyStorageEntry({ name: "settings", value: JSON.stringify({ [name]: value }) }), value)).toBeNull();
