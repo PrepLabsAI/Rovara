@@ -88,10 +88,14 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
     ["build.dockerfile outside the repository folder (/mnt/workspace/Dockerfile)", { dockerFile: "Dockerfile", build: { dockerfile: "../../../Dockerfile" } }],
     ["build.context outside the repository folder (/mnt/workspace)", { dockerFile: "Dockerfile", context: "../../..", build: { context: ".." } }],
     ["build.context outside the repository folder (/mnt/workspace)", { dockerFile: "Dockerfile", context: "..", build: { dockerfile: "Dockerfile", context: "../../.." } }],
-    ["build.options --cache-from type=local", { build: { dockerfile: "Dockerfile", options: ["--cache-from", "type=local,src=/tmp/cache"] } }],
-    ["build.options --cache-from type=local", { build: { dockerfile: "Dockerfile", options: ["--cache-from=type=local,src=cache"] } }],
-    ["build.cacheFrom type=local", { build: { dockerfile: "Dockerfile", cacheFrom: "type=local,src=/tmp/cache" } }],
-    ["build.cacheFrom type=local", { build: { dockerfile: "Dockerfile", cacheFrom: ["example.test/app:cache", "type=local,src=/tmp/cache"] } }],
+    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from", "type=local,src=/tmp/cache"] } }],
+    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from=type=local,src=cache"] } }],
+    ["build.cacheFrom that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", cacheFrom: "type=local,src=/tmp/cache" } }],
+    ["build.cacheFrom that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", cacheFrom: ["example.test/app:cache", "type=local,src=/tmp/cache"] } }],
+    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ['--cache-from', '"type=local",src=/tmp/cache'] } }],
+    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from", "type=registry,ref=example.test/app:cache,ref=/x"] } }],
+    ["build.options --cache-from that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", options: ["--cache-from", "type=gha"] } }],
+    ["build.cacheFrom that is not an image or type=registry,ref=<image>", { build: { dockerfile: "Dockerfile", cacheFrom: '"type=local",src=/tmp/cache' } }],
     ["build.args BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", args: { BUILDKIT_SYNTAX: "example.test/frontend:1" } } }],
     ["build.args BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", args: { buildkit_syntax: "example.test/frontend:1" } } }],
     ["build.options --build-arg BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", options: ["--build-arg", "BUILDKIT_SYNTAX=example.test/frontend:1"] } }],
@@ -105,6 +109,50 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
     ["workspaceMount with a bind mount of /", { workspaceMount: "source=/,target=/workspaces/x,type=bind", workspaceFolder: "/workspaces/x" }],
   ])("refuses %s", (expected, config) => {
     expect(refusal(config)).toBe(expected);
+  });
+
+  const OWN = "/mnt/workspace/repo/sample/x";
+  const MOUNT_FORMS: Array<[string, string, unknown]> = [
+    // Each reads differently in Docker's parser than in a simple split, so the strict form refuses it.
+    ["a mount with a setting given twice (source)", `type=bind,source=${OWN},src=/etc,target=/t`, undefined],
+    ["a mount with a setting given twice (source)", `type=bind,src=${OWN},source=/etc,target=/t`, undefined],
+    ["a mount with a setting given twice (target)", `type=bind,source=${OWN},target=/t,dst=/u`, undefined],
+    ["a mount with a setting given twice (type)", `type=volume,type=bind,source=/etc,target=/t`, undefined],
+    ["a mount with a quote", '"type=bind","source=/etc","target=/t"', undefined],
+    ["a mount with a quote", `type=bind,source="${OWN}",target=/t`, undefined],
+    ["a mount with the setting bind-propagation", `type=bind,source=${OWN},target=/t,bind-propagation=shared`, undefined],
+  ];
+  it.each(MOUNT_FORMS)("refuses a mount string with %s (%s) in mounts, workspaceMount and runArgs", (expected, text) => {
+    expect(refusal({ mounts: [text] })).toBe(`mounts with ${expected}`);
+    expect(refusal({ workspaceMount: text })).toBe(`workspaceMount with ${expected}`);
+    expect(refusal({ runArgs: ["--mount", text] })).toBe(`runArgs ${expected}`);
+    expect(refusal({ runArgs: [`--mount=${text}`] })).toBe(`runArgs ${expected}`);
+  });
+
+  it("refuses an object mount with a comma or a quote in a field, or a setting it does not know", () => {
+    const bind = { type: "bind", source: OWN, target: "/t" };
+    expect(refusal({ mounts: [{ ...bind, target: "/t,src=/etc" }] })).toBe("mounts with a mount with a comma or a quote in a field");
+    expect(refusal({ mounts: [{ ...bind, source: `${OWN}",x` }] })).toBe("mounts with a mount with a comma or a quote in a field");
+    expect(refusal({ mounts: [{ ...bind, type: 'bind"' }] })).toBe("mounts with a mount with a comma or a quote in a field");
+    expect(refusal({ mounts: [{ ...bind, src: "/etc" }] })).toBe("mounts with a mount with the setting src");
+    expect(refusal({ mounts: [bind] })).toBeUndefined();
+  });
+
+  it("allows a bind mount only inside the repository folder, or a named volume", () => {
+    expect(refusal({ mounts: [`type=bind,source=${OWN},target=/t`, "type=volume,source=cache,target=/c", "type=tmpfs,target=/tmp/x", "type=bind,source=${localWorkspaceFolder},target=/w,readonly"] })).toBeUndefined();
+    expect(refusal({ mounts: ["type=bind,source=/mnt/workspace/repo/other,target=/o"] })).toBe("mounts with a bind mount of /mnt/workspace/repo/other");
+    expect(refusal({ runArgs: ["-v", "/mnt/workspace/repo/other:/o"] })).toBe("runArgs a bind mount of /mnt/workspace/repo/other");
+  });
+
+  it.each([
+    ["containerEnv", { containerEnv: { SECRET: "${localEnv:SECRET}" } }],
+    ["remoteEnv", { remoteEnv: { PATH: "${localEnv:PATH}:/x" } }],
+    ["a key", { containerEnv: { "${localEnv:KEY}": "x" } }],
+    ["a list", { postCreateCommand: ["echo", "${localEnv:TOKEN}"] }],
+    ["the env spelling", { containerEnv: { A: "${env:HOME}" } }],
+    ["a nested value", { customizations: { tool: { deep: [{ value: "x-${localEnv:A}-y" }] } } }],
+  ])("refuses ${localEnv} in %s, which would copy the worker's environment into the container", (_where, config) => {
+    expect(refusal(config)).toBe("a ${localEnv} reference (it would copy the worker's environment into the container)");
   });
 
   it("allows an ordinary dev container: an image or a Dockerfile, features, harmless runArgs, and mounts inside the workspace or named volumes", () => {
