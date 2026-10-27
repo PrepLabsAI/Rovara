@@ -1,11 +1,27 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { e2eAgentModelsFor } from "../../packages/contracts/src/e2e-agent-models.js";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import { E2EModelRouteDefinitionSchema, e2eModelRouteRevision } from "../../packages/contracts/src/e2e-model-channel.js";
 import {
-  deriveE2EAgentRoute, deriveE2EAgentRouteForModel, e2eAgentInstallationFromEnvironment, e2eAgentRouteDefinitionDigest, resolveE2EAgentRouteForAdmission, searchE2EAgentRoute,
+  E2E_AGENT_ROUTE_SEARCH_LIMIT, deriveE2EAgentRoute, deriveE2EAgentRouteForModel, e2eAgentInstallationFromEnvironment, e2eAgentRouteDefinitionDigest, resolveE2EAgentRouteForAdmission, searchE2EAgentRoute,
   type E2EAgentInstallation,
 } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { bedrockRoute } from "../support/e2e-model-fixtures.js";
+
+// The search's give-up is proved by counting: the harness can swap in a synthetic model list longer than the limit and counts every table lookup the search makes.
+const searchHarness = vi.hoisted(() => ({ syntheticModelIds: undefined as string[] | undefined, lookups: 0 }));
+vi.mock("@agentx/contracts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@agentx/contracts")>();
+  return {
+    ...actual,
+    e2eAgentModelsFor: (...args: Parameters<typeof actual.e2eAgentModelsFor>) =>
+      searchHarness.syntheticModelIds === undefined ? actual.e2eAgentModelsFor(...args) : searchHarness.syntheticModelIds.map((modelId) => ({ modelId })),
+    eligibleE2EAgentModel: (...args: Parameters<typeof actual.eligibleE2EAgentModel>) => {
+      searchHarness.lookups += 1;
+      return actual.eligibleE2EAgentModel(...args);
+    },
+  };
+});
 
 /** The secret ARN the pinned digests below were computed with at 38b55645 (a route's digest covers its secret ARN). */
 const SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/key-AbCdEf";
@@ -177,13 +193,25 @@ describe("the worker finds the route of the admission's revision among the eligi
     expect(resolved.ok && resolved.definition.modelId).toBe(HAIKU_45_US);
   });
 
-  it("searches every eligible model of the provider in both shapes in well under 100 ms, and gives up after 1,000 candidates", () => {
+  it("searches every eligible model of the provider in both shapes, and gives up after 1,000 candidates (counted, not timed)", () => {
     const installation = e2eAgentInstallationFromEnvironment({ AGENTX_MODEL_PROVIDER: "openrouter", AGENTX_OPENROUTER_SECRET_ARN: SECRET_ARN, AWS_REGION: "us-east-1" });
-    const started = performance.now();
-    const missing = searchE2EAgentRoute(installation, "openrouter", 1, "r1-ffffffffffff");
-    const elapsed = performance.now() - started;
-    expect(missing).toBeUndefined();
-    expect(elapsed).toBeLessThan(100);
+    // Today's table: every eligible model is tried in both shapes and nothing matches. The recommended model's row needs no lookup, so it costs two candidates and no lookup.
+    searchHarness.lookups = 0;
+    expect(searchE2EAgentRoute(installation, "openrouter", 1, "r1-ffffffffffff")).toBeUndefined();
+    const eligibleCount = e2eAgentModelsFor("openrouter", "us-east-1").length;
+    expect(eligibleCount).toBeGreaterThan(1);
+    expect(searchHarness.lookups).toBe(2 * (eligibleCount - 1));
+    expect(searchHarness.lookups).toBeLessThan(E2E_AGENT_ROUTE_SEARCH_LIMIT);
+
+    // A list far longer than the limit: the search stops at exactly 1,000 candidates (two of them the recommended model, which needs no lookup).
+    searchHarness.syntheticModelIds = Array.from({ length: 2_000 }, (_, index) => `synthetic/model-${index}`);
+    searchHarness.lookups = 0;
+    try {
+      expect(searchE2EAgentRoute(installation, "openrouter", 1, "r1-ffffffffffff")).toBeUndefined();
+    } finally {
+      searchHarness.syntheticModelIds = undefined;
+    }
+    expect(searchHarness.lookups).toBe(E2E_AGENT_ROUTE_SEARCH_LIMIT - 2);
   });
 
   it("finds the minimal shape only through the shape loop (mutation: with no minimal candidates the minimal revision is not found)", () => {
