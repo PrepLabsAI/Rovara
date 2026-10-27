@@ -1213,7 +1213,8 @@ export function parseGitHubRepository(repositoryUrl: string): { owner: string; n
     segments.length !== 2 ||
     segments.some((segment) => segment.includes("%"))
   ) {
-    throw agentXError("CONFIG_INVALID", url.hostname.toLowerCase() === "github.com"
+    // An empty host (`github.com:org/repo` parses as a scheme) is not another host: no blame.
+    throw agentXError("CONFIG_INVALID", url.hostname === "" || url.hostname.toLowerCase() === "github.com"
       ? "credentialed repository must be a canonical GitHub HTTPS URL"
       : "credentialed repository must be a canonical GitHub HTTPS URL: only github.com repositories are supported");
   }

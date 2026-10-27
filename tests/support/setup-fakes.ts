@@ -120,7 +120,7 @@ export function fakeControlPlane(): FakeControlPlane {
           return json(503, { error: { code: "RUNTIME_UNAVAILABLE", message: "trusted source snapshot is unavailable" } });
         }
         const sourceMatch = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(request.repositoryUrl);
-        if (!sourceMatch?.[1] || !sourceMatch[2]) return json(400, { error: { code: "CONFIG_INVALID", message: "setup repository must be a canonical GitHub repository URL" } });
+        if (!sourceMatch?.[1] || !sourceMatch[2]) return json(400, { error: { code: "CONFIG_INVALID", message: "setup repository must be a canonical GitHub repository URL: only github.com repositories are supported" } });
         const snapshot = await plane.captureSetupSource(request.repositoryUrl, request.ref);
         const expectedRepositoryId = `${sourceMatch[1]}/${sourceMatch[2]}`;
         if (snapshot.candidate.repositories.length !== 1 || snapshot.candidate.repositories[0]?.repositoryId.toLowerCase() !== expectedRepositoryId.toLowerCase()) {

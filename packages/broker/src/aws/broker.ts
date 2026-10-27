@@ -1247,7 +1247,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (!dependencies.projectSetupSource) throw agentXError("RUNTIME_UNAVAILABLE", "trusted project source capture is not configured");
         const requestBody = z.object({ repositoryUrl: z.string().url().max(500), ref: z.string().min(1).max(255) }).strict().parse(body);
         const urlParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(requestBody.repositoryUrl);
-        if (!urlParts?.[1] || !urlParts[2]) throw agentXError("CONFIG_INVALID", "setup repository must be a canonical GitHub repository URL");
+        if (!urlParts?.[1] || !urlParts[2]) throw agentXError("CONFIG_INVALID", "setup repository must be a canonical GitHub repository URL: only github.com repositories are supported");
         const snapshot = await dependencies.projectSetupSource.capture({ repositoryUrl: requestBody.repositoryUrl, ref: requestBody.ref });
         const candidate = snapshot.candidate;
         const sourceRepository = candidate.repositories.length === 1 ? candidate.repositories[0] : undefined;
@@ -14133,7 +14133,7 @@ function githubRepositoryFullName(repositoryUrl: string): string {
     || segments.length !== 2 || segments.some((segment) => segment.includes("%"))
     || !segments[0] || !name || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(segments[0])
     || !/^[A-Za-z0-9_.-]{1,100}$/.test(name)) {
-    throw agentXError("CONFIG_INVALID", "registered repository URL is not a canonical GitHub repository");
+    throw agentXError("CONFIG_INVALID", "registered repository URL is not a canonical GitHub repository: only github.com repositories are supported");
   }
   return `${segments[0]}/${name}`;
 }

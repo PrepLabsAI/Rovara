@@ -1328,5 +1328,7 @@ describe("repository URL refusals say github.com only when the host is another h
     expect(other.message).toBe("CONFIG_INVALID: credentialed repository must be a canonical GitHub HTTPS URL: only github.com repositories are supported");
     expect(refusal("https://gitlab.com/another/private.git").message).toMatch(/only github\.com repositories are supported/);
     expect(refusal("https://github.com/another/private/tree/main").message).toBe("CONFIG_INVALID: credentialed repository must be a canonical GitHub HTTPS URL");
+    // `github.com:org/repo` parses as a scheme with an empty host: it names github.com, so no "only github.com" blame.
+    expect(refusal("github.com:org/repo").message).toBe("CONFIG_INVALID: credentialed repository must be a canonical GitHub HTTPS URL");
   });
 });
