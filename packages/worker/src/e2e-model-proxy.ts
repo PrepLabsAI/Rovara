@@ -7,6 +7,7 @@ import {
   E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES,
   E2E_MODEL_CHANNEL_SCHEMA_VERSION,
   E2E_MODEL_CHANNEL_STEP_PATH,
+  E2E_MODEL_CHANNEL_SYNC_PATH,
   E2EModelChannelRequestSchema,
   E2EModelChannelStepMarkerSchema,
   E2EModelChannelResponseSchema,
@@ -28,6 +29,7 @@ import {
   type E2EModelGenerateOutcome,
   type GovernedE2EModelRoute,
 } from "@agentx/model-runtime";
+import { createE2ESessionSyncLedger } from "./e2e-model-session-sync.js";
 import { createE2ECredentialGuard, type E2ECredentialGuard, type E2ECredentialSet } from "./e2e-model-credential-guard.js";
 import { isScriptedE2EModelAdmissible } from "./e2e-model-scripted.js";
 
@@ -35,7 +37,7 @@ import { isScriptedE2EModelAdmissible } from "./e2e-model-scripted.js";
  * The per-run model proxy (M1.4 Task 4.1): the worker side of `rovara-e2e-model-channel/v1`.
  *
  * It listens on one Unix socket (mode 0600) that the worker mounts into the executor container only, and accepts
- * `POST /v1/generate` (a model call) and `POST /v1/step` (the executor's marker that an agent step began or ended), and nothing else. The AI browser-test agent in the executor never holds a provider, key or
+ * `POST /v1/generate` (a model call), `POST /v1/sync` (the executor's session values, before every call) and `POST /v1/step` (the executor's marker that an agent step began or ended), and nothing else. The AI browser-test agent in the executor never holds a provider, key or
  * endpoint: everything it asks of a model comes through here, and the proxy is the only holder of the governed route.
  *
  * Per request, in this order: count it against the step and group budgets, refuse it if another call is in flight,
@@ -204,6 +206,8 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     passwords: [...options.credentialSet.passwords, ...route.secretValues], emails: [...options.credentialSet.emails], cookieValues: [...options.credentialSet.cookieValues],
   };
   let guard: E2ECredentialGuard = createE2ECredentialGuard(credentials);
+  // MIDSTEPCOOKIE: a call is served only under the newest session sync (see e2e-model-session-sync.ts), whose values are in `guard` before the call is looked at.
+  const syncLedger = createE2ESessionSyncLedger();
   const transcriptBudget = options.transcriptBudgetBytes ?? DEFAULT_TRANSCRIPT_BUDGET_BYTES;
   const stepCallLimit = budgets.maxActionsPerStep + budgets.extraModelCallsPerStep;
 
@@ -297,6 +301,9 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     if (!parsed.success) return declined("refused-protocol", "the request is not a valid model channel request", { omitted: "unparseable" });
     const request: E2EModelChannelRequest = parsed.data;
     const promptSha256 = e2ePromptSha256(request.call);
+    // The scan only knows what the executor has synced; a call that names no current sync is refused before anything is read from it, and its prompt is not kept (the scrub may not know its cookie).
+    const syncCheck = syncLedger.useForCall(request.syncSeq);
+    if (!syncCheck.ok) return declined("refused-protocol", syncCheck.message, { promptSha256, omitted: "unparseable" });
     const redactedForEvidence = () => JSON.stringify(guard.scrubValue(request.call));
     if (request.runId !== runId || request.caseId !== identity.caseId || request.stepIndex !== identity.stepIndex || request.callIndex !== identity.callIndex) {
       return declined("refused-protocol", "the request does not match this run, step and call position", { promptSha256, prompt: redactedForEvidence() });
@@ -362,6 +369,20 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     guard = createE2ECredentialGuard(credentials, { onUnscannable: "latch" });
   }
 
+  /** `POST /v1/sync`: the executor's session values, sent before every model call. Accepted only in order for this run; the values join the credential scan at once. */
+  function serveSync(body: BodyRead): { status: number; body: unknown } {
+    const refuse = (status: number, code: string) => ({ status, body: { schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, status: "refused", code } });
+    if (closing) return refuse(503, "closing");
+    if (body.kind === "too-large") return refuse(413, "too-large");
+    if (body.kind === "failed") return refuse(400, "unreadable");
+    let json: unknown;
+    try { json = JSON.parse(body.bytes.toString("utf8")); } catch { return refuse(400, "not-json"); }
+    const outcome = syncLedger.accept(json, runId);
+    if (!outcome.ok) return refuse(outcome.code === "other-run" ? 403 : outcome.code === "stale-sync" ? 409 : 400, outcome.code);
+    if (outcome.added.length > 0) doAddCredentialValues({ cookieValues: outcome.added });
+    return { status: 200, body: { schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, status: "ok", syncSeq: syncLedger.latestSeq } };
+  }
+
   /** The size of a step marker the proxy reads: a marker is a position and at most 32 cookie values. */
   const MAX_MARKER_BYTES = 262_144;
   const allowed = new Set((options.allowedSteps ?? []).map((position) => stepKey(position)));
@@ -406,12 +427,12 @@ export async function startE2EModelProxy(options: E2EModelProxyOptions): Promise
     req.on("error", () => undefined);
     res.on("error", () => undefined);
     void (async () => {
-      if (req.url !== E2E_MODEL_CHANNEL_GENERATE_PATH && req.url !== E2E_MODEL_CHANNEL_STEP_PATH) { req.resume(); send(res, 404, { error: "not-found" }); return; }
+      if (req.url !== E2E_MODEL_CHANNEL_GENERATE_PATH && req.url !== E2E_MODEL_CHANNEL_STEP_PATH && req.url !== E2E_MODEL_CHANNEL_SYNC_PATH) { req.resume(); send(res, 404, { error: "not-found" }); return; }
       if (req.method !== "POST") { req.resume(); res.setHeader("allow", "POST"); send(res, 405, { error: "method-not-allowed" }); return; }
-      if (req.url === E2E_MODEL_CHANNEL_STEP_PATH) {
+      if (req.url === E2E_MODEL_CHANNEL_STEP_PATH || req.url === E2E_MODEL_CHANNEL_SYNC_PATH) {
         const marker = await readBody(req, MAX_MARKER_BYTES);
         if (res.writableEnded || res.destroyed) return;
-        const reply = serveMarker(marker);
+        const reply = req.url === E2E_MODEL_CHANNEL_SYNC_PATH ? serveSync(marker) : serveMarker(marker);
         send(res, reply.status, reply.body);
         return;
       }

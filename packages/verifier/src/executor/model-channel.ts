@@ -5,13 +5,17 @@ import {
   E2E_MODEL_CHANNEL_MAX_RESPONSE_BYTES,
   E2E_MODEL_CHANNEL_SCHEMA_VERSION,
   E2E_MODEL_CHANNEL_STEP_PATH,
+  E2E_MODEL_CHANNEL_SYNC_PATH,
+  E2E_MODEL_SESSION_SYNC_MAX_VALUES,
   E2EModelChannelRequestSchema,
   E2EModelChannelResponseSchema,
   type E2EModelChannelClient,
   type E2EModelChannelRequest,
   type E2EModelChannelResponse,
   type E2EModelChannelStepMarker,
+  type E2EModelSessionSync,
 } from "@agentx/contracts";
+import { createSessionSyncState, syncSessionBeforeCall, type E2EModelSessionSource } from "./model-channel-sync.js";
 
 /**
  * The executor's client for the worker's model socket (M1.4 Task 4.3a). It speaks the two requests of `rovara-e2e-model-channel/v1` and nothing else: a step marker
@@ -24,7 +28,7 @@ import {
  * - A request that is not a valid channel request (a file part, an unknown tool, an oversized prompt) is refused here, before it is sent.
  */
 
-export const E2E_MODEL_CHANNEL_ERROR_CODES_CLIENT = ["unavailable", "timeout", "aborted", "refused", "invalid-response", "invalid-request"] as const;
+export const E2E_MODEL_CHANNEL_ERROR_CODES_CLIENT = ["unavailable", "timeout", "aborted", "refused", "invalid-response", "invalid-request", "session-sync"] as const;
 export type E2EModelChannelClientErrorCode = (typeof E2E_MODEL_CHANNEL_ERROR_CODES_CLIENT)[number];
 
 const MESSAGES: Record<E2EModelChannelClientErrorCode, string> = {
@@ -34,6 +38,7 @@ const MESSAGES: Record<E2EModelChannelClientErrorCode, string> = {
   refused: "the model channel refused the request",
   "invalid-response": "the model channel answered with something that is not a valid answer",
   "invalid-request": "the request is not a valid model channel request",
+  "session-sync": "the session values could not be synced to the model channel, so the call was not sent",
 };
 
 /** A plain, non-retryable error. `isRetryable` is false so the AI SDK's own retry never re-sends a call the worker already counted. */
@@ -55,6 +60,11 @@ export interface E2EModelChannelClientOptions {
   runId: string;
   /** Per request. Default `E2E_MODEL_CHANNEL_CLIENT_TIMEOUT_MS`. */
   timeoutMs?: number;
+  /**
+   * The browser's session values (MIDSTEPCOOKIE). Required: every `generate` first reads them, tells the worker the ones it does not have, and names that sync on the call. There is no
+   * way to make a call without it, so a caller cannot bypass the sync.
+   */
+  sessionSync: E2EModelSessionSource;
 }
 
 type Reply = { status: number; body: unknown };
@@ -86,6 +96,15 @@ function post(options: E2EModelChannelClientOptions, path: string, payload: Buff
 }
 
 export function createE2EModelChannelClient(options: E2EModelChannelClientOptions): E2EModelChannelClient {
+  const syncState = createSessionSyncState();
+  const syncBefore = (signal: AbortSignal | undefined): Promise<number> => syncSessionBeforeCall(options.sessionSync, syncState, async (sync: E2EModelSessionSync) => {
+    const reply = await post(options, E2E_MODEL_CHANNEL_SYNC_PATH, Buffer.from(JSON.stringify(sync), "utf8"), signal);
+    const body = reply.body as { status?: unknown; syncSeq?: unknown } | null;
+    return reply.status === 200 && body?.status === "ok" && body.syncSeq === sync.syncSeq;
+  }, { runId: options.runId, maxValues: E2E_MODEL_SESSION_SYNC_MAX_VALUES, schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION },
+  () => new E2EModelChannelError("session-sync"));
+  // One call at a time: a sync belongs to the call that follows it.
+  let calls: Promise<unknown> = Promise.resolve();
   const marker = async (body: E2EModelChannelStepMarker, signal: AbortSignal | undefined): Promise<void> => {
     const reply = await post(options, E2E_MODEL_CHANNEL_STEP_PATH, Buffer.from(JSON.stringify(body), "utf8"), signal);
     if (reply.status !== 200 || (reply.body as { status?: unknown } | null)?.status !== "ok") throw new E2EModelChannelError("refused");
@@ -94,17 +113,26 @@ export function createE2EModelChannelClient(options: E2EModelChannelClientOption
     beginStep: (position, signal) => marker({ schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, runId: options.runId, marker: "begin", caseId: position.caseId, stepIndex: position.stepIndex,
       ...(position.cookieValues === undefined || position.cookieValues.length === 0 ? {} : { cookieValues: [...position.cookieValues] }) }, signal),
     endStep: (position, signal) => marker({ schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, runId: options.runId, marker: "end", caseId: position.caseId, stepIndex: position.stepIndex }, signal),
-    async generate(request: { caseId: string; stepIndex: number; callIndex: number; call: E2EModelChannelRequest["call"] }, signal?: AbortSignal): Promise<E2EModelChannelResponse> {
-      const parsed = E2EModelChannelRequestSchema.safeParse({ schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, runId: options.runId, caseId: request.caseId, stepIndex: request.stepIndex,
-        callIndex: request.callIndex, call: request.call });
-      if (!parsed.success) throw new E2EModelChannelError("invalid-request");
-      const payload = Buffer.from(JSON.stringify(parsed.data), "utf8");
-      if (payload.length > E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES) throw new E2EModelChannelError("invalid-request");
-      const reply = await post(options, E2E_MODEL_CHANNEL_GENERATE_PATH, payload, signal);
-      // The worker answers a refused or failed call with a valid answer of status `error` (and a status code that says why); that answer is the result, not a transport failure.
-      const answer = E2EModelChannelResponseSchema.safeParse(reply.body);
-      if (!answer.success) throw new E2EModelChannelError(reply.status >= 200 && reply.status < 300 ? "invalid-response" : "refused");
-      return answer.data;
+    generate(request: { caseId: string; stepIndex: number; callIndex: number; call: E2EModelChannelRequest["call"] }, signal?: AbortSignal): Promise<E2EModelChannelResponse> {
+      const run = calls.then(async (): Promise<E2EModelChannelResponse> => {
+        // A request the channel would not carry is refused before anything is synced or sent.
+        const shape = E2EModelChannelRequestSchema.safeParse({ schemaVersion: E2E_MODEL_CHANNEL_SCHEMA_VERSION, runId: options.runId, caseId: request.caseId, stepIndex: request.stepIndex,
+          callIndex: request.callIndex, syncSeq: 1, call: request.call });
+        if (!shape.success) throw new E2EModelChannelError("invalid-request");
+        // The sync is taken as late as possible: after the prompt is built, so it is at least as new as anything the prompt can hold.
+        const syncSeq = await syncBefore(signal);
+        const parsed = E2EModelChannelRequestSchema.safeParse({ ...shape.data, syncSeq });
+        if (!parsed.success) throw new E2EModelChannelError("invalid-request");
+        const payload = Buffer.from(JSON.stringify(parsed.data), "utf8");
+        if (payload.length > E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES) throw new E2EModelChannelError("invalid-request");
+        const reply = await post(options, E2E_MODEL_CHANNEL_GENERATE_PATH, payload, signal);
+        // The worker answers a refused or failed call with a valid answer of status `error` (and a status code that says why); that answer is the result, not a transport failure.
+        const answer = E2EModelChannelResponseSchema.safeParse(reply.body);
+        if (!answer.success) throw new E2EModelChannelError(reply.status >= 200 && reply.status < 300 ? "invalid-response" : "refused");
+        return answer.data;
+      });
+      calls = run.catch(() => undefined);
+      return run;
     },
   };
 }

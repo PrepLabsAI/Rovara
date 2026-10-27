@@ -11,6 +11,7 @@ import { createE2ECredentialGuard } from "../../packages/worker/src/e2e-model-cr
 import { createE2EProviderInvoke } from "../../packages/model-runtime/src/e2e-provider-invoke.js";
 import { createE2EProviderInvokeForTesting } from "../../packages/model-runtime/src/e2e-provider-invoke-testing.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
+import { noSessionValues } from "../support/e2e-session-sync.js";
 import { createGovernedE2EModelRoute, createInMemoryE2EDayBudget } from "../../packages/model-runtime/src/e2e-route.js";
 import { startE2EModelProxy, type E2EModelProxy } from "../../packages/worker/src/e2e-model-proxy.js";
 import { CASE_ID, MODEL_ID, PROVIDER_KEY, RUN_ID, SECRET_ARN, bedrockRoute, installationEnvironment, keyedRoute } from "../support/e2e-model-fixtures.js";
@@ -242,7 +243,7 @@ describe("Step 0: e2e 0.20.0's tool loop round-trips through the governed route 
     const { createRovaraE2EAgentExecutor } = await import("../../packages/verifier/src/executor/agent-executor.js");
     const { createE2EAgentLedgerWriter } = await import("../../packages/verifier/src/executor/agent-ledger.js");
     const { generateE2EAgentValueKey } = await import("../../packages/contracts/src/e2e-model-channel.js");
-    const client = createE2EModelChannelClient({ socketPath: join(dir, "m.sock"), runId: RUN_ID });
+    const client = createE2EModelChannelClient({ socketPath: join(dir, "m.sock"), runId: RUN_ID, sessionSync: noSessionValues });
     const position = { caseId: CASE_ID, stepIndex: 0 };
     const adapter = createE2EAgentModelAdapter({ client, routeId: "rovara-e2e-default", position: () => position });
     const ledger = createE2EAgentLedgerWriter({ outDir: dir, runId: RUN_ID, caseId: CASE_ID, valueKey: generateE2EAgentValueKey() });

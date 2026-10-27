@@ -504,15 +504,30 @@ describe("ec2-ebs delivery", () => {
       it("hands a round with AI navigation steps, unchanged, to a worker that lists the agent-steps feature", async () => {
         const ref = admission({ kind: "application", agentSteps: true });
         const record = checks(ref);
-        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"], workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
+        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1", "task.workflowE2EMidStepSync.v1"], workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
         expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
         expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
+      });
+
+      it("never sends a round with AI navigation steps to a worker that lists agent steps but not task.workflowE2EMidStepSync.v1 (MIDSTEPCOOKIE: a scan a step old), and says why", async () => {
+        const ref = admission({ kind: "application", agentSteps: true });
+        const record = checks(ref);
+        const beforeSync = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"], workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
+        const refusal = await beforeSync.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+        expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+        expect(refusal?.message).toContain("This worker can't protect session values during AI navigation steps yet");
+        expect(beforeSync.post).not.toHaveBeenCalled();
+        // A round with no AI navigation step does not need it.
+        const plain = admission({ kind: "application" });
+        const plainRecord = checks(plain);
+        const older = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"], workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
+        expect(await older.deliver(plainRecord, plainRecord.invocation)).toBe("DELIVERED");
       });
 
       describe("a chosen AI navigation model or the minimal request shape (M1.4 Task 4.10A, test 15)", () => {
         const APPLICATION = "workflow-e2e-application-admission/v1";
         const MESSAGE = "agent-route-not-approved: this worker is too old for the chosen AI navigation model";
-        const withAgents = [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"];
+        const withAgents = [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1", "task.workflowE2EMidStepSync.v1"];
         const withChoice = [...withAgents, "task.workflowE2EAgentModelChoice.v1"];
         const dependenciesFor = (needs: boolean | undefined | Error, features: string[]) => ({
           workerFeatures: async () => features, workflowE2EAdmissionSchemaVersion: async () => APPLICATION, workflowE2EAdmissionUsesAgentSteps: async () => true,
@@ -567,7 +582,7 @@ describe("ec2-ebs delivery", () => {
       });
 
       describe("the reference's agentSteps flag against the admission it names (checked before delivery)", () => {
-        const withAgents = [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"];
+        const withAgents = [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1", "task.workflowE2EMidStepSync.v1"];
         const APPLICATION = "workflow-e2e-application-admission/v1";
         const dependenciesFor = (usesAgentSteps: boolean | undefined | Error, features = withAgents) => ({
           workerFeatures: async () => features, workflowE2EAdmissionSchemaVersion: async () => APPLICATION,
@@ -776,7 +791,7 @@ describe("ec2-ebs delivery", () => {
 
         it("never sends a replay admission to a worker that runs application admissions (even AI navigation steps and baselines) but does not list the replay feature, and says why", async () => {
           const record = checks(replayRef());
-          const older = delivery({ workerFeatures: async () => [...applicationOnly, "task.workflowE2EBaselineChecks", "task.workflowE2EAgentSteps.v1"], workflowE2EAdmissionSchemaVersion: schema });
+          const older = delivery({ workerFeatures: async () => [...applicationOnly, "task.workflowE2EBaselineChecks", "task.workflowE2EAgentSteps.v1", "task.workflowE2EMidStepSync.v1"], workflowE2EAdmissionSchemaVersion: schema });
           const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
           expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
           expect(refusal?.message).toContain("task.workflowE2EReplayChecks.v1");

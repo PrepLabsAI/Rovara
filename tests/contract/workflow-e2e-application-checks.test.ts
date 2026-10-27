@@ -581,7 +581,7 @@ describe("workflow E2E application rounds: the model channel", () => {
     s.fake.onExecutor = async (outDir, args) => {
       planKey = (JSON.parse(readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8")) as { modelChannel: { valueKey: string } }).modelChannel.valueKey;
       const socketPath = join(s.runRoot, s.runId, "model", "model.sock");
-      const client = createE2EModelChannelClient({ socketPath, runId: s.runId });
+      const client = createE2EModelChannelClient({ socketPath, runId: s.runId, sessionSync: { read: async () => [] } });
       const caseId = s.fixture.compiled.expectedCases[0]!.caseId;
       await client.beginStep({ caseId, stepIndex: 0 });
       const answer = await client.generate({ caseId, stepIndex: 0, callIndex: 0, call: { prompt: [{ role: "system", content: "You drive a web application." }, { role: "user", content: [{ type: "text", text: "Goal: Export the orders as a CSV file\n#n1 button \"Download orders\"" }] }],
@@ -612,7 +612,7 @@ describe("workflow E2E application rounds: the model channel", () => {
       const s = await setup({ route: SCRIPTED, agent: true });
       s.fake.onExecutor = async (outDir) => {
         planKey = (JSON.parse(readFileSync(join(s.runRoot, s.runId, "plan.json"), "utf8")) as { modelChannel: { valueKey: string } }).modelChannel.valueKey;
-        const client = createE2EModelChannelClient({ socketPath: join(s.runRoot, s.runId, "model", "model.sock"), runId: s.runId });
+        const client = createE2EModelChannelClient({ socketPath: join(s.runRoot, s.runId, "model", "model.sock"), runId: s.runId, sessionSync: { read: async () => [] } });
         const caseId = s.fixture.compiled.expectedCases[0]!.caseId;
         await client.beginStep({ caseId, stepIndex: 0 });
         await client.generate({ caseId, stepIndex: 0, callIndex: 0, call: { prompt: [{ role: "system", content: "You drive a web application." }, { role: "user", content: [{ type: "text", text: "Goal: Export the orders as a CSV file\n#n1 button \"Download orders\"" }] }],

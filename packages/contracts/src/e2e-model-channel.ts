@@ -309,6 +309,8 @@ export const E2EModelChannelRequestSchema = z.object({
   caseId: id(160),
   stepIndex: nonNegativeInt.max(255),
   callIndex: nonNegativeInt.max(MAX_RECEIPT_CALL_INDEX),
+  /** The session sync this call was made under (`e2e-model-session-sync.ts`). Optional so a record written before it still parses; the worker refuses a call without one. */
+  syncSeq: nonNegativeInt.min(1).max(2_147_483_647).optional(),
   call: E2EModelChannelCallSchema,
 }).strict().superRefine((request, context) => {
   if (bytes(request) > E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES) context.addIssue({ code: "custom", message: `request exceeds ${E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES} bytes` });

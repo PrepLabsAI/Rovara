@@ -155,7 +155,7 @@ describe("the application CHECKS feature as /ping reports it (never waits on Doc
     const REPLAY = "task.workflowE2EReplayChecks.v1";
     // T6: trying a plan's proposed checks runs them in a container of the executor image, so it is listed, and withheld, with the application CHECKS feature.
     const DRY_RUN = "task.workflowPlanDryRun.v1";
-    expect(monitor.executor.withholdableInvocationFeatures).toEqual([FEATURE, V2, BASELINE, "task.workflowE2EAgentSteps.v1", REPLAY, DRY_RUN]);
+    expect(monitor.executor.withholdableInvocationFeatures).toEqual([FEATURE, V2, BASELINE, "task.workflowE2EAgentSteps.v1", REPLAY, DRY_RUN, "task.workflowE2EMidStepSync.v1"]);
     const before = await pingOf(monitor);
     expect(before.body.invocationFeatures).not.toContain(BASELINE);
     // Task 3.4: the string for version 2 admissions (web and API groups in one plan) is listed and withheld with the application CHECKS feature, so a worker that cannot run application rounds never claims it.

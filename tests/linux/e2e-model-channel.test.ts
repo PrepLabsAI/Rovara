@@ -38,7 +38,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const plan = JSON.parse(readFileSync("/run/rovara/plan.json", "utf8"));
       const { createE2EModelChannelClient } = await import("/opt/agentx/packages/verifier/dist/executor/model-channel.js");
       const caseId = plan.admission.groups[0].outerBinding.expectedCases[0].caseId;
-      const client = createE2EModelChannelClient({ socketPath: plan.modelChannel.socketPath, runId: plan.runId });
+      const client = createE2EModelChannelClient({ socketPath: plan.modelChannel.socketPath, runId: plan.runId, sessionSync: { read: async () => [] } });
       const call = { prompt: [{ role: "system", content: "You drive a web application one tool call at a time." },
         { role: "user", content: [{ type: "text", text: "Goal: ${GOAL}\\n#n1 button \\"Download orders\\"" }] }],
         tools: [{ type: "function", name: "tap", inputSchema: { type: "object", properties: { target: { type: "string" } } } },

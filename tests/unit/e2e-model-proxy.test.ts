@@ -47,6 +47,7 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "rm-"));
   socketPath = join(dir, "m.sock");
   proxies = [];
+  syncCounter = 0;
 });
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -55,7 +56,25 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-function post(body: unknown, options: { method?: string; path?: string; raw?: boolean; path2?: string } = {}): Promise<{ status: number; text: string; body: Reply }> {
+/**
+ * Every model call is made under a session sync (MIDSTEPCOOKIE). A call posted here is preceded by its own sync (empty, or the values in `options.sync`) unless the test names a
+ * `syncSeq` of its own (`options.syncSeq`, or `null` for none), as the executor's client does.
+ */
+let syncCounter = 0;
+async function post(body: unknown, options: { method?: string; path?: string; raw?: boolean; path2?: string; sync?: string[]; syncSeq?: number | null } = {}): Promise<{ status: number; text: string; body: Reply }> {
+  const isCall = (options.path ?? "/v1/generate") === "/v1/generate" && (options.method ?? "POST") === "POST" && !options.raw && typeof body === "object" && body !== null && !("syncSeq" in body);
+  if (isCall && options.syncSeq !== null) {
+    let seq = options.syncSeq;
+    if (seq === undefined) {
+      syncCounter += 1;
+      seq = syncCounter;
+      await rawPost({ schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, syncSeq: seq, values: options.sync ?? [] }, { path: "/v1/sync" });
+    }
+    return rawPost({ ...body, syncSeq: seq }, options);
+  }
+  return rawPost(body, options);
+}
+function rawPost(body: unknown, options: { method?: string; path?: string; raw?: boolean; path2?: string } = {}): Promise<{ status: number; text: string; body: Reply }> {
   const payload = options.raw ? String(body) : JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const req = request({ socketPath, path: options.path ?? "/v1/generate", method: options.method ?? "POST", headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload) } }, (res) => {
@@ -119,7 +138,9 @@ describe("e2e model proxy: clients that go away", () => {
       let entered: () => void = () => undefined;
       const invoke: E2EInvoke = async () => { if (slow) { entered(); await wait(60); } return tapAnswer(); };
       const { proxy } = await start(invoke);
-      const bodyFor = (callIndex: number) => JSON.stringify(channelRequest({ callIndex }));
+      // A raw client names its own sync: the sync is sent first, as the executor's client does.
+      const syncFirst = async () => { syncCounter += 1; await rawPost({ schemaVersion: "rovara-e2e-model-channel/v1", runId: RUN_ID, syncSeq: syncCounter, values: [] }, { path: "/v1/sync" }); return syncCounter; };
+      const bodyFor = (callIndex: number, syncSeq?: number) => JSON.stringify(channelRequest({ callIndex, ...(syncSeq === undefined ? {} : { syncSeq }) }));
       const body = bodyFor(0);
 
       // 1. Hangs up with part of the body sent.
@@ -129,12 +150,12 @@ describe("e2e model proxy: clients that go away", () => {
       // 3. Sends a whole request and goes away while the call is in flight, so the answer meets a dead socket.
       slow = true;
       const inFlight = new Promise<void>((resolve) => { entered = resolve; });
-      const third = bodyFor(2);
+      const third = bodyFor(2, await syncFirst());
       await rawClient(async (socket) => { socket.write(head(Buffer.byteLength(third)) + third); await inFlight; socket.destroy(); });
       await wait(120);
       slow = false;
       // 4. Half-closes right after sending and never reads the answer.
-      const fourth = bodyFor(3);
+      const fourth = bodyFor(3, await syncFirst());
       await rawClient(async (socket) => { socket.end(head(Buffer.byteLength(fourth)) + fourth); await wait(80); socket.destroy(); });
 
       // The proxy still serves a well-behaved client, and still closes.

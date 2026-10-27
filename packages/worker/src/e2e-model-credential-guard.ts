@@ -1,5 +1,6 @@
 import type { E2EModelChannelRequest } from "@agentx/contracts";
 import { e2eScannableEmailLocalPart, redactText } from "@agentx/contracts";
+import { e2eSecretSpellings } from "./e2e-secret-spellings.js";
 
 /**
  * The credential scan of the e2e model proxy (M1.4 Task 4.1). It runs on the prompt bytes before every provider call.
@@ -70,9 +71,7 @@ function secretVariants(values: readonly string[], label: string): string[] {
   for (const value of values) {
     if (value === "") continue;
     if (value.length < MIN_SCANNABLE_SECRET_LENGTH) throw new Error(`a ${label} is too short to scan for safely (under ${MIN_SCANNABLE_SECRET_LENGTH} characters)`);
-    out.add(value);
-    out.add(encodeURIComponent(value));
-    out.add(Buffer.from(value, "utf8").toString("base64"));
+    for (const form of e2eSecretSpellings(value)) out.add(form);
   }
   return [...out];
 }
@@ -119,7 +118,7 @@ export function createE2ECredentialGuard(set: E2ECredentialSet, guardOptions: E2
 
   function scrubText(text: string): string {
     let out = text;
-    for (const needle of [...passwords, ...cookies]) out = out.split(needle).join(PLACEHOLDER_SECRET);
+    for (const needle of [...passwords, ...cookies].sort((a, b) => b.length - a.length)) out = out.split(needle).join(PLACEHOLDER_SECRET);
     for (const shape of SHAPES) out = out.replace(shape, PLACEHOLDER_SECRET);
     return redactText(redactIdentity(out).text);
   }

@@ -21,6 +21,7 @@ import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
 import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, createRovaraE2EReplayExecutor } from "./agent-replay.js";
 import { createE2EModelChannelClient } from "./model-channel.js";
 import { createCredentialRedactor } from "./redact.js";
+import { createE2ESessionSyncSource } from "./session-sync.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
 import { createPlaywrightFormLoginDriver, isSessionCookieSecret, isSessionStorageSecret, parseSetCookie } from "./form-login.js";
 import { casePlanFor, resolveE2EExecutorSuite } from "./suite.js";
@@ -175,6 +176,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     ledger?.registerSessionSecret(value);
     appendFileSync(join(context.projectDir, E2E_EXECUTOR_SESSION_SECRETS_FILE), `${JSON.stringify(value)}\n`, { mode: 0o600 });
   };
+  // Before every model call the channel client reads the browser's session values from this and tells the worker (MIDSTEPCOOKIE).
+  const sessionSync = createE2ESessionSyncSource({ register: registerSecret, known: () => sessionSecrets });
   const store = createExecutorSessionStore({ plan, registerSecret,
     onLoginFailed: (profileId) => appendFileSync(join(context.projectDir, E2E_EXECUTOR_LOGIN_FAILED_FILE), `${JSON.stringify(profileId)}\n`, { mode: 0o600 }),
     ...(context.cdpEndpoint ? { formLogin: createPlaywrightFormLoginDriver({ cdpEndpoint: context.cdpEndpoint, guard }) } : {}) });
@@ -192,7 +195,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const replayPlan = plan.replay;
   if (channelPlan !== undefined || replayPlan !== undefined) installRefusingE2EDefaultProvider();
   const agent = channelPlan === undefined ? null : (() => {
-    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId });
+    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, sessionSync });
     const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
     // The adapter's own scan covers what the worker's cannot: a session value learned during a step (the begin marker, sent once per step, carries only what was known then).
     const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position, scan: (bytes) => agentRedactor.contains(bytes) });
@@ -236,6 +239,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       // caught by the out scan. Best effort: a closed page has nothing to ask.
       const owned = ownedContexts.get(sessionRef);
       ownedContexts.delete(sessionRef);
+      sessionSync.detach(sessionRef);
       // The signed-out visitor has no credential, and what an application sets for a visitor (a visitor id, a cart) is not a secret: nothing of it is registered.
       if (owned && !store.isAnonymous(sessionRef)) {
         try {
@@ -299,15 +303,16 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         ownedContexts.set(sessionRef, browserContext);
         // A session cookie the application swaps in while the case runs is registered when its answer arrives.
         const anonymous = store.isAnonymous(sessionRef);
+        sessionSync.attach(sessionRef, browserContext, { anonymous });
         browserContext.on("response", (response) => {
           if (anonymous) return;
-          void response.headersArray().then((headers) => {
+          sessionSync.track(response.headersArray().then((headers) => {
             for (const header of headers) {
               if (header.name.toLowerCase() !== "set-cookie") continue;
               const issued = parseSetCookie(header.value);
               if (issued !== null && isSessionCookieSecret(issued)) registerSecret(issued.value);
             }
-          }, () => undefined);
+          }, () => undefined));
         });
         const page = browserContext.pages()[0];
         if (!page) throw new Error("the owned browser context has no page to identify");
