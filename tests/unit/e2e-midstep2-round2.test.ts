@@ -240,7 +240,9 @@ describe("fix round 3 (re-check 2)", () => {
 
   it("M3-1: one short or random-looking piece never makes a token a path (the re-check's examples, which the fix round 3 rule called paths)", () => {
     for (const token of ["keuKworc/72N1kIkJ5mQjGuvL9k3e8RRxCORrdK7NZs", "4/f9EDeEMdOdCrluy3cor3zIui5R6gz9K1cB8DnegrU", "levZOQeFlMUeSw5bnSgCr4zKCjog2b/8", "/Ko/Xk3pQ9xW2mV7cL4nR8tYabcdEFGHijk12LM",
-      "caxso3/SCS1tjURjp5uz4keV0SldtQ4V5RrYQQzM/ac", "ve/Zbzio5/Z4ZGLOGCp24cHJf26hMPW7"]) {
+      "caxso3/SCS1tjURjp5uz4keV0SldtQ4V5RrYQQzM/ac", "ve/Zbzio5/Z4ZGLOGCp24cHJf26hMPW7",
+      // Short words and short numbers between slashes say nothing, even three of them.
+      "Xk3pQ9xW2mV7cL4nR8tYabcdEFGHij/ab/xy/ok", "Xk3pQ9xW2mV7cL4nR8tYabcdEFGHij/12/34/56"]) {
       expect(classifyString("anything", token).map((item) => item.tier), token).toContain("strong");
     }
   });
@@ -259,6 +261,10 @@ describe("fix round 3 (re-check 2)", () => {
       for (const header of ["X-Auth-Token", "X-API-Key", "Authorization", "X-Access-Token"]) {
         expect(headerSecrets([{ name: header, value }]).filter((item) => item.value === value && item.tier === "strong"), header).toHaveLength(1);
       }
+    });
+
+    it("a short value under a credential key is scrubbed even when it is a route (leaf mode)", () => {
+      expect(classifyStorageEntry({ name: "state", value: JSON.stringify({ session: "/orders/12" }) }).map((item) => item.tier)).toEqual(["weak"]);
     });
 
     it("under a neutral key and a neutral parameter or header the same values stay what they were: paths are nothing or weak, tokens strong", () => {
