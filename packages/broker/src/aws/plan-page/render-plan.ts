@@ -503,7 +503,7 @@ export async function renderPlanDocument(input: RenderPlanInput): Promise<string
   const moreDecisions = plan.decisions.slice(SHOWN);
   const decisionsBlock = moreDecisions.length === 0
     ? ""
-    : `<details class="more more-decisions"><summary>Show ${moreDecisions.length} more decisions</summary>${moreDecisions.map((decision) => decisionHtml(context, decision, true)).join("")}</details>`;
+    : `<details class="more more-decisions"><summary>Show ${moreDecisions.length} more ${moreDecisions.length === 1 ? "decision" : "decisions"}</summary>${moreDecisions.map((decision) => decisionHtml(context, decision, true)).join("")}</details>`;
   return [
     `<section id="${escapeHtml(docId)}" class="doc doc-${escapeHtml(anchor)}">`,
     `<header class="doc-header"><h2>${KIND_LABEL[input.kind]} v${version}</h2>`,

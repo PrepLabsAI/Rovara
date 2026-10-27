@@ -347,8 +347,8 @@ async function runSteps(steps: readonly QualificationStep[], effects: Qualificat
         case "run-instance": {
           const facts = need(state.facts, "the stack facts");
           state.launchRun = step.clientToken;
-          // The plan's generation is the floor: after an automatic renewal the registered runtime is newer, and a runner booted for generation 1 would fail its own host-identity check against a newer challenge.
-          state.generation = Math.max(1, await effects.nextGeneration());
+          // After an automatic renewal the registered runtime is newer than generation 1; the runner is booted for the next generation (nextGeneration is already at least 1).
+          state.generation = await effects.nextGeneration();
           const userData = renderQualificationUserData(facts, { workspaceId: step.workspaceId, volumeId: need(state.volumeId, "the volume"), generation: state.generation, qualification: step.qualification }, options.bootScript ?? readBootScript());
           state.instanceId = await effects.runInstance(buildRunInstancesInput(facts, { env: options.env ?? "", runId: step.clientToken, revision: options.revision, userData }));
           effects.print(`instance ${state.instanceId}`);
@@ -363,6 +363,8 @@ async function runSteps(steps: readonly QualificationStep[], effects: Qualificat
           const facts = need(state.facts, "the stack facts");
           const binding = Ec2RuntimeBindingSchema.parse(facts.binding);
           const generation = need(state.generation, "the generation the runner was booted with");
+          // Re-read just before the challenge: if another renewal moved the registered runtime since the boot, this runner would qualify for the wrong generation (and fail its own host-identity check).
+          if (await effects.nextGeneration() !== generation) throw new Error("the registered runtime moved after the runner was booted (another renewal ran); nothing was issued, run this script again");
           const issued = await effects.issueChallenge({ binding, endpoint: `http://${need(state.privateIp, "the private IP")}:${step.port}`, generation, transportCorrelationId: step.transportCorrelationId, profile: step.profile });
           state.challengeFile = issued.file;
           effects.print(`challenge ${issued.challengeId}, expires ${issued.expiresAt}`);

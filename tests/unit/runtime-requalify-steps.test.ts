@@ -170,6 +170,48 @@ describe("the runner is booted as the challenge says (live finding: host-identit
   });
 });
 
+describe("a run that started before the workspace id and generation were recorded (review M1 of AR-fix1)", () => {
+  /** The state exactly as the previous code wrote it: the launched runner's `instance` has the id and the deadlines, no workspaceId, no generation. */
+  const asPreviousCodeWrote = (state: Record<string, unknown>): void => {
+    const instance = state["instance"] as Record<string, unknown> | undefined;
+    if (instance !== undefined) { delete instance["workspaceId"]; delete instance["generation"]; }
+  };
+
+  it.each(["attachVolume", "awaitReady", "issueChallenge"])("when the run is picked up at %s, it fails cleanly with its own reason: alert, new runner ended, lock released, old runner kept, no parse error", async (resumeAt) => {
+    const old = oldInstallation();
+    const runId = randomUUID();
+    let resumed = false;
+    const run = await runMachine(definition, { runId }, cloud, async (payload) => {
+      // The deploy happens just before `resumeAt`: from here on every step receives the old shape.
+      if (payload.action === resumeAt) resumed = true;
+      if (resumed) asPreviousCodeWrote(payload.state as Record<string, unknown>);
+      return runRequalifyAction(deps, payload);
+    });
+    expect(run.status).toBe("Succeeded");
+    const error = JSON.stringify((run.state as Record<string, unknown>)["error"]);
+    expect(error).toContain("requalify-refused:legacy-run-state");
+    expect(error).not.toMatch(/ZodError|invalid_type|Invalid input|expected string/);
+    const sent = alert();
+    expect(sent).toHaveLength(1);
+    expect(FIXED_REASONS.has(sent[0]!.reason!)).toBe(true);
+    expect(sent[0]!.text).toContain("(legacy-run-state)");
+    expect(sent[0]!.text).toContain("The old runner and the registered rows were left as they were.");
+    expect(cloud.instances.get(old.id)?.state).toBe("running");
+    expect(cloud.launches.map((id) => cloud.instances.get(id)?.state)).toEqual(["terminated"]);
+    expect(survivingRunnerVolumes(runId)).toEqual([]);
+    expect(cloud.lock()).toBeUndefined();
+    expect(cloud.hold()).toBeUndefined();
+    expect(cloud.metrics).toEqual(["RequalifyFailed"]);
+  });
+
+  it("a run in the current shape is not affected (positive control: the same machine succeeds without the old shape)", async () => {
+    oldInstallation();
+    const { run } = await renew();
+    expect(run.trace.at(-1)).toBe("Done");
+    expect(alert()).toEqual([]);
+  });
+});
+
 describe("single flight and the cost guard", () => {
   it("does nothing when another run holds the lock, and does not take or release its lock", async () => {
     oldInstallation();

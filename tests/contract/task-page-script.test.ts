@@ -19,7 +19,7 @@ const owner = { role: "owner" as const, canComment: true, canSuggest: false, can
 const commenter = { role: "commenter" as const, canComment: true, canSuggest: true, canDecide: false, canAsk: true };
 
 const option = (id: string, label: string) => ({ id, label, consequence: `${label} it is.` });
-/** Six decisions: d1 sits on a folded child claim, d6 under "Show 1 more decisions". */
+/** Six decisions: d1 sits on a folded child claim, d6 under "Show 1 more decision". */
 function decisions(count = 6) {
   return Array.from({ length: count }, (_, index) => ({
     id: `d${index + 1}`, claimId: index === 0 ? "1.1" : "2", question: `Question ${index + 1}?`,
@@ -726,7 +726,7 @@ describe("the deciding and commenting script", () => {
     for (let up: FakeElement | null = first; up !== null; up = up.parentElement) if (up.tagName === "DETAILS") expect(up.open).toBe(true);
     expect(first.closest(".decision")!.scrolled).toHaveLength(1);
     expect(page.document.activeElement).toBe(first);
-    // Picking answers counts down; d6 is under "Show 1 more decisions".
+    // Picking answers counts down; d6 is under "Show 1 more decision".
     for (const decision of ["d1", "d2", "d3", "d4", "d5"]) radio(page, decision, "below").click();
     expect(next.textContent).toBe("Next decision (1 to answer)");
     const last = radio(page, "d6", "above");
