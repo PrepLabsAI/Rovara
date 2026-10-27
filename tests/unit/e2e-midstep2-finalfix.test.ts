@@ -122,6 +122,26 @@ describe("F-2: the caps do not stop the mask", () => {
   }, 60_000);
 });
 
+describe("F-9: a list or a value past the bound fails the view closed instead of being skipped", () => {
+  it("201 URL parameters, 201 headers, or a header value over 16 KiB give an overflow note; below the bounds there is none", () => {
+    const many = Array.from({ length: 201 }, (_unused, index) => `p${index}=v${index}`).join("&");
+    expect(urlSecrets(`https://app.test/?${many}`).some((item) => item.tier === "overflow")).toBe(true);
+    expect(urlSecrets("https://app.test/?a=b&token=Ab3dEf9hJk").some((item) => item.tier === "overflow")).toBe(false);
+    expect(urlSecrets(`https://app.test/?q=${"x".repeat(20_000)}`).some((item) => item.tier === "overflow")).toBe(true);
+    expect(headerSecrets(Array.from({ length: 201 }, (_unused, index) => ({ name: `x-h${index}`, value: "short" }))).some((item) => item.tier === "overflow")).toBe(true);
+    expect(headerSecrets([{ name: "x-big", value: "y".repeat(20_000) }]).some((item) => item.tier === "overflow")).toBe(true);
+    expect(headerSecrets([{ name: "x-api-key", value: "Ab3dEf9hJk" }]).some((item) => item.tier === "overflow")).toBe(false);
+  });
+  it("an overflow note learned by the session source fails the model's view closed, once", async () => {
+    const { e, shown } = await stackFor([]);
+    const fresh = "Zq8LmWp3Rt6YvB2nXc5K";
+    expect(await shown(`doc ${fresh}`)).toBe(`doc ${fresh}`);
+    e.source.learn([{ value: "", tier: "overflow" }, { value: "", tier: "overflow" }]);
+    expect(e.registry.maskOverflowed()).toBe(true);
+    expect(await shown(`doc ${fresh}`)).toBe("doc <session>");
+  });
+});
+
 describe("F-3: a signed-out visitor's context is read", () => {
   it("a token the visitor gains mid-step (a fragment, a Supabase-style cache) is registered and refused if shown; a visitor id and a cart are not registered", async () => {
     const e = await harness.executor();
