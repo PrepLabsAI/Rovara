@@ -123,7 +123,7 @@ describe("hidden characters in a repository's rule file (A4)", () => {
   });
 
   it("inertContextText reports the removed count and keeps \\n and \\t but drops other controls", () => {
-    expect(inertContextText(`a\tb\nc${cp(0x00)}${cp(0x1b)}${cp(0x0d)}${cp(0xfeff)}${cp(0xad)}d`)).toEqual({ text: "a\tb\ncd", removed: 5 });
+    expect(inertContextText(`a\tb\nc${cp(0x00)}${cp(0x1b)}${cp(0x0d)}${cp(0xfeff)}${cp(0xad)}d`)).toEqual({ text: "a\tb\nc\nd", removed: 4 });
     expect(inertContextText("")).toEqual({ text: "", removed: 0 });
   });
 

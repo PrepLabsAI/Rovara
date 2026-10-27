@@ -164,7 +164,7 @@ export function workspaceRepositoriesNote(
 }
 
 function checkedOut({ name, path }: WorkspaceRepositoryReference): string {
-  return `The repository ${quoted(name)} is checked out at ${quoted(path).slice(1, -1)} in this workspace.`;
+  return `The repository ${quoted(inertContextText(name).text)} is checked out at ${inert(path)} in this workspace.`;
 }
 
 /**

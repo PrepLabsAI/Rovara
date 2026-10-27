@@ -21,6 +21,7 @@ import {
   hostPathResolver,
   type ContainerInspection,
 } from "./devcontainer-policy.js";
+import { inertContextText } from "./context-text.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import type { CommandResult } from "./readiness.js";
 
@@ -127,7 +128,7 @@ export function devcontainerContextFile(paths: DevcontainerPaths): { path: strin
     path: "AgentX devcontainer",
     content: [
       "Shell commands (the bash tool) run inside this project's devcontainer.",
-      `The repository is at ${paths.hostFolder}. Inside the devcontainer it is also at ${paths.containerFolder}.`,
+      `The repository is at ${inertContextText(paths.hostFolder).text}. Inside the devcontainer it is also at ${inertContextText(paths.containerFolder).text}.`,
       "Both paths name the same files, in the file tools and in the shell; prefer the first.",
     ].join("\n"),
   };

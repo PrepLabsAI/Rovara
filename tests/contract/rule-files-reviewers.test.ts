@@ -98,6 +98,7 @@ function obedientAnswer(input: PiSessionInput, prompt: string): string {
 
 async function review(workspace: Awaited<ReturnType<typeof reviewWorkspace>>, adapter: PiSessionAdapter) {
   return runWorkflowReviews({
+    ruleFileBaseCommits: [{ repositoryId: "payments", baseCommitSha: workspace.base }],
     operationId: randomUUID(), rootPath: workspace.rootPath, model, candidate: workspace.candidate, repositories: workspace.repositories, piAdapter: adapter,
   });
 }
@@ -172,6 +173,7 @@ describe("the code and security reviewers read the base commit's rule file (A5)"
     const inputs: PiSessionInput[] = [];
 
     await runWorkflowReviews({
+      ruleFileBaseCommits: [],
       operationId: randomUUID(), rootPath: workspace.rootPath, model, repositories: workspace.repositories, piAdapter: recordingReviewer(inputs),
       candidate: workspace.candidate.map(({ baseCommitSha, ...identity }) => { void baseCommitSha; return identity; }),
     });
@@ -225,6 +227,7 @@ describe("the PR-feedback reviewer reads the base commit's rule file (A5)", () =
     const inputs: PiSessionInput[] = [];
 
     await runWorkflowFeedbackReview({
+      ruleFileBaseCommits: [{ repositoryId: "payments", baseCommitSha: workspace.base }],
       operationId: randomUUID(), taskId: bundle.taskId, workflowRevision: 7, taskRequirements: "Handle the empty case.", candidateDigest: bundle.candidateDigest,
       rootPath: workspace.rootPath, model, candidate, repositories, bundles: [{ ref, bytes }], piAdapter: recordingReviewer(inputs),
       artifactSink: async () => undefined,
