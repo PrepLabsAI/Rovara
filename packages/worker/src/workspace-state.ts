@@ -55,3 +55,11 @@ async function ensurePrivateDirectory(path: string, uid: number | undefined): Pr
   }
   await mkdir(path, { mode: 0o700 });
 }
+
+/** Name prefixes of the empty volumes a dev container's start mounts over the worker's own folders (devcontainer.ts). */
+export const MASK_VOLUME_PREFIXES = ["agentx-mask-", "agentx-docker-data-mask-"] as const;
+
+/** Whether `name` is one of those volumes: a prefix, the folder's name and the start's own 12 hex digits. */
+export function isMaskVolumeName(name: string): boolean {
+  return MASK_VOLUME_PREFIXES.some((prefix) => name.startsWith(prefix)) && /-[0-9a-f]{12}$/u.test(name);
+}

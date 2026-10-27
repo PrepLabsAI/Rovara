@@ -2,6 +2,7 @@ import { request } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { agentXError } from "@agentx/contracts";
+import { isMaskVolumeName } from "./workspace-state.js";
 import { workspaceProcessScope, type WorkspaceProcessScope } from "./workspace-processes.js";
 
 /**
@@ -40,6 +41,10 @@ export interface DockerApi {
   listContainers(): Promise<DockerContainer[]>;
   /** Stops (SIGKILL) and deletes a container; one already gone counts as removed. */
   removeContainer(id: string): Promise<void>;
+  /** The names of the volumes. */
+  listVolumes?(): Promise<string[]>;
+  /** Deletes a volume; one already gone counts as removed. */
+  removeVolume?(name: string): Promise<void>;
 }
 
 export interface SweepWorkspaceContainersOptions {
@@ -96,7 +101,10 @@ export async function sweepWorkspaceContainers(options: SweepWorkspaceContainers
       throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not find its own container in Docker's list, so it did not push");
     }
     const found = containersToRemove(containers, { selfId, rootPath: options.rootPath });
-    if (found.length === 0) return { removed };
+    if (found.length === 0) {
+      await removeMaskVolumes(docker, log);
+      return { removed };
+    }
     for (const entry of found) {
       try {
         await docker.removeContainer(entry.id);
@@ -114,6 +122,21 @@ export async function sweepWorkspaceContainers(options: SweepWorkspaceContainers
     });
   }
   throw agentXError("RUNTIME_UNAVAILABLE", "AgentX kept finding new containers started from the workspace, so it did not push");
+}
+
+/**
+ * Once no container but the worker's is left, nothing uses a dev container's mask volumes (workspace-state.ts), so they go
+ * too. A volume that cannot be removed is logged and left: the next sweep and the worker's startup try again.
+ */
+async function removeMaskVolumes(docker: DockerApi, log: (event: Record<string, unknown>) => void): Promise<void> {
+  if (docker.listVolumes === undefined || docker.removeVolume === undefined) return;
+  try {
+    const names = (await docker.listVolumes()).filter(isMaskVolumeName);
+    for (const name of names) await docker.removeVolume(name);
+    if (names.length > 0) log({ event: "publish.volumes.removed", volumes: names.length });
+  } catch (error) {
+    log({ event: "publish.volumes.remove.failed", reason: errorMessage(error).slice(0, 200) });
+  }
 }
 
 /**
@@ -167,6 +190,19 @@ export function dockerSocketApi(socketPath: string, timeoutMs = DOCKER_TIMEOUT_M
           state: typeof value.State === "string" ? value.State : "",
         };
       });
+    },
+    async listVolumes() {
+      const response = await dockerRequest(socketPath, "GET", `/volumes?filters=${encodeURIComponent(JSON.stringify({ name: ["agentx-"] }))}`, timeoutMs);
+      if (response.status !== 200) throw new Error(`Docker answered ${response.status}: ${dockerMessage(response.body)}`);
+      const parsed = JSON.parse(response.body) as { Volumes?: unknown };
+      return Array.isArray(parsed.Volumes)
+        ? parsed.Volumes.flatMap((entry: unknown) => (typeof (entry as { Name?: unknown } | null)?.Name === "string" ? [(entry as { Name: string }).Name] : []))
+        : [];
+    },
+    async removeVolume(name) {
+      const response = await dockerRequest(socketPath, "DELETE", `/volumes/${encodeURIComponent(name)}`, timeoutMs);
+      if (response.status === 204 || response.status === 200 || response.status === 404) return;
+      throw new Error(`Docker answered ${response.status}: ${dockerMessage(response.body)}`);
     },
     async removeContainer(id) {
       const response = await dockerRequest(socketPath, "DELETE", `/containers/${encodeURIComponent(id)}?force=1`, timeoutMs);

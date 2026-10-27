@@ -27,8 +27,8 @@ import { inertContextText } from "./context-text.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
 import type { CommandResult } from "./readiness.js";
-import type { DockerCli } from "./swebench/containers.js";
-import { hiddenWorkspaceDirectories } from "./workspace-state.js";
+import { createDockerCli, type DockerCli } from "./swebench/containers.js";
+import { hiddenWorkspaceDirectories, isMaskVolumeName } from "./workspace-state.js";
 
 const execFile = promisify(execFileCallback);
 const UP_TIMEOUT_MS = 20 * 60_000;
@@ -174,6 +174,8 @@ export interface DevcontainerChecks {
   inspect(containerId: string): Promise<ContainerInspection>;
   /** Stops and deletes the container. */
   remove(containerId: string): Promise<void>;
+  /** Deletes volumes by name, once their container is gone; one already gone or still in use is left. */
+  removeVolumes?(names: readonly string[]): Promise<void>;
 }
 
 /** The empty volume mounted over the workspace's Docker data folder in every dev container. */
@@ -234,17 +236,17 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
   let hidden = await hiddenWorkspaceDirectories(target.rootPath);
   const started = await start(hidden);
   if (cli.checks === undefined) return started;
-  let problems = await startedContainerProblems(cli.checks, started.containerId, target, hidden);
+  let { problems, volumes } = await startedContainerProblems(cli.checks, started.containerId, target, hidden);
   let current = started;
   if (problems.length > 0 && problems.every((problem) => problem === DOCKER_DATA_VISIBLE || problem === WORKER_STATE_VISIBLE)) {
     // A container created before AgentX hid these folders: created again, with them hidden.
-    await removeStartedContainer(cli.checks, current.containerId);
+    await removeStartedContainer(cli.checks, current.containerId, volumes);
     hidden = await hiddenWorkspaceDirectories(target.rootPath);
     current = await start(hidden);
-    problems = await startedContainerProblems(cli.checks, current.containerId, target, hidden);
+    ({ problems, volumes } = await startedContainerProblems(cli.checks, current.containerId, target, hidden));
   }
   if (problems.length > 0) {
-    await removeStartedContainer(cli.checks, current.containerId);
+    await removeStartedContainer(cli.checks, current.containerId, volumes);
     throw agentXError("CONFIG_INVALID", `The dev container for ${relative(target.rootPath, target.workspaceFolder) || "."} was started with ${problems.join(", ")}, which AgentX does not allow, so AgentX removed it. A dev container feature or the image's devcontainer.metadata label can ask for these; see "Dev container" in docs/project-configuration.md.`.slice(0, 1_000));
   }
   return current;
@@ -378,7 +380,7 @@ async function startedContainerProblems(
   containerId: string,
   target: DevcontainerTarget,
   hidden: readonly string[],
-): Promise<string[]> {
+): Promise<{ problems: string[]; volumes: string[] }> {
   let inspection: ContainerInspection;
   try {
     inspection = await containers.inspect(containerId);
@@ -388,21 +390,38 @@ async function startedContainerProblems(
   }
   const dockerDataPath = hidden.find((path) => basename(path) === DOCKER_DATA_DIRECTORY);
   const maskedPaths = hidden.filter((path) => path !== dockerDataPath);
-  return containerProblems(inspection, {
+  const problems = containerProblems(inspection, {
     rootPath: target.rootPath,
     resolvePath: hostPathResolver(target.rootPath),
     ...(dockerDataPath === undefined ? {} : { dockerDataPath }),
     maskedPaths,
   });
+  // The mask volumes this container was given, which go with it.
+  const volumes = (inspection.Mounts ?? []).flatMap((mount) => (mount.Type === "volume" && mount.Name !== undefined && isMaskVolumeName(mount.Name) ? [mount.Name] : []));
+  return { problems, volumes };
 }
 
-async function removeStartedContainer(containers: DevcontainerChecks, containerId: string): Promise<void> {
+async function removeStartedContainer(containers: DevcontainerChecks, containerId: string, volumes: readonly string[] = []): Promise<void> {
   try {
     await containers.remove(containerId);
   } catch (error) {
     // Publication removes every leftover container before it pushes, and fails when it cannot.
     throw new Error(`AgentX could not remove a dev container it does not allow: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512), { cause: error });
   }
+  // The volumes are only the container's; one that cannot be removed now is swept later (removeLeftoverMaskVolumes).
+  if (volumes.length > 0) await containers.removeVolumes?.(volumes).catch(() => undefined);
+}
+
+/**
+ * Removes the mask volumes no container uses (a crash or a removal that missed them), by name; Docker lists as unused only
+ * a volume no container, running or stopped, refers to, so a resumed workspace's stopped dev container keeps its own. The
+ * worker calls it once at startup. Returns how many it removed.
+ */
+export async function removeLeftoverMaskVolumes(docker: DockerCli = createDockerCli()): Promise<number> {
+  const listed = await docker.run(["volume", "ls", "--quiet", "--filter", "dangling=true", "--filter", "name=agentx-"], { timeoutMs: DOCKER_CALL_TIMEOUT_MS });
+  const names = listed.exitCode === 0 ? listed.stdout.split("\n").map((line) => line.trim()).filter(isMaskVolumeName) : [];
+  if (names.length > 0) await docker.run(["volume", "rm", ...names], { timeoutMs: DOCKER_CALL_TIMEOUT_MS });
+  return names.length;
 }
 
 async function startDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget, hidden: readonly string[], frozenLockfile: boolean): Promise<DevcontainerUpResult> {
@@ -706,6 +725,9 @@ export function createDevcontainerCli(options: { dockerPath?: string } = {}): De
       },
       async remove(containerId) {
         await execFile(docker, ["rm", "--force", containerId], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS });
+      },
+      async removeVolumes(names) {
+        await execFile(docker, ["volume", "rm", ...names], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS });
       },
     },
   };

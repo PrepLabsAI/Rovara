@@ -265,7 +265,7 @@ export interface ContainerInspection {
     VolumesFrom?: readonly string[] | null;
     DeviceRequests?: readonly unknown[] | null;
   };
-  Mounts?: ReadonlyArray<{ Type?: string; Source?: string; Destination?: string }> | null;
+  Mounts?: ReadonlyArray<{ Type?: string; Name?: string; Source?: string; Destination?: string }> | null;
 }
 
 /**
