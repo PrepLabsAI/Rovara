@@ -203,6 +203,85 @@ describe("oversized rule files (C84)", () => {
   });
 });
 
+describe("the scratch directory is where a hard link from the workspace works (C84)", () => {
+  /** A temporary directory that is on the workspace's device but is a different mount point, as a bind mount is: a link from the workspace into it fails with EXDEV. */
+  async function withTemporaryArea<T>(body: (area: string) => Promise<T>): Promise<T> {
+    const area = await realpath(await mkdtemp(join(tmpdir(), "agentx-trusted-mount-")));
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = area;
+    try {
+      return await body(area);
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous;
+    }
+  }
+  const linkExceptInto = (area: string, linked: string[]) => async (source: string, target: string) => {
+    if (target.startsWith(`${area}/`)) return exdev();
+    const { link } = await import("node:fs/promises");
+    linked.push(target);
+    await link(source, target);
+  };
+
+  it("the scratch directory is the workspace's own runtime directory when a link into the temporary directory fails with EXDEV, and nothing is copied", async () => {
+    const subject = await repository();
+    await withTemporaryArea(async (area) => {
+      git(subject.directory, "gc", "--quiet", "--prune=now");
+      const runtime = join(subject.root, ".agentx-runtime", "tmp");
+      await mkdir(runtime, { recursive: true, mode: 0o700 });
+      const linked: string[] = [];
+      let scratch = "";
+      // A copy of any size stops the read, so a read that gives the rule file linked every file it brought in.
+      const found = await read(subject, { linkFile: linkExceptInto(area, linked), copyLimitBytes: 0, onScratchReady: async (paths) => { scratch = paths.scratch; } });
+      expect(text(found)).toBe(BASE_RULE);
+      expect(scratch.startsWith(`${runtime}/`)).toBe(true);
+      expect(linked.some((target) => target.endsWith(".pack") && target.startsWith(`${runtime}/`))).toBe(true);
+      expect(readdirSync(area)).toEqual([]);
+    });
+  });
+
+  it("the scratch directory is the workspace's fallback directory when the runtime directory does not take a link either", async () => {
+    const subject = await repository();
+    await withTemporaryArea(async (area) => {
+      git(subject.directory, "gc", "--quiet", "--prune=now");
+      const runtime = join(subject.root, ".agentx-runtime", "tmp");
+      await mkdir(runtime, { recursive: true, mode: 0o700 });
+      let scratch = "";
+      const { link } = await import("node:fs/promises");
+      const linkFile = async (source: string, target: string) => {
+        if (target.startsWith(`${area}/`) || target.startsWith(`${runtime}/`)) return exdev();
+        await link(source, target);
+      };
+      expect(text(await read(subject, { linkFile, copyLimitBytes: 0, onScratchReady: async (paths) => { scratch = paths.scratch; } }))).toBe(BASE_RULE);
+      expect(scratch.startsWith(`${join(subject.root, ".agentx", "scratch")}/`)).toBe(true);
+    });
+  });
+
+  it("when every candidate fails with EXDEV the files are copied, under the copy limit", async () => {
+    const subject = await repository();
+    await withTemporaryArea(async (area) => {
+      git(subject.directory, "gc", "--quiet", "--prune=now");
+      await mkdir(join(subject.root, ".agentx-runtime", "tmp"), { recursive: true, mode: 0o700 });
+      let scratch = "";
+      expect(text(await read(subject, { linkFile: exdev, onScratchReady: async (paths) => { scratch = paths.scratch; } }))).toBe(BASE_RULE);
+      expect(scratch.startsWith(`${area}/`)).toBe(true);
+      expect(await unverified(read(subject, { linkFile: exdev, copyLimitBytes: 16 }))).toBe(UNVERIFIED);
+    });
+  });
+
+  it("a repository without packs is probed too, and the probe file is not left in its objects directory", async () => {
+    const subject = await repository();
+    await withTemporaryArea(async (area) => {
+      await mkdir(join(subject.root, ".agentx-runtime", "tmp"), { recursive: true, mode: 0o700 });
+      const before = readdirSync(subject.objects).sort();
+      let scratch = "";
+      expect(text(await read(subject, { linkFile: linkExceptInto(area, []), copyLimitBytes: 0, onScratchReady: async (paths) => { scratch = paths.scratch; } }))).toBe(BASE_RULE);
+      expect(scratch.startsWith(`${join(subject.root, ".agentx-runtime", "tmp")}/`)).toBe(true);
+      expect(readdirSync(subject.objects).sort()).toEqual(before);
+      expect(readdirSync(join(subject.root, ".agentx-runtime", "tmp"))).toEqual([]);
+    });
+  });
+});
+
 describe("the scratch directory (C84)", () => {
   it("is the temporary directory when that is on the workspace's file system", async () => {
     const subject = await repository();
