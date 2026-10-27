@@ -10,6 +10,16 @@ Run `agentx --env <name> project add` from the project checkout and select a Git
 
 Before saving E2E setup, AgentX shows the proposed setup and readiness commands, detected targets, mock-substitutable inputs, and unresolved blockers. Review the source-backed targets and every proposed command. A mock substitution is allowed only for inputs the proposal marks `mock-substitutable`; unresolved inputs marked `blocking` remain blockers.
 
+## Supported stacks
+
+Browser and API checks run only for a Node.js app that:
+
+- has a `package.json` with a `start` script (and optionally a `build` script) at the root of the repository, and an npm lockfile next to it (`package-lock.json` or `npm-shrinkwrap.json`). Rovara runs `npm ci`, then `npm run build` if there is one, then `npm start`.
+- runs on Node 22 (the fixed image is `node:22.23.2-bookworm-slim`, arm64) and needs no outside service: no database, no docker-compose services, and no private package registry (an `.npmrc` is ignored and traffic to private networks is blocked).
+- needs no secrets: environment variable names that contain TOKEN, SECRET, PASSWORD or API_KEY are refused.
+
+Python, Ruby, Go, Java and docker-compose projects, and Node projects that use only a pnpm, yarn or bun lockfile, are not supported yet. For them `project add` says "no targets detected" and names this section; a Node project can add an `agentx.e2e` contract, or switch to npm, to be picked up.
+
 ## Approve or decline
 
 Choose whether to use the proposed setup. AgentX records that choice against the immutable proposal reference and digest. Approving stores the proposal's E2E policy with the project revision. Declining records the decision and omits that E2E policy, so browser and API checks are off; the project keeps its own setup and test commands (the proposed ones and any you passed as flags), and you can run `agentx project setup-approve` later to turn the checks on.

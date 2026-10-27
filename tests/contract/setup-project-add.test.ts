@@ -395,7 +395,7 @@ describe("agentx project add (FR-040)", () => {
     const plane = fakeControlPlane();
     const prompter = scriptedPrompter(["acme/docs", "", true]);
     await addProject({ env: "staging", session, githubToken: "ghs_x", prompter, write: () => undefined, services: services(plane), flags: {} });
-    expect(prompter.asked.some((question) => question.includes("no targets detected"))).toBe(true);
+    expect(prompter.asked.some((question) => question.includes("no targets detected (browser and API checks need a Node 22 app with a package.json start script and an npm lockfile; see docs/e2e-onboarding.md, Supported stacks)"))).toBe(true);
     expect((plane.registered[0] as { definition: { setup: unknown[]; readiness: unknown[]; e2e?: E2EPolicy } }).definition).toMatchObject({ setup: [], readiness: [], e2e: { targets: [] } });
   });
 
