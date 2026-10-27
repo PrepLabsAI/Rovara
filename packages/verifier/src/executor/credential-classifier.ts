@@ -60,7 +60,10 @@ function isSlugOrPath(value: string): boolean {
 
 /** A single long base64, base64url or hex run with a letter and a digit that is not a UUID, a path or a slug. */
 function isLongOpaqueRun(value: string): boolean {
-  return LONG_RUN.test(value) && /[0-9]/.test(value) && /[A-Za-z]/.test(value) && !UUID.test(value) && !isSlugOrPath(value);
+  if (!LONG_RUN.test(value) || !/[0-9]/.test(value) || !/[A-Za-z]/.test(value) || UUID.test(value) || isSlugOrPath(value)) return false;
+  // A `/` in it is either a standard-base64 character or a path separator. A random base64 token of 32+ characters has both cases; a REST path with numeric or hex ids
+  // (`/users/8423/orders/12345/items/99882211`, `/files/9f8a7b6c...`) is single-case.
+  return !value.includes("/") || (/[a-z]/.test(value) && /[A-Z]/.test(value));
 }
 
 /** A token with dots, pipes or colons in it (a Sanctum `12|abcd...`, a JWE, a PASETO) whose parts include a long opaque run. */
@@ -148,7 +151,7 @@ export function classifyString(name: string, value: string, options: ClassifyOpt
       const part = hasOpaquePart(trimmed);
       if (part !== null) { add(trimmed, "strong"); add(part, "strong"); }
       else if (isLongOpaqueRun(trimmed)) {
-        const mixed = /[a-z]/.test(trimmed) && /[A-Z]/.test(trimmed) || /[+/=]/.test(trimmed);
+        const mixed = /[a-z]/.test(trimmed) && /[A-Z]/.test(trimmed) || /[+=]/.test(trimmed);
         if (!options.leaf || key.credential || (mixed && !PURE_HEX.test(trimmed))) add(trimmed, "strong");
       }
     }

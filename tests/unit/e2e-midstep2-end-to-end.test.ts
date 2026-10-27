@@ -103,7 +103,7 @@ class FakeContext extends EventEmitter implements BrowserContextLike {
   stored: Awaited<ReturnType<BrowserContextLike["storageState"]>> = { cookies: [], origins: [] };
   pageList: Array<EventEmitter & { frames: () => unknown[] }> = [];
   async storageState() { return this.stored; }
-  pages() { return this.pageList.map((page) => ({ frames: () => page.frames() as never })); }
+  pages() { return this.pageList.map((page) => ({ frames: () => page.frames() as never, mainFrame: () => (page.frames() as BrowserFrameLike[])[0]! })); }
   addPage(frames: FakeContext["frames"]): EventEmitter { const page = Object.assign(new EventEmitter(), { frames: () => frames }); this.pageList.push(page); this.emit("page", page); return page; }
 }
 const request = (url: string, headers: Record<string, string>, later: Array<{ name: string; value: string }> = [], delayMs = 20) => ({
@@ -247,10 +247,10 @@ describe("gap 5: session storage and IndexedDB, through the real reader", () => 
     e.source.attach("s2", { storageState: () => readBrowserState(context) }, { anonymous: false });
     expect((await e.workerSays("fine")).status).toBe("ok");
     expect(asked).toBe(0);
-    // A navigating iframe that never answers: skipped (it is given a bounded settle and asked again, three times), the other frame's storage is still read.
+    // A navigating child iframe that never answers: skipped (it is given a bounded settle and asked again, three times); the main frame, read first, still gives its storage.
     let settled = 0;
-    context.addPage([{ url: () => `${E2E_EXECUTOR_COMPILED_ORIGIN}/preview`, evaluate: async () => { asked += 1; throw new Error("Execution context was destroyed"); },
-      waitForLoadState: async () => { settled += 1; } }, sessionFrame([{ name: "msal.idtoken", value: JWT }])]);
+    context.addPage([sessionFrame([{ name: "msal.idtoken", value: JWT }]), { url: () => `${E2E_EXECUTOR_COMPILED_ORIGIN}/preview`, evaluate: async () => { asked += 1; throw new Error("Execution context was destroyed"); },
+      waitForLoadState: async () => { settled += 1; } }]);
     expect((await e.workerSays("still fine")).status).toBe("ok");
     expect(asked).toBe(3);
     expect(settled).toBe(2);

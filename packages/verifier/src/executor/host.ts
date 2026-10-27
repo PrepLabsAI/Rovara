@@ -21,6 +21,7 @@ import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
 import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, createRovaraE2EReplayExecutor } from "./agent-replay.js";
 import { createE2EModelChannelClient } from "./model-channel.js";
 import { createCredentialRedactor } from "./redact.js";
+import { sessionSecretLine } from "./session-secrets-file.js";
 import { createSessionSecretRegistry } from "./session-secret-registry.js";
 import { readBrowserState } from "./browser-state-reader.js";
 import { tellBrowserState } from "./browser-state-secrets.js";
@@ -174,9 +175,9 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const agentRedactor = createCredentialRedactor(plan.accounts);
   // A session value is told to the ledger (so evidence and captures that carry it are caught) and left for the parent (so the text it writes is scrubbed of it). Only a credential is told to the
   // worker and makes a model-bound payload refused; an evidence-only value (a draft, a route) does neither (see session-secret-registry.ts).
-  const registry = createSessionSecretRegistry({ redactor: agentRedactor, onRegister: (value) => {
+  const registry = createSessionSecretRegistry({ redactor: agentRedactor, onRegister: (value, options) => {
     ledger?.registerSessionSecret(value);
-    appendFileSync(join(context.projectDir, E2E_EXECUTOR_SESSION_SECRETS_FILE), `${JSON.stringify(value)}\n`, { mode: 0o600 });
+    appendFileSync(join(context.projectDir, E2E_EXECUTOR_SESSION_SECRETS_FILE), sessionSecretLine(value, options?.evidenceOnly === true), { mode: 0o600 });
   } });
   const { sessionSecrets } = registry;
   const registerSecret = registry.register;

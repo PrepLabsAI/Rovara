@@ -30,14 +30,14 @@ export function registerStorageEntry(register: SessionSecretRegistry["register"]
   for (const item of classifyStorageEntry(entry)) { if (item.tier === "strong") register(item.value); else register(item.value, { evidenceOnly: true }); }
 }
 
-export function createSessionSecretRegistry(input: { redactor: CredentialRedactor; onRegister?: (value: string) => void }): SessionSecretRegistry {
+export function createSessionSecretRegistry(input: { redactor: CredentialRedactor; onRegister?: (value: string, options?: { evidenceOnly?: boolean }) => void }): SessionSecretRegistry {
   const sessionSecrets: string[] = [];
   return {
     sessionSecrets,
     register(value, options = {}): void {
       input.redactor.addSessionSecret(value, options);
       if (options.evidenceOnly !== true && typeof value === "string" && value.length >= 8 && !sessionSecrets.includes(value)) sessionSecrets.push(value);
-      input.onRegister?.(value);
+      input.onRegister?.(value, options);
     },
     modelScan: (bytes) => input.redactor.contains(bytes, "model"),
     evidenceScan: (bytes) => input.redactor.contains(bytes, "all"),

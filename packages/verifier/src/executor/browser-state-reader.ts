@@ -18,7 +18,7 @@ export interface BrowserContextLike<Cookie extends { value: string; httpOnly: bo
     cookies: ReadonlyArray<Cookie>;
     origins: ReadonlyArray<{ origin: string; localStorage: ReadonlyArray<{ name: string; value: string }>; indexedDB?: unknown }>;
   }>;
-  pages(): ReadonlyArray<{ frames(): ReadonlyArray<BrowserFrameLike> }>;
+  pages(): ReadonlyArray<{ frames(): ReadonlyArray<BrowserFrameLike>; mainFrame?: () => BrowserFrameLike }>;
 }
 
 export const SESSION_STORAGE_MAX_ENTRIES = 2_000;
@@ -53,20 +53,28 @@ function isAnswer(value: unknown): value is SessionStorageAnswer {
 
 const FRAME_RETRIES = 3;
 const FRAME_SETTLE_MS = 1_500;
-// Frames that were read once with session storage in them. A frame that cannot be read now but held app state before is a real loss and fails the read; a frame that never held any
-// (a sandboxed or cross-origin iframe, a frame that is still loading) is skipped, because it cannot refuse every model call of the case.
+/** The most one read spends waiting for frames that are navigating, across all frames (many flaky frames must not add up call after call). */
+const READ_SETTLE_BUDGET_MS = 3_000;
+// Frames that were read once with session storage in them. A CHILD frame that cannot be read now but held app state before is a real loss and fails the read; a child frame that never held
+// any (a sandboxed or cross-origin iframe, a frame that is still loading) is skipped, because it cannot refuse every model call of the case. The MAIN frame is never skipped: it carries
+// the app's own token (right after an auth redirect, for one), so when it cannot be read the read fails.
 const heldState = new WeakSet<object>();
 
-/** The frame's session storage, or null for a frame that cannot be read and never held any state. */
-async function readFrameSessionStorage(frame: BrowserFrameLike): Promise<SessionStorageAnswer | null> {
+/** The frame's session storage, or null for a child frame that cannot be read and never held any state. */
+async function readFrameSessionStorage(frame: BrowserFrameLike, main: boolean, budget: { leftMs: number }): Promise<SessionStorageAnswer | null> {
   for (let attempt = 0; attempt < FRAME_RETRIES; attempt += 1) {
     try {
       const answer = await frame.evaluate(READ_SESSION_STORAGE);
       if (isAnswer(answer)) { if (answer.entries.length > 0) heldState.add(frame); return answer; }
     } catch { /* a frame in the middle of a navigation: given a moment, then asked again */ }
-    if (attempt < FRAME_RETRIES - 1) await frame.waitForLoadState?.("domcontentloaded", { timeout: FRAME_SETTLE_MS }).catch(() => undefined);
+    if (attempt < FRAME_RETRIES - 1 && budget.leftMs > 0) {
+      const wait = Math.min(FRAME_SETTLE_MS, budget.leftMs);
+      const started = Date.now();
+      await frame.waitForLoadState?.("domcontentloaded", { timeout: wait }).catch(() => undefined);
+      budget.leftMs -= Math.max(1, Date.now() - started);
+    }
   }
-  if (heldState.has(frame)) throw new BrowserStateCapError("sessionstorage-unreadable");
+  if (main || heldState.has(frame)) throw new BrowserStateCapError("sessionstorage-unreadable");
   return null;
 }
 
@@ -84,13 +92,15 @@ export async function readBrowserState<Cookie extends { value: string; httpOnly:
     origins.set(item.origin, { origin: item.origin, localStorage: [...item.localStorage], sessionStorage: [], ...(item.indexedDB === undefined ? {} : { indexedDB: item.indexedDB }) });
   }
   const urls: string[] = [];
+  const budget = { leftMs: READ_SETTLE_BUDGET_MS };
   for (const page of context.pages()) {
+    const main = page.mainFrame?.();
     for (const frame of page.frames()) {
       const url = frame.url();
       urls.push(url);
       // A blank, data or error frame has no origin of the application's; only an http(s) frame is asked.
       if (!/^https?:\/\//i.test(url)) continue;
-      const answer = await readFrameSessionStorage(frame);
+      const answer = await readFrameSessionStorage(frame, frame === main, budget);
       if (answer === null) continue;
       if (answer.over) throw new BrowserStateCapError("sessionstorage-size");
       const existing = origins.get(answer.origin) ?? { origin: answer.origin, localStorage: [], sessionStorage: [] };
