@@ -284,6 +284,13 @@ describe("the plan page renderer", () => {
     expect(html).toMatch(/<li class="option recommended" data-option="three"><span class="option-label">Three times<\/span> <span class="badge badge-recommended">AgentX recommends/);
   });
 
+  it("says \"Show 1 more decision\" in the singular for one decision beyond the five shown (SHOWMORE)", async () => {
+    const plan = planDocument({ claims: claims(6), decisions: [1, 2, 3, 4, 5, 6].map((index) => decision(index, String(index))) });
+    const html = await renderPlanDocument(input({ plan }));
+    expect(html).toContain("<summary>Show 1 more decision</summary>");
+    expect(html).not.toContain("1 more decisions");
+  });
+
   it("shows five decisions in their claims and lists the rest with links to their claims", async () => {
     const plan = planDocument({ claims: claims(7), decisions: [1, 2, 3, 4, 5, 6, 7].map((index) => decision(index, String(index))) });
     const html = await renderPlanDocument(input({ plan }));
