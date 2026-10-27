@@ -64,6 +64,12 @@ describe("tiers (gap 2)", () => {
       expect(tierOf(classifyString(name, value), value), `${name}=${value}`).toBe("strong");
     }
     expect(tierOf(classifyString("sessionStart", "2026-10-27T09:15:00.000Z"), "2026-10-27T09:15:00.000Z")).toBe("weak");
+    // R4-5: each metadata word of the "when" family is pinned on its own (removing `end`/`ended` or `created`/`updated`/`modified` from the list turns these dates strong).
+    for (const name of ["sessionEnd", "sessionEnded", "tokenCreated", "sessionUpdated", "authModified"]) {
+      expect(tierOf(classifyString(name, "2026-10-27T09:15:00.000Z"), "2026-10-27T09:15:00.000Z"), name).toBe("weak");
+      expect(credentialKey(name).credential, name).toBe(false);
+    }
+    for (const name of ["sessionEnd", "sessionEnded"]) expect(credentialKey(name).loose, name).toBe(true);
     // A UUID kept as a session id IS a credential: the key says so.
     expect(tierOf(classifyString("sessionId", uuid), uuid)).toBe("strong");
   });

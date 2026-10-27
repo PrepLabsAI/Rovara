@@ -16,10 +16,9 @@ import { createRovaraE2EAgentExecutor } from "./agent-executor.js";
 import { createHostAgentCaptureStore } from "./host-capture-store.js";
 import type { E2EAgentLedgerWriter } from "./agent-ledger.js";
 import { createE2EAgentStepDriver } from "./agent-step-driver.js";
-import { createE2EAgentModelAdapter } from "./agent-model-adapter.js";
+import { createHostModelStack } from "./host-model-stack.js";
 import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
 import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, createRovaraE2EReplayExecutor } from "./agent-replay.js";
-import { createE2EModelChannelClient } from "./model-channel.js";
 import { createCredentialRedactor } from "./redact.js";
 import { sessionSecretLine } from "./session-secrets-file.js";
 import { createSessionSecretRegistry } from "./session-secret-registry.js";
@@ -200,10 +199,9 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const replayPlan = plan.replay;
   if (channelPlan !== undefined || replayPlan !== undefined) installRefusingE2EDefaultProvider();
   const agent = channelPlan === undefined ? null : (() => {
-    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, sessionSync, scan: registry.modelScan });
     const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
-    // The adapter's own scan is the executor's second check; the worker's scan is told the browser's session values before every call by the client's sync (MIDSTEPCOOKIE).
-    const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position, scan: registry.modelScan });
+    // The channel client and the adapter, with the registry's credential scan and its mask of evidence-only values (MASKMAYBE); see host-model-stack.ts.
+    const { client, adapter } = createHostModelStack({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, routeId: channelPlan.routeId, registry, sessionSync, position: () => current.position });
     // The goals of the steps run so far: a trace's typed value that is text of one stays as it is, the ledger's rule (the runner writes a trace after its step has ended).
     const goals: string[] = [];
     const origin = declaration.originByApplicationId.find((item) => item.applicationId === launchContext.selectedTarget.applicationId)?.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN;

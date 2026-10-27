@@ -8,7 +8,7 @@ import { createE2ESessionSyncSource, type E2ESessionSyncSource } from "../../pac
 import { startE2EModelProxy, type E2EModelEvidenceSink, type E2EModelProxy } from "../../packages/worker/src/e2e-model-proxy.js";
 import { CASE_ID, RUN_ID, bedrockRoute, call, tapAnswer } from "./e2e-model-fixtures.js";
 
-/** The MIDSTEP-2 tests' shared stack: the real worker proxy, the real executor redactor, registry and session source, and two real channel clients (with and without the executor's scan). */
+/** The MIDSTEP-2 tests' shared stack: the real worker proxy, the real executor redactor, registry and session source, and two real channel clients (with the executor's scan and mask, and without either). */
 export const MIDSTEP2_POSITION = { caseId: CASE_ID, stepIndex: 0 };
 
 class Sink implements E2EModelEvidenceSink { writeReceipt() { /* not needed */ } writeTranscript() { /* not needed */ } }
@@ -46,7 +46,7 @@ export function createMidstep2Harness(input: { dir: () => string; closers: Array
     const source = createE2ESessionSyncSource({ register: registry.register, known: () => registry.sessionSecrets });
     const state: { current: BrowserSecretState } = { current: { cookies: [], origins: [] } };
     source.attach("s1", { storageState: async () => state.current }, { anonymous: false });
-    const scanning = createE2EModelChannelClient({ socketPath: run.socketPath, runId: RUN_ID, sessionSync: source, scan: registry.modelScan });
+    const scanning = createE2EModelChannelClient({ socketPath: run.socketPath, runId: RUN_ID, sessionSync: source, scan: registry.modelScan, mask: registry.maskForModel });
     const workerOnly = createE2EModelChannelClient({ socketPath: run.socketPath, runId: RUN_ID, sessionSync: source });
     await workerOnly.beginStep(MIDSTEP2_POSITION);
     let index = 0;

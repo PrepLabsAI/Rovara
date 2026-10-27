@@ -89,6 +89,32 @@ function isLongOpaqueRun(value: string): boolean {
   return !value.includes("/") || (/[a-z]/.test(value) && /[A-Z]/.test(value) && !isPathLike(value));
 }
 
+/** A host name (`login.example.com`, `auth.internal:8443`): never a credential, but shown on pages. */
+const HOST_LIKE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:\d{2,5})?$/i;
+
+/** The share of the letters of a random-looking token that sit in a word-sized piece: 3 or more lower-case letters (with at most one capital before them) or a run of capitals. */
+function wordLetterShare(value: string): number {
+  const letters = value.replace(/[^A-Za-z]/g, "").length;
+  if (letters === 0) return 0;
+  const inWords = (value.match(/[A-Z]?[a-z]{3,}|[A-Z]{3,}(?![a-z])/g) ?? []).reduce((total, piece) => total + piece.length, 0);
+  return inWords / letters;
+}
+/** Words in a camel-case or title-case identifier are most of its letters; in random letters about 40% are (95% of them below 0.73). Between the two lies this line (measured in the tests). */
+const RANDOM_WORD_SHARE_BELOW = 0.72;
+/** English is about 38% vowels; random base64 letters are 19% (10 of 52), most 24-byte samples are below this line. */
+const RANDOM_VOWEL_SHARE_BELOW = 0.34;
+/**
+ * A random-looking token with no digit in it (MIDSTEP-2 MASKMAYBE, R4-3): 20 characters or more of letters in both cases, with at most `+ / - _ =` between them. A letter-and-digit run is an
+ * opaque token and is judged elsewhere; this is the digit-less rest (about 0.5% of 24-byte base64 tokens, 0.07% of 32-byte ones). It is never an ordinary word, a slug, a path, a URL, a host or an
+ * email: those are not weak (that was B-1: ordinary values must not corrupt reports or fail runs).
+ */
+export function isDigitlessRandomToken(value: string): boolean {
+  if (value.length < 20 || value.length > 4_096 || !/^[A-Za-z+/_=-]+$/.test(value) || !/[a-z]/.test(value) || !/[A-Z]/.test(value)) return false;
+  if (URL_LIKE.test(value) || isSlugOrPath(value) || isPathLike(value) || HOST_LIKE.test(value) || /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(value)) return false;
+  const letters = value.replace(/[^A-Za-z]/g, "");
+  return wordLetterShare(value) < RANDOM_WORD_SHARE_BELOW && letters.replace(/[^aeiouAEIOU]/g, "").length / letters.length < RANDOM_VOWEL_SHARE_BELOW;
+}
+
 /** A token with dots, pipes or colons in it (a Sanctum `12|abcd...`, a JWE, a PASETO) whose parts include a long opaque run. */
 function hasOpaquePart(value: string): string | null {
   if (!/[.|:]/.test(value)) return null;
@@ -108,7 +134,9 @@ const STRONGEST_WORDS = new Set(["token", "tokens", "jwt", "secret", "secrets", 
 /** After a credential word, these say the value is about the credential, not the credential itself (`tokenType`, `authUser`, `sessionExpiresAt`). */
 const METADATA_WORDS = new Set(["user", "username", "email", "name", "at", "time", "timestamp", "date", "expires", "expiry", "expiration", "expired", "exp", "ttl", "timeout", "url", "uri", "path",
   "redirect", "return", "route", "callback", "enabled", "disabled", "type", "status", "provider", "method", "count", "length", "version", "mode", "flag", "flags", "kind", "required", "valid",
-  "error", "message", "label", "title", "text", "hint", "domain", "scope", "scopes", "policy", "config", "settings", "consent", "preference", "preferences", "prefs", "banner", "notice", "dismissed", "start", "started", "end", "ended", "created", "updated", "modified"]);
+  "error", "message", "label", "title", "text", "hint", "domain", "scope", "scopes", "policy", "config", "settings", "consent", "preference", "preferences", "prefs", "banner", "notice", "dismissed", "start", "started", "end", "ended", "created", "updated", "modified",
+  // Where a thing lives or when it happened, not the thing (`tokenEndpoint`, `authHost`, `authIssuer`, `sessionLastActive`, `tokenIssued`): MIDSTEP-2 MASKMAYBE.
+  "endpoint", "endpoints", "host", "hostname", "issuer", "issued", "server", "page", "link", "region", "seen", "active", "opened", "closed", "last", "origin", "referrer", "referer", "next"]);
 /** Anywhere in the key, these say the value is a route (`redirectAfterAuth`, `returnTo`, `next`). */
 const ROUTE_WORDS = new Set(["redirect", "return", "returnto", "callback", "next", "referrer", "referer", "origin"]);
 
@@ -117,22 +145,28 @@ export function keyWords(name: string): string[] {
   return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length > 0);
 }
 
-/** Whether a key names a credential: `strongest` when its word is one a short value can sit under. */
-export function credentialKey(name: string): { credential: boolean; strongest: boolean } {
+/**
+ * Whether a key names a credential: `strongest` when its word is one a short value can sit under. `loose` is a key that only SOUNDS secret: a credential word followed by a metadata word
+ * (`tokenEndpoint`, `authHost`, `sessionLastActive`, `tokenIssued`, `sessionExpiresAt`). It is not a credential, but a date, URL, path, host or email under it is registered weak (masked from the model).
+ * A clear secret word (token, secret, password, jwt, api key, bearer, ...) always wins over a route word (`callbackToken`, `nextToken`, `next-auth.session-token`); a route word beats only the looser words
+ * (`redirectAfterAuth`, `returnTo`).
+ */
+export function credentialKey(name: string): { credential: boolean; strongest: boolean; loose: boolean } {
   const words = keyWords(name);
-  if (words.some((word) => ROUTE_WORDS.has(word))) return { credential: false, strongest: false };
   let credential = false;
   let strongest = false;
+  let loose = false;
   for (let index = 0; index < words.length; index += 1) {
     const word = words[index]!;
     // "api key" and "access key" are two words.
     const bigram = (word === "api" || word === "access" || word === "private" || word === "secret") && words[index + 1] === "key";
     if (!CREDENTIAL_WORDS.has(word) && !bigram) continue;
-    if (words.slice(index + 1).some((later) => METADATA_WORDS.has(later))) continue;
+    if (words.slice(index + 1).some((later) => METADATA_WORDS.has(later))) { loose = true; continue; }
     credential = true;
     if (STRONGEST_WORDS.has(word) || bigram) strongest = true;
   }
-  return { credential, strongest };
+  if (!strongest && words.some((word) => ROUTE_WORDS.has(word))) return { credential: false, strongest: false, loose: false };
+  return { credential, strongest, loose: loose && !credential };
 }
 
 export interface ClassifyOptions {
@@ -184,8 +218,10 @@ export function classifyString(name: string, value: string, options: ClassifyOpt
       if (trimmed.length >= floor) add(trimmed, "strong");
     }
   }
+  // A name that only sounds secret (`tokenEndpoint`, `sessionLastActive`) holding a date, URL, path, host or email: weak, whatever the position (it is shown on pages, so never refused; masked from the model).
+  const shapedUnderLooseKey = key.loose && noSpace && trimmed.length >= MIN_WEAK_LENGTH && (isRouteOrDate(trimmed) || HOST_LIKE.test(trimmed));
   // Everything else that is long enough, or short under a credential key, is app data that may be secret: scrubbed, not refused.
-  const weakAllowed = options.leaf !== true || key.credential
+  const weakAllowed = options.leaf !== true || key.credential || shapedUnderLooseKey || (noSpace && isDigitlessRandomToken(trimmed))
     || (isOpaqueToken(trimmed) && trimmed.length >= MIN_WEAK_LENGTH && !PURE_HEX.test(trimmed) && !UUID.test(trimmed));
   if (weakAllowed && !found.has(trimmed) && (trimmed.length >= MIN_WEAK_LENGTH || (key.credential && trimmed.length >= MIN_CREDENTIAL_LENGTH))) add(trimmed, "weak");
   if (weakAllowed && trimmed !== value && !found.has(value) && value.length >= MIN_WEAK_LENGTH) add(value, "weak");

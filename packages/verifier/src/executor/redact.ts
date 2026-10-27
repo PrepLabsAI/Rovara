@@ -37,6 +37,11 @@ export type CredentialRedactor = Readonly<{
    * registered evidence-only.
    */
   contains(bytes: Uint8Array, scope?: "accounts" | "all" | "model"): boolean;
+  /**
+   * Replaces every registered EVIDENCE-ONLY (weak) session value in text with `<session>`, and nothing else: accounts and credentials are left as they are, so a model-bound payload that shows one is still
+   * refused by `contains(..., "model")`. This is what the model is shown instead of a weak value (MIDSTEP-2 MASKMAYBE).
+   */
+  maskEvidenceOnly(value: string): string;
   /** Registers a secret the run created (the session cookie) so `text` redacts it and `contains` finds it. It never throws: a short or odd value is still redacted. */
   addSessionSecret(value: string, options?: { evidenceOnly?: boolean }): void;
 }>;
@@ -60,6 +65,11 @@ export function createCredentialRedactor(accounts: readonly E2EExecutorAccount[]
     text(value: string): string {
       let result = value;
       for (const rule of ordered()) result = result.split(rule.form).join(rule.label);
+      return result;
+    },
+    maskEvidenceOnly(value: string): string {
+      let result = value;
+      for (const rule of ordered()) if (rule.session && !rule.model) result = result.split(rule.form).join(rule.label);
       return result;
     },
     contains(bytes: Uint8Array, scope: "accounts" | "all" | "model" = "all"): boolean {

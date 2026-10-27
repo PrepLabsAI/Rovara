@@ -196,7 +196,10 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
 
   it("the host wires its two model-bound scans (the channel client, the model adapter) to the registry's model scan, and what it writes (the capture store) to the all-scope evidence scan (MIDSTEP-2 fix round 1)", () => {
     const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
-    expect(host.match(/scan: registry\.modelScan/g)).toHaveLength(2);
+    // The two model-bound scans (and the weak-value mask) moved into host-model-stack.ts (MASKMAYBE); its behaviour is pinned in e2e-midstep2-maskmaybe.test.ts.
+    const stack = readFileSync(new URL("../../packages/verifier/src/executor/host-model-stack.ts", import.meta.url), "utf8");
+    expect(stack.match(/scan: input\.registry\.modelScan/g)).toHaveLength(2);
+    expect(host).toContain("createHostModelStack({");
     expect(host).toContain("createHostAgentCaptureStore({ registry,");
     expect(host).not.toMatch(/createE2EAgentCaptureStore\(/);
     expect(host).not.toMatch(/agentRedactor\.contains\(/);

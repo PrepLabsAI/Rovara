@@ -7,7 +7,8 @@ import { classifyStorageEntry } from "./storage-entry-classifier.js";
  * - A CREDENTIAL (a cookie value, a token) is told to the redactor as a session secret, kept in `sessionSecrets` (what the worker is told: the begin marker and the sync), and
  *   makes any model-bound payload that shows it refused (`modelScan`).
  * - An `evidenceOnly` value (a draft, a route, a cache the app left in storage) is scrubbed from what the executor writes and refused in evidence, but it is neither told to the worker nor
- *   does it make a model-bound payload refused: the worker refuses a call that shows a value it was told, so the executor's own check must agree with it.
+ *   does it make a model-bound payload refused: the worker refuses a call that shows a value it was told, so the executor's own check must agree with it. The model never sees it either:
+ *   `maskForModel` replaces it with `<session>` in every model-bound payload (MASKMAYBE).
  */
 export interface SessionSecretRegistry {
   readonly register: (value: string, options?: { evidenceOnly?: boolean }) => void;
@@ -20,6 +21,11 @@ export interface SessionSecretRegistry {
    * that is allowed in a model prompt can never reach the out directory and end the run `credential-leak` at the final scan.
    */
   readonly evidenceScan: (bytes: Uint8Array) => boolean;
+  /**
+   * What the model is shown instead of an evidence-only (weak) value: the text with each such value replaced by `<session>` (the evidence scrub's placeholder). A credential is NOT replaced here;
+   * it is refused by `modelScan`. Every model-bound payload passes through this before the scans (`model-channel.ts`).
+   */
+  readonly maskForModel: (text: string) => string;
 }
 
 /**
@@ -41,5 +47,6 @@ export function createSessionSecretRegistry(input: { redactor: CredentialRedacto
     },
     modelScan: (bytes) => input.redactor.contains(bytes, "model"),
     evidenceScan: (bytes) => input.redactor.contains(bytes, "all"),
+    maskForModel: (text) => input.redactor.maskEvidenceOnly(text),
   };
 }

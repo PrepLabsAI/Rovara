@@ -669,14 +669,17 @@ describe("the executor's channel client syncs before every call", () => {
     const mention = (pattern: RegExp) => files.filter((file) => pattern.test(readFileSync(file, "utf8"))).map((file) => file.slice(root.length + 1)).sort();
     expect(mention(/E2E_MODEL_CHANNEL_GENERATE_PATH|["'`]\/v1\/generate["'`]/)).toEqual(["executor/model-channel.ts"]);
     expect(mention(/\bclient\.generate\(|options\.client\.generate\(/)).toEqual(["executor/agent-model-adapter.ts"]);
-    expect(mention(/createE2EModelChannelClient\(/)).toEqual(["executor/host.ts", "executor/model-channel.ts"]);
+    // The host builds its one client through `createHostModelStack` (MASKMAYBE), the only code that does.
+    expect(mention(/createE2EModelChannelClient\(/)).toEqual(["executor/host-model-stack.ts", "executor/model-channel.ts"]);
+    expect(mention(/createHostModelStack\(/)).toEqual(["executor/host-model-stack.ts", "executor/host.ts"]);
     expect(mention(/E2E_MODEL_CHANNEL_SYNC_PATH/)).toEqual(["executor/model-channel.ts"]);
     // `sessionSync` is required by the client's options type: a client cannot be built without it.
     // @ts-expect-error sessionSync is required
     const missing: Parameters<typeof createE2EModelChannelClient>[0] = { socketPath: "/x", runId: RUN_ID };
     void missing;
     // The host builds its one client with the browser-backed source.
-    expect(readFileSync(join(root, "executor/host.ts"), "utf8")).toMatch(/createE2EModelChannelClient\(\{[^}]*sessionSync, scan:/);
+    expect(readFileSync(join(root, "executor/host-model-stack.ts"), "utf8")).toMatch(/createE2EModelChannelClient\(\{[^}]*sessionSync: input\.sessionSync, scan:/);
+    expect(readFileSync(join(root, "executor/host.ts"), "utf8")).toMatch(/createHostModelStack\(\{[^}]*registry, sessionSync,/);
   });
 });
 
