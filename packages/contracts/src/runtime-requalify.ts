@@ -28,7 +28,7 @@ export const REQUALIFY_TAGS = {
 export const REQUALIFY_REASON_CODES = [
   "launch-failed", "not-ready", "qualification-failed", "drain-timeout", "retire-failed", "cost-guard",
   "wrong-profile", "binding-mismatch", "endpoint-not-managed-instance", "generation-not-next", "challenge-not-requalifier",
-  "lock-not-held", "runner-pointer-invalid", "runner-changed", "invalid-input",
+  "lock-not-held", "runner-pointer-invalid", "runner-changed", "invalid-input", "legacy-run-state",
 ] as const;
 export type RequalifyReasonCode = (typeof REQUALIFY_REASON_CODES)[number];
 export const RequalifyReasonCodeSchema = z.enum(REQUALIFY_REASON_CODES);

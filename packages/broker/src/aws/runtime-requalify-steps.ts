@@ -20,6 +20,7 @@ import {
 } from "@agentx/contracts";
 import { e2eModelCheckRunnerKey } from "../e2e/model-route-registry.js";
 import { e2eRegisteredRuntimeKey } from "./e2e-runtime-readiness.js";
+import { assertRunStateIsCurrent, bootIdentityOf } from "./runtime-requalify-state.js";
 import { issueRequalifyChallenge, nextGeneration, registerRequalifiedRuntime, type RequalifyDependencies } from "./runtime-requalify.js";
 import { acquireRequalifyLock, releaseRequalifyLock } from "./runtime-requalify-lock.js";
 import { dailyHeartbeat, recordRenewalSuccess } from "./runtime-requalify-heartbeat.js";
@@ -100,7 +101,8 @@ const StateSchema = z.looseObject({
   preflight: z.object({ settingsDigest: z.string().regex(/^[a-f0-9]{64}$/), workerRoleId: Role, refused: z.literal("cost-guard").optional() }).optional(),
   ami: z.object({ amiId: z.string().regex(AL2023_AMI) }).optional(),
   volume: z.object({ volumeId: z.string().regex(/^vol-[0-9a-f]{8,17}$/), deadlineAt: Iso, status: Poll.optional() }).optional(),
-  instance: z.object({ instanceId: Instance, workspaceId: z.string().uuid(), generation: z.number().int().positive(), attachDeadlineAt: Iso, readyDeadlineAt: Iso, attachStatus: Poll.optional(), readyStatus: Poll.optional() }).optional(),
+  // workspaceId and generation are absent in a run the previous code started (see runtime-requalify-state.ts): the state must still parse so the failure path can run.
+  instance: z.object({ instanceId: Instance, workspaceId: z.string().uuid().optional(), generation: z.number().int().positive().optional(), attachDeadlineAt: Iso, readyDeadlineAt: Iso, attachStatus: Poll.optional(), readyStatus: Poll.optional() }).optional(),
   challenge: z.object({ challengeId: z.string().uuid(), expiresAt: Iso, generation: z.number().int().positive(), transportCorrelationId: z.string().uuid(), qualifyDeadlineAt: Iso, drainDeadlineAt: Iso }).optional(),
   qualification: z.object({ status: Poll, failure: z.array(z.string()).max(16).optional() }).optional(),
   drain: z.object({ status: Poll.optional() }).optional(),
@@ -119,6 +121,9 @@ const ActionSchema = z.object({
   force: z.boolean().optional(),
 }).strict();
 
+/** The steps that carry a launched runner towards the switch: a run whose state predates the workspace id and generation is refused here, cleanly. */
+const CONTINUING_ACTIONS: ReadonlySet<string> = new Set(["attachVolume", "awaitReady", "issueChallenge", "awaitQualification", "putHold", "awaitDrain"]);
+
 const nowOf = (deps: RequalifyStepsDependencies): number => deps.now?.() ?? Date.now();
 const iso = (ms: number): string => new Date(ms).toISOString();
 
@@ -126,6 +131,7 @@ export async function runRequalifyAction(deps: RequalifyStepsDependencies, event
   const { action, state: rawState, force } = ActionSchema.parse(event);
   if (action === "due") return dueAction(deps, force === true);
   const state = StateSchema.parse(rawState);
+  if (CONTINUING_ACTIONS.has(action)) assertRunStateIsCurrent(state);
   const out = await perform(deps, action, state);
   return { ...state, ...out };
 }
@@ -404,7 +410,7 @@ async function awaitReady(deps: RequalifyStepsDependencies, state: RequalifyStat
 
 async function issueChallenge(deps: RequalifyStepsDependencies, state: RequalifyState): Promise<NonNullable<RequalifyState["challenge"]>> {
   const instance = need(state.instance, "instance");
-  const issued = await issueRequalifyChallenge(deps, { runId: state.runId, instanceId: instance.instanceId, roleId: need(state.preflight, "preflight").workerRoleId, workspaceId: instance.workspaceId, generation: instance.generation });
+  const issued = await issueRequalifyChallenge(deps, { runId: state.runId, instanceId: instance.instanceId, roleId: need(state.preflight, "preflight").workerRoleId, ...bootIdentityOf(instance) });
   const expires = Date.parse(issued.expiresAt);
   return {
     challengeId: issued.challengeId, expiresAt: issued.expiresAt, generation: issued.generation, transportCorrelationId: issued.transportCorrelationId,
