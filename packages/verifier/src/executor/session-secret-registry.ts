@@ -1,6 +1,5 @@
-import { isSessionStorageSecret } from "./form-login.js";
 import type { CredentialRedactor } from "./redact.js";
-import { isSessionStorageCredential } from "./session-storage-secret.js";
+import { classifyStorageEntry } from "./storage-entry-classifier.js";
 
 /**
  * The executor's register of session values (MIDSTEPCOOKIE): what each value is told to, by whether it is a credential.
@@ -19,12 +18,11 @@ export interface SessionSecretRegistry {
 }
 
 /**
- * Registers one local storage entry the way sign-in and the mid-step sync classify it: a credential (key and value, `isSessionStorageCredential`) is a session secret; any other long value is
- * evidence-only; a short or common one is not registered. Used where the case's browser state is read when the case closes.
+ * Registers one storage entry the way sign-in and the mid-step sync classify it (`classifyStorageEntry`): a credential (key and value, JSON leaves included) is a session secret; any other long value
+ * is evidence-only; a short or common one is not registered.
  */
 export function registerStorageEntry(register: SessionSecretRegistry["register"], entry: { name: string; value: string }): void {
-  if (isSessionStorageCredential(entry)) register(entry.value);
-  else if (isSessionStorageSecret(entry.value)) register(entry.value, { evidenceOnly: true });
+  for (const item of classifyStorageEntry(entry)) { if (item.tier === "strong") register(item.value); else register(item.value, { evidenceOnly: true }); }
 }
 
 export function createSessionSecretRegistry(input: { redactor: CredentialRedactor; onRegister?: (value: string) => void }): SessionSecretRegistry {

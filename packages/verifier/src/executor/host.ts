@@ -21,7 +21,10 @@ import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
 import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, createRovaraE2EReplayExecutor } from "./agent-replay.js";
 import { createE2EModelChannelClient } from "./model-channel.js";
 import { createCredentialRedactor } from "./redact.js";
-import { createSessionSecretRegistry, registerStorageEntry } from "./session-secret-registry.js";
+import { createSessionSecretRegistry } from "./session-secret-registry.js";
+import { readBrowserState } from "./browser-state-reader.js";
+import { tellBrowserState } from "./browser-state-secrets.js";
+import { watchBrowserRequests } from "./request-capture.js";
 import { createE2ESessionSyncSource } from "./session-sync.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
 import { createPlaywrightFormLoginDriver, isSessionCookieSecret, parseSetCookie } from "./form-login.js";
@@ -244,9 +247,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       // The signed-out visitor has no credential, and what an application sets for a visitor (a visitor id, a cart) is not a secret: nothing of it is registered.
       if (owned && !store.isAnonymous(sessionRef)) {
         try {
-          const kept = await owned.storageState();
-          for (const cookie of kept.cookies) if (isSessionCookieSecret(cookie)) registerSecret(cookie.value);
-          for (const item of kept.origins) for (const entry of item.localStorage) registerStorageEntry(registerSecret, entry);
+          // The same read and the same classifier as the sync: cookies, local and session storage, IndexedDB, frame URLs (MIDSTEP-2).
+          tellBrowserState(await readBrowserState(owned), (item) => sessionSync.learn([item]));
         } catch { /* the context is gone */ }
       }
       const result = await store.close(sessionRef, signal);
@@ -304,7 +306,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         ownedContexts.set(sessionRef, browserContext);
         // A session cookie the application swaps in while the case runs is registered when its answer arrives.
         const anonymous = store.isAnonymous(sessionRef);
-        sessionSync.attach(sessionRef, browserContext, { anonymous });
+        sessionSync.attach(sessionRef, { storageState: () => readBrowserState(browserContext) }, { anonymous });
+        if (!anonymous) watchBrowserRequests(browserContext, { learn: (items) => sessionSync.learn(items), track: (pending) => sessionSync.track(pending) });
         browserContext.on("response", (response) => {
           if (anonymous) return;
           sessionSync.track(response.headersArray().then((headers) => {

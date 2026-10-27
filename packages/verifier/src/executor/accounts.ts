@@ -4,8 +4,9 @@ import { E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_ANONYMOUS_SESSION_REF_PREFIX, E2E
 import type { E2EApplicationOwnedSubject } from "../application-result-adapter.js";
 import type { E2EApiRuntimeResponse } from "../api-runtime.js";
 import type { ExecutorSessionFacts } from "./case-ledger.js";
-import { isSessionStorageCredential } from "./session-storage-secret.js";
-import { FormLoginError, isSessionCookieSecret, isSessionStorageSecret, parseSetCookie, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
+import { tellBrowserState } from "./browser-state-secrets.js";
+import type { ClassifiedValue } from "./credential-classifier.js";
+import { FormLoginError, isSessionCookieSecret, parseSetCookie, type FormLoginDriver, type FormLoginStorageState, type FormRequestContext, type StorageCookie } from "./form-login.js";
 import { resolveE2EExecutorSuite } from "./suite.js";
 
 const MAX_BODY_BYTES = 1_048_576;
@@ -205,15 +206,12 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     const operation = bounded(signal);
     let requests: FormRequestContext | null = null;
     try {
-      const signedIn = await formLogin.signIn({ origin, login, email: account.email, password: account.password, signal: operation });
+      const learn = (item: ClassifiedValue): void => registerOnce(item.value, item.tier === "weak" ? { evidenceOnly: true } : {});
+      const signedIn = await formLogin.signIn({ origin, login, email: account.email, password: account.password, signal: operation, observe: (items) => { for (const item of items) learn(item); } });
       // Told before anything else is done with them, so a failure further on cannot leave a cookie the executor does not know to scrub. Only what looks like a secret: a consent flag is not.
-      for (const cookie of signedIn.state.cookies) if (isSessionCookieSecret(cookie)) registerOnce(cookie.value);
-      // The same classifier as the mid-step sync (key and value): a credential is told to the worker; other long values (a draft, a route, a cache) are only scrubbed from what the executor writes,
-      // because the worker refuses a call whose prompt shows a value it was told.
-      for (const item of signedIn.state.origins) for (const entry of item.localStorage) {
-        if (isSessionStorageCredential(entry)) registerOnce(entry.value);
-        else if (isSessionStorageSecret(entry.value)) registerOnce(entry.value, { evidenceOnly: true });
-      }
+      // The same read and classifier as the mid-step sync (`tellBrowserState`: cookies, local and session storage, IndexedDB, URLs; key and value, JSON leaves): a credential is told to the worker; other
+      // long values (a draft, a route, a cache) are only scrubbed from what the executor writes, because the worker refuses a call whose prompt shows a value it was told.
+      tellBrowserState(signedIn.state, learn);
       requests = await formLogin.requestContext({ origin, state: signedIn.state });
       const meResponse = await requests.request({ method: "GET", path: "/api/me", signal: operation });
       const me = parseJsonObject(meResponse.body, "identity response");

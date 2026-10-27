@@ -214,9 +214,9 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
     expect(redactor.contains(Buffer.from("dark"), "all")).toBe(false);
   });
 
-  it("the host registers the storage it reads at case close through that classifier, not as evidence-only wholesale", () => {
+  it("the host registers what it reads at case close through the classifier (the sync's read and tier), not as evidence-only wholesale", () => {
     const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
-    expect(host).toMatch(/registerStorageEntry\(registerSecret, entry\)/);
+    expect(host).toMatch(/tellBrowserState\(await readBrowserState\(owned\), \(item\) => sessionSync\.learn\(\[item\]\)\)/);
     expect(host).not.toMatch(/evidenceOnly: true/);
   });
 

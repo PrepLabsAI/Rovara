@@ -126,7 +126,8 @@ function fakeBrowser(port: number, onResponse: (setCookies: string[]) => void) {
 /** The executor's side, wired the way the host wires it: registered session values, the source, the response listener, the client. */
 function executorFor(port: number, options: { learnFromBrowser?: boolean } = {}) {
   const sessionSecrets: string[] = [];
-  const register = (value: string) => { if (value.length >= 8 && !sessionSecrets.includes(value)) sessionSecrets.push(value); };
+  // As the host's registry does: an evidence-only value is scrubbed, but not told to the worker.
+  const register = (value: string, options?: { evidenceOnly?: boolean }) => { if (options?.evidenceOnly !== true && value.length >= 8 && !sessionSecrets.includes(value)) sessionSecrets.push(value); };
   const source = createE2ESessionSyncSource({ register, known: () => sessionSecrets });
   const browser = fakeBrowser(port, (setCookies) => {
     source.track(new Promise<void>((resolve) => setTimeout(() => {
@@ -432,7 +433,8 @@ describe("the executor's session source reads the browser before each sync", () 
 
   it("registers cookies and local storage credentials and leaves short, common and ordinary-data values alone, once each", async () => {
     const registered: string[] = [];
-    const source = createE2ESessionSyncSource({ register: (value) => registered.push(value), known: () => registered });
+    const evidenceOnly: string[] = [];
+    const source = createE2ESessionSyncSource({ register: (value, options) => { if (options?.evidenceOnly === true) evidenceOnly.push(value); else registered.push(value); }, known: () => registered });
     source.attach("s1", reader({
       cookies: [{ value: "1", httpOnly: false }, { value: "true", httpOnly: false }, { value: "en-US", httpOnly: true }, { value: "a-long-session-cookie-value", httpOnly: false }, { value: "abc12345", httpOnly: true }],
       origins: [{ localStorage: [
@@ -446,6 +448,8 @@ describe("the executor's session source reads the browser before each sync", () 
     expect(await source.read()).toEqual(["a-long-session-cookie-value", "abc12345", "a-long-local-storage-access-token"]);
     await source.read();
     expect(registered).toHaveLength(3);
+    // The ordinary app data is scrubbed (weak), once each, and never told to the worker; `accepted` and the short cookies are not registered at all.
+    expect(evidenceOnly).toEqual(["Quarterly report for ACME", "https://app.example.com/settings?tab=billing", "{\"newCheckout\": true, \"darkMode\": false, \"beta\": \"yes please\"}"]);
   });
 
   it("tells a credential in local storage from app data by its value and its key", () => {

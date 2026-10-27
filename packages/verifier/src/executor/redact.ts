@@ -1,29 +1,12 @@
-import { e2eScannableEmailLocalPart, type E2EExecutorAccount } from "@agentx/contracts";
+import { e2eScannableEmailLocalPart, e2eSecretSpellings, type E2EExecutorAccount } from "@agentx/contracts";
 
 /**
- * Pieces of the base64 (and base64url) text of `value` that stay the same wherever the value sits in a longer encoded string. Base64 groups three bytes into four
- * characters, so a secret inside a longer string is spelled differently for each of the three alignments, and only its inner characters are the same whatever bytes
- * come before and after it. Without the shifted forms, a credential in a `Basic` header or a JWT payload is missed two times in three.
+ * Every spelling of a secret that an HTTP client, a JSON encoder, a URL builder or a base64, base64url or hex field could leave in an output file or a model prompt. It is the contracts'
+ * one builder, the same the worker's model-channel scan uses (raw, JSON-escaped, percent-encoded once and twice, base64 and base64url at any alignment, hex), so the executor's scan and the
+ * worker's cannot disagree about what a spelling of a secret is (MIDSTEP-2). Longest first, so a text replacement takes the longest form.
  */
-function base64Fragments(value: string): string[] {
-  const data = Buffer.from(value, "utf8");
-  const forms = new Set<string>();
-  for (let shift = 0; shift < 3; shift += 1) {
-    const encoded = Buffer.concat([Buffer.alloc(shift), data]).toString("base64").replace(/=+$/, "");
-    // The characters the unknown bytes before the value touch, and the one the unknown bytes after it may touch, are left out.
-    const head = Math.ceil((shift * 8) / 6);
-    const tail = (shift + data.byteLength) % 3 === 0 ? 0 : 1;
-    const core = encoded.slice(head, encoded.length - tail);
-    if (core.length >= 6) { forms.add(core); forms.add(core.replace(/\+/g, "-").replace(/\//g, "_")); }
-  }
-  return [...forms];
-}
-
-/** Every spelling of a secret that an HTTP client, a JSON encoder, a URL builder or a base64 or base64url field could leave in an output file. */
 function spellings(value: string): string[] {
-  const forms = new Set<string>([value, JSON.stringify(value).slice(1, -1), encodeURIComponent(value),
-    Buffer.from(value, "utf8").toString("base64"), ...base64Fragments(value)]);
-  return [...forms].filter((form) => form.length > 0).sort((a, b) => b.length - a.length);
+  return e2eSecretSpellings(value).sort((a, b) => b.length - a.length);
 }
 
 const WRAP_GAP = /(?<=[A-Za-z0-9+/_=-])[\r\n\t ]+(?=[A-Za-z0-9+/_=-])/g;
