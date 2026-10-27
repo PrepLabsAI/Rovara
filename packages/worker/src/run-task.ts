@@ -296,6 +296,7 @@ export async function runTaskInvocation(
       if (status === "verified" && plan.source === "project" && !stop.signal.aborted) {
         const testProof = await runTestProofStep({ plan, round: round.entries, runners, repositories, candidateBefore, rootPath: canonicalRoot, signal: stop.signal,
           budgetMs: roundBudgetMs - roundSpentMs, events, originalCode: dependencies.testProofOriginalCode });
+        // Read only when the proof ran, and deliberately fail-closed: a read failure here fails the task rather than reporting a candidate nobody confirmed.
         // The after-snapshot is read after the proof run too: whatever it left behind in the candidate is then seen by the broker as drift.
         const afterProof = await readCandidateRepositories(repositories);
         if (createCandidateManifest(afterProof).digest !== createCandidateManifest(candidateAfter).digest) candidateAfter = afterProof;

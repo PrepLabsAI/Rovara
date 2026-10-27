@@ -39,8 +39,9 @@ export function testProofPullRequestLines(proof: unknown, candidateDigest: strin
     ...(noRun > 0 ? [`${noRun} could not run on the original code`] : []),
     ...(notChecked > 0 ? [`${notChecked} not checked`] : []),
   ];
-  // Test names and labels are written by the agent: an HTML comment opener (even unclosed) and a backtick could hide or reshape the rest of the description.
-  const plain = (text: string) => text.replace(/<!--|-->|`/gu, "");
+  // Test names and labels are written by the agent. Every `<`, `>` and backtick is removed outright (no pattern to rebuild by nesting), so no HTML comment,
+  // tag or code span can hide or reshape the rest of the description; `inert` then handles mentions and links.
+  const plain = (text: string) => text.replace(/[<>`]/gu, "");
   const quoted = (text: string) => plain(inert(plain(redactText(text)).replace(/\s+/gu, " "))).slice(0, NAME_MAX);
   const names = doesNot.map((item) => quoted(item.test === undefined ? item.label : `${item.label}: ${item.test}`));
   return [
@@ -52,8 +53,8 @@ export function testProofPullRequestLines(proof: unknown, candidateDigest: strin
 }
 
 /**
- * Known limitation: after a pushed PR-feedback fix the proof line drops out of the description, because broker.ts (describeFeedbackFixes) rewrites the
- * status lines without it. The line is never stale (it is bound to one candidate digest); it is only absent until a one-line change there passes it.
+ * Known limitations: the task page shows no proof lines yet (only the pull request does). After a pushed PR-feedback fix the proof line drops out of the
+ * description, because broker.ts (describeFeedbackFixes) rewrites the status lines without it. The line is never stale (it is bound to one candidate digest); it is only absent until a one-line change there passes it.
  *
  * The lines from the newest test-proof.json, among the task's latest operations, that is bound to `candidateDigest`. Only an object under
  * the task's own key prefix is read. Any fault reading it gives no lines: the pull request is published without them.

@@ -150,8 +150,8 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
   }
 
   const subPlan: CheckPlan = { source: "project", readiness: runIndexes.map((index) => commands[index]!), projectBefore: runIndexes.map(() => "unknown" as const) };
+  // Every repository shows its original tree (an empty overlay when it has no changed test), so old and new code are never mixed across repositories.
   const originalCode = (options.originalCode ?? gitOriginalCode)(perRepository
-    .filter(({ changed }) => changed.paths.length > 0)
     .map(({ repository, changed }) => ({ directory: repository.directory, commit: repository.startCommit, overlay: changed.paths })));
   const budgetMs = Math.max(0, Math.min(options.capMs ?? TEST_PROOF_CAP_MS, options.budgetMs));
   let ran: { entries: CheckEntry[]; oldReports: Map<number, ReadResult> };
@@ -216,7 +216,8 @@ function looksLikeTestCheck(command: ProjectCommand, entry: CheckEntry, changedT
   const words = [command.executable, ...command.args];
   if (isTestCommandHead(words)) return true;
   if (/^(?:npm|pnpm|yarn|bun)$/.test(command.executable) && /^test(?::[\w:.-]*)?$/.test(words[1] === "run" ? words[2] ?? "" : words[1] ?? "")) return true;
-  return changedTestPaths.some((path) => entry.output.includes(path) || entry.output.includes(basename(path)));
+  // The full relative path: a bare file name in a linter's output proves nothing.
+  return changedTestPaths.some((path) => entry.output.includes(path));
 }
 
 function labelOf(entry: CheckEntry | undefined, command: ProjectCommand): string {
