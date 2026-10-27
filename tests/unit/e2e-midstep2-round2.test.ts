@@ -189,6 +189,27 @@ describe("N-6: survivors", () => {
     expect(told.filter((item) => !item.evidenceOnly && !item.maskOnly).map((item) => item.value)).toEqual([JWT]);
   });
 
+  it("the sign-in tells the store once that a weak value could not be registered at all (a value over 64 KiB), and the store passes it on as an overflow note", async () => {
+    const told: Array<{ value: string; overflow: boolean }> = [];
+    const driver: FormLoginDriver = {
+      async signIn(input) {
+        const state: FormLoginStorageState = { cookies: [], origins: [{ origin: input.origin, localStorage: [{ name: "session", value: "word ".repeat(20_000) }, { name: "session2", value: "word ".repeat(20_001) }] }] };
+        return { state, status: 200 };
+      },
+      async requestContext(): Promise<FormRequestContext> {
+        return { async request({ path }) {
+          const profile = contract.accountProfiles.find((item) => item.roleRef === "owner") ?? contract.accountProfiles[0]!;
+          return { status: 200, body: new TextEncoder().encode(JSON.stringify(path === "/api/me" ? { subjectId: "s-1", tenantId: profile.tenantRef, role: profile.roleRef } : {})), contentType: "application/json", setCookies: [] as string[] };
+        }, async dispose() { /* nothing */ } };
+      },
+    };
+    const store = createExecutorSessionStore({ plan: fixture.plan, formLogin: driver, registerSecret: (value, options) => { told.push({ value, overflow: options?.overflow === true }); } });
+    const profileId = contract.accountProfiles.find((item) => item.roleRef === "owner")?.profileId ?? contract.accountProfiles[0]!.profileId;
+    const ref = { applicationId, profileId, revision: 1, definitionDigest: "8".repeat(64) };
+    await store.open({ binding: {}, applicationId, profileId, approvedAccountRef: ref, origin: E2E_EXECUTOR_COMPILED_ORIGIN }, new AbortController().signal);
+    expect(told.filter((item) => item.overflow)).toEqual([{ value: "", overflow: true }]);
+  });
+
   it("the classify memo is cleared when it would pass its bound, and the new entries are remembered", () => {
     const memo = new Set<string>(Array.from({ length: BROWSER_STATE_MEMO_MAX - 1 }, (_unused, index) => `old-${index}`));
     tellBrowserState({ cookies: [], origins: [{ localStorage: [{ name: "a", value: "1" }, { name: "b", value: "2" }, { name: "c", value: "3" }] }] }, () => undefined, memo);

@@ -350,6 +350,7 @@ describe("the host wires the new reads (static: the host is not started in unit 
     expect(host).not.toMatch(/if \(!anonymous\) watchBrowserRequests/);
     // The response handler no longer skips a visitor's context (F-3).
     expect(host).not.toMatch(/if \(anonymous\) return;/);
+    expect(host).not.toMatch(/if \(owned && !store\.isAnonymous/);
     expect(host).toMatch(/tellBrowserState\(await readBrowserState\(owned\), \(item\) => sessionSync\.learn\(\[item\]\), undefined, \{ visitor: store\.isAnonymous\(sessionRef\) \}\)/);
   });
 });

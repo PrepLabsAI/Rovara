@@ -132,6 +132,18 @@ describe("F-9: a list or a value past the bound fails the view closed instead of
     expect(headerSecrets([{ name: "x-big", value: "y".repeat(20_000) }]).some((item) => item.tier === "overflow")).toBe(true);
     expect(headerSecrets([{ name: "x-api-key", value: "Ab3dEf9hJk" }]).some((item) => item.tier === "overflow")).toBe(false);
   });
+  it("more weak leaves in one entry than the mask bound (5,000) give an overflow note; fewer do not", () => {
+    const leaves = (count: number) => JSON.stringify(Object.fromEntries(Array.from({ length: count }, (_unused, index) => [`k${index}`, `Lf${String(index).padStart(6, "0")}Xc7Yb2Nm5Qr8Tw`])));
+    expect(classifyStorageEntry({ name: "cache", value: leaves(5_300) }).some((item) => item.tier === "overflow")).toBe(true);
+    expect(classifyStorageEntry({ name: "cache", value: leaves(300) }).some((item) => item.tier === "overflow")).toBe(false);
+  });
+  it("an overflow note is registered once, however often it is learned", () => {
+    const registered: Array<{ value: string; overflow: boolean }> = [];
+    const source = createE2ESessionSyncSource({ register: (value, options) => { registered.push({ value, overflow: options?.overflow === true }); }, known: () => [] });
+    source.learn([{ value: "", tier: "overflow" }, { value: "", tier: "overflow" }]);
+    source.learn([{ value: "", tier: "overflow" }]);
+    expect(registered).toEqual([{ value: "", overflow: true }]);
+  });
   it("an overflow note learned by the session source fails the model's view closed, once", async () => {
     const { e, shown } = await stackFor([]);
     const fresh = "Zq8LmWp3Rt6YvB2nXc5K";
@@ -194,7 +206,7 @@ describe("F-4: one-time sign-in URL parameters are credentials", () => {
   const SAML = "AAQAAMFbLinlmzYhpL8Tq7Wx0v3Cn2D5Rk9sE1uJ4gB6hN8mA";
   const OOB = "b9Gk2Lx7Qw4Zp1Vm6Rt3Hc8Dn5Fs0JyAeUo";
   it.each([["oobCode", OOB], ["otp", "Ab3dEf9hJk"], ["magic_link", "https://app.test/magic/b9Gk2Lx7Qw4Zp1Vm6Rt3"], ["magicLink", "https://app.test/magic/b9Gk2Lx7Qw4Zp1Vm6Rt3"], ["inviteCode", "spring-team-invite"],
-    ["SAMLart", SAML], ["SAMLResponse", `${SAML}${SAML}`], ["verificationCode", "Qx7Lm2Vb9Tz"], ["resetCode", "Rn4Kp8Wd1Yc"], ["t", OOB]])("?%s= is strong", (name, value) => {
+    ["SAMLart", SAML], ["SAMLResponse", `${SAML}${SAML}`], ["verificationCode", "Qx7Lm2Vb9Tz"], ["resetCode", "Rn4Kp8Wd1Yc"], ["t", OOB], ["t", "Qx7Lm2Vb9Tz4Wk8P"]])("?%s= is strong", (name, value) => {
     expect(tierOf(urlSecrets(`https://app.test/auth?${name}=${encodeURIComponent(value)}&lang=en-US`), value)).toBe("strong");
   });
   it("SAMLart is one word (not sam and lart), and a parameter named t counts only when its value is a token; other *code names are masked, not refused", () => {
