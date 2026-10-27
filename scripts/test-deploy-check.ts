@@ -35,6 +35,7 @@ export type FindingKind =
   | "requalify-not-installed"
   | "requalify-running"
   | "requalify-last-run"
+  | "requalify-schedule-off"
   | "requalify-unreadable"
   | "model-route-not-approved"
   | "model-access-unverified"

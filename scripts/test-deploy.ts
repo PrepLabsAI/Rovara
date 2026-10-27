@@ -111,10 +111,13 @@ import {
   readInstalledFacts,
   readRow,
   readRunnerTags,
+  readScheduleFact,
   readinessProblems,
+  requalifyHeadContext,
   requalifyInstalled,
   type RequalifyFacts,
 } from "./test-deploy-requalify.js";
+import { enabledMarkerPutArgs, wantsScheduleEnabled } from "./test-deploy-requalify-schedule.js";
 
 /**
  * `control-plane-code` rebuilds every packaged control-plane Lambda (CONTROL_PLANE_LAMBDAS) in one change set; `broker` and
@@ -246,6 +249,7 @@ export type DeployStep =
   | { id: string; kind: "check-requalify-ready"; stack: string; identityMode: IdentityMode }
   | { id: string; kind: "check-requalify-lock"; stack: string }
   | { id: string; kind: "verify-requalify-schedule"; stack: string; logicalId: string }
+  | { id: string; kind: "record-requalify-enabled"; stack: string }
   | { id: string; kind: "start-requalify"; stack: string; logicalId: string };
 
 /** A file the release bundle holds beside the handler (`packagedFunction`'s extraFiles): repo-relative source, name in the zip. */
@@ -632,6 +636,8 @@ export function planTestDeploy(
       },
       { id: "execute-requalify-schedule", kind: "execute-change-set", stack: stacks["control-plane"], createdBy: "change-set-requalify-schedule" },
       { id: "verify-requalify-schedule", kind: "verify-requalify-schedule", stack: stacks["control-plane"], logicalId: REQUALIFY_SCHEDULE_LOGICAL_ID },
+      // Only after the schedule is verified ENABLED: from here on --check reports a schedule found off as an error (ARGUARD).
+      { id: "record-requalify-enabled", kind: "record-requalify-enabled", stack: stacks["control-plane"] },
     );
   }
 
@@ -1144,6 +1150,7 @@ export function formatPlan(steps: readonly DeployStep[]): string {
       case "check-requalify-ready": return `${head} stop unless control-plane-code and the stack are current with this build (the --check comparison) and the current runner and its workspace volume carry DeploymentMode=e2e-qualification, Environment and agentx:requalify-managed=true (read only)`;
       case "check-requalify-lock": return `${head} read the renewal lock in ${step.stack}'s state table (read only) and stop if a renewal or a by-hand qualification holds it; this step does not take the lock, the renewal machine's first step does, so two starts cannot both run`;
       case "verify-requalify-schedule": return `${head} verify with scheduler get-schedule that ${step.logicalId} is ENABLED`;
+      case "record-requalify-enabled": return `${head} record in ${step.stack}'s state table (one conditional put, never overwritten) that the daily schedule was enabled; from then on test-deploy --check reports it switched off as an error, and a head synth keeps it enabled`;
       case "start-requalify": return `${head} invoke ${step.logicalId} once with ${REQUALIFY_NOW_PAYLOAD}: it starts one renewal of the test machine (its first step takes the same lock); owner-run, never started by an agent`;
     }
   }).join("\n");
@@ -1506,6 +1513,16 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
       console.log(`the daily schedule is ENABLED`);
       return;
     }
+    case "record-requalify-enabled": {
+      const table = stackOutput(describeStack(context.runner, context.region, step.stack), "StateTableName");
+      const result = context.runner.aws(enabledMarkerPutArgs({ table, region: context.region, now: new Date() }), true);
+      // Already recorded is the normal case on a second run. Any other failure leaves the schedule on without its record: the daily check writes it on its first run, so say so and stop for the owner.
+      if (result.status !== 0 && !result.stderr.includes("ConditionalCheckFailedException")) {
+        throw new Error("the schedule is ENABLED, but the record that it was enabled could not be written (the renewal's daily check writes it on its first run); check the profile's DynamoDB write access");
+      }
+      console.log("recorded that the daily schedule was enabled");
+      return;
+    }
     case "check-requalify-lock": {
       const table = stackOutput(describeStack(context.runner, context.region, step.stack), "StateTableName");
       const lock = lockFact(readRow(context.runner, { table, region: context.region, key: requalifyLockKey(REQUALIFY_PROFILE_ID) }), new Date());
@@ -1567,7 +1584,7 @@ export interface CheckReaders {
   region: string;
   env: string;
   /** The control-plane template head synthesizes; with `requalify` the automatic renewal's resources are in it too (they are, when the stack has them, and for the review of what `requalify-infra` would add). */
-  headTemplate: (options?: { requalify?: boolean }) => CfnTemplate;
+  headTemplate: (options?: { requalify?: boolean; scheduleEnabled?: boolean }) => CfnTemplate;
   /** The head build of every control-plane Lambda: its zip sha256 (base64) and the repo paths the bundle comes from, by logical ID. With `requalify`, the renewal's Lambda is built too (the stack has it). */
   builtZips: (options?: { requalify?: boolean }) => Promise<{ shas: Record<string, string>; sources: Record<string, string[]> }>;
   headRevision: string;
@@ -1880,9 +1897,12 @@ export async function gatherCheckFacts(unchecked: CheckReaders): Promise<{ facts
     const provenance = parseDeployedCodeKey(typeof key === "string" ? key : undefined, logicalId, deployedSha);
     if ("revision" in provenance) inputsChanged[logicalId] = readers.changedSince(provenance.revision, built.sources[logicalId] ?? []);
   }
-  const headTemplate = readers.headTemplate({ requalify: renewalInstalled });
+  // The schedule's state and whether it was ever enabled: read before the head synth, which keeps an enabled schedule enabled (ARGUARD).
+  const stateTable = stackOutput(controlPlane, "StateTableName");
+  const schedule = renewalInstalled ? readScheduleFact(readers.runner, { table: stateTable, region: readers.region }, deployedTemplate) : undefined;
+  const headTemplate = readers.headTemplate({ requalify: renewalInstalled, ...(schedule !== undefined && wantsScheduleEnabled(schedule) ? { scheduleEnabled: true } : {}) });
   const requalify: RequalifyFacts = renewalInstalled
-    ? readInstalledFacts(readers.runner, { table: stackOutput(controlPlane, "StateTableName"), region: readers.region, now: new Date() })
+    ? { ...readInstalledFacts(readers.runner, { table: stateTable, region: readers.region, now: new Date() }), ...(schedule === undefined ? {} : { schedule }) }
     : { state: "not-installed", plannedGrants: plannedRequalifyGrants(readers.headTemplate({ requalify: true }), deployedTemplate) };
   return {
     facts: {
@@ -1947,8 +1967,9 @@ function gitChangedSince(runner: Runner): CheckReaders["changedSince"] {
 }
 
 /** Head's control-plane template: the engine's synth with the standing qualification transport, as TEST runs it. */
-function synthesizeHeadTemplate(context: ApplyContext, identityMode: IdentityMode, options?: { requalify?: boolean }): CfnTemplate {
-  return synthesizeLiftSource(context, { construct: QUALIFICATION.construct, cdkContext: options?.requalify === true ? REQUALIFY_INFRA.context : QUALIFICATION.context, identityMode });
+function synthesizeHeadTemplate(context: ApplyContext, identityMode: IdentityMode, options?: { requalify?: boolean; scheduleEnabled?: boolean }): CfnTemplate {
+  // With the renewal installed the schedule's state is carried into the synth (ARGUARD): a stack update made from it must not switch an enabled schedule off.
+  return synthesizeLiftSource(context, { construct: QUALIFICATION.construct, cdkContext: options?.requalify === true ? requalifyHeadContext(options.scheduleEnabled) : QUALIFICATION.context, identityMode });
 }
 
 function checkContext(args: TestDeployArgs, runner: Runner, options: ReleaseOptions, revision: string, outputDir: string): ApplyContext {

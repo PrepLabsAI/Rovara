@@ -422,7 +422,7 @@ describe("the IAM statements the check prints for the renewal's grants", () => {
 describe("the requalify-schedule unit (AR-5 review I1)", () => {
   it("enables the daily check with a change set that may touch only the schedule's State, after the ready check, and verifies it", () => {
     const steps = plan(["requalify-schedule"], true);
-    expect(steps.map((step) => step.kind)).toEqual(["check-requalify-ready", "create-change-set", "execute-change-set", "verify-requalify-schedule"]);
+    expect(steps.map((step) => step.kind)).toEqual(["check-requalify-ready", "create-change-set", "execute-change-set", "verify-requalify-schedule", "record-requalify-enabled"]);
     const changeSet = steps[1] as Extract<DeployStep, { kind: "create-change-set" }>;
     expect(changeSet).toMatchObject({ stack: CONTROL_PLANE, template: { source: "enable-schedule" }, expect: { action: "Modify", logicalIds: [REQUALIFY_SCHEDULE_LOGICAL_ID], allowedAttributes: ["Properties.State"] } });
     expect(steps[3]).toMatchObject({ kind: "verify-requalify-schedule", logicalId: REQUALIFY_SCHEDULE_LOGICAL_ID });

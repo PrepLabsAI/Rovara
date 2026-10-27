@@ -9,7 +9,8 @@ import {
   CONTROL_PLANE_LAMBDAS, assertCheckAllowsApply, assertOnlyExpectedChanges, liftResources, patchLiftedCode, plannedRequalifyGrants, type CfnTemplate, type ObservedChange,
 } from "../../scripts/test-deploy.js";
 import { evaluateIamDrift, tier3Request } from "../../scripts/test-deploy-check.js";
-import { REQUALIFY_INFRA, REQUALIFY_LAMBDA, REQUALIFY_SCHEDULE_LOGICAL_ID, enableScheduleTemplate } from "../../scripts/test-deploy-requalify.js";
+import { REQUALIFY_INFRA, REQUALIFY_LAMBDA, REQUALIFY_SCHEDULE_LOGICAL_ID, enableScheduleTemplate, requalifyHeadContext } from "../../scripts/test-deploy-requalify.js";
+import { scheduleStateOf, wantsScheduleEnabled } from "../../scripts/test-deploy-requalify-schedule.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
@@ -139,5 +140,40 @@ describe("the renewal's deploy units against the synthesized control-plane stack
     // Once the stack has the renewal, head against itself is clean and the code deploy is not blocked.
     expect(plannedRequalifyGrants(head, head)).toEqual([]);
     expect(evaluateIamDrift(head, head)).toEqual([]);
+  });
+});
+
+describe("a stack update made from the head synth does not switch an enabled schedule off (ARGUARD)", () => {
+  let installed: CfnTemplate;
+  let enabledHead: CfnTemplate;
+  let enabledDeployed: CfnTemplate;
+  beforeAll(() => {
+    installed = controlPlane(requalifyHeadContext());
+    enabledHead = controlPlane(requalifyHeadContext(true));
+    // The deployed stack after requalify-infra and requalify-schedule: the install, with only the schedule's State changed.
+    enabledDeployed = enableScheduleTemplate(installed);
+  }, 240_000);
+
+  it("synthesizes the schedule disabled for the install and enabled with the schedule context, and nothing else differs", () => {
+    expect(scheduleStateOf(installed)).toBe("DISABLED");
+    expect(scheduleStateOf(enabledHead)).toBe("ENABLED");
+    const ids = Object.keys(installed.Resources ?? {});
+    expect(Object.keys(enabledHead.Resources ?? {})).toEqual(ids);
+    const differing = ids.filter((id) => JSON.stringify(installed.Resources?.[id]) !== JSON.stringify(enabledHead.Resources?.[id]));
+    expect(differing).toEqual([REQUALIFY_SCHEDULE_LOGICAL_ID]);
+    expect(JSON.stringify(enabledHead.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID])).toBe(JSON.stringify(enabledDeployed.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID]));
+  });
+
+  it("is what the check does: a deployed ENABLED schedule (or one that was enabled once) makes the head synth ENABLED, so nothing about the schedule is in the update", () => {
+    for (const fact of [
+      { deployed: scheduleStateOf(enabledDeployed), enabledOnce: { state: "no" } as const },
+      { deployed: "DISABLED" as const, enabledOnce: { state: "yes", at: "2026-10-20T06:00:00.000Z" } as const },
+    ]) {
+      const head = controlPlane(requalifyHeadContext(wantsScheduleEnabled(fact)));
+      expect(scheduleStateOf(head)).toBe("ENABLED");
+    }
+    // Without the carried-forward context, the same synth would disable it: the update this guards against.
+    expect(JSON.stringify(installed.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID])).not.toBe(JSON.stringify(enabledDeployed.Resources?.[REQUALIFY_SCHEDULE_LOGICAL_ID]));
+    expect(scheduleStateOf(controlPlane(requalifyHeadContext(wantsScheduleEnabled({ deployed: "DISABLED", enabledOnce: { state: "no" } }))))).toBe("DISABLED");
   });
 });

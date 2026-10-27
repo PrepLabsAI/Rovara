@@ -1,9 +1,15 @@
 // AUTOREQUALIFY tooling for test-deploy (AR-5): what the `requalify-infra` and `requalify-now` units are, how the check finds out whether the automatic renewal is installed,
 // and how it reports the last renewal. Pure code and read-only AWS reads; nothing here writes. The Lambda unit, the lift context and the step plans are named here so
 // scripts/test-deploy.ts only wires them in.
-import { REQUALIFY_PROFILE_ID, REQUALIFY_TAGS, RequalifyLockSchema, RequalifyRunRecordSchema, requalifyHoldKey, requalifyLockKey, requalifyRunKey } from "../packages/contracts/src/index.js";
+import {
+  REQUALIFY_PROFILE_ID, REQUALIFY_TAGS, RequalifyLockSchema, RequalifyRunRecordSchema, RequalifyScheduleEnabledSchema, requalifyHoldKey, requalifyLockKey, requalifyRunKey, requalifyScheduleEnabledKey,
+} from "../packages/contracts/src/index.js";
 import { e2eModelCheckRunnerKey } from "../packages/broker/src/e2e/model-route-registry.js";
 import type { CheckTemplate, Finding } from "./test-deploy-check.js";
+import { REQUALIFY_SCHEDULE_CONTEXT_KEY, REQUALIFY_SCHEDULE_LOGICAL_ID, scheduleFindings, scheduleStateOf, type ScheduleFact } from "./test-deploy-requalify-schedule.js";
+
+// The schedule's ID lives with the rest of the schedule logic (ARGUARD); it is exported from here as before.
+export { REQUALIFY_SCHEDULE_LOGICAL_ID };
 
 /** The renewal's Lambda: built from the same files as every control-plane Lambda, but only present on a stack that deployed `requalify-infra`. */
 export const REQUALIFY_LAMBDA = {
@@ -88,7 +94,7 @@ export type LastRunFact =
 
 export type RequalifyFacts =
   | { state: "not-installed"; plannedGrants?: readonly Finding[] | undefined }
-  | { state: "installed"; lock: LockFact; hold: "none" | "present" | "unreadable"; lastRun: LastRunFact };
+  | { state: "installed"; lock: LockFact; hold: "none" | "present" | "unreadable"; lastRun: LastRunFact; /** The daily schedule's state and whether it was ever enabled (ARGUARD); absent where the check did not read it. */ schedule?: ScheduleFact };
 
 /**
  * The last renewal, reached from the model-check runner pointer: the switch writes `requalifyRunId` into it, and the run record is the audit row of that switch. A pointer a script wrote
@@ -127,7 +133,24 @@ export function readInstalledFacts(reader: RequalifyReader, input: { table: stri
   };
 }
 
-/** The findings about the renewal. Information, except what cannot be read (a warning: silence would look like health). */
+/** The daily schedule: what the deployed template says and whether it was ever enabled (the record the `requalify-schedule` unit and the renewal's daily check write; one read by key). */
+export function readScheduleFact(reader: RequalifyReader, input: { table: string; region: string }, deployedTemplate: CheckTemplate): ScheduleFact {
+  const read = readRow(reader, { ...input, key: requalifyScheduleEnabledKey(REQUALIFY_PROFILE_ID) });
+  const deployed = scheduleStateOf(deployedTemplate);
+  if (read.state === "absent") return { deployed, enabledOnce: { state: "no" } };
+  if (read.state === "unreadable") return { deployed, enabledOnce: { state: "unreadable", reason: read.reason } };
+  const { pk: _pk, sk: _sk, ...fields } = read.item;
+  void _pk; void _sk;
+  const parsed = RequalifyScheduleEnabledSchema.safeParse(fields);
+  return { deployed, enabledOnce: parsed.success ? { state: "yes", at: parsed.data.at } : { state: "unreadable", reason: "the schedule record is not as the renewal writes it" } };
+}
+
+/** The CDK context for a head synth that includes the renewal: the install context, plus the schedule on when it is on or ever was, so a stack update made from the synth does not switch it off. */
+export function requalifyHeadContext(scheduleEnabled?: boolean): Record<string, string> {
+  return scheduleEnabled === true ? { ...REQUALIFY_INFRA.context, [REQUALIFY_SCHEDULE_CONTEXT_KEY]: "enabled" } : { ...REQUALIFY_INFRA.context };
+}
+
+/** The findings about the renewal. Information, except what cannot be read (a warning: silence would look like health) and a schedule that is off after it was on (an error). */
 export function requalifyFindings(facts: RequalifyFacts | undefined, renewNow: string): Finding[] {
   if (facts === undefined) return [];
   const finding = (kind: Finding["kind"], severity: Finding["severity"], message: string): Finding => ({ kind, severity, subject: "requalify", label: "requalify", message });
@@ -149,6 +172,7 @@ export function requalifyFindings(facts: RequalifyFacts | undefined, renewNow: s
       findings.push(finding("requalify-last-run", "warning", `the model-check runner pointer names ${run.pointerRunner}, not the last renewal's runner ${run.newRunner}: a by-hand qualification replaced it afterwards`));
     }
   }
+  if (facts.schedule !== undefined) findings.push(...scheduleFindings(facts.schedule, renewNow));
   return findings;
 }
 
@@ -178,12 +202,6 @@ export function parseStartAnswer(text: string): { started: boolean; reason: stri
 // ---------------------------------------------------------------------------------------------
 // Readiness: what must be true before a renewal may start, by the owner's hand or by the schedule (AR-5 review I1)
 // ---------------------------------------------------------------------------------------------
-
-/**
- * The daily schedule's logical ID (CDK's id of `RuntimeRequalify/DailyCheck`). The schedule is created DISABLED by `requalify-infra`; the `requalify-schedule` unit enables it with a
- * change set that moves only its State.
- */
-export const REQUALIFY_SCHEDULE_LOGICAL_ID = "RuntimeRequalifyDailyCheckFBF4C861";
 
 /** The deployed template with the schedule's State set to ENABLED, and every other byte as it is. Refuses unless the schedule is there as a schedule. */
 export function enableScheduleTemplate(deployed: CheckTemplate): CheckTemplate {
