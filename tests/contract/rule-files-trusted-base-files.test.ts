@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, statSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -248,7 +248,7 @@ describe("the scratch directory (C84)", () => {
 
 describe("git runs only in a read-only, empty git directory (C84)", () => {
   /** A repository-style config that makes a missing object fetch from a remote whose url runs a command, and allows that transport. */
-  async function hostileConfig(marker: string) {
+  async function fetchingConfig(marker: string) {
     const script = join(realpathSync(mkdtempSync(join(tmpdir(), "agentx-planted-"))), "run.sh");
     await writeFile(script, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
     return `[core]\n\trepositoryformatversion = 1\n[extensions]\n\tpartialClone = planted\n[remote "planted"]\n\turl = ext::sh ${script}\n\tpromisor = true\n[protocol "ext"]\n\tallow = always\n`;
@@ -259,19 +259,29 @@ describe("git runs only in a read-only, empty git directory (C84)", () => {
     const marker = join(area, "ran");
     const gitDir = join(area, "planted.git");
     execFileSync("git", ["init", "--bare", "--quiet", "--template=", gitDir]);
-    await writeFile(join(gitDir, "config"), await hostileConfig(marker));
+    await writeFile(join(gitDir, "config"), await fetchingConfig(marker));
     // Git 2.45 and later can be told not to fetch lazily; the image's Git cannot, so the control does not tell it to.
     try { execFileSync("git", ["cat-file", "-s", "1".repeat(40)], { env: { ...process.env, GIT_DIR: gitDir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }, stdio: "ignore" }); } catch { /* the object is missing */ }
     expect(existsSync(marker)).toBe(true);
   });
 
-  it("a config planted where the session can write (the scratch directory, its objects directory, a git directory made there) never runs its command", async () => {
+  /** The base blob is gone, so a read that honoured a planted config would try to fetch it. */
+  async function withoutBaseBlob() {
     const subject = await repository();
+    await rm(join(subject.objects, subject.blob.slice(0, 2), subject.blob.slice(2)), { force: true });
     const area = realpathSync(mkdtempSync(join(tmpdir(), "agentx-planted-")));
     const marker = join(area, "ran");
-    const config = await hostileConfig(marker);
-    // The base blob is gone, so a read that honoured such a config would try to fetch it.
-    for (const oid of [subject.blob]) await rm(join(subject.objects, oid.slice(0, 2), oid.slice(2)), { force: true });
+    return { subject, marker, config: await fetchingConfig(marker) };
+  }
+  /** A git directory the session could have written, holding `config`. */
+  async function plantGitDirectory(path: string, config: string) {
+    execFileSync("git", ["init", "--bare", "--quiet", "--template=", path], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" } });
+    await writeFile(join(path, "config"), config);
+  }
+  const hardeningOff = { protocolBans: false, noLazyFetch: false };
+
+  it("a config planted where the session can write (the scratch directory, its objects directory, a git directory made there) never runs its command", async () => {
+    const { subject, marker, config } = await withoutBaseBlob();
     const onScratchReady = async ({ scratch, objects }: { scratch: string; objects: string }) => {
       await writeFile(join(scratch, "config"), config);
       await writeFile(join(objects, "config"), config);
@@ -281,6 +291,40 @@ describe("git runs only in a read-only, empty git directory (C84)", () => {
     };
     expect(await unverified(read(subject, { onScratchReady }))).toBe(UNVERIFIED);
     expect(existsSync(marker)).toBe(false);
+  });
+
+  it("with the protocol bans and the lazy-fetch setting off, such a config still never runs its command: the read-only git directory is what stops it", async () => {
+    const { subject, marker, config } = await withoutBaseBlob();
+    const onScratchReady = async ({ scratch, objects }: { scratch: string; objects: string }) => {
+      await writeFile(join(scratch, "config"), config);
+      await writeFile(join(objects, "config"), config);
+      await plantGitDirectory(join(scratch, "base.git"), config);
+      await writeFile(join(objects, "pack", "pack-0000000000000000000000000000000000000000.promisor"), "");
+    };
+    expect(await unverified(read(subject, { onScratchReady, gitHardeningForTest: hardeningOff }))).toBe(UNVERIFIED);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("control: with the same settings off and a writable per-read git directory that holds the config (the earlier design), the command does run", async () => {
+    const { subject, marker, config } = await withoutBaseBlob();
+    const onScratchReady = async ({ scratch }: { scratch: string }) => plantGitDirectory(join(scratch, "base.git"), config);
+    const gitHardeningForTest = { ...hardeningOff, gitDirectory: (scratch: string) => join(scratch, "base.git") };
+    expect(await unverified(read(subject, { onScratchReady, gitHardeningForTest }))).toBe(UNVERIFIED);
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it("the test seam is named only by the module that defines it", () => {
+    const found: string[] = [];
+    const walk = (directory: string) => {
+      for (const item of readdirSync(directory, { withFileTypes: true })) {
+        if (item.name === "node_modules" || item.name === "dist") continue;
+        const path = join(directory, item.name);
+        if (item.isDirectory()) walk(path);
+        else if (path.endsWith(".ts") && readFileSync(path, "utf8").includes("gitHardeningForTest")) found.push(path);
+      }
+    };
+    walk(join(process.cwd(), "packages"));
+    expect(found.map((path) => path.slice(process.cwd().length + 1))).toEqual(["packages/worker/src/trusted-base-objects.ts"]);
   });
 
   it("a planted alternate list in the objects directory can only redirect reads, and the checks on the bytes catch a substitute", async () => {

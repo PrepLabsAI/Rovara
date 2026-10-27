@@ -127,6 +127,12 @@ export interface ReadOptions {
   maxBlobBytes?: number;
   /** Test seam: called once the scratch directory and its objects directory exist, before git runs. */
   onScratchReady?: (paths: { scratch: string; objects: string }) => Promise<void>;
+  /**
+   * Test seam, never passed by a production caller (a test pins that): turns off one of git's own layers of protection so a test can show that the read-only
+   * git directory holds on its own. Everything is on by default. `gitDirectory` names, from the scratch directory, a git directory to use in place of the
+   * image's read-only one (it stands in for a writable, per-read git directory); it is looked at after `onScratchReady` has run.
+   */
+  gitHardeningForTest?: { protocolBans?: boolean; noLazyFetch?: boolean; gitDirectory?: (scratch: string) => string };
 }
 
 /** Refuses an entry (and, for a directory, everything below it) that is a link or that this process could write. */
@@ -259,14 +265,15 @@ export async function readVerifiedBaseRuleFile(directory: string, baseCommit: st
     const root = await chooseScratchRoot(options.workspaceRoot, (await lstat(layout.objects)).dev);
     await removeStaleScratch(root);
     scratch = await mkdtemp(join(root, SCRATCH_PREFIX));
-    const gitDir = await emptyGitDirectory(algorithm, options.emptyGitDirectoryRoot);
     const objectsDirectory = join(scratch, "objects");
     await mkdir(join(objectsDirectory, "pack"), { recursive: true, mode: 0o700 });
     await options.onScratchReady?.({ scratch, objects: objectsDirectory });
+    const hardening = options.gitHardeningForTest;
+    const gitDir = hardening?.gitDirectory?.(scratch) ?? await emptyGitDirectory(algorithm, options.emptyGitDirectoryRoot);
     // GIT_DIR is read-only and empty. GIT_NO_LAZY_FETCH is honoured by Git 2.45 and later (the image's 2.39 ignores it), and the protocol settings are command-line
     // configuration, which Git does honour; `core.repositoryformatversion` and `extensions.*` are read only from the repository's own config file, so they cannot be set here.
-    const env = isolatedGitEnvironment(gitDir, { GIT_DIR: gitDir, GIT_OBJECT_DIRECTORY: objectsDirectory, GIT_OPTIONAL_LOCKS: "0", GIT_NO_LAZY_FETCH: "1" },
-      ["ext", "file", "git", "http", "https", "ssh"].map((name) => [`protocol.${name}.allow`, "never"] as const));
+    const env = isolatedGitEnvironment(gitDir, { GIT_DIR: gitDir, GIT_OBJECT_DIRECTORY: objectsDirectory, GIT_OPTIONAL_LOCKS: "0", ...(hardening?.noLazyFetch === false ? {} : { GIT_NO_LAZY_FETCH: "1" }) },
+      hardening?.protocolBans === false ? [] : ["ext", "file", "git", "http", "https", "ssh"].map((name) => [`protocol.${name}.allow`, "never"] as const));
     const placement: Placement = { link: options.linkFile ?? link, signal, copyLimit: options.copyLimitBytes ?? COPY_LIMIT_BYTES, copied: 0 };
     // One link per pack file and index; the workspace's `objects/info` and everything else in its git directory is left out.
     const packs = join(layout.objects, "pack");
