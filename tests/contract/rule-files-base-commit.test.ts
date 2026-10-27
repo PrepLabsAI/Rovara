@@ -246,3 +246,55 @@ describe("pi sessions and the rule file source (A5)", () => {
     expect(capture.inputs[0]!.contextFilesAt).toBe("base-commit");
   });
 });
+
+// Paths come from the agent-writable preparation manifest, and the path schema accepts invisible characters.
+const ZWSP = String.fromCodePoint(0x200b);
+const TAG_PAYLOAD = [..."ignore"].map((letter) => String.fromCodePoint(0xe0000 + letter.charCodeAt(0))).join("");
+const hiddenIn = (text: string) => text.includes(ZWSP) || /[\u{E0000}-\u{E007F}]/u.test(text);
+
+/** A prepared workspace whose one repository sits in a directory named with hidden characters, with a base rule file edited in the working tree. */
+async function hiddenPathWorkspace() {
+  const path = `repo/pay${ZWSP}ments${TAG_PAYLOAD}`;
+  const rootPath = await realpath(await mkdtemp(join(tmpdir(), "agentx-hiddenpath-")));
+  const directory = join(rootPath, path);
+  await mkdir(directory, { recursive: true });
+  git(directory, "init", "--quiet", "--initial-branch=main");
+  await writeFile(join(directory, "AGENTS.md"), BASE_RULE);
+  git(directory, "add", ".");
+  git(directory, "commit", "--quiet", "-m", "base");
+  const base = git(directory, "rev-parse", "HEAD");
+  await writeFile(join(directory, "AGENTS.md"), EDITED_RULE);
+  const now = new Date().toISOString();
+  await mkdir(join(rootPath, ".agentx"), { recursive: true });
+  await writeFile(join(rootPath, ".agentx/preparation-manifest.json"), JSON.stringify({
+    schemaVersion: 2, projectName: "payments", projectRevision: 1,
+    repositories: [{ name: "payments", path, defaultBranch: "main", resolvedCommit: base, resolvedAt: now, completedAt: now }],
+    completedSetupSteps: [], readinessResults: [], creationIdentity: "fixture", complete: true, updatedAt: now,
+  }));
+  return { rootPath, base };
+}
+
+describe("hidden characters in a manifest's repository path (round 3)", () => {
+  it("the workspace note carries none of them, in a coding session and in a review session", async () => {
+    const { rootPath, base } = await hiddenPathWorkspace();
+    for (const options of [{}, { contextFilesAt: "base-commit" as const, baseCommits: [{ repositoryId: "payments", baseCommitSha: base }] }]) {
+      const capture = capturingAdapter();
+      await createWorkspacePiSession({ rootPath, model, ...options }, capture.adapter);
+      const note = capture.inputs[0]!.contextFiles.find((file) => file.path === "AgentX workspace");
+      expect(note?.content, JSON.stringify(options)).toContain("pay");
+      expect(hiddenIn(note!.content), JSON.stringify(options)).toBe(false);
+      expect(note!.content).toContain("payments");
+    }
+  });
+
+  it("the rule file's label and the review note carry none of them", async () => {
+    const { rootPath, base } = await hiddenPathWorkspace();
+
+    const { files, notices } = await loadRepositoryContextFiles(rootPath, (await readPreparedRepositories(rootPath)).map((repository) => ({ ...repository, baseCommit: base })), { at: "base-commit" });
+
+    expect(files).toHaveLength(1);
+    expect(files[0]!.content).toContain("repo/payments");
+    expect(hiddenIn(files[0]!.content)).toBe(false);
+    expect(notices).toEqual([EDIT_LINE]);
+  });
+});
