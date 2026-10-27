@@ -7,6 +7,8 @@ import { deflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
   createCandidateManifest,
+  WORKFLOW_BLOCK_REASONS,
+  WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE,
   WorkflowFeedbackBundleSchema,
   type WorkflowFeedbackBundle,
   type WorkflowFeedbackBundleRef,
@@ -326,7 +328,7 @@ describe("a REVIEW-mode task invocation reads the base commit's rule file in eve
 describe("a base whose rule file cannot be verified stops the review with one fixed reason (C84)", () => {
   const UNVERIFIED = "CONFIG_INVALID: couldn't verify the base rule files";
 
-  /** The base blob's stored bytes are replaced by another well-formed object, as a session that can write `.git` could. */
+  /** A workspace whose stored bytes for the base rule file are a well-formed object of another id. */
   async function unverifiableWorkspace() {
     const workspace = await reviewWorkspace({ rules: false, todo: true });
     const blob = git(workspace.directory, "rev-parse", `${workspace.base}:AGENTS.md`);
@@ -340,6 +342,11 @@ describe("a base whose rule file cannot be verified stops the review with one fi
   const reviewInvocation = (workflowBase?: Array<{ repositoryId: string; baseCommitSha: string }>) => ({
     protocolVersion: 1 as const, kind: "task" as const, operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1, callbackCapability: "c".repeat(64),
     payload: { conversationId: randomUUID(), prompt: "Run the independent read-only reviews.", workflowMode: "REVIEW" as const, ...(workflowBase === undefined ? {} : { workflowBase }) },
+  });
+
+  it("the worker's reason and the owner's block reason are the fixed sentences", () => {
+    expect(`CONFIG_INVALID: ${WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE}`).toBe(UNVERIFIED);
+    expect(WORKFLOW_BLOCK_REASONS.ruleFilesUnverified).toBe("AgentX couldn't verify the base rule files, so the review did not run. Retry the review, or close the task.");
   });
 
   it("control: the same workspace with its base object left alone is reviewed", async () => {

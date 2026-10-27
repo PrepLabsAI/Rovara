@@ -83,6 +83,7 @@ import {
   createCandidateManifest,
   WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
   WORKFLOW_NO_CODE_CHANGE_MESSAGE,
+  WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE,
   WORKFLOW_BLOCK_REASONS,
   WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
   WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE,
@@ -12523,7 +12524,9 @@ async function completedWorkflowItems(
     }
   } else if (operation.workflowMode === "REVIEW") {
     if (terminalStatus !== "SUCCEEDED") {
-      next = blockWorkflow(task.workflow, workflowRunEndedReason("REVIEW", terminalStatus), now);
+      // A review that stopped because its base rule files could not be verified says so; any other stop keeps the generic reason.
+      next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.ruleFilesUnverified
+        : workflowRunEndedReason("REVIEW", terminalStatus), now);
     } else {
       const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
       const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];

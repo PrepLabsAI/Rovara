@@ -37,7 +37,7 @@ export const AUTO_FIX_CODES = [
   // A person must act.
   "runtime-expired", "runtime-environment-drifted", "model-environment-unsafe", "login-failed", "model-route-changed-reapprove", "agent-route-not-approved", "model-route-not-tested",
   "runtime-unusable", "selection-changed", "accounts-changed", "plan-not-approvable", "history-rewritten", "cancelled-by-owner", "check-broken", "fails-on-original-code",
-  "review-unusable", "pull-request-open", "unknown-group-code", "unreadable",
+  "review-unusable", "rule-files-unverified", "pull-request-open", "unknown-group-code", "unreadable",
   // DISPATCHEXHAUST: why a block was written outside a finished run (see `AutoFixBlockCause`): the start was tried until its budget ran out and the run was lost (Rovara's side, transient),
   // or the owner stopped the run (a person's choice, never retried).
   "dispatch-exhausted", "run-lost", "owner-stopped",
@@ -207,6 +207,8 @@ function reviewSignals(workflow: WorkflowSnapshot): Signal[] {
   const signals: Signal[] = [];
   const current = workflow.candidate?.digest;
   if (workflow.blockReason === WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE || workflow.blockReason === WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE) signals.push(transient("review-not-run"));
+  // The base rule files did not match their ids: the same workspace gives the same answer, so a retry is a person's choice, never automatic.
+  if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.ruleFilesUnverified) signals.push(person("rule-files-unverified"));
   if (current === undefined) return signals;
   for (const review of (workflow.reviews ?? []).filter((entry) => entry.candidateDigest === current)) {
     if (blockingFindings(review, workflow.acceptedFindings).length > 0) signals.push(code("review-findings"));

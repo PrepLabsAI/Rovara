@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -241,6 +241,19 @@ describe("the base rule file does not depend on the workspace's object store (C8
     await expectUnverified(subject);
   });
 
+  it("an object that the workspace's store reaches only through an alternate is not read, even when it is the real one", async () => {
+    const subject = await fixture();
+    const alternate = await realpath(await mkdtemp(join(tmpdir(), "agentx-trusted-alt-")));
+    await mkdir(join(alternate, subject.baseBlob.slice(0, 2)), { recursive: true });
+    copyFileSync(loosePath(objectsOf(subject), subject.baseBlob), loosePath(alternate, subject.baseBlob));
+    await rm(loosePath(objectsOf(subject), subject.baseBlob), { force: true });
+    await mkdir(join(objectsOf(subject), "info"), { recursive: true });
+    await writeFile(join(objectsOf(subject), "info/alternates"), `${alternate}\n`);
+    // The workspace's own git still finds it through the alternate; the verified read does not follow the list.
+    expect(execFileSync("git", ["-C", subject.directory, "cat-file", "blob", subject.baseBlob], { encoding: "utf8" })).toContain("Flag every TODO");
+    await expectUnverified(subject);
+  });
+
   it("a stale commit-graph file in the workspace's store changes nothing", async () => {
     const subject = await fixture();
     await mkdir(join(objectsOf(subject), "info"), { recursive: true });
@@ -257,7 +270,7 @@ describe("the base rule file does not depend on the workspace's object store (C8
 
   it("a different blob stored in a pack under the base blob's id does not change the rule file", async () => {
     const subject = await fixture();
-    // Stored (uncompressed) pack entries keep the text readable in the pack, so a same-length edit with a matching zlib checksum is a well-formed object under the wrong id.
+    // An uncompressed pack entry whose bytes differ from the object's id, and are otherwise well formed.
     git(subject.directory, "-c", "pack.compression=0", "repack", "-a", "-d", "--quiet");
     const packs = join(objectsOf(subject), "pack");
     let edited = 0;
@@ -349,13 +362,22 @@ describe("the base rule file does not depend on the workspace's object store (C8
     expect(listing()).toBe(before);
   });
 
-  it("the load removes the temporary repository it made", async () => {
-    const subject = await fixture();
-    const leftovers = () => readdirSync(tmpdir()).filter((name) => name.startsWith("agentx-base-rules-"));
-    const before = leftovers();
-    await expectRealRule(subject);
-    await expectUnverified(await (async () => { const broken = await fixture(); await rm(loosePath(objectsOf(broken), broken.baseTree), { force: true }); return broken; })());
-    expect(leftovers()).toEqual(before);
+  it("the load removes the temporary repository it made, whether it succeeds or stops", async () => {
+    const intact = await fixture();
+    const broken = await fixture();
+    await rm(loosePath(objectsOf(broken), broken.baseTree), { force: true });
+    // A private temporary directory for the load, so files other tests make at the same time cannot be mistaken for leftovers.
+    const area = await realpath(await mkdtemp(join(tmpdir(), "agentx-trusted-area-")));
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = area;
+    try {
+      await expectRealRule(intact);
+      await expectUnverified(broken);
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previous;
+    }
+    expect(readdirSync(area)).toEqual([]);
   });
 });
 
