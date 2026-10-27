@@ -181,7 +181,7 @@ jobs:
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
-        run: npx vitest run tests/linux --exclude tests/linux/e2e-docker25-dns.test.ts --exclude tests/linux/e2e-model-channel.test.ts --exclude tests/linux/e2e-agent.test.ts --exclude tests/linux/e2e-agent-probes.test.ts
+        run: npx vitest run tests/linux --exclude tests/linux/e2e-docker25-dns.test.ts --exclude tests/linux/e2e-model-channel.test.ts --exclude tests/linux/e2e-agent.test.ts --exclude tests/linux/e2e-agent-probes.test.ts --exclude tests/linux/e2e-midstep-carriers.test.ts
       # The EC2 worker runs Docker 25 (the only version Amazon Linux 2023 ships), which does not forward an internal-only container's DNS queries to a --dns server; this runner's
       # Docker is newer and does, so the step above cannot see that. This one starts Docker 25.0.5 in Docker (a privileged container with its own network namespace, no change to this
       # runner) and runs the production host against it: the app's lookup of an undeclared name must reach the sinkhole, and a mock's alias must resolve.
@@ -211,6 +211,14 @@ jobs:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run tests/linux/e2e-agent-probes.test.ts
+      # MIDSTEP-2 (option A): values the app acquires after the step's first model call (a session cookie, local and session storage, a JSON leaf, a `?token=` URL, an Authorization
+      # header, IndexedDB, one opaque id) never reach the model: the real executor image and Chromium on this Docker host, the scripted route recording every call, three groups of three
+      # cases. Strong values are refused in any spelling, the weak one shows as `<session>`, a control case goes through, no transcript is truncated. Values are random for each run.
+      - name: Mid-step values never reach the model (scripted route)
+        env:
+          ROVARA_DOCKER: "1"
+          ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
+        run: npx vitest run tests/linux/e2e-midstep-carriers.test.ts
       # The browser path end to end through the real worker, broker and this Docker host: a failing round, send-back, a passing round, publication.
       # It skips unless Docker and the executor image are provided, so it is a native-suite file that only this job runs.
       - name: Native browser journey
