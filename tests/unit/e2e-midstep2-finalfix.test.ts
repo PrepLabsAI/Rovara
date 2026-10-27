@@ -10,8 +10,7 @@ import { readBrowserState } from "../../packages/verifier/src/executor/browser-s
 import { classifyString, type ClassifiedValue } from "../../packages/verifier/src/executor/credential-classifier.js";
 import { createHostModelStack } from "../../packages/verifier/src/executor/host-model-stack.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
-import { watchBrowserRequests } from "../../packages/verifier/src/executor/request-capture.js";
-import { urlSecrets } from "../../packages/verifier/src/executor/request-secrets.js";
+import { headerSecrets, urlSecrets } from "../../packages/verifier/src/executor/request-secrets.js";
 import { createE2ESessionSyncSource } from "../../packages/verifier/src/executor/session-sync.js";
 import { classifyStorageEntry } from "../../packages/verifier/src/executor/storage-entry-classifier.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
@@ -152,9 +151,8 @@ describe("F-3: a signed-out visitor's context is read", () => {
     const context = await browser.newContext();
     const e = await harness.executor();
     e.source.detach("s1");
-    // As the host wires a signed-out visitor: attached with the visitor bar, requests watched with it.
+    // As the host attaches a signed-out visitor: with the visitor bar. Nothing else watches this context, so the fragment is found only because the visitor's browser state is read.
     e.source.attach("visitor", { storageState: () => readBrowserState(context) }, { anonymous: true });
-    watchBrowserRequests(context, { learn: (items) => e.source.learn(items), track: (pending) => e.source.track(pending) }, { visitor: true });
     const page = await context.newPage();
     await page.goto(`${origin}/`);
     expect(await e.executorSays("Welcome visitor-3f2504e0-4f89-11d3-9a0c-0305e82c3301"), "the visitor id is no secret").toBe("ok");
@@ -162,6 +160,14 @@ describe("F-3: a signed-out visitor's context is read", () => {
     expect(await e.executorSays(`You are at ${page.url()}`)).toBe("credential-in-prompt");
     expect(e.registry.sessionSecrets).toContain(JWT);
   }, 60_000);
+});
+
+describe("F-3: the visitor bar of the request watch", () => {
+  it("a visitor's Cookie header (its id and cart) registers nothing, a JWT in it does; a signed-in context's cookie header is unchanged", () => {
+    const header = [{ name: "cookie", value: `visitor=visitor-3f2504e0-4f89-11d3-9a0c-0305e82c3301; cart=3-items-blue-shirt-red-hat; sid=${JWT}` }];
+    expect(headerSecrets(header, { visitor: true }).map((item) => item.value)).toEqual([JWT]);
+    expect(headerSecrets(header).map((item) => item.value)).toEqual(expect.arrayContaining(["visitor-3f2504e0-4f89-11d3-9a0c-0305e82c3301", JWT]));
+  });
 });
 
 describe("F-4: one-time sign-in URL parameters are credentials", () => {
