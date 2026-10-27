@@ -347,6 +347,22 @@ describe("a failure before the switch", () => {
     expect(close.sns.map((message) => /^reason: ([a-z-]+)/m.exec(message.message)?.[1])).toEqual(["drain-timeout"]);
   });
 
+  it("when the drain's reads are refused it says drain-read-failed (not drain-timeout), with no AWS text, and does not switch or count the work as 0 (DRAINREAD)", async () => {
+    const old = oldInstallation({ expiresInMs: 5 * 24 * HOUR });
+    cloud.drainReadFails = true;
+    const { run } = await renew();
+    expect(run.status).toBe("Succeeded");
+    expect(cloud.row("web")?.["generation"]).toBe(1);
+    expect(cloud.instances.get(old.id)?.state).toBe("running");
+    expect(cloud.hold()).toBeUndefined();
+    expect(cloud.launches.map((id) => cloud.instances.get(id)?.state)).toEqual(["terminated"]);
+    // The rows are 5 days from expiry, where a drain TIMEOUT is not worth an alert; a refused read always is.
+    const [sent] = alert();
+    expect(alert()).toHaveLength(1);
+    expect(sent?.reason).toBe("drain-read-failed");
+    expect(sent?.text).not.toMatch(/AccessDenied|not authorized|arn:aws|dynamodb/);
+  });
+
   it("abandons without a switch when the worker settings changed during the run", async () => {
     const old = oldInstallation();
     const { run } = await renew(randomUUID(), { after: (action) => { if (action === "putHold") cloud.ssm.set(`/agentx/${ENV}/worker-image`, `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-test/worker@sha256:${"c".repeat(64)}`); } });
