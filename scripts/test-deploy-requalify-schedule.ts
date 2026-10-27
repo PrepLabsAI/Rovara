@@ -68,3 +68,16 @@ export function recordEnabledMarker(runner: { aws(args: readonly string[], allow
   if (result.stderr.includes("ConditionalCheckFailedException")) return "already-recorded";
   throw new Error("the schedule is ENABLED, but the record that it was enabled could not be written (the renewal's daily check writes it on its first run); check the profile's DynamoDB write access, then run requalify-schedule again");
 }
+
+/**
+ * The line the `record-requalify-enabled` step prints. In the `requalify-schedule` unit a refusal stops the unit (`optional` false). After a code deploy (`optional` true) the code is already
+ * deployed and verified, so a refusal is a warning that says how to add the record, never a failed deploy.
+ */
+export function recordEnabledMarkerReport(runner: Parameters<typeof recordEnabledMarker>[0], input: { table: string; region: string; now: Date }, optional: boolean): string {
+  try {
+    return recordEnabledMarker(runner, input) === "written" ? "recorded that the daily schedule was enabled" : "the daily schedule was already recorded as enabled";
+  } catch (error) {
+    if (!optional) throw error;
+    return `WARNING: ${error instanceof Error ? error.message : "the record that the daily schedule was enabled could not be written"}`;
+  }
+}
