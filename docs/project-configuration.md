@@ -421,15 +421,13 @@ that needs more tools should use a dev container. A sandbox that cannot start fa
 AgentX never falls back to running the command in the worker. The sandbox is the default
 everywhere; running commands as children of the worker is for tests and a developer's machine,
 needs `AGENTX_TASK_SHELL=local`, and is refused on EC2 (the boot script sets `AGENTX_RUNTIME=ec2`).
-A dev container's file tools still run in the worker.
 
 #### Security follow-ups
 
 Tracked in [#325](https://github.com/PrepLabsAI/Rovara/issues/325):
 
-1. Done for projects without a dev container: they run in the task sandbox (above). A dev container
-   is not yet started with `--cap-drop ALL` or `no-new-privileges`, and its file tools still run in
-   the worker.
+1. Done for projects without a dev container: they run in the task sandbox (above). Further
+   hardening of dev containers is tracked in the same issue.
 2. Dev-container-only Docker: only AgentX's own launcher reaches Docker; projects without a dev
    container run in the task sandbox, which has none.
 3. Apply the same process and container stop before the credential of a pull request update.
