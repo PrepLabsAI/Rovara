@@ -302,7 +302,30 @@ async function assertFullConfigurationAllowed(checks: DevcontainerChecks, target
   if (reason !== undefined) {
     throw agentXError("CONFIG_INVALID", `The dev container config ${relative(target.rootPath, target.configPath)}, with its features and image, uses ${reason}, which AgentX does not allow: it would give code in the container the worker host. AgentX did not start it; see "Dev container" in docs/project-configuration.md for what is allowed.`.slice(0, 1_000));
   }
+  const localFeature = localFeatureOutsideConfigFolder(full.featuresConfiguration, target);
+  if (localFeature !== undefined) {
+    throw agentXError("CONFIG_INVALID", `The dev container config ${relative(target.rootPath, target.configPath)} uses the local feature ${localFeature}, which is not inside ${relative(target.rootPath, dirname(target.configPath)) || "."}, so AgentX did not start the dev container. A local feature must be a folder inside the dev container config's own folder, reached through no link that leaves it.`.slice(0, 1_000));
+  }
   return featureLockfile(full.featuresConfiguration, relative(target.rootPath, target.configPath));
+}
+
+/**
+ * The first local feature (one in a folder of the repository rather than from a registry) whose folder, with links resolved,
+ * is not inside the folder of devcontainer.json; undefined when each is. The CLI's own check does not resolve links.
+ */
+function localFeatureOutsideConfigFolder(featuresConfiguration: unknown, target: DevcontainerTarget): string | undefined {
+  const sets = (featuresConfiguration as { featureSets?: unknown } | null | undefined)?.featureSets;
+  const resolvePath = hostPathResolver(target.rootPath);
+  const folder = resolvePath(resolve(dirname(target.configPath)));
+  for (const set of Array.isArray(sets) ? sets as unknown[] : []) {
+    const source = (set as { sourceInformation?: { type?: unknown; userFeatureId?: unknown; resolvedFilePath?: unknown } } | null)?.sourceInformation;
+    if (source?.type !== "file-path") continue;
+    const id = typeof source.userFeatureId === "string" ? source.userFeatureId : "(unnamed)";
+    if (typeof source.resolvedFilePath !== "string") return id;
+    const fromFolder = relative(folder, resolvePath(resolve(source.resolvedFilePath)));
+    if (fromFolder.startsWith("..") || isAbsolute(fromFolder)) return id;
+  }
+  return undefined;
 }
 
 /** A devcontainer lockfile: the exact content of each remote feature, by digest. */

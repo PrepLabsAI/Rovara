@@ -69,10 +69,22 @@ export function devcontainerConfigRefusal(config: unknown, context: Devcontainer
   const build = settings.build !== null && typeof settings.build === "object" && !Array.isArray(settings.build)
     ? settings.build as Record<string, unknown>
     : {};
-  for (const [name, value] of [["build.dockerfile", build.dockerfile ?? settings.dockerFile], ["build.context", build.context ?? settings.context]] as const) {
-    if (value === undefined) continue;
-    const outside = buildPathRefusal(value, context);
-    if (outside !== undefined) return `${name} outside the repository folder (${outside})`;
+  // The devcontainer CLI reads the top-level `dockerFile` and `context` in preference to `build.*` when the first is present,
+  // so every spelling is checked, and each must be inside the repository folder.
+  for (const [name, values] of [
+    ["build.dockerfile", [build.dockerfile, settings.dockerFile]],
+    ["build.context", [build.context, settings.context]],
+  ] as const) {
+    for (const value of values) {
+      if (value === undefined) continue;
+      const outside = buildPathRefusal(value, context);
+      if (outside !== undefined) return `${name} outside the repository folder (${outside})`;
+    }
+  }
+  if (build.cacheFrom !== undefined) {
+    const sources = Array.isArray(build.cacheFrom) ? build.cacheFrom : [build.cacheFrom];
+    if (!sources.every((source) => typeof source === "string")) return "build.cacheFrom that is not a string or a list of strings";
+    if (sources.some(localCacheSource)) return "build.cacheFrom type=local";
   }
   if (build.args !== undefined && build.args !== null && typeof build.args === "object" && !Array.isArray(build.args)) {
     const refused = Object.keys(build.args).find(isBuildKitArgument);
@@ -102,6 +114,9 @@ function buildPathRefusal(value: unknown, context: DevcontainerPolicyContext): s
   return fromRepository.startsWith("..") || isAbsolute(fromRepository) ? path : undefined;
 }
 
+/** A BuildKit cache source read from a folder of the worker (`type=local`) rather than from an image or a registry. */
+const localCacheSource = (source: string) => /(^|,)\s*type=local\s*(,|$)/iu.test(source);
+
 /** A build argument that sets BuildKit itself (`BUILDKIT_SYNTAX` names the frontend image that reads the build). */
 const isBuildKitArgument = (name: string) => /^buildkit_/iu.test(name);
 
@@ -119,6 +134,10 @@ function buildOptionsRefusal(args: readonly string[]): string | undefined {
       const equals = arg.indexOf("=");
       const name = equals === -1 ? arg : arg.slice(0, equals);
       if (BUILD_REFUSED.has(name)) return name;
+      if (name === "--cache-from") {
+        const given = equals === -1 ? args[++index] ?? "" : arg.slice(equals + 1);
+        if (localCacheSource(given)) return "--cache-from type=local";
+      }
       if (name === "--build-arg") {
         const given = equals === -1 ? args[++index] ?? "" : arg.slice(equals + 1);
         if (isBuildKitArgument(given)) return `--build-arg ${given.split("=")[0]!.toUpperCase()}`;

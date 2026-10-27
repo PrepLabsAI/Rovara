@@ -393,6 +393,35 @@ describe("the devcontainer CLI seam", () => {
       expect(removed).toEqual(["id-1", "id-2"]);
     });
 
+    it("refuses a full configuration whose Dockerfile or context sits outside the repository, whichever spelling the CLI reads", async () => {
+      const target = await workspaceWith('{ "image": "node:22" }');
+      for (const [configuration, setting] of [
+        [{ dockerFile: "../../../Dockerfile", build: { dockerfile: "Dockerfile" } }, "build.dockerfile outside the repository folder"],
+        [{ dockerFile: "Dockerfile", context: "../../..", build: { context: "." } }, "build.context outside the repository folder"],
+      ] as const) {
+        const { cli, calls } = dockerCli([], { configuration, mergedConfiguration: {} });
+        await expect(ensureDevcontainer(cli, target)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(setting) as unknown });
+        expect(calls).toEqual([]);
+      }
+    });
+
+    it("keeps a local feature inside the repository's .devcontainer folder, whether or not a link leads out of it", async () => {
+      const target = await workspaceWith('{ "image": "node:22" }');
+      const folder = join(target.workspaceFolder, ".devcontainer");
+      await mkdir(join(folder, "local-feature"));
+      const outside = await mkdtemp(join(tmpdir(), "agentx-dc-feature-"));
+      await symlink(outside, join(folder, "linked-feature"));
+      const featuresFor = (resolvedFilePath: string) => ({ featureSets: [{ sourceInformation: { type: "file-path", resolvedFilePath, userFeatureId: "./feature" }, features: [{ version: "1" }] }] });
+      const { cli, calls } = dockerCli([() => ordinary], { configuration: {}, mergedConfiguration: {}, featuresConfiguration: featuresFor(join(folder, "local-feature")) });
+      await expect(ensureDevcontainer(cli, target)).resolves.toMatchObject({ containerId: "id-1" });
+      expect(calls).toHaveLength(1);
+      for (const path of [join(folder, "linked-feature"), outside, join(target.workspaceFolder, "elsewhere")]) {
+        const refused = dockerCli([], { configuration: {}, mergedConfiguration: {}, featuresConfiguration: featuresFor(path) });
+        await expect(ensureDevcontainer(refused.cli, target), path).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("local feature") as unknown });
+        expect(refused.calls).toEqual([]);
+      }
+    });
+
     it("removes and refuses a container a feature or the image's metadata made privileged", async () => {
       const target = await workspaceWith('{ "image": "node:22", "features": { "ghcr.io/devcontainers/features/docker-in-docker:2": {} } }');
       const { cli, removed } = dockerCli([() => ({ HostConfig: { Privileged: true }, Mounts: [{ Type: "bind", Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock" }] })]);

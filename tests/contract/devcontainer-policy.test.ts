@@ -83,6 +83,15 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
     ["build.dockerfile outside the repository folder (/mnt/workspace/repo/Dockerfile)", { dockerFile: "../../Dockerfile" }],
     ["build.dockerfile outside the repository folder (/mnt/workspace/repo/other/Dockerfile)", { build: { dockerfile: "../../other/Dockerfile" } }],
     ["build.dockerfile outside the repository folder (/mnt/workspace/.agentx/Dockerfile)", { build: { dockerfile: "../../../.agentx/Dockerfile" } }],
+    // The CLI prefers the top-level spelling when both are present, so every spelling is checked.
+    ["build.dockerfile outside the repository folder (/mnt/workspace/Dockerfile)", { dockerFile: "../../../Dockerfile", build: { dockerfile: "Dockerfile" } }],
+    ["build.dockerfile outside the repository folder (/mnt/workspace/Dockerfile)", { dockerFile: "Dockerfile", build: { dockerfile: "../../../Dockerfile" } }],
+    ["build.context outside the repository folder (/mnt/workspace)", { dockerFile: "Dockerfile", context: "../../..", build: { context: ".." } }],
+    ["build.context outside the repository folder (/mnt/workspace)", { dockerFile: "Dockerfile", context: "..", build: { dockerfile: "Dockerfile", context: "../../.." } }],
+    ["build.options --cache-from type=local", { build: { dockerfile: "Dockerfile", options: ["--cache-from", "type=local,src=/tmp/cache"] } }],
+    ["build.options --cache-from type=local", { build: { dockerfile: "Dockerfile", options: ["--cache-from=type=local,src=cache"] } }],
+    ["build.cacheFrom type=local", { build: { dockerfile: "Dockerfile", cacheFrom: "type=local,src=/tmp/cache" } }],
+    ["build.cacheFrom type=local", { build: { dockerfile: "Dockerfile", cacheFrom: ["example.test/app:cache", "type=local,src=/tmp/cache"] } }],
     ["build.args BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", args: { BUILDKIT_SYNTAX: "example.test/frontend:1" } } }],
     ["build.args BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", args: { buildkit_syntax: "example.test/frontend:1" } } }],
     ["build.options --build-arg BUILDKIT_SYNTAX", { build: { dockerfile: "Dockerfile", options: ["--build-arg", "BUILDKIT_SYNTAX=example.test/frontend:1"] } }],
@@ -105,6 +114,8 @@ describe("dev container settings AgentX refuses (docker containment)", () => {
     // A Dockerfile is in the repository folder or below it, and ordinary build arguments are fine.
     for (const file of ["Dockerfile", "../Dockerfile", "../docker/Dockerfile", "${localWorkspaceFolder}/Dockerfile"]) expect(refusal({ build: { dockerfile: file } }), file).toBeUndefined();
     expect(refusal({ build: { dockerfile: "Dockerfile", args: { VARIANT: "22" }, options: ["--build-arg", "A=1"] } })).toBeUndefined();
+    // Both spellings, each inside the repository folder, and a cache taken from an image.
+    expect(refusal({ dockerFile: "Dockerfile", context: "..", build: { dockerfile: "../Dockerfile", context: ".", cacheFrom: ["example.test/app:cache", "type=registry,ref=example.test/app:cache"], options: ["--cache-from", "example.test/app:cache"] } })).toBeUndefined();
     expect(devcontainerConfigRefusal({
       build: { dockerfile: "Dockerfile", context: "..", options: ["--add-host", "db:10.0.0.2", "--build-arg", "A=1", "--pull"] },
       features: { "ghcr.io/devcontainers/features/node:1": {} },
