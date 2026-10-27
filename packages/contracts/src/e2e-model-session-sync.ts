@@ -35,7 +35,7 @@ export const E2E_MODEL_SESSION_SYNC_MAX_BODY_BYTES = 200_000;
  * than the worker's memory and its scan of every prompt growing without bound.
  */
 export const E2E_MODEL_SESSION_SYNC_MAX_TOTAL_VALUES = 512;
-export const E2E_MODEL_SESSION_SYNC_MAX_TOTAL_BYTES = 131_072;
+export const E2E_MODEL_SESSION_SYNC_MAX_TOTAL_BYTES = 65_536;
 
 /** What the executor sends for one value: the value, or for one over the bound its head and its tail (any prompt that shows the whole value shows both). */
 export function boundSessionValue(value: string): string[] {

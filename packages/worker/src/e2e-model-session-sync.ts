@@ -21,8 +21,8 @@ import { e2eSecretSpellings } from "./e2e-secret-spellings.js";
 export type SessionSyncOutcome = { ok: true; added: string[]; syncToken: string; epoch: string } | { ok: false; code: E2EModelSessionSyncRefusalCode };
 export type SessionSyncCallCheck = { ok: true } | { ok: false; message: string };
 
-/** The most characters of spellings the guard scans every prompt for, for the values of the sync. At about 14 spellings of each value this is some 100 KB of values; each prompt scan stays a few milliseconds. */
-export const E2E_SESSION_SYNC_MAX_NEEDLE_CHARS = 1_500_000;
+/** The most characters of spellings the guard scans every prompt for, for the values of the sync. At about 14 spellings of each value this is some 70 KB of values; each prompt scan stays a few milliseconds. */
+export const E2E_SESSION_SYNC_MAX_NEEDLE_CHARS = 1_000_000;
 
 export interface E2ESessionSyncLedger {
   /** Validates a sync body (already parsed JSON) and, if it is for this run and within the caps, records it and issues the token the next call must name. A refused sync changes nothing. */

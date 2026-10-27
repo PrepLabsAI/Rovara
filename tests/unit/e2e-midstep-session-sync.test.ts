@@ -327,14 +327,17 @@ describe("what a run may teach the worker is bounded: values, bytes, and the wor
     expect(run.seen).toHaveLength(0);
   });
 
-  it("refuses a sync past the run's total bytes", async () => {
-    await startRun();
-    let refused: Awaited<ReturnType<typeof postJson>> | undefined;
-    for (let sent = 0; sent < 40 && refused === undefined; sent += 1) {
-      const reply = await postJson("/v1/sync", syncBody(Array.from({ length: 2 }, (_, index) => `${String(sent)}-${String(index)}-`.padEnd(E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS, "q"))));
-      if (reply.status !== 200) refused = reply;
+  it("refuses a sync past the run's total bytes (for values that spell short, so the scan-work cap is not the one that trips)", async () => {
+    const ledger = createE2ESessionSyncLedger();
+    let accepted = 0;
+    let refused = false;
+    for (let index = 0; index < 64 && !refused; index += 1) {
+      const outcome = ledger.accept(syncBody([`${String(index).padStart(4, "0")}`.padEnd(E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS, "q")]), RUN_ID);
+      if (outcome.ok) accepted += 1; else { refused = true; expect(outcome).toMatchObject({ code: "too-many-values" }); }
     }
-    expect(refused).toMatchObject({ status: 400, body: { code: "too-many-values" } });
+    expect(refused).toBe(true);
+    expect(accepted * E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS).toBeLessThanOrEqual(E2E_MODEL_SESSION_SYNC_MAX_TOTAL_BYTES);
+    expect((accepted + 1) * E2E_MODEL_SESSION_SYNC_MAX_VALUE_CHARS).toBeGreaterThan(E2E_MODEL_SESSION_SYNC_MAX_TOTAL_BYTES);
   });
 
   it("refuses a sync past the run's scan work (the characters of every spelling the guard scans each prompt for), well before the byte cap for values that spell long", async () => {
