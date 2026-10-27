@@ -43,6 +43,8 @@ export class FakeCloud {
   runner: { ready: boolean; qualify: "SUCCEEDED" | "FAILED" | "never"; failure: string[]; proposal?: Buffer } = { ready: true, qualify: "SUCCEEDED", failure: [] };
   /** Work that began before the hold and has not finished. */
   activeWork: number | "unknown" = 0;
+  /** The drain's reads are refused (an IAM denial): the port throws, with AWS-looking text that must never reach the alert. */
+  drainReadFails = false;
   failRegister = false;
   /** Puts whose body held the challenge secret: the positive control for "the secret never reaches state". */
   secretWrites = 0;
@@ -256,7 +258,7 @@ export class FakeCloud {
       config: { workerRoleArn: ROLE_ARN, workerSettingsPrefix: `/agentx/${ENV}/`, amiParameterName: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64", controlPlaneUrl: "https://cp.example", logGroupName: "/agentx/worker",
         operatorTopicArn: "arn:aws:sns:us-east-1:111122223333:alerts", metricsNamespace: "AgentX", stateMachineArn: "arn:aws:states:us-east-1:111122223333:stateMachine:renew" },
       ec2: this.ec2 as never, ssm: this.ssmClient as never, iam: this.iam as never, sns: this.sns_ as never, cloudwatch: this.cloudwatch as never, sfn: this.sfn as never,
-      drain: { activeWork: async () => this.activeWork },
+      drain: { activeWork: async () => { if (this.drainReadFails) throw Object.assign(new Error("User: arn:aws:sts::123456789012:assumed-role/x is not authorized to perform: dynamodb:Query"), { name: "AccessDeniedException" }); return this.activeWork; } },
       bootScript: () => "#!/bin/bash\n# boot\n",
       invokePublicKey: async () => `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE${"A".repeat(88)}`,
       parseProposal: (bytes) => ({ proposal: JSON.parse(bytes.toString("utf8")), sha256: createHash("sha256").update(bytes).digest("hex") }),

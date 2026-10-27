@@ -33,3 +33,15 @@ as the `node` user in its container and has root-equivalent host access through 
 socket. The workspace is mounted at the same host and container path so Docker bind mounts refer to
 the same files. The worker removes other containers before a push, so the boot unit must remain the
 only container that this script starts.
+
+## Task sandbox
+
+A project without a devcontainer runs a task's commands in a sandbox container that the worker
+starts from its own image, so the worker's environment file carries two lines:
+`AGENTX_SANDBOX_IMAGE` (the image the worker was launched from, which is already on the host) and
+`AGENTX_RUNTIME=ec2`. The second makes the worker refuse to run a task's commands in its own
+process, whatever else is set (the worker image also sets `AGENTX_WORKER_PROCESS_SCOPE=container`,
+which the worker reads as the same mark). The sandbox mounts the workspace at the same path as the
+worker does, which is why the worker's own mount keeps the host and container paths equal. The
+sandbox has no Docker socket, no extra group, no capabilities and `no-new-privileges`, and joins a
+plain user-defined bridge network (`agentx-task`); its network walls are a separate step.

@@ -2,8 +2,8 @@ import { GetCommand, QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/
 import { STALE_RUN_SWEEP_AGE_MS } from "@agentx/verifier";
 import {
   INDEX_EXPIRY_ATTRIBUTE, REQUALIFY_PROFILE_ID, RequalifyHoldSchema, TERMINAL_OPERATION_STATUSES, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKSPACE_SESSION_STATE_INDEX,
-  agentXError, canonicalJson, projectSetupExecutionKey, requalifyHoldKey,
-  type E2EApplicationSelectionRecord, type E2ERegisteredRuntime,
+  agentXError, canonicalJson, projectSetupExecutionKey, requalifyDrainProjection, requalifyHoldKey,
+  type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type RequalifyDrainRead,
 } from "@agentx/contracts";
 import type { SessionManager } from "../aws/sessions.js";
 import { isConditional } from "../aws/broker-shared.js";
@@ -89,11 +89,17 @@ export function requalifySetupWorkRow(setupExecutionId: string, deadlineAt: stri
 
 export interface RequalifyDrainStatus { drained: boolean; applicationRounds: number; setupRuns: number }
 
-async function queryAll(store: RequalifyHoldStore, input: Record<string, unknown>): Promise<Array<Record<string, unknown>>> {
+/**
+ * One paged query that names the attributes it reads (`read`, see REQUALIFY_DRAIN_READS): the renewal role may only read those, and only by naming them. A page that fails throws; nothing
+ * here turns a refused or failed read into an empty answer.
+ */
+async function queryAll(store: RequalifyHoldStore, read: RequalifyDrainRead, input: { ExpressionAttributeNames?: Record<string, string> } & Record<string, unknown>): Promise<Array<Record<string, unknown>>> {
   const items: Array<Record<string, unknown>> = [];
+  const projection = requalifyDrainProjection(read);
   let start: Record<string, unknown> | undefined;
   do {
-    const page = await store.documentClient.send(new QueryCommand({ TableName: store.tableName, ...input, ...(start === undefined ? {} : { ExclusiveStartKey: start }) })) as
+    const page = await store.documentClient.send(new QueryCommand({ TableName: store.tableName, ...input, Select: "SPECIFIC_ATTRIBUTES", ProjectionExpression: projection.ProjectionExpression,
+      ExpressionAttributeNames: { ...input.ExpressionAttributeNames, ...projection.ExpressionAttributeNames }, ...(start === undefined ? {} : { ExclusiveStartKey: start }) })) as
       { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
     items.push(...(page.Items ?? []));
     start = page.LastEvaluatedKey;
@@ -107,12 +113,12 @@ async function queryAll(store: RequalifyHoldStore, input: Record<string, unknown
  * counts until its record is terminal or its marker ends. Reads only.
  */
 export async function requalifyDrainStatus(store: RequalifyHoldStore, now: number): Promise<RequalifyDrainStatus> {
-  const sessions = await queryAll(store, { IndexName: WORKSPACE_SESSION_STATE_INDEX.name, KeyConditionExpression: "#index = :state",
+  const sessions = await queryAll(store, "sessions", { IndexName: WORKSPACE_SESSION_STATE_INDEX.name, KeyConditionExpression: "#index = :state",
     ExpressionAttributeNames: { "#index": WORKSPACE_SESSION_STATE_INDEX.partitionKey }, ExpressionAttributeValues: { ":state": "READY" } });
   let applicationRounds = 0;
   for (const session of sessions) {
     if (typeof session.workspaceId !== "string") continue;
-    const operations = await queryAll(store, { KeyConditionExpression: "pk = :pk AND begins_with(sk, :operation)", ConsistentRead: true,
+    const operations = await queryAll(store, "operations", { KeyConditionExpression: "pk = :pk AND begins_with(sk, :operation)", ConsistentRead: true,
       ExpressionAttributeValues: { ":pk": `WORKSPACE#${session.workspaceId}`, ":operation": "OPERATION#" } });
     for (const operation of operations) {
       const admission = operation.workflowE2EAdmission as { kind?: unknown } | undefined;
@@ -124,11 +130,11 @@ export async function requalifyDrainStatus(store: RequalifyHoldStore, now: numbe
     }
   }
   let setupRuns = 0;
-  const markers = await queryAll(store, { KeyConditionExpression: "pk = :pk AND begins_with(sk, :setup)", ConsistentRead: true,
+  const markers = await queryAll(store, "setupMarkers", { KeyConditionExpression: "pk = :pk AND begins_with(sk, :setup)", ConsistentRead: true,
     ExpressionAttributeValues: { ":pk": setupWorkKey("x").pk, ":setup": "SETUP#" } });
   for (const marker of markers) {
     if (typeof marker.setupExecutionId !== "string" || Date.parse(String(marker.until)) <= now) continue;
-    const execution = await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: projectSetupExecutionKey(marker.setupExecutionId), ConsistentRead: true })) as { Item?: { state?: unknown } };
+    const execution = await store.documentClient.send(new GetCommand({ TableName: store.tableName, Key: projectSetupExecutionKey(marker.setupExecutionId), ConsistentRead: true, ...requalifyDrainProjection("setupExecution") })) as { Item?: { state?: unknown } };
     if (execution.Item === undefined || execution.Item.state === "ACCEPTED" || execution.Item.state === "DISPATCHING") setupRuns += 1;
   }
   return { drained: applicationRounds === 0 && setupRuns === 0, applicationRounds, setupRuns };

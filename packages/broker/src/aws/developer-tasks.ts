@@ -231,6 +231,7 @@ import {
   planOwnerAnswers, promptComments, readDecisionDetail, refusalMessage,
 } from "../developer/owner-answers.js";
 import type { TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
+import { loadTestProofLines } from "../developer/test-proof-lines.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -3294,8 +3295,8 @@ export async function autoRetryReviewsFromSystem(deps: DeveloperTaskRouteDepende
   const caller = automaticCaller(task);
   const access = await authorizeTaskAction(deps, caller, taskId, "retry");
   await actionableWorkspace(deps, task);
-  await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, requestId, input.reason, access, caller, decision);
-  return "STARTED";
+  const accepted = await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, requestId, input.reason, access, caller, decision);
+  return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
 
 /** Starts a separate server-admitted native CHECKS operation from VERIFY/WAITING. */
@@ -4260,7 +4261,7 @@ export function inertTaskTitle(title: string): string {
  * (or, first, that no automated check applied and why), where the task lives, and that a human merges it. At most
  * 30,000 bytes.
  */
-export function workflowPullRequestBody(task: DeveloperTaskRecord, workflow: WorkflowSnapshot, plan: LoadedDocument | string | undefined, pageUrl: string | undefined): string {
+export function workflowPullRequestBody(task: DeveloperTaskRecord, workflow: WorkflowSnapshot, plan: LoadedDocument | string | undefined, pageUrl: string | undefined, proofLines: readonly string[] = []): string {
   // A structured plan's summary is its top claims; a legacy one's is its first lines (task 18: the same as the plan's
   // Slack message). Either way each line is made inert for GitHub first.
   const summary = (typeof plan === "object" && plan.format === "structured"
@@ -4276,7 +4277,7 @@ export function workflowPullRequestBody(task: DeveloperTaskRecord, workflow: Wor
     "",
     // Between markers, so a pushed PR feedback fix can bring them up to date and leave the rest as the person left it.
     PULL_REQUEST_STATUS_START,
-    ...workflowPullRequestStatusLines(workflow),
+    ...workflowPullRequestStatusLines(workflow, proofLines),
     PULL_REQUEST_STATUS_END,
     ...(pageUrl === undefined ? [] : [`AgentX task: ${pageUrl}`]),
     "",
@@ -4294,7 +4295,7 @@ export function workflowPullRequestBody(task: DeveloperTaskRecord, workflow: Wor
  * line is one line, redacted and made inert for GitHub. Rewritten after a pushed PR feedback fix, so it is always about
  * the code on the pull request.
  */
-export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot): string[] {
+export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot, proofLines: readonly string[] = []): string[] {
   const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.proposed ?? []), ...(workflow.checkPolicy?.optional ?? [])];
   const passed = (workflow.verification?.results ?? []).filter((result) => result.status === "PASS")
     // A proposed check's label is model-written: one line, redacted and made inert like a plan line, as every label is.
@@ -4316,6 +4317,7 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot): stri
       ...(accepted.length > WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED ? [`- and ${accepted.length - WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED} more; see the task page`] : []),
     ]),
     ...(partial ? [PULL_REQUEST_PARTIAL_REVIEW_LINE] : []),
+    ...proofLines,
   ];
 }
 
@@ -4508,7 +4510,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   const publication = await workflowPublicationAuthority(deps, task, workflow, approvedPlan, workflow.revision + (ownerRetry ? 1 : 0));
   if (publication === undefined) return "STALE";
   const title = `AgentX: ${inertTaskTitle(task.title)}`.slice(0, 256);
-  const body = workflowPullRequestBody(task, workflow, approvedPlan, origin.taskPageUrl);
+  const body = workflowPullRequestBody(task, workflow, approvedPlan, origin.taskPageUrl, await loadTestProofLines(deps.actions, task, workflow.candidate?.digest, inertPlanLine));
   const receivedAt = iso(deps);
   const unchanged = {
     ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND attribute_not_exists(closedAt)",

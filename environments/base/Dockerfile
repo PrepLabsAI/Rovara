@@ -69,8 +69,10 @@ FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63
 # Python 3, pip and venv (Debian bookworm) so a Python repository's tests run; a project's
 # devcontainer (#121) is the route for anything else. tini, pinned, runs as PID 1 and reaps the
 # processes a command leaves behind: commands run in their own process group (#170).
+# This image is also the task sandbox a project without a devcontainer runs in, so it carries
+# the tools such a project's commands reach for: curl, git, python3, bash and a POSIX shell (dash).
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates git openssh-client python3 python3-pip python3-venv tini=0.19.0-1+b3 \
+    && apt-get install --yes --no-install-recommends ca-certificates curl git openssh-client python3 python3-pip python3-venv tini=0.19.0-1+b3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=tools /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
@@ -83,6 +85,18 @@ COPY --from=build /opt/agentx/packages/model-runtime ./packages/model-runtime
 COPY --from=build /opt/agentx/packages/contracts ./packages/contracts
 COPY --from=build /opt/agentx/packages/verifier ./packages/verifier
 COPY --from=build /opt/agentx/packages/worker ./packages/worker
+
+# Empty, read-only git directories (one per object format) for the worker's verified base read (packages/worker/src/trusted-base-objects.ts).
+# Git runs in one of these with GIT_OBJECT_DIRECTORY pointed at a scratch objects directory, so no process that can write the workspace can give
+# Git a config to read. Root-owned, nothing writable, outside the workspace and every mount a dev container is given.
+RUN set -eu; \
+    install -d -o root -g root -m 0755 /usr/share/agentx; \
+    for format in sha1 sha256; do \
+      git init --bare --quiet --template= "--object-format=$format" "/usr/share/agentx/empty-$format.git"; \
+    done; \
+    chown -R root:root /usr/share/agentx; \
+    find /usr/share/agentx -type d -exec chmod 0555 {} +; \
+    find /usr/share/agentx -type f -exec chmod 0444 {} +
 
 # AGENTX_WORKER_PROCESS_SCOPE: this container is the worker's own process namespace, so before a push every other
 # process of the worker's user in it is stopped (packages/worker/src/workspace-processes.ts).

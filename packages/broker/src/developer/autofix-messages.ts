@@ -76,9 +76,13 @@ const CODE_SENTENCES: Readonly<Record<AutoFixCode, string>> = Object.freeze({
   "check-broken": "A check could not run because the check itself is broken.",
   "fails-on-original-code": "A check fails on the original code too.",
   "review-unusable": "A review could not be used.",
+  "rule-files-unverified": "The base rule files could not be verified, so the review did not run.",
   "pull-request-open": "A pull request is already open for part of this change.",
   "unknown-group-code": "A check group ended in a way Rovara has no wording for.",
   unreadable: "The block could not be read.",
+  "dispatch-exhausted": "Rovara tried several times to start this step and could not.",
+  "run-lost": "The runner lost the task partway through the run.",
+  "owner-stopped": "You stopped this run.",
   "e2e-evidence-unknown": "Some checks ended without a result, and nothing says whether the code or the setup is at fault.",
   "check-result-unknown": "A check ended without a result.",
   "check-failed-cause-unknown": "A check failed and nothing says yet whether the code or the setup is at fault.",
@@ -95,6 +99,7 @@ export function autoFixAskReasonSentence(reason: AutoFixAskReason, capUsd?: numb
     case "needs-a-person": return "Only a person can fix this; new code or a retry would not.";
     case "original-code-also-fails": return failedOnOriginal ? "The same checks also fail on the original code, so new code may not fix it." : "The original code could not be checked, so I can't tell whether new code would fix it.";
     case "unclear-fault": return "I could not tell whether the code or the setup is at fault.";
+    case "owner-stopped": return "You stopped this, so I did not retry it by myself.";
     case "send-back-limit": return "I already sent this back to coding twice for this plan, which is my limit.";
     case "retry-limit": return "I already retried this once for this code, which is my limit.";
     case "total-limit": return "I reached my limit of 6 automatic actions on this task.";
@@ -143,6 +148,9 @@ export function autoFixCardLines(workflow: Pick<WorkflowSnapshot, "decisions" | 
   if (tried !== undefined) lines.push(`${bold("What Rovara already tried:")} ${tried}`);
   if (current !== undefined) {
     const groups = current.groups ?? [];
+    // DISPATCHEXHAUST: a block that no finished run wrote says what failed in its own line (the other blocks' reasons are on the card already).
+    const failed = current.codes.filter((code) => code === "dispatch-exhausted" || code === "run-lost").map((code) => autoFixCodeSentence(code));
+    if (failed.length > 0) lines.push(`${bold("What failed:")} ${failed.join(" ")}`);
     // "Also fails on the original code" is said only when a scenario really failed there; a round that could not run says so instead.
     lines.push(`${bold("Why I'm asking you:")} ${autoFixAskReasonSentence(current.reason, current.capUsd, groups.length === 0 || groups.some((group) => group.original === "failed"))}`);
     if (groups.length > 0) {

@@ -13,8 +13,8 @@ import { DeleteCommand, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
   E2E_QUALIFICATION_INSTANCE_ID_PATTERN, E2E_QUALIFICATION_PROFILE_ID, E2E_QUALIFICATION_ROLE_ID_PATTERN, QUALIFICATION_POLL_TIMEOUT_MS, QUALIFICATION_READY_TIMEOUT_MS,
-  QUALIFICATION_VOLUME_DEVICE, QUALIFIED_AMI_SETTING_NAME, REQUALIFY_PROFILE_ID, REQUALIFY_STEP_REASON_CODES, REQUALIFY_TAGS, WORKER_SETTING_PARAMETERS,
-  WebApiRuntimeInstallProposalSchema, buildRunInstancesInput, canonicalJson, chunkParameterNames, e2eQualificationPrefix, launchTemplateShapeProblem, qualificationVolumeTags,
+  QUALIFICATION_VOLUME_DEVICE, QUALIFIED_AMI_SETTING_NAME, REQUALIFY_PROFILE_ID, REQUALIFY_REFUSAL_PREFIX, REQUALIFY_STEP_REASON_CODES, REQUALIFY_TAGS, WORKER_SETTING_PARAMETERS,
+  WebApiRuntimeInstallProposalSchema, agentXError, buildRunInstancesInput, canonicalJson, chunkParameterNames, e2eQualificationPrefix, launchTemplateShapeProblem, qualificationVolumeTags,
   renderQualificationUserData, requalifyHoldKey, requalifyRunKey, webApiRuntimeInstallProposalSha256,
   type QualificationFacts, type QualificationSettings, type RequalifyReasonCode, type RequalifyRunRecord,
 } from "@agentx/contracts";
@@ -35,7 +35,7 @@ import { dailyHeartbeat, recordRenewalSuccess } from "./runtime-requalify-heartb
  */
 
 export type RequalifyReason = RequalifyReasonCode | (typeof REQUALIFY_STEP_REASON_CODES)[number];
-const REASONS = new Set<string>(["launch-failed", "not-ready", "qualification-failed", "drain-timeout", "retire-failed", "cost-guard", ...REQUALIFY_STEP_REASON_CODES]);
+const REASONS = new Set<string>(["launch-failed", "not-ready", "qualification-failed", "drain-timeout", "drain-read-failed", "retire-failed", "cost-guard", ...REQUALIFY_STEP_REASON_CODES]);
 
 const RUN_WAIT_DEADLINES = { volumeMs: 3 * 60_000, attachMs: 5 * 60_000, terminateMs: 10 * 60_000, qualifyMarginMs: 10 * 60_000, drainMarginMs: 5 * 60_000 } as const;
 /** The expiry of a catalog row that makes the daily check start a renewal (day 4 of 7: three daily attempts before the 24 h error). */
@@ -451,7 +451,13 @@ async function deleteHold(deps: RequalifyStepsDependencies, runId: string): Prom
 }
 
 async function awaitDrain(deps: RequalifyStepsDependencies, state: RequalifyState): Promise<NonNullable<RequalifyState["drain"]>> {
-  const work = await deps.drain.activeWork();
+  // A read that was refused or failed is not a drain that ran out of time: it gets its own fixed reason (the AWS error text is never carried). It still throws, so nothing counts 0 and nothing switches.
+  const work = await deps.drain.activeWork().catch((error: unknown) => {
+    // For diagnosis only the error's class name is logged (e.g. AccessDeniedException) under a fixed event: never its message, which can quote ARNs and request details.
+    const name = typeof error === "object" && error !== null && typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
+    console.error(JSON.stringify({ component: "broker", event: "requalify.drain_read_failed", errorName: /^[A-Za-z0-9_.]{1,64}$/.test(name) ? name : "unknown" }));
+    throw agentXError("FORBIDDEN", `${REQUALIFY_REFUSAL_PREFIX}drain-read-failed`);
+  });
   return { status: pollResult(deps, need(state.challenge, "challenge").drainDeadlineAt, work === 0) };
 }
 
@@ -583,6 +589,8 @@ async function complete(deps: RequalifyStepsDependencies, state: RequalifyState)
 
 /** The reason code the alert carries: only a fixed code, never text from the error. */
 export function alertReason(state: RequalifyState): RequalifyReason {
+  // The one refusal that is the reason itself: the machine's reason for a failed AwaitDrain is "drain-timeout", which would point the owner at the wrong cause.
+  if (refusalDetail(state.error) === "drain-read-failed") return "drain-read-failed";
   return typeof state.reason === "string" && REASONS.has(state.reason) ? state.reason as RequalifyReason : "unexpected-error";
 }
 
@@ -628,7 +636,7 @@ async function failAlert(deps: RequalifyStepsDependencies, state: RequalifyState
   // The switch may have committed without the machine knowing (its answer was lost and the recovery failed too): the pointer and the run record say so.
   const committed = state.switch?.switched === true || await pointerNames(deps, state.instance?.instanceId);
   const previous = state.switch?.previous ?? (committed ? await recordedPrevious(deps, state.runId) : null);
-  const detail = state.qualification?.failure?.join(",") ?? refusalDetail(state.error);
+  const detail = state.qualification?.failure?.join(",") ?? (refusalDetail(state.error) === reason ? undefined : refusalDetail(state.error));
   const lines = [
     `The automatic renewal of the browser and API test machine did not finish (${deps.environment}).`,
     `reason: ${reason}${detail ? ` (${detail})` : ""}`, `run: ${state.runId}`,

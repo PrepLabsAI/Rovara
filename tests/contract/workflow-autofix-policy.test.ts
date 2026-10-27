@@ -179,6 +179,10 @@ describe("AUTOFIX policy: reviews", () => {
     expect(decide(blocked("REVIEW", WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE))).toEqual({ action: "RETRY", stage: "REVIEW", codes: ["review-not-run"] });
   });
 
+  it("asks, and never retries by itself, when a review stopped because its base rule files could not be verified", () => {
+    expect(decide(blocked("REVIEW", WORKFLOW_BLOCK_REASONS.ruleFilesUnverified))).toEqual({ action: "ASK", reason: "needs-a-person", codes: ["rule-files-unverified"] });
+  });
+
   it("sends back when findings and a stopped run come together", () => {
     expect(decide(blocked("REVIEW", undefined, { reviews: [review("CRITIC", "FINDINGS", [finding("bug")]), review("SECURITY", "INTERRUPTED", [], { failureReason: "INTERRUPTED" })] })))
       .toEqual({ action: "SEND_BACK", codes: ["review-findings", "review-run-failed"] });

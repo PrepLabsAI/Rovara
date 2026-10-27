@@ -172,11 +172,14 @@ below is refused, with a message naming the setting, before any container starts
 | `dockerComposeFile` | The Compose services' settings cannot be checked. |
 | `privileged: true`, `securityOpt`, or any `capAdd` other than `SYS_PTRACE` | They grant powers over the host. |
 | `runArgs` with `--privileged`, `--pid`, `--ipc=host` or `container:…`, `--network=host` (or `--net`) or `container:…`, `--userns=host`, `--uts=host`, `--cgroupns=host`, `--cap-add` (other than `SYS_PTRACE`), `--security-opt`, `--device`, `--device-cgroup-rule`, `--gpus` or `--volumes-from` | They share the host's (or the worker's) processes, network, devices or files. |
-| A bind mount (`mounts`, `workspaceMount`, or `-v`/`--volume`/`--mount` in `runArgs`) of `/`, `/var/run/docker.sock`, the workspace root itself, its `.docker` folder, or any path outside the workspace, including through a link (whether or not its target exists), or a path AgentX cannot check | They expose host files or the Docker socket. |
+| A bind mount (`mounts`, `workspaceMount`, or `-v`/`--volume`/`--mount` in `runArgs`) whose source is not inside the repository folder (so not `/`, `/var/run/docker.sock`, the workspace root, the worker's own folders in it (`.docker`, `.agentx`, `agent-sessions`, `.agentx-runtime`; AgentX hides them inside the container too), another folder of the workspace, or anything outside it), including through a link (whether or not its target exists), or a source AgentX cannot check | They expose host files or the Docker socket. |
+| A mount written in any form but the plain one: settings in quotes, a setting given twice or under two spellings (`source` and `src`, `target` and `dst`), a setting AgentX does not list, or a comma or quote in a field of a mount object | AgentX reads a mount only in the one form every tool reads the same way. |
+| `${localEnv:…}` (or `${env:…}`) anywhere in the configuration | It would copy the worker's environment variables into the container. |
 | A feature AgentX cannot pin to the content it checked (one fetched from a GitHub release) | Its content could change before the container is built. |
+| A local feature whose folder is outside the dev container config's own folder, including through a link | It would read files of the workspace that are not the project's. |
 | A volume with `volume-opt` or `volume-driver` options | Such a volume can be a bind mount of any host path. |
-| `build.context` or `build.dockerfile` outside the workspace | The build would read host files. |
-| `build.options` with `--network=host` or `container:…`, `--output`/`-o`, `--iidfile`, `--metadata-file`, `--allow`, `--security-opt`, `--secret`, `--ssh`, `--build-context`, `--cache-to` or `--file`/`-f` | They reach the host's network, extra privileges, or files outside the build. |
+| `build.dockerfile` or `build.context`, or the top-level `dockerFile` or `context`, outside the repository folder (every spelling present is checked), or a `BUILDKIT_*` build argument (`build.args`, or `--build-arg` in `build.options`) | The build shares the Dockerfile's folder and the context with its frontend, and the workspace holds more than the repository (the worker's own folders). |
+| `build.options` with `--network=host` or `container:…`, `--output`/`-o`, `--iidfile`, `--metadata-file`, `--allow`, `--security-opt`, `--secret`, `--ssh`, `--build-context`, `--cache-to`, `--cache-from` (or `build.cacheFrom`) with anything but an image reference or `type=registry,ref=<image>`, or `--file`/`-f` | They reach the host's network, extra privileges, or files outside the build. |
 
 Everything else is allowed: `image` or `build` (with options such as `--build-arg`, `--target`,
 `--pull` or `--add-host`), `features`, `containerEnv`, `remoteUser`, lifecycle commands such as
@@ -195,8 +198,13 @@ the version available when the check runs, not to the repository's lockfile.
 
 After the container starts, AgentX checks it again as Docker ran it; a container that breaks the
 rules is removed and the step fails. AgentX mounts the whole workspace into the container at the
-same path, with the workspace's `.docker` folder (Docker's own data) hidden by an empty volume. A
-container created before AgentX hid that folder is created again once. Before each publication
+same path, with the worker's own folders of it (`.docker`, which is Docker's own data, `.agentx`,
+`agent-sessions` and `.agentx-runtime`) hidden by empty volumes. A container created before AgentX
+hid those folders is created again once. The agent's file tools (read, write, edit, grep, find and
+ls) run inside the dev container, as its user, so they only reach the repository folders it mounts.
+If the dev container cannot run them, they run in a separate sandbox container instead, and the
+task says so. A review of pull request feedback does not start the dev container: its file tools run
+in the task sandbox. Before each publication
 AgentX removes the dev container (see the security notes below), so the next step creates it again;
 creating it reruns its creation commands, such as `onCreateCommand` and `postCreateCommand`.
 
@@ -407,21 +415,30 @@ it keeps the token away from code the agent or the project controls:
 - The published commit's parent is the base commit AgentX pinned for the task, never one the
   workspace reports. The broker checks the pull request's commit, its code and its parent on GitHub.
 
-Known limitation: on EC2 workers, when a project has no dev container, the coding step currently runs
-with the worker's Docker access. Before publishing, AgentX stops processes and containers started by
-the task and pushes from an isolated repository, but that does not undo anything done earlier in the
-task. With a dev container that follows the rules in "Dev container" above, the agent's shell and the
-project's commands run in that container, without Docker access. Running AI-written code as a
-separate user without Docker access is tracked in
-[#325](https://github.com/PrepLabsAI/Rovara/issues/325).
+On EC2 workers, task code never runs inside the worker's own process or user. With a dev container
+that follows the rules in "Dev container" above, the agent's shell and the project's commands run in
+that container. A project without a dev container gets a task sandbox instead: a container started
+from the worker's own image for the task, in which the task's commands run without host access. It
+has no Docker socket and no extra group, all capabilities dropped, `no-new-privileges`, user 1000,
+tini as its init, and only the workspace mounted (the worker's own folders in the workspace are
+hidden). It joins the `agentx-task` bridge network, so outbound internet works. The agent's shell
+and file tools, AgentX's checks, and the project's `setup` and `readiness` commands all run there,
+and the sandbox is removed when the task, the preparation or the publication step ends, on success
+or failure. The image carries `curl`, `git`, `python3`, `uv`, `bash` and a POSIX shell; a project
+that needs more tools should use a dev container. A sandbox that cannot start fails the task.
+AgentX never falls back to running the command in the worker. The sandbox is the default
+everywhere; running commands as children of the worker is for tests and a developer's machine,
+needs `AGENTX_TASK_SHELL=local`, and is refused on EC2 (the boot script sets `AGENTX_RUNTIME=ec2`).
+The sandbox needs the worker's image (`AGENTX_SANDBOX_IMAGE`); on a developer's machine without it, the sandbox does not start unless `AGENTX_TASK_SHELL=local` is set.
 
 #### Security follow-ups
 
 Tracked in [#325](https://github.com/PrepLabsAI/Rovara/issues/325):
 
-1. Run agent and project code as a separate operating-system user with no Docker access.
-2. Dev-container-only Docker: only AgentX's own dev container launcher reaches Docker; projects
-   without a dev container get no Docker access.
+1. Done for projects without a dev container: they run in the task sandbox (above). Further
+   hardening of dev containers is tracked in the same issue.
+2. Dev-container-only Docker: only AgentX's own launcher reaches Docker; projects without a dev
+   container run in the task sandbox, which has none.
 3. Apply the same process and container stop before the credential of a pull request update.
 
 ## Checks: how Rovara verifies the agent's work (spec 051)

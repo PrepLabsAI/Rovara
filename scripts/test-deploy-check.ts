@@ -551,6 +551,24 @@ function statementsFor(grants: readonly Grant[]): PolicyStatement[] {
 }
 
 /**
+ * Whether `grant` (head's) only narrows one the role already holds: an Allow with the same action and resource whose condition is a strict part of head's (every operator, key and value the
+ * deployed grant has, head has too, and head adds more). The role can then do everything the new code does, so new code may be deployed first and the IAM narrowing applied after (DRAINREAD);
+ * the deployed, broader grant still shows as an iam-extra-grant warning until it is narrowed. A Deny is never covered this way, and a different condition (not a subset) is a gap as before.
+ */
+function isNarrowingOfHeldGrant(grant: Grant, held: ReadonlyMap<string, Grant>): boolean {
+  if (grant.effect !== "Allow" || grant.condition === undefined || grant.condition === null || typeof grant.condition !== "object") return false;
+  const wanted = grant.condition as Record<string, Record<string, unknown>>;
+  return [...held.values()].some((candidate) => {
+    if (candidate.effect !== "Allow" || canonical(candidate.action) !== canonical(grant.action) || canonical(candidate.resource) !== canonical(grant.resource)) return false;
+    if (candidate.condition === undefined || candidate.condition === null) return true;
+    if (typeof candidate.condition !== "object") return false;
+    const has = candidate.condition as Record<string, Record<string, unknown>>;
+    return Object.entries(has).every(([operator, keys]) => keys !== null && typeof keys === "object"
+      && Object.entries(keys).every(([key, value]) => wanted[operator] !== undefined && canonical(wanted[operator]?.[key]) === canonical(value)));
+  });
+}
+
+/**
  * Head's grants that the deployed role lacks (errors) and the deployed role's grants that head no longer has (warnings), role by role.
  * A grant is an effect, condition, action and resource, so a reordered or regrouped statement is not a difference. Wildcards are
  * not expanded: a deployed `ssm:*` does not stand in for a head `ssm:GetParameters`.
@@ -561,7 +579,7 @@ export function evaluateIamDrift(headTemplate: CheckTemplate, deployedTemplate: 
   const findings: Finding[] = [];
   for (const roleLogicalId of [...head.keys()].sort()) {
     const has = deployed.get(roleLogicalId) ?? new Map<string, Grant>();
-    const missing = [...(head.get(roleLogicalId)?.values() ?? [])].filter((grant) => !has.has(grant.key));
+    const missing = [...(head.get(roleLogicalId)?.values() ?? [])].filter((grant) => !has.has(grant.key) && !isNarrowingOfHeldGrant(grant, has));
     for (const policyLogicalId of [...new Set(missing.map((grant) => grant.policyLogicalId))].sort()) {
       const grants = missing.filter((grant) => grant.policyLogicalId === policyLogicalId);
       const statements = statementsFor(grants);

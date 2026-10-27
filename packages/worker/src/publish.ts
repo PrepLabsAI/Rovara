@@ -7,6 +7,7 @@ import {
   WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE,
   agentXError,
   type CheckEntry,
+  type ProjectCommand,
   type PublicationCheckResult,
   type PullRequestResult,
   type PullRequestLifecycleResult,
@@ -25,6 +26,7 @@ import { runProjectCommand, type PreparationCommandRunner, type PreparationManif
 import { storedCommandOutput } from "./command-failure.js";
 import { planChecks, publicationCheckEntries } from "./verification/checks.js";
 import type { CommandResult } from "./readiness.js";
+import { taskSandboxFor, taskShellSelection, type TaskShellSelection } from "./task-sandbox.js";
 import {
   createDevcontainerCli,
   ensureDevcontainer,
@@ -45,6 +47,8 @@ export interface PublishWorkspaceOptions {
   codeBuildSink?: CodeBuildSink;
   /** The `devcontainer` CLI, as a seam for tests. */
   devcontainerCli?: DevcontainerCli;
+  /** Where readiness checks run in a project without a devcontainer. Default: from the worker's environment. */
+  taskShell?: TaskShellSelection;
   /**
    * Stops every process left running from the workspace before the push credential is fetched, failing when it cannot
    * (see workspace-processes.ts for what it covers). A seam for tests; the default stops them for real.
@@ -207,6 +211,7 @@ export async function publishWorkspace(
   if (candidateTreeSha === undefined) {
     checks = await runReadinessChecks(rootPath, invocation, manifest, {
       ...(options.devcontainerCli !== undefined ? { devcontainerCli: options.devcontainerCli } : {}),
+      ...(options.taskShell !== undefined ? { taskShell: options.taskShell } : {}),
     });
     // Spec 051 P-2 (D-7, Ruling S): a broker that asks for the checks opens a draft pull request when one fails, so a
     // failing check no longer refuses the publication. A broker built before it would open a normal one, so it still refuses.
@@ -521,16 +526,35 @@ export async function runReadinessChecks(
   rootPath: string,
   invocation: CheckedInvocation,
   manifest: Pick<PreparationManifest, "devcontainer" | "repositories">,
-  options: { devcontainerCli?: DevcontainerCli } = {},
+  options: { devcontainerCli?: DevcontainerCli; taskShell?: TaskShellSelection } = {},
 ): Promise<PublicationCheckResult[]> {
   const readiness = invocation.payload.project.readiness;
-  let runner: PreparationCommandRunner = runProjectCommand;
   const target = preparedDevcontainerTarget(rootPath, manifest);
-  if (target !== undefined && readiness.length > 0) {
-    const cli = options.devcontainerCli ?? createDevcontainerCli();
-    await ensureDevcontainer(cli, target);
-    runner = (command) => runDevcontainerCommand(cli, target, command);
+  // Without a devcontainer the checks run in the task sandbox, started with the first command and removed after the last.
+  const sandbox = target === undefined && readiness.length > 0
+    ? taskSandboxFor(options.taskShell ?? taskShellSelection(), { rootPath, taskId: invocation.operationId })
+    : undefined;
+  let runner: PreparationCommandRunner = sandbox === undefined
+    ? (command, index, root) => runProjectCommand(command, index, root, undefined, true)
+    : (command) => sandbox.runCommand(command);
+  try {
+    if (target !== undefined && readiness.length > 0) {
+      const cli = options.devcontainerCli ?? createDevcontainerCli();
+      await ensureDevcontainer(cli, target);
+      runner = (command) => runDevcontainerCommand(cli, target, command);
+    }
+    return await runReadinessCommands(rootPath, invocation, readiness, runner);
+  } finally {
+    await sandbox?.dispose();
   }
+}
+
+async function runReadinessCommands(
+  rootPath: string,
+  invocation: CheckedInvocation,
+  readiness: readonly ProjectCommand[],
+  runner: PreparationCommandRunner,
+): Promise<PublicationCheckResult[]> {
   const results: PublicationCheckResult[] = [];
   for (const [index, command] of readiness.entries()) {
     const startedAt = new Date().toISOString();

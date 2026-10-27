@@ -1,6 +1,6 @@
 // Facts about the EC2 worker image, read from its Dockerfile (the image itself is built only by the
 // release workflow): what a repository's setup and test commands can count on.
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { webApiProbeRunnerConfig } from "../../packages/verifier/src/install-qualification-cli.js";
 
@@ -18,6 +18,32 @@ describe("the worker image", () => {
     expect(finalStage).toContain("rm -rf /var/lib/apt/lists/*");
   });
 
+  // a project without a devcontainer runs its commands in a container of this image.
+  it("carries what the task sandbox needs: curl, git, python3, bash, a POSIX shell, and the node user (uid 1000) it runs as", () => {
+    const install = /apt-get install --yes --no-install-recommends ([^\n\\]+)/.exec(finalStage)?.[1] ?? "";
+    for (const pkg of ["curl", "git", "python3", "tini=0.19.0-1+b3"]) expect(install.split(/\s+/), pkg).toContain(pkg);
+    // bash and /bin/sh (dash) come with Debian bookworm-slim, which the final stage is based on.
+    expect(finalStage.slice(0, finalStage.indexOf("\n", 1))).toMatch(/node:22\.23\.2-bookworm-slim@sha256:/);
+    expect(finalStage).toMatch(/\nUSER node\n/);
+    const policyUser = readFileSync("packages/worker/src/task-sandbox.ts", "utf8").match(/TASK_SANDBOX_USER = "(\d+:\d+)"/)?.[1];
+    expect(policyUser).toBe("1000:1000");
+  });
+
+  // The file-tool helper is copied alone into a devcontainer, and tsc does not bundle, so it
+  // may import only Node's own modules.
+  it("ships a file-tool helper that imports nothing but node: modules, so it runs as one copied file", () => {
+    const imports = (text: string) => [...text.matchAll(/(?:^|\n)\s*(?:import|export)\b[^;]*?\bfrom\s+["']([^"']+)["']/gu)].map((match) => match[1]!);
+    const source = readFileSync("packages/worker/src/sandbox-file-ops.ts", "utf8");
+    expect(imports(source).length).toBeGreaterThan(0);
+    for (const specifier of imports(source)) expect(specifier, specifier).toMatch(/^node:/u);
+    // Where a build exists (the image build, CI after tsc -b), the compiled file is checked too.
+    const compiled = "packages/worker/dist/sandbox-file-ops.js";
+    if (existsSync(compiled)) for (const specifier of imports(readFileSync(compiled, "utf8"))) expect(specifier, specifier).toMatch(/^node:/u);
+    expect(dockerfile).toContain("COPY --from=build /opt/agentx/packages/worker ./packages/worker");
+    const helper = readFileSync("packages/worker/src/task-sandbox.ts", "utf8").match(/SANDBOX_FILE_OPS_HELPER = "([^"]+)"/)?.[1];
+    expect(helper).toBe("/opt/agentx/packages/worker/dist/sandbox-file-ops.js");
+  });
+
   it("pins uv by version and by SHA-256 for each architecture, and verifies the download", () => {
     expect(toolsStage).toContain("ARG UV_VERSION=0.12.20");
     expect(toolsStage).toContain("uv_sha=8a7aad7bc76a2fae5151566ff3e43eacce0b2a113d5e4de3e4afe3e58fa2441e");
@@ -26,6 +52,17 @@ describe("the worker image", () => {
     expect(toolsStage).toMatch(/amd64\) uv_arch=x86_64; uv_sha=6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f ;/);
     expect(toolsStage).toContain('https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$uv_arch-unknown-linux-gnu.tar.gz');
     expect(toolsStage).toMatch(/echo "\$uv_sha {2}\/tmp\/uv\.tgz" \| sha256sum -c -/);
+  });
+
+  it("carries an empty, root-owned, read-only git directory for each object format, made before the image drops to its user", () => {
+    const user = finalStage.indexOf("\nUSER node");
+    const block = finalStage.slice(finalStage.indexOf("for format in sha1 sha256"), finalStage.indexOf("\n\n", finalStage.indexOf("for format in sha1 sha256")));
+    expect(finalStage.indexOf("/usr/share/agentx/empty-$format.git")).toBeGreaterThan(0);
+    expect(finalStage.indexOf("/usr/share/agentx/empty-$format.git")).toBeLessThan(user);
+    expect(block).toContain('git init --bare --quiet --template= "--object-format=$format"');
+    expect(block).toContain("chown -R root:root /usr/share/agentx");
+    expect(block).toContain("find /usr/share/agentx -type d -exec chmod 0555 {} +");
+    expect(block).toContain("find /usr/share/agentx -type f -exec chmod 0444 {} +");
   });
 
   it("copies uv and uvx into the final stage", () => {

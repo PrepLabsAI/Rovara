@@ -2,15 +2,16 @@ import { request } from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { agentXError } from "@agentx/contracts";
+import { isMaskVolumeName } from "./workspace-state.js";
 import { workspaceProcessScope, type WorkspaceProcessScope } from "./workspace-processes.js";
 
 /**
  * Before a push token exists, every container other than the worker's own is removed (stopped and deleted).
  *
- * On EC2 workers, when a project has no dev container, the coding step currently runs with the worker's Docker access
- * (boot.sh gives the worker container the host's Docker, to run dev containers), and stopping the worker's processes
- * (workspace-processes.ts) does not reach a container. The instance serves this one workspace, and boot.sh starts exactly one container,
- * the worker (`agentx-worker`). So the only container allowed to stay is the worker's own, known by its container ID
+ * On EC2 workers task code runs in a container: the project's dev container, or the task sandbox (task-sandbox.ts)
+ * for a project without one. Stopping the worker's processes (workspace-processes.ts) does not reach a container. The
+ * sandbox is removed when its operation ends; this sweep is the backstop. The instance serves this one workspace, and
+ * boot.sh starts exactly one container, the worker (`agentx-worker`). So the only container allowed to stay is the worker's own, known by its container ID
  * as the worker itself reads it from /proc (never by a name or label, which any container can copy). Everything else
  * goes: the workspace's dev containers (the devcontainer CLI labels each with `devcontainer.local_folder`, the
  * repository folder in this workspace, and finds or recreates it on the next `devcontainer up`) and any other container,
@@ -40,6 +41,10 @@ export interface DockerApi {
   listContainers(): Promise<DockerContainer[]>;
   /** Stops (SIGKILL) and deletes a container; one already gone counts as removed. */
   removeContainer(id: string): Promise<void>;
+  /** The names of the volumes. */
+  listVolumes?(): Promise<string[]>;
+  /** Deletes a volume; one already gone counts as removed. */
+  removeVolume?(name: string): Promise<void>;
 }
 
 export interface SweepWorkspaceContainersOptions {
@@ -96,7 +101,10 @@ export async function sweepWorkspaceContainers(options: SweepWorkspaceContainers
       throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not find its own container in Docker's list, so it did not push");
     }
     const found = containersToRemove(containers, { selfId, rootPath: options.rootPath });
-    if (found.length === 0) return { removed };
+    if (found.length === 0) {
+      await removeMaskVolumes(docker, log);
+      return { removed };
+    }
     for (const entry of found) {
       try {
         await docker.removeContainer(entry.id);
@@ -114,6 +122,31 @@ export async function sweepWorkspaceContainers(options: SweepWorkspaceContainers
     });
   }
   throw agentXError("RUNTIME_UNAVAILABLE", "AgentX kept finding new containers started from the workspace, so it did not push");
+}
+
+/**
+ * Once no container but the worker's is left, nothing uses a dev container's mask volumes (workspace-state.ts), so they go
+ * too. A volume that cannot be removed is logged and left: the next sweep and the worker's startup try again.
+ */
+async function removeMaskVolumes(docker: DockerApi, log: (event: Record<string, unknown>) => void): Promise<void> {
+  if (docker.listVolumes === undefined || docker.removeVolume === undefined) return;
+  let names: string[];
+  try {
+    names = (await docker.listVolumes()).filter(isMaskVolumeName);
+  } catch (error) {
+    log({ event: "publish.volumes.remove.failed", reason: errorMessage(error).slice(0, 200) });
+    return;
+  }
+  let removed = 0;
+  for (const name of names) {
+    try {
+      await docker.removeVolume(name);
+      removed += 1;
+    } catch (error) {
+      log({ event: "publish.volumes.remove.failed", volume: name, reason: errorMessage(error).slice(0, 200) });
+    }
+  }
+  if (removed > 0) log({ event: "publish.volumes.removed", volumes: removed });
 }
 
 /**
@@ -167,6 +200,19 @@ export function dockerSocketApi(socketPath: string, timeoutMs = DOCKER_TIMEOUT_M
           state: typeof value.State === "string" ? value.State : "",
         };
       });
+    },
+    async listVolumes() {
+      const response = await dockerRequest(socketPath, "GET", `/volumes?filters=${encodeURIComponent(JSON.stringify({ name: ["agentx-"] }))}`, timeoutMs);
+      if (response.status !== 200) throw new Error(`Docker answered ${response.status}: ${dockerMessage(response.body)}`);
+      const parsed = JSON.parse(response.body) as { Volumes?: unknown };
+      return Array.isArray(parsed.Volumes)
+        ? parsed.Volumes.flatMap((entry: unknown) => (typeof (entry as { Name?: unknown } | null)?.Name === "string" ? [(entry as { Name: string }).Name] : []))
+        : [];
+    },
+    async removeVolume(name) {
+      const response = await dockerRequest(socketPath, "DELETE", `/volumes/${encodeURIComponent(name)}`, timeoutMs);
+      if (response.status === 204 || response.status === 200 || response.status === 404) return;
+      throw new Error(`Docker answered ${response.status}: ${dockerMessage(response.body)}`);
     },
     async removeContainer(id) {
       const response = await dockerRequest(socketPath, "DELETE", `/containers/${encodeURIComponent(id)}?force=1`, timeoutMs);

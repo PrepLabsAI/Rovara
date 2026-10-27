@@ -1,5 +1,5 @@
 // What the worker checks in a plan's code citations before posting it: the files, the anchor lines and the line ranges.
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PLAN_DOCUMENT_INFO_STRING, type PlanDocument } from "@agentx/contracts";
@@ -165,5 +165,85 @@ describe("citedFileReader", () => {
     const line = `${"x".repeat(1023)}\n`;
     await writeFile(join(root, "repo/app/big.txt"), `${line.repeat(2_100)}tail`);
     expect(await citedFileReader(root)(join(root, "repo/app/big.txt"))).toEqual({ lineCount: 2_101, lines: undefined });
+  });
+});
+
+// The task controls the cited files. In a devcontainer project its code can run while the plan
+// is checked and flip one between a real file and a link to a worker file; the read must never follow that link. The walk
+// needs /proc/self/fd, so this runs on Linux (CI).
+(process.platform === "linux" ? describe : describe.skip)("citedFileReader on files the task flips to links", () => {
+  async function workspace() {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-citations-flip-")));
+    await mkdir(join(root, "repo/app/src"), { recursive: true });
+    await mkdir(join(root, "repo/web"), { recursive: true });
+    return root;
+  }
+
+  it("never reads a worker file, however the flips fall", async () => {
+    const root = await workspace();
+    const secret = join(root, "worker-secret.txt");
+    await writeFile(secret, Array.from({ length: 7 }, (_, index) => `WORKER-SECRET ${index + 1}`).join("\n"));
+    const target = join(root, "repo/app/src/x.ts");
+    const real = "real line 1\nreal line 2\nreal line 3\n";
+    await writeFile(target, real);
+    let flipping = true;
+    const flipper = (async () => {
+      let toSecret = true;
+      while (flipping) {
+        const temporary = join(root, "repo/app/src/x.ts.flip");
+        await rm(temporary, { force: true });
+        if (toSecret) await symlink(secret, temporary); else await writeFile(temporary, real);
+        await rename(temporary, target).catch(() => undefined);
+        toSecret = !toSecret;
+        await new Promise<void>((done) => { const wait = Math.random() * 2; if (wait < 0.4) setImmediate(done); else setTimeout(done, wait); });
+      }
+    })();
+    // The control: the plain filesystem API does reach the secret while it flips.
+    let naiveLeaks = 0;
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if ((await readFile(target, "utf8").catch(() => "")).startsWith("WORKER-SECRET")) naiveLeaks += 1;
+    }
+    expect(naiveLeaks).toBeGreaterThan(0);
+    const read = citedFileReader(root, repositories);
+    const results: Array<CitedFile | undefined> = [];
+    const readable = () => results.filter((result) => result !== undefined).length;
+    for (let attempt = 0; attempt < 5_000 && (attempt < 300 || readable() < 3); attempt += 1) results.push(await read(target));
+    flipping = false;
+    await flipper;
+    expect(JSON.stringify(results)).not.toContain("WORKER-SECRET");
+    for (const result of results) if (result !== undefined) expect(result).toEqual({ lineCount: 3, lines: ["real line 1", "real line 2", "real line 3"] });
+    // Some reads got the real file and some were refused: the flips really fell both ways.
+    expect(readable()).toBeGreaterThan(0);
+    expect(results.some((result) => result === undefined)).toBe(true);
+  }, 60_000);
+
+  it("reads only within the repository that holds the file: a link out, into a sibling repository, or a repository folder made a link", async () => {
+    const root = await workspace();
+    await writeFile(join(root, "repo/web/y.ts"), "web line\n");
+    await writeFile(join(root, "repo/app/src/ok.ts"), "ok line\n");
+    await symlink("../../web/y.ts", join(root, "repo/app/src/to-sibling.ts"));
+    await symlink("src/ok.ts", join(root, "repo/app/inside.ts"));
+    const read = citedFileReader(root, repositories);
+    expect(await read(join(root, "repo/app/src/ok.ts"))).toEqual({ lineCount: 1, lines: ["ok line"] });
+    expect(await read(join(root, "repo/app/inside.ts"))).toEqual({ lineCount: 1, lines: ["ok line"] });
+    expect(await read(join(root, "repo/app/src/to-sibling.ts"))).toBeUndefined();
+    expect(await read(join(root, "repo/app"))).toBeUndefined();
+    expect(await read(join(root, "elsewhere/file.ts"))).toBeUndefined();
+    await rm(join(root, "repo/web"), { recursive: true });
+    await mkdir(join(root, "outside-repo"));
+    await writeFile(join(root, "outside-repo/y.ts"), "outside\n");
+    await symlink(join(root, "outside-repo"), join(root, "repo/web"));
+    expect(await read(join(root, "repo/web/y.ts"))).toBeUndefined();
+  });
+
+  it("counts the lines of a file over 2 MB by streaming, through the same walk, and checks citations with it", async () => {
+    const root = await workspace();
+    const line = `${"x".repeat(1023)}\n`;
+    await writeFile(join(root, "repo/app/big.txt"), `${line.repeat(2_100)}tail`);
+    await writeFile(join(root, "repo/app/README.md"), Array.from({ length: 12 }, (_, index) => `line ${index + 1}`).join("\n"));
+    expect(await citedFileReader(root, repositories)(join(root, "repo/app/big.txt"))).toEqual({ lineCount: 2_101, lines: undefined });
+    const checked = await checkCodeCitations(cite({ startLine: 3, endLine: 99 }), root, repositories);
+    expect(checked.issues).toEqual([]);
+    expect(range(checked.plan)).toEqual([3, 12]);
   });
 });
