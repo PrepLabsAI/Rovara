@@ -144,7 +144,7 @@ describe("TESTPROOF review fixes", () => {
       runners: fakeTestRunner(made.directory, calls),
       repositories: [
         { repositoryId: "app", directory: made.directory, startCommit: made.startCommit, candidateTreeSha: made.candidateTreeSha },
-        { repositoryId: "other", directory: made.directory, startCommit: "", candidateTreeSha: made.candidateTreeSha },
+        { repositoryId: "other", directory: made.directory, startCommit: "main", candidateTreeSha: made.candidateTreeSha },
       ],
     }));
     expect(calls).toEqual([]);

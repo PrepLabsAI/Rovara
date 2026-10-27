@@ -125,7 +125,7 @@ describe("TESTPROOF", () => {
 
   it("gives a verdict per test, for the changed files only, when the check's own command writes a JSON report; and puts the report file back", async () => {
     const made = await repository({ "src/bug.ts": SOURCE_1, "src/old.test.ts": "an old test\n" }, { "src/bug.ts": SOURCE_2, "src/bug.test.ts": TEST_EXPECTS(2) });
-    const command: ProjectCommand = { ...FAKE_TEST_COMMAND, args: ["--reporter=json", "--outputFile=report.json"] };
+    const command: ProjectCommand = { ...FAKE_TEST_COMMAND, args: ["test", "--", "--reporter=json", "--outputFile=report.json"] };
     const base = fakeTestRunner(made.directory);
     // A vitest-like runner: the fake's result for src/bug.test.ts, an always-passing old test, and the report written where the arguments name it.
     const runner: CheckRunners = {

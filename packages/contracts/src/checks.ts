@@ -209,7 +209,12 @@ function simpleTest(parsed: readonly ShellWord[]): boolean {
   while (index < words.length && ASSIGNMENT.test(words[index]!)) index += 1;
   if (words[index] === "timeout" && /^\d+[smh]?$/.test(words[index + 1] ?? "")) index += 2;
   const tail = words.slice(index);
-  return TEST_HEADS.some((head) => head.every((word, position) => tail[position] === word));
+  return isTestCommandHead(tail);
+}
+
+/** Whether `words` (an executable and its arguments) start like a known test runner command (npm test, pytest, vitest, go test, ...). */
+export function isTestCommandHead(words: readonly string[]): boolean {
+  return TEST_HEADS.some((head) => head.every((word, position) => words[position] === word));
 }
 
 /**

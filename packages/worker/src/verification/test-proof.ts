@@ -15,9 +15,9 @@
 //   neither        a failure AgentX cannot tell is "could not run on the original code" (never "proves").
 // A verdict is per check, unless the check's own command already writes a vitest/jest JSON or a JUnit XML report to a path its arguments name
 // (--outputFile, --junitxml): then it is per test, for the tests in the changed files. AgentX never alters a customer's command.
-import { readFile, unlink, writeFile } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
-import { redactText, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict } from "@agentx/contracts";
+import { lstat, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { isTestCommandHead, redactText, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict } from "@agentx/contracts";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
 import { AgentFilesRestoreError, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
@@ -25,6 +25,12 @@ import { AgentFilesRestoreError, git, gitOriginalCode, type OriginalCode, type O
 /** The whole run on the original code gets this long, inside what is left of the check round's budget. */
 export const TEST_PROOF_CAP_MS = 10 * 60_000;
 const ITEMS_MAX = 200;
+/** Less budget than this left, and the run on the original code is not started: it could not finish a real check. */
+export const MIN_TEST_PROOF_BUDGET_MS = 60_000;
+/** test-proof.json stays well below the broker loader's 256 KiB read limit. */
+const PROOF_MAX_BYTES = 200 * 1024;
+const REPORT_MAX_BYTES = 8 * 1024 * 1024;
+const START_COMMIT = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const GITLINK_MODE = "160000";
 
 export interface TestProofRepository {
@@ -93,6 +99,10 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
     schemaVersion: 1, candidateDigest: options.candidateDigest, status, note, changedTests, items, durationMs: Math.max(0, Math.round(now() - started)),
   });
 
+  // Showing the original code in only some repositories would mix two states: every repository needs a usable start commit (as defaultOriginalCode requires).
+  if (options.repositories.some((repository) => !START_COMMIT.test(repository.startCommit) || repository.candidateTreeSha === "")) {
+    return result("not_checked", "original_code_unavailable");
+  }
   const perRepository: Array<{ repository: TestProofRepository; changed: ChangedTests }> = [];
   try {
     for (const repository of options.repositories) perRepository.push({ repository, changed: await changedTestFiles(repository) });
@@ -109,21 +119,34 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
   if (commands.length === 0) return result("not_checked", "no_project_checks", changedTests);
   if (options.signal.aborted) return result("not_checked", "stopped", changedTests);
 
+  const changedPresent = perRepository.flatMap(({ changed }) => changed.present);
+  const entryOf = (index: number) => options.newEntries.find((candidate) => candidate.id === `readiness:${index}`);
   const items: TestProofItem[] = [];
   const runIndexes: number[] = [];
   commands.forEach((command, index) => {
-    const entry = options.newEntries.find((candidate) => candidate.id === `readiness:${index}`);
-    if (entry?.after === "passed") runIndexes.push(index);
-    else items.push({ checkId: `readiness:${index}`, label: labelOf(entry, command), granularity: "check", verdict: "not_checked", reason: "not_passed_on_new" });
+    const entry = entryOf(index);
+    const base = { checkId: `readiness:${index}`, label: labelOf(entry, command), granularity: "check" as const };
+    if (entry?.after !== "passed") items.push({ ...base, verdict: "not_checked", reason: "not_passed_on_new" });
+    else if (!looksLikeTestCheck(command, entry, changedPresent)) items.push({ ...base, verdict: "not_applicable", reason: "not_a_test_check" });
+    else runIndexes.push(index);
   });
-  if (runIndexes.length === 0) return result("not_checked", "no_passing_checks", changedTests, items);
+  if (runIndexes.length === 0) {
+    return result("not_checked", items.some((item) => item.reason === "not_a_test_check") ? "no_test_checks" : "no_passing_checks", changedTests, items);
+  }
+  if (options.budgetMs < MIN_TEST_PROOF_BUDGET_MS) {
+    for (const index of runIndexes) items.push({ checkId: `readiness:${index}`, label: labelOf(entryOf(index), commands[index]!), granularity: "check", verdict: "not_checked", reason: "budget" });
+    return result("not_checked", "budget", changedTests, items);
+  }
 
-  // The reports the checks just wrote on the candidate, read before the original code is shown (the run on it overwrites the same files).
-  const reports = new Map<number, { spec: ReportSpec; path: string; newText: string | undefined }>();
+  // The reports the checks just wrote on the candidate, read before the original code is shown. A report the run on the original code would overwrite is
+  // deleted before that run (so a stale one is never read as its result) and put back after it.
+  const reports = new Map<number, ReportFile>();
   for (const index of runIndexes) {
     const spec = reportSpecOf(commands[index]!);
-    const path = spec === undefined ? undefined : reportPath(options.rootPath, commands[index]!, spec);
-    if (spec !== undefined && path !== undefined) reports.set(index, { spec, path, newText: await readFile(path, "utf8").catch(() => undefined) });
+    const path = spec === undefined ? undefined : await safeReportPath(options.rootPath, commands[index]!, spec);
+    if (spec === undefined || path === undefined) continue;
+    const before = await readBytes(path);
+    if (before.state !== "unreadable") reports.set(index, { spec, path, before });
   }
 
   const subPlan: CheckPlan = { source: "project", readiness: runIndexes.map((index) => commands[index]!), projectBefore: runIndexes.map(() => "unknown" as const) };
@@ -131,51 +154,74 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
     .filter(({ changed }) => changed.paths.length > 0)
     .map(({ repository, changed }) => ({ directory: repository.directory, commit: repository.startCommit, overlay: changed.paths })));
   const budgetMs = Math.max(0, Math.min(options.capMs ?? TEST_PROOF_CAP_MS, options.budgetMs));
-  let ran: { entries: CheckEntry[]; oldTexts: Map<number, string | undefined> };
+  let ran: { entries: CheckEntry[]; oldReports: Map<number, ReadResult> };
   try {
     ran = await originalCode.run(async () => {
+      for (const report of reports.values()) await unlink(report.path).catch(() => undefined);
       const round = await runChecks(subPlan, options.runners, { budgetMs, signal: options.signal });
       // Read while the original code is shown, before the files are put back.
-      const oldTexts = new Map<number, string | undefined>();
-      for (const [index, report] of reports) oldTexts.set(index, await readFile(report.path, "utf8").catch(() => undefined));
-      return { entries: round.entries, oldTexts };
+      const oldReports = new Map<number, ReadResult>();
+      for (const [index, report] of reports) oldReports.set(index, await readBytes(report.path));
+      return { entries: round.entries, oldReports };
     });
   } catch (error) {
     // The one fault that must stop the task: the agent's files are not back.
     if (error instanceof AgentFilesRestoreError) throw error;
     return result("not_checked", options.signal.aborted ? "stopped" : "original_code_unavailable", changedTests, items);
   } finally {
-    // A report file the run on the original code overwrote goes back as the candidate's run left it.
-    for (const report of reports.values()) await restoreFile(report.path, report.newText);
+    for (const report of reports.values()) await restoreFile(report);
   }
 
-  const changedPresent = perRepository.flatMap(({ changed }) => changed.present);
+  const perCheck: TestProofItem[] = [];
+  const perTest = new Map<string, TestProofItem[]>();
   runIndexes.forEach((index, position) => {
     const entry = ran.entries[position];
-    const command = commands[index]!;
-    const label = labelOf(options.newEntries.find((candidate) => candidate.id === `readiness:${index}`), command);
-    const base = { checkId: `readiness:${index}`, label };
+    const base = { checkId: `readiness:${index}`, label: labelOf(entryOf(index), commands[index]!) };
     if (entry === undefined) {
-      items.push({ ...base, granularity: "check", verdict: "not_checked", reason: "infrastructure" });
+      perCheck.push({ ...base, granularity: "check", verdict: "not_checked", reason: "infrastructure" });
       return;
     }
-    const report = reports.get(index);
-    const perTest = entry.after === "passed" || entry.after === "failed" ? perTestItems(base, report, ran.oldTexts.get(index), changedPresent) : undefined;
-    if (perTest !== undefined) items.push(...perTest);
-    else items.push({ ...base, granularity: "check", ...classifyEntry(entry, options.signal.aborted) });
+    perCheck.push({ ...base, granularity: "check", ...classifyEntry(entry, options.signal.aborted) });
+    const tests = entry.after === "passed" || entry.after === "failed"
+      ? perTestItems(base, reports.get(index), ran.oldReports.get(index), changedPresent, entry.after === "passed") : undefined;
+    if (tests !== undefined) perTest.set(base.checkId, tests);
   });
-
-  const final = items.length > ITEMS_MAX ? items.filter((item) => item.granularity === "check") : items;
+  // Per test where a report allows it; past the item limit, one summary item per check instead (never dropped).
+  const testCount = [...perTest.values()].reduce((total, tests) => total + tests.length, 0);
+  const useTests = items.length + perCheck.length - perTest.size + testCount <= ITEMS_MAX;
+  const final = [...items, ...perCheck.flatMap((item) => (useTests ? perTest.get(item.checkId) : undefined) ?? [item])];
   const stopped = options.signal.aborted;
   const note = stopped ? "stopped" as const
     : final.some((item) => item.reason === "timed_out" || item.reason === "budget") ? "timed_out" as const : "completed" as const;
-  const status = stopped || final.every((item) => item.verdict === "not_checked") ? "not_checked" as const : "checked" as const;
+  const verdicts = final.filter((item) => item.verdict !== "not_applicable");
+  const status = stopped || verdicts.every((item) => item.verdict === "not_checked") ? "not_checked" as const : "checked" as const;
   return result(status, note, changedTests, final.slice(0, ITEMS_MAX));
+}
+
+/**
+ * test-proof.json as the worker saves it: always under PROOF_MAX_BYTES, so the broker's loader (256 KiB) reads all of it. Labels and test names are cut
+ * (nothing else is lost) when the full text is too long, and items are dropped from the end only as a last resort.
+ */
+export function serializeTestProof(proof: TestProof): string {
+  let current = proof;
+  const fits = () => Buffer.byteLength(JSON.stringify(current)) <= PROOF_MAX_BYTES;
+  if (fits()) return JSON.stringify(current);
+  current = { ...proof, items: proof.items.map((item) => ({ ...item, label: item.label.slice(0, 120) || "check", ...(item.test === undefined ? {} : { test: item.test.slice(0, 80) }) })) };
+  while (!fits() && current.items.length > 0) current = { ...current, items: current.items.slice(0, Math.floor(current.items.length / 2)) };
+  return JSON.stringify(current);
+}
+
+/** Whether a check looks like a test runner: a known runner command, an npm-style `test:*` script, or output that names one of the changed test files. */
+function looksLikeTestCheck(command: ProjectCommand, entry: CheckEntry, changedTestPaths: readonly string[]): boolean {
+  const words = [command.executable, ...command.args];
+  if (isTestCommandHead(words)) return true;
+  if (/^(?:npm|pnpm|yarn|bun)$/.test(command.executable) && /^test(?::[\w:.-]*)?$/.test(words[1] === "run" ? words[2] ?? "" : words[1] ?? "")) return true;
+  return changedTestPaths.some((path) => entry.output.includes(path) || entry.output.includes(basename(path)));
 }
 
 function labelOf(entry: CheckEntry | undefined, command: ProjectCommand): string {
   const text = entry?.label ?? [command.executable, ...command.args].join(" ");
-  return redactText(text).slice(0, 1_024) || "check";
+  return redactText(text).slice(0, 300) || "check";
 }
 
 /** One check's verdict from its run on the original code. */
@@ -244,41 +290,79 @@ export function reportSpecOf(command: ProjectCommand): ReportSpec | undefined {
   return kind === undefined ? undefined : { kind, argument: path };
 }
 
-function reportPath(root: string, command: ProjectCommand, spec: ReportSpec): string | undefined {
-  const base = resolve(root, command.cwd);
-  const target = resolve(base, spec.argument);
-  const fromRoot = relative(resolve(root), target);
-  return fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || fromRoot.startsWith("/") ? undefined : target;
+type ReadResult = { state: "ok"; bytes: Buffer } | { state: "missing" } | { state: "unreadable" };
+interface ReportFile { spec: ReportSpec; path: string; before: ReadResult }
+
+/**
+ * The report file's real path, only when it lies inside the workspace root and is not a symlink: AgentX never reads or writes through a link that could
+ * lead outside. The file need not exist (its directory must).
+ */
+async function safeReportPath(root: string, command: ProjectCommand, spec: ReportSpec): Promise<string | undefined> {
+  try {
+    const realRoot = await realpath(root);
+    const target = resolve(root, command.cwd, spec.argument);
+    const path = join(await realpath(dirname(target)), basename(target));
+    const fromRoot = relative(realRoot, path);
+    if (fromRoot === "" || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || resolve(realRoot, fromRoot) !== path) return undefined;
+    const existing = await lstat(path).catch((error: NodeJS.ErrnoException) => (error.code === "ENOENT" ? undefined : null));
+    if (existing === null || existing?.isSymbolicLink() === true || (existing !== undefined && !existing.isFile())) return undefined;
+    return path;
+  } catch {
+    return undefined;
+  }
 }
 
-async function restoreFile(path: string, content: string | undefined): Promise<void> {
+/** The file's bytes (within a size cap); `missing` only for a file that is not there. Any other fault is `unreadable`, and such a file is never touched. */
+async function readBytes(path: string): Promise<ReadResult> {
   try {
-    if (content === undefined) await unlink(path).catch(() => undefined);
-    else await writeFile(path, content);
+    const info = await stat(path);
+    if (!info.isFile() || info.size > REPORT_MAX_BYTES) return { state: "unreadable" };
+    return { state: "ok", bytes: await readFile(path) };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? { state: "missing" } : { state: "unreadable" };
+  }
+}
+
+/** Puts a report file back as the candidate's run left it: its bytes, or gone when it was not there. A link the run left in its place is replaced, never followed. */
+async function restoreFile(report: ReportFile): Promise<void> {
+  try {
+    const now = await lstat(report.path).catch(() => undefined);
+    if (report.before.state === "missing") {
+      if (now !== undefined) await unlink(report.path);
+      return;
+    }
+    if (report.before.state !== "ok") return;
+    if (now?.isSymbolicLink() === true) await unlink(report.path);
+    await writeFile(report.path, report.before.bytes);
   } catch { /* A report file that cannot be put back is only a stale report. */ }
 }
 
 function perTestItems(
   base: { checkId: string; label: string },
-  report: { spec: ReportSpec; newText: string | undefined } | undefined,
-  oldText: string | undefined,
+  report: ReportFile | undefined,
+  old: ReadResult | undefined,
   changedPaths: readonly string[],
+  checkPassed: boolean,
 ): TestProofItem[] | undefined {
-  if (report === undefined || report.newText === undefined || oldText === undefined) return undefined;
+  if (report === undefined || report.before.state !== "ok" || old === undefined || old.state !== "ok") return undefined;
+  // The very bytes the new run wrote: the old run did not write a report of its own, so this says nothing about the old code.
+  if (old.bytes.equals(report.before.bytes)) return undefined;
   const inChanged = (record: TestRecord): string | undefined =>
     record.file === undefined ? undefined : changedPaths.find((path) => sameFile(record.file!, path));
   const parse = report.spec.kind === "json" ? parseJsonReport : parseJunitReport;
-  const newTests = parse(report.newText).filter((record) => record.status === "passed" && inChanged(record) !== undefined);
+  const newTests = parse(report.before.bytes.toString("utf8")).filter((record) => record.status === "passed" && inChanged(record) !== undefined);
   if (newTests.length === 0) return undefined;
-  const oldTests = parse(oldText);
+  const oldTests = parse(old.bytes.toString("utf8"));
+  // The report must agree with the check's own exit code: a failed check with no failing test (or a passed one with a failing test) is not a report to trust.
+  if (oldTests.length === 0 || oldTests.some((record) => record.status === "failed") === checkPassed) return undefined;
   const keyOf = (record: TestRecord): string => `${inChanged(record) ?? record.file ?? ""}::${record.name}`;
   const oldByKey = new Map(oldTests.map((record) => [keyOf(record), record]));
   return newTests.map((record): TestProofItem => {
-    const old = oldByKey.get(keyOf(record));
-    const item = { ...base, granularity: "test" as const, test: redactText(record.name).slice(0, 300) || "test" };
-    if (old === undefined || old.status === "skipped") return { ...item, verdict: "could_not_run_on_old", reason: "test_missing_on_old" };
-    if (old.status === "passed") return { ...item, verdict: "does_not_prove", reason: "passed_on_old" };
-    return { ...item, ...failureVerdict(old.message) };
+    const found = oldByKey.get(keyOf(record));
+    const item = { ...base, granularity: "test" as const, test: redactText(record.name).slice(0, 200) || "test" };
+    if (found === undefined || found.status === "skipped") return { ...item, verdict: "could_not_run_on_old", reason: "test_missing_on_old" };
+    if (found.status === "passed") return { ...item, verdict: "does_not_prove", reason: "passed_on_old" };
+    return { ...item, ...failureVerdict(found.message) };
   });
 }
 

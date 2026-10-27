@@ -104,7 +104,7 @@ describe("TESTPROOF in the CHECKS run", () => {
   // 13
   it("says in a progress line that no test changed", async () => {
     const run = await checksRun(await workspace({ "src/bug.ts": "export const value = 3; // no test\n" }));
-    const messages = run.events.filter((event) => event.type === "progress").map((event) => JSON.stringify(event.data ?? event));
+    const messages = run.events.filter((event) => event.type === "progress").map((event) => JSON.stringify(event));
     expect(messages.some((message) => message.includes("no new or changed tests"))).toBe(true);
   });
 
@@ -114,7 +114,7 @@ describe("TESTPROOF in the CHECKS run", () => {
     const withTest = await checksRun(await workspace({ ...files, "src/bug.test.ts": 'import { value } from "./bug.js";\nexpect(value).toBe(2);\n' }), { fixedOutput: "ok\n" });
     const without = await checksRun(await workspace(files), { fixedOutput: "ok\n" });
     expect(withTest.artifacts.some((artifact) => artifact.name === "test-proof.json")).toBe(true);
-    const normalised = (run: typeof withTest) => run.artifacts.find((artifact) => artifact.name === "checks.json")!.content.replace(/"durationMs":\d+/g, '"durationMs":0');
+    const normalised = (run: typeof withTest) => run.artifacts.find((artifact) => artifact.name === "checks.json")!.content.replace(/"durationMs": *\d+/g, '"durationMs": 0');
     expect(normalised(withTest)).toBe(normalised(without));
   });
 });

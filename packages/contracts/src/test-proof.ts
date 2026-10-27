@@ -10,8 +10,9 @@ export const TEST_PROOF_ARTIFACT = "test-proof.json";
  * could_not_run_on_old: failed to load or compile on the original code (a missing file or symbol), or failed in a way AgentX could not tell.
  * does_not_prove: also passes on the original code (a warning).
  * not_checked: a timeout, a stop or an infrastructure fault, so nothing is known.
+ * not_applicable: the check is not a test runner (a linter, a type check): it is neither counted nor warned about.
  */
-export const TestProofVerdictSchema = z.enum(["proves_change", "could_not_run_on_old", "does_not_prove", "not_checked"]);
+export const TestProofVerdictSchema = z.enum(["proves_change", "could_not_run_on_old", "does_not_prove", "not_checked", "not_applicable"]);
 export type TestProofVerdict = z.infer<typeof TestProofVerdictSchema>;
 
 /** Fixed codes only: no command output or error text is ever stored here. */
@@ -26,6 +27,7 @@ export const TestProofReasonSchema = z.enum([
   "budget",
   "infrastructure",
   "not_passed_on_new",
+  "not_a_test_check",
 ]);
 export type TestProofReason = z.infer<typeof TestProofReasonSchema>;
 
@@ -48,7 +50,7 @@ export const TestProofSchema = z.object({
   candidateDigest: z.string().regex(/^[a-f0-9]{64}$/),
   /** no_changed_tests: nothing was run. checked: the checks ran on the original code with the new tests. not_checked: the run could not be made. */
   status: z.enum(["no_changed_tests", "checked", "not_checked"]),
-  note: z.enum(["no_changed_tests", "no_project_checks", "no_passing_checks", "completed", "timed_out", "stopped", "original_code_unavailable"]),
+  note: z.enum(["no_changed_tests", "no_project_checks", "no_passing_checks", "no_test_checks", "budget", "completed", "timed_out", "stopped", "original_code_unavailable"]),
   changedTests: z.object({ added: z.number().int().nonnegative(), changed: z.number().int().nonnegative(), deleted: z.number().int().nonnegative() }).strict(),
   items: z.array(TestProofItemSchema).max(200),
   durationMs: z.number().int().nonnegative(),

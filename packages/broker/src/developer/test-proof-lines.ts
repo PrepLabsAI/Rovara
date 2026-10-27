@@ -30,6 +30,7 @@ export function testProofPullRequestLines(proof: unknown, candidateDigest: strin
   const count = (verdict: TestProof["items"][number]["verdict"]) => bound.items.filter((item) => item.verdict === verdict).length;
   const proves = count("proves_change");
   const noRun = count("could_not_run_on_old");
+  // A check that is not a test runner (not_applicable) is neither counted nor warned about.
   const notChecked = count("not_checked");
   const doesNot = bound.items.filter((item) => item.verdict === "does_not_prove");
   const noun = (n: number) => `${bound.items.every((item) => item.granularity === "test") ? "test" : "check"}${n === 1 ? "" : "s"}`;
@@ -38,7 +39,9 @@ export function testProofPullRequestLines(proof: unknown, candidateDigest: strin
     ...(noRun > 0 ? [`${noRun} could not run on the original code`] : []),
     ...(notChecked > 0 ? [`${notChecked} not checked`] : []),
   ];
-  const quoted = (text: string) => inert(redactText(text).replace(/\s+/gu, " ")).slice(0, NAME_MAX);
+  // Test names and labels are written by the agent: an HTML comment opener (even unclosed) and a backtick could hide or reshape the rest of the description.
+  const plain = (text: string) => text.replace(/<!--|-->|`/gu, "");
+  const quoted = (text: string) => plain(inert(plain(redactText(text)).replace(/\s+/gu, " "))).slice(0, NAME_MAX);
   const names = doesNot.map((item) => quoted(item.test === undefined ? item.label : `${item.label}: ${item.test}`));
   return [
     ...(parts.length > 0 ? [`Test proof: ${parts.join("; ")}`] : []),
@@ -49,6 +52,9 @@ export function testProofPullRequestLines(proof: unknown, candidateDigest: strin
 }
 
 /**
+ * Known limitation: after a pushed PR-feedback fix the proof line drops out of the description, because broker.ts (describeFeedbackFixes) rewrites the
+ * status lines without it. The line is never stale (it is bound to one candidate digest); it is only absent until a one-line change there passes it.
+ *
  * The lines from the newest test-proof.json, among the task's latest operations, that is bound to `candidateDigest`. Only an object under
  * the task's own key prefix is read. Any fault reading it gives no lines: the pull request is published without them.
  */
