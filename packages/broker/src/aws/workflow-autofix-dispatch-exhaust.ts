@@ -81,11 +81,12 @@ export function ownerStopRows(dependencies: RowDependencies, current: Step, now:
 export const autofixSwitchOn = (env: Readonly<Record<string, string | undefined>>): boolean => env.AUTOFIX_ENABLED?.trim().toLowerCase() !== "false";
 
 /**
- * A run that ended without its own result (the dispatcher gave up delivering it, its compute was lost, the stuck-cancel release): `FAILED` is a lost run, `CANCELLED` and `INTERRUPTED`
- * are the owner's stop and its failed stop. The Lambdas that write these blocks have no broker configuration, so the installation switch is read from the environment as the broker does;
- * a row written while it is off is removed by the broker unlooked at.
+ * A run that ended without its own result (the dispatcher gave up delivering it, its compute was lost, the stuck-cancel release). The cause comes from WHO ended it, never from the status it
+ * ended with: a run the owner asked to stop (a cancel requested, a failed stop released) is `owner-stopped` even when its compute is gone, so Rovara never starts again what the owner stopped.
+ * The Lambdas that write these blocks have no broker configuration, so the installation switch is read from the environment as the broker does; a row written while it is off is removed by the
+ * broker unlooked at.
  */
-export function endedRunRows(tableName: string, current: Step, endedAs: "CANCELLED" | "INTERRUPTED" | "FAILED", now: string, env: Readonly<Record<string, string | undefined>> = process.env): PutItem[] {
+export function endedRunRows(tableName: string, current: Step, cause: "run-lost" | "owner-stopped", now: string, env: Readonly<Record<string, string | undefined>> = process.env): PutItem[] {
   if (!autofixSwitchOn(env)) return [];
-  return autofixBlockRows(tableName, blockedStep(current), endedAs === "FAILED" ? "run-lost" : "owner-stopped", now);
+  return autofixBlockRows(tableName, blockedStep(current), cause, now);
 }

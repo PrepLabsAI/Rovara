@@ -161,7 +161,9 @@ export async function runWorkflowAutofix(deps: AutofixDependencies, task: Develo
   if (config.since !== undefined && !(Date.parse(workflow.updatedAt) >= Date.parse(config.since))) return "STALE";
 
   // What the policy needs, read only where the classification says it matters.
-  const facts: AutoFixFacts = input.cause === undefined ? {} : { blockCause: input.cause };
+  // DISPATCHEXHAUST: a lost run is the owner's stop when a cancel targets that stage's latest run, whatever wrote the block: Rovara never starts again what the owner stopped.
+  const cause = input.cause === "run-lost" && await deps.ownerCancelledChecks(task) ? "owner-stopped" as const : input.cause;
+  const facts: AutoFixFacts = cause === undefined ? {} : { blockCause: cause };
   const classes = classifyBlockedWorkflow(workflow, facts);
   const codes = new Set<AutoFixCode>(classes.map((entry) => entry.code));
   let baselineRequests = 0;

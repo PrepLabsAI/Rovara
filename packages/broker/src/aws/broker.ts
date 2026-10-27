@@ -10936,9 +10936,11 @@ async function runAutofixDispatch(dependencies: AwsBrokerDependencies, item: Acc
       dayBudgetHasRoom: (current) => autofixDayBudgetHasRoom(dependencies, current),
       scenarioResults: async (current) => loadWorkflowE2EScenarioResults(dependencies, current, [], "owner").catch(() => undefined),
       ownerCancelledChecks: async (current) => {
-        const operations = await tasks.operations(current.workspaceId);
-        const latest = operations.filter((operation) => operation.kind === "task" && operation.workflowMode === "CHECKS").sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-        return latest !== undefined && operations.some((operation) => operation.kind === "cancel" && (operation as { targetOperationId?: string }).targetOperationId === latest.id);
+        // The stored records, not the public operations: a public operation does not carry which run a cancel targets (so this never saw an owner's stop). DISPATCHEXHAUST: the stage's own latest run.
+        const operations = (await queryAllItems(dependencies, `WORKSPACE#${current.workspaceId}`, "OPERATION#")) as Array<{ id?: string; kind?: string; workflowMode?: string; createdAt: string; targetOperationId?: string }>;
+        const mode = current.workflow?.stage === "REVIEW" ? "REVIEW" : "CHECKS";
+        const latest = operations.filter((operation) => operation.kind === "task" && operation.workflowMode === mode).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+        return latest !== undefined && operations.some((operation) => operation.kind === "cancel" && operation.targetOperationId === latest.id);
       },
       baselineSourceReady: async (current) => {
         const digest = current.workflow?.candidate?.digest;

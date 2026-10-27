@@ -494,7 +494,13 @@ describe("PLANINC-2: every other workflow step", () => {
       expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: started.stage, state: "BLOCKED", blockReason: reasonFor(started, "failed"), revision: running.revision + 1 });
       expect(taskWorkflow(harness, taskId).decisions).toEqual(running.decisions);
       expect(workspaceRow(harness, workspaceId)).toMatchObject({ status: "READY" });
-      expect(stepRows(harness)).toEqual([]); // DISPATCHEXHAUST: no step is queued; the block of a VERIFY or REVIEW step carries its AUTOFIX row (workflow-autofix-dispatch-exhaust.test.ts)
+      // The owner asked to stop, so the compute being gone is still the owner's stop: a VERIFY or REVIEW step carries exactly one AUTOFIX row that explains it (never a lost run, which would be retried); the other steps none.
+      const rows = dispatchRows(harness);
+      if (started.stage === "VERIFY" || started.stage === "REVIEW") {
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ kind: "AUTOFIX", autofixCause: "owner-stopped" });
+        expect(rows[0]).not.toHaveProperty("autofixNotBefore");
+      } else expect(rows).toEqual([]);
       expect(operations(harness, workspaceId)).toHaveLength(operationsBefore + 1);
       if (started.retry !== undefined) expect((await started.retry(taskWorkflow(harness, taskId).revision)).status).toBe(200);
     });

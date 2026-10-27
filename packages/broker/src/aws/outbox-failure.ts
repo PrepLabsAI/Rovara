@@ -90,7 +90,7 @@ export function workflowRunEndedReason(workflowMode: "PLAN" | "IMPLEMENT" | "CHE
  * the step running for ever. Only a task still running that step is blocked; a failed write is logged, since the
  * operation itself is already failed.
  */
-async function blockFailedWorkflowRun(documentClient: Pick<DynamoDBDocumentClient, "send">, tableName: string, workspaceId: string, operationId: string, failureText?: string): Promise<void> {
+async function blockFailedWorkflowRun(documentClient: Pick<DynamoDBDocumentClient, "send">, tableName: string, workspaceId: string, operationId: string, failureText?: string, cancelRequested = false): Promise<void> {
   try {
     const read = async (key: { pk: string; sk: string }) => (await documentClient.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))).Item;
     const operation = await read({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` }) as {
@@ -131,7 +131,7 @@ async function blockFailedWorkflowRun(documentClient: Pick<DynamoDBDocumentClien
       ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running AND attribute_not_exists(closedAt)",
       ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
       ExpressionAttributeValues: { ":workflow": blockWorkflow(workflow, reason, now), ":now": now, ":revision": workflow.revision, ":stage": workflow.stage, ":running": "RUNNING" },
-    } }, ...endedRunRows(tableName, workflow, "FAILED", now)] }));
+    } }, ...endedRunRows(tableName, workflow, cancelRequested ? "owner-stopped" : "run-lost", now)] }));
   } catch (failure) {
     console.log(JSON.stringify({ component: "broker", event: "workflow.lost_run_block_failed", operationId, error: failure instanceof Error ? failure.name : "unknown" }));
   }
@@ -189,7 +189,7 @@ export async function failActiveOperation(
   const operation = (await documentClient.send(new GetCommand({
     TableName: tableName,
     Key: { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` },
-  }))).Item as { kind?: string; fence?: number; closePreviousStatus?: string } | undefined;
+  }))).Item as { kind?: string; status?: string; fence?: number; closePreviousStatus?: string } | undefined;
   if (operation?.fence === undefined) return undefined;
   const released = operation.kind === "prepare"
     ? "PREPARATION_FAILED"
@@ -219,7 +219,8 @@ export async function failActiveOperation(
     ] }));
     if (released === "PREPARATION_FAILED") await releaseFailedPreparation(documentClient, tableName, workspaceId);
     if (operation.kind === "maintain") await blockFailedPullRequestUpdate(documentClient, tableName, workspaceId, operationId, error);
-    if (operation.kind === "task") await blockFailedWorkflowRun(documentClient, tableName, workspaceId, operationId, error);
+    // A run the owner already asked to stop is the owner's stop, not a lost run (DISPATCHEXHAUST): it is explained and never started again.
+    if (operation.kind === "task") await blockFailedWorkflowRun(documentClient, tableName, workspaceId, operationId, error, operation.status === "CANCEL_REQUESTED");
     return operationId;
   } catch (failure) {
     if (failure instanceof Error && failure.name === "TransactionCanceledException") return undefined;

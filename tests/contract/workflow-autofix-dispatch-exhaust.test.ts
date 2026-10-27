@@ -404,15 +404,14 @@ describe("DISPATCHEXHAUST 2: the runner lost the task mid-run", () => {
     expect(dispatchRows(harness)).toEqual([]);
   });
 
-  it("endedRunRows: FAILED is a lost run, CANCELLED and INTERRUPTED are the owner's stop; the switch is read as the broker reads it", () => {
+  it("endedRunRows: the cause is the caller's, a lost run or the owner's stop; the switch is read as the broker reads it", () => {
     const step = { taskId: "t", revision: 7, stage: "REVIEW" as const, candidate: undefined };
     const at = new Date().toISOString();
     const rowOf = (rows: ReturnType<typeof endedRunRows>) => (rows[0] as { Put: { Item: Record<string, unknown> } }).Put.Item;
-    expect(rowOf(endedRunRows("state", step, "FAILED", at, {}))).toMatchObject({ autofixCause: "run-lost", workflowRevision: 8 });
-    expect(rowOf(endedRunRows("state", step, "CANCELLED", at, {}))).toMatchObject({ autofixCause: "owner-stopped", workflowRevision: 8 });
-    expect(rowOf(endedRunRows("state", step, "INTERRUPTED", at, {}))).toMatchObject({ autofixCause: "owner-stopped" });
-    expect(rowOf(endedRunRows("state", step, "CANCELLED", at, {}))).not.toHaveProperty("autofixNotBefore");
-    expect(endedRunRows("state", step, "FAILED", at, { AUTOFIX_ENABLED: "false" })).toEqual([]);
+    expect(rowOf(endedRunRows("state", step, "run-lost", at, {}))).toMatchObject({ autofixCause: "run-lost", workflowRevision: 8 });
+    expect(rowOf(endedRunRows("state", step, "owner-stopped", at, {}))).toMatchObject({ autofixCause: "owner-stopped", workflowRevision: 8 });
+    expect(rowOf(endedRunRows("state", step, "owner-stopped", at, {}))).not.toHaveProperty("autofixNotBefore");
+    expect(endedRunRows("state", step, "run-lost", at, { AUTOFIX_ENABLED: "false" })).toEqual([]);
     for (const env of [{}, { AUTOFIX_ENABLED: "false" }, { AUTOFIX_ENABLED: " FALSE " }, { AUTOFIX_ENABLED: "true" }, { AUTOFIX_ENABLED: "" }]) expect(autofixSwitchOn(env)).toBe(autofixConfigFromEnvironment(env).enabled);
   });
 });
@@ -532,19 +531,99 @@ describe("DISPATCHEXHAUST 3: the owner stopped the task", () => {
     expect(ask(harness, ctx.taskId)).toMatchObject({ reason: "owner-stopped", codes: ["owner-stopped"] });
   });
 
-  it("a stop that never answered because the compute is gone is a LOST run: one retry after the delay", async () => {
+  it("B-1: a stop that never answered because the compute is gone is STILL the owner's stop: explained, never started again", async () => {
     const harness = await broker();
     const ctx = await workflowAtVerification(harness);
     const { run } = await stopRequested(harness, ctx);
     expect((await sweepStuck(harness, ctx.workspaceId, new Date(Date.now() + 31 * 60_000))).ended).toEqual([run.id]);
     const blocked = workflowOf(harness, ctx.taskId);
     expect(blocked).toMatchObject({ stage: "REVIEW", state: "BLOCKED", blockReason: "independent review operation ended failed" });
-    expect(dispatchRows(harness)[0]).toMatchObject({ kind: "AUTOFIX", workflowRevision: blocked.revision, autofixCause: "run-lost" });
-    expect(Date.parse(String(dispatchRows(harness)[0]!.autofixNotBefore))).toBeGreaterThan(Date.now());
+    expect(dispatchRows(harness)).toHaveLength(1);
+    expect(dispatchRows(harness)[0]).toMatchObject({ kind: "AUTOFIX", workflowRevision: blocked.revision, autofixCause: "owner-stopped" });
+    expect(dispatchRows(harness)[0]).not.toHaveProperty("autofixNotBefore");
+    await sweep(harness);
+    expect(automatic(harness, ctx.taskId)).toEqual([]);
+    expect(reviewRuns(harness, ctx.workspaceId)).toHaveLength(1);
+    expect(ask(harness, ctx.taskId)).toMatchObject({ reason: "owner-stopped", codes: ["owner-stopped"] });
+    expect(card(harness, ctx.taskId).text).toContain("You stopped this, so I did not retry it by myself.");
+  });
+
+  it("B-1: the reconciler losing the compute under a run the owner asked to stop (CANCEL_REQUESTED) is the owner's stop; under a run nobody asked to stop it is a lost run", async () => {
+    const stopped = await broker();
+    const ctx = await workflowAtVerification(stopped);
+    await stopRequested(stopped, ctx);
+    expect(operations(stopped, ctx.workspaceId).find((item) => item.workflowMode === "REVIEW")).toMatchObject({ status: "CANCEL_REQUESTED" });
+    await failActiveOperation(stopped.db as never, "state", ctx.workspaceId, "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request");
+    expect(dispatchRows(stopped)[0]).toMatchObject({ kind: "AUTOFIX", autofixCause: "owner-stopped" });
+    expect(dispatchRows(stopped)[0]).not.toHaveProperty("autofixNotBefore");
+    await sweep(stopped);
+    expect(automatic(stopped, ctx.taskId)).toEqual([]);
+    expect(reviewRuns(stopped, ctx.workspaceId)).toHaveLength(1);
+    expect(ask(stopped, ctx.taskId)).toMatchObject({ reason: "owner-stopped" });
+    // The same loss with no stop asked for is the infrastructure fault.
+    const lost = await broker();
+    const other = await workflowAtVerification(lost);
+    await other.finishImplementation();
+    await failActiveOperation(lost.db as never, "state", other.workspaceId, "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request");
+    expect(dispatchRows(lost)[0]).toMatchObject({ kind: "AUTOFIX", autofixCause: "run-lost" });
+  });
+
+  it("B-1 race: a row that says run-lost (an older writer) for a run the owner asked to stop is read as the owner's stop: the scheduled retry does not start", async () => {
+    const harness = await broker();
+    const ctx = await workflowAtVerification(harness);
+    const { run } = await stopRequested(harness, ctx);
+    // An older Lambda (or any writer that only knows the status) blocks the step as a lost run, held for the delay.
+    await failActiveOperation(harness.db as never, "state", ctx.workspaceId, "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request");
+    const owner = dispatchRows(harness)[0]!;
+    harness.db.set({ ...owner, autofixCause: "run-lost", autofixNotBefore: new Date(Date.now() + DISPATCH_EXHAUST_RETRY_DELAY_MS).toISOString() });
+    elapse(harness, dispatchRows(harness)[0]!);
+    await sweep(harness);
+    expect(automatic(harness, ctx.taskId)).toEqual([]);
+    expect(reviewRuns(harness, ctx.workspaceId)).toHaveLength(1);
+    expect(reviewRuns(harness, ctx.workspaceId)[0]!.id).toBe(run.id);
+    expect(ask(harness, ctx.taskId)).toMatchObject({ reason: "owner-stopped", codes: ["owner-stopped"] });
+  });
+
+  it("race: the owner stops the running reviews of the AUTOMATIC retry while it runs: the owner's stop is explained and nothing starts again", async () => {
+    const harness = await broker();
+    const ctx = await workflowAtVerification(harness);
+    await ctx.finishImplementation();
+    await failActiveOperation(harness.db as never, "state", ctx.workspaceId, "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request");
     elapse(harness, dispatchRows(harness)[0]!);
     await sweep(harness);
     expect(automatic(harness, ctx.taskId)).toHaveLength(1);
+    const retried = reviewRuns(harness, ctx.workspaceId)[1]!;
+    await harness.events(ctx.workspaceId, String(retried.id), [{ type: "lifecycle", payload: { status: "RUNNING" } }]);
+    expect((await harness.dev(MAYA, "POST", `/v1/dev/tasks/${ctx.taskId}/cancel`, { requestId: randomUUID() })).status).toBe(200);
+    const cancel = operations(harness, ctx.workspaceId).find((item) => item.kind === "cancel" && item.targetOperationId === retried.id)!;
+    await harness.finish(ctx.workspaceId, String(cancel.id), "SUCCEEDED");
+    expect(workflowOf(harness, ctx.taskId)).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
+    await sweep(harness);
+    expect(automatic(harness, ctx.taskId)).toHaveLength(1);
     expect(reviewRuns(harness, ctx.workspaceId)).toHaveLength(2);
+    expect(ask(harness, ctx.taskId)).toMatchObject({ reason: "owner-stopped" });
+  });
+
+  it("the owner's Stop of a running NON-E2E VERIFY step ends the step (blocked, explained), not RUNNING: the cancel-path fix with automatic fixing on", async () => {
+    const harness = await broker();
+    const ctx = await workflowAtVerification(harness);
+    // The final checks report is unreadable, so verification blocks; the owner's retry then runs the checks alone.
+    await harness.finish(ctx.workspaceId, String(codingRuns(harness, ctx.workspaceId)[0]!.id), "SUCCEEDED", { result: { workflowCandidateRepositories: ctx.candidate.repositories, workflowCheckCandidateRepositories: ctx.candidate.repositories, checks: "not a report" } });
+    const blocked = workflowOf(harness, ctx.taskId);
+    expect([blocked.stage, blocked.state]).toEqual(["VERIFY", "BLOCKED"]);
+    expect((await harness.dev(MAYA, "POST", `/v1/dev/tasks/${ctx.taskId}/workflow/retry`, { requestId: randomUUID(), instructions: "Run the checks again", expectedRevision: blocked.revision })).status).toBe(200);
+    const checks = checkRuns(harness, ctx.workspaceId)[0]!;
+    await harness.events(ctx.workspaceId, String(checks.id), [{ type: "lifecycle", payload: { status: "RUNNING" } }]);
+    expect(workflowOf(harness, ctx.taskId)).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+    const automaticBefore = automatic(harness, ctx.taskId).length;
+    expect((await harness.dev(MAYA, "POST", `/v1/dev/tasks/${ctx.taskId}/cancel`, { requestId: randomUUID() })).status).toBe(200);
+    await harness.finish(ctx.workspaceId, String(operations(harness, ctx.workspaceId).find((item) => item.kind === "cancel" && item.targetOperationId === checks.id)!.id), "SUCCEEDED");
+    expect(workflowOf(harness, ctx.taskId)).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "verification retry operation ended cancelled" });
+    // The row committed with the block was looked at in the same invocation and is gone; its ask explains the stop.
+    await sweep(harness);
+    expect(automatic(harness, ctx.taskId)).toHaveLength(automaticBefore);
+    expect(checkRuns(harness, ctx.workspaceId)).toHaveLength(1);
+    expect(ask(harness, ctx.taskId)).toMatchObject({ reason: "owner-stopped" });
   });
 
   it("without automatic fixing the stop leaves no row and no ask", async () => {

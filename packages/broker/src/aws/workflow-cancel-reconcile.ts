@@ -106,8 +106,8 @@ export async function blockStoppedWorkflowRun(client: Client, tableName: string,
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":ready": "READY" },
       } },
-      // DISPATCHEXHAUST: a VERIFY or REVIEW step this block stops commits its AUTOFIX row with it: a lost run (FAILED) is retried once after a delay, the owner's stop (CANCELLED, INTERRUPTED) is explained and never retried.
-      ...endedRunRows(tableName, workflow, endedAs, now),
+      // DISPATCHEXHAUST: a VERIFY or REVIEW step this block stops commits its AUTOFIX row with it: every caller here ends a run the owner asked to stop (a cancel, or a failed stop released, even when its compute is gone): explained, never retried (`endedAs` only words the reason).
+      ...endedRunRows(tableName, workflow, "owner-stopped", now),
     ] }));
     log({ component: "broker", event: "workflow.released_run_blocked", operationId: run.id, workflowMode: mode });
     return true;
