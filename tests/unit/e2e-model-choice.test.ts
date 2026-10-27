@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type * as Contracts from "@agentx/contracts";
 import { e2eAgentModelsFor } from "../../packages/contracts/src/e2e-agent-models.js";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import { E2EModelRouteDefinitionSchema, e2eModelRouteRevision } from "../../packages/contracts/src/e2e-model-channel.js";
@@ -11,7 +12,7 @@ import { bedrockRoute } from "../support/e2e-model-fixtures.js";
 // The search's give-up is proved by counting: the harness can swap in a synthetic model list longer than the limit and counts every table lookup the search makes.
 const searchHarness = vi.hoisted(() => ({ syntheticModelIds: undefined as string[] | undefined, lookups: 0 }));
 vi.mock("@agentx/contracts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@agentx/contracts")>();
+  const actual = await importOriginal<typeof Contracts>();
   return {
     ...actual,
     e2eAgentModelsFor: (...args: Parameters<typeof actual.e2eAgentModelsFor>) =>

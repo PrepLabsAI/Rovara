@@ -11,7 +11,7 @@ describe("the gates after an M1.4 journey's verdict", () => {
     expect(publicationFencesOf(admission, "PASS")).toEqual(["web-1:web", "web-1:api"]);
     expect(publicationFencesOf(admission, "FAILED")).toEqual([]);
     expect(publicationFencesOf(admission, "UNKNOWN")).toEqual([]);
-    expect(publicationFencesOf({ runtimeBindings: [] } as never, "PASS")).toEqual([]);
+    expect(publicationFencesOf({ runtimeBindings: [] }, "PASS")).toEqual([]);
   });
 
   it("offers send-back for a FAILED round and for no other verdict", () => {
