@@ -34,6 +34,7 @@ export * from "./runtime-installation.js";
 export * from "./runtime-requalify.js";
 export * from "./runtime-requalify-schedule.js";
 export * from "./qualification-launch.js";
+export * from "./requalify-drain-reads.js";
 export * from "./e2e-web-api-qualification.js";
 export * from "./e2e-chromium-sandbox.js";
 export * from "./slack.js";
