@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
-import { REQUALIFY_REASON_CODES, REQUALIFY_STEP_REASON_CODES, e2eQualificationPrefix, requalifyRunKey } from "../../packages/contracts/src/index.js";
+import { REQUALIFY_REASON_CODES, REQUALIFY_PROFILE_ID, REQUALIFY_STEP_REASON_CODES, e2eQualificationPrefix, requalifyLastSuccessKey, requalifyRunKey } from "../../packages/contracts/src/index.js";
 import { assertRuntimeInstallationHostIdentity } from "../../packages/verifier/src/install-qualification.js";
 import { requalifyDefinition } from "../../infra/lib/runtime-requalify.js";
 import { runRequalifyAction, type RequalifyStepsDependencies } from "../../packages/broker/src/aws/runtime-requalify-steps.js";
@@ -110,6 +110,8 @@ describe("a successful renewal", () => {
     // The hold covered the switch only: it was put before and gone after.
     expect(run.trace.indexOf("PutHold")).toBeLessThan(run.trace.indexOf("Switch"));
     expect(cloud.ddb.get(cloud.key(requalifyRunKey(runId)))).toMatchObject({ amiId: "ami-0abcdef1234567890" });
+    // The time the stale alarm counts from (ARGUARD).
+    expect(cloud.ddb.get(cloud.key(requalifyLastSuccessKey(REQUALIFY_PROFILE_ID)))).toMatchObject({ runId, at: new Date(cloud.clock).toISOString() });
   });
 
   it("keeps the challenge secret out of every step input, output and alert, and out of the bucket once the switch is done (positive control: the secret was written)", async () => {
@@ -234,6 +236,7 @@ describe("a failure before the switch", () => {
     expect(FIXED_REASONS.has(sent[0]!.reason!)).toBe(true);
     expect(sent[0]!.text).toContain("The old runner and the registered rows were left as they were.");
     expect(cloud.metrics).toEqual(["RequalifyFailed"]);
+    expect(cloud.ddb.has(cloud.key(requalifyLastSuccessKey(REQUALIFY_PROFILE_ID)))).toBe(false);
     expect(cloud.lock()).toBeUndefined();
     expect(cloud.hold()).toBeUndefined();
     expect(cloud.s3.has(`${e2eQualificationPrefix(ROLE_ID, cloud.launches[0] ?? "i-00000000000000000")}challenge.json`)).toBe(false);

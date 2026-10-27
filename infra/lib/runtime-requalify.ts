@@ -18,7 +18,7 @@ import {
   aws_stepfunctions as sfn,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { QUALIFIED_AMI_SETTING_NAME, REQUALIFY_TAGS, WORKER_SETTING_PARAMETERS, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { QUALIFIED_AMI_SETTING_NAME, REQUALIFY_AGE_METRIC, REQUALIFY_STALE_AFTER_DAYS, REQUALIFY_TAGS, WORKER_SETTING_PARAMETERS, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { packagedFunction } from "./control-plane.js";
 import { EC2_WORKER_AMI_PARAMETER } from "./ec2-workers.js";
 import type { AgentXNaming } from "./naming.js";
@@ -259,8 +259,10 @@ export class RuntimeRequalify extends Construct {
     alarm("MachineFailuresAlarm", "RuntimeRequalifyMachineFailures", "A test machine renewal execution failed or timed out without cleaning up. Open it in Step Functions.",
       new cloudwatch.MathExpression({ expression: "FILL(failed, 0) + FILL(timedOut, 0)", usingMetrics: { failed: this.machine.metricFailed({ period: Duration.minutes(5) }), timedOut: this.machine.metricTimedOut({ period: Duration.minutes(5) }) }, period: Duration.minutes(5) }),
       1, cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD, 1, cloudwatch.TreatMissingData.NOT_BREACHING);
-    // No success for six days. Missing data is NOT breaching: until the owner enables the schedule (or a first renewal ran) the metric does not exist and the owner must not be mailed; the runtime-expiry check covers a renewal nobody started.
+    // No successful renewal for six days. The daily check reports the age of the last success every run (ARGUARD), so once the schedule is enabled the alarm has a number to breach on.
+    // Missing data is NOT breaching: until the owner enables the schedule the metric does not exist and must not mail anyone; a schedule switched off afterwards is an error in test-deploy --check
+    // (it records that the schedule was enabled once), and a renewal nobody started is covered by the runtime-expiry notice.
     alarm("StaleAlarm", "RuntimeRequalifyStale", "The browser and API test machine has not been renewed for six days; its registration expires after seven. Run test-deploy --only requalify-now or qualify by hand.",
-      new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName: "RequalifySucceeded", statistic: "Sum", period: Duration.days(1) }), 6, cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD, 1, cloudwatch.TreatMissingData.NOT_BREACHING);
+      new cloudwatch.Metric({ namespace: naming.metricsNamespace, metricName: REQUALIFY_AGE_METRIC, statistic: "Maximum", period: Duration.days(1) }), 1, cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD, REQUALIFY_STALE_AFTER_DAYS, cloudwatch.TreatMissingData.NOT_BREACHING);
   }
 }

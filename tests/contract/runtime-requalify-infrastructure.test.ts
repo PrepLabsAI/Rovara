@@ -5,6 +5,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { REQUALIFY_LOGICAL_ID_PREFIX, requalifyDefinition } from "../../infra/lib/runtime-requalify.js";
+import { REQUALIFY_AGE_METRIC, REQUALIFY_STALE_AFTER_DAYS } from "../../packages/contracts/src/index.js";
 import { REQUALIFY_SCHEDULE_LOGICAL_ID } from "../../scripts/test-deploy-requalify.js";
 import { checkLambdaBundles } from "../../scripts/lambda-load-check.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -171,9 +172,14 @@ describe("the renewal's infrastructure", () => {
     expect(schedules).toHaveLength(1);
     expect(schedules[0]!.Properties["ScheduleExpression"]).toBe("cron(0 6 * * ? *)");
     expect(JSON.stringify(schedules[0]!.Properties["Target"])).toContain('{\\"action\\":\\"due\\"}');
-    const stale = Object.values(on).find((resource) => resource.Type === "AWS::CloudWatch::Alarm" && JSON.stringify(resource.Properties).includes("RequalifySucceeded"));
-    expect(stale?.Properties).toMatchObject({ EvaluationPeriods: 6, Period: 86400, ComparisonOperator: "LessThanThreshold", Threshold: 1, TreatMissingData: "notBreaching" });
-    // No data is not a failure: before the schedule is enabled (or the first renewal) the metric does not exist, and the owner must not be mailed for that. The runtime-expiry check covers a forgotten renewal.
+    // The stale alarm counts the daily check's own number: days since the last successful renewal (ARGUARD). The old alarm watched a 1 on success, so with no data it could never breach.
+    const stale = Object.values(on).find((resource) => resource.Type === "AWS::CloudWatch::Alarm" && JSON.stringify(resource.Properties).includes("RuntimeRequalifyStale"));
+    expect(stale?.Properties).toMatchObject({
+      MetricName: REQUALIFY_AGE_METRIC, Statistic: "Maximum", EvaluationPeriods: 1, Period: 86400, ComparisonOperator: "GreaterThanOrEqualToThreshold", Threshold: REQUALIFY_STALE_AFTER_DAYS, TreatMissingData: "notBreaching",
+    });
+    expect(REQUALIFY_STALE_AFTER_DAYS).toBe(6);
+    // Missing data is not breaching: before the schedule is first enabled the metric does not exist and the owner must not be mailed for that. Once it runs the number arrives daily; a schedule
+    // switched off afterwards is caught by test-deploy --check (an error once it was enabled), and a renewal nobody started by the runtime-expiry notice.
     // The Lambda may start only the renewal machine.
     expect(JSON.stringify(withAction("states:StartExecution")[0]!.Resource)).toContain("-runtime-requalify");
   });

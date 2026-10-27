@@ -22,6 +22,7 @@ import { e2eModelCheckRunnerKey } from "../e2e/model-route-registry.js";
 import { e2eRegisteredRuntimeKey } from "./e2e-runtime-readiness.js";
 import { issueRequalifyChallenge, nextGeneration, registerRequalifiedRuntime, type RequalifyDependencies } from "./runtime-requalify.js";
 import { acquireRequalifyLock, releaseRequalifyLock } from "./runtime-requalify-lock.js";
+import { dailyHeartbeat, recordRenewalSuccess } from "./runtime-requalify-heartbeat.js";
 
 /**
  * AUTOREQUALIFY steps (AR-2): the actions the renewal's Step Functions machine calls, one Lambda invocation per action. Every action takes the machine's
@@ -245,6 +246,8 @@ function parseStatus(bytes: Buffer): { state: "SUCCEEDED" | "FAILED"; failure: s
 
 /** Starts a renewal when a catalog row expires within 72 hours, the deployed images differ from the last renewal's, or the operator forced one. Single-flight by execution name and by the lock. */
 async function dueAction(deps: RequalifyStepsDependencies, force: boolean): Promise<{ started: boolean; reason: string }> {
+  // The schedule's own run (not the operator's forced start) reports how old the last renewal is (ARGUARD); it never fails the check.
+  if (!force) await dailyHeartbeat(deps);
   const now = nowOf(deps);
   let reason: string | undefined = force ? "requested" : undefined;
   if (reason === undefined) {
@@ -567,6 +570,8 @@ async function metric(deps: RequalifyStepsDependencies, name: string): Promise<v
 
 async function complete(deps: RequalifyStepsDependencies, state: RequalifyState): Promise<void> {
   await metric(deps, "RequalifySucceeded");
+  // The time the stale alarm counts from. A failure to record it must not strand the lock: the next daily check reports a larger age, which is the safe direction.
+  try { await recordRenewalSuccess(deps, state.runId); } catch { console.error("requalify-success-record-failed"); }
   await releaseRequalifyLock(deps, state.runId);
 }
 

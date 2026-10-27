@@ -32,6 +32,9 @@ export class FakeCloud {
   ddb = new Map<string, Item>();
   sns: Array<{ subject: string; message: string }> = [];
   metrics: string[] = [];
+  /** The same puts with their values (the age metric's value is the point). */
+  metricValues: Array<{ name: string; value: number }> = [];
+  failMetrics = false;
   executions: string[] = [];
   terminated: string[] = [];
   deleted: string[] = [];
@@ -179,7 +182,13 @@ export class FakeCloud {
 
   iam = { send: async (): Promise<any> => ({ Role: { Arn: ROLE_ARN, RoleId: ROLE_ID } }) };
   sns_ = { send: async (command: { input: { Subject: string; Message: string } }): Promise<any> => { this.sns.push({ subject: command.input.Subject, message: command.input.Message }); return {}; } };
-  cloudwatch = { send: async (command: { input: { MetricData: Array<{ MetricName: string }> } }): Promise<any> => { this.metrics.push(command.input.MetricData[0]!.MetricName); return {}; } };
+  cloudwatch = { send: async (command: { input: { MetricData: Array<{ MetricName: string; Value: number }> } }): Promise<any> => {
+    if (this.failMetrics) throw named("AccessDenied");
+    const datum = command.input.MetricData[0]!;
+    this.metrics.push(datum.MetricName);
+    this.metricValues.push({ name: datum.MetricName, value: datum.Value });
+    return {};
+  } };
   sfn = { send: async (command: { input: { name: string } }): Promise<any> => {
     if (this.executions.includes(command.input.name)) throw named("ExecutionAlreadyExists");
     this.executions.push(command.input.name);
