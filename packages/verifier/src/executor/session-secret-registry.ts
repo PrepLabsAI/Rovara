@@ -1,5 +1,5 @@
 import { SESSION_REDACTION_LABEL, type CredentialRedactor } from "./redact.js";
-import { isDigitlessRandomToken, type ClassifiedValue, type CredentialTier } from "./credential-classifier.js";
+import { isPathLike, isSlugOrPath, type ClassifiedValue, type CredentialTier } from "./credential-classifier.js";
 import { classifyStorageEntry } from "./storage-entry-classifier.js";
 
 /**
@@ -66,10 +66,13 @@ export function registerItem(register: SessionSecretRegistry["register"], item: 
   if (options === undefined) register(item.value); else register(item.value, options);
 }
 
-/** An opaque run: 16 or more of letters, digits and `+ / _ = -`, with a letter and a digit, or letters only and random-looking. */
+/**
+ * The fail-closed view (MASKMAYBE round 2, R-5a): every run of 16 or more of letters, digits and `+ / _ = -`, of any length and whatever its letters (digits, one case, both), except a slug or a
+ * path (a route the model must read to navigate).
+ */
 const TOKEN_RUN = /[A-Za-z0-9+/_=-]{16,}/g;
 function opaqueRun(run: string): boolean {
-  return (/[0-9]/.test(run) && /[A-Za-z]/.test(run)) || isDigitlessRandomToken(run);
+  return !isSlugOrPath(run) && !isPathLike(run);
 }
 
 export function createSessionSecretRegistry(input: { redactor: CredentialRedactor; onRegister?: (value: string, options?: SessionSecretRegisterOptions) => void }): SessionSecretRegistry {

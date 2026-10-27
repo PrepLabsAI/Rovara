@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isSessionCookieSecret } from "./cookie-secret.js";
-import { isTokenShape, type ClassifiedValue } from "./credential-classifier.js";
+import { type ClassifiedValue } from "./credential-classifier.js";
+import { visitorCookieSecret } from "./visitor-cookie.js";
 import { urlSecrets } from "./request-secrets.js";
 import { classifyStorageEntry, classifyStructure } from "./storage-entry-classifier.js";
 
@@ -9,7 +10,7 @@ import { classifyStorageEntry, classifyStructure } from "./storage-entry-classif
  * pages are at. One function for every point the executor reads the browser (sign-in capture, every mid-step sync, case close), so none of them can lag behind another.
  */
 export interface BrowserSecretState {
-  cookies: ReadonlyArray<{ value: string; httpOnly: boolean }>;
+  cookies: ReadonlyArray<{ value: string; httpOnly: boolean; name?: string }>;
   origins: ReadonlyArray<{
     localStorage: ReadonlyArray<{ name: string; value: string }>;
     sessionStorage?: ReadonlyArray<{ name: string; value: string }>;
@@ -104,8 +105,8 @@ export function tellBrowserState(state: BrowserSecretState, learn: (item: Classi
     for (const digest of pendingDigests.splice(0)) if (memo.size < BROWSER_STATE_MEMO_MAX) memo.add(digest);
   };
   // Only what looks like a secret: a consent flag is not one (the cookie rule of the sign-in and the sync).
-  // A visitor's script-readable cookie is an id or a cart, not a secret; only a token-shaped one or an HttpOnly one (the application's session) counts.
-  for (const cookie of state.cookies) if (visitor ? isTokenShape(cookie.value) || (cookie.httpOnly && isSessionCookieSecret(cookie)) : isSessionCookieSecret(cookie)) learn({ value: cookie.value, tier: "strong" });
+  // A visitor's cookie is judged by its name and value (`visitorCookieSecret`): an id or a cart is not a secret, a session is.
+  for (const cookie of state.cookies) if (visitor ? visitorCookieSecret(cookie) : isSessionCookieSecret(cookie)) learn({ value: cookie.value, tier: "strong" });
   for (const origin of state.origins) {
     for (const entry of origin.localStorage) if (fresh(`${mark}l`, entry.name, entry.value)) for (const item of classifyStorageEntry(entry, { visitor })) learn(item);
     for (const entry of origin.sessionStorage ?? []) if (fresh(`${mark}s`, entry.name, entry.value)) for (const item of classifyStorageEntry(entry, { visitor })) learn(item);

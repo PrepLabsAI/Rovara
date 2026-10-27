@@ -342,16 +342,12 @@ describe("sign-in capture reads the same things", () => {
   });
 });
 
-describe("the host wires the new reads (static: the host is not started in unit tests)", () => {
-  it("attaches a reader that goes through readBrowserState, watches requests of every context (a signed-out visitor's too, with the visitor bar), and reads the case's browser through the same classifier when it closes", () => {
+describe("the host wires the new reads (static: the host is not started in unit tests; the behaviour is in e2e-midstep2-round2fix.test.ts)", () => {
+  it("hands every case context, a signed-out visitor's too, to the wiring (attach, request watch, Set-Cookie) and reads it at case close through it", () => {
     const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
-    expect(host).toMatch(/sessionSync\.attach\(sessionRef, \{ storageState: \(\) => readBrowserState\(browserContext\) \}, \{ anonymous \}\)/);
-    expect(host).toMatch(/\n\s+watchBrowserRequests\(browserContext, \{ learn: \(items\) => sessionSync\.learn\(items\), track: \(pending\) => sessionSync\.track\(pending\) \}, \{ visitor: anonymous \}\)/);
-    expect(host).not.toMatch(/if \(!anonymous\) watchBrowserRequests/);
-    // The response handler no longer skips a visitor's context (F-3).
+    expect(host).toMatch(/wireSessionContext\(\{ browserContext, sessionRef, anonymous: store\.isAnonymous\(sessionRef\), sessionSync, registerSecret \}\)/);
+    expect(host).toMatch(/if \(owned\) await readSessionContextAtClose\(\{ browserContext: owned, anonymous: store\.isAnonymous\(sessionRef\), sessionSync \}\)/);
     expect(host).not.toMatch(/if \(anonymous\) return;/);
-    expect(host).not.toMatch(/if \(owned && !store\.isAnonymous/);
-    expect(host).toMatch(/tellBrowserState\(await readBrowserState\(owned\), \(item\) => sessionSync\.learn\(\[item\]\), undefined, \{ visitor: store\.isAnonymous\(sessionRef\) \}\)/);
   });
 });
 

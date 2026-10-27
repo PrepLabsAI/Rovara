@@ -1,5 +1,6 @@
 import { isSessionCookieSecret } from "./cookie-secret.js";
-import { classifyString, credentialKey, isDigitlessRandomToken, isLongOpaqueRun, isOpaqueToken, isTokenShape, MIN_CREDENTIAL_LENGTH, tierWins, type ClassifiedValue } from "./credential-classifier.js";
+import { visitorCookieSecret } from "./visitor-cookie.js";
+import { classifyString, credentialKey, isDigitlessRandomToken, isLongOpaqueRun, isOpaqueToken, isRandomLikeRun, isTokenShape, MIN_CREDENTIAL_LENGTH, tierWins, type ClassifiedValue } from "./credential-classifier.js";
 
 /**
  * Secrets in what the browser sends and visits (MIDSTEP-2): query and fragment parameters of page URLs, and the headers of the application's requests.
@@ -23,6 +24,15 @@ function tokenLike(value: string): boolean {
   if (/^(0x)?[0-9a-fA-F]+$/.test(value) || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) return false;
   return (isOpaqueToken(value) && value.length >= 16) || isLongOpaqueRun(value) || isDigitlessRandomToken(value);
 }
+/** The value of a one-time parameter must look like a token: a state word (`required`, `accepted`, `sent-already`) is not one. A URL (a magic link) counts when a piece of it is opaque. */
+function oneTimeValue(value: string): boolean {
+  if (isTokenShape(value) || tokenLike(value) || isRandomLikeRun(value)) return true;
+  return value.split(/[^A-Za-z0-9]+/).some((piece) => isOpaqueToken(piece));
+}
+/** Parameters and headers read per URL or request; the rest are not read (an app with more is not a credential store). */
+const MAX_PAIRS = 5_000;
+const MAX_HEADERS = 1_000;
+const MAX_VALUE_CHARS = 16_384;
 // A long hex or base64 run in a URL parameter or a header that is not named like a credential is NOT registered: trace ids, order ids and content hashes are shown on pages and in URLs, and
 // refusing a prompt for one would fail ordinary steps. A JWT shape is registered under any name.
 
@@ -53,16 +63,19 @@ export function urlSecrets(rawUrl: string): ClassifiedValue[] {
     pairs.push(...parameters(hash.includes("?") ? hash.slice(hash.indexOf("?") + 1) : hash));
   }
   const found = new Map<string, ClassifiedValue>();
-  // A list past the bound is not read to the end: the model's view fails closed instead of the rest being silently ignored.
-  if (pairs.length > 200) found.set("", { value: "", tier: "overflow" });
-  for (const [name, value] of pairs.slice(0, 200)) {
+  for (const [name, value] of pairs.slice(0, MAX_PAIRS)) {
     if (value.length < MIN_CREDENTIAL_LENGTH) continue;
-    if (value.length > 16_384) { found.set("", { value: "", tier: "overflow" }); continue; }
+    if (value.length > MAX_VALUE_CHARS) {
+      // An oversized value (a diagram or a search kept in the URL) is skipped. Only one under a credential name fails the view closed: that is a credential too large to register.
+      if (credentialKey(name).credential || ONE_TIME_PARAMETERS.has(name.toLowerCase().replace(NORMALISE, ""))) found.set("", { value: "", tier: "overflow" });
+      continue;
+    }
     // Strong parameters are the ones the key reading of `credential-classifier.ts` calls credentials (`token`, `access_token`, `id_token`, `refresh_token`, `session_id`, `api_key`, `password`, ...), the
     // one-time sign-in parameters, or whose value is token-shaped. A neutral parameter whose value looks like a token is masked (weak); other long values (a search text, a page title) are not registered.
     const normalised = name.toLowerCase().replace(NORMALISE, "");
     const weakName = WEAK_PARAMETERS.has(normalised) || (CODE_SUFFIX.test(normalised) && !ONE_TIME_PARAMETERS.has(normalised));
-    const credentialNamed = credentialKey(name).credential || ONE_TIME_PARAMETERS.has(normalised) || (normalised === "t" && tokenLike(value));
+    const oneTime = ONE_TIME_PARAMETERS.has(normalised) && oneTimeValue(value);
+    const credentialNamed = credentialKey(name).credential || oneTime || (normalised === "t" && tokenLike(value));
     for (const item of classifyString(name, value, { keyedFloor: MIN_CREDENTIAL_LENGTH })) {
       if (!credentialNamed && !weakName && !isTokenShape(item.value)) continue;
       // A parameter named like a signature or a code is scrubbed, never refused, unless its value is itself token-shaped.
@@ -70,9 +83,9 @@ export function urlSecrets(rawUrl: string): ClassifiedValue[] {
       if (tierWins(tier, found.get(item.value)?.tier)) found.set(item.value, { value: item.value, tier });
     }
     // The one-time parameters are credentials whatever their value looks like (an invite code may be words); a neutral name with a token-like value is masked.
-    if (ONE_TIME_PARAMETERS.has(normalised) || (normalised === "t" && credentialNamed)) found.set(value, { value, tier: "strong" });
+    if (oneTime || (normalised === "t" && credentialNamed)) found.set(value, { value, tier: "strong" });
     else if (weakName && !found.has(value)) found.set(value, { value, tier: "weak" });
-    else if (!credentialNamed && !weakName && tokenLike(value) && !found.has(value)) found.set(value, { value, tier: "weak" });
+    else if (!credentialNamed && !weakName && !ONE_TIME_PARAMETERS.has(normalised) && tokenLike(value) && !found.has(value)) found.set(value, { value, tier: "weak" });
   }
   return [...found.values()];
 }
@@ -92,16 +105,18 @@ function cookiePairs(header: string): Array<[string, string]> {
 export function headerSecrets(headers: ReadonlyArray<{ name: string; value: string }>, options: { visitor?: boolean } = {}): ClassifiedValue[] {
   const found = new Map<string, ClassifiedValue>();
   const add = (item: ClassifiedValue): void => { if (tierWins(item.tier, found.get(item.value)?.tier)) found.set(item.value, item); };
-  // A list or a value past the bound is not read: the model's view fails closed instead of the rest being silently ignored.
-  if (headers.length > 200) add({ value: "", tier: "overflow" });
-  for (const header of headers.slice(0, 200)) {
+  for (const header of headers.slice(0, MAX_HEADERS)) {
     const name = header.name.toLowerCase();
     const value = header.value;
-    if (value.length > 16_384) { add({ value: "", tier: "overflow" }); continue; }
+    if (value.length > MAX_VALUE_CHARS) {
+      // An oversized header (a long Referer, a big cookie jar of ordinary cookies) is skipped. Only one that carries a credential fails the view closed.
+      if (name === "authorization" || name === "proxy-authorization" || credentialKey(name).credential) add({ value: "", tier: "overflow" });
+      continue;
+    }
     if (value.length < MIN_CREDENTIAL_LENGTH) continue;
     if (name === "cookie") {
-      // A signed-out visitor's cookies are its id and cart (see `ClassifyOptions.visitor`): only a token-shaped one counts.
-      if (options.visitor === true) { for (const [, cookieValue] of cookiePairs(value)) if (isTokenShape(cookieValue)) add({ value: cookieValue, tier: "strong" }); continue; }
+      // A signed-out visitor's cookies are judged by name and value (`visitorCookieSecret`): its id and cart are not secrets, a session is.
+      if (options.visitor === true) { for (const [cookieName, cookieValue] of cookiePairs(value)) if (visitorCookieSecret({ name: cookieName, value: cookieValue, httpOnly: false })) add({ value: cookieValue, tier: "strong" }); continue; }
       for (const [, cookieValue] of cookiePairs(value)) if (isSessionCookieSecret({ value: cookieValue, httpOnly: false })) add({ value: cookieValue, tier: "strong" });
       continue;
     }

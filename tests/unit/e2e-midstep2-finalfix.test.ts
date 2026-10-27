@@ -48,7 +48,7 @@ async function stackFor(storage: Array<{ name: string; value: string }>, redacto
 describe("F-1: ordinary values at the top level of storage are scrub-only, never masked for the model", () => {
   const ORDINARY: Array<[string, string]> = [["apiBase", "https://app.example.com"], ["lastProject", "Quarterly Report"], ["lastRoute", "/projects/alpha/settings"], ["returnUrl", "https://app.example.com/orders/12345"],
     ["userEmail", "maya.rodriguez@example.com"], ["selectedWorkspace", "acme-engineering-team"], ["draft:42", "Meeting notes for Monday standup"], ["lastSeen", "2026-10-27T09:15:00.000Z"],
-    ["workspaceId", "3f2504e0-4f89-11d3-9a0c-0305e82c3301"], ["tz", "America/Los_Angeles"], ["apiHost", "login.example.com"], ["searchQuery", "internationalization settings"], ["build", "a1b2c3d4e5f60718293a4b5c"]];
+    ["workspaceId", "3f2504e0-4f89-11d3-9a0c-0305e82c3301"], ["tz", "America/Los_Angeles"], ["apiHost", "login.example.com"], ["searchQuery", "internationalization settings"]];
   it.each(ORDINARY)("%s=%s is scrub at the top level and not registered as a JSON leaf", (name, value) => {
     expect(tierOf(classifyStorageEntry({ name, value }), value)).toBe("scrub");
     expect(tierOf(classifyStorageEntry({ name: "settings", value: JSON.stringify({ [name]: value }) }), value)).toBeNull();
@@ -122,14 +122,12 @@ describe("F-2: the caps do not stop the mask", () => {
   }, 60_000);
 });
 
-describe("F-9: a list or a value past the bound fails the view closed instead of being skipped", () => {
-  it("201 URL parameters, 201 headers, or a header value over 16 KiB give an overflow note; below the bounds there is none", () => {
-    const many = Array.from({ length: 201 }, (_unused, index) => `p${index}=v${index}`).join("&");
-    expect(urlSecrets(`https://app.test/?${many}`).some((item) => item.tier === "overflow")).toBe(true);
+describe("F-9 / R-2: a credential too large to register fails the view closed; an oversized ordinary parameter or header does not", () => {
+  it("a credential-named URL value or header over 16 KiB gives an overflow note; below the bounds there is none", () => {
+    expect(urlSecrets(`https://app.test/?token=${"x".repeat(20_000)}`).some((item) => item.tier === "overflow")).toBe(true);
     expect(urlSecrets("https://app.test/?a=b&token=Ab3dEf9hJk").some((item) => item.tier === "overflow")).toBe(false);
-    expect(urlSecrets(`https://app.test/?q=${"x".repeat(20_000)}`).some((item) => item.tier === "overflow")).toBe(true);
-    expect(headerSecrets(Array.from({ length: 201 }, (_unused, index) => ({ name: `x-h${index}`, value: "short" }))).some((item) => item.tier === "overflow")).toBe(true);
-    expect(headerSecrets([{ name: "x-big", value: "y".repeat(20_000) }]).some((item) => item.tier === "overflow")).toBe(true);
+    expect(headerSecrets([{ name: "x-api-key", value: "y".repeat(20_000) }]).some((item) => item.tier === "overflow")).toBe(true);
+    expect(headerSecrets([{ name: "authorization", value: `Bearer ${"y".repeat(20_000)}` }]).some((item) => item.tier === "overflow")).toBe(true);
     expect(headerSecrets([{ name: "x-api-key", value: "Ab3dEf9hJk" }]).some((item) => item.tier === "overflow")).toBe(false);
   });
   it("more weak leaves in one entry than the mask bound (5,000) give an overflow note; fewer do not", () => {
@@ -205,7 +203,7 @@ describe("F-3: the visitor bar of the request watch", () => {
 describe("F-4: one-time sign-in URL parameters are credentials", () => {
   const SAML = "AAQAAMFbLinlmzYhpL8Tq7Wx0v3Cn2D5Rk9sE1uJ4gB6hN8mA";
   const OOB = "b9Gk2Lx7Qw4Zp1Vm6Rt3Hc8Dn5Fs0JyAeUo";
-  it.each([["oobCode", OOB], ["otp", "Ab3dEf9hJk"], ["magic_link", "https://app.test/magic/b9Gk2Lx7Qw4Zp1Vm6Rt3"], ["magicLink", "https://app.test/magic/b9Gk2Lx7Qw4Zp1Vm6Rt3"], ["inviteCode", "spring-team-invite"],
+  it.each([["oobCode", OOB], ["otp", "Ab3dEf9hJk"], ["magic_link", "https://app.test/magic/b9Gk2Lx7Qw4Zp1Vm6Rt3"], ["magicLink", "https://app.test/magic/b9Gk2Lx7Qw4Zp1Vm6Rt3"], ["inviteCode", "Tm9x2Kq8Lw"],
     ["SAMLart", SAML], ["SAMLResponse", `${SAML}${SAML}`], ["verificationCode", "Qx7Lm2Vb9Tz"], ["resetCode", "Rn4Kp8Wd1Yc"], ["t", OOB], ["t", "Qx7Lm2Vb9Tz4Wk8P"]])("?%s= is strong", (name, value) => {
     expect(tierOf(urlSecrets(`https://app.test/auth?${name}=${encodeURIComponent(value)}&lang=en-US`), value)).toBe("strong");
   });

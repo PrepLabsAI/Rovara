@@ -64,7 +64,7 @@ export function isOpaqueToken(value: string): boolean {
  * A slug or a path: separated by `-`, `_` or `/` into word-like parts ("projects/alpha/settings/notifications2", "my-quarterly-report-2024-final"). A random token has parts of mixed case and
  * digits that are not words. Two parts or more, and at least 60% of them words.
  */
-function isSlugOrPath(value: string): boolean {
+export function isSlugOrPath(value: string): boolean {
   // In a mixed-case value a `/` is not a slug separator: such a value is a base64 token or a path with ids, and `isPathLike` tells which (random base64 pieces between slashes are sometimes word-like).
   const separators = value.includes("/") && /[a-z]/.test(value) && /[A-Z]/.test(value) ? /[-_]/ : /[-_/]/;
   const parts = value.split(separators).filter((part) => part.length > 0);
@@ -87,7 +87,7 @@ function isPathSegment(segment: string): boolean {
  * is mixed. A random standard-base64 token has a few random characters between its slashes; they are almost never a word, a digit id or a hex id. One short piece never decides: with two segments
  * both must say "path"; with more, at least three and half of them.
  */
-function isPathLike(value: string): boolean {
+export function isPathLike(value: string): boolean {
   const segments = value.split("/").filter((segment) => segment.length > 0);
   if (segments.length < 2) return false;
   const meaningful = segments.filter(isPathSegment).length;
@@ -129,6 +129,30 @@ export function isDigitlessRandomToken(value: string): boolean {
   return wordLetterShare(value) < RANDOM_WORD_SHARE_BELOW && letters.replace(/[^aeiouAEIOU]/g, "").length / letters.length < RANDOM_VOWEL_SHARE_BELOW;
 }
 
+/** A real host name (`login.example.com`, `auth.internal:8443`): lower-case labels and a letters-only last label. A mixed-case token with a dot in it is not one. */
+const STRICT_HOST = /^([a-z0-9-]+\.)+[a-z]{2,24}(:\d{2,5})?$/;
+/** English is about 38% vowels; random letters of one case 19% (5 of 26). Single-case runs are called random below this line. */
+const SINGLE_CASE_VOWEL_BELOW = 0.34;
+
+/**
+ * A random-looking run (MASKMAYBE round 2, R-1): 16 or more characters of `A-Za-z0-9+/_=.|:-`, no whitespace, that looks like a generated id or token rather than a word: hex, base64, base64url, a
+ * nanoid, a `token_urlsafe`, `payload.signature` and `s:value.sig` shapes, random letters of one case. It is NOT a slug, a path, a URL, a host, an email, a date, a UUID or a dictionary-ish word.
+ * Used for a value at the top level of storage under a neutral key, where it is masked for the model (weak); everything else there is scrub-only.
+ */
+export function isRandomLikeRun(value: string): boolean {
+  if (value.length < MIN_WEAK_LENGTH || !/^[A-Za-z0-9+/_=.|:-]+$/.test(value)) return false;
+  if (UUID.test(value) || ISO_DATE.test(value) || URL_LIKE.test(value) || STRICT_HOST.test(value) || /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(value)) return false;
+  if (isSlugOrPath(value) || isPathLike(value)) return false;
+  const hasLetter = /[A-Za-z]/.test(value);
+  if (!hasLetter) return false;
+  if (/[0-9]/.test(value) || (/[a-z]/.test(value) && /[A-Z]/.test(value))) {
+    // A letters-and-digits run, or letters of both cases, is random unless its letters are plainly words (a mixed-case run without digits goes through the word and vowel lines).
+    return /[0-9]/.test(value) ? true : isDigitlessRandomToken(value.replace(/[.|:]/g, "-"));
+  }
+  const letters = value.replace(/[^A-Za-z]/g, "");
+  return letters.length >= MIN_WEAK_LENGTH && letters.replace(/[^aeiouAEIOU]/g, "").length / letters.length < SINGLE_CASE_VOWEL_BELOW;
+}
+
 /** A token with dots, pipes or colons in it (a Sanctum `12|abcd...`, a JWE, a PASETO) whose parts include a long opaque run. */
 function hasOpaquePart(value: string): string | null {
   if (!/[.|:]/.test(value)) return null;
@@ -136,9 +160,12 @@ function hasOpaquePart(value: string): string | null {
   return null;
 }
 
-/** A JWT, a JWE or a PASETO. */
+/** A Supabase SSR session cookie: `base64-` and the base64url of a JSON session. */
+const BASE64_PREFIXED = /^base64-[A-Za-z0-9_-]{16,}={0,2}$/;
+
+/** A JWT, a JWE, a PASETO or a `base64-` prefixed session. */
 export function isTokenShape(value: string): boolean {
-  return JWT.test(value) || JWE.test(value) || PASETO.test(value);
+  return JWT.test(value) || JWE.test(value) || PASETO.test(value) || BASE64_PREFIXED.test(value);
 }
 
 const CREDENTIAL_WORDS = new Set(["token", "tokens", "jwt", "secret", "secrets", "password", "passwords", "passwd", "pwd", "passcode", "credential", "credentials", "cred", "creds",
@@ -250,7 +277,7 @@ function classifyStringAll(name: string, value: string, options: ClassifyOptions
   // Everything else that is long enough, or short under a credential key, is app data that may be secret. It is MASKED for the model (weak) only when it is what a JSON leaf would be registered for:
   // a value under a credential-sounding name, a date/URL/host under a name that only sounds secret, a random-looking run, an opaque letters-and-digits token. Any other value is app data the
   // model must be able to read (a path, a URL, an email, a date, a UUID, a slug, a sentence, a word, hex): scrubbed from evidence at the top level, and not registered at all as a leaf.
-  const maskable = key.credential || shapedUnderLooseKey || (noSpace && isDigitlessRandomToken(trimmed))
+  const maskable = key.credential || shapedUnderLooseKey || (noSpace && isDigitlessRandomToken(trimmed)) || (options.leaf !== true && noSpace && isRandomLikeRun(trimmed))
     || (isOpaqueToken(trimmed) && trimmed.length >= MIN_WEAK_LENGTH && !PURE_HEX.test(trimmed) && !UUID.test(trimmed));
   const weakAllowed = options.leaf !== true || maskable;
   const tier: CredentialTier = maskable ? "weak" : "scrub";

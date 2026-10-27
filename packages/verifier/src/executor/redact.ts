@@ -36,36 +36,39 @@ export const MASK_ONLY_LIMIT = 20_000;
 /** The mask finds a form by its first characters; the shortest spelling the contracts build is 6 characters long. */
 const MASK_PREFIX = 6;
 /**
- * The mask index is a prefix tree that only grows where values share a start (every JWT begins `eyJhbGci`): a bucket holds at most MASK_SPLIT forms before the ones long enough are split by their next
- * MASK_CHUNK characters, so a lookup compares against a handful of forms however many values are registered.
+ * The mask index is a prefix tree that only grows where values share a start (every JWT begins `eyJhbGci`): a bucket holds at most MASK_SPLIT forms before the ones long enough are split by their
+ * next MASK_CHUNK characters, so a lookup compares against a handful of forms however many values are registered. Insert and lookup are loops (no recursion: values that share tens of thousands of
+ * characters must not overflow the stack), and the chunk is 4 characters so that forms of 8 to 13 characters that share a start still separate.
  */
 const MASK_SPLIT = 16;
-const MASK_CHUNK = 8;
+const MASK_CHUNK = 4;
 interface MaskNode { at: number; list: Rule[]; kids?: Map<string, MaskNode> }
-function maskInsert(node: MaskNode, rule: Rule): void {
-  if (node.kids !== undefined && rule.form.length >= node.at + MASK_CHUNK) {
-    const key = rule.form.slice(node.at, node.at + MASK_CHUNK);
-    let kid = node.kids.get(key);
-    if (kid === undefined) { kid = { at: node.at + MASK_CHUNK, list: [] }; node.kids.set(key, kid); }
-    maskInsert(kid, rule);
-    return;
-  }
-  node.list.push(rule);
-  if (node.kids === undefined && node.list.length > MASK_SPLIT && node.list.some((item) => item.form.length >= node.at + MASK_CHUNK)) {
-    const all = node.list;
-    node.list = [];
-    node.kids = new Map();
-    for (const item of all) maskInsert(node, item);
+function maskInsert(root: MaskNode, rule: Rule): void {
+  // The work list holds the nodes a split still has to place; a plain insert is one pass down the tree.
+  const pending: Array<[MaskNode, Rule]> = [[root, rule]];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    let node = next[0];
+    const item = next[1];
+    while (node.kids !== undefined && item.form.length >= node.at + MASK_CHUNK) {
+      const key = item.form.slice(node.at, node.at + MASK_CHUNK);
+      let kid = node.kids.get(key);
+      if (kid === undefined) { kid = { at: node.at + MASK_CHUNK, list: [] }; node.kids.set(key, kid); }
+      node = kid;
+    }
+    node.list.push(item);
+    if (node.kids === undefined && node.list.length > MASK_SPLIT && node.list.some((form) => form.form.length >= node.at + MASK_CHUNK)) {
+      const all = node.list;
+      node.list = [];
+      node.kids = new Map();
+      for (const form of all) pending.push([node, form]);
+    }
   }
 }
 /** The longest registered form that starts at `start` in `value` and is maskable. */
-function maskFind(node: MaskNode, value: string, start: number): Rule | undefined {
+function maskFind(root: MaskNode, value: string, start: number): Rule | undefined {
   let best: Rule | undefined;
-  for (const rule of node.list) if (rule.mask && !rule.model && (best === undefined || rule.form.length > best.form.length) && value.startsWith(rule.form, start)) best = rule;
-  const kid = node.kids?.get(value.slice(start + node.at, start + node.at + MASK_CHUNK));
-  if (kid !== undefined) {
-    const deeper = maskFind(kid, value, start);
-    if (deeper !== undefined && (best === undefined || deeper.form.length > best.form.length)) best = deeper;
+  for (let node: MaskNode | undefined = root; node !== undefined; node = node.kids?.get(value.slice(start + node.at, start + node.at + MASK_CHUNK))) {
+    for (const rule of node.list) if (rule.mask && !rule.model && (best === undefined || rule.form.length > best.form.length) && value.startsWith(rule.form, start)) best = rule;
   }
   return best;
 }
