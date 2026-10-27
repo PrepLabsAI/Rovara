@@ -21,7 +21,7 @@ const dirs: string[] = []; const apps: AccountsAppProcess[] = [];
 afterEach(async () => { await Promise.all(apps.splice(0).map((app) => app.stop())); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 type AccountsOptions = NonNullable<Parameters<typeof createAccountsExecutorPlan>[0]>;
-async function runAccounts(options: { defect?: "viewer-access.json" | "echo-session.json" | "echo-email.json" | "rotate-echo.json" | "storage-echo.json"; api?: boolean; web?: AccountsOptions["web"] } = {}) {
+async function runAccounts(options: { defect?: "viewer-access.json" | "echo-session.json" | "echo-email.json" | "rotate-echo.json" | "storage-echo.json" | "weak-echo.json"; api?: boolean; web?: AccountsOptions["web"] } = {}) {
   const fixture = createAccountsExecutorPlan({ healthTimeoutMs: 20_000, ...(options.api ? { api: true } : {}), ...(options.web ? { web: options.web } : {}) });
   const app = await startAccountsApp(fixture, options.defect ? { defect: options.defect } : {}); apps.push(app);
   const dir = realpathSync(await mkdtemp(join(tmpdir(), "accounts-run-"))); dirs.push(dir);
