@@ -155,8 +155,9 @@ describe("the code and security reviewers read the base commit's rule file (A5)"
   it("3b. positive control: the scripted reviewer does obey its rules, so it stays quiet when given the edited ones", () => {
     const prompt = "+++ b/src/a.ts\n+// TODO: later";
     const given = (content: string) => ({ contextFiles: [{ path: "AGENTS.md", content }] }) as PiSessionInput;
-    expect(JSON.parse(obedientAnswer(given(BASE_RULE), prompt)).findings).toHaveLength(1);
-    expect(JSON.parse(obedientAnswer(given(`${BASE_RULE}${EDITED_RULE}`), prompt)).findings).toHaveLength(0);
+    const count = (content: string) => (JSON.parse(obedientAnswer(given(content), prompt)) as { findings: unknown[] }).findings.length;
+    expect(count(BASE_RULE)).toBe(1);
+    expect(count(`${BASE_RULE}${EDITED_RULE}`)).toBe(0);
   });
 });
 
