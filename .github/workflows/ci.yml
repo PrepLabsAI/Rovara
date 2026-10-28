@@ -65,6 +65,9 @@ jobs:
       # The stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/) may not
       # add errors beyond tests/typecheck-baseline.json (issue #50, scripts/typecheck-baseline.ts).
       - run: npm run typecheck:all
+      # The whole repository with the rules of `eslint .`, but in shards (scripts/lint-shards.ts), two eslint processes at a time. One process
+      # over the whole repository needed more than 6 GB; each shard stays under a 4 GB heap cap. It reads the packages' declarations that
+      # `npm run typecheck` just built.
       - run: npm run lint
 
   # Vitest hands each shard an even share of the test files. To change the count, change the list:
