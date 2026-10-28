@@ -13,6 +13,6 @@
     "@devcontainers/cli": "0.89.0",
     "@earendil-works/pi-ai": "1.3.0",
     "@earendil-works/pi-coding-agent": "1.3.0",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   }
 }
