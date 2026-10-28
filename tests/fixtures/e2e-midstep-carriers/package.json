@@ -1,0 +1,88 @@
+{
+  "name": "@agentx/midstep-carriers-fixture",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "agentx": {
+    "e2e": {
+      "schemaVersion": "e2e-application-project/v1",
+      "recipe": {
+        "schemaVersion": 1,
+        "recipeDigest": "d0b2113794b336fdb38209bd92bd1c8bfa3bf1938903fdd27d91dad83593703d",
+        "build": [],
+        "launch": {
+          "kind": "service",
+          "start": {
+            "program": "node",
+            "args": [
+              "server.mjs"
+            ],
+            "cwd": ".",
+            "timeoutMs": 60000,
+            "env": {}
+          },
+          "health": {
+            "path": "/health",
+            "expectedStatus": 200
+          }
+        },
+        "serviceProfileIds": [
+          "node-http/v1"
+        ],
+        "seedProfileId": "rovara-accounts-file/v1",
+        "accountProfileIds": [
+          "orders-owner"
+        ],
+        "allowedOrigins": [
+          "orders-api"
+        ],
+        "seed": {
+          "program": "node",
+          "args": [
+            "seed.mjs"
+          ],
+          "cwd": ".",
+          "timeoutMs": 30000,
+          "env": {}
+        }
+      },
+      "service": {
+        "listenPort": 4317,
+        "portEnv": "APP_PORT",
+        "originBindings": [
+          {
+            "originRef": "orders-api",
+            "envName": "ORDERS_SERVICE_ORIGIN"
+          }
+        ]
+      },
+      "accountProfiles": [
+        {
+          "profileId": "orders-owner",
+          "scope": "synthetic-test",
+          "authProfileId": "rovara-form-login/v1",
+          "seedProfileId": "rovara-accounts-file/v1",
+          "tenantRef": "tenant-a",
+          "roleRef": "owner",
+          "identityProbeId": "orders-identity/v1",
+          "login": {
+            "kind": "form",
+            "path": "/",
+            "usernameTestId": "email",
+            "passwordTestId": "password",
+            "submitTestId": "login-submit",
+            "successTestId": "identity"
+          }
+        }
+      ],
+      "targetAccounts": [
+        {
+          "baseTargetId": "web-1",
+          "profileId": "orders-owner"
+        }
+      ]
+    }
+  }
+}

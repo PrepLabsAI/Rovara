@@ -19,7 +19,7 @@ export type AccountsAppProcess = Readonly<{ upstream: string; directory: string;
  * The accounts fixture app as the Rovara host would run it, but on this machine: the accounts file the host writes for the plan's accounts, the recipe's seed command run for real
  * against it, then the app on a loopback port reading the records the seed built. For executor tests that run the real CLI and a real local Chromium without Docker.
  */
-export async function startAccountsApp(fixture: OrdersExecutorFixture, options: { defect?: "viewer-access.json" | "echo-session.json" | "echo-email.json" | "rotate-echo.json" | "storage-echo.json" } = {}): Promise<AccountsAppProcess> {
+export async function startAccountsApp(fixture: OrdersExecutorFixture, options: { defect?: "viewer-access.json" | "echo-session.json" | "echo-email.json" | "rotate-echo.json" | "storage-echo.json" | "weak-echo.json" } = {}): Promise<AccountsAppProcess> {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "accounts-app-")));
   const app = join(directory, "app");
   await mkdir(join(app, ".owned"), { recursive: true });
