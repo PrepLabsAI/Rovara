@@ -15,6 +15,7 @@ import {
   type E2EModelChannelStepMarker,
   type E2EModelSessionSync,
 } from "@agentx/contracts";
+import { maskModelCall, ModelMaskDepthError } from "./model-mask.js";
 import { createSessionSyncState, syncSessionBeforeCall, type E2EModelSessionSource } from "./model-channel-sync.js";
 
 /**
@@ -71,6 +72,11 @@ export interface E2EModelChannelClientOptions {
    * request it flags is refused (`credential-in-prompt`) and not sent. The worker's scan is the one that decides; this is the second check.
    */
   scan?: (bytes: Uint8Array) => boolean;
+  /**
+   * What the model is shown instead of an evidence-only (weak) session value (MASKMAYBE): applied to every string of the call after the sync and after `scan` has refused any credential, so the
+   * step goes on with `<session>` in place of the value. The host passes the registry's `maskForModel`. `scan` runs again on the masked call.
+   */
+  mask?: (text: string) => string;
 }
 
 type Reply = { status: number; body: unknown };
@@ -130,7 +136,16 @@ export function createE2EModelChannelClient(options: E2EModelChannelClientOption
         if (!parsed.success) throw new E2EModelChannelError("invalid-request");
         // The executor's own scan, now that the sync has taught it what the browser holds.
         if (options.scan?.(Buffer.from(JSON.stringify(parsed.data.call), "utf8")) === true) throw new E2EModelChannelError("credential-in-prompt");
-        const payload = Buffer.from(JSON.stringify(parsed.data), "utf8");
+        // A weak value is masked, not refused. The credential scan above ran on the unmasked call, so masking a weak value that overlaps a credential cannot hide the credential from it.
+        let masked = parsed.data;
+        if (options.mask !== undefined) {
+          try { masked = { ...parsed.data, call: maskModelCall(parsed.data.call, options.mask) }; } catch (error) { throw error instanceof ModelMaskDepthError ? new E2EModelChannelError("invalid-request") : error; }
+          const again = E2EModelChannelRequestSchema.safeParse(masked);
+          if (!again.success) throw new E2EModelChannelError("invalid-request");
+          masked = again.data;
+          if (options.scan?.(Buffer.from(JSON.stringify(masked.call), "utf8")) === true) throw new E2EModelChannelError("credential-in-prompt");
+        }
+        const payload = Buffer.from(JSON.stringify(masked), "utf8");
         if (payload.length > E2E_MODEL_CHANNEL_MAX_REQUEST_BYTES) throw new E2EModelChannelError("invalid-request");
         const reply = await post(options, E2E_MODEL_CHANNEL_GENERATE_PATH, payload, signal);
         // The worker answers a refused or failed call with a valid answer of status `error` (and a status code that says why); that answer is the result, not a transport failure.

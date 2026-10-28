@@ -13,18 +13,19 @@ import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStatePro
 import { isPinnedRovaraHttpEngine } from "../rovara-http-engine-descriptor.js";
 import { createExecutorSessionStore } from "./accounts.js";
 import { createRovaraE2EAgentExecutor } from "./agent-executor.js";
-import { createE2EAgentCaptureStore, persistE2EAgentTrace } from "./agent-capture-store.js";
+import { createHostAgentCaptureStore } from "./host-capture-store.js";
 import type { E2EAgentLedgerWriter } from "./agent-ledger.js";
 import { createE2EAgentStepDriver } from "./agent-step-driver.js";
-import { createE2EAgentModelAdapter } from "./agent-model-adapter.js";
+import { createHostModelStack } from "./host-model-stack.js";
 import { installRefusingE2EDefaultProvider } from "./ai-default-provider.js";
 import { createE2EReplayState, createE2EReplayStepDriver, createE2EReplayStore, createRovaraE2EReplayExecutor } from "./agent-replay.js";
-import { createE2EModelChannelClient } from "./model-channel.js";
 import { createCredentialRedactor } from "./redact.js";
-import { createSessionSecretRegistry, registerStorageEntry } from "./session-secret-registry.js";
+import { sessionSecretLine } from "./session-secrets-file.js";
+import { createSessionSecretRegistry } from "./session-secret-registry.js";
+import { adoptCaseContext, closeCaseContext } from "./session-context-wiring.js";
 import { createE2ESessionSyncSource } from "./session-sync.js";
 import { createFileCaseLedger, type FileCaseLedger } from "./case-ledger.js";
-import { createPlaywrightFormLoginDriver, isSessionCookieSecret, parseSetCookie } from "./form-login.js";
+import { createPlaywrightFormLoginDriver } from "./form-login.js";
 import { casePlanFor, resolveE2EExecutorSuite } from "./suite.js";
 
 export const E2E_EXECUTOR_CONTEXT_ENV = "ROVARA_E2E_EXECUTOR_CONTEXT" as const;
@@ -171,9 +172,9 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const agentRedactor = createCredentialRedactor(plan.accounts);
   // A session value is told to the ledger (so evidence and captures that carry it are caught) and left for the parent (so the text it writes is scrubbed of it). Only a credential is told to the
   // worker and makes a model-bound payload refused; an evidence-only value (a draft, a route) does neither (see session-secret-registry.ts).
-  const registry = createSessionSecretRegistry({ redactor: agentRedactor, onRegister: (value) => {
+  const registry = createSessionSecretRegistry({ redactor: agentRedactor, onRegister: (value, options) => {
     ledger?.registerSessionSecret(value);
-    appendFileSync(join(context.projectDir, E2E_EXECUTOR_SESSION_SECRETS_FILE), `${JSON.stringify(value)}\n`, { mode: 0o600 });
+    appendFileSync(join(context.projectDir, E2E_EXECUTOR_SESSION_SECRETS_FILE), sessionSecretLine(value, options?.evidenceOnly === true), { mode: 0o600 });
   } });
   const { sessionSecrets } = registry;
   const registerSecret = registry.register;
@@ -196,18 +197,13 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   const replayPlan = plan.replay;
   if (channelPlan !== undefined || replayPlan !== undefined) installRefusingE2EDefaultProvider();
   const agent = channelPlan === undefined ? null : (() => {
-    const client = createE2EModelChannelClient({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, sessionSync, scan: registry.modelScan });
     const current: { position: { caseId: string; stepIndex: number } | null; ledger: E2EAgentLedgerWriter | null } = { position: null, ledger: null };
-    // The adapter's own scan is the executor's second check; the worker's scan is told the browser's session values before every call by the client's sync (MIDSTEPCOOKIE).
-    const adapter = createE2EAgentModelAdapter({ client, routeId: channelPlan.routeId, position: () => current.position, scan: registry.modelScan });
+    // The channel client and the adapter, with the registry's credential scan and its mask of evidence-only values (MASKMAYBE); see host-model-stack.ts.
+    const { client, adapter } = createHostModelStack({ socketPath: context.modelSocketPath ?? channelPlan.socketPath, runId: plan.runId, routeId: channelPlan.routeId, registry, sessionSync, position: () => current.position });
     // The goals of the steps run so far: a trace's typed value that is text of one stays as it is, the ledger's rule (the runner writes a trace after its step has ended).
     const goals: string[] = [];
     const origin = declaration.originByApplicationId.find((item) => item.applicationId === launchContext.selectedTarget.applicationId)?.origin ?? E2E_EXECUTOR_COMPILED_ORIGIN;
-    const store = createE2EAgentCaptureStore({
-      scan: registry.modelScan,
-      persist: (keyHash, bytes) => persistE2EAgentTrace(context.outDir, keyHash, bytes),
-      valueKey: channelPlan.valueKey, goals: () => goals, origin,
-    });
+    const store = createHostAgentCaptureStore({ registry, outDir: context.outDir, valueKey: channelPlan.valueKey, goals: () => goals, origin });
     const executor = createRovaraE2EAgentExecutor({ position: () => current.position, ledger: () => current.ledger, origin: () => origin });
     const driveStep = createE2EAgentStepDriver({ client, adapter, current, runId: plan.runId, valueKey: channelPlan.valueKey, outDir: context.outDir, sessionSecrets: () => sessionSecrets });
     const runStep: typeof driveStep = (request) => { if (!goals.includes(request.goal)) goals.push(request.goal); return driveStep(request); };
@@ -238,17 +234,9 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       // What the case's browser holds at the end, whoever put it there (the application's headers, or its scripts): any cookie, and any local storage value, that looks like a secret
       // (the same rules the sign-in's were held to) is registered, so a value the application replaced or wrote after the sign-in is scrubbed from what the parent writes and is
       // caught by the out scan. Best effort: a closed page has nothing to ask.
-      const owned = ownedContexts.get(sessionRef);
-      ownedContexts.delete(sessionRef);
-      sessionSync.detach(sessionRef);
-      // The signed-out visitor has no credential, and what an application sets for a visitor (a visitor id, a cart) is not a secret: nothing of it is registered.
-      if (owned && !store.isAnonymous(sessionRef)) {
-        try {
-          const kept = await owned.storageState();
-          for (const cookie of kept.cookies) if (isSessionCookieSecret(cookie)) registerSecret(cookie.value);
-          for (const item of kept.origins) for (const entry of item.localStorage) registerStorageEntry(registerSecret, entry);
-        } catch { /* the context is gone */ }
-      }
+      // A signed-out visitor's context is read too (MASKMAYBE F-3): the application can issue a token to a visitor mid-step (a sign-up, a magic link). It is read with the visitor bar, so a visitor id
+      // or a cart registers nothing.
+      await closeCaseContext({ contexts: ownedContexts, sessionRef, isAnonymous: store.isAnonymous, sessionSync });
       const result = await store.close(sessionRef, signal);
       if (result.confirmed && activeSessionRef === sessionRef) { activeSessionRef = null; activeCaseId = null; }
       return result;
@@ -301,20 +289,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
           }, { origin: item.origin, entries: item.entries.map((entry) => ({ ...entry })) });
         }
         await guard(browserContext);
-        ownedContexts.set(sessionRef, browserContext);
-        // A session cookie the application swaps in while the case runs is registered when its answer arrives.
-        const anonymous = store.isAnonymous(sessionRef);
-        sessionSync.attach(sessionRef, browserContext, { anonymous });
-        browserContext.on("response", (response) => {
-          if (anonymous) return;
-          sessionSync.track(response.headersArray().then((headers) => {
-            for (const header of headers) {
-              if (header.name.toLowerCase() !== "set-cookie") continue;
-              const issued = parseSetCookie(header.value);
-              if (issued !== null && isSessionCookieSecret(issued)) registerSecret(issued.value);
-            }
-          }, () => undefined));
-        });
+        // Signed-out visitors included (F-3): remembered, attached, watched (requests, Set-Cookie answers) and read at close like any other context, with the visitor bar (a visitor id or a cart is not a secret; a session is).
+        adoptCaseContext({ contexts: ownedContexts, sessionRef, browserContext, isAnonymous: store.isAnonymous, sessionSync, registerSecret });
         const page = browserContext.pages()[0];
         if (!page) throw new Error("the owned browser context has no page to identify");
         const session = await browserContext.newCDPSession(page);

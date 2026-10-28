@@ -3,6 +3,9 @@ const byId = (id) => document.querySelector(`[data-testid="${id}"]`);
 // The storage-echo defect asks the page to keep a refresh token in local storage; without the defect the attribute is absent and nothing is stored.
 const refresh = byId("identity")?.dataset.refresh;
 if (refresh) localStorage.setItem("refresh_token", refresh);
+// The weak-echo defect keeps an opaque document id under a neutral key.
+const documentId = byId("identity")?.dataset.doc;
+if (documentId) localStorage.setItem("lastDocument", documentId);
 
 byId("login-submit")?.form.addEventListener("submit", async (event) => {
   event.preventDefault();

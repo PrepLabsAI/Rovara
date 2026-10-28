@@ -126,7 +126,8 @@ function fakeBrowser(port: number, onResponse: (setCookies: string[]) => void) {
 /** The executor's side, wired the way the host wires it: registered session values, the source, the response listener, the client. */
 function executorFor(port: number, options: { learnFromBrowser?: boolean } = {}) {
   const sessionSecrets: string[] = [];
-  const register = (value: string) => { if (value.length >= 8 && !sessionSecrets.includes(value)) sessionSecrets.push(value); };
+  // As the host's registry does: an evidence-only value is scrubbed, but not told to the worker.
+  const register = (value: string, options?: { evidenceOnly?: boolean }) => { if (options?.evidenceOnly !== true && value.length >= 8 && !sessionSecrets.includes(value)) sessionSecrets.push(value); };
   const source = createE2ESessionSyncSource({ register, known: () => sessionSecrets });
   const browser = fakeBrowser(port, (setCookies) => {
     source.track(new Promise<void>((resolve) => setTimeout(() => {
@@ -432,7 +433,8 @@ describe("the executor's session source reads the browser before each sync", () 
 
   it("registers cookies and local storage credentials and leaves short, common and ordinary-data values alone, once each", async () => {
     const registered: string[] = [];
-    const source = createE2ESessionSyncSource({ register: (value) => registered.push(value), known: () => registered });
+    const evidenceOnly: string[] = [];
+    const source = createE2ESessionSyncSource({ register: (value, options) => { if (options?.evidenceOnly === true) evidenceOnly.push(value); else registered.push(value); }, known: () => registered });
     source.attach("s1", reader({
       cookies: [{ value: "1", httpOnly: false }, { value: "true", httpOnly: false }, { value: "en-US", httpOnly: true }, { value: "a-long-session-cookie-value", httpOnly: false }, { value: "abc12345", httpOnly: true }],
       origins: [{ localStorage: [
@@ -446,6 +448,8 @@ describe("the executor's session source reads the browser before each sync", () 
     expect(await source.read()).toEqual(["a-long-session-cookie-value", "abc12345", "a-long-local-storage-access-token"]);
     await source.read();
     expect(registered).toHaveLength(3);
+    // The ordinary app data is scrubbed (weak), once each, and never told to the worker; `accepted` and the short cookies are not registered at all.
+    expect(evidenceOnly).toEqual(["Quarterly report for ACME", "https://app.example.com/settings?tab=billing"]);
   });
 
   it("tells a credential in local storage from app data by its value and its key", () => {
@@ -480,7 +484,7 @@ describe("the executor's session source reads the browser before each sync", () 
     expect(run.seen).toHaveLength(1);
   });
 
-  it("leaves out an anonymous visitor's context and a context that was detached", async () => {
+  it("reads an anonymous visitor's context with the visitor bar (a plain cookie id registers nothing) and leaves out a context that was detached", async () => {
     const registered: string[] = [];
     const source = createE2ESessionSyncSource({ register: (value) => registered.push(value), known: () => registered });
     source.attach("anon", reader({ cookies: [{ value: "visitor-id-1234567890123", httpOnly: false }], origins: [] }), { anonymous: true });
@@ -665,14 +669,17 @@ describe("the executor's channel client syncs before every call", () => {
     const mention = (pattern: RegExp) => files.filter((file) => pattern.test(readFileSync(file, "utf8"))).map((file) => file.slice(root.length + 1)).sort();
     expect(mention(/E2E_MODEL_CHANNEL_GENERATE_PATH|["'`]\/v1\/generate["'`]/)).toEqual(["executor/model-channel.ts"]);
     expect(mention(/\bclient\.generate\(|options\.client\.generate\(/)).toEqual(["executor/agent-model-adapter.ts"]);
-    expect(mention(/createE2EModelChannelClient\(/)).toEqual(["executor/host.ts", "executor/model-channel.ts"]);
+    // The host builds its one client through `createHostModelStack` (MASKMAYBE), the only code that does.
+    expect(mention(/createE2EModelChannelClient\(/)).toEqual(["executor/host-model-stack.ts", "executor/model-channel.ts"]);
+    expect(mention(/createHostModelStack\(/)).toEqual(["executor/host-model-stack.ts", "executor/host.ts"]);
     expect(mention(/E2E_MODEL_CHANNEL_SYNC_PATH/)).toEqual(["executor/model-channel.ts"]);
     // `sessionSync` is required by the client's options type: a client cannot be built without it.
     // @ts-expect-error sessionSync is required
     const missing: Parameters<typeof createE2EModelChannelClient>[0] = { socketPath: "/x", runId: RUN_ID };
     void missing;
     // The host builds its one client with the browser-backed source.
-    expect(readFileSync(join(root, "executor/host.ts"), "utf8")).toMatch(/createE2EModelChannelClient\(\{[^}]*sessionSync, scan:/);
+    expect(readFileSync(join(root, "executor/host-model-stack.ts"), "utf8")).toMatch(/createE2EModelChannelClient\(\{[^}]*sessionSync: input\.sessionSync, scan:/);
+    expect(readFileSync(join(root, "executor/host.ts"), "utf8")).toMatch(/createHostModelStack\(\{[^}]*registry, sessionSync,/);
   });
 });
 

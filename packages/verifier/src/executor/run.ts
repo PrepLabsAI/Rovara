@@ -10,6 +10,7 @@ import { normalizeE2EApplicationPublicList } from "../application-result-adapter
 import { parseE2EApplicationReport } from "../application-report-schema.js";
 import { createE2EApplicationRuntimeAssets } from "../application-runtime-assets.js";
 import type { E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
+import { readSessionSecretFile, scanOutputFile } from "./session-secrets-file.js";
 import { E2E_EXECUTOR_BLOCKED_LOG, E2E_EXECUTOR_CONTEXT_ENV, E2E_EXECUTOR_LOGIN_FAILED_FILE, E2E_EXECUTOR_OUTPUT_DIR, E2E_EXECUTOR_SESSION_SECRETS_FILE, type ExecutorHostContext } from "./host.js";
 import { verifyExecutorHostRegistration } from "./host-registry.js";
 import { startAppForwarder, type AppForwarder } from "./app-forward.js";
@@ -205,7 +206,7 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
   const run = await runProcess(process.execPath, [cliPath, "run", "--config", configPath, "--reporter", "json", "--output", E2E_EXECUTOR_OUTPUT_DIR,
     ...(input.agentCapture === true ? [] : ["--no-cache"]), "--workers", "1", "--retries", "0"], { cwd: project, env, deadlineAt: resolved.deadlineAtMs, signal: input.signal });
   // What the sessions of this shard's cases hold (cookie values) is scrubbed from every text this parent writes from here on, the raw report included.
-  for (const secret of await readJsonStrings(join(project, E2E_EXECUTOR_SESSION_SECRETS_FILE))) input.redactor.addSessionSecret(secret);
+  for (const secret of await readSessionSecretFile(join(project, E2E_EXECUTOR_SESSION_SECRETS_FILE))) input.redactor.addSessionSecret(secret.value, { evidenceOnly: secret.evidenceOnly });
   const failedLogins = [...new Set(await readJsonStrings(join(project, E2E_EXECUTOR_LOGIN_FAILED_FILE)))].sort();
   await writeText("report.json", run.stdout); await writeText("run.stderr.txt", run.stderr);
   let upstreamRunId: string | null = null;
@@ -310,11 +311,9 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
         if (info.size > MAX_SCAN_BYTES) { await rm(file, { force: true }); await failScan("removed an output file too large to scan for credentials"); continue; }
         // A run credential in any spelling, or a session value a form login made (the cookies and token-like local storage the CLI process told this parent about): a file that
         // carries one is removed, and the run has no trustworthy result.
-        if (redactor.contains(await readFile(file))) {
-          await rm(file, { force: true });
-          await appendFile(logPath, `${new Date().toISOString()} removed an output file that carried an account credential or a session value: ${file.slice(outDir.length + 1)}\n`);
-          if (exitCode !== 2 || reason === null) { exitCode = 2; reason = "credential-leak"; }
-        }
+        // An evidence-only value (scrubbed, never refused) only removes the file: it can never fail the run, however late it was registered.
+        const verdict = await scanOutputFile({ file, outDir, redactor, log: (line) => appendFile(logPath, `${new Date().toISOString()} ${line}\n`) });
+        if (verdict === "credential" && (exitCode !== 2 || reason === null)) { exitCode = 2; reason = "credential-leak"; }
       }
     } catch (error) { await failScan(`the output scan failed: ${error instanceof Error ? error.message : "unreadable"}`); }
     await writeFile(join(outDir, "executor-result.json"), `${JSON.stringify({ schemaVersion: "e2e-executor-result/v1", exitCode, reason,
