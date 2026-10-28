@@ -58,6 +58,9 @@
   "overrides": {
     "@earendil-works/pi-coding-agent": {
       "undici": "8.12.2"
+    },
+    "e2e": {
+      "zod": "4.6.6"
     }
   }
 }
