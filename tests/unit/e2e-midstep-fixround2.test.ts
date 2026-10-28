@@ -194,9 +194,14 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
     expect((await bare.generate({ ...POSITION, callIndex: 1, call: call(`#n3 text "${JWT}"`) })).result).toMatchObject({ status: "error", code: "refused-credential-match" });
   });
 
-  it("the host wires its three model-bound scans (the channel client, the model adapter, the capture store) to the registry's model scan, not to the redactor's all-scope check", () => {
+  it("the host wires its two model-bound scans (the channel client, the model adapter) to the registry's model scan, and what it writes (the capture store) to the all-scope evidence scan (MIDSTEP-2 fix round 1)", () => {
     const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
-    expect(host.match(/scan: registry\.modelScan/g)).toHaveLength(3);
+    // The two model-bound scans (and the weak-value mask) moved into host-model-stack.ts (MASKMAYBE); its behaviour is pinned in e2e-midstep2-maskmaybe.test.ts.
+    const stack = readFileSync(new URL("../../packages/verifier/src/executor/host-model-stack.ts", import.meta.url), "utf8");
+    expect(stack.match(/scan: input\.registry\.modelScan/g)).toHaveLength(2);
+    expect(host).toContain("createHostModelStack({");
+    expect(host).toContain("createHostAgentCaptureStore({ registry,");
+    expect(host).not.toMatch(/createE2EAgentCaptureStore\(/);
     expect(host).not.toMatch(/agentRedactor\.contains\(/);
     expect(host).toMatch(/createSessionSecretRegistry\(\{ redactor: agentRedactor/);
   });
@@ -214,10 +219,13 @@ describe("R-1: the values registered at sign-in follow the sync's classifier and
     expect(redactor.contains(Buffer.from("dark"), "all")).toBe(false);
   });
 
-  it("the host registers the storage it reads at case close through that classifier, not as evidence-only wholesale", () => {
+  it("the host registers what it reads at case close through the classifier (the sync's read and tier), not as evidence-only wholesale", () => {
     const host = readFileSync(new URL("../../packages/verifier/src/executor/host.ts", import.meta.url), "utf8");
-    expect(host).toMatch(/registerStorageEntry\(registerSecret, entry\)/);
+    const wiring = readFileSync(new URL("../../packages/verifier/src/executor/session-context-wiring.ts", import.meta.url), "utf8");
+    expect(host).toContain("closeCaseContext(");
+    expect(wiring).toMatch(/tellBrowserState\(await readBrowserState\(input\.browserContext\), \(item\) => input\.sessionSync\.learn\(\[item\]\), undefined, \{ visitor: input\.anonymous \}\)/);
     expect(host).not.toMatch(/evidenceOnly: true/);
+    expect(wiring).not.toMatch(/evidenceOnly: true/);
   });
 
   it("registering a value evidence-only and then as a credential makes it a credential; the other way round it stays one", () => {

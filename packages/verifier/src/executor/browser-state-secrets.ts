@@ -1,0 +1,116 @@
+import { createHash } from "node:crypto";
+import { type ClassifiedValue } from "./credential-classifier.js";
+import { cookieTier } from "./visitor-cookie.js";
+import { urlSecrets } from "./request-secrets.js";
+import { classifyStorageEntry, classifyStructure } from "./storage-entry-classifier.js";
+
+/**
+ * What a browser context holds that may be a login secret, told to a `learn` callback with its tier (MIDSTEP-2): cookies, local storage, session storage, IndexedDB, and the URLs the
+ * pages are at. One function for every point the executor reads the browser (sign-in capture, every mid-step sync, case close), so none of them can lag behind another.
+ */
+export interface BrowserSecretState {
+  cookies: ReadonlyArray<{ value: string; httpOnly: boolean; name?: string }>;
+  origins: ReadonlyArray<{
+    localStorage: ReadonlyArray<{ name: string; value: string }>;
+    sessionStorage?: ReadonlyArray<{ name: string; value: string }>;
+    /** Playwright's `storageState({ indexedDB: true })` shape: databases, their object stores, their records (values encoded). */
+    indexedDB?: unknown;
+  }>;
+  /** The URL of every frame of every page, read when the state was. */
+  urls?: readonly string[];
+}
+
+/** IndexedDB is read whole by the browser driver; the executor accepts it only up to these bounds and otherwise fails closed (the caller's read rejects and no model call is made). */
+export const BROWSER_STATE_IDB_MAX_RECORDS = 5_000;
+export const BROWSER_STATE_IDB_MAX_BYTES = 4 * 1024 * 1024;
+/** The sync keeps a digest of every entry it classified, up to this many. */
+export const BROWSER_STATE_MEMO_MAX = 50_000;
+
+/** A bound of the browser state read was exceeded. Carries a fixed code only, never a value. */
+export class BrowserStateCapError extends Error {
+  constructor(readonly code: "indexeddb-records" | "indexeddb-bytes" | "indexeddb-shape" | "sessionstorage-size" | "sessionstorage-unreadable") {
+    super(`browser state exceeds a fixed bound (${code})`);
+    this.name = "BrowserStateCapError";
+  }
+}
+
+/** Playwright encodes an IndexedDB value as `{o:[{k,v}]}` (object), `{a:[...]}` (array), `{d}` a date, `{ta}` a typed array; strings and numbers are plain. */
+function decodeIndexedDbValue(node: unknown, depth = 0): unknown {
+  if (depth > 16 || node === null || typeof node !== "object") return typeof node === "string" ? node : null;
+  if (Array.isArray(node)) return node.map((item) => decodeIndexedDbValue(item, depth + 1));
+  const record = node as Record<string, unknown>;
+  if (Array.isArray(record.o)) {
+    const out: Record<string, unknown> = {};
+    for (const entry of record.o as unknown[]) {
+      const pair = entry as { k?: unknown; v?: unknown } | null;
+      if (pair !== null && typeof pair === "object" && typeof pair.k === "string") out[pair.k] = decodeIndexedDbValue(pair.v, depth + 1);
+    }
+    return out;
+  }
+  if (Array.isArray(record.a)) return record.a.map((item) => decodeIndexedDbValue(item, depth + 1));
+  if ("d" in record || "ta" in record || "ab" in record || "n" in record || "bi" in record) return null;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(record)) out[key] = decodeIndexedDbValue(child, depth + 1);
+  return out;
+}
+
+function tellIndexedDb(indexedDB: unknown, learn: (item: ClassifiedValue) => void, fresh: (...parts: string[]) => boolean, visitor: boolean): void {
+  if (!Array.isArray(indexedDB)) throw new BrowserStateCapError("indexeddb-shape");
+  let records = 0;
+  let bytes = 0;
+  for (const database of indexedDB as Array<{ name?: unknown; stores?: unknown }>) {
+    if (database === null || typeof database !== "object" || !Array.isArray(database.stores)) throw new BrowserStateCapError("indexeddb-shape");
+    for (const store of database.stores as Array<{ name?: unknown; records?: unknown }>) {
+      if (store === null || typeof store !== "object" || !Array.isArray(store.records)) throw new BrowserStateCapError("indexeddb-shape");
+      const path = `${typeof database.name === "string" ? database.name : "db"}.${typeof store.name === "string" ? store.name : "store"}`;
+      for (const record of store.records as Array<Record<string, unknown>>) {
+        records += 1;
+        if (records > BROWSER_STATE_IDB_MAX_RECORDS) throw new BrowserStateCapError("indexeddb-records");
+        const raw = JSON.stringify(record) ?? "";
+        bytes += raw.length;
+        if (bytes > BROWSER_STATE_IDB_MAX_BYTES) throw new BrowserStateCapError("indexeddb-bytes");
+        if (!fresh(visitor ? "Vi" : "i", path, raw)) continue;
+        const value = decodeIndexedDbValue(record.valueEncoded ?? record.value);
+        for (const item of classifyStructure(path, value, () => raw, { visitor })) learn(item);
+        const key = decodeIndexedDbValue(record.keyEncoded ?? record.key);
+        if (typeof key === "string") for (const item of classifyStructure(`${path}.key`, key, () => raw, { visitor })) learn(item);
+      }
+    }
+  }
+}
+
+/**
+ * Tells `learn` every value of the browser state that is worth registering, with its tier. Throws `BrowserStateCapError` when IndexedDB is over its bounds or unreadable in shape.
+ * `memo` (the session sync keeps one): a storage entry or an IndexedDB record that was classified before, byte for byte, is not classified again. The sync reads the whole browser before every
+ * model call, and a large JSON value must not be parsed on every one of them; a value that changed has a new digest, so it is classified.
+ */
+export function tellBrowserState(state: BrowserSecretState, learn: (item: ClassifiedValue) => void, memo?: Set<string>, options: { visitor?: boolean } = {}): void {
+  // A signed-out visitor's state is read with the visitor bar (see `ClassifyOptions.visitor`): the memo keys differ, because the same entry is judged differently there.
+  const visitor = options.visitor === true;
+  const mark = visitor ? "V" : "";
+  // `fresh` says whether an item is new to the memo; the memo learns it only after the item was told (if `learn` throws, the next read tells it again).
+  const pendingDigests: string[] = [];
+  const fresh = (...parts: string[]): boolean => {
+    if (memo === undefined) return true;
+    const digest = createHash("sha256").update(parts.join("\u0000")).digest("hex");
+    if (memo.has(digest)) return false;
+    pendingDigests.push(digest);
+    return true;
+  };
+  const commit = (): void => {
+    if (memo === undefined) return;
+    // Bounded: an app that rewrites a large store on every step must not grow it without end (a cleared memo only means classifying again).
+    if (memo.size + pendingDigests.length > BROWSER_STATE_MEMO_MAX) memo.clear();
+    for (const digest of pendingDigests.splice(0)) if (memo.size < BROWSER_STATE_MEMO_MAX) memo.add(digest);
+  };
+  // Only what looks like a secret: a consent flag is not one (the cookie rule of the sign-in and the sync).
+  // A visitor's cookie is judged by its name and value (`visitorCookieSecret`): an id or a cart is not a secret, a session is.
+  for (const cookie of state.cookies) { const tier = cookieTier(cookie, visitor); if (tier !== null) learn({ value: cookie.value, tier }); }
+  for (const origin of state.origins) {
+    for (const entry of origin.localStorage) if (fresh(`${mark}l`, entry.name, entry.value)) for (const item of classifyStorageEntry(entry, { visitor })) learn(item);
+    for (const entry of origin.sessionStorage ?? []) if (fresh(`${mark}s`, entry.name, entry.value)) for (const item of classifyStorageEntry(entry, { visitor })) learn(item);
+    if (origin.indexedDB !== undefined) tellIndexedDb(origin.indexedDB, learn, fresh, visitor);
+  }
+  for (const url of state.urls ?? []) if (fresh("u", url)) for (const item of urlSecrets(url)) learn(item);
+  commit();
+}
