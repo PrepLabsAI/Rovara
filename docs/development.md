@@ -20,6 +20,13 @@ have known errors, listed per file in tests/typecheck-baseline.json. The check f
 more errors than its baseline or a new file gets any. After you fix some, run
 `npm run typecheck:baseline` to lower the baseline and commit it. It never raises a count.
 
+`npm run lint` lints the whole repository with the rules of `eslint .`, but in shards (scripts/lint-shards.ts): one eslint
+process per group of directories, each with its own, smaller TypeScript program, then one for everything else. One process
+over the whole repository needs more than 6 GB. Each shard has a 4 GB heap cap, and two run at a time on a machine with 16 GB or
+more (`--jobs 1` runs them one after the other). Run `npm run typecheck` first: the programs read the packages' built
+declarations. `node scripts/lint-shards.ts --only <shard>[,<shard>]` lints some shards, and `--list` names them. A plain
+`npx eslint <file>` still works and uses the whole-repository program (tsconfig.lint.json).
+
 The latest results are the CI runs on each pull request. Docker and AWS are not required for this
 local suite.
 
