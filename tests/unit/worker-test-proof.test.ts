@@ -102,7 +102,8 @@ describe("TESTPROOF", () => {
   it("says not checked when the run on the original code times out or is stopped, and restores the candidate", async () => {
     const made = await repository({ "src/bug.ts": SOURCE_1 }, { "src/bug.ts": SOURCE_2, "src/bug.test.ts": TEST_EXPECTS(2) });
     const slow = { ...fakeTestRunner(made.directory), runProjectCommand: async () => ({ exitCode: null, timedOut: true, stdout: "", stderr: "" }) };
-    const timedOut = await runTestProof(proofOptions(made, { runners: slow }));
+    // A budget well above the check's own 60 s timeout, so the time the run takes never caps the check and the stub's timeout reads as its own.
+    const timedOut = await runTestProof(proofOptions(made, { runners: slow, budgetMs: 10 * 60_000 }));
     expect(timedOut.items).toEqual([expect.objectContaining({ verdict: "not_checked", reason: "timed_out" })]);
     expect(await readFile(join(made.directory, "src/bug.ts"), "utf8")).toBe(SOURCE_2);
     const stop = new AbortController();
