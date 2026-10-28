@@ -1,6 +1,11 @@
 import eslint from "@eslint/js";
 import tseslint from "typescript-eslint";
 
+// `npm run lint` (scripts/lint-shards.ts) lints in shards so that the whole repository never sits in one heap. Each shard names its own, smaller
+// TypeScript program (a tsconfig that extends tsconfig.lint.json) in LINT_SHARD_PROJECT. Run by hand (an editor, `npx eslint file`) it is not set
+// and the whole repository is one program, as before. The rules and the ignores are the same for every shard.
+const lintProject = process.env.LINT_SHARD_PROJECT || "./tsconfig.lint.json";
+
 export default tseslint.config(
   {
     ignores: [
@@ -24,7 +29,7 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        project: "./tsconfig.lint.json",
+        project: lintProject,
         tsconfigRootDir: import.meta.dirname,
       },
     },
