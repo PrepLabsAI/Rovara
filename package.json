@@ -54,5 +54,13 @@
     "typescript": "5.9.3",
     "typescript-eslint": "8.70.0",
     "vitest": "5.0.3"
+  },
+  "overrides": {
+    "@earendil-works/pi-coding-agent": {
+      "undici": "8.12.2"
+    },
+    "e2e": {
+      "zod": "4.6.6"
+    }
   }
 }
