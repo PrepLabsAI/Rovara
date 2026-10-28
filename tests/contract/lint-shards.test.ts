@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { ESLint } from "eslint";
 import tseslint from "typescript-eslint";
 import type * as TypeScript from "typescript";
@@ -40,7 +40,7 @@ afterAll(() => { rmSync(scratch, { recursive: true, force: true }); });
  * are enumerated does not depend on it.
  */
 async function lintedBy(targets: readonly string[], ignorePatterns: readonly string[] = []): Promise<string[]> {
-  const eslint = new ESLint({ cwd: root, ignorePatterns: [...ignorePatterns], overrideConfig: [tseslint.configs.disableTypeChecked] });
+  const eslint = new ESLint({ cwd: root, errorOnUnmatchedPattern: false, ignorePatterns: [...ignorePatterns], overrideConfig: [tseslint.configs.disableTypeChecked] });
   const results = await eslint.lintFiles([...targets]);
   return results.map((result) => relative(root, result.filePath).replaceAll("\\", "/")).sort();
 }
@@ -133,7 +133,7 @@ describe("the lint shards: one config, one command", () => {
       const args = eslintArguments("node_modules/eslint/bin/eslint.js", shard, DEFAULT_HEAP_MB);
       expect(args.slice(0, 2)).toEqual([`--max-old-space-size=${DEFAULT_HEAP_MB}`, "node_modules/eslint/bin/eslint.js"]);
       const flags = args.slice(2).filter((arg) => arg.startsWith("-"));
-      expect(flags.every((flag) => flag === "--ignore-pattern"), `${shard.name}: ${flags.join(" ")}`).toBe(true);
+      expect(flags.every((flag) => flag === "--ignore-pattern" || flag === "--no-error-on-unmatched-pattern"), `${shard.name}: ${flags.join(" ")}`).toBe(true);
       expect(args.slice(-shard.targets.length)).toEqual([...shard.targets]);
     }
   });
@@ -152,6 +152,8 @@ describe("the lint shards: one config, one command", () => {
   it("read their options", () => {
     expect(parseOptions([])).toEqual({ list: false, heapMb: DEFAULT_HEAP_MB });
     expect(parseOptions(["--heap", "2048", "--jobs", "3", "--only", "a,b", "--eslint-bin", "x.js"])).toEqual({ list: false, heapMb: 2048, jobs: 3, only: new Set(["a", "b"]), eslintBin: "x.js" });
+    expect(parseOptions(["--timeout", "30"])).toEqual({ list: false, heapMb: DEFAULT_HEAP_MB, timeoutSeconds: 30 });
+    expect(parseOptions(["--timeout", "0"])).toMatch(/--timeout needs/);
     expect(parseOptions(["--list"])).toEqual({ list: true, heapMb: DEFAULT_HEAP_MB });
     expect(parseOptions(["--heap", "12"])).toMatch(/--heap needs/);
     expect(parseOptions(["--jobs", "0"])).toMatch(/--jobs needs/);
@@ -222,5 +224,41 @@ describe("the lint shards: a failing shard fails the command", () => {
     rmSync(log);
     const passing = run({});
     expect(passing.status, passing.stdout + passing.stderr).toBe(0);
+  });
+
+  it("a shard whose glob matches no file lints nothing and passes, instead of failing eslint, in the real command and in the enumeration", async () => {
+    const empty: Shard = { name: "empty", targets: ["tests/contract/zz-matches-nothing*.ts"], ignore: [], include: ["tests/contract/zz-matches-nothing*.ts"], exclude: [] };
+    expect(await lintedBy(empty.targets)).toEqual([]);
+    // Positive control: without the flag, eslint itself fails on this pattern, so the pass below is the flag's doing.
+    const bare = spawnSync(process.execPath, ["node_modules/eslint/bin/eslint.js", ...empty.targets], { cwd: root, encoding: "utf8" });
+    expect(bare.status).not.toBe(0);
+    expect(bare.stderr).toContain("No files matching the pattern");
+    const result = spawnSync(process.execPath, eslintArguments("node_modules/eslint/bin/eslint.js", empty, DEFAULT_HEAP_MB), { cwd: root, encoding: "utf8", env: { ...process.env, [PROJECT_ENV]: writeShardTsconfig(empty, root) } });
+    expect(result.status, result.stderr).toBe(0);
+  });
+
+  it("stops a shard that runs longer than the timeout and fails the command with a clear message", () => {
+    const fake = join(scratch, "slow-eslint.js");
+    writeFileSync(fake, "setTimeout(() => process.exit(0), 60000);\n");
+    const started = Date.now();
+    const result = spawnSync(process.execPath, ["scripts/lint-shards.ts", "--eslint-bin", fake, "--only", shards[0]!.name, "--timeout", "1"], { cwd: root, encoding: "utf8" });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout).toContain("timed out");
+    expect(Date.now() - started).toBeLessThan(30_000);
+  });
+
+  it("explains a shard killed by the operating system as a possible out-of-memory kill", () => {
+    const fake = join(scratch, "killed-eslint.js");
+    writeFileSync(fake, 'process.kill(process.pid, "SIGKILL");\n');
+    const result = spawnSync(process.execPath, ["scripts/lint-shards.ts", "--eslint-bin", fake, "--only", shards[0]!.name], { cwd: root, encoding: "utf8" });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("SIGKILL");
+    expect(result.stdout).toContain("--jobs 1");
+  });
+
+  it("writes a shard's tsconfig in one piece (rename into place, no temporary file left)", () => {
+    const file = writeShardTsconfig(shards[0]!, root);
+    expect(JSON.parse(readFileSync(file, "utf8")) as unknown).toEqual(shardTsconfig(shards[0]!, root));
+    expect(readdirSync(dirname(file)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
   });
 });

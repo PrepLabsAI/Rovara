@@ -14,9 +14,9 @@
 //
 // Node runs this file directly, so only erasable syntax. Usage, from the repository root, after `tsc -b` (the packages import each other
 // through their built declarations):
-//   node scripts/lint-shards.ts [--list] [--only <shard>[,<shard>...]] [--jobs <n>] [--heap <MB>]
+//   node scripts/lint-shards.ts [--list] [--only <shard>[,<shard>...]] [--jobs <n>] [--heap <MB>] [--timeout <seconds>]
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { availableParallelism, totalmem } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,8 @@ import { fileURLToPath } from "node:url";
 export const PROJECT_ENV = "LINT_SHARD_PROJECT";
 /** The heap cap of one shard's eslint process. The biggest shards peak at about 3.5 GB of memory in all; see docs/development.md. */
 export const DEFAULT_HEAP_MB = 4096;
+/** How long one shard's eslint may run before the command stops it and fails; the slowest shard takes under 30 seconds. */
+export const DEFAULT_TIMEOUT_SECONDS = 600;
 /** The name of the last shard, which lints everything the other shards do not name. */
 export const REST = "rest";
 /** Where the generated tsconfig files go: ignored by git, and inside the repository so TypeScript finds node_modules/@types from there. */
@@ -104,13 +106,20 @@ export function writeShardTsconfig(shard: Shard, root: string): string {
   const directory = join(root, PROGRAM_DIRECTORY);
   mkdirSync(directory, { recursive: true });
   const file = join(directory, `${shard.name}.json`);
-  writeFileSync(file, `${JSON.stringify(shardTsconfig(shard, root), null, 2)}\n`);
+  // Written under a name of its own and renamed into place, so a second run in the same checkout never reads half a file.
+  const temporary = `${file}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(shardTsconfig(shard, root), null, 2)}\n`);
+  renameSync(temporary, file);
   return file;
 }
 
-/** Node's arguments for one shard's eslint run. Only the heap cap, the ignore patterns and the targets differ between shards. */
+/**
+ * Node's arguments for one shard's eslint run. Only the heap cap, the ignore patterns and the targets differ between shards.
+ * A glob that matches no file (every file of a letter was renamed) lints nothing instead of failing eslint with "No files matching
+ * the pattern"; that cannot hide a file, because tests/contract/lint-shards.test.ts compares the shards' files with `eslint .`.
+ */
 export function eslintArguments(eslintBin: string, shard: Shard, heapMb: number): string[] {
-  return [`--max-old-space-size=${heapMb}`, eslintBin, ...shard.ignore.flatMap((pattern) => ["--ignore-pattern", pattern]), ...shard.targets];
+  return [`--max-old-space-size=${heapMb}`, eslintBin, "--no-error-on-unmatched-pattern", ...shard.ignore.flatMap((pattern) => ["--ignore-pattern", pattern]), ...shard.targets];
 }
 
 /**
@@ -122,7 +131,7 @@ export function defaultJobs(totalMemoryBytes: number, cores: number): number {
   return totalMemoryBytes >= 14 * 1024 ** 3 && cores >= 4 ? 2 : 1;
 }
 
-export interface Options { list: boolean; heapMb: number; jobs?: number; only?: ReadonlySet<string>; eslintBin?: string }
+export interface Options { list: boolean; heapMb: number; timeoutSeconds?: number; jobs?: number; only?: ReadonlySet<string>; eslintBin?: string }
 
 export function parseOptions(argv: readonly string[]): Options | string {
   const options: Options = { list: false, heapMb: DEFAULT_HEAP_MB };
@@ -137,6 +146,10 @@ export function parseOptions(argv: readonly string[]): Options | string {
       const value = Number(argv[++index]);
       if (!Number.isInteger(value) || value < 1 || value > 8) return "--jobs needs a whole number from 1 to 8";
       options.jobs = value;
+    } else if (arg === "--timeout") {
+      const value = Number(argv[++index]);
+      if (!Number.isInteger(value) || value < 1) return "--timeout needs a number of seconds, at least 1";
+      options.timeoutSeconds = value;
     } else if (arg === "--only") {
       const value = argv[++index];
       if (value === undefined || value === "") return "--only needs a comma-separated list of shard names";
@@ -145,7 +158,7 @@ export function parseOptions(argv: readonly string[]): Options | string {
       const value = argv[++index];
       if (value === undefined || value === "") return "--eslint-bin needs a path";
       options.eslintBin = value;
-    } else return `Unknown option ${arg}. Usage: node scripts/lint-shards.ts [--list] [--only <shard>[,<shard>...]] [--jobs <n>] [--heap <MB>]`;
+    } else return `Unknown option ${arg}. Usage: node scripts/lint-shards.ts [--list] [--only <shard>[,<shard>...]] [--jobs <n>] [--heap <MB>] [--timeout <seconds>]`;
   }
   return options;
 }
@@ -185,7 +198,7 @@ export async function runShards(shards: readonly Shard[], jobs: number, run: (sh
   return results;
 }
 
-function runEslint(root: string, eslintBin: string, heapMb: number, shard: Shard): Promise<ShardResult> {
+function runEslint(root: string, eslintBin: string, heapMb: number, timeoutSeconds: number, shard: Shard): Promise<ShardResult> {
   const started = Date.now();
   const finish = (partial: Pick<ShardResult, "status" | "output"> & Partial<ShardResult>): ShardResult => ({ shard, seconds: (Date.now() - started) / 1000, ...partial });
   return new Promise((done) => {
@@ -195,10 +208,15 @@ function runEslint(root: string, eslintBin: string, heapMb: number, shard: Shard
     // Only this variable differs between shards; eslint.config.js reads it. NODE_OPTIONS (a caller may set a larger heap) never loosens
     // the cap: Node takes the command-line flag over it.
     const child = spawn(process.execPath, eslintArguments(eslintBin, shard, heapMb), { cwd: root, env: { ...process.env, [PROJECT_ENV]: project }, stdio: ["ignore", "pipe", "pipe"] });
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutSeconds * 1000);
     child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
     child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-    child.on("error", (error) => { done(finish({ status: null, output, error: String(error) })); });
-    child.on("close", (status, signal) => { done(finish({ status, signal, output })); });
+    child.on("error", (error) => { clearTimeout(timer); done(finish({ status: null, output, error: String(error) })); });
+    child.on("close", (status, signal) => {
+      clearTimeout(timer);
+      done(finish(timedOut ? { status, signal, output, error: `timed out: eslint was stopped after ${timeoutSeconds} seconds (--timeout)` } : { status, signal, output }));
+    });
   });
 }
 
@@ -207,7 +225,12 @@ function describeResult(result: ShardResult): string {
   const lines = [`${ok ? "ok  " : "FAIL"} ${result.shard.name} (${result.seconds.toFixed(0)}s)`];
   if (result.output.trim() !== "") lines.push(result.output.trimEnd());
   if (result.signal !== undefined && result.signal !== null) {
-    lines.push(`eslint was stopped by ${result.signal}.${result.signal === "SIGABRT" ? ` Node aborts when its heap is full: the cap is --max-old-space-size in eslintArguments (scripts/lint-shards.ts). If one shard needs more, split its directories in SHARD_DIRECTORIES.` : ""}`);
+    const hint = result.signal === "SIGABRT"
+      ? " Node aborts when its heap is full: the cap is --max-old-space-size in eslintArguments (scripts/lint-shards.ts). If one shard needs more, split its directories in SHARD_DIRECTORIES."
+      : result.signal === "SIGKILL" && result.error === undefined
+        ? " The operating system may have run out of memory and killed it: try --jobs 1, or split the shard's directories in SHARD_DIRECTORIES."
+        : "";
+    lines.push(`eslint was stopped by ${result.signal}.${hint}`);
   }
   if (result.error !== undefined) lines.push(result.error);
   return lines.join("\n");
@@ -226,7 +249,7 @@ async function main(): Promise<void> {
   const jobs = options.jobs ?? defaultJobs(totalmem(), availableParallelism());
   const eslintBin = options.eslintBin ?? join(root, "node_modules/eslint/bin/eslint.js");
   const started = Date.now();
-  const results = await runShards(selected, jobs, (shard) => runEslint(root, eslintBin, options.heapMb, shard), (result) => { console.log(describeResult(result)); });
+  const results = await runShards(selected, jobs, (shard) => runEslint(root, eslintBin, options.heapMb, options.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS, shard), (result) => { console.log(describeResult(result)); });
   const failed = results.filter((result) => result.status !== 0 || result.error !== undefined);
   console.log(`${results.length - failed.length} of ${results.length} lint shards passed in ${((Date.now() - started) / 1000).toFixed(0)}s (${jobs} at a time).`);
   if (failed.length > 0) console.error(`Failed: ${failed.map((result) => result.shard.name).join(", ")}`);
