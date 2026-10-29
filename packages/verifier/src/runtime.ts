@@ -13,8 +13,17 @@ function composeOperationSignal(parent: AbortSignal, deadlineAt: number): { sign
   const onParentAbort = () => { parentWasAborted = true; controller.abort(parent.reason); };
   if (parent.aborted) controller.abort(parent.reason);
   else parent.addEventListener("abort", onParentAbort, { once: true });
-  const delay = Math.max(0, deadlineAt - Date.now());
-  const timer = setTimeout(() => { deadlineExpired = true; controller.abort(new Error("E2E round deadline elapsed")); }, delay);
+  // Node timers run on a monotonic clock and can fire a millisecond before `Date.now()` reaches the deadline (about 1 in 100 on a loaded runner). A signal that aborted then
+  // would be read by the application host as a cancellation (it compares its own clock with the deadline), so the timer re-arms until the wall clock has really reached it.
+  let timer: ReturnType<typeof setTimeout>;
+  const arm = () => {
+    timer = setTimeout(() => {
+      const remaining = deadlineAt - Date.now();
+      if (remaining > 0) { arm(); return; }
+      deadlineExpired = true; controller.abort(new Error("E2E round deadline elapsed"));
+    }, Math.max(0, deadlineAt - Date.now()));
+  };
+  arm();
   const expired = () => { if (!controller.signal.aborted && Date.now() >= deadlineAt) { deadlineExpired = true; controller.abort(new Error("E2E round deadline elapsed")); } return controller.signal.aborted || Date.now() >= deadlineAt; };
   return { signal: controller.signal, timedOut: () => deadlineExpired || Date.now() >= deadlineAt && !parentWasAborted, parentAborted: () => parentWasAborted, expired, dispose: () => { clearTimeout(timer); parent.removeEventListener("abort", onParentAbort); } };
 }
