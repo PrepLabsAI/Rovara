@@ -62,6 +62,22 @@ describe("isolated E2E lease lifecycle", () => {
     expect(result.cleanup).toBe("pending");
   });
 
+  it("never aborts the operation before the wall clock has reached the deadline, even when the timer fires early", async () => {
+    // Node can fire a timer a millisecond before Date.now() reaches its due time; here every timer of 10 ms or more fires 3 ms early, so the shortfall is certain.
+    const realSetTimeout = globalThis.setTimeout;
+    const early = vi.spyOn(globalThis, "setTimeout").mockImplementation((handler: () => void, delay?: number) =>
+      realSetTimeout(handler, (delay ?? 0) >= 10 ? (delay ?? 0) - 3 : delay));
+    try {
+      const deadlineAt = Date.now() + 80;
+      let clockAtAbort = 0;
+      const result = await runIsolatedE2E({ binding: { deadlineAt: new Date(deadlineAt).toISOString() } } as never, { allocate: async () => ({ leaseId: "early-timer-lease",
+        execute: (signal: AbortSignal) => new Promise<ReturnType<typeof collection>>(() => { signal.addEventListener("abort", () => { clockAtAbort = Date.now(); }, { once: true }); }),
+        close: async () => ({ confirmed: true }) }) }, new AbortController().signal);
+      expect(clockAtAbort).toBeGreaterThanOrEqual(deadlineAt);
+      expect(result.process).toMatchObject({ exitCode: null, timedOut: true, aborted: false });
+    } finally { early.mockRestore(); }
+  });
+
   it("settles a never-resolving execute at the admitted deadline", async () => {
     fakeClock();
     const deadlineInput = { binding: { deadlineAt: new Date(Date.now() + 35).toISOString() } } as never;
