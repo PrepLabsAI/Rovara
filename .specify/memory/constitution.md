@@ -1,3 +1,16 @@
+<!-- Sync impact: 4.1.0 -> 5.0.0 (admits channel adapters beside Slack).
+Principles modified: I. One orchestrator, remote coding (the orchestrator accepts requests signed by
+Slack or by a registered channel adapter; an adapter actor must be linked to a developer sign-in and
+post in a space bound to a project the adapter is registered for; only an administrator registers
+an adapter; step-up decisions are made on the task page); II. Administrator-prepared projects (a
+project is also selected by posting in an adapter space bound to it); III. Shared definitions,
+isolated instances (a workspace is owned by a conversation, Slack or adapter, or by one developer
+task; owner keys of different channels never collide); VI. Human-gated task workflow (channel
+adapters are clients, not orchestrators).
+Sections modified: none. Removed sections: none.
+Slack's verified identity, keys and behaviour are unchanged. Design and verification are recorded in
+specs/062-channel-adapters/ (issue #423).
+Follow-up TODOs: none. -->
 <!-- Sync impact: 4.0.0 -> 4.1.0 (adds a native, human-gated task workflow without adding an orchestrator model).
 Principles modified: I. One orchestrator, remote coding (the control plane remains the only workflow
 coordinator; it may pause for an attributable human decision and resume only on an authenticated
@@ -60,7 +73,7 @@ Follow-up TODOs: specify the hosted Slack orchestrator as its own Spec Kit featu
 
 ### I. One orchestrator, remote coding
 
-The hosted Slack orchestrator is the only orchestrator. It MUST expose only orchestration
+The hosted orchestrator is the only orchestrator. It MUST expose only orchestration
 capabilities and administrator-enabled third-party connector tools mediated by the authenticated
 control plane to its agent. Those connector tools MUST enforce project scope and each connector's
 registered scope, keep credentials out of model context, and deduplicate writes durably. The
@@ -69,11 +82,20 @@ project policy narrows what the agent is offered but is not the access boundary.
 Repository code inspection, editing, shell execution,
 builds, and tests MUST run in remote coding workers. Tool registration and extension loading MUST
 enforce this boundary; prompts alone are insufficient. The orchestrator runs unattended. It MUST
-accept only requests that Slack has signed and that come from a member of the channel bound to the
-project. It MUST act through a service identity limited to Slack thread workspaces, and MUST record
-the requesting Slack user with every operation.
+accept only requests that Slack or a registered channel adapter has signed. A Slack request MUST
+come from a member of the Slack channel bound to the project. An adapter request MUST come from an
+actor linked to a developer sign-in, in a space bound to a project that adapter is registered for.
+It MUST act through a service identity limited to conversation workspaces, and MUST record the
+requesting actor, and for an adapter actor the linked developer, with every operation.
 
-The hosted Slack orchestrator is the only AgentX orchestrator model. A second client, the developer
+Only an administrator registers a channel adapter, and each adapter is limited to the projects it
+is registered for. An adapter relays messages and renders events. It is a client, not an
+orchestrator, and MUST NOT receive credentials or run coding work. A decision kind an adapter is
+set to step up, plan approval and administration by default, MUST be made by a signed-in developer
+on the task page and MUST be refused from the adapter. Slack keeps its verified identity and is not
+subject to linking or step-up.
+
+The hosted orchestrator is the only AgentX orchestrator model. Another client, the developer
 task API, may drive coding work. It MUST authenticate a developer through the control plane's
 developer sign-in, and the developer's own AI tool writes the instructions, which reach the remote
 worker unchanged with no AgentX model in between.
@@ -87,7 +109,7 @@ API with a developer sign-in.
 
 Administrators MUST define and prepare each product's fixed environment, repository layout,
 and setup procedure before any coding task. A developer selects a registered project by posting in
-the Slack channel bound to it, or by name through the developer task API when they may use it.
+the Slack channel or adapter space bound to it, or by name through the developer task API when they may use it.
 Preparing or resuming an isolated instance of that definition MUST complete before task acceptance.
 A coding task MUST NOT implicitly define or reconfigure a project.
 
@@ -99,12 +121,14 @@ instance. A client-supplied name or session identifier MUST NOT grant access. Ch
 available to colleagues through explicit repository publication and integration, never through a
 shared writable checkout.
 
-Every workspace is owned by a Slack thread or by one developer task. A Slack thread's workspace is
-owned by its thread (team, channel and thread, as verified by Slack's signed request) and is
-intentionally shared by the channel members who post in that thread. A developer task's workspace
+Every workspace is owned by a conversation or by one developer task. A conversation is a Slack
+thread (team, channel and thread, as verified by Slack's signed request) or an adapter thread
+(channel, tenant, space and thread, as signed by its registered adapter). A conversation's
+workspace is intentionally shared by the members who post in it; on an adapter, only by linked
+members. Owner keys of different channels MUST NOT collide. A developer task's workspace
 is reachable only by the developer who started it, and, while the developer shares it in continue
 mode, by the members of the bound channel who post in its shared thread. No workspace is reachable
-from any other thread, task, or identifier supplied through any other client.
+from any other conversation, task, or identifier supplied through any other client.
 Personal workspaces not tied to a task stay retired.
 The existing ones are stopped and kept, and no route creates another.
 
@@ -129,8 +153,8 @@ need; optional features MUST NOT delay the first complete coding workflow.
 ### VI. Human-gated task workflow
 
 AgentX MAY maintain a versioned task workflow that pauses at named human decision gates. One
-control-plane workflow coordinator owns state transitions; Slack and developer MCP are clients,
-not separate orchestrators. A gate MUST record the authenticated actor, decision, reason, task,
+control-plane workflow coordinator owns state transitions; Slack, channel adapters and developer
+MCP are clients, not separate orchestrators. A gate MUST record the authenticated actor, decision, reason, task,
 workflow revision, and candidate digest where applicable. A worker or reviewer MUST NOT approve
 its own output or change workflow state directly. A skip is an explicit, attributable outcome,
 never a pass. A new candidate or workflow-contract revision invalidates dependent approvals,
@@ -170,4 +194,4 @@ Amendments MUST identify changed principles and update affected specifications a
 Use semantic versioning: major for incompatible principles, minor for new principles, patch
 for clarifications. Reviewers MUST identify and resolve violations before declaring delivery complete.
 
-**Version**: 4.1.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-10-05
+**Version**: 5.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-11-08
