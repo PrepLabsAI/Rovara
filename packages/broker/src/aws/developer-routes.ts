@@ -42,6 +42,7 @@ import {
   type TaskChannelPeopleResponse,
   type TaskPeopleDisplayReadRequest,
   type TaskPeopleDisplayReadResponse,
+  SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
 } from "@agentx/contracts";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { evaluateProjectAuthority } from "../developer/task-project-access.js";
@@ -539,7 +540,7 @@ async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessS
 }
 
 async function bindingsOf(deps: DeveloperRouteDependencies): Promise<SlackChannelBinding[]> {
-  return deps.developer.slackTeamId === undefined ? [] : queryAll<SlackChannelBinding>(deps, `SLACK_BINDING#${deps.developer.slackTeamId}`, "CHANNEL#");
+  return deps.developer.slackTeamId === undefined ? [] : queryAll<SlackChannelBinding>(deps, channelBindingPartition(SLACK_CHANNEL, deps.developer.slackTeamId), channelBindingSortPrefix(SLACK_CHANNEL));
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperProjectsResponse> {

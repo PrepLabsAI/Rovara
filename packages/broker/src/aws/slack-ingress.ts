@@ -14,7 +14,6 @@ import {
   CLOSED_SHARED_NOTICE,
   routeAttributes,
   SharedTaskRecordSchema,
-  SlackChannelBindingSchema,
   SlackChannelIdSchema,
   SlackMessageTimestampSchema,
   SlackRequestMessageSchema,
@@ -34,6 +33,10 @@ import {
   type SlackRequestMessage,
   type SlackThread,
   type TaskQuestionRoute,
+  SLACK_CHANNEL,
+  channelBindingKey,
+  readChannelBindingItem,
+  slackBindingOf,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { createSlackMemberCheck, type SlackMemberCheck } from "./slack-members.js";
@@ -1062,19 +1065,11 @@ function createAwsSlackIngressHandler() {
       },
     },
     async getBinding(teamId, channelId) {
-      const response = await documentClient.send(new GetCommand({
-        TableName: stateTableName,
-        Key: { pk: `SLACK_BINDING#${teamId}`, sk: `CHANNEL#${channelId}` },
-      }));
-      const item = response.Item as Record<string, unknown> | undefined;
-      return item
-        ? SlackChannelBindingSchema.parse({
-            teamId: item.teamId,
-            channelId: item.channelId,
-            projectName: item.projectName,
-            updatedAt: item.updatedAt,
-          })
-        : undefined;
+      // Spec 062 FR-010: the neutral binding key and reader; a Slack binding's key and row are unchanged.
+      const ref = { channel: SLACK_CHANNEL, tenant: teamId, space: channelId };
+      const response = await documentClient.send(new GetCommand({ TableName: stateTableName, Key: channelBindingKey(ref) }));
+      const binding = readChannelBindingItem(ref, response.Item as Record<string, unknown> | undefined);
+      return binding === undefined ? undefined : slackBindingOf(binding);
     },
     async claimEvent(eventId, expiresAtSeconds) {
       try {

@@ -5,7 +5,7 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetCommand, QueryCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
-import { Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation } from "@agentx/contracts";
+import { Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation, SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
@@ -425,7 +425,7 @@ function taskPersonRuntimePorts(input: {
       },
       async bindings(teamId, admission, abortSignal) {
         const result = await queryPages<SlackChannelBinding & { pk: string; sk: string }>({
-          pk: `SLACK_BINDING#${teamId}`, prefix: "CHANNEL#", projection: ["pk", "sk", "teamId", "channelId", "projectName", "updatedAt"], abortSignal,
+          pk: channelBindingPartition(SLACK_CHANNEL, teamId), prefix: channelBindingSortPrefix(SLACK_CHANNEL), projection: ["pk", "sk", "teamId", "channelId", "projectName", "updatedAt"], abortSignal,
         });
         admission.assertOpen();
         return result;
