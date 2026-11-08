@@ -5,6 +5,7 @@ import type {
   SlackThreadWorkspaceResult,
   SlackWorkspaceCloseStartResult,
 } from "../../packages/contracts/src/index.js";
+import { inboundFromSlackRequest } from "../../packages/contracts/src/index.js";
 import { processGroup, runConsumer, type QueueClient, type QueueMessage } from "../../packages/slack-service/src/consumer.js";
 import { deterministicUuid, requestIdSequence } from "../../packages/slack-service/src/ids.js";
 import {
@@ -555,6 +556,25 @@ describe("thread-ordered queue consumer", () => {
     ], groupOptions, () => undefined);
     expect(attempts).toEqual([false, true]);
     expect(deleted).toEqual(["receipt-Ev000000A1", "receipt-Ev000000A2", "receipt-bad"]);
+  });
+
+  it("handles a version 2 Slack inbound message as the version 1 request it carries (spec 062)", async () => {
+    const { queue, deleted } = fakeQueue([]);
+    const handled: SlackRequestMessage[] = [];
+    const v1 = slackMessage({ eventId: "Ev000000A1" });
+    const v2 = inboundFromSlackRequest(v1);
+    const whatsapp = {
+      ...v2, channel: "whatsapp", eventId: "wamid.A1",
+      conversation: { channel: "whatsapp", tenant: "+14155550100", space: "group-1", thread: "main" },
+      actor: { channel: "whatsapp", tenant: "+14155550100", userId: "+14155550123" },
+    };
+    await processGroup(queue, async (message) => { handled.push(message); }, [
+      { body: JSON.stringify(v2), receiptHandle: "receipt-v2", groupId: "thread-a", receiveCount: 1 },
+      { body: JSON.stringify(whatsapp), receiptHandle: "receipt-whatsapp", groupId: "thread-a", receiveCount: 1 },
+    ], groupOptions, () => undefined);
+    // The Slack service handles Slack only; another channel's message is discarded, never run as Slack.
+    expect(handled).toEqual([v1]);
+    expect(deleted).toEqual(["receipt-v2", "receipt-whatsapp"]);
   });
 
   it("extends visibility while a long request is still running", async () => {

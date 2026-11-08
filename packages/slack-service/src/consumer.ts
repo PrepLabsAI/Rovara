@@ -1,4 +1,4 @@
-import { SlackPageCommentMessageSchema, SlackRequestMessageSchema, type SlackPageCommentMessage, type SlackRequestMessage, type TaskQuestionRoute } from "@agentx/contracts";
+import { SlackPageCommentMessageSchema, readSlackRequestMessage, type SlackPageCommentMessage, type SlackRequestMessage, type TaskQuestionRoute } from "@agentx/contracts";
 import { HANDOFF_MILLISECONDS, TurnHandedOffError } from "./interrupted-turn.js";
 import type { ServiceLog } from "./processor.js";
 
@@ -140,11 +140,12 @@ export async function processGroup(
         await queue.delete(entry.receiptHandle);
         continue;
       }
-      const parsed = SlackRequestMessageSchema.safeParse(parseJson(entry.body));
-      if (!parsed.success) {
+      // Spec 062: version 1 or a Slack version 2 inbound message; another channel's message is discarded.
+      const parsed = readSlackRequestMessage(parseJson(entry.body));
+      if (parsed === undefined) {
         log("message.discarded", { reason: "invalid_message" });
       } else {
-        await handle(parsed.data, {
+        await handle(parsed, {
           finalAttempt: entry.receiveCount >= options.maxReceiveCount,
           ...(entry.queuedBehind === undefined ? {} : { queuedBehind: entry.queuedBehind }),
           ...(entry.route === undefined ? {} : { route: entry.route }),
