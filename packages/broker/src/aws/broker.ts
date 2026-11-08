@@ -130,6 +130,7 @@ import {
   legacyProjectFields,
   SLACK_THREAD_OWNER_ISSUER,
   SLACK_CHANNEL,
+  ActorRefSchema,
   SlackChannelBindingSchema,
   channelBindingAttributes,
   channelBindingFromSlack,
@@ -280,6 +281,17 @@ import { observeConnectorRoute } from "./connector-metrics.js";
 import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConnector, discoverLegacyGitHubScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
+import {
+  deleteChannelAdapter,
+  deleteChannelBinding,
+  listChannelAdapters,
+  putChannelBinding,
+  registerChannelAdapter,
+  secretsManagerAdapterSecrets,
+  type ChannelAdapterConfiguration,
+  type ChannelAdapterDependencies,
+} from "./channel-adapters.js";
+import { removeLink, type ChannelLinkDependencies } from "./channel-links.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import type { DeveloperRecord } from "../developer/store.js";
 import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
@@ -554,6 +566,8 @@ interface AwsBrokerDependencies {
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   codeBuild: CodeBuildGateway;
   slack?: SlackServiceConfiguration;
+  /** Spec 062: channel adapters; absent unless the deployment turns them on, and /v1/admin/channels answers NOT_FOUND. */
+  channelAdapters?: ChannelAdapterConfiguration;
   /** Spec 025 developer sign-in; absent when the deployment has none, and /v1/dev/* answers NOT_FOUND. */
   developer?: DeveloperApiConfiguration;
   /** Sign in with ChatGPT (#338): each developer's ChatGPT connection; absent without its key. */
@@ -1034,6 +1048,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (event.routeKey === FEEDBACK_REVIEW_ROUTE_KEY) {
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
         return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+          ...channelLinkRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           ...workflowApplicationRouteDependencies(dependencies) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
       }
@@ -1210,6 +1225,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+          ...channelLinkRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           ...workflowApplicationRouteDependencies(dependencies) }, request, url), request.requestId);
       }
@@ -1445,6 +1461,33 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       }
       if (slackBinding?.[1] && slackBinding[2] && request.method === "DELETE") {
         return json(await deleteSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2]), request.requestId);
+      }
+      // Spec 062 FR-020, FR-024: channel adapters and their bindings.
+      const channelRoute = /^\/v1\/admin\/channels(?:\/([^/]+)(?:\/bindings\/([^/]+)\/([^/]+))?)?$/.exec(url.pathname);
+      if (channelRoute !== null) {
+        const channels = channelAdapterDependencies(dependencies);
+        const [, channel, tenant, space] = channelRoute;
+        if (channel === undefined && request.method === "GET") return json(await listChannelAdapters(channels, identity), request.requestId);
+        if (channel !== undefined && tenant === undefined && request.method === "PUT") {
+          return json(await registerChannelAdapter(channels, identity, channel, body, { rotate: url.searchParams.get("rotate") === "true" }), request.requestId);
+        }
+        if (channel !== undefined && tenant === undefined && request.method === "DELETE") return json(await deleteChannelAdapter(channels, identity, channel), request.requestId);
+        if (channel !== undefined && tenant !== undefined && space !== undefined && request.method === "PUT") {
+          return json(await putChannelBinding(channels, identity, channel, tenant, space, body), request.requestId);
+        }
+        if (channel !== undefined && tenant !== undefined && space !== undefined && request.method === "DELETE") {
+          return json(await deleteChannelBinding(channels, identity, channel, tenant, space), request.requestId);
+        }
+      }
+      // FR-031: an administrator removes anyone's channel link.
+      const adminLink = /^\/v1\/admin\/channel-links\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+      if (adminLink !== null && request.method === "DELETE") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        const links = channelLinkRouteDependencies(dependencies).channelLinks;
+        if (links === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
+        const actor = ActorRefSchema.safeParse({ channel: decodeURIComponent(adminLink[1]!), tenant: decodeURIComponent(adminLink[2]!), userId: decodeURIComponent(adminLink[3]!) });
+        if (!actor.success || actor.data.channel === SLACK_CHANNEL) throw agentXError("NOT_FOUND", "link not found");
+        return json(await removeLink(links, actor.data, undefined), request.requestId);
       }
       // Spec 052: batches of eval runs, started, shown, stopped and read by an administrator of the channel's project.
       if (url.pathname === "/v1/admin/evals/batches" && request.method === "POST") {
@@ -13735,6 +13778,25 @@ async function publicationProject(
   return { project: { ...pinned, definition }, settingsRevision: settings.definition.revision };
 }
 
+/** Spec 062: the link store the developer routes use, when the deployment has channel adapters. */
+function channelLinkRouteDependencies(dependencies: AwsBrokerDependencies): { channelLinks?: ChannelLinkDependencies } {
+  const channelAdapters = dependencies.channelAdapters;
+  return channelAdapters === undefined ? {} : { channelLinks: { documentClient: dependencies.documentClient, stateTableName: dependencies.tableName, now: Date.now } };
+}
+
+/** Spec 062: the channel adapter routes' dependencies; NOT_FOUND when the deployment has no channel adapters. */
+function channelAdapterDependencies(dependencies: AwsBrokerDependencies): ChannelAdapterDependencies {
+  const channelAdapters = dependencies.channelAdapters;
+  if (channelAdapters === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
+  return {
+    documentClient: dependencies.documentClient,
+    tableName: dependencies.tableName,
+    channelAdapters,
+    requireAdministrator: (identity, projectName) => requireAdministrator(dependencies, identity, projectName),
+    requireProject: async (projectName) => { await requireLatestProject(dependencies, projectName); },
+  };
+}
+
 async function requireLatestProject(
   dependencies: AwsBrokerDependencies,
   projectName: string,
@@ -14514,6 +14576,13 @@ export const handler = createAwsBrokerHandler({
     : {}),
   ...(developer ? { developer } : {}),
   ...(chatgpt ? { chatgpt } : {}),
+  // Spec 062: channel adapters, only where the deployment turns them on (infra/lib/channel-adapters.ts).
+  ...(process.env.CHANNEL_ADAPTERS === "enabled"
+    ? { channelAdapters: {
+        secretPrefix: requiredEnvironment("CHANNEL_ADAPTER_SECRET_PREFIX"),
+        secrets: secretsManagerAdapterSecrets(secretsManager),
+      } }
+    : {}),
   // M1.4 Task 4.2: the installation's worker model settings (SSM, ids and ARNs only), read per request. Absent until a guarded deploy sets the prefix and grants the read, so the
   // AI navigation route cannot be derived and agent steps stay unavailable (`agent-route-not-approved`).
   ...(process.env.AGENTX_E2E_AGENT_SETTINGS_PREFIX

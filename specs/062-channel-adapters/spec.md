@@ -2,7 +2,7 @@
 
 **Feature Branch**: `claude/062-channel-adapters`
 **Created**: 2026-11-08
-**Status**: Draft; Phase 1 in progress
+**Status**: Phases 1–2 in PR #424; Phase 3 in progress
 **Issue**: #423
 **Input**: "We need a way to trigger Rovara through a third-party trigger, like Slack today. I should be able to
 do it through WhatsApp or anything, as long as it conforms to the protocol through a lightweight adapter."
@@ -120,6 +120,8 @@ phase. A thread started before the change resumes its workspace after it.
 - **FR-032:** Each adapter has `stepUp`, a set from `plan_approval` and `admin`, defaulting to both. A decision
   of a step-up kind posted by that adapter is refused, and the `approval_request` event carries the task page
   link instead of an approve action.
+  The refusal is applied where the decision is applied (Phase 4), since only the core knows the request's kind;
+  Phase 3 already sends no approve action for a stepped-up kind.
 - **FR-033:** Slack actors keep their current verified identity. Slack is never subject to FR-030 to FR-032.
 
 ### Core without Slack (Phase 4)

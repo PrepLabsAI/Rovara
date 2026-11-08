@@ -43,7 +43,10 @@ import {
   type TaskPeopleDisplayReadRequest,
   type TaskPeopleDisplayReadResponse,
   SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
+  ActorRefSchema,
 } from "@agentx/contracts";
+import { createChannelLinkWeb } from "./channel-link-web.js";
+import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { evaluateProjectAuthority } from "../developer/task-project-access.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
@@ -117,6 +120,8 @@ export interface DeveloperRouteDependencies {
   registeredRepositoryIdentity?: DeveloperTaskRouteDependencies["registeredRepositoryIdentity"];
   /** Sign in with ChatGPT (#338): each developer's connection; without it /v1/dev/chatgpt/* answers NOT_FOUND. */
   chatgpt?: ChatGptConnections;
+  /** Spec 062: channel account links; without them /review/link/* and /v1/dev/channel-links answer NOT_FOUND. */
+  channelLinks?: ChannelLinkDependencies;
 }
 export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string }
 
@@ -821,6 +826,20 @@ export function developerTaskRouteDependencies(
 }
 
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
+  if (url.pathname.startsWith("/review/link/")) {
+    const links = deps.channelLinks;
+    if (links === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
+    return createChannelLinkWeb({
+      origin: deps.developer.issuer,
+      authenticateSession: async (sessionId) => {
+        try { return await authenticateDeveloperSessionId(deps, sessionId); }
+        catch { return undefined; }
+      },
+      preview: (code) => previewLinkCode(links, code),
+      redeem: (developerId, code) => redeemLinkCode(links, developerId, code),
+    })(request, url);
+  }
   if (url.pathname.startsWith("/review/")) {
     if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
     const authenticateSession = async (sessionId: string) => {
@@ -879,6 +898,23 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   }
   if (url.pathname === CHATGPT_CONNECTION_PATH || url.pathname === `${CHATGPT_CONNECTION_PATH}/finish`) {
     return routeChatGptConnection(deps, caller, request, url);
+  }
+  if (url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/")) {
+    return routeOwnChannelLinks(deps, caller, request, url);
+  }
+  throw agentXError("NOT_FOUND", "route not found");
+}
+
+/** Spec 062 FR-031: a developer lists and removes their own channel links, and only theirs. */
+async function routeOwnChannelLinks(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const links = deps.channelLinks;
+  if (links === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
+  if (url.pathname === "/v1/dev/channel-links" && request.method === "GET") return { links: await listDeveloperLinks(links, caller.developerId) };
+  const one = /^\/v1\/dev\/channel-links\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+  if (one !== null && request.method === "DELETE") {
+    const actor = ActorRefSchema.safeParse({ channel: decodeURIComponent(one[1]!), tenant: decodeURIComponent(one[2]!), userId: decodeURIComponent(one[3]!) });
+    if (!actor.success || actor.data.channel === "slack") throw agentXError("NOT_FOUND", "link not found");
+    return removeLink(links, actor.data, caller.developerId);
   }
   throw agentXError("NOT_FOUND", "route not found");
 }
