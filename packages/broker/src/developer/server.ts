@@ -65,7 +65,8 @@ export type ChannelMembersResult = ChannelMembersResponse | { ok: false; error: 
 
 const CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
 // The PR-feedback review page, or the read-only task page, which may name one document and the earlier version it came from.
-const REVIEW_RETURN_TO = /^\/review\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/task(?:\?doc=(?:requirements|design|coding-plan)(?:&from=[1-9][0-9]{0,2})?)?)?$/i;
+// Spec 062 FR-031: also a channel link page, /review/link/<32-character code>.
+const REVIEW_RETURN_TO = /^\/review\/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/task(?:\?doc=(?:requirements|design|coding-plan)(?:&from=[1-9][0-9]{0,2})?)?)?|link\/[A-Za-z0-9_-]{32})$/i;
 const REVIEW_PKCE_COOKIE = "__Host-agentx_review_pkce";
 const REVIEW_SESSION_COOKIE = "__Host-agentx_review_session";
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store", pragma: "no-cache" };

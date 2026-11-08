@@ -163,6 +163,17 @@ describe("browser sign-in for an AgentX feedback review", () => {
     }
   });
 
+  it("accepts a channel link page (spec 062 FR-031) and nothing longer, shorter or beside it", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    const linkPath = `/review/link/${"A1_-".repeat(8)}`;
+    const good = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(linkPath)}`));
+    expect(good.statusCode).toBe(302);
+    for (const returnTo of [`${linkPath}x`, linkPath.slice(0, -1), `${linkPath}/confirm`, `${linkPath}?x=1`, "/review/link/../v1/admin", `/review/link/${"A".repeat(31)}.`]) {
+      const refused = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(returnTo)}`));
+      expect(refused.statusCode).toBe(400);
+    }
+  });
+
   it("sets an opaque secure 30-day session cookie only after state and PKCE-bound Slack sign-in", async () => {
     const h = identityHarness({ slackUsers: [maya] });
     const start = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(reviewPath)}`));
