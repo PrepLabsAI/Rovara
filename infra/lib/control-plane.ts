@@ -33,6 +33,7 @@ import {
 import type { Construct } from "constructs";
 import { E2E_ARTIFACT_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
+import { ChannelAdapters } from "./channel-adapters.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
@@ -887,7 +888,9 @@ export class ControlPlaneStack extends Stack {
         actions: ["cloudwatch:DescribeAlarms"],
         resources: [`arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:${alarmPrefix}*`],
       }));
-      const deadLetterQueues = { dispatch: deadLetterQueue, "slack-requests": slackDeadLetterQueue, "developer-notices": notifier.deadLetters, "developer-notice-stream": notifier.streamFailures };
+      // Spec 062: channel adapters, off until the ChannelAdapters parameter is enabled.
+      const channelAdapters = new ChannelAdapters(this, "ChannelApi", { naming, env: naming.env, api, state, broker, notifyOperator });
+      const deadLetterQueues = { dispatch: deadLetterQueue, "slack-requests": slackDeadLetterQueue, "developer-notices": notifier.deadLetters, "developer-notice-stream": notifier.streamFailures, "channel-events": channelAdapters.eventDeadLetters };
       broker.addEnvironment("HEALTH_DEAD_LETTER_QUEUES", this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
       broker.addToRolePolicy(new iam.PolicyStatement({
         actions: ["sqs:GetQueueAttributes"],

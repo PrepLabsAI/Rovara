@@ -770,7 +770,7 @@ describe("liftSynthArguments", () => {
 
 
 const ALL_IDS = [
-  "BrokerE1355FD6", "DeveloperSignInFunction10B62B05", "DeveloperTaskNotifierFunction551419CC", "DispatcherD4A12972", "EvalBatchTickA4585B04",
+  "BrokerE1355FD6", "ChannelApiEventSenderDECD5203", "ChannelApiIngress9235D30E", "DeveloperSignInFunction10B62B05", "DeveloperTaskNotifierFunction551419CC", "DispatcherD4A12972", "EvalBatchTickA4585B04",
   "OutboxPublisherD572F72E", "PlanEvidence3615C4CB", "SessionsReaper8FEF958E", "SessionsReconciler4316A0A2", "SessionsSteps3B98DD2B", "SlackIngress5C88FFA0",
 ];
 
@@ -843,7 +843,10 @@ describe("the control-plane-code unit", () => {
 describe("assertOnlyExpectedChanges for every control-plane Lambda (change set derived from the TEST template)", () => {
   const live = JSON.parse(readFileSync(new URL("../fixtures/test-deploy/control-plane-all-code-change-set.json", import.meta.url), "utf8")) as { Changes: Change[] };
   const expectation = (logicalIds: readonly string[]) => ({ action: "Modify", logicalIds, allowedAttributes: ["Properties.Code"], allowArnReevaluations: true }) as const;
-  const all = expectation(ALL_IDS);
+  // The fixture is a change set recorded from a TEST deploy before spec 062 added the channel API's two Lambdas, so it is judged
+  // against the Lambdas it was recorded with. Record it again after the first TEST deploy that has them, and drop this filter.
+  const RECORDED_IDS = ALL_IDS.filter((id) => !id.startsWith("ChannelApi"));
+  const all = expectation(RECORDED_IDS);
   const fresh = (): Change[] => structuredClone(live.Changes);
   const find = (changes: Change[], logicalId: string) => changes.find((change) => change.ResourceChange?.LogicalResourceId === logicalId)!.ResourceChange!;
 
@@ -851,11 +854,11 @@ describe("assertOnlyExpectedChanges for every control-plane Lambda (change set d
     const result = assertOnlyExpectedChanges(observedChanges(fresh()), all);
     expect(result.noOpReevaluations).toContain("SlackIngressIntegration");
     expect(result.noOpReevaluations).toContain("SessionsProvisioner9C44055B");
-    for (const logicalId of ALL_IDS) expect(result.noOpReevaluations).not.toContain(logicalId);
+    for (const logicalId of RECORDED_IDS) expect(result.noOpReevaluations).not.toContain(logicalId);
   });
 
   it("refuses when the same change set is judged against fewer code units", () => {
-    expect(() => assertOnlyExpectedChanges(observedChanges(fresh()), expectation(ALL_IDS.filter((id) => id !== "SlackIngress5C88FFA0")))).toThrow(/Modify SlackIngress5C88FFA0/);
+    expect(() => assertOnlyExpectedChanges(observedChanges(fresh()), expectation(RECORDED_IDS.filter((id) => id !== "SlackIngress5C88FFA0")))).toThrow(/Modify SlackIngress5C88FFA0/);
   });
 
   it("refuses a change set that is missing one of the code units", () => {
@@ -915,7 +918,7 @@ describe("assertOnlyExpectedChanges for every control-plane Lambda (change set d
       environment(outside).CausingEntity = "State.Arn";
       expect(() => assertOnlyExpectedChanges(observedChanges(outside), all)).toThrow(/BrokerE1355FD6/);
       // DeveloperSignIn is a real function, but not a unit of this run: Broker's dependence on it is not accepted.
-      expect(() => assertOnlyExpectedChanges(observedChanges(fresh()), expectation(ALL_IDS.filter((id) => id !== "DeveloperSignInFunction10B62B05")))).toThrow(/BrokerE1355FD6/);
+      expect(() => assertOnlyExpectedChanges(observedChanges(fresh()), expectation(RECORDED_IDS.filter((id) => id !== "DeveloperSignInFunction10B62B05")))).toThrow(/BrokerE1355FD6/);
     });
 
     it("refuses a cause that is another attribute of a unit, the unit itself, or no entity at all", () => {
