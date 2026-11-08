@@ -39,6 +39,7 @@ import {
   type ChannelMembersResponse,
   type ProjectDefinition,
   type WorkspaceInstance,
+  SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminHealth, type AdminHealthProbes } from "./admin-health.js";
@@ -115,7 +116,7 @@ export async function adminProjectNames(deps: AdminReadDependencies, identity: A
 export async function adminProjects(deps: AdminReadDependencies, identity: AuthenticatedIdentity): Promise<Array<{ name: string; latest: LatestProjectRecord }>> {
   const [catalog, bindings, memberships] = await Promise.all([
     queryAllItems(deps, PROJECT_CATALOG_PK, "PROJECT#"),
-    deps.slackTeamId === undefined ? Promise.resolve([]) : queryAllItems(deps, `SLACK_BINDING#${deps.slackTeamId}`, "CHANNEL#"),
+    deps.slackTeamId === undefined ? Promise.resolve([]) : queryAllItems(deps, channelBindingPartition(SLACK_CHANNEL, deps.slackTeamId), channelBindingSortPrefix(SLACK_CHANNEL)),
     queryAllItems(deps, `MEMBER#${identity.ownerKey}`, "PROJECT#"),
   ]);
   const names = new Set<string>();
@@ -248,7 +249,7 @@ async function listBindings(deps: AdminReadDependencies, identity: Authenticated
   const team = asked === null ? deps.slackTeamId : SlackTeamIdSchema.safeParse(asked).success ? asked : null;
   if (team === null) throw agentXError("CONFIG_INVALID", "team must be a Slack team ID, such as T0123456789");
   if (team === undefined) throw agentXError("CONFIG_INVALID", "this environment records no Slack team; send team=<team ID>, such as team=T0123456789");
-  const items = await queryAllItems(deps, `SLACK_BINDING#${team}`, "CHANNEL#");
+  const items = await queryAllItems(deps, channelBindingPartition(SLACK_CHANNEL, team), channelBindingSortPrefix(SLACK_CHANNEL));
   const rows = items.filter((item) => typeof item.channelId === "string" && typeof item.projectName === "string");
   const reveal = memberReveal(deps, identity, authorization);
   const { labels, available } = await channelLabels(deps, rows.map((item) => String(item.channelId)), reveal === undefined ? {} : { reveal });

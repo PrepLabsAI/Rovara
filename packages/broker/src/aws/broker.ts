@@ -129,7 +129,15 @@ import {
   TOOL_WARNING_THRESHOLD,
   legacyProjectFields,
   SLACK_THREAD_OWNER_ISSUER,
+  SLACK_CHANNEL,
   SlackChannelBindingSchema,
+  channelBindingAttributes,
+  channelBindingFromSlack,
+  channelBindingKey,
+  readChannelBindingItem,
+  slackBindingOf,
+  type ChannelBinding,
+  type ChannelSpaceRef,
   SlackChannelIdSchema,
   SlackMessageTimestampSchema,
   SlackRequesterSchema,
@@ -2804,7 +2812,7 @@ async function putSlackBinding(
   const latest = await requireLatestProject(dependencies, binding.projectName);
   await dependencies.documentClient.send(new PutCommand({
     TableName: dependencies.tableName,
-    Item: { ...slackBindingKey(binding.teamId, binding.channelId), entityType: "SLACK_BINDING", ...binding, updatedBy: identity.ownerKey },
+    Item: { ...slackBindingKey(binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
   }));
   return { binding, latestRevision: latest.definition.revision };
 }
@@ -2832,15 +2840,13 @@ async function getSlackBinding(
   teamId: string,
   channelId: string,
 ): Promise<SlackChannelBinding | undefined> {
-  const item = await getItem<Record<string, unknown>>(dependencies, slackBindingKey(teamId, channelId));
-  if (!item) return undefined;
-  // Bindings written before channels followed the latest revision also carry projectRevision; it is ignored.
-  return SlackChannelBindingSchema.parse({
-    teamId: item.teamId,
-    channelId: item.channelId,
-    projectName: item.projectName,
-    updatedAt: item.updatedAt,
-  });
+  const binding = await getChannelBinding(dependencies, { channel: SLACK_CHANNEL, tenant: teamId, space: channelId });
+  return binding === undefined ? undefined : slackBindingOf(binding);
+}
+
+/** Spec 062 FR-010: one space's binding on any channel. Rows written before channels followed the latest revision also carry projectRevision; it is ignored. */
+async function getChannelBinding(dependencies: AwsBrokerDependencies, ref: ChannelSpaceRef): Promise<ChannelBinding | undefined> {
+  return readChannelBindingItem(ref, await getItem<Record<string, unknown>>(dependencies, channelBindingKey(ref)));
 }
 
 /** The close preflight's operation, worker invocation and outbox item: the Slack close's and a developer task's. */
@@ -4025,7 +4031,7 @@ function slackRequesterOf(identity: AuthenticatedIdentity): { requestedBy?: Slac
 }
 
 function slackBindingKey(teamId: string, channelId: string) {
-  return { pk: `SLACK_BINDING#${teamId}`, sk: `CHANNEL#${channelId}` };
+  return channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId });
 }
 
 
@@ -7946,7 +7952,7 @@ async function currentAuthorityFences(dependencies: AwsBrokerDependencies, task:
     const teamId = developer.slackTeamId;
     if (teamId === undefined || creatorAccess.channelIds.length === 0) { reject("current-channel-access-proof-unavailable"); return undefined; }
     for (const channelId of creatorAccess.channelIds) {
-      const bindingKey: { pk: string; sk: string } = { pk: `SLACK_BINDING#${teamId}`, sk: `CHANNEL#${channelId}` };
+      const bindingKey: { pk: string; sk: string } = slackBindingKey(teamId, channelId);
       const binding: Record<string, unknown> | undefined = await getItem<Record<string, unknown>>(dependencies, bindingKey);
       if (binding?.teamId !== teamId || binding.channelId !== channelId || binding.projectName !== task.project
         || typeof binding.updatedAt !== "string" || binding.updatedAt.length === 0) { reject("current-channel-binding-unavailable"); return undefined; }
@@ -8410,7 +8416,7 @@ async function workflowE2ECreatorAuthorityProof(
   const channelIds = [...new Set(access.channelIds)].sort();
   const bindings: Array<{ channelId: string; updatedAt: string }> = [];
   for (const channelId of channelIds) {
-    const row = await getItem<Record<string, unknown>>(dependencies, { pk: `SLACK_BINDING#${teamId}`, sk: `CHANNEL#${channelId}` });
+    const row = await getItem<Record<string, unknown>>(dependencies, slackBindingKey(teamId, channelId));
     if (row?.teamId !== teamId || row.channelId !== channelId || row.projectName !== task.project
       || typeof row.updatedAt !== "string" || row.updatedAt.length === 0) return undefined;
     bindings.push({ channelId, updatedAt: row.updatedAt });

@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { SLACK_CHANNEL, isChannelBindingKeyOf } from "@agentx/contracts";
 import type { ProjectAuthorityWitness } from "../developer/task-project-access.js";
 
 export type TaskPersonProjectAuthorityWitness = ProjectAuthorityWitness & {
@@ -47,7 +48,7 @@ function positiveRowCondition(
   }
   const binding = witness.binding;
   if (binding === undefined || witness.membership !== undefined
-    || binding.pk !== `SLACK_BINDING#${teamId}` || binding.sk !== `CHANNEL#${binding.channelId}`
+    || !isChannelBindingKeyOf(binding, { channel: SLACK_CHANNEL, tenant: teamId, space: binding.channelId })
     || binding.teamId !== teamId || binding.projectName !== project || typeof binding.updatedAt !== "string"
     || binding.updatedAt.length === 0) return undefined;
   return {

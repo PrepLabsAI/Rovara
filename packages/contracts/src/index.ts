@@ -39,6 +39,7 @@ export * from "./e2e-web-api-qualification.js";
 export * from "./e2e-chromium-sandbox.js";
 export * from "./slack.js";
 export * from "./conversation.js";
+export * from "./channel-binding.js";
 export * from "./slack-details.js";
 export * from "./slack-confirmation.js";
 export * from "./slack-routing.js";

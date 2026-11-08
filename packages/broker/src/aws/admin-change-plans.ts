@@ -6,6 +6,7 @@ import {
   ADMIN_CHANGE_EFFECT_MAX, AgentXNameSchema, CredentialRegistrationSchema, SlackChannelIdSchema, WorkspaceInstanceSchema, agentXError, developerTaskPolicy,
   redactSecrets, redactText, workspaceRecordFields,
   type AdminChangeInput, type AdminChangeKind, type ChannelByNameRequest, type ConfirmationMethod, type ChannelByNameResponse, type ProjectDefinition,
+  SLACK_CHANNEL, channelBindingKey, channelBindingPartition, channelBindingSortPrefix,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { chatGptSettingsOf, readChatGptSettingsRecord, writeChatGptSettings } from "../chatgpt/settings.js";
@@ -129,7 +130,7 @@ export async function resolveChannel(deps: PlanDependencies, teamId: string, val
   const text = value.trim().replace(/^#/, "");
   if (SlackChannelIdSchema.safeParse(text).success) return labelled(deps, text, options);
   if (!CHANNEL_NAME.test(text)) throw agentXError("CONFIG_INVALID", "channel must be a Slack channel ID such as C0123456789, or a public channel's name such as #payments-dev");
-  const bound = (await queryAllItems(deps.reads, `SLACK_BINDING#${teamId}`, "CHANNEL#")).map((item) => String(item.channelId));
+  const bound = (await queryAllItems(deps.reads, channelBindingPartition(SLACK_CHANNEL, teamId), channelBindingSortPrefix(SLACK_CHANNEL))).map((item) => String(item.channelId));
   // No reveal here: only a public channel's name is ever matched.
   const { labels } = await channelLabels(deps.reads, bound);
   for (const [channelId, label] of labels) {
@@ -161,7 +162,7 @@ const teamOf = (deps: PlanDependencies): string => {
   return deps.reads.slackTeamId;
 };
 const bindingOf = async (deps: PlanDependencies, teamId: string, channelId: string) => {
-  const item = await getStateItem(deps.reads, { pk: `SLACK_BINDING#${teamId}`, sk: `CHANNEL#${channelId}` });
+  const item = await getStateItem(deps.reads, channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId }));
   return typeof item?.projectName === "string" ? { projectName: item.projectName, updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : "" } : undefined;
 };
 /** "#name" for a named channel, the ID otherwise. */

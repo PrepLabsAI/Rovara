@@ -4,6 +4,7 @@ import {
   developerTaskPolicy,
   type DeveloperTaskPolicy,
   type SlackChannelBinding,
+  SLACK_CHANNEL, isChannelBindingKeyOf,
 } from "@agentx/contracts";
 import type { TaskAuthorityAdmission } from "../aws/task-authority-admission.js";
 
@@ -56,8 +57,9 @@ export function evaluateProjectAuthority(input: {
   if (input.developerId !== undefined && input.teamId !== undefined && (input.revision.pk !== `PROJECT#${input.project}` || input.revision.sk !== revisionKey)) return { kind: "unavailable" };
   if (input.developerId !== undefined && input.memberships.some((row) => row.projectName === input.project
     && (row.pk !== `MEMBER#${input.developerId}` || row.sk !== `PROJECT#${input.project}`))) return { kind: "unavailable" };
-  if (input.teamId !== undefined && input.bindings.some((binding) => binding.projectName === input.project
-    && (binding.pk !== `SLACK_BINDING#${input.teamId}` || binding.sk !== `CHANNEL#${binding.channelId}` || binding.teamId !== input.teamId))) return { kind: "unavailable" };
+  const teamId = input.teamId;
+  if (teamId !== undefined && input.bindings.some((binding) => binding.projectName === input.project
+    && (!isChannelBindingKeyOf(binding, { channel: SLACK_CHANNEL, tenant: teamId, space: binding.channelId }) || binding.teamId !== teamId))) return { kind: "unavailable" };
 
   const policy = developerTaskPolicy(input.revision.definition);
   const matchingBindings = input.bindings.filter((binding) => binding.projectName === input.project);
