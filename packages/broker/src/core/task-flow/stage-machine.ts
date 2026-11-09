@@ -1,0 +1,314 @@
+// Lane L6a, task flow core: the stage machine's driver. The transitions themselves are the pure functions in `@agentx/contracts`
+// (`task-workflow-node.ts`: `startWorkflowUnderstand`, `recordIntentAssessment`, `submitWorkflowArtifact`, ...). This module is what Cloud's
+// `developer-tasks/workflow-starts.ts` and the broker's result hook do around them: read the task, apply one transition, and write the new
+// snapshot (fenced on the revision it was computed from) in the same transaction as the operation that carries the step out.
+//
+// A step is: [task.workflow := next (if revision = r)] + [workspace := BUSY under a new fence] + [the operation and its staged message]
+// + [whatever else must commit with it, such as resolving the dispatch row]. If the transaction does not apply, nothing happened.
+import {
+  AgentXError,
+  WorkflowTransitionError,
+  answerWorkflowIntent,
+  blockWorkflow,
+  change,
+  recordIntentAssessment,
+  startWorkflowPlanAfterUnderstand,
+  startWorkflowUnderstand,
+  submitWorkflowArtifact,
+  when,
+  workflowRequestId,
+  type DocumentKey,
+  type Operation,
+  type TransactItem,
+  type WorkflowSnapshot,
+} from "@agentx/contracts";
+import { buildOperation, assertPromptFits } from "./accept.js";
+import type { TaskFlowDeps } from "./deps.js";
+import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js";
+import { dispatchRowKey, operationRequestKey, taskKey, taskPointerKey, workspaceKey } from "./keys.js";
+import { readTask } from "./reads.js";
+import { fromDocument, toDocument, type DispatchRowRecord, type DispatchSpec, type OperationRecord, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
+import { DEFAULT_PROMPTS, iso, log } from "./support.js";
+import type { StepOutcome } from "./outcome.js";
+
+export type StepStart = "STARTED" | "DUPLICATE" | "STALE" | "WAITING";
+
+const WAIT_SECONDS = 15;
+/** After this many failed tries a row's step is given up on and the task blocks, naming the step. */
+export const DISPATCH_ROW_ATTEMPTS_MAX = 8;
+const backoffSeconds = (attempts: number): number => Math.min(15 * 60, 15 * 2 ** Math.max(0, attempts - 1));
+const later = (deps: Pick<TaskFlowDeps, "now">, seconds: number): string => new Date((deps.now?.() ?? new Date()).getTime() + seconds * 1_000).toISOString();
+
+export async function readWorkspace(deps: Pick<TaskFlowDeps, "store">, workspaceId: string): Promise<WorkspaceRecord | undefined> {
+  return fromDocument<WorkspaceRecord>(await deps.store.get(workspaceKey(workspaceId)));
+}
+
+/** The workspace steps that hand it to one operation: BUSY, held by it, under the next fence. Applies only to a ready workspace nobody holds, at the fence read. */
+export function holdWorkspaceItem(workspace: WorkspaceRecord, operationId: string, now: string): TransactItem {
+  return {
+    kind: "update",
+    key: workspaceKey(workspace.id),
+    ops: [change.set("status", "BUSY"), change.set("activeOperationId", operationId), change.set("fence", workspace.fence + 1), change.set("updatedAt", now)],
+    condition: when.and(when.eq("status", "READY"), when.eq("activeOperationId", null), when.eq("fence", workspace.fence)),
+  };
+}
+
+export interface StepInput {
+  task: TaskRecord;
+  workspace: WorkspaceRecord;
+  /** The idempotency name of this step: the same request id answers with the operation it made the first time. */
+  requestId: string;
+  prompt: string;
+  /** The server-selected tool boundary of the step; absent for a plain task's. */
+  workflowMode?: Operation["workflowMode"];
+  /** The workflow after this step's transition, and the revision it was computed from (a plain task has neither). */
+  workflow?: { current: WorkflowSnapshot; next: WorkflowSnapshot };
+  /** Rows and records that must commit with the step. */
+  extra?: readonly TransactItem[];
+  /** Worker features the step cannot run without. */
+  requires?: readonly string[];
+}
+
+/** Accepts the operation for one step. `STALE` and `WAITING` write nothing. */
+export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<{ result: StepStart; operation?: OperationRecord }> {
+  assertPromptFits(input.prompt);
+  const { task, workspace } = input;
+  const existing = await deps.store.get(operationRequestKey(workspace.ownerKey, workspace.id, input.requestId));
+  if (existing !== undefined) return { result: "DUPLICATE" };
+  if (workspace.status !== "READY" || workspace.activeOperationId !== null) return { result: "WAITING" };
+  const now = iso(deps);
+  const workflowRevision = input.workflow?.next.revision ?? task.workflow?.revision;
+  const built = buildOperation(deps, {
+    workspace: { id: workspace.id, ownerKey: workspace.ownerKey, fence: workspace.fence + 1 },
+    kind: "task", requestId: input.requestId, now, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
+    conversationId: task.conversationId,
+    ...(workflowRevision === undefined ? {} : { workflowRevision }),
+    dispatch: {
+      kind: "task", projectRevision: workspace.projectRevision,
+      payload: { conversationId: task.conversationId, prompt: input.prompt, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }) },
+      ...(input.requires === undefined ? {} : { requires: input.requires }),
+    },
+    requester: { personId: task.developerId, provider: task.provider },
+  });
+  const items: TransactItem[] = [
+    {
+      kind: "update",
+      key: taskKey(task.taskId),
+      ops: [...(input.workflow === undefined ? [] : [change.set("workflow", toDocument(input.workflow.next))]), change.set("updatedAt", now)],
+      condition: when.and(when.notExists("closedAt"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision)])),
+    },
+    holdWorkspaceItem(workspace, built.operation.id, now),
+    ...built.items,
+    ...(input.extra ?? []),
+  ];
+  const applied = await deps.store.transact(items);
+  if (applied.applied) {
+    // Handed to its queue now; a relay from a timer does it too if this one is lost, so a failure here never fails the step.
+    await deps.outbox.relay({ companyId: deps.companyId, ids: [built.operation.id] }).catch((error: unknown) => log(deps, { event: "task_flow.relay_failed", error: error instanceof Error ? error.name : "unknown" }));
+    return { result: "STARTED", operation: built.operation };
+  }
+  // Why it did not apply: the same request committed first, the workspace is taken, or the task moved on.
+  if (await deps.store.get(operationRequestKey(workspace.ownerKey, workspace.id, input.requestId)) !== undefined) return { result: "DUPLICATE" };
+  const fresh = await readWorkspace(deps, workspace.id);
+  if (fresh !== undefined && (fresh.status !== "READY" || fresh.activeOperationId !== null || fresh.fence !== workspace.fence) && fresh.status !== "CLOSED" && fresh.status !== "PREPARATION_FAILED") return { result: "WAITING" };
+  return { result: "STALE" };
+}
+
+/** Applies one workflow transition with no operation (a result recorded, a block), fenced on the revision it was computed from. False when the task moved on. */
+async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, extra: readonly TransactItem[] = []): Promise<boolean> {
+  const current = task.workflow;
+  if (current === undefined) return false;
+  const result = await deps.store.transact([
+    {
+      kind: "update", key: taskKey(task.taskId), ops: [change.set("workflow", toDocument(next)), change.set("updatedAt", iso(deps))],
+      condition: when.and(when.notExists("closedAt"), when.eq(["workflow", "revision"], current.revision)),
+    },
+    ...extra,
+  ]);
+  return result.applied;
+}
+
+/** The workflow, blocked with a reason the owner reads. A task that moved on is left alone. */
+export async function blockTaskWorkflow(deps: TaskFlowDeps, taskId: string, expectedRevision: number, reason: string): Promise<void> {
+  const task = await readTask(deps, taskId);
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== expectedRevision || workflow.state === "COMPLETE") return;
+  try {
+    await commitWorkflow(deps, task, blockWorkflow(workflow, reason, iso(deps)));
+  } catch (error) {
+    if (!(error instanceof WorkflowTransitionError)) throw error;
+  }
+}
+
+// ---- The dispatch rows: the steps that start with no one asking ----
+
+/** Cloud's `startTaskWorkflowUnderstandFromSystem` and `startTaskWorkflowPlanFromSystem`, on the ports. */
+export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<StepStart> {
+  const resolve = (): TransactItem => resolveRowItem(deps, row.taskId, row.workflowRevision);
+  const task = await readTask(deps, row.taskId);
+  const workflow = task?.workflow;
+  const stale = async (): Promise<StepStart> => {
+    await deps.store.transact([resolve()]);
+    return "STALE";
+  };
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.definitionVersion !== "1.1.0" || workflow.revision !== row.workflowRevision) return stale();
+  const workspace = await readWorkspace(deps, task.workspaceId);
+  if (workspace === undefined || workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return stale();
+  const prompts = deps.prompts ?? DEFAULT_PROMPTS;
+  let next: WorkflowSnapshot;
+  let prompt: string;
+  let mode: "UNDERSTAND" | "PLAN";
+  let requestId: string;
+  try {
+    if (row.kind === "UNDERSTAND") {
+      if (workflow.stage !== "UNDERSTAND" || workflow.state !== "READY") return stale();
+      next = startWorkflowUnderstand(workflow, iso(deps));
+      prompt = prompts.understand({ requestText: task.requestText ?? "" });
+      mode = "UNDERSTAND";
+      requestId = workflowRequestId("agentx-understand", task.taskId, workflow.revision);
+    } else {
+      const assessment = workflow.intent?.assessment;
+      if (workflow.stage !== "PLAN" || workflow.state !== "READY" || assessment?.kind !== "ready") return stale();
+      next = startWorkflowPlanAfterUnderstand(workflow, iso(deps));
+      prompt = prompts.plan({ requestText: task.requestText ?? "", path: workflow.path, restatement: assessment.restatement, assumptions: assessment.assumptions });
+      mode = "PLAN";
+      requestId = workflowRequestId("agentx-plan", task.taskId, workflow.revision);
+    }
+  } catch (error) {
+    if (error instanceof WorkflowTransitionError) return stale();
+    throw error;
+  }
+  // The machine is still being set up (or another step holds the workspace): the step runs when it is ready, not before.
+  if (workspace.status === "PREPARING") return "WAITING";
+  const accepted = await acceptStep(deps, { task, workspace, requestId, prompt, workflowMode: mode, workflow: { current: workflow, next }, extra: [resolve()], requires: ["task.workflowMode"] });
+  if (accepted.result === "DUPLICATE") await deps.store.transact([resolve()]);
+  return accepted.result;
+}
+
+export interface DispatchSweepReport { started: number; waiting: number; stale: number; failed: number; blocked: number }
+
+/** The recovery sweep for rows left behind (and the way a row becomes due after a backoff). Safe to run from a timer; a repeat of a step is the first one's duplicate. */
+export async function runDueDispatches(deps: TaskFlowDeps, options: { limit?: number } = {}): Promise<DispatchSweepReport> {
+  const report: DispatchSweepReport = { started: 0, waiting: 0, stale: 0, failed: 0, blocked: 0 };
+  const rows = await dueDispatchRows(deps.store, deps.companyId, iso(deps), options.limit ?? 20);
+  for (const row of rows) {
+    try {
+      const result = await runDispatchRow(deps, row);
+      if (result === "STARTED" || result === "DUPLICATE") report.started += 1;
+      else if (result === "STALE") report.stale += 1;
+      else {
+        report.waiting += 1;
+        await deps.store.transact([rescheduleRowItem(row, later(deps, WAIT_SECONDS), row.attempts)]);
+      }
+    } catch (error) {
+      const attempts = row.attempts + 1;
+      const message = error instanceof Error ? error.message : "unknown";
+      log(deps, { event: "task_flow.dispatch_row_failed", taskId: row.taskId, kind: row.kind, attempts, error: error instanceof AgentXError ? error.code : "unknown" });
+      if (attempts >= DISPATCH_ROW_ATTEMPTS_MAX) {
+        await blockTaskWorkflow(deps, row.taskId, row.workflowRevision, `Rovara could not start the ${row.kind === "UNDERSTAND" ? "step that reads the request" : "planning step"}: ${message}`.slice(0, 500));
+        await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
+        report.blocked += 1;
+      } else {
+        await deps.store.transact([rescheduleRowItem(row, later(deps, backoffSeconds(attempts)), attempts, message)]);
+        report.failed += 1;
+      }
+    }
+  }
+  return report;
+}
+
+// ---- The first run of a task that has no Understand ----
+
+/**
+ * After the preparation: the task's first instructions are queued as a run (Cloud's pointer `pendingPrompt`, R3). A workflow task's is a PLAN-mode
+ * run of the workflow that already started RUNNING at PLAN; a task with no workflow runs the instructions plainly.
+ */
+export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promise<StepStart> {
+  const pointer = fromDocument<TaskPointerRecord>(await deps.store.get(taskPointerKey(task.workspaceId)));
+  if (pointer === undefined || pointer.pendingPrompt === undefined || pointer.cancelledAt !== undefined) return "STALE";
+  const workspace = await readWorkspace(deps, task.workspaceId);
+  if (workspace === undefined || workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
+  const mode = pointer.pendingWorkflowMode === "PLAN" ? "PLAN" as const : undefined;
+  const accepted = await acceptStep(deps, {
+    task, workspace, requestId: pointer.firstRequestId, prompt: pointer.pendingPrompt, ...(mode === undefined ? {} : { workflowMode: mode, requires: ["task.workflowMode"] }),
+    extra: [{ kind: "update", key: taskPointerKey(task.workspaceId), ops: [change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")], condition: when.exists("pendingPrompt") }],
+  });
+  if (accepted.result === "DUPLICATE") {
+    // The first run was accepted and only the pointer was not cleared (or it was, by a repeat): clear it so the task no longer reads as starting.
+    await deps.store.update({ key: taskPointerKey(task.workspaceId), ops: [change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")], condition: when.exists("pendingPrompt") });
+  }
+  return accepted.result;
+}
+
+// ---- What an ended operation moves ----
+
+/**
+ * After an operation's terminal result committed: the next move of the task. Idempotent: a repeat finds the step already taken (its request id is
+ * the first one's) and does nothing. Never throws for a task that moved on.
+ */
+export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void> {
+  const pointer = fromDocument<TaskPointerRecord>(await deps.store.get(taskPointerKey(operation.workspaceId)));
+  if (pointer === undefined) return;
+  const task = await readTask(deps, pointer.taskId);
+  if (task === undefined || task.closedAt !== undefined) return;
+  const succeeded = ended.status === "SUCCEEDED";
+
+  if (operation.kind === "prepare") {
+    if (!succeeded) return;
+    if (ended.outcome?.kind === "prepared" && ended.outcome.base !== undefined && task.preparedBase === undefined) {
+      await deps.store.update({ key: taskKey(task.taskId), ops: [change.set("preparedBase", toDocument(ended.outcome.base)), change.set("updatedAt", iso(deps))], condition: when.notExists("preparedBase") });
+    }
+    if (pointer.pendingPrompt !== undefined) await queueFirstRun(deps, task);
+    else if (task.workflow !== undefined) {
+      const row = await deps.store.get(dispatchRowKey(deps.companyId, task.taskId, task.workflow.revision));
+      if (row !== undefined) await runDispatchRow(deps, row as unknown as DispatchRowRecord);
+    }
+    return;
+  }
+
+  const workflow = task.workflow;
+  if (workflow === undefined || operation.workflowMode === undefined || operation.workflowRevision === undefined || workflow.revision !== operation.workflowRevision) return;
+
+  if (!succeeded) {
+    if (ended.status === "CANCELLED") return;
+    const what = operation.workflowMode === "UNDERSTAND" ? "reading the request" : "planning";
+    await blockTaskWorkflow(deps, task.taskId, workflow.revision, `Rovara stopped while ${what}${ended.error === undefined ? "" : `: ${ended.error}`}`.slice(0, 500));
+    return;
+  }
+  const outcome = ended.outcome;
+  try {
+    if (operation.workflowMode === "UNDERSTAND" && outcome?.kind === "understood") {
+      const now = iso(deps);
+      const isAnswer = typeof outcome.assessment === "object" && outcome.assessment !== null && (outcome.assessment as { kind?: unknown }).kind === "answer";
+      if (isAnswer) {
+        if (outcome.answerArtifact === undefined) throw new WorkflowTransitionError("an answer needs the file it was read from");
+        await commitWorkflow(deps, task, answerWorkflowIntent(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, artifact: outcome.answerArtifact, now }));
+        return;
+      }
+      const next = recordIntentAssessment(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, now });
+      // A ready request goes on to planning with no one asking: the row commits with the transition, and is run right after.
+      const toPlan = next.stage === "PLAN" && next.state === "READY";
+      const committed = await commitWorkflow(deps, task, next, toPlan ? [dispatchRowItem(deps, task.taskId, next.revision, "PLAN", now)] : []);
+      if (committed && toPlan) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "PLAN" });
+      return;
+    }
+    if (operation.workflowMode === "PLAN" && outcome?.kind === "planned") {
+      await commitWorkflow(deps, task, submitWorkflowArtifact(workflow, {
+        expectedRevision: workflow.revision, artifact: outcome.artifact, now: iso(deps),
+        ...(outcome.proposal === undefined ? {} : { proposal: outcome.proposal }),
+        ...(outcome.noChangeNeeded === true ? { noChangeNeeded: true } : {}),
+      }));
+      return;
+    }
+  } catch (error) {
+    if (!(error instanceof WorkflowTransitionError)) throw error;
+    await blockTaskWorkflow(deps, task.taskId, workflow.revision, "Rovara could not read the result of this step; retry it.");
+    return;
+  }
+  // A result with no outcome the step understands: the step ended without what it was asked for.
+  if (operation.workflowMode === "UNDERSTAND" || operation.workflowMode === "PLAN") {
+    await blockTaskWorkflow(deps, task.taskId, workflow.revision, "Rovara could not read the result of this step; retry it.");
+  }
+}
+
+export type { DispatchSpec, DocumentKey };
