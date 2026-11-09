@@ -435,6 +435,16 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect(assertGithubCloneAccessFor("https://github.com/example/demo.git", "clone")).toBe(true);
     for (const url of ["http://github.com/a/b.git", "https://github.com.evil.example/a/b.git", "https://user:pw@github.com/a/b.git", "https://github.com:444/a/b.git", "https://GITHUB.COM.evil.example/a/b.git", "https://api.github.com/a/b.git"]) expect(assertGithubCloneAccessFor(url, "clone"), url).toBe(false);
     expect(assertGithubCloneAccessFor("https://github.com/a/b.git", "push")).toBe(false);
+    // N2: where URL parsers disagree. The WHATWG parser reads `https://github.com\@evil.example.com/x.git` as host github.com; git and curl connect to evil.example.com.
+    const evil = ["https://github.com", "@evil.example.com/x.git"].join("\\");
+    expect(new URL(evil).hostname).toBe("github.com");
+    for (const url of [evil, "https://github.com\\.evil.example.com/a/b.git", "https://github.com%5C@evil.example.com/a/b.git", "https://github.com%5c@evil.example.com/a/b.git", "https://github.com/a/b.git\t", "https://github.com/a/\tb.git", "https://github.com/a/b.git\n", "https://github.com\\\\evil.example.com/a/b.git", "https://github.com@evil.example.com/a/b.git", "https://github.com/a/b.git?x=@evil", "https://github.com/a/b.git#x", " https://github.com/a/b.git", "https://github.com/a/b/c.git", "https://github.com/a", "https://github.com/\u0430/b.git"]) expect(assertGithubCloneAccessFor(url, "clone"), JSON.stringify(url)).toBe(false);
+    for (const url of ["https://github.com/example/demo.git", "https://github.com/example/demo", "https://github.com/example/demo/", "https://github.com/Example/de-mo_1.git"]) expect(assertGithubCloneAccessFor(url, "clone"), url).toBe(true);
+    // The same addresses are refused when a project is registered, for any host.
+    for (const url of [evil, "https://examplehost\\@evil.example.com/a/b.git", "https://examplehost/a/b.git\n", "https://examplehost/a%5Cb.git", "https://exämple.test/a/b.git"]) {
+      const refusedProject = await h.api("/v1/admin/projects", { method: "POST", body: { ...PROJECT, name: "odd", repositories: [{ ...PROJECT.repositories[0]!, url }] } });
+      expect(refusedProject.status, JSON.stringify(url)).toBe(400);
+    }
   });
 
   it("stops and retries over /v1/dev/tasks through the session control: audited, on the timeline, and once per request id (M2)", async () => {

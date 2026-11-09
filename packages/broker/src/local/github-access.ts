@@ -46,7 +46,16 @@ export async function resolveGithubAccess(input: { companyId: string; keyFile: M
  * The owner's GitHub token goes only to github.com over https, and only to clone. A repository on any other host (an allowed-but-foreign site, a look-alike name) gets nothing, and a push
  * credential is not issued here at all until the laptop GitHub client (lane L11) scopes one per repository. A stopgap for the 51 gap above, not the final rule.
  */
+/**
+ * The whole string must be `https://github.com/<owner>/<name>[.git][/]`, checked BEFORE any URL parser sees it. A parser's idea of the host and git's differ for some strings
+ * (`https://github.com\@evil.example/x.git` is host github.com to the WHATWG parser and evil.example to git and curl), so nothing but plain characters is let through: no backslash,
+ * whitespace, control or non-ASCII character, no `@`, port, query or fragment.
+ */
+export const GITHUB_REPOSITORY_URL = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?\/?$/;
+
 export function assertGithubCloneAccess(repositoryUrl: string, access: "clone" | "push"): void {
+  if (!GITHUB_REPOSITORY_URL.test(repositoryUrl)) throw agentXError("FORBIDDEN", "this install gives the GitHub token only to repositories on github.com");
+  // The parser must agree with the pattern (belt and braces).
   let url: URL;
   try {
     url = new URL(repositoryUrl);
@@ -57,4 +66,12 @@ export function assertGithubCloneAccess(repositoryUrl: string, access: "clone" |
     throw agentXError("FORBIDDEN", "this install gives the GitHub token only to repositories on github.com");
   }
   if (access !== "clone") throw agentXError("FORBIDDEN", "this install does not give a push credential yet");
+}
+
+/**
+ * A repository address the install registers: plain characters only. A backslash, a space or control character, a percent-encoded backslash or a non-ASCII character is where URL
+ * parsers part ways about the host, so such an address is refused when the project is registered (not only when a token would be handed out).
+ */
+export function isPlainRepositoryUrl(repositoryUrl: string): boolean {
+  return !/[\\\s\u0000-\u001f\u007f-\uffff]/u.test(repositoryUrl) && !/%5c/iu.test(repositoryUrl);
 }
