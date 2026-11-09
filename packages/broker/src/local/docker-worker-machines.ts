@@ -163,6 +163,10 @@ export class DockerWorkerMachines implements WorkerMachines {
       return handle("starting");
     }
     if (existing !== undefined) {
+      // A worker in the middle of a job is not replaced: the caller retries when it is idle.
+      if (existing.status === "running" && existing.hostPort !== undefined && ((await this.#ping(existing.hostPort))?.activeOperations ?? 0) > 0) {
+        throw new MachineError("unavailable", "the worker is running a job and was created with another image, environment or broker address; try again when it is idle");
+      }
       // It was created for another image, environment or broker address (a restart on a new port): its callbacks would go to the old
       // address. The workspace folder is a bind mount and survives.
       const removed = await this.#docker(["rm", "--force", name]);
@@ -181,7 +185,7 @@ export class DockerWorkerMachines implements WorkerMachines {
     await chmod(workspaceDirectory, 0o777);
 
     const group = await this.#dockerGroup(image);
-    const generation = 1 + randomInt(2_000_000_000);
+    const generation = 1 + randomInt(999_999_998);
     const envFile = join(this.#workspacesRoot, `.env-${randomBytes(8).toString("hex")}`);
     await writeFile(envFile, `${Object.entries({ ...environment, AGENTX_SESSION_GENERATION: String(generation) }).map(([key, value]) => `${key}=${value}`).join("\n")}\n`, { mode: 0o600, flag: "wx" });
     try {

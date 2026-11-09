@@ -298,4 +298,15 @@ describe("local docker worker machines", () => {
     expect(existsSync(folder)).toBe(false);
     expect(docker.containers.has("abcdef012345")).toBe(false);
   });
+
+  it("does not replace a running worker that is in the middle of a job", async () => {
+    const docker = new FakeDocker();
+    const signer = createEphemeralInvokeSigner();
+    const first = await build({ docker, signer, controlPlaneUrl: "http://host.docker.internal:1111" });
+    const { machineId } = await first.machines.start({ machineKey: "ws-busy", companyId: COMPANY });
+    await first.machines.deliver(machineId, invocationFor(workspaceIdFor(COMPANY, "ws-busy"), randomUUID()));
+    const second = await build({ docker, signer, stateDirectory: first.stateDirectory, controlPlaneUrl: "http://host.docker.internal:2222" });
+    await expect(second.machines.start({ machineKey: "ws-busy", companyId: COMPANY })).rejects.toMatchObject({ code: "unavailable" });
+    expect(docker.containers.get(machineId)!.status).toBe("running");
+  });
 });
