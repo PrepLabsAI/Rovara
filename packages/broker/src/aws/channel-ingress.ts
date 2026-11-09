@@ -149,8 +149,8 @@ export function createChannelIngressHandler(deps: ChannelIngressDependencies) {
       }
 
       const queued: ChannelQueueItem = kind === "messages"
-        ? { kind: "message", message: InboundMessageSchema.parse(item), projectName: binding.projectName, developerId }
-        : { kind: "decision", decision: ChannelDecisionSchema.parse(item), projectName: binding.projectName, developerId };
+        ? { kind: "message", message: InboundMessageSchema.parse(item), projectName: binding.projectName, developerId, stepUp: adapter.stepUp }
+        : { kind: "decision", decision: ChannelDecisionSchema.parse(item), projectName: binding.projectName, developerId, stepUp: adapter.stepUp };
       await deps.enqueue(queued, groupOf(conversation));
       if (kind === "messages") {
         // Queued already: a failed ack must not fail the request, or the adapter's retry would queue it twice.

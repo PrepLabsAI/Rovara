@@ -23,7 +23,9 @@ export interface QueueClient {
   extendVisibility(receiptHandle: string, seconds: number): Promise<void>;
 }
 
-export interface ConsumerOptions {
+export interface ConsumerOptions<M = SlackRequestMessage> {
+  /** Spec 062: reads a queued body; the Slack request reader when absent. Undefined discards the message. */
+  read?: (value: unknown) => M | undefined;
   concurrency: number;
   maxReceiveCount: number;
   visibilitySeconds: number;
@@ -39,7 +41,7 @@ export interface ConsumerOptions {
 
 export type PageCommentHandler = (message: SlackPageCommentMessage, context: { handoff?: AbortSignal }) => Promise<void>;
 
-export type RequestHandler = (message: SlackRequestMessage, context: {
+export type RequestHandler<M = SlackRequestMessage> = (message: M, context: {
   finalAttempt: boolean;
   queuedBehind?: number;
   /** Task 21: route this plain request first (see QueueMessage.route). */
@@ -53,7 +55,7 @@ export type RequestHandler = (message: SlackRequestMessage, context: {
   onHeartbeat?: (listener: () => void) => void;
 }) => Promise<void>;
 
-type GroupOptions = Pick<ConsumerOptions, "maxReceiveCount" | "visibilitySeconds" | "heartbeatMilliseconds" | "pageComment"> & {
+type GroupOptions<M> = Pick<ConsumerOptions<M>, "maxReceiveCount" | "visibilitySeconds" | "heartbeatMilliseconds" | "pageComment" | "read"> & {
   /** Once aborted, a later message of the group is released rather than started. */
   stop?: AbortSignal;
   handoff?: AbortSignal;
@@ -62,7 +64,7 @@ type GroupOptions = Pick<ConsumerOptions, "maxReceiveCount" | "visibilitySeconds
 };
 
 // Each Slack thread is one FIFO message group: its messages run one at a time, and different threads run in parallel.
-export async function runConsumer(queue: QueueClient, handle: RequestHandler, options: ConsumerOptions): Promise<void> {
+export async function runConsumer<M = SlackRequestMessage>(queue: QueueClient, handle: RequestHandler<M>, options: ConsumerOptions<M>): Promise<void> {
   const log: ServiceLog = options.log ?? (() => undefined);
   const active = new Set<Promise<void>>();
   // Issue 157: the hand-off deadline starts with the stop, and sits under Fargate's 120-second stopTimeout.
@@ -74,7 +76,7 @@ export async function runConsumer(queue: QueueClient, handle: RequestHandler, op
   };
   if (options.signal.aborted) startHandoffClock();
   else options.signal.addEventListener("abort", startHandoffClock, { once: true });
-  const groupOptions: GroupOptions = { ...options, stop: options.signal, handoff: handoff.signal };
+  const groupOptions: GroupOptions<M> = { ...options, stop: options.signal, handoff: handoff.signal };
   while (!options.signal.aborted) {
     if (active.size >= options.concurrency) {
       await Promise.race(active);
@@ -105,11 +107,11 @@ export async function runConsumer(queue: QueueClient, handle: RequestHandler, op
   options.signal.removeEventListener("abort", startHandoffClock);
 }
 
-export async function processGroup(
+export async function processGroup<M = SlackRequestMessage>(
   queue: QueueClient,
-  handle: RequestHandler,
+  handle: RequestHandler<M>,
   group: readonly QueueMessage[],
-  options: GroupOptions,
+  options: GroupOptions<M>,
   log: ServiceLog,
 ): Promise<void> {
   for (const [index, entry] of group.entries()) {
@@ -141,7 +143,8 @@ export async function processGroup(
         continue;
       }
       // Spec 062: version 1 or a Slack version 2 inbound message; another channel's message is discarded.
-      const parsed = readSlackRequestMessage(parseJson(entry.body));
+      const read = options.read ?? (readSlackRequestMessage as unknown as (value: unknown) => M | undefined);
+      const parsed = read(parseJson(entry.body));
       if (parsed === undefined) {
         log("message.discarded", { reason: "invalid_message" });
       } else {
