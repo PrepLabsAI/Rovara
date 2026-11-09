@@ -131,6 +131,15 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/e2e/requalify-hold.ts",
       // Spec 062 FR-031: a channel link code, one-time and dead after 10 minutes.
       "packages/broker/src/aws/channel-links.ts",
+      // The Code port lanes' core (packages/broker/src/core, on the document store port). Each file was read for it: every one writes a row that is meant to expire after a named retention, none a durable record.
+      // L6b: the notice batch rows (pending and sent), the run cost estimate history and the cost ledger's entry and once-markers, the approval proofs and their used/spent markers, the decision records, and the task sessions' events, requests, messages and ended summaries.
+      "packages/broker/src/core/notify/attention.ts", "packages/broker/src/core/cost/estimate.ts", "packages/broker/src/core/cost/ledger.ts",
+      "packages/broker/src/core/decisions/approval-gate.ts", "packages/broker/src/core/decisions/store.ts",
+      "packages/broker/src/core/sessions/read.ts", "packages/broker/src/core/sessions/summary.ts", "packages/broker/src/core/sessions/control.ts", "packages/broker/src/core/sessions/store.ts",
+      // L6a: the workflow dispatch row (RETENTION_SECONDS) and its record type, the same row broker-shared.ts defines for the AWS broker.
+      "packages/broker/src/core/task-flow/dispatch-rows.ts", "packages/broker/src/core/task-flow/records.ts",
+      // L7a: the pull request head and branch index rows (90 days). L7b: the merge commit index (MERGE_COMMIT_INDEX_KEPT_DAYS), the proof evidence blobs (their retention class) and the CI fix record (EVIDENCE_RETENTION_SECONDS).
+      "packages/broker/src/core/merge/store.ts", "packages/broker/src/core/proof/revert/merge-commit-index.ts", "packages/broker/src/core/proof/evidence-blob-store.ts", "packages/broker/src/core/ci-fix/ci-fix.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

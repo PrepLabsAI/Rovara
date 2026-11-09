@@ -185,8 +185,11 @@ describe("the admitted policy never admits a trace", () => {
     expect(E2EArtifactRefSchema.safeParse(ref).success).toBe(true);
     expect(E2EArtifactRefSchema.safeParse({ ...ref, kind: "trace" }).success).toBe(false);
   });
-  it("has no trace function left in the web case adapter", () => {
-    expect(Object.keys(webRuntime)).not.toContain("startWebCaseTrace");
+  // Replaces Ruling CJ (owner decision 2026-10-30, proof and evidence B4): a trace is now possible, but only through the separate media ports, which the host supplies only for a round whose accounts are all
+  // run-scoped (executor/media.ts `admittedMediaPolicy`). The screenshot policy above still refuses a trace outright, and without media ports the adapter starts none.
+  it("starts a trace only when the host supplied media ports (it never does for a screenshot-only policy)", async () => {
+    const context = { tracing: { start: async () => { throw new Error("must not start"); } } } as never;
+    expect(await webRuntime.startWebCaseTrace({ media: undefined, context })).toBe(false);
   });
 });
 

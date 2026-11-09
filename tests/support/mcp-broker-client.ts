@@ -84,8 +84,8 @@ export async function signedInClient(harness: Harness, who: Developer | undefine
   await server.connect(serverSide);
   const client = new Client({ name: "claude-code", version: "2.1.0" });
   await client.connect(clientSide);
-  // Ruling F3: listing first makes the client validate every structuredContent it gets back.
-  expect((await client.listTools()).tools).toHaveLength(26);
+  // The 26 workflow tools plus the 11 agent, approval and session tools the port lanes added. Ruling F3: listing first makes the client validate every structuredContent it gets back.
+  expect((await client.listTools()).tools).toHaveLength(37);
   const answers: string[] = [];
   const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolAnswer> => {
     const result = await client.callTool({ name, arguments: args });
