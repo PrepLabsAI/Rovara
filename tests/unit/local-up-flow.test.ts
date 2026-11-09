@@ -5,7 +5,10 @@ import { request as httpRequest } from "node:http";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, type WorkerInvocation } from "@agentx/contracts";
+import {
+  DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES,
+  createCandidateManifest, type WorkerInvocation,
+} from "@agentx/contracts";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { listSessions, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -31,13 +34,14 @@ interface TaskJson { taskId: string; sessionId?: string; workflow: { stage: stri
 interface ApiBody { task: TaskJson; tasks: TaskJson[]; url: string; projects: Array<{ name: string; latestRevision: number }>; error?: { code: string; message: string } }
 interface CallbackBody { accepted?: number; error?: { code: string } }
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
+const BASE_COMMIT = "b".repeat(40);
 
 async function launch(extra: { storage?: "sqlite" | "memory"; root?: string } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-  const machines = new FakeWorkerMachines({ startingChecks: 0, features: ["task.workflowMode"] });
+  const machines = new FakeWorkerMachines({ startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] });
   const runtime: LocalRuntime = await startLocalRuntime({
     stateDirectory, cwd: join(root, "project"), environment: {}, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false, ...(extra.storage === undefined ? {} : { storage: extra.storage }),
   });
@@ -87,7 +91,7 @@ async function toPlanReview(h: Awaited<ReturnType<typeof launch>>, requestId = "
   const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
   const seen = new Set<string>();
   const prepare = await h.nextJob(workspaceId, seen);
-  await h.callback(prepare, "result", { status: "SUCCEEDED", result: {} });
+  await h.callback(prepare, "result", { status: "SUCCEEDED", result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: BASE_COMMIT }] } });
   const understand = await h.nextJob(workspaceId, seen);
   await h.callback(understand, "artifacts", { name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify({ kind: "ready", path: "QUICK", restatement: "Add a /health endpoint that answers 200.", assumptions: [] }) });
   await h.callback(understand, "result", { status: "SUCCEEDED" });
@@ -340,5 +344,129 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect((await send(MESSAGES_PER_HOUR + 1)).delivery).toMatchObject({ state: "not_delivered", reason: MESSAGE_RATE_LIMITED });
     // A repeat of a request already answered is answered again, not counted.
     expect((await send(1)).delivery.reason).toBe(MESSAGE_NOT_PASSED_ON);
+  });
+});
+
+// ---- Lane L10: the build step. A task runs on from the approved plan against a fake worker: coding, the checks, both reviews, Rovara's own sending back, and the pull request.
+const COMMIT = "c".repeat(40);
+const CHECK_REPORT = { status: "not_verified", notVerifiedReason: "no_checks", source: "none", preambleVersion: "1", preambleSha256: "a".repeat(64), checks: [], extraTry: "not_needed", agentClaim: "none" };
+const candidateOf = (tree: string, base = BASE_COMMIT) => [{ repositoryId: "demo", commitSha: COMMIT, treeSha: tree, baseCommitSha: base }];
+
+/** The owner approves the plan on the review page, as a person would. */
+async function approvePlan(h: Awaited<ReturnType<typeof launch>>, taskId: string): Promise<void> {
+  const link = new URL((await h.api("/v1/local/pages/link", { method: "POST", body: { path: `/plan/${taskId}` } })).body.url);
+  const page = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
+  const form = formOf(page.body, "/decide");
+  const post = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody({ ...form.fields, decision: "approve" }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
+  expect(post.headers["location"]).toContain("n=approved");
+}
+
+/** A task through its approved plan, with the fake worker waiting for the coding run. */
+async function toCoding(h: Awaited<ReturnType<typeof launch>>, requestId?: string) {
+  const planned = await toPlanReview(h, requestId);
+  await approvePlan(h, planned.taskId);
+  const coding = await h.nextJob(planned.workspaceId, planned.seen);
+  return { ...planned, coding };
+}
+
+const builtResult = (tree: string, base = BASE_COMMIT) => ({ status: "SUCCEEDED", result: { conversationId: "conversation", checks: CHECK_REPORT, workflowCandidateRepositories: candidateOf(tree, base), workflowCheckCandidateRepositories: candidateOf(tree, base) } });
+
+function reviewsOf(job: WorkerInvocation, tree: string, verdict: "pass" | "findings") {
+  const candidateDigest = createCandidateManifest(candidateOf(tree)).digest;
+  const report = (role: "CRITIC" | "SECURITY") => ({
+    operationId: job.operationId, candidateDigest, role, provider: "examplehost-model", version: "1", readOnly: true, recordedAt: new Date().toISOString(),
+    status: verdict === "pass" || role === "SECURITY" ? "PASS" : "FINDINGS",
+    findings: verdict === "pass" || role === "SECURITY" ? [] : [{ text: "The endpoint answers 500 when the store is down.", origin: "INTRODUCED", severity: "HIGH", file: "src/health.ts", line: 4 }],
+    ...(role === "CRITIC" ? { risk: "low" } : {}),
+  });
+  return { status: "SUCCEEDED", result: { conversationId: "conversation", workflowCandidateRepositories: candidateOf(tree), workflowReviews: [report("CRITIC"), report("SECURITY")] } };
+}
+
+const taskRecord = async (h: Awaited<ReturnType<typeof launch>>, taskId: string) =>
+  (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" })) as unknown as { workflow: { stage: string; state: string; revision: number; blockReason?: string; reviewBase?: unknown[]; verification?: { reviewOnly?: boolean }; decisions: Array<{ source?: string; actorRole?: string }> }; autofixAsk?: { reason: string } };
+
+describe("rovara up: from the approved plan to the checked code and its reviews, against a fake worker", () => {
+  it("builds the approved plan, records the checked code, runs both reviews and makes the pull request due", async () => {
+    const h = await launch();
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    // The coding run is told the approved plan, that it publishes nothing, and where the task started; its checks are the plan's selected ones (none here).
+    expect(coding).toMatchObject({ kind: "task", payload: { workflowMode: "IMPLEMENT", readiness: [], workflowBase: [{ repositoryId: "demo", baseCommitSha: BASE_COMMIT }] } });
+    const prompt = (coding.payload as { prompt: string }).prompt;
+    expect(prompt).toContain("Add a /health endpoint that answers 200.");
+    expect(prompt).toContain("Do not push branches or create pull requests");
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+
+    // The uploads a coding run makes besides its result are answered (they feed only the browser and API checks, which Code does not run yet).
+    const init = await h.callback(coding, "candidate-export", { stage: "init", schemaVersion: "workflow-candidate-export-upload/v1", totalBytes: 10, chunkCount: 1, sha256: "e".repeat(64) });
+    expect(init.status).toBe(200);
+    expect((await h.callback(coding, "candidate-export", { stage: "init", totalBytes: 0, chunkCount: 0, sha256: "e".repeat(64) })).status).toBe(400);
+
+    expect((await h.callback(coding, "result", builtResult("d".repeat(40)))).status).toBe(200);
+    // The checks passed on exactly this code (a review-only task has none to run), so the reviews start by themselves.
+    const review = await h.nextJob(workspaceId, seen);
+    expect(review).toMatchObject({ kind: "task", payload: { workflowMode: "REVIEW", workflowReviewRisk: true } });
+    expect((review.payload as { workflowReviewPlan?: { markdown: string } }).workflowReviewPlan?.markdown).toContain("/health");
+    const verified = await taskRecord(h, taskId);
+    expect(verified.workflow).toMatchObject({ stage: "REVIEW", state: "RUNNING", reviewBase: [{ repositoryId: "demo", baseCommitSha: BASE_COMMIT }], verification: { reviewOnly: true } });
+
+    // A review that names another run's id is not this run's: the step blocks instead of believing it.
+    const wrong = reviewsOf({ ...review, operationId: "00000000-0000-4000-8000-000000000000" }, "d".repeat(40), "pass");
+    expect((await h.callback(review, "result", wrong)).status).toBe(200);
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
+  });
+
+  it("makes the pull request due once both reviews pass on the checked code", async () => {
+    const h = await launch();
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    await h.callback(coding, "result", builtResult("d".repeat(40)));
+    const review = await h.nextJob(workspaceId, seen);
+    expect((await h.callback(review, "result", reviewsOf(review, "d".repeat(40), "pass"))).status).toBe(200);
+    const after = await taskRecord(h, taskId);
+    expect(after.workflow).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
+    const rows = await h.runtime.registry.require("storage").query({ pk: `ORG#${IMPLICIT_COMPANY_ID}#WORKFLOW_DISPATCH`, sk: { op: "beginsWith", prefix: `${taskId}#` } });
+    expect(rows.items.map((row) => row["kind"])).toEqual(["PUBLISH"]);
+  });
+
+  it("sends review findings back to coding by itself, twice, and then asks the owner", async () => {
+    const h = await launch();
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    let job = coding;
+    const trees = ["1", "2", "3"].map((digit) => digit.repeat(40));
+    for (const [round, tree] of trees.entries()) {
+      await h.callback(job, "result", builtResult(tree));
+      const review = await h.nextJob(workspaceId, seen);
+      await h.callback(review, "result", reviewsOf(review, tree, "findings"));
+      if (round === 2) break;
+      // Rovara's own send back: the coding run that follows is told what the reviews found, as untrusted data, and keeps to the plan.
+      job = await h.nextJob(workspaceId, seen);
+      expect(job).toMatchObject({ payload: { workflowMode: "IMPLEMENT" } });
+      const prompt = (job.payload as { prompt: string }).prompt;
+      expect(prompt).toContain("The endpoint answers 500 when the store is down.");
+      expect(prompt).toMatch(/<problem id="[0-9a-f]{16}" source="/u);
+      expect(prompt).toContain("Approved plan (sha256");
+    }
+    const blocked = await taskRecord(h, taskId);
+    expect(blocked.workflow).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
+    // Two automatic send backs, then the owner is asked, with what failed.
+    expect(blocked.workflow.decisions.filter((decision) => decision.source === "AUTO_FIX")).toHaveLength(2);
+    expect(blocked.autofixAsk).toMatchObject({ reason: "send-back-limit" });
+  });
+
+  it("blocks a coding run that failed, with a reason, and does not try to fix it by itself", async () => {
+    const h = await launch();
+    const { taskId, coding } = await toCoding(h);
+    await h.callback(coding, "result", { status: "FAILED", error: "the model did not answer" });
+    const blocked = await taskRecord(h, taskId);
+    expect(blocked.workflow).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", blockReason: "implementation operation ended failed" });
+    expect(blocked.autofixAsk).toBeUndefined();
+  });
+
+  it("blocks code that did not start where the task started", async () => {
+    const h = await launch();
+    const { taskId, coding } = await toCoding(h);
+    await h.callback(coding, "result", builtResult("d".repeat(40), "f".repeat(40)));
+    const blocked = await taskRecord(h, taskId);
+    expect(blocked.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    expect(blocked.workflow.blockReason).toContain("starting point changed");
   });
 });

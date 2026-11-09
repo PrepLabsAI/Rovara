@@ -8,6 +8,7 @@ import {
   type RegistryView,
 } from "@agentx/contracts";
 import { createTransactionalOutbox } from "../../ports/transactional-outbox.js";
+import { createBuildSteps } from "../build-step/index.js";
 import { createOwnerTaskAccess } from "./access.js";
 import { closeTask } from "./close.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
@@ -44,6 +45,8 @@ export interface TaskFlow {
 }
 
 export function createTaskFlow(deps: TaskFlowDeps): TaskFlow {
+  // The steps after the plan are part of the flow: an install that does not give its own gets the build step. (Set on the object given, so every holder of it sees the same flow.)
+  deps.buildSteps ??= createBuildSteps();
   for (const index of TASK_FLOW_INDEXES) {
     const kept = deps.store.indexes.find((candidate) => candidate.name === index.name);
     if (kept === undefined || kept.partitionAttribute !== index.partitionAttribute || kept.sortAttribute !== index.sortAttribute) throw new Error(`the document store must keep the ${index.name} index`);

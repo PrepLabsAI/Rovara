@@ -55,7 +55,7 @@ export interface WorkspaceRecord {
 
 /** What a dispatch needs to build the worker's invocation. It never holds a secret: the grant and the capability are issued at delivery. */
 export interface DispatchSpec {
-  kind: "prepare" | "task";
+  kind: "prepare" | "task" | "publish" | "maintain";
   projectRevision: number;
   /** The invocation payload without `project` and `repositoryGrant` (a prepare gets those at delivery). */
   payload: Record<string, JsonValue>;
@@ -76,13 +76,34 @@ export interface OperationRecord extends Operation {
   workflowRevision?: number;
   /** Who asked for it (the identity adapter's person id and name for itself); Cloud's closed `requestedBy` list cannot hold a Code principal. */
   requester?: { personId: string; provider: string };
+  /** A publish operation's expectation (lane L10): what the worker may open a pull request with, fixed by the broker when the publication started. The pull request callback is held to it. */
+  publication?: PublicationExpectation;
   /** The worker machine and delivery time, once the operation was handed to a machine. */
   deliveredAt?: string;
   machineId?: string;
 }
 
+/** What a publication was started with: the callback of the worker is refused unless it names exactly this (Cloud's `operation.publication`). */
+export interface PublicationExpectation {
+  repository: string;
+  repositoryUrl: string;
+  headBranch: string;
+  baseBranch: string;
+  title: string;
+  body: string;
+  draft: true;
+  /** The tree the checks and reviews passed on; the host, not the worker, says what the pushed branch holds. */
+  expectedTreeSha: string;
+  /** The base commit the broker pinned for the task in this repository; the pushed commit must stand on it. */
+  expectedBaseCommit?: string;
+  candidateDigest: string;
+  workflowRevision: number;
+}
+
 /** `WORKFLOW_DISPATCH` rows: the intent to start the next workflow step with no one asking, written in the transaction that made it due. */
-export type DispatchKind = "UNDERSTAND" | "PLAN";
+export type DispatchKind = "UNDERSTAND" | "PLAN" | "IMPLEMENT" | "REVIEW" | "PUBLISH" | "SYNC" | "AUTOFIX";
+/** The kinds the stage machine's own runner starts (Cloud's `startTaskWorkflowUnderstandFromSystem` and `startTaskWorkflowPlanFromSystem`). */
+export const READING_DISPATCH_KINDS: readonly DispatchKind[] = ["UNDERSTAND", "PLAN"];
 
 export interface DispatchRowRecord {
   pk: string;

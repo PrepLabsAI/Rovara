@@ -13,6 +13,8 @@ import {
   change,
   when,
   workerProjectDefinition,
+  workflowPublicationContext,
+  workflowPublicationContextDigest,
   type Queue,
   type ReceivedMessage,
   type WorkerInvocation,
@@ -222,11 +224,35 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
       }),
     };
   }
+  if (spec.kind === "publish") {
+    // A publication pushes one repository's branch: the grant names that one repository, with push access (the only operation that is ever given it).
+    const project = await deps.projects.revision(workspace.projectName, workspace.projectRevision);
+    if (project === undefined) return "the project revision this task was started on is gone";
+    const repository = project.definition.repositories.find((candidate) => candidate.name === payload["repository"]);
+    if (repository === undefined) return "the repository to publish is not part of the project";
+    payload = {
+      ...payload,
+      project: workerProjectDefinition(project.definition),
+      repositoryGrant: deps.repositoryGrants.issue({
+        ownerKey: workspace.ownerKey, projectName: workspace.projectName, workspaceId: workspace.id, operationId: operation.id,
+        repositories: [{ credentialRef: repository.credentialRef, repositoryUrl: repository.url, access: "push" as const }],
+      }),
+    };
+  }
   const parsed = WorkerInvocationSchema.safeParse({
     protocolVersion: AGENTX_PROTOCOL_VERSION, kind: spec.kind, operationId: operation.id, workspaceId: workspace.id, fence: operation.fence,
     projectRevision: spec.projectRevision, callbackCapability: capability, payload,
   });
-  return parsed.success ? parsed.data : "the job could not be built for the worker";
+  if (!parsed.success) return "the job could not be built for the worker";
+  // A publication of a checked tree carries the digest of its context (which workspace, operation, fence, repository, branch and tree it is for); the worker's signed token names the same
+  // digest, so a captured token cannot carry a different publication.
+  if (parsed.data.kind === "publish" && parsed.data.payload.publicationMode !== undefined) {
+    const context = workflowPublicationContext(parsed.data);
+    if (context === undefined) return "the publication could not be built for the worker";
+    const sealed = WorkerInvocationSchema.safeParse({ ...parsed.data, payload: { ...parsed.data.payload, publicationContextDigest: workflowPublicationContextDigest(context) } });
+    return sealed.success ? sealed.data : "the publication could not be built for the worker";
+  }
+  return parsed.data;
 }
 
 /** Records the workspace's machine (and the allowance taken for it). False when the workspace has moved on (the fence no longer holds): the caller must not use the machine. */

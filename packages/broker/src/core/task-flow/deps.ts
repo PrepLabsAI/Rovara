@@ -16,6 +16,8 @@ import type {
   WorkflowPath,
 } from "@agentx/contracts";
 import type { RepositoryGrantService } from "../../repository-access.js";
+import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.js";
+import type { StepOutcome } from "./outcome.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
 export interface TaskCaller {
@@ -80,6 +82,22 @@ export interface StartExtrasInput {
   receivedAt: string;
 }
 
+/** Reads what a worker saved (a plan, a document) by its object key. At most `maxBytes` are read; undefined when it is not there. Lane L9a's object-storage port fills it. */
+export interface ArtifactReader {
+  get(objectKey: string, maxBytes: number): Promise<Uint8Array | undefined>;
+}
+
+/**
+ * The steps after the plan is approved (lane L10): coding, the checks, the reviews and the publication. The stage machine's own runner starts the steps that read (Understand, Plan);
+ * a row of any other kind, and the end of any other operation, is handed here. Kept behind this seam so the stage machine does not import the steps that import it.
+ */
+export interface BuildSteps {
+  /** Starts the step a dispatch row stands for. Same answers as the stage machine's own runner: STARTED, DUPLICATE, STALE (the row is no longer wanted), WAITING (try again). */
+  runRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<"STARTED" | "DUPLICATE" | "STALE" | "WAITING">;
+  /** After a coding run, a rerun of the checks, the reviews or a publication ended (the operation's result is committed). Idempotent; never throws for a task that moved on. */
+  onEnded(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void>;
+}
+
 export interface TaskFlowDeps {
   /** Code's one company (`IMPLICIT_COMPANY_ID`); every port call carries it. */
   companyId: OrgId;
@@ -109,6 +127,17 @@ export interface TaskFlowDeps {
   prompts?: StepPrompts;
   /** Environment every worker machine of this install is started with (lane L9-wire: where the model proxy is). Never a secret. */
   machineEnvironment?: Readonly<Record<string, string>>;
+  /** Lane L10: reads the documents workers saved (the approved plan the coding step is given, the plan the reviewers are shown). */
+  artifacts?: ArtifactReader;
+  /**
+   * Lane L10, Rovara's own fixing of a block (the owner's rule: a code fault is sent back to coding by itself at most twice, one hiccup of the checks is retried once, anything unclear is asked
+   * about). `capUsd` bounds what automatic rounds may add to a task whose spend is known; `taskSpendUsd` says what it is (undefined: nothing is priced, which Code treats as 0 so the
+   * count limits alone bound the rounds, and a Cloud install that cannot read it fills this with a function that throws, which asks the owner instead).
+   */
+  autofix?: { enabled?: boolean; capUsd?: number; roundEstimateUsd?: number };
+  taskSpendUsd?: (taskId: string) => Promise<number | undefined>;
+  /** Lane L10: the steps after the plan is approved. `createTaskFlow` fills it with the build step when absent. */
+  buildSteps?: BuildSteps;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
 }

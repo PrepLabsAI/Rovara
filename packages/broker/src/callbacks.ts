@@ -3,7 +3,7 @@ import { agentXError } from "@agentx/contracts";
 import type { OperationStore } from "./operations.js";
 import type { InMemoryRegistry } from "./registry.js";
 
-export type CallbackAction = "events" | "artifacts" | "heartbeat" | "result";
+export type CallbackAction = "events" | "artifacts" | "heartbeat" | "result" | "candidate-export" | "candidate-build-source" | "baseline-source" | "pull-request" | "pull-request-update";
 
 interface CallbackCapability {
   workspaceId: string;

@@ -4,12 +4,12 @@
 import { agentXError, when, type Operation, type TransactItem } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
 import { operationKey, operationRequestKey } from "./keys.js";
-import { toDocument, type DispatchSpec, type OperationRecord, type WorkspaceRecord } from "./records.js";
+import { toDocument, type DispatchSpec, type OperationRecord, type PublicationExpectation, type WorkspaceRecord } from "./records.js";
 import { dispatchQueueName, hashJson, iso, newId } from "./support.js";
 
 export interface AcceptInput {
   workspace: Pick<WorkspaceRecord, "id" | "fence" | "ownerKey">;
-  kind: "prepare" | "task";
+  kind: "prepare" | "task" | "publish" | "maintain";
   requestId: string;
   operationId?: string;
   conversationId?: string;
@@ -17,6 +17,8 @@ export interface AcceptInput {
   dispatch: DispatchSpec;
   requester?: OperationRecord["requester"];
   workflowRevision?: number;
+  /** A publish operation's expectation, which its pull request callback is held to. */
+  publication?: PublicationExpectation;
   now?: string;
   /** Whether to write the request's idempotency record (a start does not: the start's own record covers it). */
   recordRequest?: boolean;
@@ -52,6 +54,7 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
     dispatch: input.dispatch,
     ...(input.workflowRevision === undefined ? {} : { workflowRevision: input.workflowRevision }),
     ...(input.requester === undefined ? {} : { requester: input.requester }),
+    ...(input.publication === undefined ? {} : { publication: input.publication }),
   };
   const message: DispatchMessage = { v: 1, workspaceId: input.workspace.id, operationId: id };
   return {

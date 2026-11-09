@@ -19,6 +19,7 @@ import {
   when,
   workflowRequestId,
   type DocumentKey,
+  type JsonValue,
   type Operation,
   type TransactItem,
   type WorkflowSnapshot,
@@ -28,7 +29,7 @@ import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js";
 import { dispatchRowKey, operationRequestKey, taskKey, taskPointerKey, workspaceKey } from "./keys.js";
 import { readTask } from "./reads.js";
-import { fromDocument, toDocument, type DispatchRowRecord, type DispatchSpec, type OperationRecord, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
+import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
 import type { StepOutcome } from "./outcome.js";
 
@@ -70,6 +71,17 @@ export interface StepInput {
   extra?: readonly TransactItem[];
   /** Worker features the step cannot run without. */
   requires?: readonly string[];
+  /**
+   * What kind of operation the step is: a workflow task step (the default), or the publication of the checked code (lane L10), which carries its own payload and no prompt. A workflow task's
+   * workspace takes a publication without a workflow mode, since a publication is the flow's own step and not an ordinary run.
+   */
+  kind?: "task" | "publish";
+  /** More of the worker's payload (a coding run's check commands and base, a publication's branch and tree). Never a secret: grants and capabilities are issued at delivery. */
+  payload?: Record<string, JsonValue>;
+  /** A publication's expectation, kept on the operation for the pull request callback to be held to. */
+  publication?: PublicationExpectation;
+  /** Callback actions beyond the three every operation has. */
+  extraActions?: readonly string[];
 }
 
 /** Accepts the operation for one step. `STALE` and `WAITING` write nothing. */
@@ -78,7 +90,8 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
   const { task, workspace } = input;
   // A workflow task's workspace takes only the workflow's own steps, each with its server-selected tool boundary: a plain write-capable run is refused
   // (Cloud's GATED_TASK_TURN_REFUSAL).
-  if (task.workflow !== undefined && input.workflowMode === undefined) throw agentXError("TASK_BUSY", "this task runs as a workflow: its steps are started by the workflow, not as ordinary runs");
+  const operationKind = input.kind ?? "task";
+  if (task.workflow !== undefined && input.workflowMode === undefined && operationKind === "task") throw agentXError("TASK_BUSY", "this task runs as a workflow: its steps are started by the workflow, not as ordinary runs");
   const existing = await deps.store.get(operationRequestKey(workspace.ownerKey, workspace.id, input.requestId));
   if (existing !== undefined) return { result: "DUPLICATE" };
   if (workspace.status !== "READY" || workspace.activeOperationId !== null) return { result: "WAITING" };
@@ -92,13 +105,17 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
   const workflowRevision = input.workflow?.next.revision ?? task.workflow?.revision;
   const built = buildOperation(deps, {
     workspace: { id: workspace.id, ownerKey: workspace.ownerKey, fence: workspace.fence + 1 },
-    kind: "task", requestId: input.requestId, now, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
+    kind: operationKind, requestId: input.requestId, now, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     conversationId: task.conversationId,
     ...(workflowRevision === undefined ? {} : { workflowRevision }),
+    ...(input.publication === undefined ? {} : { publication: input.publication }),
     dispatch: {
-      kind: "task", projectRevision: workspace.projectRevision,
-      payload: { conversationId: task.conversationId, prompt: input.prompt, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }) },
+      kind: operationKind, projectRevision: workspace.projectRevision,
+      payload: operationKind === "publish"
+        ? { ...input.payload }
+        : { conversationId: task.conversationId, prompt: input.prompt, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }), ...input.payload },
       ...(input.requires === undefined ? {} : { requires: input.requires }),
+      ...(input.extraActions === undefined ? {} : { extraActions: input.extraActions }),
     },
     requester: { personId: task.developerId, provider: task.provider },
   });
@@ -165,6 +182,11 @@ async function planFeedbackOf(deps: Pick<TaskFlowDeps, "store">, taskId: string)
 
 /** Cloud's `startTaskWorkflowUnderstandFromSystem` and `startTaskWorkflowPlanFromSystem`, on the ports. */
 export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<StepStart> {
+  // Any step after the plan (coding, reviews, the publication, a sync of the branch, Rovara's own fix of a block) is the build step's (lane L10).
+  if (!READING_DISPATCH_KINDS.includes(row.kind)) {
+    if (deps.buildSteps === undefined) throw agentXError("CONFIG_INVALID", "this install has no steps after the plan");
+    return deps.buildSteps.runRow(deps, row);
+  }
   const resolve = (): TransactItem => resolveRowItem(deps, row.taskId, row.workflowRevision);
   const task = await readTask(deps, row.taskId);
   const workflow = task?.workflow;
@@ -207,6 +229,10 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
   return accepted.result;
 }
 
+const STEP_NAMES: Record<DispatchRowRecord["kind"], string> = {
+  UNDERSTAND: "step that reads the request", PLAN: "planning step", IMPLEMENT: "coding step", REVIEW: "reviews", PUBLISH: "pull request", SYNC: "merge of the base branch", AUTOFIX: "automatic fix",
+};
+
 export interface DispatchSweepReport { started: number; waiting: number; stale: number; failed: number; blocked: number }
 
 /** The recovery sweep for rows left behind (and the way a row becomes due after a backoff). Safe to run from a timer; a repeat of a step is the first one's duplicate. */
@@ -233,7 +259,7 @@ export async function runDueDispatches(deps: TaskFlowDeps, options: { limit?: nu
       log(deps, { event: "task_flow.dispatch_row_failed", taskId: row.taskId, kind: row.kind, attempts, error: error instanceof AgentXError ? error.code : "unknown" });
       try {
         if (attempts >= DISPATCH_ROW_ATTEMPTS_MAX) {
-          await blockTaskWorkflow(deps, row.taskId, row.workflowRevision, `Rovara could not start the ${row.kind === "UNDERSTAND" ? "step that reads the request" : "planning step"}: ${message}`.slice(0, 500));
+          await blockTaskWorkflow(deps, row.taskId, row.workflowRevision, `Rovara could not start the ${STEP_NAMES[row.kind]}: ${message}`.slice(0, 500));
           await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
           report.blocked += 1;
         } else {
@@ -296,6 +322,12 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
       const row = await deps.store.get(dispatchRowKey(deps.companyId, task.taskId, task.workflow.revision));
       if (row !== undefined) await runDispatchRow(deps, row as unknown as DispatchRowRecord);
     }
+    return;
+  }
+
+  // The steps after the plan: coding, a rerun of the checks, the reviews, the publication and the push of a fix (lane L10).
+  if (operation.kind === "publish" || operation.kind === "maintain" || operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS" || operation.workflowMode === "REVIEW") {
+    if (deps.buildSteps !== undefined) await deps.buildSteps.onEnded(deps, task, operation, ended);
     return;
   }
 

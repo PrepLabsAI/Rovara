@@ -13,10 +13,14 @@ import { IMPLICIT_COMPANY_ID, type AdapterRegistry, type OrgId, type Principal }
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../../core/decisions/local-actions.js";
-import { createWorkflowDocumentSubject } from "../../core/decisions/workflow-subject.js";
+import { createWorkflowDocumentSubject, currentDocumentType } from "../../core/decisions/workflow-subject.js";
 import type { LocalPageSessions } from "../../core/local-pages/guard.js";
 import { createLocalPagesServer, type LocalPagesServer } from "../../core/local-pages/server.js";
 import { createDocumentEvidenceBlobStore, type EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
+import { textReaderOf } from "../../core/build-step/plan-input.js";
+import { planFactsOf, planRiskOf } from "../../core/decisions/plan-risk.js";
+import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
+import { WorkflowArtifactSchema } from "@agentx/contracts";
 import { startSessionProjector } from "../../core/sessions/projector.js";
 import { sweepOpenSessions } from "../../core/sessions/sweep.js";
 import type { SummaryDependencies } from "../../core/sessions/summary.js";
@@ -111,6 +115,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const signingKey = await loadCallbackKey(options.stateDirectory);
   const grants = new RepositoryGrantService(signingKey, options.resolveRepositoryCredential ?? (async () => { throw new Error("no GitHub access is set up: run `gh auth login` or set GH_TOKEN"); }));
 
+  const ledger = createCostLedger({ store, metering: registry.require("metering"), ...(options.now === undefined ? {} : { now: options.now }) });
+
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
     projects: createStoreProjectSource(store, companyId),
@@ -122,12 +128,14 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     checkCodeHosts: registry.names("code-host").length > 0,
     ...(options.modelProxyEndpoint === undefined ? {} : { machineEnvironment: { AGENTX_MODEL_PROXY_URL: options.modelProxyEndpoint.url } }),
     startExtras: createSessionStartExtras(companyId),
+    // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
+    artifacts: blobs,
+    taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
   });
 
   // Sessions: facts over the task records, the cost ledger over the metering seam.
-  const ledger = createCostLedger({ store, metering: registry.require("metering"), ...(options.now === undefined ? {} : { now: options.now }) });
   const summaryDeps: SummaryDependencies = {
     store,
     facts: createTaskFactsSource(flow.deps),
@@ -141,7 +149,17 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     store, approvers: registry.require("approvers"), audit: registry.require("audit-sink"),
     subjects: [createWorkflowDocumentSubject({
       store,
+      // The tier of the plan waiting now, read from the plan itself (the files it names, the claims nothing proves): a plan nobody could grade is never graded low, but a plan that names its files
+      // and its proof is not high just for being a plan.
+      riskOf: async (_task, workflow) => {
+        const artifact = workflow.artifacts.filter((entry) => entry.type === currentDocumentType(workflow)).at(-1);
+        const parsed = artifact === undefined ? undefined : WorkflowArtifactSchema.safeParse(artifact);
+        const loaded = parsed?.success === true ? await loadWorkflowDocument(textReaderOf(blobs), parsed.data, {}).catch(() => undefined) : undefined;
+        return planRiskOf(planFactsOf(loaded, workflow), undefined);
+      },
       onDecided: ({ taskId, before, after, attempt, at }) => {
+        // The plan was approved: coding starts with no one asking, as a row like every automatic step.
+        if (after.stage === "IMPLEMENT" && after.state === "READY" && before.stage !== "IMPLEMENT") return [dispatchRowItem(flow.deps, taskId, after.revision, "IMPLEMENT", at)];
         if (after.stage !== "PLAN" || after.state !== "READY" || before.stage === "PLAN") return [];
         const text = (attempt.reason ?? "").trim();
         return [

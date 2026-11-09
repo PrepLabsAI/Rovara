@@ -14,6 +14,7 @@ import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js"
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { currentDocumentType } from "../../core/decisions/workflow-subject.js";
 import { operationKey, taskPointerKey } from "../../core/task-flow/keys.js";
+import { acknowledgeUpload } from "./candidate-export.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import type { StepOutcome } from "../../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
@@ -128,6 +129,10 @@ export async function readOutcome(deps: CallbackDeps, operation: OperationRecord
     });
     return parsed.success ? { kind: "planned", artifact: parsed.data } : undefined;
   }
+  // The steps after the plan: what the worker reported is handed to the build step as it was reported; the build step reads it against its schemas and the task's own record.
+  if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") return { kind: "built", result: result ?? {} };
+  if (operation.workflowMode === "REVIEW") return { kind: "reviewed", result: result ?? {} };
+  if (operation.kind === "publish") return { kind: "published", result: result ?? {} };
   return { kind: "ended" };
 }
 
@@ -156,6 +161,13 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "repository-credentials") return json(200, { credential: await exchangeCredential(deps, request, workspaceId, operationId) });
       const token = request.headers[CAPABILITY_HEADER];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
+      if (action === "candidate-export" || action === "candidate-build-source" || action === "baseline-source") {
+        const capability = capabilities.verify(token, action);
+        if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
+        const operation = await operationOf(deps, workspaceId, operationId);
+        if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
+        return json(200, acknowledgeUpload(bodyOf(request), { allowUnavailable: action !== "candidate-export" }));
+      }
       if (action !== "events" && action !== "artifacts" && action !== "result") {
         // A callback this install does not serve yet. The capability is still checked, so the answer tells an unauthorised caller nothing.
         capabilities.verify(token, action as CallbackAction);
@@ -171,7 +183,9 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       const status = body["status"];
       if (status !== "SUCCEEDED" && status !== "FAILED" && status !== "CANCELLED") throw agentXError("CONFIG_INVALID", "a result needs a status");
       const error = typeof body["error"] === "string" ? body["error"] : undefined;
-      const outcome = status === "SUCCEEDED" ? await readOutcome(deps, operation, body["result"]) : undefined;
+      // A coding run that left the code as it was reports what it found with its failure, so a failed coding run's result is handed over too (the build step reads only what it needs of it).
+      const outcome = status === "SUCCEEDED" ? await readOutcome(deps, operation, body["result"])
+        : operation.workflowMode === "IMPLEMENT" && typeof body["result"] === "object" && body["result"] !== null ? { kind: "built" as const, result: body["result"] } : undefined;
       const recorded = await recordOperationResult(deps.flow, { workspaceId, operationId, fence: capability.fence, status, ...(error === undefined ? {} : { error }), ...(outcome === undefined ? {} : { outcome }) });
       return json(200, { ok: true, duplicate: recorded.duplicate });
     } catch (error) {

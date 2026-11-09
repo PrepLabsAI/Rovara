@@ -8,7 +8,7 @@
 // KNOWN LIMIT: "a check proves this claim" is what the PLAN asserts (its `checks.proves` and `scenarioProves`); nothing here runs the check, so a plan can claim proof it does not have and look less
 // risky. The backstop is the merge card, whose tier comes from the pull request's actual changed files and the checks that really ran.
 import type { DecisionRisk, PlanDocument, WorkflowSnapshot } from "@agentx/contracts";
-import type { LoadedDocument } from "../../developer/plan-artifacts.js";
+import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import { pathsIn, planFiles, planUntestedClaims } from "./plan-facts.js";
 import { riskTierOf } from "./risk-tier.js";
 

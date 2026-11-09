@@ -12,7 +12,7 @@ import {
   workflowFindingAccepted,
 } from "@agentx/contracts";
 import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
-import type { LoadedDocument } from "../../developer/plan-artifacts.js";
+import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import { documentSummaryLines } from "../../developer/workflow-messages.js";
 import { breakLinearKeys } from "./linear-close.js";
 import { inertPlanLine } from "./inert-text.js";

@@ -4,7 +4,7 @@
 import type { E2EScenarioResults, WorkflowSnapshot } from "@agentx/contracts";
 import type { OperationFacts } from "../../developer/task-records.js";
 import type { TestProofActions } from "../../developer/test-proof-lines.js";
-import type { LoadedDocument } from "../../developer/plan-artifacts.js";
+import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import type { ProofContext, ProofDesignContext } from "./proof-section.js";
 import type { ProofEvidenceContext } from "./evidence-lines.js";
 import { loadTestProof } from "./test-proof-reader.js";

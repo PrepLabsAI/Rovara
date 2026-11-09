@@ -9,6 +9,15 @@ export type StepOutcome =
   | { kind: "understood"; assessment: unknown; answerArtifact?: { id: string; objectKey: string; createdAt: string } }
   /** A planning run's document. */
   | { kind: "planned"; artifact: WorkflowArtifact; proposal?: WorkflowCheckProposal; noChangeNeeded?: boolean }
+  /**
+   * A coding run, or a rerun of the checks: what the worker reported (the code it ended on, the code its checks ran on, the check report). It is the worker's word, so the build step
+   * reads it against its schemas and the task's recorded start before it believes any of it (Cloud's `completedWorkflowItems`).
+   */
+  | { kind: "built"; result: unknown }
+  /** The reviews: the code the reviewers read and their reports, read the same way. */
+  | { kind: "reviewed"; result: unknown }
+  /** A publication: the pull request the worker says it opened. Held to the operation's recorded expectation and checked at the host. */
+  | { kind: "published"; result: unknown }
   /** A run that needs no workflow move. */
   | { kind: "ended" };
 

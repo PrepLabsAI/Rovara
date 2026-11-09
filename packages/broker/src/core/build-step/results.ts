@@ -1,0 +1,228 @@
+// Lane L10, the build step: what a finished coding run, rerun of the checks or set of reviews meant. Cloud's `completedWorkflowItems` (about 600 lines of DynamoDB transaction items for these
+// three modes) written on the document store: each reads what the worker reported against the schemas and the task's own record of where it started, applies the engine's pure transition
+// (`recordWorkflowVerification`, `submitWorkflowReview`) and commits the new workflow, with the dispatch row of the step that follows, in one transaction.
+//
+// Left out on purpose (not part of Code's wave 1): the browser and API checks (E2E), the approved work breakdown (parts built in order or side by side), a custom step sequence (a program), the
+// second review by another company, and the design review. A workflow that carries any of them is not one this install starts.
+import {
+  CheckReportSchema, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
+  WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, WORKFLOW_SETUP_CHANGED_FILES_MESSAGE, blockWorkflow, createCandidateManifest, endWorkflowCiFixUnrelated, noChangeFindingsFrom, recordWorkflowVerification,
+  submitWorkflowReview, workflowIsReviewOnly, workflowPullRequestTrees, workflowReviewRoles, workflowSelectedChecks,
+  type CandidateRepository, type TransactItem, type WorkflowSnapshot,
+} from "@agentx/contracts";
+import { codeHostForRecord } from "../../plugins/routing.js";
+import type { TaskFlowDeps } from "../task-flow/deps.js";
+import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
+import type { StepOutcome } from "../task-flow/outcome.js";
+import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
+import { blockTaskWorkflow, commitWorkflow, runDispatchRow } from "../task-flow/stage-machine.js";
+import { iso, log } from "../task-flow/support.js";
+import { checkCommandCouldNotRun, regressedCheckLabels } from "./check-results.js";
+
+export interface Ended { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }
+
+const recordOf = (value: unknown): Record<string, unknown> => (typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {});
+
+/** Why a step stopped when its run ended FAILED or INTERRUPTED: the reason a failed result records too (Cloud's `workflowRunEndedReason`). */
+export function runEndedReason(mode: "IMPLEMENT" | "CHECKS" | "REVIEW", status: string): string {
+  const step = mode === "CHECKS" ? "verification retry" : mode === "REVIEW" ? "independent review" : "implementation";
+  return `${step} operation ended ${status.toLowerCase()}`;
+}
+
+/** A blocked VERIFY or REVIEW is looked at by Rovara's own fixing right away (a row, committed with the block); anything else is for the owner. */
+export function autofixRowFor(deps: TaskFlowDeps, taskId: string, next: WorkflowSnapshot, now: string): TransactItem[] {
+  return next.state === "BLOCKED" && (next.stage === "VERIFY" || next.stage === "REVIEW") ? [dispatchRowItem(deps, taskId, next.revision, "AUTOFIX", now)] : [];
+}
+
+/**
+ * Commits the workflow `next` with the row of the step that follows it, then starts that step now (the row is also found by the sweep if this process dies first). A task that moved on while
+ * the result was read changes nothing.
+ */
+export async function commitAndContinue(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, now: string): Promise<void> {
+  const following = next.stage === "REVIEW" && next.state === "WAITING" ? [dispatchRowItem(deps, task.taskId, next.revision, "REVIEW", now)]
+    : next.stage === "PULL_REQUEST" && next.state === "READY" ? [dispatchRowItem(deps, task.taskId, next.revision, "PUBLISH", now)]
+    : autofixRowFor(deps, task.taskId, next, now);
+  const committed = await commitWorkflow(deps, task, next, following);
+  const row = following[0];
+  if (!committed || row === undefined || row.kind !== "put") return;
+  const kind = row.item["kind"] as "REVIEW" | "PUBLISH" | "AUTOFIX";
+  await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind }).catch((error: unknown) => log(deps, { event: "build_step.start_failed", taskId: task.taskId, kind, error: error instanceof Error ? error.name : "unknown" }));
+}
+
+// ---- coding, and a rerun of the checks
+
+function blockReasonOfFailedRun(mode: "IMPLEMENT" | "CHECKS", ended: Ended): string {
+  const error = ended.error;
+  if (error?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true) return WORKFLOW_HISTORY_REWRITTEN_MESSAGE;
+  if (error?.includes(WORKFLOW_NO_CODE_CHANGE_MESSAGE) === true) return WORKFLOW_BLOCK_REASONS.noCodeChanged;
+  // The checks' rerun could not first stop the programs earlier work left running, so no check ran: a person decides (nothing sends it back or retries it by itself).
+  if (error?.includes(WORKFLOW_LEFTOVER_PROCESSES_MESSAGE) === true) return WORKFLOW_BLOCK_REASONS.leftoverProcesses;
+  // The checks' fresh dev container ran its setup and that changed the project's files: the checks did not run on them.
+  if (error?.includes(WORKFLOW_SETUP_CHANGED_FILES_MESSAGE) === true) return WORKFLOW_BLOCK_REASONS.setupChangedFiles;
+  return runEndedReason(mode, ended.status);
+}
+
+/** The confirmation that each starting commit is real history at the host the repository names, before the first pin. A repository whose host is not registered here is refused. */
+async function confirmStartingCommits(deps: TaskFlowDeps, task: TaskRecord, candidate: ReturnType<typeof createCandidateManifest>): Promise<void> {
+  if (deps.codeHosts === undefined) return;
+  const project = await deps.projects.revision(task.project, task.startingRevision);
+  for (const repository of candidate.repositories) {
+    const definition = project?.definition.repositories.find((entry) => entry.name === repository.repositoryId);
+    if (definition === undefined) throw new Error("candidate repository is not registered");
+    const host = codeHostForRecord(deps.codeHosts, definition);
+    await host.tree({ url: definition.url }, repository.baseCommitSha as string, { orgId: deps.companyId });
+  }
+}
+
+/**
+ * After a coding run or a rerun of the checks ended. Failed: the step blocks with a reason the owner reads. Succeeded: the code it ended on is the candidate; its checks are read against the
+ * plan's policy and, when every selected check passed on that very code, the reviews are due. Anything the report does not prove blocks the step with its own reason.
+ */
+export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: Ended): Promise<void> {
+  const workflow = task.workflow;
+  const mode = operation.workflowMode === "CHECKS" ? "CHECKS" as const : "IMPLEMENT" as const;
+  // The result counts only while the task waits for exactly this run; a late one changes nothing.
+  if (workflow === undefined || operation.workflowRevision === undefined || workflow.revision !== operation.workflowRevision || workflow.state !== "RUNNING") return;
+  if (workflow.stage !== (mode === "CHECKS" ? "VERIFY" : "IMPLEMENT")) return;
+  if (ended.status === "CANCELLED") return;
+  const now = iso(deps);
+  const reported = recordOf(ended.outcome?.kind === "built" ? ended.outcome.result : undefined);
+  if (ended.status !== "SUCCEEDED") {
+    // A coding run that left the code as it was reports what it found (redacted and bounded again here); it is kept only with that stop.
+    const reason = blockReasonOfFailedRun(mode, ended);
+    await commitAndContinue(deps, task, blockWorkflow(workflow, reason, now, { noChangeFindings: noChangeFindingsFrom(reported["noChangeFindings"]) }), now);
+    return;
+  }
+
+  const checks = CheckReportSchema.safeParse(reported["checks"]);
+  // The record that is blocked while the checks are recorded: recording a verification starts from a blocked VERIFY.
+  const verifying = { ...blockWorkflow(workflow, "candidate checks are being recorded", now), stage: "VERIFY" as const };
+  let failure: string = WORKFLOW_BLOCK_REASONS.checksUnconfirmed;
+  let detail: string | undefined;
+  let regressedChecks: string[] | undefined;
+  let next: WorkflowSnapshot;
+  try {
+    if (mode === "CHECKS" && workflow.stage !== "VERIFY") { failure = WORKFLOW_BLOCK_REASONS.checkRetryStale; throw new Error("verification retry stage changed"); }
+    if (!checks.success) { failure = WORKFLOW_BLOCK_REASONS.checkReportUnreadable; throw new Error("invalid check report"); }
+    // Review only: the approved plan and the project select no check, so "no checks ran" is the expected report. A task with no stored policy is never this.
+    const reviewOnly = workflowIsReviewOnly(workflow.checkPolicy);
+    if (reviewOnly && checks.data.status === "regression") {
+      failure = WORKFLOW_BLOCK_REASONS.regressionFound; detail = checks.data.status; regressedChecks = regressedCheckLabels(checks.data.checks);
+      throw new Error("a rerun test regressed");
+    }
+    if (checks.data.status === "not_verified" && !reviewOnly) {
+      failure = checks.data.notVerifiedReason === "no_checks" ? WORKFLOW_BLOCK_REASONS.noChecksConfigured : WORKFLOW_BLOCK_REASONS.checkRunnerFailed;
+      detail = checks.data.notVerifiedReason ?? checks.data.status;
+      throw new Error("checks were not verified");
+    }
+    const project = await deps.projects.revision(task.project, task.startingRevision);
+    if (project === undefined) throw new Error("the project revision is gone");
+    const expectedRepositories = project.definition.repositories.map((repository) => repository.name).sort();
+    const candidate = createCandidateManifest((Array.isArray(reported["workflowCandidateRepositories"]) ? reported["workflowCandidateRepositories"] : []) as CandidateRepository[]);
+    const checkedCandidate = createCandidateManifest((Array.isArray(reported["workflowCheckCandidateRepositories"]) ? reported["workflowCheckCandidateRepositories"] : []) as CandidateRepository[]);
+    if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositories.join("\n")) { failure = WORKFLOW_BLOCK_REASONS.repositoriesIncomplete; throw new Error("candidate repositories are incomplete"); }
+    // An approved fix to an open pull request that leaves every repository's code as the pull request holds it changed nothing: there is nothing to check again or push.
+    const pullRequestTrees = workflowPullRequestTrees(workflow);
+    if (mode === "IMPLEMENT" && pullRequestTrees !== undefined && candidate.repositories.every((repository) => pullRequestTrees.get(repository.repositoryId) === repository.treeSha)) {
+      failure = WORKFLOW_BLOCK_REASONS.fixChangedNothing; throw new Error("the fix left the pull request's code as it was");
+    }
+    if (checkedCandidate.digest !== candidate.digest) { failure = WORKFLOW_BLOCK_REASONS.codeChangedAfterChecks; throw new Error("checked candidate is stale"); }
+    // Reviewers judge the change from the task's base, so every repository must say where it started, and it must be where preparation checked out.
+    if (candidate.repositories.some((repository) => repository.baseCommitSha === undefined)) { failure = WORKFLOW_BLOCK_REASONS.startUnrecorded; throw new Error("candidate has no base commit"); }
+    const pinnedBase = workflow.reviewBase;
+    const expectedBase = pinnedBase ?? task.preparedBase;
+    if (expectedBase === undefined) { failure = WORKFLOW_BLOCK_REASONS.startUnrecorded; throw new Error("the task has no prepared base commit"); }
+    if (candidate.repositories.some((repository) => expectedBase.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha !== repository.baseCommitSha)) {
+      failure = WORKFLOW_BLOCK_REASONS.startChanged; throw new Error("candidate base commit differs from the task's base");
+    }
+    // Before the first pin, the code host has each starting commit, so the base is real history and not a local commit.
+    if (pinnedBase === undefined) {
+      try { await confirmStartingCommits(deps, task, candidate); } catch (error) { failure = WORKFLOW_BLOCK_REASONS.startUnconfirmed; throw error; }
+    }
+    // The worker reports the readiness commands it was sent as `readiness:<index>`, in the order of the selected checks; agent-claimed entries never stand in for them, and a missing one is unknown.
+    const selected = workflowSelectedChecks(workflow.checkPolicy);
+    const byId = new Map(checks.data.checks.filter((entry) => entry.source === "project").map((entry) => [entry.id, entry]));
+    const results = selected.map((check, index) => {
+      const entry = byId.get(`readiness:${index}`);
+      const status = entry === undefined || entry.after === "not_run" || entry.after === "unknown" ? "UNKNOWN" as const : entry.after === "passed" ? "PASS" as const : "FAILED" as const;
+      // The worker's report of a program it could not start, which is all the check's output then holds; any other spawn error with no exit code is the same.
+      const programNotFound = status === "FAILED" && entry?.output.trim() === `spawn ${check.command.executable} ENOENT`;
+      const neverStarted = status === "FAILED" && !programNotFound && entry?.exitCode == null && /^spawn \S+ E[A-Z]+$/u.test(entry?.output.trim() ?? "");
+      const broken = status === "FAILED" && entry !== undefined && (programNotFound || neverStarted || checkCommandCouldNotRun(check.command, entry.exitCode, entry.output));
+      return { checkId: check.id, status, ...(programNotFound ? { programNotFound: true as const } : {}), ...(broken ? { broken: true as const } : {}), ...(neverStarted ? { neverStarted: true as const } : {}) };
+    });
+    if (results.length === 0 && !reviewOnly) { failure = WORKFLOW_BLOCK_REASONS.noCheckResults; throw new Error("there are no selected check results"); }
+    next = recordWorkflowVerification(verifying, {
+      candidate,
+      checks: { candidateDigest: candidate.digest, producer: "agentx-worker-checks", environmentId: task.workspaceId, recordedAt: now, results, ...(reviewOnly ? { reviewOnly: true } : {}) },
+      now,
+    });
+  } catch (error) {
+    log(deps, { event: "build_step.verification_blocked", taskId: task.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown", reason: failure, ...(detail === undefined ? {} : { detail }) });
+    if (failure === WORKFLOW_BLOCK_REASONS.fixChangedNothing && workflow.fixSource === "ci") {
+      // A round for failing CI that left the code as the pull request holds it: the failure is not this change's, so a person is asked to look (the round stays counted).
+      next = endWorkflowCiFixUnrelated(workflow, now);
+    } else {
+      next = failure === WORKFLOW_BLOCK_REASONS.fixChangedNothing ? blockWorkflow(workflow, failure, now)
+        : blockWorkflow(verifying, failure, now, regressedChecks === undefined ? {} : { regressedChecks });
+    }
+  }
+  await commitAndContinue(deps, task, next, now);
+}
+
+// ---- reviews
+
+/**
+ * After the reviews ended. Failed: the step blocks (the owner's Retry, or Rovara's own one automatic retry, runs it again). Succeeded: every report must be for this very code, from this very
+ * run, and exactly the reviews the step asked for; each is recorded with the engine's own transition. Passed reviews make the pull request due; findings block the step.
+ */
+export async function recordReviewed(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: Ended): Promise<void> {
+  const workflow = task.workflow;
+  if (workflow === undefined || operation.workflowRevision === undefined || workflow.revision !== operation.workflowRevision || workflow.state !== "RUNNING" || workflow.stage !== "REVIEW") return;
+  if (ended.status === "CANCELLED") return;
+  const now = iso(deps);
+  if (ended.status !== "SUCCEEDED") {
+    // A review that stopped because its base rule files could not be verified says so; the programs earlier work left running could not be stopped: its own reason; any other stop keeps the generic one.
+    const reason = ended.error?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.ruleFilesUnverified
+      : ended.error?.includes(WORKFLOW_LEFTOVER_PROCESSES_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.leftoverProcesses
+      : runEndedReason("REVIEW", ended.status);
+    await commitAndContinue(deps, task, blockWorkflow(workflow, reason, now), now);
+    return;
+  }
+  const reported = recordOf(ended.outcome?.kind === "reviewed" ? ended.outcome.result : undefined);
+  let reviewFailure = "independent candidate review was invalid, incomplete, or stale";
+  let next: WorkflowSnapshot;
+  try {
+    const reviews = reported["workflowReviews"];
+    if (!Array.isArray(reviews)) throw new Error("review result has an invalid report collection");
+    const candidate = createCandidateManifest((Array.isArray(reported["workflowCandidateRepositories"]) ? reported["workflowCandidateRepositories"] : []) as CandidateRepository[]);
+    if (workflow.candidate?.digest !== candidate.digest) throw new Error("review result is stale, incomplete, or came from another operation");
+    // What the workflow keeps of a report: neither the same-model flag (the broker's own record of the dispatch, never the worker's say) nor the model-failure sentence. The workflow's review
+    // record is strict, so a key a build that does not know it would fail after a rollback.
+    const kept = reviews.map((review) => {
+      const { sameModelAsBuild: _reported, modelFailure: _failure, ...report } = recordOf(review);
+      void _reported; void _failure;
+      return report;
+    });
+    const { blockReason: _earlier, ...base } = workflow;
+    void _earlier;
+    for (const review of kept) {
+      if (review["operationId"] !== operation.id) throw new Error("review result is stale, incomplete, or came from another operation");
+      submitWorkflowReview(base, review, now);
+    }
+    // Exactly the reviews the step asks for: two of one kind would leave the stage waiting for the other.
+    const roles = kept.map((review) => review["role"]).sort();
+    const asked = workflowReviewRoles(workflow);
+    if (roles.length !== asked.length || roles.some((role, index) => role !== asked[index])) {
+      reviewFailure = WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE;
+      throw new Error("review result does not hold one code review and one security review");
+    }
+    next = base;
+    for (const review of kept) next = submitWorkflowReview(next, review, now);
+  } catch {
+    next = blockWorkflow(workflow, reviewFailure, now);
+  }
+  await commitAndContinue(deps, task, next, now);
+}
+
+export { blockTaskWorkflow };
