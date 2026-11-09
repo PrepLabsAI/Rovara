@@ -8,5 +8,6 @@ export * from "./worker-machines.js";
 export * from "./policy.js";
 export * from "./audit-sink.js";
 export * from "./model-keys.js";
+export * from "./object-storage.js";
 export * from "./plugin-adapters.js";
 export * from "./plugin-points.js";

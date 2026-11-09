@@ -6,7 +6,8 @@
   "exports": {
     ".": "./dist/index.js",
     "./storage": "./dist/storage-plugin.js",
-    "./queue": "./dist/queue-plugin.js"
+    "./queue": "./dist/queue-plugin.js",
+    "./object-storage": "./dist/object-storage-plugin.js"
   },
   "types": "./dist/index.d.ts",
   "engines": {

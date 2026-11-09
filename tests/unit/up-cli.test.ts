@@ -154,6 +154,7 @@ describe("rovara up", () => {
       configPath: "/state/config.json",
       sessionTokenPath: "/state/session-token",
       pageSessions: {} as LocalRuntime["pageSessions"],
+      modelProxy: {} as LocalRuntime["modelProxy"],
       wiring: () => ({ storage: ["memory"] }),
       stopped: false,
       async stop() { value.stopped = true; },

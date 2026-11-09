@@ -38,6 +38,7 @@ import {
 } from "@agentx/contracts";
 import type { DockerRunner } from "./docker-runner.js";
 import type { InvokeSigner } from "./invoke-signer.js";
+import { MODEL_PROXY_PREFIX } from "./model-proxy/proxy.js";
 import { WORKSPACES_DIRECTORY_NAME, ensurePrivateDirectory } from "./state-directory.js";
 
 /** The worker's port inside its container (environments/base/Dockerfile). */
@@ -61,6 +62,9 @@ const COMPANY_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_INVOCATION_BYTES = 1_048_576;
 export const LOCAL_WORKER_IMAGE_BUILD_HINT = "build it from a Rovara checkout: docker build -f environments/base/Dockerfile -t rovara-worker:local .";
 
+/** Where a worker calls the broker's model proxy: its own network's name for the broker (the gateway answers it) plus the proxy's path. */
+export const modelProxyWorkerUrl = (): string => `http://${BROKER_ALIAS}:${CALLBACK_RELAY_PORT}${MODEL_PROXY_PREFIX}`;
+
 /** Names the worker sets itself: a spec's environment cannot override them (a project cannot turn on the local shell). */
 const RESERVED_ENVIRONMENT = new Set([
   "AGENTX_WORKSPACE_ROOT",
@@ -71,6 +75,8 @@ const RESERVED_ENVIRONMENT = new Set([
   "AGENTX_SANDBOX_IMAGE",
   "AGENTX_TASK_SHELL",
   "AGENTX_SANDBOX_NETWORK",
+  // Lane L9a: the model proxy's address is the broker's to set (below). A spec cannot point the worker's model calls elsewhere.
+  "AGENTX_MODEL_PROXY_URL",
   "AGENTX_RUNTIME",
   "AGENTX_WORKER_PROCESS_SCOPE",
   "PORT",
@@ -81,6 +87,11 @@ const RESERVED_ENVIRONMENT = new Set([
   "USER",
   "SHELL",
 ]);
+/**
+ * Lane L9a: the worker holds no model key (it holds a short-lived token for the broker's model proxy), so a spec's environment may not carry one
+ * either, nor point a provider's client at another address. The names are the ones the model libraries read.
+ */
+const MODEL_KEY_ENVIRONMENT = /^(ANTHROPIC|OPENAI|OPENROUTER|GEMINI|GOOGLE|MISTRAL|COHERE|GROQ|XAI|DEEPSEEK|AZURE_OPENAI)_(API_KEY|AUTH_TOKEN|BASE_URL|API_BASE|ENDPOINT)$|^AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|BEARER_TOKEN_BEDROCK)$/u;
 /** Names that change how a program loads or where the Docker socket is: the worker holds the socket, so none may come from a spec. */
 const RESERVED_ENVIRONMENT_PREFIXES = ["NODE_", "LD_", "DYLD_", "DOCKER_"];
 const RESERVED_LABEL_PREFIXES = ["rovara.", "agentx.", "com.docker.", "org.opencontainers."];
@@ -97,6 +108,8 @@ export interface DockerWorkerMachinesOptions {
    * `http://rovara-broker:8081`, an address on its own network that the gateway answers.
    */
   callback: () => { tcpPort: number; socketDirectory?: string | undefined };
+  /** Lane L9a: the broker serves the local model proxy on its callback listener; tell the worker where it is (`AGENTX_MODEL_PROXY_URL`). */
+  modelProxy?: boolean | undefined;
   /** Websites the sandboxes and the worker may reach beyond the default list (the cloud's, without its own network's names). */
   allowedDomains?: readonly string[];
   signer: InvokeSigner;
@@ -433,7 +446,7 @@ export class DockerWorkerMachines implements WorkerMachines {
   #environment(spec: MachineSpec, workspaceDirectory: string, image: string, names: IsolationNames): Record<string, string> {
     const environment: Record<string, string> = {};
     for (const [key, value] of Object.entries(spec.environment ?? {})) {
-      if (!ENVIRONMENT_NAME.test(key) || RESERVED_ENVIRONMENT.has(key) || RESERVED_ENVIRONMENT_PREFIXES.some((prefix) => key.startsWith(prefix))) throw new MachineError("rejected", `the environment name ${key.slice(0, 40)} is not allowed`);
+      if (!ENVIRONMENT_NAME.test(key) || RESERVED_ENVIRONMENT.has(key) || MODEL_KEY_ENVIRONMENT.test(key) || RESERVED_ENVIRONMENT_PREFIXES.some((prefix) => key.startsWith(prefix))) throw new MachineError("rejected", `the environment name ${key.slice(0, 40)} is not allowed`);
       if (/[\r\n\0]/.test(value)) throw new MachineError("rejected", `the environment value of ${key} has a line break`);
       environment[key] = value;
     }
@@ -444,6 +457,9 @@ export class DockerWorkerMachines implements WorkerMachines {
       AGENTX_INVOKE_PUBLIC_KEY: this.#options.signer.publicKey(),
       // The gateway answers this name on the worker's network and relays the worker's own callbacks (and no other request) to the broker.
       AGENTX_CONTROL_PLANE_URL: `http://${BROKER_ALIAS}:${CALLBACK_RELAY_PORT}`,
+      // Lane L9a: the broker's model proxy, reached through the same relay. An address, not a secret: the worker asks for its token with its callback
+      // capability (`GET /v1/internal/model-access`), and a setup run starts only when this is set (setup-agent-invocation.ts), so its spend is counted.
+      ...(this.#options.modelProxy === true ? { AGENTX_MODEL_PROXY_URL: modelProxyWorkerUrl() } : {}),
       // The Docker calls go to the guard, which holds the socket; the sandboxes join the sandbox network, which the worker does not make itself.
       DOCKER_HOST: `tcp://${SOCKET_GUARD_ALIAS}:${SOCKET_GUARD_PORT}`,
       AGENTX_SANDBOX_NETWORK: names.sandboxNet,

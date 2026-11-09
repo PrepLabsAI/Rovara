@@ -200,10 +200,30 @@ your home are shared with the VM, which is where the state folder is.
 A stub. Running the worker beside the broker with no container gives task commands your files and accounts, so it is refused unless
 you start with `rovara up --this-machine`; even then it is not built, and every call says so.
 
+### Model calls: the worker holds no key (lane L9a, provisional until Pratik agrees, owner decision 58)
+
+The broker serves a small model proxy on the same callback listener (`packages/broker/src/local/model-proxy/`). A worker is given the proxy's
+address (`AGENTX_MODEL_PROXY_URL`, an address, not a secret) and asks the broker for a token with its callback capability
+(`GET /v1/internal/model-access`). The token lasts 15 minutes, is good for one workspace and one operation, and names the models the broker chose for
+that operation. The worker sends its model calls to `<proxy>/v1/messages`, `/v1/responses` or `/v1/chat/completions` with the token where a key would
+go; the proxy reads the real key from the `model-keys` port (the environment, then `keys.json`), calls Anthropic, OpenAI or OpenRouter, passes the
+answer back, and records what it used through the `metering` port. The egress gateway relays only those three routes and the token request, stamps
+the worker's own workspace on each, and removes any such header the worker sent, so a token taken from one worker is refused from another.
+
+- The key is never in the worker's environment, in a log, in an event or in an answer. A provider's error text is shortened and scrubbed before
+  the worker sees it, and an answer that contains the key is cut off. A spec's environment may not carry a model key, a provider's address or
+  AWS credentials (`DockerWorkerMachines` refuses them).
+- A task budget is held in the proxy: with a price table (`metering` adapter) and a budget on the operation's grant, a call is refused with the
+  words the worker reads as "the task's budget is spent" once the spend reaches it. A model with no price cannot be held to a budget and is refused.
+  Code's default price table is empty, so a budget needs a price table first.
+- Not here: Bedrock (it needs the computer's AWS sign-in; list it in the 51 gaps), design-review key slots, and a spend ledger that survives a
+  broker restart (a restarted broker starts each operation's spend at zero).
+- The task flow turns it on: its dispatch lists the `model-access` action in the worker's capability and gives `startLocalRuntime` a
+  `modelGrants` source (`capabilityModelGrants`) that says which models and what budget an operation has (`localRoute` makes a model's route).
+
 ## Not in this lane
 
-See the report of lane L4 for the list with file and line. In short: how the model key reaches the worker (the adapter takes a
-non-secret `environment` only), the published worker image, the SQLite store and queue, and the task flow and pages. Devcontainers,
+See the report of lane L4 for the list with file and line. In short: the published worker image, the SQLite store and queue, and the task flow and pages. Devcontainers,
 test services and the setup run need Docker calls the guard refuses; they are not available locally until each is given a place in
 the guard's rules.
 

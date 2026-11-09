@@ -8,6 +8,7 @@ import { AGENTX_PROTOCOL_VERSION, MachineError, WorkerInvocationSchema, type Wor
 import { afterEach, describe, expect, it } from "vitest";
 import { DockerWorkerMachines, workspaceIdFor } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
+import { runSetupAgentInvocation } from "../../packages/worker/src/setup-agent-invocation.js";
 import { runWorkerMachinesConformance } from "../support/ports/worker-machines-conformance.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 
@@ -17,7 +18,7 @@ afterEach(async () => {
   while (cleanup.length > 0) await rm(cleanup.pop()!, { recursive: true, force: true });
 });
 
-async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: number | null; stateDirectory?: string; callbackPort?: number; signer?: ReturnType<typeof createEphemeralInvokeSigner> } = {}) {
+async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: number | null; stateDirectory?: string; callbackPort?: number; signer?: ReturnType<typeof createEphemeralInvokeSigner>; modelProxy?: boolean } = {}) {
   const stateDirectory = options.stateDirectory ?? (await mkdtemp(join(tmpdir(), "rovara-l4-")));
   cleanup.push(stateDirectory);
   const docker = options.docker ?? new FakeDocker();
@@ -28,6 +29,7 @@ async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: num
     signer: options.signer ?? createEphemeralInvokeSigner(),
     docker,
     fetch: docker.fetch,
+    ...(options.modelProxy === undefined ? {} : { modelProxy: options.modelProxy }),
     ...(options.maxConcurrentMachines === undefined ? {} : { maxConcurrentMachines: options.maxConcurrentMachines }),
   });
   return { stateDirectory, docker, machines };
@@ -70,7 +72,7 @@ runWorkerMachinesConformance("local docker (simulated docker)", {
 describe("local docker worker machines", () => {
   it("creates the worker on its internal network only, with no socket, no published port and the environment in a file", async () => {
     const { machines, docker, stateDirectory } = await build();
-    const handle = await machines.start({ machineKey: "ws-flags", companyId: COMPANY, resources: { cpu: 2, memoryMiB: 4096 }, environment: { ANTHROPIC_API_KEY: "never-in-arguments" } });
+    const handle = await machines.start({ machineKey: "ws-flags", companyId: COMPANY, resources: { cpu: 2, memoryMiB: 4096 }, environment: { EXAMPLE_FLAG: "never-in-arguments" } });
     const create = docker.calls.find((call) => call[0] === "create" && call.includes(handle.machineId))!;
     const text = create.join(" ");
     for (const flag of ["--cap-drop ALL", "--security-opt no-new-privileges", "--pids-limit 4096", "--user 1000:1000", "--memory 4096m", "--cpus 2"]) expect(text).toContain(flag);
@@ -83,7 +85,7 @@ describe("local docker worker machines", () => {
     expect(create).toContain(`${workspace}:${workspace}`);
     expect(create.filter((entry) => entry === "--volume")).toHaveLength(1);
     const container = docker.containers.get(handle.machineId)!;
-    expect(container.environment.ANTHROPIC_API_KEY).toBe("never-in-arguments");
+    expect(container.environment.EXAMPLE_FLAG).toBe("never-in-arguments");
     expect(container.environment.AGENTX_SANDBOX_IMAGE).toBe("worker:test");
     expect(container.environment.AGENTX_TASK_SHELL).toBeUndefined();
     // The worker is told addresses on its own network, never the computer's.
@@ -377,5 +379,47 @@ describe("local docker worker machines", () => {
     const second = await build({ docker, signer, stateDirectory: first.stateDirectory, callbackPort: 2222 });
     await expect(second.machines.start({ machineKey: "ws-busy", companyId: COMPANY })).rejects.toMatchObject({ code: "unavailable" });
     expect(docker.containers.get(machineId)!.status).toBe("running");
+  });
+});
+
+describe("local docker worker machines and the model proxy (lane L9a)", () => {
+  it("tells the worker where the broker's model proxy is, an address and never a key", async () => {
+    const { machines, docker } = await build({ modelProxy: true });
+    const handle = await machines.start({ machineKey: "ws-proxy", companyId: COMPANY });
+    const environment = docker.containers.get(handle.machineId)!.environment;
+    expect(environment.AGENTX_MODEL_PROXY_URL).toBe("http://rovara-broker:8081/v1/internal/model-proxy");
+    expect(Object.keys(environment).filter((name) => /KEY|SECRET|TOKEN|PASSWORD/iu.test(name))).toEqual(["AGENTX_INVOKE_PUBLIC_KEY"]);
+  });
+
+  it("sets no proxy address when the broker serves no proxy, and a spec cannot set or move it", async () => {
+    const off = await build();
+    const plain = await off.machines.start({ machineKey: "ws-plain", companyId: COMPANY });
+    expect(off.docker.containers.get(plain.machineId)!.environment.AGENTX_MODEL_PROXY_URL).toBeUndefined();
+    const on = await build({ modelProxy: true });
+    await expect(on.machines.start({ machineKey: "ws-move", companyId: COMPANY, environment: { AGENTX_MODEL_PROXY_URL: "http://elsewhere.example.test" } })).rejects.toMatchObject({ code: "rejected" });
+  });
+
+  it("refuses a model key, a provider's address or cloud credentials in a spec's environment: the worker holds none", async () => {
+    const { machines } = await build({ modelProxy: true });
+    for (const name of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GEMINI_API_KEY"]) {
+      await expect(machines.start({ machineKey: `ws-${name.toLowerCase().replaceAll("_", "-")}`, companyId: COMPANY, environment: { [name]: "x" } }), name).rejects.toMatchObject({ code: "rejected" });
+    }
+  });
+
+  it("lets a setup run start: it needs the proxy address the adapter sets, so the run's spend is counted", async () => {
+    const { machines, docker } = await build({ modelProxy: true });
+    const handle = await machines.start({ machineKey: "ws-setup", companyId: COMPANY });
+    const environment = { ...docker.containers.get(handle.machineId)!.environment };
+    const invocation = { kind: "task", operationId: "op-setup", projectRevision: 1, payload: { conversationId: "c", setupAgent: { limits: {}, commits: {} } } };
+    const run = (env: NodeJS.ProcessEnv) => runSetupAgentInvocation(invocation as never, { rootPath: "/nowhere", model: { provider: "anthropic", modelId: "claude-test" }, eventSink: { async send() {} } as never, setupAgent: async () => ({}), environment: env }, { repositories: [] }, "/nowhere");
+    const without = { ...environment };
+    delete without.AGENTX_MODEL_PROXY_URL;
+    await expect(run(without)).rejects.toThrow(/no model proxy/);
+    // With the address the check passes; the run then goes on and fails further in (there is no Docker or repository here), never on the proxy.
+    const withProxy: unknown = await run(environment).catch((error: unknown) => error);
+    expect(String((withProxy as { message?: unknown }).message)).not.toMatch(/model proxy/);
+    const plain = await build();
+    const off = await plain.machines.start({ machineKey: "ws-setup-off", companyId: COMPANY });
+    await expect(run(plain.docker.containers.get(off.machineId)!.environment)).rejects.toThrow(/no model proxy/);
   });
 });

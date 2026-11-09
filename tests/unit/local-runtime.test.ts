@@ -164,4 +164,25 @@ describe("rovara up runtime", () => {
     expect(docker.containers.get(handle.machineId)!.status).toBe("exited");
     await expect(fetch(`${runtime.url}/healthz`)).rejects.toThrow();
   });
+
+  it("serves the model proxy on the callback listener, tells workers where it is, and grants nothing until a task flow is wired (lane L9a)", async () => {
+    const { runtime, docker } = await launch({ environment: { ANTHROPIC_API_KEY: ["sk-ant", "test", "never", "real", "0123456789"].join("-") } });
+    expect(runtime.wiring()).toMatchObject({ "object-storage": ["document"] });
+    const handle = await runtime.registry.require("worker-machines", "docker").start({ machineKey: "ws-proxy", companyId: IMPLICIT_COMPANY_ID });
+    const environment = docker.containers.get(handle.machineId)!.environment;
+    expect(environment.AGENTX_MODEL_PROXY_URL).toBe("http://rovara-broker:8081/v1/internal/model-proxy");
+    // The key the broker holds is nowhere in the worker's container or in the arguments Docker was given.
+    expect(JSON.stringify([...docker.containers.values()].map((container) => container.environment))).not.toContain("sk-ant-test");
+    expect(JSON.stringify(docker.calls)).not.toContain("sk-ant-test");
+    const answer = await runtime.modelProxy.access({ path: "/v1/internal/model-access", headers: { "x-agentx-callback-capability": "c".repeat(48), "x-rovara-workspace": "w" } });
+    expect(answer.statusCode).toBe(403);
+    expect(answer.body).not.toContain("sk-ant");
+  });
+
+  it("keeps objects as documents by default", async () => {
+    const { runtime } = await launch();
+    const objects = runtime.registry.require("object-storage");
+    await objects.put("private/o/w/evidence/t/x", new Uint8Array([1, 2, 3]), { contentType: "text/plain", metadata: {}, retention: "evidence-std" });
+    expect(Array.from((await objects.get("private/o/w/evidence/t/x", 10))!)).toEqual([1, 2, 3]);
+  });
 });
