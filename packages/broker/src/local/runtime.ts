@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
@@ -25,17 +25,23 @@ import {
 } from "../ports/index.js";
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
-import { OUTBOX_PENDING_INDEX } from "@agentx/contracts";
+import { SqliteDocumentStore, SqliteQueueService } from "@agentx/local-adapters";
+import type { WorkerMachines } from "@agentx/contracts";
+import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
+import { createLocalApp, type LocalApp } from "./app/app.js";
+import { configurationAnswer } from "./app/routes.js";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
 import { localSessionProofVerifier } from "../core/decisions/local-session.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
+import { resolveGithubAccess } from "./github-access.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
 import {
   KEYS_FILE_NAME,
   SESSION_TOKEN_FILE_NAME,
+  STATE_DB_FILE_NAME,
   WORKSPACES_DIRECTORY_NAME,
   isInside,
   ensureStateDirectory,
@@ -92,6 +98,8 @@ export function parsePluginConfigText(text: string): PluginConfig {
 
 /** The name under which the local Docker adapter is registered on the `worker-machines` point. */
 export const DOCKER_ADAPTER_NAME = "docker";
+/** The name of a worker-machines adapter handed in through `LocalRuntimeOptions.machines`. */
+export const INJECTED_ADAPTER_NAME = "injected";
 
 export interface LocalRuntimeOptions {
   stateDirectory: string;
@@ -111,6 +119,12 @@ export interface LocalRuntimeOptions {
   allowedDomains?: readonly string[] | undefined;
   /** Stop the running workers when the runtime stops. Default true. */
   stopWorkersOnClose?: boolean;
+  /** Where the task flow's records live. `sqlite` (default): `<state folder>/state.db`; `memory`: gone when the process ends (tests). A configured `storage` plug-in replaces either. */
+  storage?: "sqlite" | "memory";
+  /** Use this worker-machines adapter instead of Docker (tests; a later this-machine adapter). */
+  machines?: WorkerMachines;
+  /** Run the dispatch, sweep and session timers. Default true; tests call `runtime.tick()`. */
+  timers?: boolean;
 }
 
 export interface LocalRuntime {
@@ -122,6 +136,12 @@ export interface LocalRuntime {
   readonly sessionTokenPath: string;
   /** The local review pages' sessions: pass them to `createLocalPagesServer({ sessions })` so the proofs the pages sign are the ones the approvers accept. */
   readonly pageSessions: LocalPageSessions;
+  /** The review pages' address: `http://127.0.0.1:<port>` (the page links themselves carry a session token and come from `POST /v1/local/pages/link`). */
+  readonly pagesUrl: string;
+  /** The wired task flow, sessions, decisions and pages (lane L9-wire). */
+  readonly app: LocalApp;
+  /** One pass of what the timers do (tests). */
+  tick(): Promise<void>;
   /** The adapters registered at each plug-in point, by name. */
   wiring(): Record<string, string[]>;
   stop(): Promise<void>;
@@ -140,6 +160,12 @@ function ownerName(): string {
   } catch {
     return "Local owner";
   }
+}
+
+/** The surface the request came from, for the session's origin: the MCP tools and the CLI name themselves. */
+function clientOf(request: BrokerRequest): string {
+  const named = request.headers["x-agentx-client"];
+  return named === "mcp" || named === "cli" ? named : "app";
 }
 
 function json(statusCode: number, value: unknown): BrokerResponse {
@@ -176,9 +202,25 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
     priceTable: { currency: "USD", models: {} },
   });
 
-  // Storage and queue: in-memory fakes for now. A configured `storage`/`queue` plug-in (the SQLite lane) replaces them.
-  registry.register("storage", "memory", new MemoryDocumentStore({ indexes: [OUTBOX_PENDING_INDEX] }), { isDefault: true });
-  registry.register("queue", "memory", new MemoryQueueService(), { isDefault: true });
+  // Storage and queue: one SQLite file in the state folder (lane L3's adapters), unless the config names its own. The store keeps the indexes the task flow needs.
+  const closers: Array<() => Promise<void> | void> = [];
+  const configured = (point: PluginPoint): boolean => config.plugins.some((entry) => entry.point === point);
+  if (options.storage === "memory") {
+    registry.register("storage", "memory", new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES }), { isDefault: true });
+    registry.register("queue", "memory", new MemoryQueueService(), { isDefault: true });
+  } else {
+    const databasePath = join(stateDirectory, STATE_DB_FILE_NAME);
+    if (!configured("storage")) {
+      const store = SqliteDocumentStore.open({ path: databasePath, indexes: TASK_FLOW_INDEXES, migrate: true });
+      closers.push(() => store.close());
+      registry.register("storage", "sqlite", store, { isDefault: true });
+    }
+    if (!configured("queue")) {
+      const queue = SqliteQueueService.open({ path: databasePath });
+      closers.push(() => queue.close());
+      registry.register("queue", "sqlite", queue, { isDefault: true });
+    }
+  }
 
   // Worker machines. The callback listener's port is not known until the handler exists, so it is read when a machine starts.
   const callbackServer: { current?: CallbackServer } = {};
@@ -194,12 +236,25 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
     docker: options.docker ?? createDockerRunner(options.environment),
   });
   registry.register("worker-machines", DOCKER_ADAPTER_NAME, docker);
+  if (options.machines !== undefined) registry.register("worker-machines", INJECTED_ADAPTER_NAME, options.machines);
   registry.register("worker-machines", THIS_MACHINE_ADAPTER_NAME, new ThisMachineWorkerMachines({ enabled: options.thisMachine === true }));
 
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
   registry.seal();
 
   const identity = registry.require("identity");
+  const githubKeys = createLocalGithubKeyStore(stateDirectory);
+  const app = await createLocalApp({
+    registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
+    machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
+    resolveRepositoryCredential: async () => {
+      const access = await resolveGithubAccess({ companyId: config.companyId ?? IMPLICIT_COMPANY_ID, keyFile: githubKeys, environment: options.environment });
+      if (access === undefined) throw new Error("no GitHub access is set up: run `gh auth login`, set GH_TOKEN, or put a github token in keys.json");
+      return { token: access.token.reveal() };
+    },
+    ...(options.timers === undefined ? {} : { timers: options.timers }),
+  });
+
   const workspaces = new InMemoryRegistry();
   const brokerHandler = createBrokerHandler({
     authenticator: {
@@ -232,21 +287,32 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   const handler = async (request: BrokerRequest): Promise<BrokerResponse> => {
     const path = request.path.split("?")[0];
     if (request.method === "GET" && path === "/healthz") return json(200, { status: "ok", version: options.version });
+    if (request.method === "GET" && path === "/v1/auth/.well-known/agentx-configuration") return configurationAnswer(options.version);
+    const bearer = request.headers.authorization;
+    const authenticated = bearer?.startsWith("Bearer ") === true
+      ? await identity.authenticate({ scheme: "local-session", value: bearer.slice(7), remoteAddress: "127.0.0.1" })
+      : ({ ok: false } as const);
     if (request.method === "GET" && path === "/v1/local/status") {
-      const bearer = request.headers.authorization;
-      const result = bearer?.startsWith("Bearer ") === true
-        ? await identity.authenticate({ scheme: "local-session", value: bearer.slice(7), remoteAddress: "127.0.0.1" })
-        : ({ ok: false } as const);
-      if (!result.ok) return json(401, { error: { code: "AUTH_REQUIRED", message: "the local session token is required" } });
-      return json(200, { version: options.version, company: result.principal.companyId, owner: result.principal.displayName, wiring: wiring() });
+      if (!authenticated.ok) return json(401, { error: { code: "AUTH_REQUIRED", message: "the local session token is required" } });
+      return json(200, { version: options.version, company: authenticated.principal.companyId, owner: authenticated.principal.displayName, wiring: wiring(), pages: app.pages.origin });
+    }
+    if (authenticated.ok) {
+      const answer = await app.routes(request, { principal: authenticated.principal, client: clientOf(request) });
+      if (answer !== undefined) return answer;
+    } else if (path?.startsWith("/v1/dev/") === true || path?.startsWith("/v1/local/") === true) {
+      return json(401, { error: { code: "AUTH_REQUIRED", message: "the local session token is required" } });
     }
     return brokerHandler(request);
   };
+  // A worker's callbacks never reach the owner's routes; they have the listener of their own (callback-server.ts) and these handlers only.
+  const callbackHandler = (request: BrokerRequest): Promise<BrokerResponse> => app.callbacks(request);
 
   const server: LocalHttpServer = await startLocalHttpServer({ handler, ...(options.port === undefined ? {} : { port: options.port }) });
   // Workers call back on a listener of their own, not on the owner's server (callback-server.ts).
-  callbackServer.current = await startCallbackServer({ handler, stateDirectory }).catch(async (error: unknown) => {
+  callbackServer.current = await startCallbackServer({ handler: callbackHandler, stateDirectory }).catch(async (error: unknown) => {
     await server.close();
+    await app.stop();
+    for (const close of closers) await close();
     throw error;
   });
 
@@ -259,13 +325,18 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
     configPath: location.path,
     sessionTokenPath,
     pageSessions,
+    pagesUrl: app.pages.origin,
+    app,
+    tick: () => app.tick(),
     wiring,
     async stop() {
       if (stopped) return;
       stopped = true;
       await server.close();
       await callbackServer.current?.close();
+      await app.stop();
       if (options.stopWorkersOnClose !== false) await docker.stopAll().catch(() => 0);
+      for (const close of closers) await close();
     },
   };
 }

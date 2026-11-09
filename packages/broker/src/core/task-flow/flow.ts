@@ -65,6 +65,8 @@ export function createTaskFlow(deps: TaskFlowDeps): TaskFlow {
 export type RegistryTaskFlowOptions = Omit<TaskFlowDeps, "store" | "queues" | "outbox" | "machines" | "admission" | "audit" | "access" | "companyId" | "codeHosts"> & {
   companyId?: OrgId;
   access?: TaskFlowDeps["access"];
+  /** The `worker-machines` adapter to use when several are registered (the point holds many). Absent: the only one. */
+  machinesName?: string;
 };
 
 /**
@@ -72,15 +74,16 @@ export type RegistryTaskFlowOptions = Omit<TaskFlowDeps, "store" | "queues" | "o
  * it registered. The outbox is built over the store and the queues. A registry that lacks one of the points throws, naming it.
  */
 export function createTaskFlowFromRegistry(registry: AdapterRegistry | RegistryView, options: RegistryTaskFlowOptions): TaskFlow {
+  const { machinesName, ...rest } = options;
   const store = registry.require("storage");
   const queues = registry.require("queue");
   return createTaskFlow({
-    ...options,
+    ...rest,
     companyId: options.companyId ?? IMPLICIT_COMPANY_ID,
     store,
     queues,
     outbox: createTransactionalOutbox({ store, queues, ...(options.now === undefined ? {} : { now: options.now }) }),
-    machines: registry.require("worker-machines"),
+    machines: registry.require("worker-machines", machinesName),
     admission: registry.require("admission"),
     audit: registry.require("audit-sink"),
     access: options.access ?? createOwnerTaskAccess(),

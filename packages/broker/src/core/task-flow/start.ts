@@ -117,6 +117,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
   const title = redactedTitle(request);
   const ownerKey = taskOwnerKey(developerId, taskId);
   const requestText = storedRequestText(request.instructions);
+  const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt });
 
   const workspace: WorkspaceRecord = {
     ...workspaceKey(workspaceId), sk: "META", entityType: "WORKSPACE", id: workspaceId, companyId: deps.companyId, orgId: deps.companyId, ownerKey,
@@ -135,6 +136,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     // A workflow task quotes the request in each plan's "why".
     ...(asWorkflow ? { requestText } : {}),
     createdAt: receivedAt, updatedAt: receivedAt,
+    ...(extras?.sessionId === undefined ? {} : { sessionId: extras.sessionId }),
     ...(asWorkflow ? { workflow: createWorkflowSnapshot({
       taskId, ownerId: ownerKey, now: receivedAt, path: workflowPath, checkPolicy: taskWorkflowCheckPolicy(project.definition),
       // A 1.1.0 workflow alone may hold the Understand stage: it starts at UNDERSTAND/READY, and says whether the request or Understand chose the path.
@@ -162,6 +164,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     { kind: "put", item: { ...idempotencyKey, entityType: "IDEMPOTENCY", taskId, payloadHash }, condition: when.absent() },
     // A task that understands first starts by understanding the request, as a dispatch row like every automatic step; it runs once the preparation has ended.
     ...(understandFirst ? [dispatchRowItem(deps, taskId, 1, "UNDERSTAND", receivedAt)] : []),
+    ...(extras?.items ?? []),
   ];
   const idempotencyIndex = (items: readonly TransactItem[]): number => items.findIndex((item) => item.kind === "put" && item.item.pk === idempotencyKey.pk && item.item.sk === idempotencyKey.sk);
 

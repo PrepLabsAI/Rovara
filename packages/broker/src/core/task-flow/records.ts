@@ -16,6 +16,8 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
   companyId: string;
   /** The admission reservation the start took; whoever closes the task gives it back. */
   admissionReservationId?: string;
+  /** The task's session (lane L6b), created in the same transaction as the task when the install wires sessions. */
+  sessionId?: string;
 };
 
 /** Cloud's `WORKSPACE#<id>/DEVELOPER_TASK` pointer: how a worker callback finds the task. The requester names the identity adapter, not a closed sign-in list. */
