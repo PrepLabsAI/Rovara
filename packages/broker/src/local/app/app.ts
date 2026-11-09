@@ -19,7 +19,6 @@ import { createDecisionActions } from "../../core/decisions/local-actions.js";
 import { createWorkflowDocumentSubject, currentDocumentType } from "../../core/decisions/workflow-subject.js";
 import type { LocalPageSessions } from "../../core/local-pages/guard.js";
 import { createLocalPagesServer, type LocalPagesServer } from "../../core/local-pages/server.js";
-import { createDocumentEvidenceBlobStore, type EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
 import { gradePlanRisk } from "../../core/decisions/plan-risk.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
@@ -45,7 +44,6 @@ import { RepositoryGrantService, type RepositoryCredential } from "../../reposit
 import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
 import { createCallbackHandler } from "./callbacks.js";
-import { withCodeHostPush } from "./push-credential.js";
 import { createTaskFactsSource } from "./facts.js";
 import { createLocalPageData, createPageExtraActions } from "./page-data.js";
 import { createOwnerRoutes } from "./routes.js";
@@ -127,10 +125,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const rootKey = await loadCallbackKey(options.stateDirectory);
   // Two kinds of token, two keys: a repository grant is not good as a callback capability, nor the other way round (the signature fails first, so a mix-up is a 403).
   const signingKey = deriveKey(rootKey, "callback-capability");
-  // A clone is the owner's token by the rules of the runtime; a push comes from the code-host adapter registered for the repository, never from the owner's token (review H1).
-  const grants = new RepositoryGrantService(deriveKey(rootKey, "repository-grant"), withCodeHostPush({
-    registry, companyId, clone: options.resolveRepositoryCredential ?? (async () => { throw new Error("no GitHub access is set up: run `gh auth login` or set GH_TOKEN"); }),
-  }));
+  const grants = new RepositoryGrantService(deriveKey(rootKey, "repository-grant"), options.resolveRepositoryCredential ?? (async () => { throw new Error("no GitHub access is set up: run `gh auth login` or set GH_TOKEN"); }));
 
   // The model a task step calls: the owner's choice, else the first provider (Anthropic, then OpenAI) that has a key. No key: no route, and the worker has no model access.
   const keys = registry.require("model-keys");

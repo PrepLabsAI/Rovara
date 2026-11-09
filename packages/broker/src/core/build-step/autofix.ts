@@ -13,7 +13,8 @@ import {
 import { AutoFixAskSchema, autoFixRetryReason, autoFixSendBackReason } from "../../developer/autofix-messages.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { dispatchRowItem, resolveRowItem } from "../task-flow/dispatch-rows.js";
-import { taskKey } from "../task-flow/keys.js";
+import { dispatchRowKey, taskKey } from "../task-flow/keys.js";
+import { fromDocument, type DispatchRowRecord } from "../task-flow/records.js";
 import { readTask } from "../task-flow/reads.js";
 import { commitWorkflow, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
@@ -53,7 +54,9 @@ export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; work
   let spent: number | undefined;
   try { spent = deps.taskSpendUsd === undefined ? 0 : (await deps.taskSpendUsd(task.taskId)) ?? 0; } catch { spent = undefined; }
   const spend: WorkflowAutoSpend = { spentUsd: wholeTaskSpendUsd(spent ?? Number.NaN), roundEstimateUsd: config.roundEstimateUsd ?? AUTOFIX_ROUND_ESTIMATE_USD, capUsd: config.capUsd ?? AUTO_FIX_DEFAULT_CAP_USD };
-  const facts: AutoFixFacts = {};
+  // How the block came about when no finished run wrote it (the row says so): a lost run is the infrastructure's, one automatic retry, never a send back to coding.
+  const row_ = fromDocument<DispatchRowRecord>(await deps.store.get(dispatchRowKey(deps.companyId, row.taskId, row.workflowRevision)));
+  const facts: AutoFixFacts = row_?.cause === undefined ? {} : { blockCause: row_.cause };
   const first = autoFixDecision(workflow, facts, { enabled: true, spend, dayBudgetHasRoom: true, baselineRequests: 1 });
   // There is no original-code round in Code, so an unclear fault is the owner's to settle.
   const decision: AutoFixDecision = first.action === "WAIT_FOR_BASELINE" || first.action === "REQUEST_BASELINE" ? { action: "ASK", reason: "unclear-fault", codes: first.codes } : first;

@@ -138,6 +138,8 @@ export interface DispatchRowRecord {
   dispatchDueSk: string;
   indexExpiresAt: number;
   lastError?: string;
+  /** An AUTOFIX row: how the block it looks at came about when no finished run wrote it (the run was lost, or its start was tried until the budget ran out). */
+  cause?: "run-lost" | "dispatch-exhausted";
 }
 
 /** A record as the store keeps it: plain JSON, with undefined fields dropped. */

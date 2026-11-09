@@ -1,6 +1,7 @@
 // Lane L10, the build step: starting the steps after the plan is approved. Each start reads the task fresh, answers STALE when the task is no longer where the dispatch row left it, and
 // accepts the operation in one transaction with the workflow change that makes it RUNNING (the stage machine's `acceptStep`). The request id of each is made from the task, the revision and
 // the candidate, so a recovered or repeated row is the first one's duplicate.
+import { createHash } from "node:crypto";
 import {
   abandonWorkflowFix, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
   type JsonValue, type ProjectDefinition, type WorkflowReviewChecks, type WorkflowSnapshot,
@@ -20,6 +21,12 @@ import {
   AUTOMATIC_REVIEW_NOTE, AUTOMATIC_REVIEW_ONLY_NOTE, NO_PUBLISH_NOTE, implementPrompt, ownerConstraintsSection, promptTagId, reviewCheckCommand, reviewPrompt, selectedCheckCommands,
   sendBackPrompt, sendBackProblemsPromptSection,
 } from "./prompts.js";
+
+/** A UUID made from text (the workflow's retry record wants one): the same text always gives the same one, so a repeated retry is recognised. */
+export function uuidFrom(text: string): string {
+  const hex = createHash("sha256").update(`agentx-retry\0${text}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((parseInt(hex[16] ?? "0", 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 
 export interface RowRef { taskId: string; workflowRevision: number }
 
@@ -161,7 +168,7 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
   void _blockReason;
   const next: WorkflowSnapshot = {
     ...unblocked, revision: workflow.revision + 1, stage: "VERIFY", state: "RUNNING", ...workflowVerificationPosition(workflow),
-    verificationRetries: [...(workflow.verificationRetries ?? []), { requestId: retry.requestId, actorId: retry.actorId, selectedOptionalCheckIds: [...policy.selectedOptionalIds], selectedProposedCheckIds: policy.selectedProposedIds ?? policy.proposed.map((check) => check.id), at: receivedAt }],
+    verificationRetries: [...(workflow.verificationRetries ?? []), { requestId: uuidFrom(retry.requestId), actorId: retry.actorId, selectedOptionalCheckIds: [...policy.selectedOptionalIds], selectedProposedCheckIds: policy.selectedProposedIds ?? policy.proposed.map((check) => check.id), at: receivedAt }],
     ...(retry.automaticDecision === undefined ? {} : { decisions: [...workflow.decisions, retry.automaticDecision] }),
     updatedAt: receivedAt,
   };

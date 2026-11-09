@@ -12,6 +12,7 @@ import {
 } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
+import { DISPATCH_EXHAUSTED_ERROR } from "../task-flow/dispatch.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import type { StepOutcome } from "../task-flow/outcome.js";
 import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
@@ -33,18 +34,24 @@ export function runEndedReason(mode: "IMPLEMENT" | "CHECKS" | "REVIEW", status: 
 export const CHECKED_OTHER_CODE_REASON = "The checks ran on other code than the code on the pull request. Send the task back to coding, or close it.";
 
 /** A blocked VERIFY or REVIEW is looked at by Rovara's own fixing right away (a row, committed with the block); anything else is for the owner. */
-export function autofixRowFor(deps: TaskFlowDeps, taskId: string, next: WorkflowSnapshot, now: string): TransactItem[] {
-  return next.state === "BLOCKED" && (next.stage === "VERIFY" || next.stage === "REVIEW") ? [dispatchRowItem(deps, taskId, next.revision, "AUTOFIX", now)] : [];
+export function autofixRowFor(deps: TaskFlowDeps, taskId: string, next: WorkflowSnapshot, now: string, cause?: "run-lost" | "dispatch-exhausted"): TransactItem[] {
+  return next.state === "BLOCKED" && (next.stage === "VERIFY" || next.stage === "REVIEW") ? [dispatchRowItem(deps, taskId, next.revision, "AUTOFIX", now, now, cause)] : [];
+}
+
+/** How a run that did not finish came to end, for Rovara's own fixing: a lost run, or a start tried until its budget ran out, is the infrastructure's (one automatic retry), never the code's. */
+export function causeOfEnd(ended: Ended): "run-lost" | "dispatch-exhausted" | undefined {
+  if (ended.error === DISPATCH_EXHAUSTED_ERROR) return "dispatch-exhausted";
+  return ended.status === "INTERRUPTED" ? "run-lost" : undefined;
 }
 
 /**
  * Commits the workflow `next` with the row of the step that follows it, then starts that step now (the row is also found by the sweep if this process dies first). A task that moved on while
  * the result was read changes nothing.
  */
-export async function commitAndContinue(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, now: string): Promise<void> {
+export async function commitAndContinue(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, now: string, cause?: "run-lost" | "dispatch-exhausted"): Promise<void> {
   const following = next.stage === "REVIEW" && next.state === "WAITING" ? [dispatchRowItem(deps, task.taskId, next.revision, "REVIEW", now)]
     : next.stage === "PULL_REQUEST" && next.state === "READY" ? [dispatchRowItem(deps, task.taskId, next.revision, "PUBLISH", now)]
-    : autofixRowFor(deps, task.taskId, next, now);
+    : autofixRowFor(deps, task.taskId, next, now, cause);
   const committed = await commitWorkflow(deps, task, next, following);
   const row = following[0];
   if (!committed || row === undefined || row.kind !== "put") return;
@@ -93,7 +100,7 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
   if (ended.status !== "SUCCEEDED") {
     // A coding run that left the code as it was reports what it found (redacted and bounded again here); it is kept only with that stop.
     const reason = blockReasonOfFailedRun(mode, ended);
-    await commitAndContinue(deps, task, blockWorkflow(workflow, reason, now, { noChangeFindings: noChangeFindingsFrom(reported["noChangeFindings"]) }), now);
+    await commitAndContinue(deps, task, blockWorkflow(workflow, reason, now, { noChangeFindings: noChangeFindingsFrom(reported["noChangeFindings"]) }), now, causeOfEnd(ended));
     return;
   }
 
@@ -191,7 +198,7 @@ export async function recordReviewed(deps: TaskFlowDeps, task: TaskRecord, opera
     const reason = ended.error?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.ruleFilesUnverified
       : ended.error?.includes(WORKFLOW_LEFTOVER_PROCESSES_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.leftoverProcesses
       : runEndedReason("REVIEW", ended.status);
-    await commitAndContinue(deps, task, blockWorkflow(workflow, reason, now), now);
+    await commitAndContinue(deps, task, blockWorkflow(workflow, reason, now), now, causeOfEnd(ended));
     return;
   }
   const reported = recordOf(ended.outcome?.kind === "reviewed" ? ended.outcome.result : undefined);

@@ -33,6 +33,8 @@ import type { OperationRecord, WorkspaceRecord } from "./records.js";
 const CAPABILITY_SECONDS = 32_400;
 /** After this many deliveries of one message the operation is given up on: the machine never became usable. */
 export const DISPATCH_ATTEMPTS_MAX = 20;
+/** The reason a run is ended with when its machine never became usable (merge of "the start was tried until its budget ran out"). */
+export const DISPATCH_EXHAUSTED_ERROR = "the worker machine did not become ready in time";
 const BASE_ACCESS_ACTIONS = ["artifacts", "events", "result"] as const;
 
 export interface DispatchReport {
@@ -109,7 +111,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     // The workspace has moved on (closed, or taken by a newer hold): this job is no longer wanted.
     return endAndAck("INTERRUPTED", "the workspace no longer waits for this job");
   }
-  if (message.receiveCount > DISPATCH_ATTEMPTS_MAX) return endAndAck("FAILED", "the worker machine did not become ready in time");
+  if (message.receiveCount > DISPATCH_ATTEMPTS_MAX) return endAndAck("FAILED", DISPATCH_EXHAUSTED_ERROR);
 
   let reservationId: string | undefined;
   // A machine that does not exist yet is new spend: ask admission once for it (each machine of the workspace has its own key), before it starts.

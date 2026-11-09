@@ -5,7 +5,7 @@ import { request as httpRequest } from "node:http";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AdapterRegistry, AuditEvent, AuditSink, OrgId } from "@agentx/contracts";
+import type { AdapterRegistry, AuditEvent, AuditSink } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES,
   change, createCandidateManifest, projectMetaKey, startWorkflowBranchSync, startWorkflowFix, when, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
@@ -29,6 +29,7 @@ import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/br
 import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
+import { runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
@@ -72,7 +73,7 @@ const classicToken = (seed: string): string => ["gh", "p_"].join("") + seed.repe
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 const BASE_COMMIT = "b".repeat(40);
 
-async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean } = {}) {
+async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[]; host?: boolean; model?: FakeHostModel; readiness?: boolean } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -80,16 +81,24 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
   const machines = new FakeWorkerMachines({ startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] });
   // A fake code host that holds the repository (lane L10): the build step reads the pushed branch and opens the pull request through its port.
   const hostedUrl = "https://github.com/example/demo.git";
-  const model = new FakeHostModel({ url: hostedUrl, id: "1", fullName: "example/demo" });
+  const model = extra.model ?? new FakeHostModel({ url: hostedUrl, id: "1", fullName: "example/demo" });
+  const fakeHost = Object.defineProperty(new FakeCodeHost(model), "kind", { value: "github" });
   // A project cannot yet name another code host at registration (51 gap: the project contract refuses `repositories[].host`), so a repository is on the code host registered as `github`; the
   // test's host is the fake one under that name.
-  const project = extra.host === true ? { ...PROJECT, repositories: [{ ...PROJECT.repositories[0]!, url: hostedUrl }] } : PROJECT;
+  const readiness = extra.readiness === true ? [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }] : [];
+  const project = extra.host === true ? { ...PROJECT, readiness, repositories: [{ ...PROJECT.repositories[0]!, url: hostedUrl }] } : PROJECT;
   const base = extra.host === true ? model.headOf("main") : BASE_COMMIT;
   /** The addresses the server asked the browser to open: the only place a page address goes. */
   const opened: string[] = [];
   const registerAdapters = (registry: AdapterRegistry): void => {
     if (extra.audit !== undefined) registry.register("audit-sink", "recording", recordingAudit(extra.audit));
-    if (extra.host === true) registry.register("code-host", "github", Object.defineProperty(new FakeCodeHost(model), "kind", { value: "github" }));
+    if (extra.host === true) {
+      const host = fakeHost;
+      // The fake's clock is its own (2026-10-30); a credential the worker is sent must expire in the real future.
+      const issue = host.issueGitCredential.bind(host);
+      host.issueGitCredential = async (repository, access, scope) => ({ ...(await issue(repository, access, scope)), expiresAt: new Date(Date.now() + 50 * 60_000).toISOString() });
+      registry.register("code-host", "github", host);
+    }
   };
   const runtime: LocalRuntime = await startLocalRuntime({
     stateDirectory, cwd: join(root, "project"), environment: extra.environment ?? {}, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false,
@@ -152,7 +161,7 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
     }
     throw new Error("the flow did not hand a job to the worker");
   };
-  return { root, stateDirectory, runtime, machines, token, api, bodies, opened, browse, callback, nextJob, model, project, base };
+  return { root, stateDirectory, runtime, machines, token, api, bodies, opened, browse, callback, nextJob, model, project, base, host: fakeHost };
 }
 
 /** Registers the project, starts a task and answers its preparation, Understand and Plan, so it waits for the owner's approval. */
@@ -464,7 +473,7 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect((await h.exchange("clone")).statusCode).toBe(200);
     const before = h.github.calls.length;
     // The project is archived: its repository is no longer a registered one, whatever the token can see and whatever the worker's grant still names.
-    await h.runtime.registry.require("storage").put({ item: { ...projectMetaKey(IMPLICIT_COMPANY_ID as OrgId, "ghproject"), entityType: "PROJECT_META", status: "archived" } });
+    await h.runtime.registry.require("storage").put({ item: { ...projectMetaKey(IMPLICIT_COMPANY_ID, "ghproject"), entityType: "PROJECT_META", status: "archived" } });
     const stopped = await h.exchange("clone");
     expect(stopped.statusCode).toBe(403);
     expect(stopped.body).not.toContain(token);
@@ -1003,26 +1012,407 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     expect(after.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ headSha: fixCommit, headTreeSha: fixTree }] });
   });
 
-  it("merges the base branch into the pull request's branch when merge tracking asks, and records the merge the host shows", async () => {
+
+  // ---- the opus review's fixes (lane L10 round 1)
+  type Harness = Awaited<ReturnType<typeof launch>>;
+  const PR_RECORD = (workspaceId: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: "PULL_REQUEST#demo#0000000001" });
+  const recordHead = async (h: Harness, workspaceId: string) => (await h.runtime.registry.require("storage").get(PR_RECORD(workspaceId)))?.["expectedHeadCommit"];
+  /** The worker exchanges its repository grant for a credential, as its helper does. */
+  const exchange = (h: Harness, job: WorkerInvocation, access: "clone" | "push", url = h.project.repositories[0]!.url) => h.runtime.app.callbacks({
+    method: "POST", path: `/v1/internal/workspaces/${job.workspaceId}/operations/${job.operationId}/repository-credentials`,
+    headers: { "x-agentx-repository-grant": (job.payload as { repositoryGrant: string }).repositoryGrant }, body: JSON.stringify({ credentialRef: "host-app", repositoryUrl: url, access }),
+  });
+
+  /** A CI fix reviewed and ready to be pushed: the maintain job is in hand. */
+  async function toAppend(h: Harness) {
+    const waiting = await toWaitForMerge(h);
+    const now = new Date().toISOString();
+    await commitRound(h, waiting.taskId, (workflow) => startWorkflowFix(workflow, { source: "ci", problems: ["unit-tests"], now }), "IMPLEMENT", (after) => [
+      ciEvidenceItem({ orgId: IMPLICIT_COMPANY_ID, taskId: waiting.taskId, revision: after.revision, block: ciOutputBlock([{ name: "unit-tests", conclusion: "failure", log: "1 failing" }]), now: Date.now() }),
+    ]);
+    const fix = await h.nextJob(waiting.workspaceId, waiting.seen);
+    h.model.branches.set("fix", waiting.commit);
+    const fixCommit = h.model.commit("fix", { "src/health.ts": "export const health = 200; // CI fixed\n" });
+    const fixTree = h.model.revision(fixCommit).tree;
+    await h.callback(fix, "result", builtResult(fixTree, h.base, fixCommit));
+    const review = await h.nextJob(waiting.workspaceId, waiting.seen);
+    await h.callback(review, "result", reviewsOf(review, fixTree, "pass", h.base, fixCommit));
+    const update = await h.nextJob(waiting.workspaceId, waiting.seen);
+    const call = { repository: "demo", pullRequestNumber: 1, action: "append", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: waiting.commit, commit: fixCommit };
+    const lifecycle = (commit: string, treeSha: string, action = "append") => ({ action, repository: "demo", number: 1, url: h.model.crUrl("1"), state: "open", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: waiting.commit, commit, treeSha, checks: [], reconciled: false });
+    return { ...waiting, update, fixCommit, fixTree, call, lifecycle };
+  }
+
+  /** The base moved on and merge tracking asked for a merge: the maintain job is in hand. */
+  async function toSync(h: Harness) {
+    const waiting = await toWaitForMerge(h);
+    const newBase = h.model.commit("main", { "README.md": "# demo, moved on\n" });
+    await commitRound(h, waiting.taskId, (workflow) => startWorkflowBranchSync(workflow, { repositoryId: "demo", number: 1, reason: "behind", now: new Date().toISOString() }), "SYNC");
+    const sync = await h.nextJob(waiting.workspaceId, waiting.seen);
+    /** The worker's merge commit on the host's branch: the given parents, and a tree. */
+    const merge = (sha: string, tree: string, parents: string[]) => { h.model.revisions.set(sha, { sha, tree, parents, files: new Map() }); h.model.branches.set(waiting.headBranch, sha); return sha; };
+    const call = (commit: string) => ({ repository: "demo", pullRequestNumber: 1, action: "sync", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: waiting.commit, commit });
+    const lifecycle = (commit: string, treeSha: string) => ({ action: "sync", repository: "demo", number: 1, url: h.model.crUrl("1"), state: "open", headBranch: waiting.headBranch, baseBranch: "main", previousCommit: waiting.commit, commit, treeSha, checks: [], reconciled: false });
+    return { ...waiting, newBase, sync, merge, call, lifecycle };
+  }
+
+  it("gives a worker a push credential only from the code host, for a publication and for a push to an open pull request, and never after the operation ended or for a clone grant", async () => {
     const h = await launch({ host: true });
-    const { taskId, workspaceId, seen, headBranch, commit } = await toWaitForMerge(h);
-    const base = h.model.commit("main", { "README.md": "# demo, moved on\n" });
-    await commitRound(h, taskId, (workflow) => startWorkflowBranchSync(workflow, { repositoryId: "demo", number: 1, reason: "behind", now: new Date().toISOString() }), "SYNC");
-    const sync = await h.nextJob(workspaceId, seen);
-    expect(sync).toMatchObject({ kind: "maintain", payload: { action: "sync", pullRequestNumber: 1, expectedHeadCommit: commit, workflowSync: { baseCommit: base, expectedHeadCommit: commit } } });
-    // The worker's merge commit: the recorded head first, the base commit second.
-    const merge = "8".repeat(40);
-    const mergeTree = "9".repeat(40);
-    h.model.revisions.set(merge, { sha: merge, tree: mergeTree, parents: [commit, base], files: new Map() });
-    h.model.branches.set(headBranch, merge);
-    expect((await h.callback(sync, "pull-request-update", { repository: "demo", pullRequestNumber: 1, action: "sync", headBranch, baseBranch: "main", previousCommit: commit, commit: merge })).status).toBe(200);
-    const result = { action: "sync", repository: "demo", number: 1, url: h.model.crUrl("1"), state: "open", headBranch, baseBranch: "main", previousCommit: commit, commit: merge, treeSha: mergeTree, checks: [], reconciled: false };
-    expect((await h.callback(sync, "result", { status: "SUCCEEDED", result })).status).toBe(200);
-    const after = await taskRecord(h, taskId) as unknown as { workflow: { stage: string; state: string; branchSync?: unknown; pullRequests: Array<{ headSha: string }> } };
-    expect(after.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", pullRequests: [{ headSha: merge }] });
-    expect(after.workflow.branchSync).toBeUndefined();
+    const { workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    await h.callback(coding, "result", builtResult(tree, h.base, commit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const publish = await h.nextJob(workspaceId, seen);
+    // The host's own credential (the fake gives a token whose text says it is for a push), for the one repository the grant names.
+    const given = await exchange(h, publish, "push");
+    expect(given.statusCode).toBe(200);
+    expect(JSON.parse(given.body)).toEqual({ credential: { token: "fake-push-token-not-a-real-secret" } });
+    expect((await exchange(h, publish, "clone")).statusCode).toBe(403);
+    expect((await exchange(h, publish, "push", "https://github.com/example/other.git")).statusCode).toBe(403);
+    const headBranch = (publish.payload as { headBranch: string }).headBranch;
+    h.model.branches.set(headBranch, commit);
+    const payload = publish.payload as Record<string, unknown>;
+    await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+    await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: 1, url: h.model.crUrl("1"), headBranch, baseBranch: "main", commit, checks: [], reconciled: false, draft: true } });
+    expect((await exchange(h, publish, "push")).statusCode).toBe(403);
+
+    // The push of a fix to the open pull request asks the same way.
+    const now = new Date().toISOString();
+    const taskId = (await h.api("/v1/dev/tasks")).body.tasks[0]!.taskId;
+    await commitRound(h, taskId, (workflow) => startWorkflowFix(workflow, { source: "ci", problems: ["unit-tests"], now }), "IMPLEMENT", (after) => [
+      ciEvidenceItem({ orgId: IMPLICIT_COMPANY_ID, taskId, revision: after.revision, block: ciOutputBlock([{ name: "unit-tests", conclusion: "failure" }]), now: Date.now() }),
+    ]);
+    const fix = await h.nextJob(workspaceId, seen);
+    h.model.branches.set("fix", commit);
+    const fixCommit = h.model.commit("fix", { "src/health.ts": "export const health = 200; // fixed\n" });
+    const fixTree = h.model.revision(fixCommit).tree;
+    await h.callback(fix, "result", builtResult(fixTree, h.base, fixCommit));
+    const second = await h.nextJob(workspaceId, seen);
+    await h.callback(second, "result", reviewsOf(second, fixTree, "pass", h.base, fixCommit));
+    const update = await h.nextJob(workspaceId, seen);
+    expect(update.kind).toBe("maintain");
+    expect(JSON.parse((await exchange(h, update, "push")).body)).toEqual({ credential: { token: "fake-push-token-not-a-real-secret" } });
+  });
+
+  it("answers no callback of an operation that has ended: a late pull request after an interrupted publication and a Retry opens no second draft", async () => {
+    const h = await launch({ host: true });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    await h.callback(coding, "result", builtResult(tree, h.base, commit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const first = await h.nextJob(workspaceId, seen);
+    const payload = first.payload as Record<string, unknown>;
+    const branch = String(payload["headBranch"]);
+    h.model.branches.set(branch, commit);
+    // The publication is lost after the push: it ends INTERRUPTED, the task stops, and the owner retries.
+    await h.callback(first, "result", { status: "FAILED", error: "the machine was lost" });
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "PULL_REQUEST", state: "BLOCKED" });
+    expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "efefefef-efef-4fef-8fef-efefefefefef" } })).status).toBe(200);
+    const second = await h.nextJob(workspaceId, seen);
+    expect(second.kind).toBe("publish");
+    // The first operation's capability is still good for 9 hours, but it has ended.
+    const ask = { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] };
+    // (The retry took the workspace again, so the old fence refuses it; the next operation's own check is below.)
+    expect([403, 409]).toContain((await h.callback(first, "pull-request", ask)).status);
+    expect(h.model.changeRequests).toHaveLength(0);
+    // Without a Retry the ended operation is refused for having ended: every action but the result.
+    const alone = await launch({ host: true });
+    const t = await toCoding(alone);
+    const c2 = alone.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree2 = alone.model.revision(c2).tree;
+    await alone.callback(t.coding, "result", builtResult(tree2, alone.base, c2));
+    expect((await alone.callback(t.coding, "candidate-export", { stage: "finalize" })).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    const review2 = await alone.nextJob(t.workspaceId, t.seen);
+    await alone.callback(review2, "result", reviewsOf(review2, tree2, "pass", alone.base, c2));
+    const publish2 = await alone.nextJob(t.workspaceId, t.seen);
+    const p2 = publish2.payload as Record<string, unknown>;
+    alone.model.branches.set(String(p2["headBranch"]), c2);
+    await alone.callback(publish2, "result", { status: "FAILED", error: "the machine was lost" });
+    const refused = await alone.callback(publish2, "pull-request", { repository: "demo", repositoryUrl: alone.project.repositories[0]!.url, headBranch: p2["headBranch"], baseBranch: "main", commit: c2, title: p2["title"], body: p2["body"] });
+    expect(refused.body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(alone.model.changeRequests).toHaveLength(0);
+  });
+
+  it("closes the draft an interrupted publication left, and writes an audit event for the one it opens", async () => {
+    const events: AuditEvent[] = [];
+    const h = await launch({ host: true, audit: events });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    await h.callback(coding, "result", builtResult(tree, h.base, commit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const first = await h.nextJob(workspaceId, seen);
+    const payload = first.payload as Record<string, unknown>;
+    const branch = String(payload["headBranch"]);
+    h.model.branches.set(branch, commit);
+    await h.callback(first, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+    expect(events.filter((event) => event.action === "pull_request.opened")).toHaveLength(1);
+    // The result is lost: the draft is open on the host and nothing tracks it.
+    await h.callback(first, "result", { status: "FAILED", error: "the machine was lost" });
+    expect(h.model.getChangeRequest("1").state).toBe("open");
+    await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "efefefef-efef-4fef-8fef-efefefefefef" } });
+    expect(h.model.getChangeRequest("1").state).toBe("closed");
+    const second = await h.nextJob(workspaceId, seen);
+    const branch2 = String((second.payload as { headBranch: string }).headBranch);
+    h.model.branches.set(branch2, commit);
+    expect((await h.callback(second, "pull-request", { ...{ repository: "demo", repositoryUrl: h.project.repositories[0]!.url, baseBranch: "main", commit, title: payload["title"], body: payload["body"] }, headBranch: branch2 })).body).toMatchObject({ number: 2 });
+  });
+
+  it("judges the opened draft's head as the first read shows it, and does not wait for a branch put back", async () => {
+    const h = await launch({ host: true });
+    const { workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    const other = h.model.commit("elsewhere", { "src/health.ts": "export const health = 500;\n" });
+    await h.callback(coding, "result", builtResult(tree, h.base, commit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const publish = await h.nextJob(workspaceId, seen);
+    const payload = publish.payload as Record<string, unknown>;
+    const branch = String(payload["headBranch"]);
+    h.model.branches.set(branch, commit);
+    // The branch moves between the check and the read of the opened draft, and is put back after it.
+    const read = h.host.getChangeRequest.bind(h.host);
+    h.host.getChangeRequest = async (ref, scope) => { h.model.branches.set(branch, other); const details = await read(ref, scope); h.model.branches.set(branch, commit); return details; };
+    const denied = await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+    expect(denied.body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(h.model.getChangeRequest("1").state).toBe("closed");
+  });
+
+  it("does not record a result that names another pull request or another commit than the one the callback opened", async () => {
+    const h = await launch({ host: true });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    await h.callback(coding, "result", builtResult(tree, h.base, commit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const publish = await h.nextJob(workspaceId, seen);
+    const payload = publish.payload as Record<string, unknown>;
+    const branch = String(payload["headBranch"]);
+    h.model.branches.set(branch, commit);
+    await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+    await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: 7, url: h.model.crUrl("7"), headBranch: branch, baseBranch: "main", commit, checks: [], reconciled: false } });
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "PULL_REQUEST", state: "BLOCKED" });
+  });
+
+  it("refuses an update whose tree is not the reviewed one or whose parents are not the recorded head, and keeps the pull request's record on the head it had", async () => {
+    const h = await launch({ host: true });
+    const t = await toAppend(h);
+    // A commit on the right parent with other code.
+    h.model.branches.set("evil", t.commit);
+    const evil = h.model.commit("evil", { "src/health.ts": "export const health = 500;\n" });
+    h.model.branches.set(t.headBranch, evil);
+    expect((await h.callback(t.update, "pull-request-update", { ...t.call, commit: evil })).body).toMatchObject({ error: { code: "STALE_FENCE" } });
+    expect(await recordHead(h, t.workspaceId)).toBe(t.commit);
+    // The reviewed tree, but not on top of the recorded head.
+    const rootless = h.model.commit("main", { "src/health.ts": "export const health = 200; // CI fixed\n" });
+    h.model.branches.set(t.headBranch, rootless);
+    expect((await h.callback(t.update, "pull-request-update", { ...t.call, commit: rootless })).body).toMatchObject({ error: { code: "STALE_FENCE" } });
+    expect(await recordHead(h, t.workspaceId)).toBe(t.commit);
+  });
+
+  it("rolls the record back when a push the callback took is refused at the end of the operation", async () => {
+    const h = await launch({ host: true });
+    const t = await toAppend(h);
+    h.model.branches.set(t.headBranch, t.fixCommit);
+    expect((await h.callback(t.update, "pull-request-update", t.call)).status).toBe(200);
+    expect(await recordHead(h, t.workspaceId)).toBe(t.fixCommit);
+    // The run then reports a push of other code than the reviewed tree: it is refused, and the push is not recorded as Rovara's.
+    await h.callback(t.update, "result", { status: "SUCCEEDED", result: t.lifecycle(t.fixCommit, "2".repeat(40)) });
+    const after = await taskRecord(h, t.taskId);
+    expect(after.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
+    expect(await recordHead(h, t.workspaceId)).toBe(t.commit);
+  });
+
+  it("lets the owner retry a push that stopped: the fix is due again and is pushed when the head is still the recorded one", async () => {
+    const h = await launch({ host: true });
+    const t = await toAppend(h);
+    await h.callback(t.update, "result", { status: "FAILED", error: "the machine was lost" });
+    expect((await taskRecord(h, t.taskId)).workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
+    expect((await h.api(`/v1/dev/tasks/${t.taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
+    const again = await h.nextJob(t.workspaceId, t.seen);
+    expect(again).toMatchObject({ kind: "maintain", payload: { action: "append", expectedHeadCommit: t.commit, workflowCandidateTreeSha: t.fixTree } });
+  });
+
+  it("does not take a merge of the base on its parents alone: wrong parents are refused, a failed run's merge is not recorded, and a good one is checked and reviewed again before the task waits for the merge", async () => {
+    // Wrong parents: not the recorded head and the base commit.
+    const a = await launch({ host: true });
+    const wrong = await toSync(a);
+    wrong.merge("7".repeat(40), "6".repeat(40), [wrong.commit, "5".repeat(40)]);
+    expect((await a.callback(wrong.sync, "pull-request-update", wrong.call("7".repeat(40)))).body).toMatchObject({ error: { code: "STALE_FENCE" } });
+    expect(await recordHead(a, wrong.workspaceId)).toBe(wrong.commit);
+
+    // A run that failed after pushing a right-looking merge: the merge is not recorded.
+    const b = await launch({ host: true });
+    const failed = await toSync(b);
+    const mergeSha = failed.merge("8".repeat(40), "9".repeat(40), [failed.commit, failed.newBase]);
+    expect((await b.callback(failed.sync, "pull-request-update", failed.call(mergeSha))).status).toBe(200);
+    await b.callback(failed.sync, "result", { status: "FAILED", error: "the readiness checks failed" });
+    const afterFailed = await taskRecord(b, failed.taskId) as unknown as { workflow: { stage: string; branchSync?: unknown; pullRequests: Array<{ headSha: string }> } };
+    expect(afterFailed.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", pullRequests: [{ headSha: failed.commit }] });
+    expect(afterFailed.workflow.branchSync).toBeUndefined();
+    expect(await recordHead(b, failed.workspaceId)).toBe(failed.commit);
+
+    // A good merge: new candidate. The checks run again on it, then the reviews; only then does the task wait for the merge again.
+    const c = await launch({ host: true });
+    const good = await toSync(c);
+    const merged = good.merge("8".repeat(40), "9".repeat(40), [good.commit, good.newBase]);
+    expect((await c.callback(good.sync, "pull-request-update", good.call(merged))).status).toBe(200);
+    expect((await c.callback(good.sync, "result", { status: "SUCCEEDED", result: good.lifecycle(merged, "9".repeat(40)) })).status).toBe(200);
+    const checks = await c.nextJob(good.workspaceId, good.seen);
+    expect(checks).toMatchObject({ kind: "task", payload: { workflowMode: "CHECKS" } });
+    expect((await taskRecord(c, good.taskId)).workflow).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+    await c.callback(checks, "result", builtResult("9".repeat(40), good.newBase, merged));
+    const review = await c.nextJob(good.workspaceId, good.seen);
+    expect((await taskRecord(c, good.taskId)).workflow).toMatchObject({ stage: "REVIEW", state: "RUNNING" });
+    await c.callback(review, "result", reviewsOf(review, "9".repeat(40), "pass", good.newBase, merged));
+    await c.runtime.tick();
+    expect((await taskRecord(c, good.taskId)).workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ headSha: merged }] });
+  });
+
+  it("blocks a merge whose checked code is not the code the host shows (extra changes in the merge)", async () => {
+    const h = await launch({ host: true });
+    const t = await toSync(h);
+    const merged = t.merge("8".repeat(40), "9".repeat(40), [t.commit, t.newBase]);
+    await h.callback(t.sync, "pull-request-update", t.call(merged));
+    await h.callback(t.sync, "result", { status: "SUCCEEDED", result: t.lifecycle(merged, "9".repeat(40)) });
+    const checks = await h.nextJob(t.workspaceId, t.seen);
+    // The workspace the checks ran on holds other code than the merge commit the host shows.
+    await h.callback(checks, "result", builtResult("4".repeat(40), t.newBase, "3".repeat(40)));
+    const blocked = await taskRecord(h, t.taskId);
+    expect(blocked.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    expect(blocked.workflow.blockReason).toContain("other code");
+  });
+
+  it("abandons a CI round when a person pushed to the pull request meanwhile, and starts no coding run", async () => {
+    const h = await launch({ host: true });
+    const w = await toWaitForMerge(h);
+    await commitRound(h, w.taskId, (workflow) => startWorkflowFix(workflow, { source: "ci", problems: ["unit-tests"], now: new Date().toISOString() }), "IMPLEMENT");
+    h.model.commit(w.headBranch, { "README.md": "a person's change\n" });
+    await h.runtime.tick();
+    expect((await taskRecord(h, w.taskId)).workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    const operations = await h.runtime.registry.require("storage").query({ pk: `WORKSPACE#${w.workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    expect(operations.items.filter((item) => item["workflowMode"] === "IMPLEMENT")).toHaveLength(1);
+  });
+
+  it("starts one operation when the same dispatch row is run twice at once", async () => {
+    const h = await launch();
+    const { taskId, workspaceId } = await toCoding(h);
+    const deps = h.runtime.app.flow.deps;
+    const ref = { taskId, workflowRevision: (await taskRecord(h, taskId)).workflow.revision - 1, kind: "IMPLEMENT" as const };
+    const again = await Promise.all([runDispatchRow(deps, ref), runDispatchRow(deps, ref)]);
+    expect(again).not.toContain("STARTED");
+    const operations = await h.runtime.registry.require("storage").query({ pk: `WORKSPACE#${workspaceId}`, sk: { op: "beginsWith", prefix: "OPERATION#" } });
+    expect(operations.items.filter((item) => item["workflowMode"] === "IMPLEMENT")).toHaveLength(1);
+  });
+
+  it("keeps a publication across a restart: the result of a draft opened before it is recorded by the new process", async () => {
+    const first = await launch({ host: true });
+    const { taskId, workspaceId, seen, coding } = await toCoding(first);
+    const commit = first.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = first.model.revision(commit).tree;
+    await first.callback(coding, "result", builtResult(tree, first.base, commit));
+    const review = await first.nextJob(workspaceId, seen);
+    await first.callback(review, "result", reviewsOf(review, tree, "pass", first.base, commit));
+    const publish = await first.nextJob(workspaceId, seen);
+    const payload = publish.payload as Record<string, unknown>;
+    const branch = String(payload["headBranch"]);
+    first.model.branches.set(branch, commit);
+    await first.callback(publish, "pull-request", { repository: "demo", repositoryUrl: first.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+    await first.runtime.stop();
+    const second = await launch({ root: first.root, host: true, model: first.model });
+    const result = { repository: "demo", number: 1, url: second.model.crUrl("1"), headBranch: branch, baseBranch: "main", commit, checks: [], reconciled: false, draft: true };
+    expect((await second.callback(publish, "result", { status: "SUCCEEDED", result })).status).toBe(200);
+    expect((await taskRecord(second, taskId)).workflow).toMatchObject({ stage: "WAIT_FOR_MERGE" });
   });
 });
+
+describe("rovara up: the reviews and checks are read against the code and the run that made them", () => {
+  async function toReview(h: Harness) {
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    await h.callback(coding, "result", builtResult("d".repeat(40)));
+    const review = await h.nextJob(workspaceId, seen);
+    return { taskId, workspaceId, seen, review };
+  }
+  type Harness = Awaited<ReturnType<typeof launch>>;
+
+  it("blocks reviews for other code, from another run, or with a role missing or doubled", async () => {
+    const forged: Array<(job: WorkerInvocation) => ReturnType<typeof reviewsOf>> = [
+      (job) => reviewsOf(job, "e".repeat(40), "pass"),
+      (job) => reviewsOf({ ...job, operationId: "00000000-0000-4000-8000-000000000000" }, "d".repeat(40), "pass"),
+      (job) => { const r = reviewsOf(job, "d".repeat(40), "pass"); (r.result.workflowReviews as unknown[]).pop(); return r; },
+      (job) => { const r = reviewsOf(job, "d".repeat(40), "pass"); (r.result.workflowReviews as unknown[]).push((r.result.workflowReviews as unknown[])[0]); return r; },
+    ];
+    for (const make of forged) {
+      const h = await launch();
+      const { taskId, review } = await toReview(h);
+      await h.callback(review, "result", make(review));
+      // Whatever the reports said, the reviews did not pass: the task is still at its reviews (blocked, or run again by Rovara's one automatic retry), and no pull request is due.
+      const after = await taskRecord(h, taskId);
+      expect(after.workflow.stage).toBe("REVIEW");
+      expect(["BLOCKED", "RUNNING"]).toContain(after.workflow.state);
+    }
+  });
+
+  it("reruns the checks when the owner retries a failed check, and the rerun's code must be the code the task holds", async () => {
+    const h = await launch({ host: true, readiness: true });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    const failedCheck = { id: "readiness:0", label: "npm test", source: "project", before: "passed", after: "failed", class: "regression", output: "1 failing", durationMs: 5, exitCode: 1 };
+    const withCheck = (entry: object, status: string) => { const r = builtResult(tree, h.base, commit); (r.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status, source: "project", notVerifiedReason: undefined, checks: [entry] }; return r; };
+    await h.callback(coding, "result", withCheck(failedCheck, "regression"));
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    // Rovara asks (the fault cannot be told from the original code) rather than sending a failed check back on a guess.
+    expect((await taskRecord(h, taskId)).autofixAsk).toMatchObject({ reason: "unclear-fault" });
+    expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
+    const rerun = await h.nextJob(workspaceId, seen);
+    expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", readiness: [{ executable: "npm" }] } });
+    await h.callback(rerun, "result", withCheck({ ...failedCheck, after: "passed", class: "passing", exitCode: 0, output: "" }, "verified"));
+    const review = await h.nextJob(workspaceId, seen);
+    expect(review).toMatchObject({ payload: { workflowMode: "REVIEW" } });
+  });
+
+  it("retries a review whose run was lost once by itself, and asks when it is lost again; a review that failed for its own reasons is asked about at once", async () => {
+    const h = await launch();
+    const { taskId, workspaceId, seen, review } = await toReview(h);
+    const lose = (job: WorkerInvocation) => h.runtime.app.flow.recordResult({ workspaceId: job.workspaceId, operationId: job.operationId, fence: job.fence, status: "INTERRUPTED", error: "the machine was lost" });
+    await lose(review);
+    const again = await h.nextJob(workspaceId, seen);
+    expect(again).toMatchObject({ payload: { workflowMode: "REVIEW" } });
+    expect((await taskRecord(h, taskId)).workflow.decisions.filter((decision) => decision.source === "AUTO_RETRY")).toHaveLength(1);
+    await lose(again);
+    const asked = await taskRecord(h, taskId);
+    expect(asked.workflow).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
+    expect(asked.autofixAsk).toBeDefined();
+    // A run that ended failed on its own is not the infrastructure's fault: the owner is asked, nothing is retried.
+    const g = await launch();
+    const failed = await toReview(g);
+    await g.callback(failed.review, "result", { status: "FAILED", error: "the model did not answer" });
+    expect((await taskRecord(g, failed.taskId)).autofixAsk).toBeDefined();
+    expect((await taskRecord(g, failed.taskId)).workflow.decisions.filter((decision) => decision.source === "AUTO_RETRY")).toHaveLength(0);
+  });
+
+  it("asks the owner when the task's spend cannot be read, and sends back with nothing priced", async () => {
+    const h = await launch();
+    h.runtime.app.flow.deps.taskSpendUsd = async () => { throw new Error("the ledger is not readable"); };
+    const { taskId, review } = await toReview(h);
+    await h.callback(review, "result", reviewsOf(review, "d".repeat(40), "findings"));
+    expect((await taskRecord(h, taskId)).autofixAsk).toMatchObject({ reason: "inputs-missing" });
+    const g = await launch();
+    g.runtime.app.flow.deps.taskSpendUsd = async () => undefined;
+    const unpriced = await toReview(g);
+    await g.callback(unpriced.review, "result", reviewsOf(unpriced.review, "d".repeat(40), "findings"));
+    expect((await taskRecord(g, unpriced.taskId)).workflow.decisions.filter((decision) => decision.source === "AUTO_FIX")).toHaveLength(1);
+  });
+});
+
 function assertGithubCloneAccessFor(url: string, access: "clone" | "push"): boolean {
   try { assertGithubCloneAccess(url, access); return true; } catch { return false;  }
 }

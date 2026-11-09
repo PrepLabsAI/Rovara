@@ -32,6 +32,7 @@ import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
 import type { BrowserOpener } from "./open-browser.js";
 import { createLocalApp, type LocalApp } from "./app/app.js";
 import { configurationAnswer } from "./app/routes.js";
+import { usableWorkerCredential } from "./app/push-credential.js";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
 import { localSessionProofVerifier } from "../core/decisions/local-session.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
@@ -388,8 +389,8 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     resolveRepositoryCredential: async (_credentialRef, repositoryUrl, accessKind) => {
       assertGithubRepositoryAddress(repositoryUrl);
       const credential = await codeHostForKind(registry, "github").issueGitCredential({ url: repositoryUrl }, accessKind, { orgId: companyOrg });
-      if (credential.kind !== "basic") throw agentXError("CONFIG_INVALID", "the code host gave a credential the worker cannot use");
-      return { token: credential.password };
+      // Expiring, and a shape the worker takes (a token, or the password of a basic credential); a push is the same call with `push`, so the adapter's push checks apply (lane L10, review H1).
+      return usableWorkerCredential(codeHostForKind(registry, "github"), credential);
     },
     ...(options.timers === undefined ? {} : { timers: options.timers }),
   });

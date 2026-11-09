@@ -1,7 +1,7 @@
 // Lane L9-wire: the retry of a blocked step. Lane L10 adds the steps after the plan (coding, the checks, the reviews, the pull request): each is the build step's own move, on the same plan and the same code.
 // The retry of a blocked Understand or Plan step. L6a leaves "the retry entry point for a BLOCKED Understand/Plan" to the sessions (L6b): a blocked step becomes READY again at the next
 // revision, with a dispatch row in the same commit, and the row is run at once (the recovery sweep does it otherwise).
-import { WorkflowSnapshotSchema, agentXError } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, agentXError } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { dispatchRowItem } from "../../core/task-flow/dispatch-rows.js";
 import { readTask } from "../../core/task-flow/reads.js";
@@ -30,6 +30,15 @@ export async function retryBlockedStep(deps: TaskFlowDeps, taskId: string): Prom
   if (workflow.stage === "VERIFY" || workflow.stage === "REVIEW" || workflow.stage === "PULL_REQUEST") {
     const result = await started();
     if (result === "STALE" || result === "WAITING") throw agentXError("CONFIG_INVALID", result === "WAITING" ? "The workspace is not ready yet. Try again in a moment." : NOTHING_TO_RETRY_STEP);
+    return;
+  }
+  // The push of an approved fix to the open pull request stopped (its head moved, the push was refused): the fix is still the reviewed one, so it is due again, and the push checks the head again first.
+  if (workflow.stage === "WAIT_FOR_MERGE" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed) {
+    const { blockReason: _reason, pullRequestUpdateFailure: _failure, ...open } = workflow;
+    void _reason; void _failure;
+    const due = WorkflowSnapshotSchema.parse({ ...open, revision: workflow.revision + 1, stage: "PULL_REQUEST", state: "READY", updatedAt: now });
+    if (!(await commitWorkflow(deps, task, due, [dispatchRowItem(deps, taskId, due.revision, "PUBLISH", now)]))) throw agentXError("CONFIG_INVALID", "The task changed while you were retrying. Read it again.");
+    await runDispatchRow(deps, { taskId, workflowRevision: due.revision, kind: "PUBLISH" });
     return;
   }
   if (workflow.stage !== "UNDERSTAND" && workflow.stage !== "PLAN" && workflow.stage !== "IMPLEMENT") throw agentXError("CONFIG_INVALID", NOTHING_TO_RETRY_STEP);

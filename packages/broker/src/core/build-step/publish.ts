@@ -6,7 +6,7 @@
 // read again and one that is not the checked code is closed and recorded nowhere; a change request is always a draft, since a person merges. What is left out: the checked-HEAD mode and the
 // required browser and API round (E2E), the project's catalog pointer, the spec gate, the attribution trailers, the CodeBuild gates, and replace and revert (not a workflow's).
 import {
-  PullRequestResultSchema, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, agentXError, blockWorkflow, registerWorkflowPullRequest, unblockWorkflowPublication, workflowPublicationRetryable, workflowRequestId,
+  PullRequestResultSchema, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, agentXError, blockWorkflow, change, when, registerWorkflowPullRequest, unblockWorkflowPublication, workflowPublicationRetryable, workflowRequestId,
   type ChangeRequestRef, type CodeHost, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
@@ -17,6 +17,7 @@ import { recomputeRisk } from "../proof/pull-request-body.js";
 import { requireRepositoryKey } from "../merge/repository-key.js";
 import { prHeadItems, recoveryRowKey } from "../merge/store.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
+import { stageAudit } from "../task-flow/admission.js";
 import { dispatchRowItem, resolveRowItem } from "../task-flow/dispatch-rows.js";
 import { newId } from "../task-flow/support.js";
 import { fromDocument, toDocument, type OperationRecord, type PublicationExpectation, type TaskRecord } from "../task-flow/records.js";
@@ -55,14 +56,15 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
     .find((entry) => !(workflow.pullRequests ?? []).some((pullRequest) => pullRequest.repositoryId === entry.repositoryId));
   // Every repository has its pull request: an approved fix whose checks and reviews passed is pushed to them instead.
   if (repository === undefined) return startPullRequestUpdate(deps, row, { task, workspace });
-  const failed = (await workspaceOperations(deps, task.workspaceId)).filter((operation) => operation.kind === "publish" && ["FAILED", "INTERRUPTED", "CANCELLED"].includes(operation.status)
-    && operation.publication?.repository === repository.repositoryId && operation.publication.expectedTreeSha === repository.treeSha && operation.publication.candidateDigest === candidate.digest).length;
-  const attempt = 1 + failed;
+  const failedOperations = (await workspaceOperations(deps, task.workspaceId)).filter((operation) => operation.kind === "publish" && ["FAILED", "INTERRUPTED", "CANCELLED"].includes(operation.status)
+    && operation.publication?.repository === repository.repositoryId && operation.publication.expectedTreeSha === repository.treeSha && operation.publication.candidateDigest === candidate.digest);
+  const attempt = 1 + failedOperations.length;
   if (attempt > 1 && !ownerRetry) return settled(deps, row, "STALE");
   const project = await deps.projects.revision(task.project, task.startingRevision);
   const definition = project?.definition.repositories.find((entry) => entry.name === repository.repositoryId);
   if (project === undefined || definition === undefined) return settled(deps, row, "STALE");
-  codeHostForRecord(deps.codeHosts, definition); // an unknown host is refused here, before anything is claimed, with the router's sentence
+  const host = codeHostForRecord(deps.codeHosts, definition); // an unknown host is refused here, before anything is claimed, with the router's sentence
+  if (ownerRetry && failedOperations.length > 0) await closeOrphanedDrafts(deps, task, workflow, host, definition.url, new Set(failedOperations.map((operation) => operation.id)), repository.repositoryId);
   const receivedAt = iso(deps);
   const plan = await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined);
   const rovaraV2 = workflow.definitionVersion === "1.1.0";
@@ -90,6 +92,24 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
     extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)],
   });
   return settled(deps, row, accepted.result);
+}
+
+/**
+ * A publication that was interrupted after its draft was opened (the worker's result was lost) leaves a draft nobody tracks. Before the owner's Retry opens another from a new branch, a draft that an
+ * earlier failed attempt of this very publication opened, and that the workflow never registered, is closed and recorded as closed.
+ */
+async function closeOrphanedDrafts(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, host: CodeHost, repositoryUrl: string, failedOperationIds: ReadonlySet<string>, repositoryId: string): Promise<void> {
+  const page = await deps.store.query({ pk: `WORKSPACE#${task.workspaceId}`, sk: { op: "beginsWith", prefix: `PULL_REQUEST#${repositoryId}#` }, limit: 50 });
+  for (const item of page.items) {
+    const record = fromDocument<PullRequestRecord>(item);
+    if (record === undefined || record.state !== "open" || !failedOperationIds.has(record.createdByOperationId) || (workflow.pullRequests ?? []).some((entry) => entry.number === record.number && entry.repositoryId === repositoryId)) continue;
+    try {
+      await host.updateChangeRequest({ repository: { url: repositoryUrl }, id: String(record.number), url: record.url }, { state: "closed" }, scopeOf(deps));
+      await deps.store.update({ key: pullRequestRecordKey(task.workspaceId, repositoryId, record.number), ops: [change.set("state", "closed"), change.set("updatedAt", iso(deps))], condition: when.present() });
+    } catch (error) {
+      log(deps, { event: "build_step.orphaned_draft_not_closed", taskId: task.taskId, number: record.number, error: error instanceof Error ? error.name : "unknown" });
+    }
+  }
 }
 
 // ---- the worker's pull request callback
@@ -175,10 +195,12 @@ export async function openPullRequest(deps: TaskFlowDeps, operation: OperationRe
   const ref: ChangeRequestRef = { repository: repositoryRef, id: reconciled.ref.id, url: reconciled.ref.url };
   // The branch could move between the check and the open (a force-push): the opened change request's own head must still be the checked commit, or it is closed again and nothing is recorded.
   let sound = false;
-  for (let attempt = 1; attempt <= 2 && !sound; attempt += 1) {
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
       const details = await host.getChangeRequest(ref, scope);
       sound = details.headRevision === commit && await host.tree(repositoryRef, commit, scope) === expected.expectedTreeSha && await onPinnedBase(host, expected.repositoryUrl, commit, expected.expectedBaseCommit, deps);
+      // A read that succeeded is judged as it stands (as Cloud does): only a read that FAILED is read again, so a branch put back between reads cannot be waited for.
+      break;
     } catch (error) {
       log(deps, { event: "build_step.publication_head_unreadable", operationId: operation.id, attempt, error: error instanceof Error ? error.name : "unknown" });
     }
@@ -194,7 +216,10 @@ export async function openPullRequest(deps: TaskFlowDeps, operation: OperationRe
     title: expected.title, body: reconciled.draftRefused === true ? `This pull request could not be opened as a draft; it is not ready to merge.\n\n${expected.body}` : expected.body,
     createdByOperationId: operation.id, updatedAt: iso(deps),
   };
-  await deps.store.put({ item: toDocument(record) });
+  // The record and the audit fact of the opening commit together (a repeat of this callback is the same occurrence: its event is already there, and the record is only written again).
+  const audit = stageAudit(deps, { eventId: `pull_request.opened:${operation.id}`, actor: { type: "person", id: task.developerId }, action: "pull_request.opened", subject: { type: "task", id: task.taskId }, details: { repository: expected.repository, number: String(number) } });
+  const written = await deps.store.transact([{ kind: "put", item: toDocument(record) }, ...audit]);
+  if (!written.applied) await deps.store.put({ item: toDocument(record) });
   return { number, url: reconciled.ref.url, reconciled: reconciled.reconciled, draft: reconciled.draftRefused !== true };
 }
 
