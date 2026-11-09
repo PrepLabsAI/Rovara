@@ -59,13 +59,29 @@ export function planDecidedOnCard(loaded: LoadedDocument | undefined, workflow: 
   return risk === "low" ? undefined : risk;
 }
 
+/** A path-like token without a file extension (`infra/iam/policy`): the directory rules read it as they read a file's path. */
+const SLASH_TOKEN = /(?:[\w@.-]+\/)+[\w@.-]+/gu;
+/** Files that are named without a directory or an extension and decide how the code is built, run or reviewed. */
+const NAMED_FILE = /(?<![\w./-])(dockerfile|jenkinsfile|codeowners)(?![\w-])/giu;
+const MAKEFILE = /(?<![\w./-])makefile(?![\w-])/iu;
+/** Words that say a plan or a request touches infrastructure, who may do what, or how data is shaped: read as the infrastructure paths are. */
+const INFRA_WORDS = /\b(iam|infrastructure|terraform|cloudformation|migrations?)\b/giu;
+/** Words that say it touches sign-in, secrets, money or permissions: read as the sensitive paths are. */
+const SENSITIVE_WORDS = /\b(auth|authentication|authorization|oauth|saml|sso|jwt|passwords?|credentials?|secrets?|payments?|billing|permissions?|encryption|crypto)\b/giu;
+
 /**
- * The floor the core computes itself (owner decision c): the paths ANY of the plan's text or the request names (not only the ones the planner cites as evidence), their count, and the cost
- * estimate where there is one, with Cloud's rules for sensitive paths and size. It reads nothing the planner claims about proof, so a plan cannot lower it.
+ * The floor the core computes itself (owner decision c): what ANY of the plan's text or the request names, not only the paths the planner cites as evidence: paths (with or without an
+ * extension), known files with no directory (`Dockerfile`, `Jenkinsfile`, `CODEOWNERS`; a `Makefile` is at least medium), words for infrastructure, IAM, migrations, sign-in, secrets, money and
+ * permissions, their count, and the cost estimate where there is one, with Cloud's rules for sensitive paths and size. It reads nothing the planner claims about proof, so a plan cannot lower it.
  */
 export function planRiskFloor(input: { texts: readonly string[]; costHighUsd?: number | undefined }): DecisionRisk {
-  const files = [...new Set(input.texts.flatMap((text) => pathsIn(text)))];
-  return riskTierOf("approve_plan", { plan: { files, untestedClaims: 0, unread: false, ...(input.costHighUsd === undefined ? {} : { costHighUsd: input.costHighUsd }) } }).risk;
+  const found = input.texts.flatMap((text) => [...pathsIn(text), ...(text.match(SLASH_TOKEN) ?? [])]);
+  const named = input.texts.flatMap((text) => [...text.matchAll(NAMED_FILE)].map((match) => match[1]!.toLowerCase()));
+  const infra = input.texts.flatMap((text) => [...text.matchAll(INFRA_WORDS)].map((match) => `infra/${match[1]!.toLowerCase()}`));
+  const sensitive = input.texts.flatMap((text) => [...text.matchAll(SENSITIVE_WORDS)].map((match) => `auth/${match[1]!.toLowerCase()}`));
+  const files = [...new Set([...found, ...named, ...infra, ...sensitive])];
+  const tier = riskTierOf("approve_plan", { plan: { files, untestedClaims: 0, unread: false, ...(input.costHighUsd === undefined ? {} : { costHighUsd: input.costHighUsd }) } }).risk;
+  return input.texts.some((text) => MAKEFILE.test(text)) ? raiseRisk(tier, "medium") : tier;
 }
 
 /** The tier of the plan waiting for approval: what the planner's own document says, raised (never lowered) to the core's floor. */
