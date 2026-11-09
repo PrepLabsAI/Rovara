@@ -86,7 +86,7 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   };
   const checks = view.checks.length === 0 ? "" : `<section class="panel"><h2>Checks</h2><ul>${view.checks.map((check) => `<li>${untrusted(check.label)}: <span class="${STATUS_CLASS[check.status]}">${STATUS_WORD[check.status]}</span></li>`).join("")}</ul></section>`;
   const findings = view.findings.length === 0 ? "" : `<section class="panel"><h2>Review findings</h2><ul>${view.findings.map((finding) => `<li><span class="tag">${esc(finding.role)}</span> ${untrusted(finding.text)}${finding.file === undefined ? "" : ` <span class="muted">${untrusted(finding.file)}${finding.line === undefined ? "" : `:${esc(finding.line)}`}</span>`}</li>`).join("")}</ul></section>`;
-  const prs = view.pullRequests.length === 0 ? "" : `<section class="panel"><h2>Pull requests</h2><ul>${view.pullRequests.map((pr) => `<li>${externalLink(pr.url, `#${pr.number}`)} <span class="muted">${untrusted(pr.state)}</span></li>`).join("")}</ul></section>`;
+  const prs = view.pullRequests.length === 0 ? "" : `<section class="panel"><h2>Pull requests</h2><ul>${view.pullRequests.map((pr) => `<li>${externalLink(pr.url, `#${pr.number}`)} <span class="muted">${untrusted(pr.state)}</span>${pr.note === undefined ? "" : ` <strong class="bad">${untrusted(pr.note)}</strong>`}</li>`).join("")}</ul></section>`;
   const documents = (await Promise.all(current.map(one))).join("");
   const olderHtml = older.length === 0 ? "" : `<details><summary>${older.length} older ${older.length === 1 ? "version" : "versions"}</summary>${(await Promise.all(older.map(one))).join("")}</details>`;
   return layout({

@@ -29,6 +29,7 @@ import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/br
 import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
+import { recordedHeadOf } from "../../packages/broker/src/core/build-step/head-check.js";
 import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
@@ -1238,6 +1239,29 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     expect(await tier("Add a /health endpoint")).toBe("medium");
     expect(await tier("Add a /health endpoint and change the IAM policy")).toBe("high");
     expect(await tier("Add a /health endpoint", 150)).toBe("high");
+  });
+
+  it("says on the page that a pull request changed outside Rovara when its head is not the one Rovara recorded, and merge tracking is told the head is not Rovara's", async () => {
+    const h = await launch({ host: true });
+    const { taskId, workspaceId, headBranch, commit } = await toWaitForMerge(h);
+    const store = h.runtime.registry.require("storage");
+    const pageOf = async () => { const link = await h.browse(`/plan/${taskId}`); return (await raw(h.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } })).body; };
+    // The head is the one Rovara recorded: nothing is said.
+    expect(await pageOf()).not.toContain("changed outside Rovara");
+    expect(await recordedHeadOf(h.runtime.app.flow.deps)(workspaceId, "demo", 1)).toBe(commit);
+    // The worker (or anyone) pushes to the branch after its operation ended; the next read of the page, a little later, sees it.
+    h.model.commit(headBranch, { "README.md": "pushed after the result\n" });
+    h.runtime.app.flow.deps.now = () => new Date(Date.now() + 60_000);
+    const body = await pageOf();
+    expect(body).toContain("changed outside Rovara");
+    expect((await store.get(PR_RECORD(workspaceId)))?.["changedOutside"]).toContain("changed outside Rovara");
+    // Merge tracking is given no recorded head for it, so it never reads the head as Rovara's and never calls the pull request ready.
+    expect(await recordedHeadOf(h.runtime.app.flow.deps)(workspaceId, "demo", 1)).toBeUndefined();
+    // Put back, the mark goes.
+    h.model.branches.set(headBranch, commit);
+    h.runtime.app.flow.deps.now = () => new Date(Date.now() + 120_000);
+    expect(await pageOf()).not.toContain("changed outside Rovara");
+    expect(await recordedHeadOf(h.runtime.app.flow.deps)(workspaceId, "demo", 1)).toBe(commit);
   });
 
   it("keeps the newest post of checks.json, each under its own digest, and no more than eight posts in one operation", async () => {
