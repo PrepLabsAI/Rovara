@@ -213,7 +213,14 @@ export class GitHubFixtureApi {
     match = new RegExp(`^${ROOT}/issues/(\\d+)/comments$`).exec(path);
     if (method === "GET" && match) {
       const cr = this.findCr(match[1]!);
-      return cr === undefined ? NOT_FOUND() : json(200, cr.comments.filter((comment) => comment.kind === "discussion").map((comment) => this.commentJson(cr, comment, "DISCUSSION")));
+      if (cr === undefined) return NOT_FOUND();
+      const since = url.searchParams.get("since");
+      return json(200, cr.comments.filter((comment) => comment.kind === "discussion" && (since === null || Date.parse(comment.updatedAt) >= Date.parse(since))).map((comment) => this.commentJson(cr, comment, "DISCUSSION")));
+    }
+    if (method === "POST" && match) {
+      const cr = this.findCr(match[1]!);
+      if (cr === undefined) return NOT_FOUND();
+      return json(201, this.commentJson(cr, this.model.addDiscussionComment(cr.id, "rovara-owner", String(body.body)), "DISCUSSION"));
     }
     return NOT_FOUND();
   };
@@ -244,7 +251,7 @@ export class GitHubFixtureApi {
 
   private commentJson(cr: FakeChangeRequest, comment: FakeChangeRequest["comments"][number], kind: "REVIEW_COMMENT" | "DISCUSSION"): Record<string, unknown> {
     const common = { id: Number(comment.id), user: { login: comment.author }, body: comment.body, updated_at: comment.updatedAt };
-    if (kind === "DISCUSSION") return { ...common, html_url: `${this.prUrl(cr.id)}#issuecomment-${comment.id}`, issue_url: `${API}${ROOT}/issues/${cr.id}` };
+    if (kind === "DISCUSSION") return { ...common, user: this.userJson(comment.author), created_at: comment.createdAt ?? comment.updatedAt, html_url: `${this.prUrl(cr.id)}#issuecomment-${comment.id}`, issue_url: `${API}${ROOT}/issues/${cr.id}` };
     return { ...common, html_url: `${this.prUrl(cr.id)}#discussion_r${comment.id}`, pull_request_url: `${API}${ROOT}/pulls/${cr.id}`, path: comment.path, line: comment.line ?? null };
   }
 

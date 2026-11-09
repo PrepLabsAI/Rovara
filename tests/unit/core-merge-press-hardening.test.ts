@@ -7,6 +7,7 @@ import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.j
 import type { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
 import { ORG, TASK_ID, githubShapedHost, mergeWorld, wrapStore, OWNER_SESSION, type MergeWorld } from "../support/merge-world.js";
+import { commentReads, freshComment } from "../support/comment-fakes.js";
 
 const rejects = async (run: () => Promise<unknown>): Promise<{ code?: string; message: string }> => {
   try { await run(); } catch (error) {
@@ -223,7 +224,7 @@ describe("a proof that names one act is used up by what it is", () => {
     const world = await mergeWorld({ codeHost: (model) => countingHost(model, mode) });
     await world.seedTracking();
     const approvers = createLocalOwnerApprovers({
-      verifyComment: () => ({ author: { provider: "github", tenant: "", accountId: "priya" }, permission: "write", approves: true }),
+      ...commentReads(freshComment({ provider: "github", tenant: "", accountId: "priya" })),
       verifySession: (token) => token === OWNER_SESSION,
     });
     const deps = { ...world.deps, approvers };

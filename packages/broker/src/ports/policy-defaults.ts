@@ -1,6 +1,7 @@
 // Port lane W0: Code's defaults for the policy seams. Each does nothing or allows what a lone developer on their own machine
 // may do. Cloud registers its own adapters (budgets, an audit ledger, second approvers, members and single sign-on, proxy-key spend)
 // on the same points.
+import { checkCommentProof, type CommentRequestContext, type FetchedComment } from "../core/pr-commands/comment-checks.js";
 import {
   IMPLICIT_COMPANY_ID,
   type Admission,
@@ -99,26 +100,20 @@ export function createLocalOwnerIdentity(options: LocalOwnerIdentityOptions = {}
 export const LOCAL_SESSION_METHOD = "local-session";
 export const CODE_HOST_COMMENT_METHOD = "code-host-comment";
 
-/** What the code host adapter found when it looked a comment up by id. */
-export interface VerifiedComment {
-  /** Who wrote it, as the host reports it (not as the proof claims). */
-  author: ExternalAccountRef;
-  /** The author's permission on the repository. A read-only collaborator may not approve. */
-  permission: "none" | "read" | "write" | "admin";
-  /** The comment is on this request's change request, was posted after the revision it approves, and says approve. */
-  approves: boolean;
-}
-
 export interface LocalOwnerApproversOptions {
   /** The local owner, for the `local-session` proof. */
   owner?: Principal;
   /** Checks a `local-session` proof token against the request it is for. The local review pages issue tokens signed over one request, revision and digest (`LocalPageSessions.verifyProof`); wire that here. Absent: `local-session` proofs are refused. */
   verifySession?: (token: string, request: ApprovalRequest) => boolean | Promise<boolean>;
   /**
-   * Looks a comment up by id at the code host and says who wrote it and what they may do. The code host adapter provides it; the core
-   * knows nothing about GitHub. Absent: comment proofs are refused.
+   * Fetches a comment by id from the code host: its text, author, times, the change request it is on and its author's permission (`FetchedComment`). FETCH ONLY (owner decision 66): the checks on it are Rovara's
+   * (`checkCommentProof`). Absent: comment proofs are refused.
    */
-  verifyComment?: (commentId: string, request: ApprovalRequest) => VerifiedComment | undefined | Promise<VerifiedComment | undefined>;
+  fetchComment?: (commentId: string, request: ApprovalRequest) => FetchedComment | undefined | Promise<FetchedComment | undefined>;
+  /** Whether comments can be fetched right now (a code host that reads them is registered). Absent: yes, whenever `fetchComment` is given. The way is offered only while it is on. */
+  commentsOn?: () => boolean;
+  /** Where Rovara's own record says the request was posted, and since when (`CommentRequestContext`). Absent or undefined: a comment answers nothing. */
+  commentContext?: (request: ApprovalRequest) => CommentRequestContext | undefined | Promise<CommentRequestContext | undefined>;
   /** Turns a verified comment author into a principal. Default: a principal built from the account, vouched for by its own provider. */
   principalForAccount?: (account: ExternalAccountRef) => Principal;
   now?: () => Date;
@@ -135,7 +130,7 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
   const used = new Set<string>();
   return {
     async requirement(): Promise<ApprovalRequirement> {
-      const methods = [...(options.verifySession === undefined ? [] : [LOCAL_SESSION_METHOD]), ...(options.verifyComment === undefined ? [] : [CODE_HOST_COMMENT_METHOD])];
+      const methods = [...(options.verifySession === undefined ? [] : [LOCAL_SESSION_METHOD]), ...(options.fetchComment === undefined || options.commentsOn?.() === false ? [] : [CODE_HOST_COMMENT_METHOD])];
       return { methods, minApprovers: 1, selfApprovalAllowed: true };
     },
     async verify(request: ApprovalRequest, proof: ApprovalProof): Promise<ApprovalVerdict> {
@@ -152,9 +147,11 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
           ? { approved: true, approver: owner, method: proof.method, proofId: proof.proofId }
           : refuse("not_the_local_owner");
       } else if (proof.method === CODE_HOST_COMMENT_METHOD) {
-        if (options.verifyComment === undefined) return refuse("method_not_available");
-        const comment = await options.verifyComment(proof.token, request);
-        if (comment === undefined || !comment.approves) return refuse("no_approving_comment");
+        if (options.fetchComment === undefined) return refuse("method_not_available");
+        const comment = await options.fetchComment(proof.token, request);
+        // Every check on the comment is Rovara's (owner decision 66); the host only reported what it holds.
+        const checked = checkCommentProof({ comment, context: await options.commentContext?.(request), outcome: request.outcome });
+        if (!checked.ok || comment === undefined) return refuse(checked.ok ? "no_approving_comment" : checked.reason);
         if (comment.permission !== "write" && comment.permission !== "admin") return refuse("not_a_collaborator");
         const claimed = proof.claimedAccount;
         if (claimed !== undefined && (claimed.provider !== comment.author.provider || claimed.tenant !== comment.author.tenant || claimed.accountId !== comment.author.accountId)) return refuse("account_mismatch");

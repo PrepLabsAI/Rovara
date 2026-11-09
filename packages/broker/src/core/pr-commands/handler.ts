@@ -2,7 +2,7 @@
 // the loop's own (contracts/rovara-comment.ts). What this adds is the question the loop never had to ask when the person ran it on their own machine:
 // is this comment good enough to act on? A comment is a claim, not a fact, so:
 //
-//   - only a freshly created comment runs; an edit never does (a person could approve a plan, then edit the comment into something else);
+//   - only a freshly created comment runs; an edit never does (a person could approve a plan, then edit the comment into something else: the host's own edit record decides, `updatedAt`);
 //   - the comment itself (text, author, time, permission) is read back from the code host by id; the webhook only names it;
 //   - an approval is a W0 `ApprovalProof` with method `code-host-comment` and the comment id as its token: the task flow hands it to the `Approvers`
 //     seam, which looks the comment up again and checks that it names this request, revision and digest;
@@ -11,7 +11,7 @@
 //
 // Nothing here knows GitHub: the event, the permission lookup and the reply come from the code host adapter, through the three seams below.
 import {
-  IMPLICIT_COMPANY_ID, companyScoped, parseRovaraComment, when,
+  IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, companyScoped, parseRovaraComment, when,
   type ApprovalProof, type DocumentStore, type ExternalAccountRef,
 } from "@agentx/contracts";
 import { CODE_HOST_COMMENT_METHOD } from "../../ports/policy-defaults.js";
@@ -40,8 +40,10 @@ export interface LookedUpComment {
   authorPermission: CommentPermission;
   /** The author is an automation account. */
   authorIsBot: boolean;
-  /** Rovara posted it (with its own token, or the owner's: the adapter knows the comment ids Rovara wrote). */
-  postedByRovara: boolean;
+  /** When the host last recorded a change to the text (`createdAt` again when it was never edited). */
+  updatedAt: string;
+  /** The change request or issue it is on, as the host names it. A webhook or a poll only says where to look; this is where the comment IS. */
+  on: { repository: string; number: number };
 }
 
 /** The code host adapter's side. */
@@ -72,7 +74,7 @@ export interface PrCommandWorld {
 }
 
 export type PrCommandOutcome =
-  | { handled: false; reason: "not_a_command" | "not_created" | "bot" | "own_comment" | "gone" | "no_permission" | "duplicate" | "other_command" }
+  | { handled: false; reason: "not_a_command" | "not_created" | "bot" | "own_comment" | "gone" | "no_permission" | "duplicate" | "other_command" | "edited" | "other_thread" }
   | { handled: true; command: "approve" | "changes" | "lesson" | "stop" | "invalid"; result: "done" | LocalActionResult };
 
 export interface PrCommandsOptions {
@@ -105,12 +107,17 @@ export function createPrCommentCommands(options: PrCommandsOptions): { handle(ev
       if (event.action !== "created") return { handled: false, reason: "not_created" };
       const comment = await options.host.lookupComment({ repository: event.repository, number: event.number, commentId: event.commentId });
       if (comment === undefined) return { handled: false, reason: "gone" };
-      if (comment.postedByRovara) return { handled: false, reason: "own_comment" };
+      // Rovara's own replies carry its marker (a host account that is also a person's); the core reads them as Rovara's, wherever the host says they came from.
+      if (comment.body.includes(ROVARA_REPLY_MARKER)) return { handled: false, reason: "own_comment" };
+      // The delivery or the poll only named a place; the comment is where the host says it is.
+      if (comment.on.repository.toLowerCase() !== event.repository.toLowerCase() || comment.on.number !== event.number) return { handled: false, reason: "other_thread" };
       if (comment.authorIsBot) return { handled: false, reason: "bot" };
       const parsed = parseRovaraComment(comment.body);
       if (parsed.kind === "reply") return { handled: false, reason: "not_a_command" };
       if (parsed.kind === "other" || parsed.kind === "file") return { handled: false, reason: "other_command" };
       if (!SPEAKS.has(comment.authorPermission)) return { handled: false, reason: "no_permission" };
+      // A comment the host records an edit of never runs, whatever it says now (a person could approve, then edit the comment into something else).
+      if (comment.updatedAt !== comment.createdAt && Date.parse(comment.updatedAt) !== Date.parse(comment.createdAt)) return { handled: false, reason: "edited" };
 
       // One comment, one run. The claim is taken first; a failure that the host could retry gives it back.
       const key = { pk: companyScoped(event.companyId === "" ? IMPLICIT_COMPANY_ID : event.companyId, CLAIMS), sk: `${event.repository}#${event.commentId}` };

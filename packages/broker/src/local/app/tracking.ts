@@ -99,6 +99,42 @@ function mergeTaskOf(record: TaskRecord, companyId: OrgId): (MergeTask & { orgId
   };
 }
 
+/** A budget for one sweep: a request allowance and a deadline shared by everything it reads. `stop` ends its timer. */
+export function createReadBudget(now: () => number, limits: { requests: number; ms: number } = { requests: SWEEP_MAX_REQUESTS, ms: SWEEP_MAX_MS }): { budget: ReadBudget; stop: () => void } {
+  const controller = new AbortController();
+  const startedAt = now();
+  let requests = 0;
+  const timer = setTimeout(() => controller.abort(), limits.ms);
+  timer.unref();
+  return {
+    stop: () => clearTimeout(timer),
+    budget: {
+      signal: controller.signal,
+      beforeRequest: () => {
+        if (controller.signal.aborted || now() >= startedAt + limits.ms || requests >= limits.requests) {
+          controller.abort();
+          const exhausted = new Error("the sweep used its request allowance");
+          exhausted.name = "GithubBudgetExhaustedError";
+          throw exhausted;
+        }
+        requests += 1;
+      },
+    },
+  };
+}
+
+/** The repository of a task's project, on the code host its record names (and the runner that reads that host's build logs, when one is registered). */
+export function createRepositoryResolver(flow: Pick<TaskFlowDeps, "projects">, registry: RegistryView): ReturnType<typeof registryRepositoryResolver> {
+  return registryRepositoryResolver(registry, {
+    async pinned(project, revision, repositoryId) {
+      const found = (await flow.projects.revision(project, revision))?.definition.repositories.find((entry) => entry.name === repositoryId);
+      return found === undefined ? undefined : { url: found.url, ...((found as { host?: { kind: string } }).host === undefined ? {} : { host: (found as { host: { kind: string } }).host }) };
+    },
+    // The runner that reads this host's build logs, built for the repository it serves (a laptop registers none by default: a CI fix is then told which check failed, without the log).
+    checkRunner: (kind, repository) => registry.get("check-runner", kind)?.create({ allowedRepositories: [repository.url] }),
+  });
+}
+
 export interface LocalTrackingOptions {
   flow: TaskFlowDeps;
   registry: RegistryView;
@@ -122,6 +158,8 @@ export interface LocalTracking {
   wake(taskId: string): Promise<void>;
   /** When every row is paused until, if the code host asked Rovara to slow down (milliseconds since the epoch). */
   readonly pausedUntil: () => number | undefined;
+  /** Pauses every row (and the comment poll) until the time a code host named when it asked Rovara to slow down. */
+  pauseUntil(retryAt: number): void;
   /** Waits for a sweep that is running. */
   idle(): Promise<void>;
 }
@@ -139,14 +177,7 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
     return record === undefined ? undefined : mergeTaskOf(record, companyId);
   };
 
-  const resolver = registryRepositoryResolver(registry, {
-    async pinned(project, revision, repositoryId) {
-      const found = (await flow.projects.revision(project, revision))?.definition.repositories.find((entry) => entry.name === repositoryId);
-      return found === undefined ? undefined : { url: found.url, ...((found as { host?: { kind: string } }).host === undefined ? {} : { host: (found as { host: { kind: string } }).host }) };
-    },
-    // The runner that reads this host's build logs, built for the repository it serves (a laptop registers none by default: a CI fix is then told which check failed, without the log).
-    checkRunner: (kind, repository) => registry.get("check-runner", kind)?.create({ allowedRepositories: [repository.url] }),
-  });
+  const resolver = createRepositoryResolver(flow, registry);
 
   const base: MergeTrackingDependencies = {
     store, now,
@@ -204,30 +235,6 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
   let cooldownUntil: number | undefined;
   let sweeping: Promise<{ attempted: number }> | undefined;
 
-  /** A budget for one sweep: a request allowance and a deadline shared by all of its rows. */
-  const sweepBudget = (): { budget: ReadBudget; stop: () => void } => {
-    const controller = new AbortController();
-    const startedAt = now();
-    let requests = 0;
-    const timer = setTimeout(() => controller.abort(), SWEEP_MAX_MS);
-    timer.unref();
-    return {
-      stop: () => clearTimeout(timer),
-      budget: {
-        signal: controller.signal,
-        beforeRequest: () => {
-          if (controller.signal.aborted || now() >= startedAt + SWEEP_MAX_MS || requests >= SWEEP_MAX_REQUESTS) {
-            controller.abort();
-            const exhausted = new Error("the sweep used its request allowance");
-            exhausted.name = "GithubBudgetExhaustedError";
-            throw exhausted;
-          }
-          requests += 1;
-        },
-      },
-    };
-  };
-
   const dueRows = async (): Promise<Array<{ taskId: string; attempts: number; quiet: number }>> => {
     const rows = await queryAll(store, { pk: "WORKFLOW_MERGE_RECOVERY", sk: { op: "beginsWith", prefix: "TASK#" } });
     const at = now();
@@ -277,7 +284,7 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
       return { attempted: 0 };
     }
     if (rows.length === 0) return { attempted: 0 };
-    const { budget, stop } = sweepBudget();
+    const { budget, stop } = createReadBudget(now);
     let attempted = 0;
     try {
       for (const row of rows) {
@@ -321,6 +328,7 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
     async wake(taskId) {
       await store.update({ key: recoveryRowKey(taskId), ops: [change.set("nextAttemptAt", now()), change.set("quiet", 0)], condition: when.and(when.present(), when.eq("kind", "tracking")) }).catch(() => undefined);
     },
+    pauseUntil(retryAt) { cooldownUntil = Math.max(cooldownUntil ?? 0, retryAt); },
     pausedUntil: () => (cooldownUntil !== undefined && now() < cooldownUntil ? cooldownUntil : undefined),
     async idle() { await sweeping?.catch(() => undefined); },
   };

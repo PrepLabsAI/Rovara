@@ -44,6 +44,7 @@ import { RepositoryGrantService, type RepositoryCredential } from "../../reposit
 import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
 import { createCallbackHandler } from "./callbacks.js";
+import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalMilestones, createLocalTracking, sessionTimeline, type LocalTracking } from "./tracking.js";
 import { createTaskFactsSource } from "./facts.js";
 import { createLocalPageData, createPageExtraActions } from "./page-data.js";
@@ -89,6 +90,8 @@ export interface LocalApp {
   readonly blobs: ObjectStorage;
   /** Merge tracking on this laptop: the timer's pass over the tracked pull requests (lane L12). */
   readonly tracking: LocalTracking;
+  /** Pull request comment commands on this laptop: polled, fetched by the code host and checked by the core (lane L12, decision 66). */
+  readonly comments: LocalComments;
   /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
   readonly modelGrants: ModelGrantSource;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
@@ -228,6 +231,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const decisionActions = createDecisionActions({ gate, companyId });
+  const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, now: () => clock().getTime(), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
   const pages = await createLocalPagesServer({
     data: createLocalPageData({ flow: flow.deps, blobs, owner, companyId }),
@@ -237,7 +241,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, openPage: (path) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser" })), version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, comments, openPage: (path) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser" })), version: options.version });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, origin: options.origin ?? (() => "http://127.0.0.1") });
   const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? ownerRoutes(request, caller);
 
@@ -251,7 +255,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await sweepOpenSessions(summaryDeps, { budgetMs: 5_000 }).catch(logFailure("local_app.session_sweep_failed"));
   };
   // Reading pull requests asks the code host over the network and may take seconds, so the timer runs it apart from the dispatch (a slow host never holds a step back); a test's `tick()` runs both in order.
-  const tickTracking = async (): Promise<void> => { await tracking.sweep().catch(logFailure("local_app.tracking_failed")); };
+  const tickTracking = async (): Promise<void> => {
+    await tracking.sweep().catch(logFailure("local_app.tracking_failed"));
+    await comments.poll().catch(logFailure("local_app.comments_failed"));
+  };
   const tick = async (): Promise<void> => {
     await tickCore();
     await tickTracking();
@@ -273,7 +280,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs, tracking, modelGrants,
+    flow, pages, gate, blobs, tracking, comments, modelGrants,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

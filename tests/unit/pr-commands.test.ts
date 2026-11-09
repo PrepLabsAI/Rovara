@@ -3,8 +3,9 @@ import { describe, expect, it } from "vitest";
 import type { ApprovalOffer } from "../../packages/broker/src/core/local-pages/index.js";
 import { createPrCommentCommands, type CommentPermission, type LookedUpComment, type PendingOffer, type PrCommentEvent, type PrCommandWorld } from "../../packages/broker/src/core/pr-commands/index.js";
 import { CODE_HOST_COMMENT_METHOD, createLocalOwnerApprovers } from "../../packages/broker/src/ports/policy-defaults.js";
+import { commentReads, freshComment } from "../support/comment-fakes.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { IMPLICIT_COMPANY_ID, parseRovaraComment, type ApprovalProof, type ExternalAccountRef } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, parseRovaraComment, type ApprovalProof, type ExternalAccountRef } from "@agentx/contracts";
 
 const OFFER: ApprovalOffer = { requestId: "card-7", revision: 4, artifactDigest: "sha256-1234", kind: "plan" };
 const PENDING: PendingOffer = { taskId: "0b4f2b1e-3c6a-4d2e-9a77-5f1d8c0a1e11", approval: OFFER, postedAt: "2026-11-09T10:00:00.000Z", repository: "example/repo" };
@@ -14,7 +15,7 @@ const AUTHOR: ExternalAccountRef = { provider: "examplehost", tenant: "", accoun
 const event = (overrides: Partial<PrCommentEvent> = {}): PrCommentEvent => ({ companyId: IMPLICIT_COMPANY_ID, action: "created", repository: "example/repo", number: 12, commentId: "c-100", ...overrides });
 
 function hostComment(body: string, overrides: Partial<LookedUpComment> = {}): LookedUpComment {
-  return { body, createdAt: "2026-11-09T10:05:00.000Z", author: AUTHOR, authorPermission: "write", authorIsBot: false, postedByRovara: false, ...overrides };
+  return { body, createdAt: "2026-11-09T10:05:00.000Z", updatedAt: "2026-11-09T10:05:00.000Z", author: AUTHOR, authorPermission: "write", authorIsBot: false, on: { repository: "example/repo", number: 12 }, ...overrides };
 }
 
 function setup(options: { permission?: CommentPermission; pending?: PendingOffer | undefined; hostPermission?: "none" | "read" | "write" | "admin" } = {}) {
@@ -24,7 +25,7 @@ function setup(options: { permission?: CommentPermission; pending?: PendingOffer
   let failNext = false;
   const stored = new Map<string, LookedUpComment>();
   // The approvers seam, fed by a fake host that looks a comment up by id: what the real task flow does with the proof.
-  const approvers = createLocalOwnerApprovers({ verifyComment: (commentId) => ({ author: AUTHOR, permission: options.hostPermission ?? "write", approves: commentId.startsWith("c-") }) });
+  const approvers = createLocalOwnerApprovers({ ...commentReads(freshComment(AUTHOR, { permission: options.hostPermission ?? "write" })) });
   const world: PrCommandWorld = {
     async pendingFor() { return "pending" in options ? options.pending : PENDING; },
     async decide(input) {
@@ -65,8 +66,11 @@ describe("which comments run", () => {
     expect(await commands.handle({ ...say("/rovara approve", "c-2"), action: "deleted" })).toEqual({ handled: false, reason: "not_created" });
     expect(await commands.handle(event({ commentId: "never-posted" }))).toEqual({ handled: false, reason: "gone" });
     expect(await commands.handle(say("/rovara approve", "c-3", { authorIsBot: true }))).toEqual({ handled: false, reason: "bot" });
-    // Rovara posts with the owner's own token in Code, so the author looks like the owner: the adapter knows which comments are Rovara's.
-    expect(await commands.handle(say("/rovara approve", "c-4", { postedByRovara: true }))).toEqual({ handled: false, reason: "own_comment" });
+    // Rovara posts with the owner's own token in Code, so the author looks like the owner: Rovara's reply carries its marker, and the core reads that.
+    expect(await commands.handle(say(`/rovara approve\n\n${ROVARA_REPLY_MARKER}`, "c-4"))).toEqual({ handled: false, reason: "own_comment" });
+    // A comment the host records an edit of never runs, and a comment that is on another thread than the one named is not this thread's.
+    expect(await commands.handle(say("/rovara approve", "c-5", { updatedAt: "2026-11-09T10:05:30.000Z" }))).toEqual({ handled: false, reason: "edited" });
+    expect(await commands.handle(say("/rovara approve", "c-6", { on: { repository: "example/repo", number: 99 } }))).toEqual({ handled: false, reason: "other_thread" });
     expect(decided).toEqual([]);
   });
 
@@ -126,8 +130,8 @@ describe("approve and changes", () => {
 
   it("refuses a comment written before the latest version was posted, and one whose time cannot be read", async () => {
     const { commands, decided, replies, say } = setup();
-    expect(await commands.handle(say("/rovara approve", "c-1", { createdAt: "2026-11-09T09:59:59.000Z" }))).toMatchObject({ result: { ok: false, reason: "stale" } });
-    expect(await commands.handle(say("/rovara approve", "c-2", { createdAt: "yesterday-ish" }))).toMatchObject({ result: { ok: false, reason: "stale" } });
+    expect(await commands.handle(say("/rovara approve", "c-1", { createdAt: "2026-11-09T09:59:59.000Z", updatedAt: "2026-11-09T09:59:59.000Z" }))).toMatchObject({ result: { ok: false, reason: "stale" } });
+    expect(await commands.handle(say("/rovara approve", "c-2", { createdAt: "yesterday-ish", updatedAt: "yesterday-ish" }))).toMatchObject({ result: { ok: false, reason: "stale" } });
     expect(decided).toEqual([]);
     expect(replies[0]).toContain("before the latest version was posted");
   });

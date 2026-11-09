@@ -8,9 +8,11 @@ import {
   type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type AuditSink, type ExternalAccountRef, type Principal, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal, type VerifiedComment } from "../../packages/broker/src/ports/policy-defaults.js";
+import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { decisionRequestIdOf, approvalBindingId, approvalProofMarkerKey, approvalRecordKey, createDecisionGate, type DecisionAttempt, type DecisionSubject } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
+import { commentReads, freshComment } from "../support/comment-fakes.js";
+import type { FetchedComment } from "../../packages/broker/src/core/pr-commands/comment-checks.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;
 const OWNER = localOwnerPrincipal();
@@ -36,13 +38,13 @@ const R0 = waiting().revision;
 /** What a proof is bound to for the plan waiting at revision R0. */
 const binding = (revision = R0, digest = waitingDocumentDigest(waiting())!) => approvalBindingId(COMPANY, "workflow-document", TASK_ID, revision, digest);
 
-function world(options: { workflow?: WorkflowSnapshot; approvers?: Approvers; risk?: "low" | "medium" | "high"; audit?: AuditSink; companyOnTask?: string; requestedBy?: Principal; expiresAt?: string; comment?: (id: string) => VerifiedComment | undefined } = {}) {
+function world(options: { workflow?: WorkflowSnapshot; approvers?: Approvers; risk?: "low" | "medium" | "high"; audit?: AuditSink; companyOnTask?: string; requestedBy?: Principal; expiresAt?: string; comment?: () => FetchedComment | undefined } = {}) {
   const store = new MemoryDocumentStore();
   const workflow = options.workflow ?? waiting();
   const put = (value: WorkflowSnapshot) => store.put({ item: { ...workflowTaskKey(TASK_ID), entityType: "DEVELOPER_TASK", orgId: options.companyOnTask ?? COMPANY, project: "web", workflow: JSON.parse(JSON.stringify(value)) } });
   const approvers = options.approvers ?? createLocalOwnerApprovers({
     owner: OWNER, now: () => NOW, verifySession: (token) => token === SESSION,
-    verifyComment: options.comment ?? ((id) => (id === COMMENT ? { author: COLLABORATOR, permission: "write", approves: true } : undefined)),
+    ...commentReads(options.comment === undefined ? freshComment(COLLABORATOR) : options.comment(), { id: COMMENT }),
   });
   const subject = createWorkflowDocumentSubject({
     store, riskOf: () => options.risk ?? "low",
@@ -150,29 +152,33 @@ describe("the approval gate: a forged or wrong proof", () => {
   it("an install can make the owner the only decider of plans: then a collaborator's comment is refused", async () => {
     const store = new MemoryDocumentStore();
     await store.put({ item: { ...workflowTaskKey(TASK_ID), orgId: COMPANY, workflow: JSON.parse(JSON.stringify(waiting())) } });
-    const approvers = createLocalOwnerApprovers({ owner: OWNER, verifyComment: () => ({ author: COLLABORATOR, permission: "write", approves: true }) });
+    const approvers = createLocalOwnerApprovers({ owner: OWNER, ...commentReads(freshComment(COLLABORATOR)) });
     const gate = createDecisionGate({ store, approvers, audit: createNoopAuditSink(), subjects: [createWorkflowDocumentSubject({ store, riskOf: () => "low", collaboratorsMayDecide: false })], now: () => NOW });
     expect(await gate.decide(attempt({ credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] }))).toMatchObject({ status: "refused", reason: "not_the_approver" });
     expect((await taskWorkflow(store)).revision).toBe(R0);
   });
 
   it("a comment from someone without write access, or from another account than the one claimed, is not an approval", async () => {
-    const reader = world({ comment: () => ({ author: COLLABORATOR, permission: "read", approves: true }) });
+    const reader = world({ comment: () => freshComment(COLLABORATOR, { permission: "read" }) });
     await reader.ready;
     expect(await reader.gate.decide(attempt({ credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] }))).toMatchObject({ reason: "not_approved", detail: expect.stringContaining("not_a_collaborator") });
     const swapped = world();
     await swapped.ready;
     expect(await swapped.gate.decide(attempt({ credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT, claimedAccount: { ...COLLABORATOR, accountId: "someone-else" } }] }))).toMatchObject({ reason: "not_approved", detail: expect.stringContaining("account_mismatch") });
-    const notApproving = world({ comment: () => ({ author: COLLABORATOR, permission: "admin", approves: false }) });
+    const notApproving = world({ comment: () => freshComment(COLLABORATOR, { permission: "admin", body: "looks fine to me" }) });
     await notApproving.ready;
     expect(await notApproving.gate.decide(attempt({ credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] }))).toMatchObject({ reason: "not_approved" });
   });
 
-  it("a comment never rejects or asks for changes, and never approves a high-risk request", async () => {
+  it("a comment never rejects, asks for changes only with a `/rovara changes:` command, and never approves a high-risk request", async () => {
     const reject = world();
     await reject.ready;
     expect(await reject.gate.decide(attempt({ outcome: "reject", credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] }))).toMatchObject({ reason: "method_not_allowed" });
-    expect(await reject.gate.decide(attempt({ outcome: "request_changes", credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] }))).toMatchObject({ reason: "method_not_allowed" });
+    // Owner decision 62 (A3): asking for changes by comment is allowed, but a comment that says "approve" is no proof for it (decision 66: the answer is part of the check).
+    expect(await reject.gate.decide(attempt({ outcome: "request_changes", reason: "keep the old API", credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] }))).toMatchObject({ reason: "not_approved", detail: expect.stringContaining("no_approving_comment") });
+    const changes = world({ comment: () => freshComment(COLLABORATOR, { body: "/rovara changes: keep the old API" }) });
+    await changes.ready;
+    expect(await changes.gate.decide(attempt({ outcome: "request_changes", reason: "keep the old API", credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] }))).toMatchObject({ status: "decided" });
     const high = world({ risk: "high" });
     await high.ready;
     expect(await high.gate.decide(attempt({ credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] }))).toMatchObject({ reason: "method_not_allowed" });
@@ -184,7 +190,7 @@ describe("the approval gate: a forged or wrong proof", () => {
     const store = new MemoryDocumentStore();
     await store.put({ item: { ...workflowTaskKey(TASK_ID), orgId: COMPANY, workflow: JSON.parse(JSON.stringify(waiting())) } });
     const subject = createWorkflowDocumentSubject({ store });
-    const gate = createDecisionGate({ store, approvers: createLocalOwnerApprovers({ owner: OWNER, verifySession: (t) => t === SESSION, verifyComment: () => ({ author: COLLABORATOR, permission: "write", approves: true }) }), audit: createNoopAuditSink(), subjects: [subject], now: () => NOW });
+    const gate = createDecisionGate({ store, approvers: createLocalOwnerApprovers({ owner: OWNER, verifySession: (t) => t === SESSION, ...commentReads(freshComment(COLLABORATOR)) }), audit: createNoopAuditSink(), subjects: [subject], now: () => NOW });
     expect(await gate.decide(attempt({ credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] }))).toMatchObject({ reason: "method_not_allowed" });
   });
 });
@@ -403,7 +409,7 @@ describe("the approval gate: what the review of round 1 found", () => {
     const store = new MemoryDocumentStore();
     await putTask(store, FIRST);
     await putTask(store, SECOND);
-    const approvers = createLocalOwnerApprovers({ owner: OWNER, now: () => NOW, verifyComment: (id) => (id === COMMENT ? { author: COLLABORATOR, permission: "write", approves: true } : undefined) });
+    const approvers = createLocalOwnerApprovers({ owner: OWNER, now: () => NOW, ...commentReads(freshComment(COLLABORATOR), { id: COMMENT }) });
     const gate = createDecisionGate({ store, approvers, audit: createNoopAuditSink(), subjects: [permissive(store)], now: () => NOW });
     const workflowOf = async (id: string) => (await store.get(workflowTaskKey(id)))!["workflow"] as unknown as WorkflowSnapshot;
     const comment = [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }];

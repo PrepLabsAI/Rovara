@@ -176,6 +176,27 @@ describe("the laptop GitHub code host", () => {
     expect(Date.parse(credential.kind === "basic" ? credential.expiresAt : "")).toBeLessThanOrEqual(NOW + 3_600_000);
   });
 
+  it("reads the comments of a pull request's conversation and posts Rovara's own comment with its marker (lane L12, decision 66: fetch only)", async () => {
+    const world = adapterWorld("environment");
+    world.model.commit(WORKING_BRANCH(1), { "a.txt": "x" });
+    const cr = world.model.reconcile({ sourceBranch: WORKING_BRANCH(1), targetBranch: "main", title: "A change" }).cr;
+    world.model.setAccount("dana", "write");
+    const comment = world.model.addDiscussionComment(cr.id, "dana", "/rovara approve");
+    const ref = { repository: world.repository, id: cr.id, url: "" };
+    const page = await world.host.comments!(ref, {}, world.scope);
+    expect(page).toEqual({ comments: [{
+      id: comment.id, ref: expect.objectContaining({ id: cr.id }) as unknown, author: { login: "dana", hostUserId: expect.any(String) as unknown, accountType: "User" },
+      body: "/rovara approve", createdAt: comment.createdAt, updatedAt: comment.updatedAt,
+    }] });
+    // Nothing in it is a judgement: whether it approves, is fresh or is from someone who may is the core's.
+    expect(Object.keys(page.comments[0]!).sort()).toEqual(["author", "body", "createdAt", "id", "ref", "updatedAt"]);
+    expect((await world.host.comments!(ref, { since: new Date(Date.parse(comment.updatedAt) + 60_000).toISOString() }, world.scope)).comments).toEqual([]);
+    expect(await world.host.postComment!(ref, "Approved.", world.scope)).toBe("posted");
+    const after = await world.host.comments!(ref, {}, world.scope);
+    expect(after.comments.at(-1)!.body).toBe("Approved.\n\n<!-- rovara-reply -->");
+    await expect(world.host.postComment!(ref, "@dana thanks", world.scope)).rejects.toThrow();
+  });
+
   it("reads the sign-in again after 30 seconds, so a new `gh auth login` is picked up without a restart", async () => {
     const first = makeToken();
     const second = makeToken();

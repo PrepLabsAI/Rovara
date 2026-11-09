@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink } from "@agentx/contracts";
 import {
-  DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES,
+  DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, ROVARA_REPLY_MARKER, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES,
   change, createCandidateManifest, projectMetaKey, startWorkflowBranchSync, startWorkflowFix, when, type Check, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
@@ -29,6 +29,7 @@ import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/br
 import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
+import { approvalOfferOf } from "../../packages/broker/src/local/app/page-data.js";
 import { recordedHeadOf } from "../../packages/broker/src/core/build-step/head-check.js";
 import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
@@ -1652,6 +1653,118 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(reads()).toBe(2);
     expect(h.runtime.app.tracking.pausedUntil()).toBeUndefined();
     expect(await trackingItem(h, waiting.taskId)).toMatchObject({ state: "open" });
+  });
+});
+
+describe("rovara up: pull request comment commands, polled through the code host and checked by the core (lane L12 slice 2, decision 66)", () => {
+  const MINUTE = 60_000;
+  type Harness = Awaited<ReturnType<typeof launch>>;
+  const store = (h: Harness) => h.runtime.registry.require("storage");
+
+  /** A task whose plan waits for approval, with a thread (a pull request on the host) the owner says the plan is posted on. */
+  async function planOnThread(options: { clock: ReturnType<typeof movingClock> }) {
+    const h = await launch({ host: true, now: options.clock.now });
+    const planned = await toPlanReview(h);
+    h.model.commit("design-discussion", { "NOTES.md": "# notes\n" });
+    const thread = h.model.reconcile({ sourceBranch: "design-discussion", targetBranch: "main", title: "Discussion of the plan" }).cr;
+    const attached = await h.api(`/v1/dev/tasks/${planned.taskId}/thread`, { method: "POST", body: { repository: "demo", number: Number(thread.id) } });
+    expect(attached.status).toBe(200);
+    // Only a repository of the task's own project can be named.
+    expect((await h.api(`/v1/dev/tasks/${planned.taskId}/thread`, { method: "POST", body: { repository: "elsewhere", number: 3 } })).status).toBe(400);
+    h.model.setAccount("dana", "write");
+    h.model.setAccount("rita", "read");
+    /** The fake host's own clock, lined up with the app's. */
+    const write = (ms: number, author: string, body: string) => { h.model.setNow(new Date(options.clock.at + ms - 1_000).toISOString()); return h.model.addDiscussionComment(thread.id, author, body); };
+    const workflowOf = async () => (await taskRecord(h, planned.taskId)).workflow;
+    /** What the decision gate says to a comment offered as the proof, for the plan as it waits now. */
+    const offer = approvalOfferOf(planned.taskId, (await store(h).get({ pk: `DEVTASK#${planned.taskId}`, sk: "META" }))!["workflow"] as unknown as WorkflowSnapshot)!;
+    const viaGate = async (commentId: string, requestId = offer.requestId) => {
+      return h.runtime.app.gate.decide({
+        companyId: IMPLICIT_COMPANY_ID, kind: WORKFLOW_DOCUMENT_KIND, subjectId: planned.taskId, requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest },
+        credentials: [{ method: "code-host-comment", token: commentId }],
+      });
+    };
+    const poll = async () => { options.clock.advance(MINUTE + 1_000); await h.runtime.tick(); };
+    const repliesOnThread = () => thread.comments.filter((comment) => comment.body.includes(ROVARA_REPLY_MARKER)).map((comment) => comment.body.split("\n")[0]);
+    return { h, ...planned, thread, write, workflowOf, viaGate, poll, repliesOnThread };
+  }
+
+  it("runs a plan approval from a writer's comment, and refuses a wrong thread, a stale or edited comment, a read-only author and a reused comment, each decided in the core", async () => {
+    const clock = movingClock();
+    const w = await planOnThread({ clock });
+    const { h, taskId } = w;
+    const waiting = async () => expect(await w.workflowOf()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+
+    // WRONG THREAD: the host reports a comment as being on another change request than the one the plan was posted on. The core refuses; the host is never asked what it means.
+    const wrongThread = w.write(5_000, "rita", "/rovara approve");
+    const original = h.host.comments.bind(h.host);
+    h.host.comments = async (...args) => { const page = await original(...args); return { ...page, comments: page.comments.map((comment) => (comment.id === wrongThread.id ? { ...comment, ref: { ...comment.ref, id: "77" } } : comment)) }; };
+    expect(await w.viaGate(wrongThread.id)).toMatchObject({ status: "refused", reason: "not_approved", detail: expect.stringContaining("comment_on_other_change") as unknown });
+    h.host.comments = original;
+
+    // STALE: written before the plan was posted (the thread's clock is earlier than the plan's).
+    h.model.setNow(new Date(clock.at - 3_600_000).toISOString());
+    const stale = h.model.addDiscussionComment(w.thread.id, "dana", "/rovara approve");
+    expect(await w.viaGate(stale.id)).toMatchObject({ status: "refused", detail: expect.stringContaining("comment_before_request") as unknown });
+
+    // EDITED: the host records an edit, so the comment is never a proof, whatever it says now.
+    const edited = w.write(10_000, "dana", "looks fine");
+    h.model.setNow(new Date(clock.at + 11_000).toISOString());
+    h.model.editDiscussionComment(w.thread.id, edited.id, "/rovara approve");
+    expect(await w.viaGate(edited.id)).toMatchObject({ status: "refused", detail: expect.stringContaining("comment_edited") as unknown });
+
+    // READ-ONLY AUTHOR and a plain remark: polled and dropped; nothing is decided and Rovara says nothing.
+    w.write(15_000, "rita", "/rovara approve");
+    w.write(16_000, "dana", "one question about the second step");
+    const readOnly = w.write(17_000, "rita", "/rovara approve");
+    expect(await w.viaGate(readOnly.id)).toMatchObject({ status: "refused", detail: expect.stringContaining("not_a_collaborator") as unknown });
+    await w.poll();
+    await waiting();
+    expect(w.repliesOnThread()).toEqual([]);
+
+    // A FRESH `/rovara approve` from a writer on the plan's thread approves the plan: the flow goes on to coding, recorded as the writer's decision (a project approver), never the owner's.
+    const approving = w.write(2 * MINUTE, "dana", "/rovara approve");
+    await w.poll();
+    expect(await w.workflowOf()).toMatchObject({ stage: "IMPLEMENT" });
+    const decision = (await w.workflowOf()).decisions.at(-1) as { decision: string; actorRole?: string };
+    expect(decision).toMatchObject({ decision: "APPROVE" });
+    expect(decision.actorRole).not.toBe("TASK_OWNER");
+    expect(w.repliesOnThread()).toEqual(["Approved."]);
+
+    // REUSED: the same comment cannot approve again, here or anywhere; Rovara's own reply (it carries the marker) is never read as a command; a later poll does nothing more.
+    expect(await w.viaGate(approving.id)).toMatchObject({ status: "replayed" });
+    expect(await w.viaGate(approving.id, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")).toMatchObject({ status: "refused" });
+    await w.poll();
+    expect(w.repliesOnThread()).toEqual(["Approved."]);
+    expect((await taskRecord(h, taskId)).workflow.decisions.filter((entry) => entry.source === undefined && (entry as { decision?: string }).decision === "APPROVE")).toHaveLength(1);
+  });
+
+  it("sends a plan back from a writer's `/rovara changes:` comment, with the words in the next plan's prompt, and ignores a command on a thread the plan is not on", async () => {
+    const clock = movingClock();
+    const w = await planOnThread({ clock });
+    const { h } = w;
+    h.model.commit("unrelated", { "OTHER.md": "# other\n" });
+    const other = h.model.reconcile({ sourceBranch: "unrelated", targetBranch: "main", title: "Something else" }).cr;
+    h.model.setNow(new Date(clock.at + 4_000).toISOString());
+    h.model.addDiscussionComment(other.id, "dana", "/rovara approve");
+    w.write(5_000, "dana", "/rovara changes: keep the old endpoint too");
+    await w.poll();
+    expect(await w.workflowOf()).toMatchObject({ stage: "PLAN" });
+    expect(w.repliesOnThread()).toEqual(["Sent back."]);
+    const feedback = await store(h).query({ pk: `DEVTASK#${w.taskId}`, sk: { op: "beginsWith", prefix: "PLAN_FEEDBACK" } });
+    expect(JSON.stringify(feedback.items)).toContain("keep the old endpoint too");
+  });
+
+  it("stops polling comments while the code host asks to slow down, and offers the comment way only while a host can read comments", async () => {
+    const clock = movingClock();
+    const w = await planOnThread({ clock });
+    const { h } = w;
+    expect(h.runtime.app.comments.available()).toBe(true);
+    h.model.rateLimitedUntil = clock.at + 10 * MINUTE;
+    w.write(5_000, "dana", "/rovara changes: x");
+    await w.poll();
+    expect(h.runtime.app.tracking.pausedUntil()).toBe(clock.at - MINUTE - 1_000 + 10 * MINUTE);
+    expect(await w.workflowOf()).toMatchObject({ stage: "PLAN_REVIEW" });
   });
 });
 

@@ -31,6 +31,7 @@ import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
 import type { BrowserOpener } from "./open-browser.js";
 import { createLocalApp, type LocalApp } from "./app/app.js";
+import type { LocalComments } from "./app/comments.js";
 import { configurationAnswer } from "./app/routes.js";
 import { usableWorkerCredential } from "./app/push-credential.js";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
@@ -298,13 +299,20 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   // The sessions of the local review pages: the pages server is given these, and the approvers check the proofs they sign.
   const pageSessions = new LocalPageSessions();
   const registry = createAdapterRegistry();
+  // The comment reads of the approvers (a comment proves an approval only after Rovara's own checks, `core/pr-commands/comment-checks.ts`) need the app, which is made after the registry is sealed.
+  const comments: { current?: Pick<LocalComments, "fetchComment" | "contextOf" | "available"> } = {};
   const modelKeys = createLocalModelKeyStore(stateDirectory, options.environment);
   registerCodeDefaults(registry, {
     ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     displayName: ownerName(),
     isValidSession: (value) => constantTimeEqual(value, sessionToken),
     // An approval is proved by a token the local pages sign over one request, revision and digest; the sign-in secret above is never an approval proof.
-    approvers: { verifySession: localSessionProofVerifier(pageSessions) },
+    approvers: {
+      verifySession: localSessionProofVerifier(pageSessions),
+      fetchComment: async (commentId, request) => comments.current?.fetchComment(commentId, request),
+      commentContext: async (request) => comments.current?.contextOf(request),
+      commentsOn: () => comments.current?.available() === true,
+    },
     modelKeys,
     // Nothing is priced until a price table is configured: usage is recorded as "unknown", never guessed.
     priceTable: { currency: "USD", models: {} },
@@ -398,6 +406,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     ...(options.now === undefined ? {} : { now: options.now }),
   });
 
+  comments.current = app.comments;
   const workspaces = new InMemoryRegistry();
   const brokerHandler = createBrokerHandler({
     authenticator: {

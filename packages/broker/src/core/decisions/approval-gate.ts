@@ -116,8 +116,10 @@ export type GateResult =
 export interface DecisionGatePolicy {
   /** The only methods that may approve a high-risk request. Default: the local session. */
   highRiskMethods?: readonly string[];
-  /** The only methods that may reject or ask for changes. Default: the local session. */
+  /** The only methods that may reject. Default: the local session. */
   rejectMethods?: readonly string[];
+  /** The only methods that may ask for changes. Default: the local session, or a repository writer's comment (owner decision 62, A3: asking for changes by comment is allowed; rejecting is not). */
+  changesMethods?: readonly string[];
   /** How long the used-proof markers are kept. Default: 400 days. */
   proofKeepSeconds?: number;
   /**
@@ -211,6 +213,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
   const subjects = new Map(deps.subjects.map((subject) => [subject.kind, subject]));
   const highRiskMethods = deps.policy?.highRiskMethods ?? [LOCAL_SESSION_METHOD_NAME];
   const rejectMethods = deps.policy?.rejectMethods ?? [LOCAL_SESSION_METHOD_NAME];
+  const changesMethods = deps.policy?.changesMethods ?? [LOCAL_SESSION_METHOD_NAME, "code-host-comment"];
   const proofKeepSeconds = deps.policy?.proofKeepSeconds ?? PROOF_KEEP_SECONDS;
   const reusableMethods = deps.policy?.reusableMethods ?? [LOCAL_SESSION_METHOD_NAME];
   const markerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));
@@ -236,7 +239,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
       const marker = await deps.store.get(markerOf(attempt.companyId, credential.method, credential.token, bindingId));
       if (marker === undefined || marker["requestId"] !== attempt.requestId) continue;
       const request: ApprovalRequest = {
-        companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId), kind: record.approvalKind, subject: { type: record.subjectType, id: record.subjectId }, revision: record.revision, artifactDigest: record.artifactDigest,
+        companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId), kind: record.approvalKind, outcome: attempt.outcome, subject: { type: record.subjectType, id: record.subjectId }, revision: record.revision, artifactDigest: record.artifactDigest,
         ...(record.projectName === undefined ? {} : { projectName: record.projectName }),
       };
       const verdict = await deps.approvers.verify(request, {
@@ -282,10 +285,10 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
 
       // ---- who may answer, and how
       const bindingId = approvalBindingId(attempt.companyId, attempt.kind, attempt.subjectId, loaded.request.revision, loaded.request.artifactDigest);
-      const request: ApprovalRequest = { ...loaded.request, companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId) };
+      const request: ApprovalRequest = { ...loaded.request, companyId: attempt.companyId, requestId: adapterRequestId(attempt.requestId), outcome: attempt.outcome };
       const requirement = await deps.approvers.requirement(request);
       const risk = loaded.request.risk ?? "high";
-      const policyMethods = attempt.outcome !== "approve" ? rejectMethods : risk === "high" ? highRiskMethods : undefined;
+      const policyMethods = attempt.outcome === "reject" ? rejectMethods : attempt.outcome === "request_changes" ? changesMethods : risk === "high" ? highRiskMethods : undefined;
       const allowed = requirement.methods.filter((method) => policyMethods === undefined || policyMethods.includes(method));
       const presented = new Set<string>();
       for (const credential of attempt.credentials) {

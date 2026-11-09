@@ -68,6 +68,11 @@ export class FakeHostModel {
     this.branches.set(this.defaultBranch, root.sha);
   }
 
+  /** Sets the model's own clock (a test lines it up with the app's), so the next time it hands out is `iso` plus one second. */
+  setNow(iso: string): void {
+    this.clock = Date.parse(iso);
+  }
+
   /** An ISO time that moves forward by one second each call, so ordering is visible and nothing reads the real clock. */
   now(): string {
     this.clock += 1_000;

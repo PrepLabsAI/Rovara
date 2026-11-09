@@ -260,6 +260,20 @@ merge of the base. **It never merges**: a person does, on the code host. A pull 
   request); a sweep reads at most 10 rows, 256 requests and 20 s. A failing pass waits 60 s times its failures, up to 15 minutes. A code host that says "slow down" (`HostRateLimitError`) pauses every row until the time it names.
 - **The clock** is the app's (`LocalRuntimeOptions.now`), so a test moves it and a restart picks the schedule up from the rows.
 
+## Pull request comment commands (lane L12, owner decision 66)
+
+A writer's comment on a pull request can approve or send back a plan (`/rovara approve`, `/rovara changes: ...`) or stop the work (`/rovara stop`). A laptop has no webhook, so the app **polls** (every 60 s, with the same rate-limit pause as merge
+tracking) the conversation of each thread through the code host's optional `comments` read, and answers with its optional `postComment`.
+
+- **A thread** is where the owner says a task's plan is posted: `POST /v1/dev/tasks/<id>/thread {"repository": "<project repository name>", "number": 12}` (an issue or pull request of the task's own project), else the task's pull request.
+  A task has one. Only a repository of the task's project can be named.
+- **The code host only fetches.** A comment is text, author, created and updated times, the change request it is on, and (through `standing`) its author's permission. **Every safety check is Rovara's**
+  (`core/pr-commands/handler.ts`, `core/pr-commands/comment-checks.ts`): the right thread, written after the version being decided was posted, never edited (the host's `updatedAt` moved), the right command for the answer
+  (`approve` approves, `changes:` asks for changes, and an `approve` comment is no proof of a request for changes), not a bot's, not Rovara's own reply (its hidden marker), a writer, and used once. The Approvers seam
+  makes the checks again from a second read when the decision is made.
+- **What a comment cannot do.** It cannot approve a high-risk plan (the owner's page session only), reject (the session only), or merge. Asking for changes by comment is allowed (decision 62).
+- **Not wired:** `/rovara lesson` (no lessons on this install) answers so. A host without `comments` offers no comment way of approving.
+
 ## Not wired yet
 
 - **Merge from `rovara up`.** A person merges a draft pull request on the code host (or with their proof); merge tracking never presses Merge (owner decision 1). The owner's own Merge button on the local page is not built;

@@ -59,6 +59,12 @@ The config file (JSON, `version: 1`) names the adapters to load:
 - `loadAdapters(config, { registry, importModule })` takes the importer as a parameter; `loadAdaptersFromFile` reads a JSON file and
   imports packages and relative paths.
 
+## Code host: reading and answering comments (optional, lane L12)
+
+Two optional abilities of the `CodeHost` port serve comment commands: `comments(ref, { since, page })` (the comments of a change request's conversation, oldest first: id, the change request it is on, author with account type,
+text, `createdAt`, `updatedAt`; **fetch only**, owner decision 66) and `postComment(ref, text)` (one comment of Rovara's own fixed text; on an account that is also a person's it carries `ROVARA_REPLY_MARKER`). A host without them
+simply has no comment commands. Whether a comment is a command, fresh, edited, on the right thread or from someone who may approve is decided in Rovara's core (`core/pr-commands/comment-checks.ts`), never by the plug-in.
+
 ## Company scope
 
 Code runs as one implicit company (`IMPLICIT_COMPANY_ID`) and keeps Cloud's `ORG#<company>#<name>` key scheme (decision 45.6):

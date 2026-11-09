@@ -97,6 +97,11 @@ export interface ApprovalRequest {
   risk?: "low" | "medium" | "high";
   /** After this time (ISO) no proof is accepted. */
   expiresAt?: string;
+  /**
+   * Which answer the proof is for, when the caller is a decision gate (lane L12, owner decision 66): a comment that says "approve" is not a proof for "request changes", and the other way round. Absent: an approval
+   * (a merge press, the older callers).
+   */
+  outcome?: "approve" | "reject" | "request_changes";
 }
 
 /** What the approver adapter says is needed, so a surface can offer the right way to answer. */

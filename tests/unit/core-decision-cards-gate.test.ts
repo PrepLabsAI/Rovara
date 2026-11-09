@@ -11,6 +11,7 @@ import { WORKFLOW_DOCUMENT_CARD_KINDS, createDecisionPerformer, workflowDocument
 import { routeDecisionCards, type DecisionSources } from "../../packages/broker/src/core/decisions/routes.js";
 import { decisionCardPath, type DecisionItem } from "../../packages/broker/src/core/decisions/project.js";
 import { documentDecisionStore } from "../../packages/broker/src/core/decisions/store.js";
+import { commentReads, freshComment } from "../support/comment-fakes.js";
 
 const TASK_ID = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const SESSION = ["local", "session", "for", "the", "card", "tests"].join("-");
@@ -29,7 +30,7 @@ async function setup(risk: "low" | "medium" | "high", options: { bound?: boolean
   const memory = new MemoryDocumentStore();
   const workflow = waiting();
   await memory.put({ item: { ...workflowTaskKey(TASK_ID), orgId: IMPLICIT_COMPANY_ID, project: "web", workflow: JSON.parse(JSON.stringify(workflow)) } });
-  const approvers = createLocalOwnerApprovers({ owner: OWNER, now: () => new Date(NOW), verifySession: (token) => token === SESSION, verifyComment: () => ({ author: { provider: "any-code-host", tenant: "", accountId: "c" }, permission: "write", approves: true }) });
+  const approvers = createLocalOwnerApprovers({ owner: OWNER, now: () => new Date(NOW), verifySession: (token) => token === SESSION, ...commentReads(freshComment({ provider: "any-code-host", tenant: "", accountId: "c" })) });
   const gate = createDecisionGate({ store: memory, approvers, audit: createNoopAuditSink(), subjects: [createWorkflowDocumentSubject({ store: memory, riskOf: () => risk })], now: () => new Date(NOW) });
   const digest = waitingDocumentDigest(workflow)!;
   const item: DecisionItem = {

@@ -3,6 +3,7 @@
 //
 // Plan decisions are NOT here: an approval is authority, and the only proof the local owner can give is the one a local page signs for exactly one request, revision and digest
 // (decisions/local-session.ts). The session token that logs a tool in is not an approval proof, so a tool that asks to approve is told to open the page.
+import type { LocalComments } from "./comments.js";
 import type { ObjectStorage } from "@agentx/contracts";
 import { AgentXError, agentXError, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
@@ -26,6 +27,8 @@ export interface OwnerRoutesDeps {
   /** Opens a review page in the owner's browser, from this process. Resolves when the browser was asked; the address is not returned. */
   openPage: (path: string) => Promise<void>;
   version: string;
+  /** Pull request comment commands (lane L12): where a task's plan is posted. */
+  comments: Pick<LocalComments, "attachThread">;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -35,7 +38,7 @@ function bodyOf(request: BrokerRequest): unknown {
   try { return JSON.parse(request.body) as unknown; } catch { throw agentXError("CONFIG_INVALID", "the request body is not JSON"); }
 }
 
-const TASK = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(?:\/(plan|close|cancel|workflow\/decision|workflow\/retry|continue))?$/u;
+const TASK = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})(?:\/(plan|close|cancel|thread|workflow\/decision|workflow\/retry|continue))?$/u;
 
 /** `GET /v1/auth/.well-known/agentx-configuration`: what a client asks before it signs in. Open, like `/healthz`. */
 export function configurationAnswer(version: string): BrokerResponse {
@@ -137,6 +140,14 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         if (action === "cancel" && request.method === "POST") {
           await controlled(caller, taskId, "stop", bodyOf(request));
           return json(200, { task: await viewOf(caller, taskId) });
+        }
+        if (action === "thread" && request.method === "POST") {
+          // The owner says where the plan is posted: an issue or pull request of the task's project. A writer's `/rovara approve` there can decide it (every check is Rovara's, decision 66).
+          await loadOwnedTask(flow.deps, caller, taskId);
+          const body = bodyOf(request) as { repository?: unknown; number?: unknown };
+          if (typeof body.repository !== "string" || typeof body.number !== "number") throw agentXError("CONFIG_INVALID", "name a repository of the project and an issue or pull request number");
+          await deps.comments.attachThread(taskId, { repository: body.repository, number: body.number });
+          return json(200, { thread: { repository: body.repository, number: body.number } });
         }
         if (action === "workflow/retry" && request.method === "POST") {
           await controlled(caller, taskId, "retry", bodyOf(request));

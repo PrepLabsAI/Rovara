@@ -17,6 +17,7 @@ import {
 } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createEnvironmentModelKeyStore, createFileModelKeyStore, createLayeredModelKeyStore, createMemoryModelKeyStore, environmentVariableFor } from "../../packages/broker/src/ports/model-key-stores.js";
 import { runAdmissionConformance, runApproversConformance, runAuditSinkConformance, runIdentityConformance, runMeteringConformance, runModelKeyStoreConformance } from "../support/ports/policy-conformance.js";
+import { commentReads, freshComment } from "../support/comment-fakes.js";
 
 const owner = localOwnerPrincipal();
 
@@ -39,9 +40,9 @@ runApproversConformance("Code default (local owner session)", {
   forgedToken: "guessed-session",
 });
 
-const lookUpComment = (commentId: string) => (commentId === COMMENT_ID ? { author: COLLABORATOR, permission: "write" as const, approves: true } : undefined);
+const commentChecks = commentReads(freshComment(COLLABORATOR), { id: COMMENT_ID });
 runApproversConformance("Code default (repository collaborator by comment)", {
-  create: async () => createLocalOwnerApprovers({ owner, verifyComment: lookUpComment }),
+  create: async () => createLocalOwnerApprovers({ owner, ...commentChecks }),
   request: REQUEST,
   acceptable: { proofId: "p", method: CODE_HOST_COMMENT_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: COMMENT_ID, claimedAccount: COLLABORATOR },
   forgedToken: "comment-that-does-not-exist",
@@ -108,14 +109,14 @@ describe("Code defaults", () => {
 
   it("refuses a comment from a read-only collaborator, a comment that does not approve, and a mismatched account", async () => {
     const proof = { proofId: "p", method: CODE_HOST_COMMENT_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: "c" };
-    const lookup = (permission: "read" | "write", approves = true) => createLocalOwnerApprovers({ owner, verifyComment: () => ({ author: COLLABORATOR, permission, approves }) });
+    const lookup = (permission: "read" | "write", approves = true) => createLocalOwnerApprovers({ owner, ...commentReads(freshComment(COLLABORATOR, { permission, ...(approves ? {} : { body: "looks fine to me" }) })) });
     expect(await lookup("read").verify(REQUEST, proof)).toEqual({ approved: false, reason: "not_a_collaborator" });
     expect(await lookup("write", false).verify(REQUEST, { ...proof, proofId: "q" })).toEqual({ approved: false, reason: "no_approving_comment" });
     expect(await lookup("write").verify(REQUEST, { ...proof, proofId: "r", claimedAccount: { ...COLLABORATOR, accountId: "someone-else" } })).toEqual({ approved: false, reason: "account_mismatch" });
   });
 
   it("names the approving collaborator under their own provider, not the local owner's", async () => {
-    const verdict = await createLocalOwnerApprovers({ owner, verifyComment: lookUpComment }).verify(REQUEST, { proofId: "p", method: CODE_HOST_COMMENT_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: COMMENT_ID });
+    const verdict = await createLocalOwnerApprovers({ owner, ...commentChecks }).verify(REQUEST, { proofId: "p", method: CODE_HOST_COMMENT_METHOD, requestId: REQUEST.requestId, revision: REQUEST.revision, artifactDigest: REQUEST.artifactDigest, token: COMMENT_ID });
     expect(verdict.approved && verdict.approver.provider).toBe("any-code-host");
   });
 
