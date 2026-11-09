@@ -42,7 +42,7 @@ export function secretReader(source: SecretSource, environment: NodeJS.ProcessEn
     } else {
       let handle;
       try {
-        handle = await open(source.file, constants.O_RDONLY | constants.O_NOFOLLOW);
+        handle = await open(source.file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       } catch {
         throw unavailable();
       }
