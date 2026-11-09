@@ -29,7 +29,7 @@ import { recoveryRowKey, workflowUpdateItem } from "../../core/merge/store.js";
 import { sessionEventItem } from "../../core/sessions/store.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
-import { pullRequestRecordOf } from "../../core/build-step/records.js";
+import { recordedHeadOf } from "../../core/build-step/head-check.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 
 /** The first wait after a pass, and the wait the quiet rows grow to. */
@@ -155,7 +155,8 @@ export function createLocalTracking(options: LocalTrackingOptions): LocalTrackin
     loadTask,
     repositoryUrl: async (project, revision, repositoryId) => (await flow.projects.revision(project, revision))?.definition.repositories.find((entry) => entry.name === repositoryId)?.url,
     repository: resolver,
-    recordedHead: async (workspaceId, repositoryId, number) => (await pullRequestRecordOf(flow, workspaceId, repositoryId, number))?.expectedHeadCommit,
+    // A pull request seen "changed outside Rovara" has no recorded head, so its head reads as someone else's and it is never called ready.
+    recordedHead: recordedHeadOf(flow),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
 
