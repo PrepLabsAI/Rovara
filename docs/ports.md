@@ -147,6 +147,53 @@ adapter answers "who wrote this comment and what may they do" through `verifyCom
 store (`ANTHROPIC_API_KEY`), a file store (JSON, refused unless only the owner can read it), a layered store and a memory store. Cloud
 adapts the port to its secret store and proxy.
 
+## Code host, tracker and check runner
+
+These three points hold Cloud's ports (`packages/contracts/src/plugins/`), which use neutral words only: change request, revision, check,
+review, item. A caller reads an adapter's `capabilities` and never branches on its name. The adapters are in
+`packages/broker/src/plugins/<point>/<name>/`; the lookups Cloud's own registry did are plain functions over the one registry in
+`plugins/routing.ts`.
+
+| Point | Port | Adapters here | Registry name |
+| --- | --- | --- | --- |
+| `code-host` | `CodeHost` | GitHub (`code-host/github`), fake | the adapter's `kind` (`github`, `fake`) |
+| `check-runner` | `CheckRunnerAdapter` (a factory: `create({ allowedRepositories })` gives a `CheckRunner`) | GitHub Actions, CodeBuild (optional, AWS), fake | `github-actions`, `codebuild`, `fake-checks` |
+| `tracker` | `Tracker` | Linear, fake | `linear`, `fake-tracker` |
+
+- **The registry name is the adapter's `kind`.** `register` refuses a code host, tracker or check runner whose `kind` differs from the
+  name it is registered under, so a lookup by name finds the adapter that calls itself that.
+- **Routing.** `codeHostForRecord(registry, repository)` picks the code host by the repository record's `host.kind`; a record with no
+  `host` (written before the field) is on the legacy kind `github`. `codeHostForKind`, `trackerForKind` and `checkRunnerForKind` do the
+  same by kind. A kind with no adapter is refused with a fixed sentence that does not name the kind, and nothing falls back to another
+  adapter. `assertRepositoryHostsKnown` refuses a task start whose repositories name a code host nobody registered.
+- **No edition gate and no required adapter.** Any kind registers; a registry with no code host simply refuses lookups.
+- **A check runner is built per project.** CodeBuild builds for the repositories that project registered and refuses any other.
+- **A plug-in module needs its client.** A config entry names a small module that exports `plugin` built by a factory, which is told how the
+  install reaches the outside system: `githubCodeHostPlugin({ createProvider })`, `githubActionsPlugin({ createProvider })`,
+  `codeBuildPlugin({ createGateway })`, `linearTrackerPlugin({ createAccess })`. The settings block holds names and options, never a secret:
+  a secret is `{ "env": "NAME" }` or `{ "file": "/path" }`, read when it is used.
+
+  ```json
+  { "point": "code-host", "name": "github", "module": "./adapters/github.js",
+    "settings": { "credentialRef": "github", "webhookSecret": { "env": "GITHUB_WEBHOOK_SECRET" } } }
+  ```
+
+  where `./adapters/github.js` is `export const plugin = githubCodeHostPlugin({ createProvider: () => myGitHubClient })`.
+- **The GitHub client is a seam of its own** (`code-host/github/provider.ts`, `GitHubCodeHostProvider`). The GitHub adapters are bound to that
+  interface, not to `github-app.ts`: this tree's `GitHubAppCredentialProvider` is the older client and lacks 15 of the 24 methods (status,
+  feedback, merge, working branches, code owners, standing, path kinds, credential expiry). The plug-in module refuses a client that lacks
+  any method when the process starts, naming the missing methods. Cloud's client, a client built on `gh` or a personal token for the local
+  runtime, and the test fixture can all sit under the adapters.
+- **Untrusted text** from a code host or tracker (comments, logs, item bodies) is data: it reaches a model only inside a labelled block, and
+  the GitHub mapping cuts every text to the port's bounds so a long comment never fails a read.
+- **Linear.** The adapter carries its own copy of the Linear webhook rules (`tracker/linear/webhook.ts`: the signature check, the issue key
+  rule and the issue-created mapping) because Cloud's adapter imports the trigger framework, which is not ported. The install gives the
+  adapter what it may do (read an issue, post a comment, the hook's signing secret); what it is not given, it does not offer.
+
+Not ported with these points (they are in Cloud's `plugins/` and belong to later lanes): the event intake and poller
+(`events/`, which keep their state in DynamoDB and move onto the document store), the tracker start path (`tracker/start.ts`, which feeds
+Cloud's intake engine), and `github-only.ts` (the "this step speaks GitHub only" refusal).
+
 ## The channel point and Pratik's registry
 
 `registry.get("channel", name)` returns a `ChannelAdapter`: Pratik's `ChannelCapabilities`, `projects`, `stepUp`, `deliver(ChannelEvent)`
@@ -171,5 +218,3 @@ record. Slack is not a `channel` adapter yet: spec 062's `AdapterChannelIdSchema
 - **Sign-in flows.** `IdentityProvider` answers who a credential is; begin/complete/sign-out, authentication freshness and member
   listing for single sign-on are interface additions for the lane that needs them.
 - A SQLite adapter must use UTF-8 text with BINARY collation for the code-point order and refuse lone surrogates in keys.
-- The ports for code host, tracker and check runner come with lane L1 (Cloud's `plugins/` contracts). Until then their line in
-  `PluginPointTypes` is `UnspecifiedAdapter`.

@@ -1,0 +1,84 @@
+// Port lane L2: which adapter serves what. These are the lookups Cloud's `plugins/registry.ts` did (its code host router, its check runner and
+// tracker tables), written as plain functions over W0's ONE registry (`AdapterRegistry`, decisions 40, 45.5 and 51), so there is no second registry.
+//
+// What is dropped from Cloud's registry: the edition gate (nothing is Enterprise-only in Code) and the rule that GitHub must be registered. What is
+// kept: a kind with no adapter is refused with a fixed sentence that does not echo the kind, and a lookup never falls back to another adapter.
+import {
+  PluginKindSchema, agentXError,
+  type CheckRunner, type CheckRunnerContext, type CodeHost, type PluginKind, type RegistryView, type RepositoryRef, type Tracker,
+} from "@agentx/contracts";
+
+export const NO_CODE_HOST_MESSAGE = "No code host is set up for this repository.";
+/** Said when a repository record names a code host this install has not registered (the kind is not echoed). */
+export const NO_HOST_MESSAGE = "This repository's code host is not available in this install.";
+export const NO_TRACKER_MESSAGE = "No tracker is set up for this kind of item.";
+export const NO_CHECK_RUNNER_MESSAGE = "No check runner is set up for this kind of build.";
+
+/** The kind of code host a repository record without a `host` is on. A decision-51 gap: records written before the host field name no provider, and the old default is GitHub. */
+export const LEGACY_CODE_HOST_KIND: PluginKind = "github";
+
+function requireKind(kind: PluginKind): void {
+  if (!PluginKindSchema.safeParse(kind).success) throw agentXError("CONFIG_INVALID", "A plug-in has a name that is not a plug-in name.");
+}
+
+/** The code host registered under this kind; throws CONFIG_INVALID (a fixed sentence) when there is none. */
+export function codeHostForKind(registry: RegistryView, kind: PluginKind): CodeHost {
+  requireKind(kind);
+  const host = registry.get("code-host", kind);
+  if (host === undefined) throw agentXError("CONFIG_INVALID", NO_CODE_HOST_MESSAGE);
+  return host;
+}
+
+/**
+ * The code host for a repository record, by its `host.kind`. A record without one is on `LEGACY_CODE_HOST_KIND`. Throws CONFIG_INVALID with a
+ * fixed sentence when that kind has no registered host; never falls back to another host.
+ */
+export function codeHostForRecord(registry: RegistryView, repository: { host?: { kind: PluginKind } | undefined }): CodeHost {
+  const host = registry.get("code-host", repository.host?.kind ?? LEGACY_CODE_HOST_KIND);
+  if (host === undefined) throw agentXError("CONFIG_INVALID", NO_HOST_MESSAGE);
+  return host;
+}
+
+/** The code host that serves a bare repository address. `hostKindOf` says which kind an address is on; the default is `LEGACY_CODE_HOST_KIND`. */
+export function codeHostForRepository(registry: RegistryView, repository: RepositoryRef, hostKindOf: (repository: RepositoryRef) => PluginKind = () => LEGACY_CODE_HOST_KIND): CodeHost {
+  return codeHostForKind(registry, hostKindOf(repository));
+}
+
+/** The kinds of code host registered, sorted. */
+export function codeHostKinds(registry: RegistryView): readonly PluginKind[] {
+  return registry.names("code-host");
+}
+
+/** At task start: every repository of the project must have a registered code host, or the start is refused before any work is spent. */
+export function assertRepositoryHostsKnown(registry: RegistryView, repositories: readonly { host?: { kind: PluginKind } | undefined }[]): void {
+  const kinds = new Set(codeHostKinds(registry));
+  for (const repository of repositories) {
+    if (!kinds.has(repository.host?.kind ?? LEGACY_CODE_HOST_KIND)) throw agentXError("CONFIG_INVALID", NO_HOST_MESSAGE);
+  }
+}
+
+/** The tracker registered under this kind; throws CONFIG_INVALID (a fixed sentence, the kind not echoed) when none is registered. Never falls back to another tracker. */
+export function trackerForKind(registry: RegistryView, kind: PluginKind): Tracker {
+  requireKind(kind);
+  const tracker = registry.get("tracker", kind);
+  if (tracker === undefined) throw agentXError("CONFIG_INVALID", NO_TRACKER_MESSAGE);
+  return tracker;
+}
+
+export function trackerKinds(registry: RegistryView): readonly PluginKind[] {
+  return registry.names("tracker");
+}
+
+/** A check runner of this kind, built for the given context (the repositories the caller's project registered). */
+export function checkRunnerForKind(registry: RegistryView, kind: PluginKind, context: CheckRunnerContext): CheckRunner {
+  requireKind(kind);
+  const adapter = registry.get("check-runner", kind);
+  if (adapter === undefined) throw agentXError("CONFIG_INVALID", NO_CHECK_RUNNER_MESSAGE);
+  const runner = adapter.create(context);
+  if (runner.kind !== kind) throw agentXError("CONFIG_INVALID", "A check runner's name does not match the name it was registered under.");
+  return runner;
+}
+
+export function checkRunnerKinds(registry: RegistryView): readonly PluginKind[] {
+  return registry.names("check-runner");
+}
