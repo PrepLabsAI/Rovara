@@ -188,13 +188,21 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
   const sameDecision = (record: ApprovalRecord, attempt: DecisionAttempt): boolean =>
     record.kind === attempt.kind && record.subjectId === attempt.subjectId && record.outcome === attempt.outcome && record.revision === attempt.seen.revision && record.artifactDigest === attempt.seen.artifactDigest;
 
+  /**
+   * A repeat of a finished decision is answered again, and only to someone who holds the proof that made it: the used-proof marker of one of the presented credentials must be there for this request. A person who
+   * only knows the request id (or presents another credential) is refused, never told "decided" by someone else's approval.
+   */
   async function replayOf(attempt: DecisionAttempt): Promise<GateResult | undefined> {
     const earlier = await deps.store.get(approvalRecordKey(attempt.companyId, attempt.requestId));
     if (earlier === undefined) return undefined;
     const record = recordOf(earlier);
     // A row that cannot be read is not a decision this gate made: it cannot be answered, and the id stays used.
     if (record === undefined || !sameDecision(record, attempt)) return refuse("request_id_reused", "That request ID was already used for a different decision.");
-    return { status: "replayed", record };
+    for (const credential of attempt.credentials) {
+      const marker = await deps.store.get(approvalProofMarkerKey(attempt.companyId, approvalProofKey({ method: credential.method, token: credential.token, requestId: attempt.requestId })));
+      if (marker !== undefined && marker["requestId"] === attempt.requestId) return { status: "replayed", record };
+    }
+    return refuse("request_id_reused", "That request ID was already used for a different decision.");
   }
 
   return {

@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import {
   INDEX_EXPIRY_ATTRIBUTE, SESSION_ENDED_MESSAGE, SESSION_MESSAGE_MAX_CHARS, SessionMessageSchema, agentSessionKey, cleanSessionName, redactText, sessionEventId, when,
-  type AgentSessionRecord, type AuditSink, type DocumentStore, type OrgId, type Principal, type SessionEvent, type SessionId, type SessionMessage, type TransactItem,
+  type AgentSessionRecord, type AuditSink, type DocumentStore, type IdentityProvider, type OrgId, type PresentedCredential, type Principal, type SessionEvent, type SessionId, type SessionMessage, type TransactItem,
 } from "@agentx/contracts";
 import { developerIdOf } from "./create.js";
 import { SessionStore, jsonOf, sessionEventItem } from "./store.js";
@@ -32,6 +32,8 @@ export interface ControlDependencies {
   store: DocumentStore;
   audit: AuditSink;
   host?: SessionControlHost | undefined;
+  /** Needed to act with a raw credential (`{ credential }`) instead of a principal the surface already authenticated. */
+  identity?: IdentityProvider | undefined;
   /** Whether this person may act on this session. Default: the company's owner. */
   authorize?: (principal: Principal, session: AgentSessionRecord, action: "stop" | "retry" | "tell") => boolean | Promise<boolean>;
   /** Recomputes the session's summary after the action (the sweep does it anyway). A failure is logged, never thrown. */
@@ -39,6 +41,9 @@ export interface ControlDependencies {
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
+
+/** Who is acting: a principal the surface already authenticated through the Identity seam, or the raw credential, which this module authenticates itself (it never trusts an id it was handed). */
+export type ControlActor = Principal | { credential: PresentedCredential };
 
 export type ControlRefusal = "not_found" | "forbidden" | "ended" | "unavailable" | "nothing_to_retry" | "invalid" | "request_id_reused";
 
@@ -76,6 +81,14 @@ export function createSessionControl(deps: ControlDependencies) {
   const now = deps.now ?? (() => new Date());
   const log = deps.log ?? ((entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...entry })));
 
+  /** The principal behind the actor: a principal as given, or the one the Identity seam vouches for. A credential it does not know is a missing session to the caller. */
+  async function principalOf(actor: ControlActor): Promise<Principal | undefined> {
+    if (!("credential" in actor)) return actor;
+    if (deps.identity === undefined) return undefined;
+    const result = await deps.identity.authenticate(actor.credential);
+    return result.ok ? result.principal : undefined;
+  }
+
   /** The session the person may act on, or the refusal. A session of another company reads as absent. */
   async function open(principal: Principal, orgId: OrgId, sessionId: SessionId, action: "stop" | "retry" | "tell"): Promise<{ session: AgentSessionRecord } | ReturnType<typeof refuse>> {
     if (principal.companyId !== orgId) return refuse("not_found", "There is no such session.");
@@ -111,8 +124,10 @@ export function createSessionControl(deps: ControlDependencies) {
 
   return {
     /** Stops the session's task through the task flow's own cancel. The session stays open and shows `stopped`; a budget pause stays a pause. Idempotent by `requestId`. */
-    async stop(principal: Principal, orgId: OrgId, sessionId: SessionId, input: { requestId: string }): Promise<ControlResult<{ nothingRunning?: true; message?: string }>> {
+    async stop(actor: ControlActor, orgId: OrgId, sessionId: SessionId, input: { requestId: string }): Promise<ControlResult<{ nothingRunning?: true; message?: string }>> {
       if (!REQUEST_ID.test(input.requestId)) return refuse("invalid", "The request ID is not valid.");
+      const principal = await principalOf(actor);
+      if (principal === undefined) return refuse("not_found", "There is no such session.");
       const found = await open(principal, orgId, sessionId, "stop");
       if ("status" in found) return found;
       const { session } = found;
@@ -133,8 +148,10 @@ export function createSessionControl(deps: ControlDependencies) {
     },
 
     /** Retries a blocked task through the task flow's own workflow retry, in the same session. Idempotent by `requestId`. */
-    async retry(principal: Principal, orgId: OrgId, sessionId: SessionId, input: { requestId: string }): Promise<ControlResult> {
+    async retry(actor: ControlActor, orgId: OrgId, sessionId: SessionId, input: { requestId: string }): Promise<ControlResult> {
       if (!REQUEST_ID.test(input.requestId)) return refuse("invalid", "The request ID is not valid.");
+      const principal = await principalOf(actor);
+      if (principal === undefined) return refuse("not_found", "There is no such session.");
       const found = await open(principal, orgId, sessionId, "retry");
       if ("status" in found) return found;
       const { session } = found;
@@ -154,10 +171,12 @@ export function createSessionControl(deps: ControlDependencies) {
     },
 
     /** Gives the agent a message. It is information, kept with its fate; a session that has ended takes none. Idempotent by `requestId` (the same id is the same message). */
-    async tell(principal: Principal, orgId: OrgId, sessionId: SessionId, input: { requestId: string; text: string }): Promise<ControlResult<{ message: SessionMessage }>> {
+    async tell(actor: ControlActor, orgId: OrgId, sessionId: SessionId, input: { requestId: string; text: string }): Promise<ControlResult<{ message: SessionMessage }>> {
       if (!REQUEST_ID.test(input.requestId)) return refuse("invalid", "The request ID is not valid.");
       const text = [...redactText(input.text).replace(/(?![\t\n\r])[\p{Cc}\p{Cf}]/gu, "").trim()].slice(0, SESSION_MESSAGE_MAX_CHARS).join("");
       if (text === "") return refuse("invalid", "A message needs some text.");
+      const principal = await principalOf(actor);
+      if (principal === undefined) return refuse("not_found", "There is no such session.");
       const found = await open(principal, orgId, sessionId, "tell");
       if ("status" in found) return found;
       const { session } = found;

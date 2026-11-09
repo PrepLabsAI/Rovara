@@ -233,6 +233,17 @@ describe("the approval gate: a stale revision or digest", () => {
 });
 
 describe("the approval gate: replayed proofs and lost races", () => {
+  it("a repeat is answered only to someone who holds the proof that made the decision: knowing the request id is not enough", async () => {
+    const { gate, ready } = world();
+    await ready;
+    const request = attempt();
+    expect(await gate.decide(request)).toMatchObject({ status: "decided" });
+    // Another person (a different credential) sends the same request id and the same body.
+    expect(await gate.decide({ ...request, credentials: [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }] })).toMatchObject({ status: "refused", reason: "request_id_reused" });
+    expect(await gate.decide({ ...request, credentials: [{ method: LOCAL_SESSION_METHOD, token: "someone-elses-session" }] })).toMatchObject({ status: "refused", reason: "request_id_reused" });
+    expect(await gate.decide(request)).toMatchObject({ status: "replayed" });
+  });
+
   it("two requests racing for one request id: one decides, the other hears the same answer, and the task moves once", async () => {
     const { store, gate, ready } = world();
     await ready;

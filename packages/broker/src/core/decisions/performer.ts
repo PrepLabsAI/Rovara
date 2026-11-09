@@ -57,6 +57,9 @@ export const CARD_REFUSAL_OF_GATE: Readonly<Record<GateRefusalReason, DecisionRe
   self_approval_not_allowed: "second_person_required", needs_more_approvers: "second_person_required", invalid_outcome: "not_ready",
 };
 
+/** The card kinds that `workflowDocumentHandler` decides: the documents a task's workflow waits on. A Code install mounts the card routes with these as `highOnCard` and `evidenceFirstOnHigh` (the gate itself asks for the local session on a high card). */
+export const WORKFLOW_DOCUMENT_CARD_KINDS: readonly DecisionKind[] = ["approve_requirements", "approve_plan", "approve_design"];
+
 /** A card's caller in Code: who is asking (as the route knows them) and the proofs the surface collected (the local session's, or a code host comment's). */
 export interface ProvingCaller extends DecisionCaller {
   credentials: readonly Credential[];

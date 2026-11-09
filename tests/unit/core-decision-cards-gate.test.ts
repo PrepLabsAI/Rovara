@@ -7,7 +7,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
-import { createDecisionPerformer, workflowDocumentHandler, type ProvingCaller } from "../../packages/broker/src/core/decisions/performer.js";
+import { WORKFLOW_DOCUMENT_CARD_KINDS, createDecisionPerformer, workflowDocumentHandler, type ProvingCaller } from "../../packages/broker/src/core/decisions/performer.js";
 import { routeDecisionCards, type DecisionSources } from "../../packages/broker/src/core/decisions/routes.js";
 import { decisionCardPath, type DecisionItem } from "../../packages/broker/src/core/decisions/project.js";
 import { documentDecisionStore } from "../../packages/broker/src/core/decisions/store.js";
@@ -39,7 +39,7 @@ async function setup(risk: "low" | "medium" | "high") {
   const sources: DecisionSources<ProvingCaller> = { list: async () => [item], locks: async () => ({}) };
   const performer = createDecisionPerformer<ProvingCaller>({ approve_plan: workflowDocumentHandler(gate) });
   const store = documentDecisionStore({ store: memory, now: () => NOW });
-  const deps = { sources, performer, store, now: () => NOW, highOnCard: new Set(["approve_plan"]), evidenceFirstOnHigh: new Set(["approve_plan"]) };
+  const deps = { sources, performer, store, now: () => NOW, highOnCard: new Set<string>(WORKFLOW_DOCUMENT_CARD_KINDS), evidenceFirstOnHigh: new Set<string>(WORKFLOW_DOCUMENT_CARD_KINDS) };
   const caller = (credentials: ProvingCaller["credentials"]): ProvingCaller => ({ orgId: IMPLICIT_COMPANY_ID, developerId: "local-owner", credentials });
   const call = (who: ProvingCaller, method: string, pathname: string, body?: unknown) => routeDecisionCards(deps, who, { method, pathname, searchParams: new URLSearchParams(), body });
   const view = async () => DecisionCardsViewSchema.parse((await call(caller([]), "GET", "/v1/app/decisions"))?.body);

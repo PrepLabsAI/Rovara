@@ -6,7 +6,7 @@ import {
   IMPLICIT_COMPANY_ID, agentSessionKey, openAgentSessionKey, sessionTaskStatus, type AgentSessionRecord, type AuditSink, type DocumentChange, type OrgId, type Principal, type SessionId,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import {
   SessionStore, computeTaskState, createSessionControl, createTaskSessionItems, developerIdOf, listSessions, projectChanges, readSessionEvents, refreshSessionSummary, sessionSnapshot, sessionTargetsOf,
   sweepOpenSessions, taskSessionId, type SessionChange, type SessionControlHost, type SessionTaskFacts, type SummaryDependencies,
@@ -249,6 +249,18 @@ describe("stop, retry and tell", () => {
     expect(await w.control.tell(guest, ORG, SESSION, { requestId: REQ(3), text: "hi" })).toMatchObject({ reason: "not_found" });
     expect(await w.control.stop(OWNER, ORG, "ses_nonexistent00000000", { requestId: REQ(4) })).toMatchObject({ reason: "not_found" });
     expect(w.calls).toEqual([]);
+  });
+
+  it("acting with a raw credential is authenticated by the Identity seam; a made-up one reads a missing session", async () => {
+    const w = world();
+    await w.create();
+    const identity = createLocalOwnerIdentity({ isValidSession: (value) => value === "owner-session-for-tests" });
+    const control = createSessionControl({ store: w.store, audit: createNoopAuditSink(), identity, host: { cancelTask: async () => undefined, retryWorkflow: async () => undefined, deliverMessage: async () => ({ state: "queued" }) }, now: () => clock.now });
+    expect(await control.stop({ credential: { scheme: "local-session", value: "owner-session-for-tests" } }, ORG, SESSION, { requestId: REQ(1) })).toMatchObject({ status: "done" });
+    expect(await control.stop({ credential: { scheme: "local-session", value: "guessed" } }, ORG, SESSION, { requestId: REQ(2) })).toMatchObject({ reason: "not_found" });
+    expect(await control.stop({ credential: { scheme: "bearer", value: "owner-session-for-tests" } }, ORG, SESSION, { requestId: REQ(3) })).toMatchObject({ reason: "not_found" });
+    const noIdentity = createSessionControl({ store: w.store, audit: createNoopAuditSink(), now: () => clock.now });
+    expect(await noIdentity.stop({ credential: { scheme: "local-session", value: "owner-session-for-tests" } }, ORG, SESSION, { requestId: REQ(4) })).toMatchObject({ reason: "not_found" });
   });
 
   it("an adapter can say who may act (the seam members plug into)", async () => {
