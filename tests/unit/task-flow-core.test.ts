@@ -349,7 +349,7 @@ describe("dispatching to a worker machine", () => {
 });
 
 describe("admission and audit are in the start's own transaction", () => {
-  it("commits what admission stages with the task, and gives a reservation back when the transaction fails", async () => {
+  it("commits what admission stages with the task, keeps the reservation on the task, and takes no allowance for a start refused at the limit", async () => {
     const released: string[] = [];
     let staged = 0;
     const h = createHarness({
@@ -365,7 +365,8 @@ describe("admission and audit are in the start's own transaction", () => {
     await h.registerProject();
     const request = { requestId: newRequestId(), project: "payments", instructions: "x" };
     const started = await h.flow.start(h.owner, request);
-    expect(await h.store.get({ pk: "BUDGET#hold", sk: `HOLD#task.start:local-owner:${request.requestId}:1` })).toBeDefined();
+    expect(await h.store.get({ pk: "BUDGET#hold", sk: `HOLD#task.start:${started.task.taskId}:1` })).toBeDefined();
+    expect(await h.store.get(taskKey(started.task.taskId))).toMatchObject({ admissionReservationId: "r1" });
     expect(released).toEqual([]);
     // A task refused at the workspace limit never reaches a transaction, so no allowance is taken for it.
     const h2 = createHarness({ limits: { member: 1, organization: 5 }, admission: h.deps.admission });

@@ -20,6 +20,10 @@ export function createOwnerTaskAccess(): TaskAccess {
     async canAct(principal, task) {
       return isOwner(principal) || principal.personId === task.developerId;
     },
+    async checkStep() {
+      // The person a task runs for was authorized at its start, and the owner of an install does not lose the right.
+      return { allowed: true };
+    },
   };
 }
 

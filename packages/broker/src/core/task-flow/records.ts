@@ -14,6 +14,8 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
   provider: string;
   charge: WorkspaceCharge;
   companyId: string;
+  /** The admission reservation the start took; whoever closes the task gives it back. */
+  admissionReservationId?: string;
 };
 
 /** Cloud's `WORKSPACE#<id>/DEVELOPER_TASK` pointer: how a worker callback finds the task. The requester names the identity adapter, not a closed sign-in list. */
@@ -38,6 +40,8 @@ export interface WorkspaceRecord {
   machine?: { machineId: string; machineKey: string };
   /** The admission reservation taken when the machine was first started; whoever stops the machine settles or releases it. */
   machineReservationId?: string;
+  /** How many machines this workspace has had; the admission key of the next start is made from it, so each machine is admitted once. */
+  machineGeneration?: number;
   preparationManifest?: string;
   /** The sparse by-project index keys (WORKSPACE_PROJECT_INDEX). */
   workspaceProject: string;

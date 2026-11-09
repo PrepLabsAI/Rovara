@@ -280,6 +280,35 @@ registered by an HTTP call is not yet visible to other processes. The follow-up 
 `ChannelAdapterRecord` as a webhook `ChannelAdapter` (signing in `deliver`), and a rule that refuses a config name already used by a
 record. Slack is not a `channel` adapter yet: spec 062's `AdapterChannelIdSchema` refuses the id `slack`.
 
+## The task flow core (lane L6a)
+
+`packages/broker/src/core/task-flow/` is Cloud's task start, the driver of the stage machine and the dispatch of work to worker machines, built only on
+the ports above (`createTaskFlow`, or `createTaskFlowFromRegistry` over the `storage`, `queue`, `worker-machines`, `admission` and `audit-sink` points).
+The pure transitions stay in `@agentx/contracts` (`task-workflow-node.ts`); this is what reads a task, applies one, and writes it fenced on the revision.
+
+- **Start** (`startTask`) is one `transact`: workspace, its preparation operation and staged dispatch message, task, index row, callback pointer,
+  conversation, idempotency record, the workspace-slot charge, whatever `Admission.stage` and `AuditSink.stage` return, and the first step's dispatch row.
+  A retried request id answers with the first task (R8); a refusal writes nothing but an audit record.
+- **Operations** carry a `DispatchSpec` (no secret). The queue message is `{ v: 1, workspaceId, operationId }`. The consumer (`runDispatchOnce`) starts the
+  workspace's machine (`machineKey` = the workspace id), waits for it to be `ready`, and only then issues the repository grant and the callback capability and
+  calls `deliver`; a delivery that waits for a machine therefore never carries an expired credential. Before anything is issued the consumer **claims** the
+  operation in one transaction (the workspace is still held by it at its fence and is not closing, and the operation becomes DISPATCHING), so a close that races a
+  dispatch sends nothing and a machine started for a closed workspace is stopped again. Each machine of a workspace is admitted on its own (`machine.start:<workspace>:<n>`). A step whose tool boundary the worker cannot enforce
+  (`workflowMode` without the `task.workflowMode` feature) is failed, never sent.
+- **Fences.** A hold of the workspace takes the next fence; a result for another fence is refused; a workflow write is conditioned on the revision it was
+  computed from. Dispatch rows (`WORKFLOW_DISPATCH`, on the company-scoped partition, found by the `workflow-dispatch-due` index) are the "start the next step
+  with no one asking" intent; `runDueDispatches` is the recovery sweep.
+- **A store given to the flow keeps three indexes** (`TASK_FLOW_INDEXES`): the outbox's, `workflow-dispatch-due` and `byWorkspaceProject`.
+- **Workspace limits** use a counter and one marker item per charged task (`TASK#<id>` beside the member counter) in place of Cloud's string set.
+- **Seams the flow brings:** `TaskAccess` (the owner by default; `checkStart` at a start, `checkStep` before every step the system starts, with items for the step's transaction), `ProjectSource` (`createStoreProjectSource` reads Cloud's project keys), `StepPrompts`
+  (simple defaults; Cloud's prompt builders are not ported), and `OperationResult`/`StepOutcome` (the callback layer reads the worker's artifacts and hands over
+  the outcome; object storage has no port yet).
+- **Gaps the flow states rather than hides:** no sweep reaps an operation nobody holds or a closed workspace that still has a machine; no watchdog ends a step whose worker
+  died (a waiting dispatch row is given up on after an hour, a running step is not); `Admission.settle` has no machine-time unit, so a closed task's reservations are
+  released; a task charged in Cloud's older form (a `tasks` set) closes without freeing a slot it has no marker for.
+- **Not in this lane:** plan decisions and approval (L6b), sessions, cost, notifications, merge, proof, branch sync, CI fix, the callback endpoints, the
+  Cloud close operation (discard unpublished work, pull-request checks), the stuck-step watchdog, test environments and saved environments.
+
 ## What is not here
 
 - **Artifact (object) storage.** Cloud keeps proofs, plan documents and evidence in an object store. No port is defined yet; the lanes

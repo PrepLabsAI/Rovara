@@ -29,7 +29,7 @@ export async function readTask(deps: Pick<TaskFlowDeps, "store">, taskId: string
 /** The task, if the caller may act on it; otherwise TASK_NOT_FOUND, the same as for a task that does not exist. */
 export async function loadOwnedTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: string): Promise<TaskRecord> {
   const task = await readTask(deps, taskId);
-  if (task === undefined || task.companyId !== deps.companyId || !(await deps.access.canAct(caller.principal, task))) throw taskNotFound();
+  if (caller.principal.companyId !== deps.companyId || task === undefined || task.companyId !== deps.companyId || !(await deps.access.canAct(caller.principal, task))) throw taskNotFound();
   return task;
 }
 
@@ -78,6 +78,7 @@ export async function getTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: st
 
 /** The caller's own tasks, newest first (the index of `DEVELOPER#<person>`). */
 export async function listTasks(deps: TaskFlowDeps, caller: TaskCaller, options: { limit?: number; cursor?: string } = {}): Promise<{ tasks: DeveloperTaskIndexRecord[]; cursor?: string }> {
+  if (caller.principal.companyId !== deps.companyId) return { tasks: [] };
   const page = await deps.store.query({
     pk: taskIndexKey(caller.principal.personId, "", "").pk,
     sk: { op: "beginsWith", prefix: "TASK#" },

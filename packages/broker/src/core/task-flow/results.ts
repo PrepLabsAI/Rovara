@@ -3,7 +3,7 @@
 import { agentXError, change, when, type TransactItem } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
 import { operationKey, taskIndexKey, workspaceKey } from "./keys.js";
-import type { OperationResult } from "./outcome.js";
+import type { OperationResult, StepOutcome } from "./outcome.js";
 import { readTask, taskViewOf } from "./reads.js";
 import { fromDocument, toDocument, type OperationRecord, type TaskPointerRecord } from "./records.js";
 import { onOperationEnded, readWorkspace } from "./stage-machine.js";
@@ -27,8 +27,13 @@ const RESULT_ATTEMPTS = 3;
  */
 export async function recordOperationResult(deps: TaskFlowDeps, result: OperationResult): Promise<{ duplicate: boolean }> {
   let operation = await readOperation(deps, result.workspaceId, result.operationId);
-  if (operation === undefined) throw agentXError("NOT_FOUND", "operation not found");
+  if (operation === undefined || operation.companyId !== deps.companyId) throw agentXError("NOT_FOUND", "operation not found");
   if (operation.fence !== result.fence) throw agentXError("STALE_FENCE", "this result is for an older hold of the workspace");
+  // A worker is cancelled only by a cancel the flow asked for. A worker that reports itself cancelled unasked has not finished its step, so it
+  // reads as a failure (which blocks the workflow for the owner), never as a quiet end that would leave the step running for ever.
+  const unaskedCancel = result.status === "CANCELLED" && operation.status !== "CANCEL_REQUESTED" && !isTerminalStatus(operation.status);
+  const status: OperationResult["status"] = unaskedCancel ? "FAILED" : result.status;
+  const error = unaskedCancel ? (result.error ?? "the worker stopped the job without being asked") : result.error;
   let duplicate = isTerminalStatus(operation.status);
   for (let attempt = 1; !duplicate && attempt <= RESULT_ATTEMPTS; attempt += 1) {
     const workspace = await readWorkspace(deps, operation.workspaceId);
@@ -38,8 +43,8 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
       kind: "update",
       key: operationKey(operation.workspaceId, operation.id),
       ops: [
-        change.set("status", result.status), change.set("updatedAt", now),
-        ...(result.error === undefined ? [] : [change.set("error", result.error.slice(0, 16_384))]),
+        change.set("status", status), change.set("updatedAt", now),
+        ...(error === undefined ? [] : [change.set("error", error.slice(0, 16_384))]),
         ...(result.outcome === undefined ? [] : [change.set("result", toDocument({ outcome: result.outcome }))]),
       ],
       condition: when.and(when.eq("fence", operation.fence), when.not(when.or(when.eq("status", "SUCCEEDED"), when.eq("status", "FAILED"), when.eq("status", "CANCELLED"), when.eq("status", "INTERRUPTED")))),
@@ -51,7 +56,7 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
         key: workspaceKey(operation.workspaceId),
         ops: [
           change.set("activeOperationId", null), change.set("updatedAt", now),
-          change.set("status", prepared ? (result.status === "SUCCEEDED" ? "READY" : "PREPARATION_FAILED") : "READY"),
+          change.set("status", prepared ? (status === "SUCCEEDED" ? "READY" : "PREPARATION_FAILED") : "READY"),
         ],
         condition: when.and(when.eq("activeOperationId", operation.id), when.eq("fence", operation.fence)),
       });
@@ -66,7 +71,9 @@ export async function recordOperationResult(deps: TaskFlowDeps, result: Operatio
   }
   const ended = await readOperation(deps, operation.workspaceId, operation.id);
   if (ended === undefined || !isTerminalStatus(ended.status)) throw agentXError("WORKSPACE_BUSY", "could not record the result just now; send it again");
-  await onOperationEnded(deps, ended, { status: result.status, ...(result.error === undefined ? {} : { error: result.error }), ...(result.outcome === undefined ? {} : { outcome: result.outcome }) });
+  // The next move is made from what was RECORDED, never from a repeat's own words: a late retry cannot turn a failure into a success.
+  const recorded = (ended.result as { outcome?: StepOutcome } | undefined)?.outcome;
+  await onOperationEnded(deps, ended, { status: ended.status as OperationResult["status"], ...(ended.error === undefined ? {} : { error: ended.error }), ...(recorded === undefined ? {} : { outcome: recorded }) });
   await syncTaskIndex(deps, ended.workspaceId);
   return { duplicate };
 }

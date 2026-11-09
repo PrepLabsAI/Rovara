@@ -36,20 +36,25 @@ export interface StagedAdmission {
   reservationId?: string;
 }
 
+/** A refused admission is an answer, not a fault: an adapter that throws is a fault and propagates as it is. */
+export interface AdmissionRefused {
+  refusal: AgentXError;
+}
+
 /**
- * Asks admission for an action and returns the steps that commit with the caller's transaction. A refusal throws (an AgentXError) before
- * anything is written. A caller whose transaction then fails must call `releaseAdmission`.
+ * Asks admission for an action and returns the steps that commit with the caller's transaction, or the refusal (before anything is written).
+ * A caller whose transaction then did not commit must call `releaseAdmission` with the reservation, and must not when it cannot tell.
  */
-export async function stageAdmission(deps: TaskFlowDeps, request: Omit<AdmissionRequest, "companyId">): Promise<StagedAdmission> {
+export async function stageAdmission(deps: TaskFlowDeps, request: Omit<AdmissionRequest, "companyId">): Promise<StagedAdmission | AdmissionRefused> {
   const { decision, items } = await deps.admission.stage({ ...request, companyId: deps.companyId });
-  if (!decision.allowed) throw admissionRefusal(decision);
+  if (!decision.allowed) return { refusal: admissionRefusal(decision) };
   return { items, ...(decision.reservationId === undefined ? {} : { reservationId: decision.reservationId }) };
 }
 
-/** Decides on its own, for an action with no transaction of its own (a machine start). A refusal throws. */
-export async function admit(deps: TaskFlowDeps, request: Omit<AdmissionRequest, "companyId">): Promise<{ reservationId?: string }> {
+/** Decides on its own, for an action with no transaction of its own (a machine start). */
+export async function admit(deps: TaskFlowDeps, request: Omit<AdmissionRequest, "companyId">): Promise<{ reservationId?: string } | AdmissionRefused> {
   const decision = await deps.admission.admit({ ...request, companyId: deps.companyId });
-  if (!decision.allowed) throw admissionRefusal(decision);
+  if (!decision.allowed) return { refusal: admissionRefusal(decision) };
   return decision.reservationId === undefined ? {} : { reservationId: decision.reservationId };
 }
 
@@ -64,7 +69,7 @@ export async function releaseAdmission(deps: TaskFlowDeps, reservationId: string
 }
 
 /** The steps that record an event with the caller's transaction (none for a sink that writes elsewhere). */
-export function stageAudit(deps: TaskFlowDeps, event: Omit<AuditEvent, "companyId" | "at" | "eventId"> & { eventId: string }): readonly TransactItem[] {
+export function stageAudit(deps: TaskFlowDeps, event: Omit<AuditEvent, "companyId" | "at">): readonly TransactItem[] {
   return deps.audit.stage({ ...event, companyId: deps.companyId, at: iso(deps) });
 }
 

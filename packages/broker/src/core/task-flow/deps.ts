@@ -10,6 +10,7 @@ import type {
   ProjectDefinition,
   QueueService,
   RegistryView,
+  TransactItem,
   TransactionalOutbox,
   WorkerMachines,
   WorkflowPath,
@@ -25,6 +26,8 @@ export interface TaskCaller {
 /** A registered project revision, as the flow needs it. */
 export interface ProjectRevision {
   definition: ProjectDefinition;
+  /** The project is archived: it accepts no new work (Cloud's PROJECT_ARCHIVED). */
+  archived?: boolean;
 }
 
 /** Where registered projects are read from. `createStoreProjectSource` reads them from the document store. */
@@ -36,13 +39,21 @@ export interface ProjectSource {
 export type StartVerdict = { allowed: true } | { allowed: false; code: AgentXErrorCode; message: string };
 
 /**
+ * The answer to "may the system start this task's next step now". `items` are steps the adapter needs in the step's own transaction (Cloud's
+ * People-revision fence), so a change of who may act between the check and the commit refuses the step.
+ */
+export type StepVerdict = { allowed: true; items?: readonly TransactItem[] } | { allowed: false; message: string };
+
+/**
  * Who may start work and who may act on a task. Code's default is the local owner (`createOwnerTaskAccess`); a hosted product fills it with
- * project roles. The flow asks again at every step that spends (a start, a dispatch) and never takes a caller's word for a role.
+ * project roles. The flow asks `checkStart` at a start and `checkStep` before every step the system starts on its own, and never takes a caller's word for a role.
  */
 export interface TaskAccess {
   checkStart(principal: Principal, project: string): Promise<StartVerdict>;
   /** Whether this principal may read and drive the task. A task of someone else is "not found" to a principal who may not (no leak). */
   canAct(principal: Principal, task: { developerId: string; project: string }): Promise<boolean>;
+  /** Asked before the system starts any step of a task with no one asking (a dispatch row, the first run): the person it runs for must still be allowed. */
+  checkStep(task: { taskId: string; developerId: string; project: string }): Promise<StepVerdict>;
 }
 
 /** The text of the first request to each step. Cloud builds these in `rovara-code/understand.ts` and `developer-tasks/workflow-inputs.ts` (not ported yet: a 51 gap). */

@@ -7,6 +7,7 @@
 // + [whatever else must commit with it, such as resolving the dispatch row]. If the transaction does not apply, nothing happened.
 import {
   AgentXError,
+  agentXError,
   WorkflowTransitionError,
   answerWorkflowIntent,
   blockWorkflow,
@@ -34,6 +35,8 @@ import type { StepOutcome } from "./outcome.js";
 export type StepStart = "STARTED" | "DUPLICATE" | "STALE" | "WAITING";
 
 const WAIT_SECONDS = 15;
+/** A row that has waited this long for the workspace is given up on (the worker that holds it is not going to answer). */
+export const WAIT_ROW_MAX_SECONDS = 3_600;
 /** After this many failed tries a row's step is given up on and the task blocks, naming the step. */
 export const DISPATCH_ROW_ATTEMPTS_MAX = 8;
 const backoffSeconds = (attempts: number): number => Math.min(15 * 60, 15 * 2 ** Math.max(0, attempts - 1));
@@ -73,9 +76,18 @@ export interface StepInput {
 export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<{ result: StepStart; operation?: OperationRecord }> {
   assertPromptFits(input.prompt);
   const { task, workspace } = input;
+  // A workflow task's workspace takes only the workflow's own steps, each with its server-selected tool boundary: a plain write-capable run is refused
+  // (Cloud's GATED_TASK_TURN_REFUSAL).
+  if (task.workflow !== undefined && input.workflowMode === undefined) throw agentXError("TASK_BUSY", "this task runs as a workflow: its steps are started by the workflow, not as ordinary runs");
   const existing = await deps.store.get(operationRequestKey(workspace.ownerKey, workspace.id, input.requestId));
   if (existing !== undefined) return { result: "DUPLICATE" };
   if (workspace.status !== "READY" || workspace.activeOperationId !== null) return { result: "WAITING" };
+  // The person the step runs for must still be allowed to have it run, asked now and fenced into the step's own transaction.
+  const permitted = await deps.access.checkStep(task);
+  if (!permitted.allowed) {
+    if (task.workflow !== undefined) await blockTaskWorkflow(deps, task.taskId, task.workflow.revision, permitted.message);
+    return { result: "STALE" };
+  }
   const now = iso(deps);
   const workflowRevision = input.workflow?.next.revision ?? task.workflow?.revision;
   const built = buildOperation(deps, {
@@ -99,6 +111,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     },
     holdWorkspaceItem(workspace, built.operation.id, now),
     ...built.items,
+    ...(permitted.items ?? []),
     ...(input.extra ?? []),
   ];
   const applied = await deps.store.transact(items);
@@ -172,7 +185,7 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
       next = startWorkflowPlanAfterUnderstand(workflow, iso(deps));
       prompt = prompts.plan({ requestText: task.requestText ?? "", path: workflow.path, restatement: assessment.restatement, assumptions: assessment.assumptions });
       mode = "PLAN";
-      requestId = workflowRequestId("agentx-plan", task.taskId, workflow.revision);
+      requestId = workflowRequestId("agentx-plan-after-understand", task.taskId, workflow.revision);
     }
   } catch (error) {
     if (error instanceof WorkflowTransitionError) return stale();
@@ -196,7 +209,12 @@ export async function runDueDispatches(deps: TaskFlowDeps, options: { limit?: nu
       const result = await runDispatchRow(deps, row);
       if (result === "STARTED" || result === "DUPLICATE") report.started += 1;
       else if (result === "STALE") report.stale += 1;
-      else {
+      else if (Date.parse(iso(deps)) - Date.parse(row.createdAt) > WAIT_ROW_MAX_SECONDS * 1_000) {
+        // The workspace never became free for this step: it is not going to without help, so the owner is told instead of the row waiting for ever.
+        await blockTaskWorkflow(deps, row.taskId, row.workflowRevision, "Rovara could not start the next step because the workspace did not become ready; retry it.");
+        await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
+        report.blocked += 1;
+      } else {
         report.waiting += 1;
         await deps.store.transact([rescheduleRowItem(row, later(deps, WAIT_SECONDS), row.attempts)]);
       }
@@ -204,12 +222,18 @@ export async function runDueDispatches(deps: TaskFlowDeps, options: { limit?: nu
       const attempts = row.attempts + 1;
       const message = error instanceof Error ? error.message : "unknown";
       log(deps, { event: "task_flow.dispatch_row_failed", taskId: row.taskId, kind: row.kind, attempts, error: error instanceof AgentXError ? error.code : "unknown" });
-      if (attempts >= DISPATCH_ROW_ATTEMPTS_MAX) {
-        await blockTaskWorkflow(deps, row.taskId, row.workflowRevision, `Rovara could not start the ${row.kind === "UNDERSTAND" ? "step that reads the request" : "planning step"}: ${message}`.slice(0, 500));
-        await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
-        report.blocked += 1;
-      } else {
-        await deps.store.transact([rescheduleRowItem(row, later(deps, backoffSeconds(attempts)), attempts, message)]);
+      try {
+        if (attempts >= DISPATCH_ROW_ATTEMPTS_MAX) {
+          await blockTaskWorkflow(deps, row.taskId, row.workflowRevision, `Rovara could not start the ${row.kind === "UNDERSTAND" ? "step that reads the request" : "planning step"}: ${message}`.slice(0, 500));
+          await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
+          report.blocked += 1;
+        } else {
+          await deps.store.transact([rescheduleRowItem(row, later(deps, backoffSeconds(attempts)), attempts, message)]);
+          report.failed += 1;
+        }
+      } catch (storeError) {
+        // The store is failing too: this row is tried again by the next sweep; the rest of this sweep goes on.
+        log(deps, { event: "task_flow.dispatch_row_bookkeeping_failed", taskId: row.taskId, error: storeError instanceof Error ? storeError.name : "unknown" });
         report.failed += 1;
       }
     }

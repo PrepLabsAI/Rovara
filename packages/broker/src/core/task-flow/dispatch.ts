@@ -72,7 +72,9 @@ export async function runDispatchOnce(deps: TaskFlowDeps, options: { maxMessages
   return report;
 }
 
-async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage): Promise<keyof Omit<DispatchReport, "received">> {
+type Outcome = keyof Omit<DispatchReport, "received">;
+
+async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage): Promise<Outcome> {
   const body = parseMessage(message.body);
   if (body === undefined) {
     await queue.deadLetter(message.receiptHandle, "malformed");
@@ -89,84 +91,110 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     await queue.ack(message.receiptHandle);
     return "dropped";
   }
+  const retryLater = async (seconds: number = retryDelay(message.receiveCount)): Promise<Outcome> => {
+    await queue.changeVisibility(message.receiptHandle, seconds);
+    return "retried";
+  };
+  /** Ends the operation, and acks only if it is now ended: an operation left held with its message gone would hold the workspace for ever. */
+  const endAndAck = async (status: "FAILED" | "INTERRUPTED", error: string): Promise<Outcome> => {
+    if (!(await endOperation(deps, operation, status, error))) return retryLater();
+    await queue.ack(message.receiptHandle);
+    return "failed";
+  };
   const workspace = await readWorkspace(deps, operation.workspaceId);
   if (workspace === undefined || workspace.fence !== operation.fence || workspace.activeOperationId !== operation.id || workspace.status === "CLOSED" || workspace.status === "CLOSING") {
     // The workspace has moved on (closed, or taken by a newer hold): this job is no longer wanted.
-    await endOperation(deps, operation, "INTERRUPTED", "the workspace no longer waits for this job");
-    await queue.ack(message.receiptHandle);
-    return "failed";
+    return endAndAck("INTERRUPTED", "the workspace no longer waits for this job");
   }
-  if (message.receiveCount > DISPATCH_ATTEMPTS_MAX) {
-    await endOperation(deps, operation, "FAILED", "the worker machine did not become ready in time");
-    await queue.ack(message.receiptHandle);
-    return "failed";
-  }
+  if (message.receiveCount > DISPATCH_ATTEMPTS_MAX) return endAndAck("FAILED", "the worker machine did not become ready in time");
 
   let reservationId: string | undefined;
-  try {
-    // A machine that does not exist yet is new spend: ask admission once, before it starts (a refusal ends the operation with the adapter's own sentence).
-    if (workspace.machine === undefined) reservationId = (await admit(deps, { idempotencyKey: `machine.start:${workspace.id}`, action: "machine.start", projectName: workspace.projectName, subject: { type: "workspace", id: workspace.id } })).reservationId;
-  } catch (error) {
-    if (error instanceof AgentXError) {
-      await endOperation(deps, operation, "FAILED", error.message.replace(`${error.code}: `, ""));
-      await queue.ack(message.receiptHandle);
-      return "failed";
-    }
-    throw error;
+  // A machine that does not exist yet is new spend: ask admission once for it (each machine of the workspace has its own key), before it starts.
+  if (workspace.machine === undefined) {
+    const admitted = await admit(deps, { idempotencyKey: `machine.start:${workspace.id}:${(workspace.machineGeneration ?? 0) + 1}`, action: "machine.start", projectName: workspace.projectName, subject: { type: "workspace", id: workspace.id } });
+    if ("refusal" in admitted) return endAndAck("FAILED", admitted.refusal.message.replace(`${admitted.refusal.code}: `, ""));
+    reservationId = admitted.reservationId;
   }
 
-  let started = false;
+  let startedMachineId: string | undefined;
   try {
     const handle = await deps.machines.start({ machineKey: workspace.id, companyId: deps.companyId, projectName: workspace.projectName, labels: { workspaceId: workspace.id } });
-    started = true;
-    await rememberMachine(deps, workspace, handle, reservationId);
+    startedMachineId = handle.machineId;
+    // The adapter gave a different machine than the one the workspace knew (the old one was reaped and the key started a new one): that is a new machine,
+    // admitted on its own like any other. Refused, it is stopped again at once.
+    if (workspace.machine !== undefined && handle.machineId !== workspace.machine.machineId) {
+      const replacement = await admit(deps, { idempotencyKey: `machine.start:${workspace.id}:${(workspace.machineGeneration ?? 0) + 1}`, action: "machine.start", projectName: workspace.projectName, subject: { type: "workspace", id: workspace.id } });
+      if ("refusal" in replacement) {
+        await deps.machines.terminate(handle.machineId);
+        return endAndAck("FAILED", replacement.refusal.message.replace(`${replacement.refusal.code}: `, ""));
+      }
+      reservationId = replacement.reservationId;
+      // The machine it replaces is gone, and so is the allowance held for it.
+      await releaseAdmission(deps, workspace.machineReservationId);
+    }
+    // The workspace must still be ours to give the machine to; if a close got in first, the machine it could not see is stopped here.
+    if (!(await rememberMachine(deps, workspace, handle, reservationId))) return abandon(deps, queue, message, operation, handle.machineId, reservationId);
     const health = await deps.machines.health(handle.machineId);
-    if (health.state !== "ready" && health.state !== "busy") {
-      // Starting, stopping, stopped (the start above wakes it) or unhealthy: try again shortly.
-      await queue.changeVisibility(message.receiptHandle, retryDelay(message.receiveCount));
-      return "retried";
+    if (health.state === "terminated") {
+      // The machine is gone for good (reaped): forget it; the next try starts another, admitted on its own.
+      await forgetMachine(deps, workspace.id, workspace.machineReservationId ?? reservationId);
+      return retryLater(0);
     }
-    const invocation = await buildInvocation(deps, operation, workspace, health.features);
-    if (typeof invocation === "string") {
-      await endOperation(deps, operation, "FAILED", invocation);
-      await queue.ack(message.receiptHandle);
-      return "failed";
-    }
+    if (health.state !== "ready" && health.state !== "busy") return retryLater(); // starting, stopping, stopped (the start above wakes it) or unhealthy
+    // A step whose tool boundary the worker cannot enforce is refused, never sent without it: a read-only step must stay read-only.
+    const missing = (operation.dispatch.requires ?? []).filter((feature) => !health.features.includes(feature));
+    if (missing.length > 0) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
+    // The claim: in one transaction, the workspace is still held by this operation at its fence and is not closing, and the operation is handed over.
+    // Nothing is issued to the worker (no grant, no capability) before it applies.
+    if (!(await claimDispatch(deps, operation, handle.machineId))) return abandon(deps, queue, message, operation, handle.machineId, reservationId ?? workspace.machineReservationId);
+    const invocation = await buildInvocation(deps, operation, workspace);
+    if (typeof invocation === "string") return endAndAck("FAILED", invocation);
     await deps.machines.deliver(handle.machineId, invocation);
-    await markDispatching(deps, operation, handle.machineId);
     await queue.ack(message.receiptHandle);
     return "delivered";
   } catch (error) {
     // Only a machine that never started gives its allowance back; one that did keeps it (the same key asks again on the next try).
-    if (!started) await releaseAdmission(deps, reservationId);
+    if (startedMachineId === undefined) await releaseAdmission(deps, reservationId);
     if (error instanceof MachineError) {
       switch (error.code) {
         case "not_ready":
         case "unavailable":
-          await queue.changeVisibility(message.receiptHandle, retryDelay(message.receiveCount));
-          return "retried";
+          return retryLater();
         case "not_found":
           // The machine is gone: forget it, and the next try starts another.
-          await forgetMachine(deps, workspace);
-          await queue.changeVisibility(message.receiptHandle, 0);
-          return "retried";
+          await forgetMachine(deps, workspace.id, workspace.machineReservationId ?? reservationId);
+          return retryLater(0);
         case "unauthorized":
         case "rejected":
-          await endOperation(deps, operation, "FAILED", error.code === "rejected" ? "the worker refused the job" : "the worker refused the job's credentials");
-          await queue.ack(message.receiptHandle);
-          return "failed";
+          return endAndAck("FAILED", error.code === "rejected" ? "the worker refused the job" : "the worker refused the job's credentials");
       }
     }
     throw error;
   }
 }
 
+/**
+ * The job is no longer wanted by the time the machine was ready (the task was closed, or the workspace moved on). A machine this call started for a
+ * workspace that is closed is stopped here, since the close could not see it; the allowance taken for it goes back. The operation is ended if it is not.
+ */
+async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessage, operation: OperationRecord, machineId: string | undefined, reservationId: string | undefined): Promise<Outcome> {
+  const workspace = await readWorkspace(deps, operation.workspaceId);
+  const closed = workspace === undefined || workspace.status === "CLOSED" || workspace.status === "CLOSING";
+  if (closed) {
+    if (machineId !== undefined) await deps.machines.terminate(machineId).catch((error: unknown) => log(deps, { event: "task_flow.terminate_orphan_failed", error: error instanceof Error ? error.name : "unknown" }));
+    await releaseAdmission(deps, reservationId);
+  }
+  if (!(await endOperation(deps, operation, "INTERRUPTED", "the workspace no longer waits for this job"))) {
+    await queue.changeVisibility(message.receiptHandle, retryDelay(message.receiveCount));
+    return "retried";
+  }
+  await queue.ack(message.receiptHandle);
+  return "dropped";
+}
+
 /** Builds the worker's invocation, or a sentence saying why this operation cannot be sent to this worker. */
-async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord, features: readonly string[]): Promise<WorkerInvocation | string> {
+async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, workspace: WorkspaceRecord): Promise<WorkerInvocation | string> {
   const spec = operation.dispatch;
-  const missing = (spec.requires ?? []).filter((feature) => !features.includes(feature));
-  // A step whose tool boundary the worker cannot enforce is refused, never sent without it: a read-only step must stay read-only.
-  if (missing.length > 0) return "this worker is too old to run this step; upgrade it";
   const secret = Buffer.from(deps.callbackSigningKey);
   const capability = new CallbackCapabilities(secret).issue({
     workspaceId: workspace.id, operationId: operation.id, fence: operation.fence,
@@ -192,35 +220,48 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   return parsed.success ? parsed.data : "the job could not be built for the worker";
 }
 
-async function rememberMachine(deps: TaskFlowDeps, workspace: WorkspaceRecord, handle: { machineId: string; machineKey: string }, reservationId: string | undefined): Promise<void> {
-  if (workspace.machine?.machineId === handle.machineId) return;
-  await deps.store.update({
+/** Records the workspace's machine (and the allowance taken for it). False when the workspace has moved on (the fence no longer holds): the caller must not use the machine. */
+async function rememberMachine(deps: TaskFlowDeps, workspace: WorkspaceRecord, handle: { machineId: string; machineKey: string }, reservationId: string | undefined): Promise<boolean> {
+  if (workspace.machine?.machineId === handle.machineId) return true;
+  const written = await deps.store.update({
     key: workspaceKey(workspace.id),
-    // The reservation is kept with the machine so the path that stops it can settle it.
-    ops: [change.set("machine", { machineId: handle.machineId, machineKey: handle.machineKey }), ...(reservationId === undefined ? [] : [change.set("machineReservationId", reservationId)])],
-    condition: when.eq("fence", workspace.fence),
+    // The reservation is kept with the machine so the path that stops it can give it back.
+    ops: [
+      change.set("machine", { machineId: handle.machineId, machineKey: handle.machineKey }), change.set("machineGeneration", (workspace.machineGeneration ?? 0) + 1),
+      ...(reservationId === undefined ? [] : [change.set("machineReservationId", reservationId)]),
+    ],
+    condition: when.and(when.eq("fence", workspace.fence), when.not(when.or(when.eq("status", "CLOSED"), when.eq("status", "CLOSING")))),
   });
+  return written.applied;
 }
 
-async function forgetMachine(deps: TaskFlowDeps, workspace: WorkspaceRecord): Promise<void> {
-  await deps.store.update({ key: workspaceKey(workspace.id), ops: [change.remove("machine")], condition: when.and(when.eq("fence", workspace.fence), when.exists("machine")) });
+/** The machine is gone: the workspace forgets it, and the allowance taken for it goes back (the next machine is admitted on its own). */
+async function forgetMachine(deps: TaskFlowDeps, workspaceId: string, reservationId: string | undefined): Promise<void> {
+  await deps.store.update({ key: workspaceKey(workspaceId), ops: [change.remove("machine"), change.remove("machineReservationId")], condition: when.exists("machine") });
+  await releaseAdmission(deps, reservationId);
 }
 
-/** The operation was handed to the machine. A worker that reported RUNNING already keeps its newer state (the condition does not hold, which is fine). */
-async function markDispatching(deps: TaskFlowDeps, operation: OperationRecord, machineId: string): Promise<void> {
-  await deps.store.update({
-    key: operationKey(operation.workspaceId, operation.id),
-    ops: [change.set("status", "DISPATCHING"), change.set("machineId", machineId), change.set("deliveredAt", iso(deps)), change.set("updatedAt", iso(deps))],
-    condition: when.eq("status", "ACCEPTED"),
-  });
+/**
+ * Hands the operation over, fenced: the workspace is still held by this operation, at its fence, and is not closing, in the same transaction that marks the
+ * operation DISPATCHING. A worker that reported RUNNING already keeps its newer state (the operation's condition then does not hold, which is a repeat).
+ */
+async function claimDispatch(deps: TaskFlowDeps, operation: OperationRecord, machineId: string): Promise<boolean> {
+  const now = iso(deps);
+  const claimed = await deps.store.transact([
+    { kind: "check", key: workspaceKey(operation.workspaceId), condition: when.and(when.eq("fence", operation.fence), when.eq("activeOperationId", operation.id), when.not(when.or(when.eq("status", "CLOSED"), when.eq("status", "CLOSING")))) },
+    { kind: "update", key: operationKey(operation.workspaceId, operation.id), ops: [change.set("status", "DISPATCHING"), change.set("machineId", machineId), change.set("deliveredAt", now), change.set("updatedAt", now)], condition: when.or(when.eq("status", "ACCEPTED"), when.eq("status", "DISPATCHING")) },
+  ]);
+  return claimed.applied;
 }
 
-/** Ends an operation the worker will never answer, through the same path a worker's result takes. */
-async function endOperation(deps: TaskFlowDeps, operation: OperationRecord, status: "FAILED" | "INTERRUPTED", error: string): Promise<void> {
+/** Ends an operation the worker will never answer, through the same path a worker's result takes. True when it is ended afterwards. */
+async function endOperation(deps: TaskFlowDeps, operation: OperationRecord, status: "FAILED" | "INTERRUPTED", error: string): Promise<boolean> {
   try {
     await recordOperationResult(deps, { workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status, error });
   } catch (cause) {
     if (!(cause instanceof AgentXError)) throw cause;
     log(deps, { event: "task_flow.end_operation_refused", code: cause.code });
   }
+  const fresh = await readOperation(deps, operation.workspaceId, operation.id);
+  return fresh !== undefined && isTerminalStatus(fresh.status);
 }

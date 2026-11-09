@@ -87,6 +87,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
 
   const project = await deps.projects.latest(request.project);
   if (project === undefined) return refused(agentXError("PROJECT_NOT_FOUND", `project \`${request.project}\` doesn't exist`));
+  // An archived project accepts no new work (Cloud's requireNewWorkAllowed).
+  if (project.archived === true) return refused(agentXError("PROJECT_ARCHIVED", `project \`${request.project}\` is archived; unarchive it to start new work`));
   // Every repository of the project must live on a code host this install registered, before the budget, the limits and any write.
   if (deps.codeHosts !== undefined) {
     try {
@@ -147,13 +149,13 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
     ...(understandFirst ? {} : { pendingPrompt: request.instructions }),
     ...(asWorkflow && !understandFirst ? { pendingWorkflowMode: "PLAN" as const } : {}),
   };
-  const steps = (staged: readonly TransactItem[]): TransactItem[] => [
+  const steps = (staged: readonly TransactItem[], taskItem: TaskRecord): TransactItem[] => [
     ...chargeItems(charge, limits, taskId, receivedAt),
     ...staged,
     ...stageAudit(deps, { eventId: `task.started:${taskId}`, actor: { type: "person", id: developerId }, action: "task.started", subject: { type: "task", id: taskId }, details: { project: request.project, workflow: asWorkflow, ...(asWorkflow ? { path: workflowPath } : {}) } }),
     { kind: "put", item: toDocument(workspace), condition: when.absent() },
     ...prepare.items,
-    { kind: "put", item: toDocument(task), condition: when.absent() },
+    { kind: "put", item: toDocument(taskItem), condition: when.absent() },
     { kind: "put", item: { ...taskIndexKey(developerId, receivedAt, taskId), entityType: "DEVELOPER_TASK_INDEX", taskId, orgId: deps.companyId, project: request.project, title, client, status: "STARTING", shared: false, startingRevision: revision, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() },
     { kind: "put", item: toDocument(pointer), condition: when.absent() },
     { kind: "put", item: { ...conversationKey(workspaceId, conversationId), entityType: "CONVERSATION", id: conversationId, workspaceId, createdAt: receivedAt, updatedAt: receivedAt }, condition: when.absent() },
@@ -164,25 +166,30 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
   const idempotencyIndex = (items: readonly TransactItem[]): number => items.findIndex((item) => item.kind === "put" && item.item.pk === idempotencyKey.pk && item.item.sk === idempotencyKey.sk);
 
   for (let attempt = 1; attempt <= START_ATTEMPTS; attempt += 1) {
-    // The admission key is new on a second try: a decision for a transaction that lost a race is not reused.
-    const admitted = await stageAdmission(deps, { idempotencyKey: `task.start:${developerId}:${request.requestId}:${attempt}`, action: "task.start", actor: principal, projectName: request.project, subject: { type: "task", id: taskId } }).catch((error: unknown) => {
-      if (error instanceof AgentXError) return refused(error);
-      throw error;
-    });
-    const items = steps(admitted.items);
+    // The admission key is made from this call's own task id and the try: a second call for the same request holds its own allowance (the first
+    // call that commits wins; the other gives back only its own), and a try after a lost race is not answered with the old decision.
+    const admitted = await stageAdmission(deps, { idempotencyKey: `task.start:${taskId}:${attempt}`, action: "task.start", actor: principal, projectName: request.project, subject: { type: "task", id: taskId } });
+    if ("refusal" in admitted) return refused(admitted.refusal);
+    const taskItem: TaskRecord = admitted.reservationId === undefined ? task : { ...task, admissionReservationId: admitted.reservationId };
+    const items = steps(admitted.items, taskItem);
     let result;
     try {
       result = await deps.store.transact(items);
     } catch (error) {
-      await releaseAdmission(deps, admitted.reservationId);
-      if (error instanceof DocumentStoreError && error.code === "conflict") throw agentXError("WORKSPACE_BUSY", "Rovara could not start the task just now; try again with the same request_id");
+      // A lost race did not commit: the allowance goes back. Any other fault may have committed, so the reservation is left (it expires) rather
+      // than given back under a task that exists.
+      if (error instanceof DocumentStoreError && error.code === "conflict") {
+        await releaseAdmission(deps, admitted.reservationId);
+        throw agentXError("WORKSPACE_BUSY", "Rovara could not start the task just now; try again with the same request_id");
+      }
       throw error;
     }
     if (result.applied) {
       // The message is handed to its queue now; a relay from a timer does it too if this one is lost, so a failure here never fails the start.
       await deps.outbox.relay({ companyId: deps.companyId, ids: [prepare.operation.id] }).catch((error: unknown) => log(deps, { event: "task_flow.relay_failed", error: error instanceof Error ? error.message : "unknown" }));
-      return { task: await taskViewOf(deps, task), duplicate: false };
+      return { task: await taskViewOf(deps, taskItem), duplicate: false };
     }
+    // Not committed: this call's own allowance goes back (another call's has a key of its own).
     await releaseAdmission(deps, admitted.reservationId);
     const failed = result.failed;
     const conflict = chargeConflict(failed, 0);
