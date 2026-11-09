@@ -6,7 +6,7 @@ import {
   codeHostRepositoryKey, mergedLines, mergedMilestoneItems, mergedStateItems, prHeadItems, readMergeTracking, trackingWriteItem, trackingItemOf,
 } from "../../packages/broker/src/core/merge/index.js";
 import { findMergeCommit } from "../../packages/broker/src/core/proof/revert/merge-commit-index.js";
-import { MemoryMilestones, ORG, SESSION_ID, TASK_ID, mergeWorld } from "../support/merge-world.js";
+import { MemoryMilestones, ORG, SESSION_ID, TASK_ID, mergeWorld, wrapStore } from "../support/merge-world.js";
 
 const SHA = "ab".repeat(20);
 const NOW = "2026-11-09T10:00:00.000Z";
@@ -49,6 +49,19 @@ describe("what a merge leaves behind", () => {
     expect((await world.store.get({ pk: "WORKSPACE#ws-1", sk: `PULL_REQUEST#app#${String(pr.number).padStart(12, "0")}` }))!["state"]).toBe("merged");
     expect(await findMergeCommit(world.store, { orgId: ORG, repositoryFullName: "acme/app", sha: SHA })).toMatchObject({ taskId: TASK_ID });
     expect(world.timeline.lines).toEqual([]);
+  });
+
+  it("keeps the expiry of the rows it writes under the attribute the store sweeps", async () => {
+    const { world, pr } = await arranged();
+    const sweeping = wrapStore(world.store, { ttlAttribute: "expiresAt" });
+    const make = (state: "OPEN" | "MERGED") => ({ ...workflow(state, state === "MERGED" ? "MERGED" : "WAIT_FOR_MERGE"), pullRequests: [{ ...workflow(state).pullRequests![0]!, number: pr.number, url: `https://github.com/acme/app/pull/${String(pr.number)}` }] }) as WorkflowSnapshot;
+    const items = await mergedStateItems({ store: sweeping, timeline: world.timeline }, { taskId: TASK_ID, orgId: ORG, workspaceId: "ws-1" }, make("OPEN"), make("MERGED"), NOW, [{ repositoryId: "app", number: pr.number, mergeCommit: SHA }]);
+    const index = items.find((item) => item.kind === "put" && String(item.item.pk).includes("GITHUB_MERGE"));
+    expect(index).toBeDefined();
+    expect((index as { item: Record<string, unknown> }).item["expiresAt"]).toBeTypeOf("number");
+    expect((index as { item: Record<string, unknown> }).item["indexExpiresAt"]).toBeUndefined();
+    const [head] = prHeadItems({ orgId: ORG, repositoryKey: "acme/app", headSha: SHA, taskId: TASK_ID, repositoryId: "app", number: 7 }, Date.parse(NOW), "expiresAt");
+    expect((head as { item: Record<string, unknown> }).item["expiresAt"]).toBeTypeOf("number");
   });
 
   it("says as a fact that a pull request was merged on the host with no approval recorded, naming only a login the host could have issued", async () => {

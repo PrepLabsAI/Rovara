@@ -113,7 +113,8 @@ export async function mergedStateItems(
     const indexed = mergeCommit === undefined || address === undefined ? undefined
       : mergeCommitIndexStep({ orgId, repositoryFullName: address.repositoryFullName, repositoryId: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url, taskId: task.taskId, mergeCommit, now }, deps.store.ttlAttribute);
     if (indexed !== undefined) items.push(indexed);
-    else if (address !== undefined) missed[mergeCommit === undefined ? "no_merge_commit" : "bad_merge_commit"] += 1;
+    else if (mergeCommit === undefined || address === undefined) missed[mergeCommit === undefined ? "no_merge_commit" : "bad_merge_commit"] += 1; // an address the index cannot hold (not GitHub-shaped) counts as a miss too
+    else missed.bad_merge_commit += 1;
     // Merged on the host (not by Rovara's Merge, which claims the pull request first) with no approval that counts: a fact for the timeline, not an error.
     if (prior !== undefined && prior.mergeClaim === undefined && prior.approval === undefined && session.success) {
       const by = observed.find((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number)?.mergedBy;

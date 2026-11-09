@@ -82,12 +82,13 @@ const HEAD_INDEX_RETENTION_SECONDS = 90 * 86_400;
 export function prHeadItems(
   input: { orgId: OrgId; repositoryKey: string; headSha: string; taskId: string; repositoryId: string; number: number; branch?: string | undefined },
   now: number,
+  ttlAttribute: string = INDEX_EXPIRY_ATTRIBUTE,
 ): TransactItem[] {
   const repositoryKey = input.repositoryKey.toLowerCase();
   const expires = Math.floor(now / 1_000) + HEAD_INDEX_RETENTION_SECONDS;
   const item = (sk: string): TransactItem => ({
     kind: "put",
-    item: plain({ ...prHeadKey(input.orgId, repositoryKey, sk), entityType: "PR_HEAD", orgId: input.orgId, taskId: input.taskId, repositoryId: input.repositoryId, number: input.number, [INDEX_EXPIRY_ATTRIBUTE]: expires }),
+    item: plain({ ...prHeadKey(input.orgId, repositoryKey, sk), entityType: "PR_HEAD", orgId: input.orgId, taskId: input.taskId, repositoryId: input.repositoryId, number: input.number, [ttlAttribute]: expires }),
   });
   return [item(input.headSha), ...(input.branch === undefined ? [] : [item(`branch:${input.branch}`)])];
 }

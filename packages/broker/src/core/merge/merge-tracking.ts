@@ -669,7 +669,7 @@ async function trackOne(
     if (!unchanged || action?.syncs !== undefined) {
       items.push(trackingWriteItem(current, written));
       // The index a check or status event finds the task by: kept up to date whenever the item is, for a head that is Rovara's.
-      if (merged.headByRovara) items.push(...prHeadItems({ orgId: task.orgId, repositoryKey, headSha: status.headRevision, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number }, now).slice(0, 1));
+      if (merged.headByRovara) items.push(...prHeadItems({ orgId: task.orgId, repositoryKey, headSha: status.headRevision, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number }, now, deps.store.ttlAttribute).slice(0, 1));
     }
     if (action !== undefined) {
       items.push((deps.workflowWrite ?? workflowUpdateItem)(task.taskId, action.workflow, task.workflow.revision), ...action.steps);
@@ -702,7 +702,7 @@ async function trackOne(
       if (attempt + 1 < COMMIT_ATTEMPTS) continue;
       throw agentXError("RUNTIME_UNAVAILABLE", "the tracking item was changed by another writer");
     }
-    if (justReady || announce !== undefined) {
+    if (justReady || announce !== undefined || (action?.milestones.length ?? 0) > 0) {
       // After the commit: the handlers are told (a failure is theirs, and the sweep tells them again).
       await deps.milestones.deliver(task.taskId).catch(() => undefined);
     }

@@ -6,7 +6,7 @@ import { createLocalOwnerApprovers, localOwnerPrincipal, CODE_HOST_COMMENT_METHO
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import type { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
-import { ORG, TASK_ID, githubShapedHost, mergeWorld, OWNER_SESSION, type MergeWorld } from "../support/merge-world.js";
+import { ORG, TASK_ID, githubShapedHost, mergeWorld, wrapStore, OWNER_SESSION, type MergeWorld } from "../support/merge-world.js";
 
 const rejects = async (run: () => Promise<unknown>): Promise<{ code?: string; message: string }> => {
   try { await run(); } catch (error) {
@@ -185,6 +185,26 @@ describe("what the approver adapter requires is enforced by the press", () => {
     const refusal = await rejects(() => pressMerge(deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }));
     expect(refusal).toMatchObject({ code: "FORBIDDEN" });
     expect(refusal.message).toContain("more than one approver");
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
+  });
+
+  it("refuses a verdict whose method the adapter does not list, even when verify approved it", async () => {
+    const world = await mergeWorld();
+    await world.seedTracking();
+    const deps = { ...world.deps, approvers: { requirement: async () => ({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }), verify: async (_r: unknown, proof: { proofId: string }) => ({ approved: true as const, approver: localOwnerPrincipal(), method: "something-else", proofId: proof.proofId }) } as Approvers };
+    const prepared = await prepareMerge(deps, { taskId: TASK_ID, requestId: world.requestId() });
+    expect((await rejects(() => pressMerge(deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }))).code).toBe("FORBIDDEN");
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
+  });
+
+  it("calls a claim transaction that failed on its audit step a fault, not 'already used'", async () => {
+    const world = await mergeWorld();
+    await world.seedTracking();
+    const prepared = await world.prepare();
+    // The claim (0) and the proof row (1) hold; the audit step (2) fails.
+    const failing = wrapStore(world.store, { transact: async (items: Parameters<typeof world.store.transact>[0]) => (items.length === 3 && items[2]!.kind === "put" ? { applied: false as const, reason: "condition_failed" as const, failed: [2] } : world.store.transact(items)) });
+    const refusal = await rejects(() => pressMerge({ ...world.deps, store: failing }, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }));
+    expect(refusal.code).toBe("RUNTIME_UNAVAILABLE");
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
   });
 
