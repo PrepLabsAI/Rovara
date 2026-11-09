@@ -123,6 +123,8 @@ export interface LocalRuntimeOptions {
   storage?: "sqlite" | "memory";
   /** Use this worker-machines adapter instead of Docker (tests; a later this-machine adapter). */
   machines?: WorkerMachines;
+  /** Called with the registry after Code's defaults and before the config's adapters, to register more (an embedding product, tests). */
+  registerAdapters?: (registry: AdapterRegistry) => void;
   /** Run the dispatch, sweep and session timers. Default true; tests call `runtime.tick()`. */
   timers?: boolean;
 }
@@ -130,6 +132,8 @@ export interface LocalRuntimeOptions {
 export interface LocalRuntime {
   readonly url: string;
   readonly port: number;
+  /** The loopback port of the listener a worker's callbacks arrive on (its Host is `host.docker.internal:<port>`). */
+  readonly callbackPort: number;
   readonly registry: AdapterRegistry;
   readonly config: PluginConfig;
   readonly configPath: string;
@@ -239,6 +243,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   if (options.machines !== undefined) registry.register("worker-machines", INJECTED_ADAPTER_NAME, options.machines);
   registry.register("worker-machines", THIS_MACHINE_ADAPTER_NAME, new ThisMachineWorkerMachines({ enabled: options.thisMachine === true }));
 
+  options.registerAdapters?.(registry);
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
   registry.seal();
 
@@ -320,6 +325,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   return {
     url: server.url,
     port: server.port,
+    callbackPort: callbackServer.current.tcpPort,
     registry,
     config,
     configPath: location.path,

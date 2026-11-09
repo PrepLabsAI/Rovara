@@ -67,6 +67,8 @@ export type RegistryTaskFlowOptions = Omit<TaskFlowDeps, "store" | "queues" | "o
   access?: TaskFlowDeps["access"];
   /** The `worker-machines` adapter to use when several are registered (the point holds many). Absent: the only one. */
   machinesName?: string;
+  /** Refuse a start whose repository names a code host nobody registered. Default true; an install with no code host adapter at all (a laptop before one is set up) turns it off. */
+  checkCodeHosts?: boolean;
 };
 
 /**
@@ -74,7 +76,7 @@ export type RegistryTaskFlowOptions = Omit<TaskFlowDeps, "store" | "queues" | "o
  * it registered. The outbox is built over the store and the queues. A registry that lacks one of the points throws, naming it.
  */
 export function createTaskFlowFromRegistry(registry: AdapterRegistry | RegistryView, options: RegistryTaskFlowOptions): TaskFlow {
-  const { machinesName, ...rest } = options;
+  const { machinesName, checkCodeHosts, ...rest } = options;
   const store = registry.require("storage");
   const queues = registry.require("queue");
   return createTaskFlow({
@@ -87,6 +89,6 @@ export function createTaskFlowFromRegistry(registry: AdapterRegistry | RegistryV
     admission: registry.require("admission"),
     audit: registry.require("audit-sink"),
     access: options.access ?? createOwnerTaskAccess(),
-    codeHosts: registry,
+    ...(checkCodeHosts === false ? {} : { codeHosts: registry }),
   });
 }

@@ -14,13 +14,13 @@ import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../../core/decisions/local-actions.js";
 import { createWorkflowDocumentSubject } from "../../core/decisions/workflow-subject.js";
-import { LocalPageSessions } from "../../core/local-pages/guard.js";
+import type { LocalPageSessions } from "../../core/local-pages/guard.js";
 import { createLocalPagesServer, type LocalPagesServer } from "../../core/local-pages/server.js";
 import { createDocumentEvidenceBlobStore, type EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import { startSessionProjector } from "../../core/sessions/projector.js";
 import { sweepOpenSessions } from "../../core/sessions/sweep.js";
 import type { SummaryDependencies } from "../../core/sessions/summary.js";
-import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
+import type { TaskCaller } from "../../core/task-flow/deps.js";
 import { dispatchRowItem } from "../../core/task-flow/dispatch-rows.js";
 import { createTaskFlowFromRegistry, TASK_FLOW_INDEXES, type TaskFlow } from "../../core/task-flow/flow.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
@@ -102,6 +102,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     callbackSigningKey: signingKey,
     understandFirst: true,
     ...(options.machinesName === undefined ? {} : { machinesName: options.machinesName }),
+    // No code host adapter registered (none is set up on a fresh laptop): a start is not refused for a host nobody knows, and publishing a pull request is simply not offered.
+    checkCodeHosts: registry.names("code-host").length > 0,
     startExtras: createSessionStartExtras(companyId),
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
