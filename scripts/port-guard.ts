@@ -113,30 +113,32 @@ export function cloudPathRule(path: string, names: NameSource = DEFAULT_NAMES): 
 
 /** A suffix that makes a file name a leftover, with what it is, in words. Matched on the last path segment, case-insensitively. */
 const STRAY_SUFFIXES: ReadonlyArray<{ pattern: RegExp; label: string }> = [
-  { pattern: /.-e$/i, label: "a sed backup (`sed -i -E` / `-e` on macOS keeps the original as <name>-E)" },
-  { pattern: /~$/, label: "an editor backup (trailing ~)" },
-  { pattern: /\.(?:orig|rej|bak|bk|backup|old|save|saved|tmp|temp|swp|swo|swn|swx|sw[a-p]|dist|merge|keep)$/i, label: "a merge, patch, editor or scratch leftover" },
+  { pattern: /.-E\d*$/, label: "a sed backup (`sed -i -E` on macOS keeps the original as <name>-E)" },
+  { pattern: /\..*-e\d*$/i, label: "a sed backup (`sed -i -e` on macOS keeps the original as <name>-e)" },
+  { pattern: /[~#]$|,v$/, label: "an editor or version-control backup (trailing ~, # or ,v)" },
+  { pattern: /\.(?:orig|rej|bak|backup|bk|tmp|temp)\d*$/i, label: "a merge, patch, editor or scratch leftover" },
+  { pattern: /\.sw[pxno]$/i, label: "a vim swap file" },
 ];
 /** Whole names, or names built around a word, that are leftovers wherever they sit in the name. */
-const STRAY_NAMES: ReadonlyArray<{ pattern: RegExp; label: string }> = [
+const STRAY_NAMES: ReadonlyArray<{ pattern: RegExp; label: string; codeOnly?: boolean }> = [
   { pattern: /^(?:\.ds_store|thumbs\.db|desktop\.ini|\.appledouble|\.localized)$/i, label: "an operating-system metadata file" },
   { pattern: /^\._./, label: "a macOS resource-fork (AppleDouble) file" },
   { pattern: /^#.+#$/, label: "an editor auto-save file (#name#)" },
   { pattern: /^\.#./, label: "an editor lock file (.#name)" },
   { pattern: /^\.~lock\./i, label: "an office-suite lock file" },
-  { pattern: /^\..+\.sw[a-p]$/i, label: "a vim swap file" },
   { pattern: /\.(?:orig|rej|bak|backup|swp|swo)\./i, label: "a merge, patch or editor leftover (the marker sits inside the name)" },
   { pattern: /\.(?:BASE|LOCAL|REMOTE|BACKUP)\.\d+/, label: "a merge-tool temporary file" },
   { pattern: /^\.merge_file_/i, label: "a merge-tool temporary file" },
-  { pattern: / copy(?: \d+)?(?:\.|$)/i, label: "a Finder duplicate (\"name copy\")" },
-  { pattern: / \(\d+\)(?:\.|$)/, label: "a browser or Finder duplicate (\"name (1)\")" },
+  // Only for source files: a document called "Brand copy.md" is an ordinary name, a source file called "engine copy.ts" is a duplicate.
+  { pattern: / copy(?: \d+)?(?:\.|$)/i, label: "a Finder duplicate (\"name copy\")", codeOnly: true },
+  { pattern: / \(\d+\)(?:\.|$)/, label: "a browser or Finder duplicate (\"name (1)\")", codeOnly: true },
 ];
 
 /** Why a repository path is a stray file (an editor, merge or sed leftover), or null. The last path segment decides. */
 export function strayFileRule(path: string): { rule: "stray-file"; detail: string } | null {
   const base = posix.basename(path.replaceAll("\\", "/"));
-  for (const { pattern, label } of [...STRAY_SUFFIXES, ...STRAY_NAMES]) {
-    if (pattern.test(base)) return { rule: "stray-file", detail: label };
+  for (const { pattern, label, codeOnly } of [...STRAY_SUFFIXES, ...STRAY_NAMES] as Array<{ pattern: RegExp; label: string; codeOnly?: boolean }>) {
+    if (pattern.test(base) && (codeOnly !== true || isCodeFile(base))) return { rule: "stray-file", detail: label };
   }
   return null;
 }
@@ -149,17 +151,11 @@ const CODE_FILE = /\.([cm]?[jt]sx?|vue|svelte|astro|html?|css|scss|sass|less)$/i
 const CODE_EXT_ANYWHERE = /\.(?:[cm]?[jt]sx?|vue|svelte|astro|html?|css|scss|sass|less)(?![a-z0-9])/i;
 /** Files that wire packages together: a Cloud-only package named here would pull it into the build (also when a backup suffix follows the name). */
 const WIRING_FILE = /(^|\/)(package\.json|tsconfig[^/]*\.json|[^/]+\.ya?ml)(?![a-z0-9])/i;
-/**
- * Text that reads as TypeScript/JavaScript whatever the file is called: an import/export statement with a source, a bare import, a
- * require() or a dynamic import(). Anchored to the start of a line (or a closing brace of a multi-line import), so that prose does not match.
- */
-const CODE_TEXT = /^[ \t]*(?:import\b[^;\n]*?\bfrom\s*['"`]|import\s*['"`]|export\b[^;\n]*?\bfrom\s*['"`]|\}\s*from\s*['"`]|(?:const|let|var)\b[^;\n]*=\s*(?:await\s+)?(?:require|import)\s*\(|(?:await\s+)?import\s*\(\s*['"`]|require\s*\(\s*['"`])/m;
-
 /** Files larger than this are not read for code-looking text unless their name says code (a huge blob is data, and the read is the cost). */
 const SNIFF_LIMIT = 8 << 20;
 
-/** The text with NUL bytes removed, so that a UTF-16 copy of a source file reads as the source it is. */
-const withoutNul = (text: string): string => (text.includes("\0") ? text.replaceAll("\0", "") : text);
+/** The text with NUL bytes and a byte-order mark removed, so that a UTF-16 copy of a source file reads as the source it is. */
+const withoutNul = (text: string): string => (text.includes("\0") || text.startsWith("\uFEFF") ? text.replaceAll("\0", "").replace(/^\uFEFF/, "") : text);
 
 /** True when a file name carries a code extension (at the end or followed by a backup suffix). */
 export function isCodeFile(file: string): boolean {
@@ -168,7 +164,7 @@ export function isCodeFile(file: string): boolean {
 
 /** True when a file is checked as TypeScript/JavaScript: by its name, or because its text reads as such code. */
 export function looksLikeCode(file: string, text: string): boolean {
-  return isCodeFile(file) || CODE_TEXT.test(withoutNul(text));
+  return isCodeFile(file) || moduleSpecifiers(withoutNul(text)).length > 0;
 }
 const CLOUD_PACKAGE = /^@(agentx|rovara)\/(ui|web|audit-verifier)(\/|$)/i;
 const CLOUD_PACKAGE_ANYWHERE = /@(agentx|rovara)\/(ui|web|audit-verifier)(?![a-z0-9-])|(^|[^a-z0-9-])packages\/(ui|web|audit-verifier)(?![a-z0-9-])/i;
@@ -833,7 +829,8 @@ function scanChange(collector: Collector, input: ScanInput): void {
     const lines = parse(patch).map((added) => added.text);
     if (lines.length > 0) collector.mergePatches.set(input.commit, lines.join("\n") + "\n");
   }
-  const added = parse(patch);
+  // A UTF-16 file reads as text with a NUL between the letters: without them the name and secret checks see the words (the earlier patch passes see the raw bytes).
+  const added = parse(patch).map((line) => (line.text.includes("\0") || line.text.includes("\uFFFD") ? { ...line, text: withoutNul(line.text).replaceAll("\uFFFD", "") } : line));
   // The second gitleaks pass reads what the range adds to every file, under a neutral name: its default config skips files by name
   // (lockfiles, images, vendor directories and more). Only added lines, so a file that already held a public fixture is not re-judged.
   const perFile = new Map<string, string[]>();

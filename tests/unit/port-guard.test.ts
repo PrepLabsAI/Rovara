@@ -314,6 +314,48 @@ describe("port-guard on a temp repository", () => {
       expect(rules(lane.guard())).toContain("cloud-import");
     });
 
+    it.each([
+      ["a one-import file with a UTF-8 byte-order mark", "\uFEFF" + `import { m } from "./${ORG}/members.js";\n`],
+      ["an import = require", `import m = require("./${ORG}/members.js");\n`],
+      ["a CommonJS re-export", `module.exports = require("./${ORG}/members.js");\n`],
+      ["a one-line file with the import after other code", `export const a = 1; import("./${ORG}/members.js");\n`],
+      ["a test mock", `vi.mock("./${ORG}/members.js");\n`],
+      ["a UTF-16 file with a byte-order mark", "\uFFFD\uFFFD" + Buffer.from(`import { m } from "./${ORG}/members.js";\n`, "utf16le").toString("latin1")],
+    ])("reads %s under a non-code name", (_name, text) => {
+      lane.write("packages/worker/src/engine.dat", text);
+      lane.commit();
+      expect(rules(lane.guard())).toContain("cloud-import");
+    });
+
+    it("finds a private name in a UTF-16 file, with or without a byte-order mark", () => {
+      lane.write("docs/a.txt", Buffer.from(`// ${PROSPECT}\n`, "utf16le").toString("latin1"));
+      lane.write("docs/b.txt", "\uFFFD\uFFFD" + Buffer.from(`// ${PROSPECT}\n`, "utf16le").toString("latin1"));
+      lane.commit();
+      const files = lane.guard().filter((f) => f.rule === "private-name").map((f) => f.file).sort();
+      expect(files).toEqual(["docs/a.txt", "docs/b.txt"]);
+    });
+
+    it.skipIf(!hasGitleaks)("finds a secret in a UTF-16 file", () => {
+      lane.write("docs/a.txt", Buffer.from(`value = "${fakeAccessKey()}"\n`, "utf16le").toString("latin1"));
+      lane.commit();
+      expect(lane.guard({ gitleaks: "run" }).filter((f) => f.rule === "secret").map((f) => f.file)).toContain("docs/a.txt");
+    });
+
+    it.each(["engine.ts-E2", "engine.ts,v", "engine.ts#", "engine.ts.bak2", "engine.ts.orig1", "engine.ts.swn"])("fails the leftover name %s", (name) => {
+      lane.write(`packages/worker/src/${name}`, "export const a = 1;\n");
+      lane.commit();
+      expect(rules(lane.guard())).toContain("stray-file");
+    });
+
+    it.each([".keep", ".env.dist", "docs/Brand copy.md", "data/list.old", "data/state.save", "data/x.merge", "assets/icon.swc", "assets/anim.swf", "scripts/make-e"])(
+      "does not call the ordinary name %s a leftover",
+      (path) => {
+        lane.write(path, "x\n");
+        lane.commit();
+        expect(rules(lane.guard())).not.toContain("stray-file");
+      },
+    );
+
     it("does not read prose as source", () => {
       lane.write("docs/notes.md", `We import things from the broker and export results; see "./${ORG}" in the plan.\nrequire a review before merge.\n`);
       lane.commit();
@@ -1006,6 +1048,7 @@ describe("port-guard pieces", () => {
     expect(strayFileRule("a.orig/b/c.ts")).toBeNull();
     expect(strayFileRule("a/tmp/c.ts")).toBeNull();
     expect(strayFileRule("a/b/review.md")).toBeNull();
+    expect(strayFileRule("a/b/.keep")).toBeNull();
   });
 
   it("isCodeFile and looksLikeCode read a code extension anywhere in the name, and source text under any name", () => {
