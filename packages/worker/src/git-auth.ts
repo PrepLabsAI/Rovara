@@ -43,6 +43,27 @@ function sshCommand(keyPath: string, knownHostsPath: string): string {
   return [sshProgram, ...options].map(shellQuote).join(" ");
 }
 
+/** The hosts a credential may be answered for: github.com, and the host of any https address the command names. */
+function askPassHosts(args: readonly string[]): string[] {
+  const hosts = new Set<string>(["github.com"]);
+  for (const argument of args) {
+    try {
+      const url = new URL(argument);
+      if (url.protocol === "https:" && /^[a-z0-9.-]{1,253}$/u.test(url.hostname)) hosts.add(url.hostname);
+    } catch { /* not an address */ }
+  }
+  return [...hosts];
+}
+
+/**
+ * The askpass helper: git asks `Username for 'https://host'` and `Password for 'https://user@host'`. It answers only when the prompt names one of `hosts`, so a command that ends up talking to another
+ * host (a redirect, a rewritten address) gets nothing, not the token.
+ */
+function askPassScript(hosts: readonly string[]): string {
+  const named = hosts.map((host) => `*"//${host}'"*|*"@${host}'"*`).join("|");
+  return `#!/bin/sh\ncase "$1" in\n  ${named}) ;;\n  *) exit 1 ;;\nesac\ncase "$1" in\n  *Username*) printf '%s\\n' "$AGENTX_GIT_USERNAME" ;;\n  *Password*) cat -- "$AGENTX_GIT_PASSWORD_FILE" ;;\n  *) exit 1 ;;\nesac\n`;
+}
+
 /** How a credentialed Git command is run; a seam for tests, which see its environment. */
 export type CredentialedGitRunner = (
   args: readonly string[],
@@ -89,11 +110,7 @@ export async function runGitWithCredential(input: {
       const askPassPath = join(askPassDirectory, "askpass.sh");
       const passwordPath = join(askPassDirectory, "password");
       await writeFile(passwordPath, `${password}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-      await writeFile(
-        askPassPath,
-        "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' \"$AGENTX_GIT_USERNAME\" ;;\n  *Password*) cat -- \"$AGENTX_GIT_PASSWORD_FILE\" ;;\n  *) exit 1 ;;\nesac\n",
-        { encoding: "utf8", mode: 0o700, flag: "wx" },
-      );
+      await writeFile(askPassPath, askPassScript(askPassHosts(input.args)), { encoding: "utf8", mode: 0o700, flag: "wx" });
       Object.assign(environment, {
         GIT_ASKPASS: askPassPath,
         AGENTX_GIT_USERNAME: username,

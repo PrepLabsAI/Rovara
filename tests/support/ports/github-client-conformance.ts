@@ -13,6 +13,7 @@
 // Two credential models run this suite. `installation-token` (the default) is a GitHub App: it mints one installation token per repository and permission set, and the least-privilege checks
 // pin those mints. `owner-token` (lane L11) is a laptop signed in with the owner's one personal token: GitHub mints nothing for it, so those checks instead pin that no mint and no App
 // request is made, that the credential is the owner's token for the one repository with an expiry Rovara chose, and that the same rules (tenant, redirects, timeouts, rate limits, inputs) hold.
+// The mint checks are real in both: an owner-token client reports each token request it answers itself (`observeMint`), and the suite pins its permission set and its one repository as it does the App's.
 //
 // The network is a fake GitHub (`tests/support/ports/github-fixture-api.ts`), never the real one. `RecordingNetwork` wraps its `fetch` and records what the client asked for, including
 // the `redirect` and `signal` options, and it follows redirects the way `fetch` does so that a client that forgot `redirect: "error"` is caught following one.
@@ -37,6 +38,8 @@ export class RecordingNetwork {
   readonly requests: RecordedRequest[] = [];
   private redirectTo: string | undefined;
   private limitedForSeconds: number | undefined;
+  /** Token requests an owner-token client answered itself (it asks GitHub for none): what it was asked to mint, as told by its `observeMint`. */
+  private readonly answeredMints: Array<{ permissions: Record<string, string>; repositories: string[] | undefined }> = [];
 
   constructor(private readonly inner: typeof fetch) {}
 
@@ -44,24 +47,19 @@ export class RecordingNetwork {
   redirectEverythingTo(location: string | undefined): void { this.redirectTo = location; }
   /** From now on every request is answered `429`. */
   limitEverythingFor(seconds: number | undefined): void { this.limitedForSeconds = seconds; }
-  clear(): void { this.requests.length = 0; }
-  /** The `POST .../access_tokens` bodies, parsed. */
+  clear(): void { this.requests.length = 0; this.answeredMints.length = 0; }
+  recordMint(mint: { permissions: Record<string, string>; repositories: string[] }): void { this.answeredMints.push(mint); }
+  /** The `POST .../access_tokens` bodies, parsed, and the mints an owner-token client answered itself. */
   tokenRequests(): Array<{ permissions: Record<string, string>; repositories: string[] | undefined }> {
-    return this.requests.filter((request) => request.method === "POST" && /\/access_tokens$/u.test(request.url.pathname)).map((request) => {
+    const asked = this.requests.filter((request) => request.method === "POST" && /\/access_tokens$/u.test(request.url.pathname)).map((request) => {
       const body = JSON.parse(request.body ?? "{}") as { permissions?: Record<string, string>; repositories?: string[] };
       return { permissions: body.permissions ?? {}, repositories: body.repositories };
     });
+    return [...asked, ...this.answeredMints];
   }
   /** Requests that read a repository or used an installation token: everything but the App's own lookups (`/app`, `/repos/.../installation`). */
   repositoryReads(): RecordedRequest[] {
     return this.requests.filter((request) => request.url.pathname !== "/app" && !/\/installation$/u.test(request.url.pathname));
-  }
-  /**
-   * `repositoryReads` without the plain read of the repository itself (`GET /repos/{owner}/{name}`). An owner-token client answers "which installation covers this repository" with that one read, as the
-   * App client answers it with `/installation`; neither is a read of the repository's content.
-   */
-  repositoryContentReads(): RecordedRequest[] {
-    return this.repositoryReads().filter((request) => !(request.method === "GET" && /^\/repos\/[^/]+\/[^/]+$/u.test(request.url.pathname)));
   }
   /** Requests to the App's own endpoints (`/app...`, `/installation`, `/access_tokens`) that reached the network. */
   appRequests(): RecordedRequest[] {
@@ -246,8 +244,7 @@ export const githubClientChecks: readonly GitHubClientConformanceCheck[] = [
         const result = await attempt(() => operation.run(world, fixture, world.scope));
         expect(result.ok, `${operation.name} answered although the tenant binding was refused`).toBe(false);
         expect(world.net.tokenRequests(), `${operation.name} minted a token after the binding was refused`).toEqual([]);
-        const reads = world.credentials === "owner-token" ? world.net.repositoryContentReads() : world.net.repositoryReads();
-        expect(reads.map((request) => `${request.method} ${request.url.pathname}`), `${operation.name} read the repository after the binding was refused`).toEqual([]);
+        expect(world.net.repositoryReads().map((request) => `${request.method} ${request.url.pathname}`), `${operation.name} read the repository after the binding was refused`).toEqual([]);
       }
     },
   },
@@ -281,18 +278,18 @@ export const githubClientChecks: readonly GitHubClientConformanceCheck[] = [
       world.net.clear();
       const clone = await world.client.resolveWithExpiry(world.credentialRef, world.repositoryUrl, "clone", world.scope);
       if (world.credentials === "owner-token") {
-        // GitHub mints nothing for a personal token: the credential is the owner's token itself, and no App endpoint is asked.
-        expect(world.net.tokenRequests()).toEqual([]);
+        // GitHub mints nothing for a personal token (no App endpoint is asked); the credential is the owner's token, and the request for it is still for one repository with one permission.
         expect(world.net.appRequests()).toEqual([]);
-        const push = await world.client.resolveWithExpiry(world.credentialRef, world.repositoryUrl, "push", world.scope);
-        expect([clone.username, clone.password, push.username, push.password]).toEqual(["x-access-token", world.ownerToken, "x-access-token", world.ownerToken]);
-        expect(world.net.tokenRequests()).toEqual([]);
-        return;
+        expect(clone).toMatchObject({ username: "x-access-token", password: world.ownerToken });
       }
       expect(world.net.tokenRequests()).toEqual([{ permissions: { contents: "read" }, repositories: ["app"] }]);
       world.net.clear();
-      await world.client.resolveWithExpiry(world.credentialRef, world.repositoryUrl, "push", world.scope);
+      const push = await world.client.resolveWithExpiry(world.credentialRef, world.repositoryUrl, "push", world.scope);
       expect(world.net.tokenRequests()).toEqual([{ permissions: { contents: "write" }, repositories: ["app"] }]);
+      if (world.credentials === "owner-token") {
+        expect(world.net.appRequests()).toEqual([]);
+        expect(push).toMatchObject({ username: "x-access-token", password: world.ownerToken });
+      }
     },
   },
   {
@@ -301,11 +298,11 @@ export const githubClientChecks: readonly GitHubClientConformanceCheck[] = [
       await world.prepare();
       world.net.clear();
       if (world.credentials === "owner-token") {
-        // One secret, so nothing to keep apart: the same owner token is handed out for both, and nothing is minted.
-        const clone = await world.client.resolveWithExpiry(world.credentialRef, world.repositoryUrl, "clone", world.scope);
-        const push = await world.client.resolveWithExpiry(world.credentialRef, world.repositoryUrl, "push", world.scope);
-        expect(new Set([clone.password, push.password])).toEqual(new Set([world.ownerToken]));
-        expect(world.net.tokenRequests()).toEqual([]);
+        // One secret, so nothing to keep apart: the same owner token is handed out for both, but each is still asked for with its own permission.
+        const first = await world.client.resolveWithExpiry(world.credentialRef, world.repositoryUrl, "clone", world.scope);
+        const second = await world.client.resolveWithExpiry(world.credentialRef, world.repositoryUrl, "push", world.scope);
+        expect(new Set([first.password, second.password])).toEqual(new Set([world.ownerToken]));
+        expect(world.net.tokenRequests().map((request) => request.permissions.contents)).toEqual(["read", "write"]);
         return;
       }
       const push = await world.client.resolveWithExpiry(world.credentialRef, world.repositoryUrl, "push", world.scope);
@@ -348,8 +345,8 @@ export const githubClientChecks: readonly GitHubClientConformanceCheck[] = [
         }
         if (world.credentials === "owner-token") expect(world.net.appRequests(), `${operation.name} reached an App endpoint with an owner token`).toEqual([]);
         // An operation that never reaches the repository is not tested at all: a path the suite cannot reach must fail loudly, not pass.
-        // (An owner-token credential is checked against the repository once a minute, so a repeat of it may be served without a request.)
-        const mayBeServedFromCache = world.credentials === "owner-token" && operation.name.startsWith("resolveWithExpiry");
+        // (An owner-token credential is checked against the repository once a minute, so a repeat of it may be served without a request: the mint it asked for is then the proof it reached it.)
+        const mayBeServedFromCache = world.credentials === "owner-token" && operation.name.startsWith("resolveWithExpiry") && world.net.tokenRequests().length > 0;
         if (operation.reachesRepository && !mayBeServedFromCache) expect(world.net.repositoryReads().length, `${operation.name} made no request to the repository`).toBeGreaterThan(0);
       }
     },

@@ -14,13 +14,14 @@ afterEach(async () => {
   while (cleanup.length > 0) await cleanup.pop()!();
 });
 
-async function run(argv: string[], options: { environment?: NodeJS.ProcessEnv; docker?: FakeDocker; gh?: string | undefined; github?: Response | Error; keysFile?: { text: string; mode: number }; portIsFree?: boolean; start?: UpCommandContext["start"]; waitForShutdown?: () => Promise<void> } = {}) {
+async function run(argv: string[], options: { environment?: NodeJS.ProcessEnv; docker?: FakeDocker; gh?: string | undefined; github?: Response | Error; keysFile?: { text: string; mode: number }; config?: string; portIsFree?: boolean; start?: UpCommandContext["start"]; waitForShutdown?: () => Promise<void> } = {}) {
   const state = await mkdtemp(join(tmpdir(), "rovara-l4-cli-"));
   cleanup.push(() => rm(state, { recursive: true, force: true }));
   if (options.keysFile !== undefined) {
     await writeFile(join(state, "keys.json"), options.keysFile.text, { mode: 0o600 });
     await chmod(join(state, "keys.json"), options.keysFile.mode);
   }
+  if (options.config !== undefined) await writeFile(join(state, "config.json"), options.config, { mode: 0o600 });
   let out = "";
   let err = "";
   const github = vi.fn<typeof fetch>(async () => {
@@ -197,5 +198,23 @@ describe("rovara up", () => {
     const bad = await run(["up", "--port", "99999"], { start: async () => runtime() });
     expect(bad.code).not.toBe(0);
     expect(bad.err).toContain("--port must be a number");
+  });
+
+  it("warns about a GitHub token that reaches every repository, recommends a fine-grained one, and says what the config allows (L11 M1)", async () => {
+    const refused = await run(["up", "--check", "--worker-image", "worker:test"]);
+    expect(refused.code).toBe(0);
+    expect(refused.out).toContain("warn  github");
+    expect(refused.out).toContain("reach every repository you can");
+    expect(refused.out).toContain("will not give it to a task's worker unless you set allowBroadTokenForWorker");
+    expect(refused.out).toContain("fine-grained personal access token limited to the repositories of your Rovara projects");
+    const allowed = await run(["up", "--check", "--worker-image", "worker:test"], { config: '{"version":1,"allowBroadTokenForWorker":true,"plugins":[]}' });
+    expect(allowed.out).toContain("You have allowed it to be given to a task's worker.");
+  });
+
+  it("builds and tests the code hosts from the shared list, not by name (L11 decision 51)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    for (const file of ["packages/cli/src/up/checks.ts", "packages/broker/src/local/runtime.ts"]) {
+      expect(await readFile(join(process.cwd(), file), "utf8"), file).not.toContain("createLocalGithubCodeHost");
+    }
   });
 });

@@ -10,7 +10,7 @@ import {
   LOCAL_WORKER_IMAGE_BUILD_HINT,
   LOCAL_HOST,
   assertStateDirectoryLocation,
-  createLocalGithubCodeHost,
+  createLocalCodeHosts,
   createLocalModelKeyStore,
   parsePluginConfigText,
   readOwnerFile,
@@ -103,8 +103,19 @@ async function checkModelKey(services: UpCheckServices): Promise<UpCheck> {
  * "Find my sign-in" and "test my connection" are the code host's own (`resolveCredentials`, `checkAccess`; port lane L11, item C3). GitHub is the one code host a laptop can sign in to today; a
  * second one is another entry in this list. The quick check only looks for the sign-in; `--check` also tests it.
  */
+/** The owner's `allowBroadTokenForWorker` setting, read without writing anything; a config that cannot be read means "not allowed" (the config check says why). */
+async function broadTokenAllowed(services: UpCheckServices): Promise<boolean> {
+  try {
+    const location = resolveConfigLocation({ stateDirectory: services.stateDirectory, configPath: services.configPath, cwd: services.cwd ?? process.cwd() });
+    const file = await readOwnerFile(location.path, { private: false, label: "plug-in config" });
+    return file !== undefined && parsePluginConfigText(file.text).allowBroadTokenForWorker === true;
+  } catch {
+    return false;
+  }
+}
+
 async function checkGithub(services: UpCheckServices): Promise<UpCheck> {
-  const hosts = [createLocalGithubCodeHost({ stateDirectory: services.stateDirectory, environment: services.environment, fetch: services.fetch, ...(services.keys === undefined ? {} : { keyFile: services.keys }), ...(services.gh === undefined ? {} : { gh: services.gh }) })];
+  const hosts = createLocalCodeHosts({ allowBroadTokenForWorker: await broadTokenAllowed(services), stateDirectory: services.stateDirectory, environment: services.environment, fetch: services.fetch, ...(services.keys === undefined ? {} : { keyFile: services.keys }), ...(services.gh === undefined ? {} : { gh: services.gh }) });
   const results: UpCheck[] = [];
   for (const host of hosts) {
     if (services.verifyGithub && host.checkAccess !== undefined) {

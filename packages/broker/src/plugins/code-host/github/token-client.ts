@@ -17,9 +17,10 @@
 //   - **No installation.** Each owner gets a stable number derived from its name so the adapter's branch listing, which pins an installation id, keeps working. It is not a GitHub installation id.
 //   - **Rovara's replies are the owner's.** GitHub shows a reply posted with a personal token as the owner's. Every reply carries a hidden marker, and a comment counts as Rovara's own
 //     only when its author is the token's owner AND it carries the marker (see `personalToken.ownComment` in `client.ts`), so a reply of Rovara's is not read back as a person's feedback.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { agentXError, type OrgId, type SecretValue } from "@agentx/contracts";
-import { GitHubAppCredentialProvider, GithubMergeRateLimitError, mergeRateLimitRetryAt } from "./client.js";
+import { GitHubAppCredentialProvider, GithubMergeRateLimitError, mergeRateLimitRetryAt, parseGitHubRepository } from "./client.js";
 import { GITHUB_CODE_HOST_PROVIDER_METHODS, type GitHubCodeHostProvider } from "./provider.js";
 
 const API_ORIGIN = "https://api.github.com";
@@ -42,8 +43,21 @@ export interface GitHubTokenClientOptions {
   credentialRef: string;
   /** The owner's token, asked for whenever one is needed (never cached for longer than the caller caches it, so a new sign-in is picked up). */
   getToken(): Promise<SecretValue>;
-  /** Asked on every call that names an organization; throws to refuse. On a laptop it holds the call to the one company (`boundToCompany`). */
+  /** Asked on every call that names an organization, before anything is sent; throws to refuse. On a laptop it holds the call to the one company (`boundToCompany`). */
   requireBound(orgId: OrgId, repository?: { owner: string; name: string }): Promise<void>;
+  /**
+   * The addresses of the repositories this company registered (its projects'). A token reaches every repository its owner can, so this list, not the token, says which repositories Rovara may
+   * use: any other is refused with GITHUB_NOT_CONNECTED before a request carrying the token is made. Only the registration-time reads (`checkRepository`, `getRepositoryIdentity`: is this
+   * repository there, who is it) are exempt, so a repository can be registered at all.
+   */
+  registeredRepositories(): Promise<readonly string[]> | readonly string[];
+  /**
+   * Whether a worker may be given a token that reaches every repository its owner can (a classic token or the GitHub CLI's, as opposed to a fine-grained token limited to chosen
+   * repositories). Default false: such a token is refused for the worker's clone and push, and every broker-side use of it is unaffected.
+   */
+  allowBroadTokenForWorker?: boolean;
+  /** Told what each token request asked for (names only, never the token): the permission set and the one repository. For logs and for the conformance suite. */
+  observeMint?(mint: { permissions: Record<string, string>; repositories: string[] }): void;
   fetchImplementation?: typeof fetch;
   now?: () => number;
 }
@@ -53,6 +67,15 @@ export function boundToCompany(companyId: string): GitHubTokenClientOptions["req
   return async (orgId) => {
     if (orgId !== companyId) throw agentXError("GITHUB_NOT_CONNECTED", "GitHub is not connected for this company.");
   };
+}
+
+/**
+ * Whether a token is limited to repositories its owner chose. A fine-grained personal token (`github_pat_...`) is, and so is an App installation token (`ghs_...`, one hour). Every other
+ * kind (a classic token `ghp_...`, the GitHub CLI's `gho_...`) reaches every repository its owner can, whatever its scopes say, so it is `broad`. A token of a shape this code does not
+ * know is `broad` too: refusing is the safe answer.
+ */
+export function githubTokenReach(token: string): "limited" | "broad" {
+  return /^(?:github_pat_|ghs_)[A-Za-z0-9_]{8,}$/u.test(token) ? "limited" : "broad";
 }
 
 /** What `GET /user` and the token's own headers say: the account it signs in as, the scopes of a classic token, and when the token itself expires. Never the token. */
@@ -108,9 +131,35 @@ interface RepositoryProbe {
   /** `permissions.push` of the answer; undefined when GitHub did not say. */
   canPush: boolean | undefined;
   tokenExpiresAt: number | undefined;
+  /** The token this answer was read with: the one a mint hands out, so the token handed over is exactly the one that passed the check. */
+  token: string;
 }
 
 const jsonResponse = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+/** A `Request` carries its own address, method, headers, body, signal and redirect mode: fold them, and any `init`, into one address and one `init`, so the checks see what the call really sends. */
+export async function foldRequest(input: string | URL | Request, init?: RequestInit): Promise<{ address: string; init: RequestInit }> {
+  if (!(input instanceof Request)) return { address: typeof input === "string" ? input : input.href, init: init ?? {} };
+  const method = input.method.toUpperCase();
+  return {
+    address: input.url,
+    init: {
+      method: input.method, headers: input.headers, signal: input.signal, redirect: input.redirect,
+      ...(method === "GET" || method === "HEAD" ? {} : { body: await input.clone().text() }), ...init,
+    },
+  };
+}
+
+/**
+ * Passes a request on to GitHub. One that carries a credential goes to `https://api.github.com` only (anything else is refused, the credential unsent) and never follows a redirect: the one
+ * request that asks to handle a redirect itself (`manual`, the job-log lookup) keeps that, every other is forced to `error`.
+ */
+export async function forwardGuarded(inner: typeof fetch, request: { address: string; init: RequestInit }): Promise<Response> {
+  const authorization = new Headers(request.init.headers).get("authorization");
+  if (authorization === null) return inner(request.address, request.init);
+  if (new URL(request.address).origin !== API_ORIGIN) throw agentXError("RUNTIME_UNAVAILABLE", "the GitHub token is sent to api.github.com only");
+  return inner(request.address, { ...request.init, redirect: request.init.redirect === "manual" ? "manual" : "error" });
+}
 
 /** Builds the narrow client. Only the methods of `GitHubCodeHostProvider` are on it: the App client's other public methods (agent tokens, webhook history) are not reachable through it. */
 export function githubTokenClient(options: GitHubTokenClientOptions): GitHubCodeHostProvider {
@@ -153,7 +202,22 @@ export function githubTokenClient(options: GitHubTokenClientOptions): GitHubCode
 
   const probes = new Map<string, { at: number; token: string; result: Promise<RepositoryProbe | undefined> }>();
   /** Reads the repository with the owner's token: undefined when the token cannot see it. A rejected token and a rate limit are errors. */
+  const registrationRead = new AsyncLocalStorage<true>();
+  const registeredKeys = async (): Promise<Set<string>> => {
+    const keys = new Set<string>();
+    for (const address of await options.registeredRepositories()) {
+      try {
+        const parsed = parseGitHubRepository(address);
+        keys.add(`${parsed.owner.toLowerCase()}/${parsed.name.toLowerCase()}`);
+      } catch { /* a repository on another host is not one of GitHub's */ }
+    }
+    return keys;
+  };
   const probe = async (owner: string, name: string): Promise<RepositoryProbe | undefined> => {
+    // Before any request that carries the token: the repository must be one the company registered (or this must be the read that registers it).
+    if (registrationRead.getStore() !== true && !(await registeredKeys()).has(`${owner.toLowerCase()}/${name.toLowerCase()}`)) {
+      throw agentXError("GITHUB_NOT_CONNECTED", `${owner}/${name} is not one of this company's registered repositories.`);
+    }
     const token = await ownerToken();
     const key = `${owner.toLowerCase()}/${name.toLowerCase()}`;
     const cached = probes.get(key);
@@ -186,7 +250,7 @@ export function githubTokenClient(options: GitHubTokenClientOptions): GitHubCode
       const push = permissions !== null && typeof permissions === "object" && "push" in permissions && typeof permissions.push === "boolean" ? permissions.push : undefined;
       return {
         canonicalOwner: owner_.login, ownerId: Number.isSafeInteger(owner_.id) && (owner_.id as number) > 0 ? owner_.id as number : 1,
-        ownerType: owner_.type === "Organization" ? "Organization" : "User", canPush: push, tokenExpiresAt: tokenExpirationOf(response),
+        ownerType: owner_.type === "Organization" ? "Organization" : "User", canPush: push, tokenExpiresAt: tokenExpirationOf(response), token,
       };
     })();
     probes.set(key, { at: now(), token, result });
@@ -219,21 +283,21 @@ export function githubTokenClient(options: GitHubTokenClientOptions): GitHubCode
       const ceiling = now() + PERSONAL_CREDENTIAL_LIFETIME_MS;
       const expiresAt = Math.min(ceiling, found.tokenExpiresAt ?? ceiling);
       if (!(expiresAt > now())) return jsonResponse(403, { message: "The token has expired." });
-      return jsonResponse(201, { token: await ownerToken(), expires_at: new Date(expiresAt).toISOString(), permissions, repository_selection: "selected", repositories: [{ name }] });
+      options.observeMint?.({ permissions: Object.fromEntries(Object.entries(permissions).map(([key, value]) => [key, String(value)])), repositories: [name] });
+      return jsonResponse(201, { token: found.token, expires_at: new Date(expiresAt).toISOString(), permissions, repository_selection: "selected", repositories: [{ name }] });
     }
     return jsonResponse(404, { message: "Not Found" });
   };
 
   const ownerFetch = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
-    const method = (init?.method ?? "GET").toUpperCase();
-    const authorization = new Headers(init?.headers).get("authorization");
-    if (url.origin === API_ORIGIN && APP_PATH.test(decodeURIComponent(url.pathname))) return appRequest(url, method, init);
+    const folded = await foldRequest(input, init);
+    const url = new URL(folded.address);
+    const method = (folded.init.method ?? "GET").toUpperCase();
+    if (url.origin === API_ORIGIN && APP_PATH.test(decodeURIComponent(url.pathname))) return appRequest(url, method, folded.init);
     // Defence in depth: the App JWT is never forwarded, whatever it was sent to.
+    const authorization = new Headers(folded.init.headers).get("authorization");
     if (authorization !== null && JWT_SHAPE.test(authorization.replace(/^Bearer /u, ""))) return jsonResponse(401, { message: "Bad credentials" });
-    // The owner's token goes to GitHub's API and nowhere else.
-    if (authorization !== null && url.origin !== API_ORIGIN) throw agentXError("RUNTIME_UNAVAILABLE", "the GitHub token is sent to api.github.com only");
-    return inner(input, init);
+    return forwardGuarded(inner, folded);
   }) as typeof fetch;
 
   let account: { at: number; token: string; login: string | undefined } | undefined;
@@ -242,6 +306,8 @@ export function githubTokenClient(options: GitHubTokenClientOptions): GitHubCode
     const token = await ownerToken();
     if (account !== undefined && account.token === token && now() - account.at < ACCOUNT_REUSE_MS) return account.login;
     const read = await describeTokenAccount(token, inner, PROBE_TIMEOUT_MS);
+    // Only an answer that named the login is kept: a failed look is asked again next time, never remembered as "unknown".
+    if (read.status !== "ok" || read.login === undefined) return undefined;
     account = { at: now(), token, login: read.login };
     return read.login;
   };
@@ -260,11 +326,43 @@ export function githubTokenClient(options: GitHubTokenClientOptions): GitHubCode
   });
   const provider: GitHubCodeHostProvider = client;
 
-  // The narrow surface: the provider's methods and nothing else of the App client's.
+  // The narrow surface: the provider's methods and nothing else of the App client's. Each call that names an organization is bound BEFORE anything is sent (the client binds again inside), the
+  // registration-time reads may name a repository not yet registered, and a credential for a worker is refused when the token reaches more than the project's repositories.
+  const REGISTRATION_READS = new Set<string>(["checkRepository", "getRepositoryIdentity"]);
+  const scopeOrgOf = (args: readonly unknown[]): OrgId | undefined => {
+    for (const argument of args) {
+      if (argument !== null && typeof argument === "object" && !Array.isArray(argument) && typeof (argument as { orgId?: unknown }).orgId === "string") return (argument as { orgId: OrgId }).orgId;
+    }
+    return undefined;
+  };
+  const repositoryOf = (args: readonly unknown[]): { owner: string; name: string } | undefined => {
+    const first = args[0];
+    const address = typeof first === "string" ? first
+      : first !== null && typeof first === "object" && typeof (first as { repositoryUrl?: unknown }).repositoryUrl === "string" ? (first as { repositoryUrl: string }).repositoryUrl
+      : first !== null && typeof first === "object" && typeof (first as { url?: unknown }).url === "string" ? (first as { url: string }).url : undefined;
+    if (address === undefined) return undefined;
+    try { return parseGitHubRepository(address); } catch { return undefined; }
+  };
   const surface: Record<string, unknown> = {};
   for (const name of [...GITHUB_CODE_HOST_PROVIDER_METHODS, "getPathKindAtCommit"] as const) {
     const method: unknown = Reflect.get(provider, name);
-    if (typeof method === "function") surface[name] = (...args: unknown[]): unknown => Reflect.apply(method as (...input: unknown[]) => unknown, provider, args);
+    if (typeof method !== "function") continue;
+    surface[name] = async (...args: unknown[]): Promise<unknown> => {
+      const run = async (): Promise<unknown> => {
+        const orgId = scopeOrgOf(args);
+        if (orgId !== undefined) await options.requireBound(orgId, repositoryOf(args));
+        const result: unknown = await Reflect.apply(method as (...input: unknown[]) => unknown, provider, args);
+        if (name === "resolveWithExpiry") assertWorkerMayHold(result);
+        return result;
+      };
+      return REGISTRATION_READS.has(name) ? registrationRead.run(true, run) : run();
+    };
+  }
+  /** The worker holds a copy of what `resolveWithExpiry` returns, so a token that reaches every repository its owner can is not handed over unless the owner said so. */
+  function assertWorkerMayHold(credential: unknown): void {
+    const password = credential !== null && typeof credential === "object" ? (credential as { password?: unknown }).password : undefined;
+    if (typeof password !== "string" || options.allowBroadTokenForWorker === true || githubTokenReach(password) === "limited") return;
+    throw agentXError("FORBIDDEN", "This GitHub token can reach every repository you can, and a task's worker would hold a copy of it. Make a fine-grained token limited to this project's repositories and use that, or set allowBroadTokenForWorker to true in the Rovara config to accept the risk.");
   }
   return Object.freeze(surface) as unknown as GitHubCodeHostProvider;
 }

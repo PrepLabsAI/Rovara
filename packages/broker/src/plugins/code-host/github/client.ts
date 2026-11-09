@@ -1402,7 +1402,11 @@ export class GitHubAppCredentialProvider {
     if (personal !== undefined) {
       let login: string | undefined;
       try { login = (await personal.login())?.toLowerCase(); } catch { login = undefined; }
-      return new Set(login === undefined ? [] : comments.filter((comment) => comment.author.toLowerCase() === login && comment.body.includes(personal.marker)).map((comment) => comment.id));
+      // Fail closed: with the owner's login unknown, Rovara's own replies cannot be told from the owner's feedback, and reading them as feedback would start a round that posts another reply.
+      if (login === undefined) throw feedbackReadError("the token owner's login could not be read");
+      // Rovara's exact reply shape: one line of at most 200 characters without a mention or control character, a blank line, then the marker and nothing else.
+      const reply = new RegExp(`^[^\\p{Cc}@]{1,200}\\r?\\n\\r?\\n${personal.marker.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "u");
+      return new Set(comments.filter((comment) => comment.author.toLowerCase() === login && reply.test(comment.body.trimEnd())).map((comment) => comment.id));
     }
     const own = await this.ownBotLogin();
     return new Set(own === undefined ? [] : comments.filter((comment) => comment.author.toLowerCase() === own).map((comment) => comment.id));

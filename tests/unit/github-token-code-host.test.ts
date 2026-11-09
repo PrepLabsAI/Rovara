@@ -15,7 +15,11 @@ import { GITHUB_OTHER_URL, GITHUB_REPO_URL, GITHUB_ORG_SCOPE, GitHubFixtureApi }
 
 const NOW = Date.parse("2026-10-30T10:00:00.000Z");
 const WORKING_BRANCH = (n: number) => `agentx/00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
-const makeToken = (): string => `fixture-owner-${randomBytes(8).toString("hex")}`;
+const PREFIX = (...parts: string[]): string => parts.join("_");
+/** Built at runtime and far too short to be real. Fine-grained: the kind a worker may be given. */
+const makeToken = (): string => `${PREFIX("github", "pat")}_fixture${randomBytes(8).toString("hex")}`;
+const makeBroadToken = (): string => `${PREFIX("gho")}_fixture${randomBytes(8).toString("hex")}`;
+const registered = { registeredRepositories: () => [GITHUB_REPO_URL] };
 const COMPANY = GITHUB_ORG_SCOPE.orgId;
 
 const emptyKeys: ModelKeyStore = { get: async () => undefined, providers: async () => [] };
@@ -31,12 +35,12 @@ describe("resolveCredentials (find my sign-in)", () => {
     const token = makeToken();
     const fetchSpy = vi.fn<typeof fetch>(async () => new Response("{}"));
     const base = { companyId: COMPANY, fetch: fetchSpy, gh: vi.fn(async () => undefined as string | undefined) };
-    const fromKeys = await githubTokenCodeHost({ ...base, keyFile: keysWith(token), environment: { GH_TOKEN: "other" } }).resolveCredentials!();
+    const fromKeys = await githubTokenCodeHost({ ...registered, ...base, keyFile: keysWith(token), environment: { GH_TOKEN: "other" } }).resolveCredentials!();
     expect(fromKeys).toEqual({ found: true, source: "the key file", summary: "A GitHub token is available from the key file." });
-    const fromEnvironment = await githubTokenCodeHost({ ...base, keyFile: emptyKeys, environment: { GH_TOKEN: token } }).resolveCredentials!();
+    const fromEnvironment = await githubTokenCodeHost({ ...registered, ...base, keyFile: emptyKeys, environment: { GH_TOKEN: token } }).resolveCredentials!();
     expect(fromEnvironment).toMatchObject({ found: true, source: "the environment" });
     const cli = vi.fn(async (args: readonly string[]) => (args[1] === "status" ? "Logged in" : token));
-    const fromCli = await githubTokenCodeHost({ ...base, gh: cli, keyFile: emptyKeys, environment: {} }).resolveCredentials!();
+    const fromCli = await githubTokenCodeHost({ ...registered, ...base, gh: cli, keyFile: emptyKeys, environment: {} }).resolveCredentials!();
     expect(fromCli).toMatchObject({ found: true, source: "the GitHub CLI" });
     // Only whether the CLI is signed in is asked; its token is not fetched for this.
     expect(cli.mock.calls.map(([args]) => args[1])).toEqual(["status"]);
@@ -45,7 +49,7 @@ describe("resolveCredentials (find my sign-in)", () => {
   });
 
   it("says how to sign in when there is none, and what to fix when the key file cannot be read", async () => {
-    const none = await githubTokenCodeHost({ companyId: COMPANY, keyFile: emptyKeys, environment: {}, gh: async () => undefined }).resolveCredentials!();
+    const none = await githubTokenCodeHost({ ...registered, companyId: COMPANY, keyFile: emptyKeys, environment: {}, gh: async () => undefined }).resolveCredentials!();
     expect(none).toMatchObject({ found: false, summary: "No GitHub access was found." });
     expect(none.fix).toContain("gh auth login");
     const dir = await mkdtemp(join(tmpdir(), "rovara-l11-keys-"));
@@ -53,7 +57,7 @@ describe("resolveCredentials (find my sign-in)", () => {
     const file = join(dir, "keys.json");
     await writeFile(file, '{"github":"x"}', { mode: 0o600 });
     await chmod(file, 0o644);
-    const unreadable = await githubTokenCodeHost({ companyId: COMPANY, keyFile: createFileModelKeyStore(file), environment: {}, keyFilePath: file }).resolveCredentials!();
+    const unreadable = await githubTokenCodeHost({ ...registered, companyId: COMPANY, keyFile: createFileModelKeyStore(file), environment: {}, keyFilePath: file }).resolveCredentials!();
     expect(unreadable).toMatchObject({ found: false });
     expect(unreadable.summary).toContain("must not be readable by other users");
     expect(unreadable.fix).toBe(`Fix the file's permissions with \`chmod 600 ${file}\`.`);
@@ -61,15 +65,52 @@ describe("resolveCredentials (find my sign-in)", () => {
   });
 });
 
+describe("checkAccess warns about a token that reaches every repository (M1, L6)", () => {
+  const check = async (token: string, headers: Record<string, string>, extra: { allowBroadTokenForWorker?: boolean; source?: "gh" } = {}) => {
+    const host = githubTokenCodeHost({
+      ...registered, companyId: COMPANY, keyFile: emptyKeys, environment: extra.source === "gh" ? {} : { GH_TOKEN: token }, allowBroadTokenForWorker: extra.allowBroadTokenForWorker === true,
+      gh: async (args) => (extra.source === "gh" ? (args[1] === "status" ? "ok" : `${token}\n`) : undefined),
+      fetch: async () => Response.json({ login: "octo-dev" }, { headers }),
+    });
+    return host.checkAccess!();
+  };
+
+  it("warns on a classic token and on the GitHub CLI's, names the wide scopes, and recommends a fine-grained token limited to the project's repositories", async () => {
+    const classic = await check(makeBroadToken(), { "x-oauth-scopes": "repo, read:org, gist, admin:public_key" });
+    expect(classic.status).toBe("warn");
+    expect(classic.summary).toContain("reach every repository you can");
+    expect(classic.summary).toMatch(/scopes: repo, read:org, gist, admin:public_key/u);
+    expect(classic.summary).toContain("will not give it to a task's worker unless you set allowBroadTokenForWorker");
+    expect(classic.fix).toContain("fine-grained");
+    expect(classic.fix).toContain("limited to the repositories of your Rovara projects");
+    const cli = await check(makeBroadToken(), {}, { source: "gh" });
+    expect(cli).toMatchObject({ status: "warn" });
+    expect(cli.summary).toContain("token from the GitHub CLI");
+  });
+
+  it("says the owner allowed it when the config does, and stays ok for a fine-grained token", async () => {
+    expect((await check(makeBroadToken(), {}, { allowBroadTokenForWorker: true })).summary).toContain("You have allowed it to be given to a task's worker.");
+    expect(await check(makeToken(), {})).toMatchObject({ status: "ok" });
+  });
+
+  it("recommends a fine-grained token, not a classic one, when GitHub rejects the token", async () => {
+    const host = githubTokenCodeHost({ ...registered, companyId: COMPANY, keyFile: emptyKeys, environment: { GH_TOKEN: makeBroadToken() }, fetch: async () => new Response("{}", { status: 401 }), gh: async () => undefined });
+    const rejected = await host.checkAccess!();
+    expect(rejected.status).toBe("fail");
+    expect(rejected.fix).toContain("fine-grained");
+    expect(rejected.fix).not.toContain("with the `repo` scope");
+  });
+});
+
 describe("checkAccess (test my connection)", () => {
-  const host = (answer: () => Response | Promise<Response> | Error, extra: { environment?: NodeJS.ProcessEnv } = {}) => {
-    const token = makeToken();
+  const host = (answer: () => Response | Promise<Response> | Error, extra: { environment?: NodeJS.ProcessEnv; token?: string } = {}) => {
+    const token = extra.token ?? makeToken();
     const fetchSpy = vi.fn<typeof fetch>(async () => { const result = await answer(); if (result instanceof Error) throw result; return result; });
-    return { token, fetchSpy, host: githubTokenCodeHost({ companyId: COMPANY, keyFile: keysWith(token), environment: extra.environment ?? {}, fetch: fetchSpy, gh: async () => undefined }) };
+    return { token, fetchSpy, host: githubTokenCodeHost({ ...registered, companyId: COMPANY, keyFile: keysWith(token), environment: extra.environment ?? {}, fetch: fetchSpy, gh: async () => undefined }) };
   };
 
   it("tests the token once with GET /user, no redirects and a time limit, and sends it to api.github.com only", async () => {
-    const { host: h, fetchSpy, token } = host(() => Response.json({ login: "octo-dev" }, { headers: { "x-oauth-scopes": "repo, read:org" } }));
+    const { host: h, fetchSpy, token } = host(() => Response.json({ login: "octo-dev" }));
     const result = await h.checkAccess!();
     expect(result).toEqual({ status: "ok", summary: "GitHub access works as octo-dev (token from the key file).", account: "octo-dev" });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -86,12 +127,12 @@ describe("checkAccess (test my connection)", () => {
     expect(await host(() => new Response("{}", { status: 503 })).host.checkAccess!()).toEqual({ status: "warn", summary: "GitHub answered HTTP 503 when the token was checked.", fix: "Try again in a minute." });
     const offline = await host(() => new TypeError("offline")).host.checkAccess!();
     expect(offline).toMatchObject({ status: "warn", summary: "GitHub could not be reached to check the token." });
-    const noScope = await host(() => Response.json({ login: "octo-dev" }, { headers: { "x-oauth-scopes": "read:user" } })).host.checkAccess!();
+    const noScope = await host(() => Response.json({ login: "octo-dev" }, { headers: { "x-oauth-scopes": "read:user" } }), { token: makeBroadToken() }).host.checkAccess!();
     expect(noScope).toMatchObject({ status: "warn", account: "octo-dev" });
     expect(noScope.summary).toContain("no `repo` scope");
-    // A fine-grained token lists no scopes, so nothing is said about them.
+    // A fine-grained token lists no scopes and is limited to chosen repositories, so there is nothing to warn about.
     expect((await host(() => Response.json({ login: "octo-dev" })).host.checkAccess!()).status).toBe("ok");
-    const none = await githubTokenCodeHost({ companyId: COMPANY, keyFile: emptyKeys, environment: {}, gh: async () => undefined }).checkAccess!();
+    const none = await githubTokenCodeHost({ ...registered, companyId: COMPANY, keyFile: emptyKeys, environment: {}, gh: async () => undefined }).checkAccess!();
     expect(none).toMatchObject({ status: "fail", summary: "No GitHub access was found." });
   });
 });
@@ -106,7 +147,7 @@ function adapterWorld(source: "environment" | "keys" | "cli"): CodeHostWorld {
     return api.fetch(input, init);
   };
   const host = githubTokenCodeHost({
-    companyId: COMPANY, keyFile: source === "keys" ? keysWith(token) : emptyKeys, environment: source === "environment" ? { GH_TOKEN: token } : {},
+    ...registered, companyId: COMPANY, keyFile: source === "keys" ? keysWith(token) : emptyKeys, environment: source === "environment" ? { GH_TOKEN: token } : {},
     gh: source === "cli" ? async (args) => (args[1] === "status" ? "ok" : `${token}\n`) : async () => undefined, fetch: fetchImplementation, now: () => NOW,
   });
   return {
@@ -143,7 +184,7 @@ describe("the laptop GitHub code host", () => {
     const model = new FakeHostModel({ url: GITHUB_REPO_URL, id: "4242", fullName: "acme/app", webBase: "https://github.com" });
     const seen: string[] = [];
     const host = githubTokenCodeHost({
-      companyId: COMPANY, keyFile: emptyKeys, environment: {}, gh: async (args) => (args[1] === "status" ? "ok" : `${current}\n`), now: () => now,
+      ...registered, companyId: COMPANY, keyFile: emptyKeys, environment: {}, gh: async (args) => (args[1] === "status" ? "ok" : `${current}\n`), now: () => now,
       fetch: async (input, init) => {
         seen.push(new Headers(init?.headers).get("authorization") ?? "");
         // The fake accepts whichever token is current, for the repository read only.

@@ -16,6 +16,10 @@ export interface LocalGithubCodeHostInput {
   fetch?: typeof fetch | undefined;
   /** The key file alone (the file store, never the layered model-key store). Default: `<state folder>/keys.json`. */
   keyFile?: ModelKeyStore | undefined;
+  /** The addresses of the repositories the company registered; the token is used for these only. Default: none (a doctor run uses no repository). */
+  registeredRepositories?: (() => Promise<readonly string[]> | readonly string[]) | undefined;
+  /** The owner's choice to give a worker a token that reaches every repository its owner can (config `allowBroadTokenForWorker`). */
+  allowBroadTokenForWorker?: boolean | undefined;
 }
 
 export function createLocalGithubCodeHost(input: LocalGithubCodeHostInput): CodeHost {
@@ -25,7 +29,17 @@ export function createLocalGithubCodeHost(input: LocalGithubCodeHostInput): Code
     keyFile: input.keyFile ?? createFileModelKeyStore(keyFilePath),
     environment: input.environment,
     keyFilePath,
+    registeredRepositories: input.registeredRepositories ?? (() => []),
+    allowBroadTokenForWorker: input.allowBroadTokenForWorker === true,
     ...(input.gh === undefined ? {} : { gh: input.gh }),
     ...(input.fetch === undefined ? {} : { fetch: input.fetch }),
   });
+}
+
+/**
+ * The code hosts a laptop can sign in to. `rovara up` registers each one that finds a sign-in under its own `kind`, and `rovara up --check` tests each one; a second host is another
+ * entry here, with no change to either (decision 51).
+ */
+export function createLocalCodeHosts(input: LocalGithubCodeHostInput): CodeHost[] {
+  return [createLocalGithubCodeHost(input)];
 }

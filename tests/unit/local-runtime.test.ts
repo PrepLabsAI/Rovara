@@ -12,7 +12,7 @@ afterEach(async () => {
   while (cleanup.length > 0) await cleanup.pop()!();
 });
 
-async function launch(options: { environment?: NodeJS.ProcessEnv; config?: unknown; files?: Record<string, string>; thisMachine?: boolean; gh?: (args: readonly string[]) => Promise<string | undefined> } = {}) {
+async function launch(options: { environment?: NodeJS.ProcessEnv; config?: unknown; files?: Record<string, string>; thisMachine?: boolean; gh?: (args: readonly string[]) => Promise<string | undefined>; fetch?: typeof fetch } = {}) {
   const root = await mkdtemp(join(tmpdir(), "rovara-l4-run-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -30,6 +30,7 @@ async function launch(options: { environment?: NodeJS.ProcessEnv; config?: unkno
     thisMachine: options.thisMachine === true,
     // The GitHub CLI is never run for real: the machine this test runs on may be signed in to it.
     gh: options.gh ?? (async () => undefined),
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
   cleanup.push(() => runtime.stop());
   const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
@@ -190,5 +191,26 @@ describe("rovara up runtime", () => {
   it("lets a configured code-host plug-in named github take the place of the laptop's own", async () => {
     // A module that does not exist is a startup error, which shows the configured entry was tried instead of the default silently winning.
     await expect(launch({ environment: { GH_TOKEN: "from-env" }, config: { version: 1, plugins: [{ point: "code-host", name: "github", module: "./missing.js" }] } })).rejects.toBeDefined();
+  });
+
+  it("uses GitHub only for registered projects' repositories: any other is refused before a request carries the token (L11 M2)", async () => {
+    const calls: string[] = [];
+    const token = ["github", "pat", "fixture0123456789"].join("_");
+    const { runtime } = await launch({ environment: { GH_TOKEN: token }, fetch: async (input) => { calls.push(typeof input === "string" ? input : input instanceof URL ? input.href : input.url); return new Response("{}", { status: 404 }); } });
+    const host = runtime.registry.require("code-host", "github");
+    const scope = { orgId: IMPLICIT_COMPANY_ID };
+    await expect(host.issueGitCredential({ url: "https://github.com/acme/private-thing" }, "clone", scope)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
+    await expect(host.fileAtRevision({ url: "https://github.com/acme/private-thing" }, "a.txt", "a".repeat(40), scope)).rejects.toMatchObject({ code: "GITHUB_NOT_CONNECTED" });
+    expect(calls).toEqual([]);
+  });
+
+  it("reads allowBroadTokenForWorker from the config, and refuses anything but a boolean", async () => {
+    const { parsePluginConfigText } = await import("../../packages/broker/src/local/runtime.js");
+    expect(parsePluginConfigText('{"version":1,"plugins":[],"allowBroadTokenForWorker":true}').allowBroadTokenForWorker).toBe(true);
+    expect(parsePluginConfigText('{"version":1,"plugins":[]}').allowBroadTokenForWorker).toBeUndefined();
+    expect(() => parsePluginConfigText('{"version":1,"plugins":[],"allowBroadTokenForWorker":"yes"}')).toThrow();
+    // It is passed to the code host: a runtime started with it allowed does not refuse on token kind (its repository is still checked).
+    const { runtime } = await launch({ environment: { GH_TOKEN: "classic-or-cli-shaped" }, config: { version: 1, allowBroadTokenForWorker: true, plugins: [] } });
+    expect(runtime.wiring()["code-host"]).toEqual(["github"]);
   });
 });

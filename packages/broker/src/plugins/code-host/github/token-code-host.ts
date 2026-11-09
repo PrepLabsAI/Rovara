@@ -6,7 +6,7 @@
 import { agentXError, type CodeHost, type CodeHostAccessCheck, type CodeHostSignInResult, type ModelKeyStore, type SecretValue } from "@agentx/contracts";
 import { githubCodeHost, GITHUB_CODE_HOST_CAPABILITIES } from "./index.js";
 import { resolveGithubAccess, type GhRunner, type GithubAccess, type GithubTokenSource } from "./token-access.js";
-import { boundToCompany, describeTokenAccount, githubTokenClient } from "./token-client.js";
+import { boundToCompany, describeTokenAccount, githubTokenClient, githubTokenReach } from "./token-client.js";
 
 /** The credential reference of the laptop's one GitHub sign-in. */
 export const LOCAL_GITHUB_CREDENTIAL_REF = "github";
@@ -24,7 +24,13 @@ export interface GitHubTokenCodeHostOptions {
   now?: () => number;
   /** The path of the key file, for the words that tell the owner what to fix. */
   keyFilePath?: string;
+  /** The repositories the company registered (its projects'): the only ones the token is used for. Read on every use. */
+  registeredRepositories(): Promise<readonly string[]> | readonly string[];
+  /** The owner's explicit choice to give a worker a token that reaches every repository its owner can. Default false. */
+  allowBroadTokenForWorker?: boolean;
 }
+
+const FINE_GRAINED_ADVICE = "Make a fine-grained personal access token limited to the repositories of your Rovara projects (GitHub, Settings, Developer settings), with Contents and Pull requests set to read and write, and put it in GH_TOKEN or keys.json.";
 
 const SOURCE_WORDS: Record<GithubTokenSource, string> = { "gh-cli": "the GitHub CLI", environment: "the environment", "key-store": "the key file" };
 
@@ -47,6 +53,7 @@ export function githubTokenCodeHost(options: GitHubTokenCodeHostOptions): CodeHo
 
   const provider = githubTokenClient({
     credentialRef: LOCAL_GITHUB_CREDENTIAL_REF, getToken, requireBound: boundToCompany(options.companyId), fetchImplementation, now,
+    registeredRepositories: () => options.registeredRepositories(), allowBroadTokenForWorker: options.allowBroadTokenForWorker === true,
   });
   const base = githubCodeHost(provider, { credentialRef: LOCAL_GITHUB_CREDENTIAL_REF, now });
 
@@ -94,15 +101,21 @@ export function githubTokenCodeHost(options: GitHubTokenCodeHostOptions): CodeHo
       try {
         const account = await describeTokenAccount(access.token.reveal(), fetchImplementation);
         if (account.status === "rejected") {
-          return { status: "fail", summary: `GitHub rejected the token from ${where}.`, fix: access.source === "gh-cli" ? "Run `gh auth login` again." : "Make a new personal access token with the `repo` scope and replace the old one." };
+          return { status: "fail", summary: `GitHub rejected the token from ${where}.`, fix: access.source === "gh-cli" ? "Run `gh auth login` again, or better, make a fine-grained token (see below) and set it in GH_TOKEN. " + FINE_GRAINED_ADVICE : "Make a new token and replace the old one. " + FINE_GRAINED_ADVICE };
         }
         if (account.status === "unavailable") return { status: "warn", summary: `GitHub answered HTTP ${account.httpStatus ?? 0} when the token was checked.`, fix: "Try again in a minute." };
         const who = account.login === undefined ? "" : ` as ${account.login}`;
-        // A classic token lists its scopes; one with neither `repo` nor `public_repo` cannot open a pull request. A fine-grained token lists none, and GitHub is asked at the first task instead.
-        if (account.scopes !== undefined && !account.scopes.includes("repo") && !account.scopes.includes("public_repo")) {
-          return { status: "warn", summary: `GitHub access works${who} (token from ${where}), but the token has no \`repo\` scope.`, fix: "Make a new personal access token with the `repo` scope (or a fine-grained token with Contents and Pull requests write access to your repositories).", ...(account.login === undefined ? {} : { account: account.login }) };
+        const named = account.login === undefined ? {} : { account: account.login };
+        const broad = githubTokenReach(access.token.reveal()) === "broad";
+        if (broad) {
+          // A classic token or the GitHub CLI's reaches every repository its owner can. Scopes only say how far: `admin:*`, `delete_repo`, `workflow`, `gist` and `read:org` reach well past one project.
+          const wide = (account.scopes ?? []).filter((scope) => /^(?:admin:|delete_repo$|workflow$|gist$|read:org$|write:org$|user$|repo$)/u.test(scope));
+          const scopes = wide.length === 0 ? "" : ` (scopes: ${wide.join(", ")})`;
+          const cannotOpen = account.scopes !== undefined && !account.scopes.includes("repo") && !account.scopes.includes("public_repo") ? " It also has no `repo` scope, so it cannot open pull requests." : "";
+          const worker = options.allowBroadTokenForWorker === true ? "You have allowed it to be given to a task's worker." : "Rovara will not give it to a task's worker unless you set allowBroadTokenForWorker to true in the config.";
+          return { status: "warn", summary: `GitHub access works${who} (token from ${where}), but this token can reach every repository you can${scopes}.${cannotOpen} ${worker}`, fix: FINE_GRAINED_ADVICE, ...named };
         }
-        return { status: "ok", summary: `GitHub access works${who} (token from ${where}).`, ...(account.login === undefined ? {} : { account: account.login }) };
+        return { status: "ok", summary: `GitHub access works${who} (token from ${where}).`, ...named };
       } catch {
         return { status: "warn", summary: "GitHub could not be reached to check the token.", fix: "Check your internet connection. Rovara needs GitHub only when a task starts." };
       }

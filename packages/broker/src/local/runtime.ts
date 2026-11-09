@@ -30,7 +30,7 @@ import { LocalPageSessions } from "../core/local-pages/guard.js";
 import { localSessionProofVerifier } from "../core/decisions/local-session.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import type { GhRunner } from "../plugins/code-host/github/token-access.js";
-import { createLocalGithubCodeHost } from "./github-code-host.js";
+import { createLocalCodeHosts } from "./github-code-host.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
@@ -201,9 +201,12 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   registry.register("worker-machines", DOCKER_ADAPTER_NAME, docker);
   registry.register("worker-machines", THIS_MACHINE_ADAPTER_NAME, new ThisMachineWorkerMachines({ enabled: options.thisMachine === true }));
 
-  // Port lane L11: when the owner has a GitHub token (key file, GH_TOKEN or the GitHub CLI), GitHub is the `code-host` named `github`. A configured `code-host/github` plug-in replaces it.
-  const githubHost = createLocalGithubCodeHost({ stateDirectory, environment: options.environment, companyId: config.companyId, gh: options.gh, fetch: options.fetch });
-  if ((await githubHost.resolveCredentials?.())?.found === true) registry.register("code-host", "github", githubHost, { isDefault: true });
+  // Port lane L11: each code host the owner has a sign-in for (a GitHub token from the key file, GH_TOKEN or the GitHub CLI) is registered under its own kind; a configured `code-host` plug-in of that name replaces it.
+  const projects = new InMemoryProjectRegistry();
+  const repositories = (): string[] => [...projects.projects.values()].flatMap((project) => project.definition.repositories.map((repository) => repository.url));
+  for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories: repositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
+    if ((await host.resolveCredentials?.())?.found === true) registry.register("code-host", host.kind, host, { isDefault: true });
+  }
 
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
   registry.seal();
@@ -227,7 +230,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
     memberships: [],
     registry: workspaces,
     operations: new OperationStore(workspaces),
-    projects: new InMemoryProjectRegistry(),
+    projects,
   });
 
   const wiring = (): Record<string, string[]> => {
