@@ -1753,6 +1753,16 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "Ref": "Artifacts82DD59A1",
       },
     },
+    "ChannelEventQueueUrl": {
+      "Value": {
+        "Ref": "ChannelApiEvents5999C77C",
+      },
+    },
+    "ChannelRequestQueueUrl": {
+      "Value": {
+        "Ref": "ChannelApiRequests36EE2867",
+      },
+    },
     "DeveloperSignInIssuer": {
       "Value": {
         "Fn::Join": [
@@ -4152,6 +4162,43 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
       },
       "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "ChannelApiRequestDeadLettersAlarm7622806F": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "A channel adapter request failed every attempt and is in the channel request dead-letter queue. Check the Slack orchestrator logs for its event ID.",
+        "AlarmName": "agentx-staging-ChannelRequestDeadLetters",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "ChannelApiRequestDeadLettersBF0B0E40",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
     },
     "ChannelApiRequestDeadLettersBF0B0E40": {
       "DeletionPolicy": "Delete",
@@ -11719,6 +11766,36 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 ],
               },
             },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueUrl",
+                "sqs:DeleteMessage",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiRequests36EE2867",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChannelApiEvents5999C77C",
+                  "Arn",
+                ],
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -14540,6 +14617,16 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
       "Type": "AWS::SSM::Parameter::Value<String>",
     },
+    "ChannelEventQueueUrl": {
+      "AllowedPattern": "^$|^https://sqs\\..+$",
+      "Default": "",
+      "Type": "String",
+    },
+    "ChannelRequestQueueUrl": {
+      "AllowedPattern": "^$|^https://sqs\\..+\\.fifo$",
+      "Default": "",
+      "Type": "String",
+    },
     "ControlPlaneUrl": {
       "AllowedPattern": "^https://.+$",
       "Type": "String",
@@ -15816,6 +15903,18 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
                 "Name": "SLACK_REQUEST_QUEUE_URL",
                 "Value": {
                   "Ref": "SlackRequestQueueUrl",
+                },
+              },
+              {
+                "Name": "CHANNEL_REQUEST_QUEUE_URL",
+                "Value": {
+                  "Ref": "ChannelRequestQueueUrl",
+                },
+              },
+              {
+                "Name": "CHANNEL_EVENT_QUEUE_URL",
+                "Value": {
+                  "Ref": "ChannelEventQueueUrl",
                 },
               },
               {

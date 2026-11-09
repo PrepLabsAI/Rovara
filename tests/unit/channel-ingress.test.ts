@@ -60,7 +60,7 @@ describe("an accepted message", () => {
   it("is queued with the bound project and linked developer, and acknowledged", async () => {
     const { post, queued, events } = harness();
     expect(status(await post(MESSAGES, message))).toEqual({ statusCode: 202, status: "accepted" });
-    expect(queued).toEqual([{ kind: "message", message, projectName: "web", developerId: "dev-1" }]);
+    expect(queued).toEqual([{ kind: "message", message, projectName: "web", developerId: "dev-1", stepUp: ["plan_approval", "admin"] }]);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: "ack", channel: "whatsapp", conversation, data: { inReplyTo: "wamid.HBgL1" } });
   });
@@ -68,7 +68,7 @@ describe("an accepted message", () => {
   it("queues a decision without an ack", async () => {
     const { post, queued, events } = harness();
     expect((await post(DECISIONS, decision)).statusCode).toBe(202);
-    expect(queued).toEqual([{ kind: "decision", decision, projectName: "web", developerId: "dev-1" }]);
+    expect(queued).toEqual([{ kind: "decision", decision, projectName: "web", developerId: "dev-1", stepUp: ["plan_approval", "admin"] }]);
     expect(events).toEqual([]);
   });
 

@@ -9,7 +9,8 @@ Each phase is one PR to `mainline` and leaves Slack working.
 | 1 | Neutral conversation, actor and inbound-message model; Slack keys unchanged | FR-001–006 |
 | 2 | Neutral bindings; access checks and rate windows read them | FR-010–011 |
 | 3 | Adapter registry, channel API, signed events, account linking, step-up | FR-020–033 |
-| 4 | Orchestrator and commands without Slack; Slack API calls behind one adapter module | FR-040–042 |
+| 4a | Adapter conversations run end to end: broker identity and charging, channel consumer, events, decisions, step-up | FR-035–038 |
+| 4b | Orchestrator and commands without Slack; Slack API calls behind one adapter module | FR-040–042 |
 | 5 | Slack adapter on the protocol; channel routes; `agentx channel add/bind` | FR-050–051 |
 | 6 | WhatsApp adapter | FR-052 |
 
@@ -100,4 +101,38 @@ needs developer sign-in.
 
 Leave or set `ChannelAdapters` to `disabled`. Reverting the PR removes the resources; `ChannelState` holds only
 expiring claims, and adapter, binding and link rows in the state table are inert without the code.
+
+## Phase 4a: adapter conversations run
+
+The `ChannelAdapters` parameter still gates everything. Enabled, the orchestrator also reads the channel request queue.
+
+| Layer | Change |
+|---|---|
+| broker | `channel-conversation.ts`: the service routes accept `x-agentx-conversation` (a four-segment subject) and `x-agentx-actor`, and check the adapter, a binding to one of its projects, the link and an active developer on every call. The identity's `channel` replaces `slack` on the routes a conversation uses: workspace ensure (lazy only), prepare, retry, close, models, connectors, task operations. A thread's charge goes through `threadCharging`: Slack's counters as before, or the linked developer's (`developerCharge`), stored on the thread record with the conversation's marker in the counter's `tasks` set. `failed-preparation.ts` gives an adapter conversation's charge back. |
+| orchestrator | `processor.ts` is generic over the thread type; `channel-requests.ts` runs queued items through it, posts replies as `message` events, confirmations as `approval_request` events, and a `done` marker. `consumer.ts` takes the body reader. `main.ts` runs the channel consumer beside the Slack one when both queue URLs are set. |
+| confirmations | A decision answers like a click, and only when its digest matches the confirmation's calls; `mayApprove` refuses an `admin` confirmation, by decision or reply, on an adapter that steps `admin` up. Requester IDs accept adapter user IDs. |
+| contracts | `message` event; `done` without required text; `approval_request.taskUrl` optional; queued items carry the adapter's `stepUp` (default: every kind). |
+| infra | The orchestrator role consumes the request queue and sends to the event queue; the control plane outputs both URLs; the orchestrator stack takes them as optional parameters; `ChannelRequestDeadLetters` alarm, which the health probe reads (the queue itself is not added to the broker's queue reads: one more ARN overflows its policy). |
+
+### Decisions
+
+- **The broker trusts the queue less than the ingress did.** The orchestrator role could name any conversation, so
+  every call re-checks the adapter, binding, link and developer. An unlink or removal stops the next call.
+- **One person, one allowance.** A linked developer with a Slack identity shares that member's counter (R6), so
+  WhatsApp is not a second quota.
+- **Records keep their keys.** An adapter conversation's thread record lives at `SLACK_THREAD#<ownerKey>` with entity
+  type `CHANNEL_THREAD`, so the readers that skip non-Slack subjects (admin owner, unwaited tasks, stuck cancels) need
+  no change; renaming the key would move every Slack row.
+- **Replies are queued as they are said.** Each post is a `message` event on the queue before the processor counts it
+  said, so a crash loses nothing; `done` is only a marker and a failure to queue it is logged.
+- **Text is converted at the edge until 4b.** The core still writes Slack markup; `plainText` drops mentions, shows
+  link addresses and undoes escapes. The model is not told to write Slack markup for an adapter turn.
+- **No progress notes or Details buttons for adapters yet.** Both need edits and turn records, which adapters do not
+  have in 4a.
+
+### Rollback
+
+Leave `ChannelAdapters` disabled, or revert: the orchestrator ignores the channel queues when their parameters are
+empty. A revert after adapter conversations were prepared leaves their workspace charges held, since only this code
+gives them back; close those workspaces first.
 

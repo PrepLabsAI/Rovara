@@ -2,7 +2,7 @@
 
 **Feature Branch**: `claude/062-channel-adapters`
 **Created**: 2026-11-08
-**Status**: Phases 1–2 in PR #424; Phase 3 in progress
+**Status**: Phases 1–2 merged (#424), Phase 3 merged (#425); Phase 4a in progress
 **Issue**: #423
 **Input**: "We need a way to trigger Rovara through a third-party trigger, like Slack today. I should be able to
 do it through WhatsApp or anything, as long as it conforms to the protocol through a lightweight adapter."
@@ -101,9 +101,10 @@ phase. A thread started before the change resumes its workspace after it.
   answers? }`. Both require a Standard Webhooks signature (`webhook-id`, `webhook-timestamp`,
   `webhook-signature`) made with that adapter's secret, a timestamp within 5 minutes, and a path `channel`
   equal to the body's.
-- **FR-022:** Rovara sends typed events to `callbackUrl`, signed the same way: `ack`, `progress`, `question`,
-  `approval_request`, `check_report`, `pr`, `done`, `error`, `link_required`. Delivery is at least once with a
-  stable event ID, retried with backoff, then dead-lettered.
+- **FR-022:** Rovara sends typed events to `callbackUrl`, signed the same way: `ack`, `message`, `progress`,
+  `question`, `approval_request`, `check_report`, `pr`, `done`, `error`, `link_required`. Delivery is at least once
+  with a stable event ID, retried with backoff, then dead-lettered. Everything Rovara says in the conversation is a
+  `message`; `done` marks that a request finished and may carry no text.
 - **FR-023:** Capabilities are `threads`, `buttons` (max per message), `edits`, `maxTextLength` and
   `proactive`. The core never sends a part the adapter cannot show; without buttons, an approval names a reply
   such as "reply 1 to approve".
@@ -124,7 +125,21 @@ phase. A thread started before the change resumes its workspace after it.
   Phase 3 already sends no approve action for a stepped-up kind.
 - **FR-033:** Slack actors keep their current verified identity. Slack is never subject to FR-030 to FR-032.
 
-### Core without Slack (Phase 4)
+### Adapter conversations run (Phase 4a)
+
+- **FR-035:** The orchestrator runs each queued message and decision in order per conversation, through the same
+  processor as a Slack thread. Its replies leave as events; it acts on the service routes for the conversation and
+  actor, and the broker checks the adapter, binding, link and developer again on every call.
+- **FR-036:** An adapter conversation's workspace is charged to the linked developer: their Slack member's counter
+  when the developer is linked to Slack, otherwise their own, and the organization's. Close and a failed preparation
+  give it back.
+- **FR-037:** An adapter answers an action confirmation with a decision naming it and the digest of its calls, or with
+  a "yes" or "cancel" reply. A confirmation an administrator's policy requires is kind `admin`; an adapter that steps
+  `admin` up cannot approve it either way (FR-032).
+- **FR-038:** SWE-bench runs, eval batches, shared tasks and task-thread answers stay Slack-only; an adapter
+  conversation is told so or refused.
+
+### Core without Slack (Phase 4b)
 
 - **FR-040:** The orchestrator's prompts and action gate name no surface; output is plain text and structured
   parts, and each adapter formats it.
@@ -191,4 +206,4 @@ The amendment permits adapters; none exists until Phase 3, so no running behavio
 - **SC-001:** Every existing Slack owner key, subject and binding key is unchanged (Phase 1 and 2 tests).
 - **SC-002:** A WhatsApp message in a bound group starts a task and receives `done`, on a test install.
 - **SC-003:** An unlinked actor, an unbound space and a bad signature each run nothing (abuse tests).
-- **SC-004:** After Phase 4, no module outside the Slack adapter imports Slack schemas or calls the Slack API.
+- **SC-004:** After Phase 4b, no module outside the Slack adapter imports Slack schemas or calls the Slack API.

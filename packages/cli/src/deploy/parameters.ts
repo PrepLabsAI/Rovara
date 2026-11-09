@@ -129,6 +129,14 @@ export class MissingStackOutputError extends Error {
 }
 
 /** Throws the exact message a missing stack output must report. */
+/** Each named output the part has, as a parameter of the same name; a missing one is left out. */
+function optionalOutputs(outputs: Partial<Record<DeployPart, StackOutputs>>, part: DeployPart, names: readonly string[]): Record<string, string> {
+  return Object.fromEntries(names.flatMap((name) => {
+    const value = outputs[part]?.[name];
+    return typeof value === "string" && value.length > 0 ? [[name, value]] : [];
+  }));
+}
+
 function required(outputs: Partial<Record<DeployPart, StackOutputs>>, part: DeployPart, name: string, env: string): string {
   const value = outputs[part]?.[name];
   if (value === undefined) throw new MissingStackOutputError(environmentStackName(env, part), name);
@@ -314,6 +322,8 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         TaskRoleArn: required(outputs, "control-plane", "SlackOrchestratorTaskRoleArn", answers.env),
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),
+        // Spec 062: present once the control plane has the channel API.
+        ...optionalOutputs(outputs, "control-plane", ["ChannelRequestQueueUrl", "ChannelEventQueueUrl"]),
         SlackThreadsTableName: required(outputs, "control-plane", "SlackThreadsTableName", answers.env),
         TurnRecordsTableName: required(outputs, "control-plane", "TurnRecordsTableName", answers.env),
         ThreadSessionBucketName: required(outputs, "control-plane", "SlackThreadSessionBucketName", answers.env),

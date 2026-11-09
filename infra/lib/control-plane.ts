@@ -889,8 +889,15 @@ export class ControlPlaneStack extends Stack {
         resources: [`arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:${alarmPrefix}*`],
       }));
       // Spec 062: channel adapters, off until the ChannelAdapters parameter is enabled.
-      const channelAdapters = new ChannelAdapters(this, "ChannelApi", { naming, env: naming.env, api, state, broker, notifyOperator });
-      const deadLetterQueues = { dispatch: deadLetterQueue, "slack-requests": slackDeadLetterQueue, "developer-notices": notifier.deadLetters, "developer-notice-stream": notifier.streamFailures, "channel-events": channelAdapters.eventDeadLetters };
+      const channelAdapters = new ChannelAdapters(this, "ChannelApi", { naming, env: naming.env, api, state, broker, orchestratorRole: slackOrchestratorRole, notifyOperator });
+      new CfnOutput(this, "ChannelRequestQueueUrl", { value: channelAdapters.requests.queueUrl });
+      new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
+      // The channel request dead-letter queue is reported by its alarm only: one more queue ARN here pushes the broker
+      // role's policy past IAM's inline size limit.
+      const deadLetterQueues = {
+        dispatch: deadLetterQueue, "slack-requests": slackDeadLetterQueue, "developer-notices": notifier.deadLetters, "developer-notice-stream": notifier.streamFailures,
+        "channel-events": channelAdapters.eventDeadLetters,
+      };
       broker.addEnvironment("HEALTH_DEAD_LETTER_QUEUES", this.toJsonString(Object.fromEntries(Object.entries(deadLetterQueues).map(([name, queue]) => [name, queue.queueUrl]))));
       broker.addToRolePolicy(new iam.PolicyStatement({
         actions: ["sqs:GetQueueAttributes"],

@@ -12,6 +12,8 @@ export interface ChannelAdaptersProps {
   api: apigwv2.CfnApi;
   state: dynamodb.Table;
   broker: lambdaNodejs.NodejsFunction;
+  /** Spec 062 Phase 4: the hosted orchestrator, which runs the queued requests and sends their replies. */
+  orchestratorRole: iam.IRole;
   notifyOperator: cloudwatchActions.SnsAction;
 }
 
@@ -23,6 +25,9 @@ export interface ChannelAdaptersProps {
  */
 export class ChannelAdapters extends Construct {
   readonly eventDeadLetters: sqs.Queue;
+  readonly requestDeadLetters: sqs.Queue;
+  readonly requests: sqs.Queue;
+  readonly events: sqs.Queue;
 
   constructor(scope: Construct, id: string, props: ChannelAdaptersProps) {
     super(scope, id);
@@ -47,11 +52,11 @@ export class ChannelAdapters extends Construct {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // Accepted messages and decisions, ordered per conversation. Its consumer arrives with Phase 4.
-    const requestDeadLetters = new sqs.Queue(this, "RequestDeadLetters", {
+    // Accepted messages and decisions, ordered per conversation, run by the hosted orchestrator.
+    const requestDeadLetters = this.requestDeadLetters = new sqs.Queue(this, "RequestDeadLetters", {
       fifo: true, retentionPeriod: Duration.days(14), enforceSSL: true, encryption: sqs.QueueEncryption.SQS_MANAGED,
     });
-    const requests = new sqs.Queue(this, "Requests", {
+    const requests = this.requests = new sqs.Queue(this, "Requests", {
       fifo: true,
       retentionPeriod: Duration.days(4),
       visibilityTimeout: Duration.minutes(15),
@@ -62,7 +67,7 @@ export class ChannelAdapters extends Construct {
 
     // Events to adapters: retried with a growing delay that the sender sets, then dead-lettered.
     this.eventDeadLetters = new sqs.Queue(this, "EventDeadLetters", { retentionPeriod: Duration.days(14), enforceSSL: true, encryption: sqs.QueueEncryption.SQS_MANAGED });
-    const events = new sqs.Queue(this, "Events", {
+    const events = this.events = new sqs.Queue(this, "Events", {
       retentionPeriod: Duration.days(1),
       visibilityTimeout: Duration.seconds(180),
       deadLetterQueue: { queue: this.eventDeadLetters, maxReceiveCount: 8 },
@@ -96,6 +101,9 @@ export class ChannelAdapters extends Construct {
     ingress.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [adapterSecrets] }));
     requests.grantSendMessages(ingress);
     events.grantSendMessages(ingress);
+    // The orchestrator runs what was queued and queues the conversation's replies; the broker checks each call again.
+    requests.grantConsumeMessages(props.orchestratorRole);
+    events.grantSendMessages(props.orchestratorRole);
 
     const integration = new apigwv2.CfnIntegration(this, "Integration", {
       apiId: props.api.ref, integrationType: "AWS_PROXY", integrationUri: ingress.functionArn, payloadFormatVersion: "2.0",
@@ -128,6 +136,16 @@ export class ChannelAdapters extends Construct {
     props.broker.addEnvironment("CHANNEL_ADAPTERS", enabled);
     props.broker.addEnvironment("CHANNEL_ADAPTER_SECRET_PREFIX", secretPrefix);
     props.broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue"], resources: [adapterSecrets] }));
+
+    new cloudwatch.Alarm(this, "RequestDeadLettersAlarm", {
+      alarmName: props.naming.alarmName("ChannelRequestDeadLetters"),
+      alarmDescription: "A channel adapter request failed every attempt and is in the channel request dead-letter queue. Check the Slack orchestrator logs for its event ID.",
+      metric: requestDeadLetters.metricApproximateNumberOfMessagesVisible({ statistic: "Maximum", period: Duration.minutes(5) }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(props.notifyOperator);
 
     new cloudwatch.Alarm(this, "EventDeadLettersAlarm", {
       alarmName: props.naming.alarmName("ChannelEventDeadLetters"),
