@@ -5,7 +5,7 @@ describe("AgentX executable command surface", () => {
   it("exposes administration and developer sign-in; developer tasks come from AI tools", () => {
     const program = createCliProgram();
 
-    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "workspaces", "chatgpt", "signin", "config", "loop", "doctor", "upgrade", "destroy", "admin", "project", "channel", "connector", "alerts", "env", "deploy", "init", "mcp"]);
+    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "workspaces", "chatgpt", "signin", "config", "loop", "doctor", "upgrade", "destroy", "admin", "project", "channel", "connector", "alerts", "env", "deploy", "init", "sessions", "session", "mcp"]);
 
     const admin = program.commands.find((command) => command.name() === "admin");
     expect(admin?.commands.map((command) => command.name())).toEqual(["project", "runtime-installation", "workspace", "slack", "eval", "credential", "turns", "task", "changes"]);
@@ -21,6 +21,8 @@ describe("AgentX executable command surface", () => {
 
     expect(subcommands(program, "signin")).toEqual(["show", "enable", "disable", "check"]);
     expect(subcommands(program, "loop")).toEqual(["init", "add", "enroll", "remove", "start", "stop", "status", "run", "do", "quick", "full", "review", "contribute", "check", "mcp"]);
+    // Lane L8: a session is started, shown, followed, commented on, told, answered, stopped, retried, taken over and shared from the command line.
+    expect(subcommands(program, "session")).toEqual(["start", "show", "follow", "unfollow", "comment", "tell", "answer", "stop", "retry", "take-over", "share"]);
     expect(subcommands(program, "chatgpt")).toEqual(["connect", "status", "disconnect"]);
     expect(subcommands(program, "mcp")).toEqual(["install"]);
     expect(subcommands(program, "project")).toEqual(["add", "setup-approve", "model-check"]);

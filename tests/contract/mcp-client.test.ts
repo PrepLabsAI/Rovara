@@ -172,6 +172,17 @@ describe("the control-plane client (FR-027)", () => {
     expect((error as ToolError).nextStep.length).toBeGreaterThan(0);
   });
 
+  it.each([
+    ["BUDGET_EXCEEDED", "The budget for this install is used up ($29 of $29).", /raise the budget/],
+    ["BUDGET_EXCEEDED", "This task has used its AI budget ($25 of $25). Choose Continue to resume this task with a fresh budget.", /agentx_continue_task/],
+  ] as const)("maps %s (HTTP 402) to BUDGET_REACHED with the broker's words and its own next step", async (brokerCode, message, step) => {
+    const error = await client(async () => reply(402, { error: { code: brokerCode, message } })).startTask(start).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ToolError);
+    expect(error).toMatchObject({ code: "BUDGET_REACHED", message });
+    expect((error as ToolError).nextStep).toMatch(step);
+    expect((error as ToolError).nextStep).not.toContain("try again later");
+  });
+
   it("stops trying at the deadline when AgentX never answers", async () => {
     vi.useFakeTimers();
     const started = Date.now();
