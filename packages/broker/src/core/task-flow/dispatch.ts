@@ -119,7 +119,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
 
   let startedMachineId: string | undefined;
   try {
-    const handle = await deps.machines.start({ machineKey: workspace.id, companyId: deps.companyId, projectName: workspace.projectName, labels: { workspaceId: workspace.id } });
+    const handle = await deps.machines.start({ machineKey: workspace.id, companyId: deps.companyId, projectName: workspace.projectName, labels: { workspaceId: workspace.id }, ...(deps.machineEnvironment === undefined ? {} : { environment: { ...deps.machineEnvironment } }) });
     startedMachineId = handle.machineId;
     // The adapter gave a different machine than the one the workspace knew (the old one was reaped and the key started a new one): that is a new machine,
     // admitted on its own like any other. Refused, it is stopped again at once.

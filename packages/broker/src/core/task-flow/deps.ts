@@ -107,6 +107,8 @@ export interface TaskFlowDeps {
   newId?: () => string;
   log?: (entry: Record<string, unknown>) => void;
   prompts?: StepPrompts;
+  /** Environment every worker machine of this install is started with (lane L9-wire: where the model proxy is). Never a secret. */
+  machineEnvironment?: Readonly<Record<string, string>>;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
 }

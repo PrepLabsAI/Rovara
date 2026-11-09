@@ -5,11 +5,13 @@ import { request as httpRequest } from "node:http";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, UNDERSTAND_ARTIFACT_NAME, type WorkerInvocation } from "@agentx/contracts";
+import { DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, type WorkerInvocation } from "@agentx/contracts";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { listSessions, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
+import { registerOpenCommand } from "../../packages/cli/src/up/cli.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
@@ -221,5 +223,69 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect((await second.api("/v1/dev/tasks")).body.tasks).toHaveLength(1);
     // The capability was signed with the key kept in the state folder.
     expect((await second.callback(prepare, "result", { status: "SUCCEEDED", result: {} })).status).toBe(200);
+  });
+
+  it("answers the reads the MCP tools and the CLI make in the shapes they parse, and takes the owner's answers to Understand's questions", async () => {
+    const h = await launch();
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const projects = DeveloperProjectsResponseSchema.safeParse((await h.api("/v1/dev/projects")).body);
+    expect(projects.success, JSON.stringify(projects.success ? {} : projects.error.issues.slice(0, 3))).toBe(true);
+    const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "66666666-6666-4666-8666-666666666666", project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+    const taskId = started.body.task.taskId;
+    expect(DeveloperTaskResponseSchema.safeParse(started.body).success).toBe(true);
+    expect(DeveloperTaskListResponseSchema.safeParse((await h.api("/v1/dev/tasks")).body).success).toBe(true);
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: {} });
+    const understand = await h.nextJob(workspaceId, seen);
+    const questions = { kind: "questions", restatement: "Add a health endpoint.", questions: [{ id: "q1", text: "Which path?", options: [{ id: "a", label: "/health" }, { id: "b", label: "/healthz" }], recommended: "a" }] };
+    await h.callback(understand, "artifacts", { name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify(questions) });
+    await h.callback(understand, "result", { status: "SUCCEEDED" });
+    const waiting = (await h.api(`/v1/dev/tasks/${taskId}`)).body.task;
+    expect(waiting.workflow).toMatchObject({ stage: "UNDERSTAND", state: "WAITING" });
+    await h.runtime.tick();
+
+    const listed = await h.api("/v1/app/sessions");
+    expect(SessionListReaderSchema.safeParse(listed.body).success).toBe(true);
+    const sessionId = waiting.sessionId!;
+    const read = await h.api(`/v1/app/sessions/${sessionId}`);
+    const parsed = SessionResponseReaderSchema.safeParse(read.body);
+    expect(parsed.success, JSON.stringify(parsed.success ? {} : parsed.error.issues.slice(0, 3))).toBe(true);
+
+    // The owner answers; Understand runs again with the answers, and then Plan follows from its assessment.
+    const answered = await h.api(`/v1/app/sessions/${sessionId}/answers`, { method: "POST", body: { requestId: "77777777-7777-4777-8777-777777777777", round: 1, answers: [{ questionId: "q1", optionId: "a" }] } });
+    expect(answered.status, JSON.stringify(answered.body)).toBe(200);
+    const again = await h.nextJob(workspaceId, seen);
+    expect(again).toMatchObject({ payload: { workflowMode: "UNDERSTAND" } });
+    expect((await h.api(`/v1/dev/tasks/${taskId}`)).body.task.workflow).toMatchObject({ stage: "UNDERSTAND", state: "RUNNING" });
+
+    // Stop: the running step ends, the task waits for Retry; a message to the agent is saved and says it was not passed on.
+    const stopped = await h.api(`/v1/app/sessions/${sessionId}/stop`, { method: "POST", body: { requestId: "88888888-8888-4888-8888-888888888888" } });
+    expect(stopped.status, JSON.stringify(stopped.body)).toBe(200);
+    expect((await h.api(`/v1/dev/tasks/${taskId}`)).body.task.workflow).toMatchObject({ state: "BLOCKED" });
+    const told = await h.api(`/v1/app/sessions/${sessionId}/messages`, { method: "POST", body: { requestId: "99999999-9999-4999-8999-999999999999", kind: "steer", text: "use /health" } });
+    expect(told.status).toBe(200);
+    expect(JSON.stringify(told.body)).toContain("not_delivered");
+    expect((await h.api(`/v1/app/sessions/${sessionId}/messages`, { method: "POST", body: { requestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", kind: "comment", text: "hello" } })).status).toBe(400);
+    expect((await h.api("/v1/app/sessions/ses_00000000000000000000")).status).toBe(404);
+  });
+
+  it("`rovara open` prints the page address from the running process, and says so when nothing is running", async () => {
+    const h = await launch();
+    const { taskId } = await toPlanReview(h);
+    const printed: string[] = [];
+    const run = async (stateDir: string, ...args: string[]) => {
+      const program = new Command().exitOverride().option("--json");
+      registerOpenCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } as never });
+      await program.parseAsync(["node", "rovara", "open", "--state-dir", stateDir, ...args]);
+    };
+    await run(h.stateDirectory, taskId);
+    const link = new URL(printed.join("").trim());
+    const page = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
+    expect(page.status).toBe(200);
+    expect(page.body).toContain("Add a /health endpoint that answers 200.");
+    await h.runtime.stop();
+    await expect(run(h.stateDirectory, taskId)).rejects.toThrow(/not running/);
+    await expect(run(h.stateDirectory, "not-a-task")).rejects.toThrow(/UUID/);
   });
 });

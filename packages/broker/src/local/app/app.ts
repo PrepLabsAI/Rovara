@@ -33,6 +33,7 @@ import { createCallbackHandler } from "./callbacks.js";
 import { createTaskFactsSource } from "./facts.js";
 import { createLocalPageData, createPageExtraActions } from "./page-data.js";
 import { createOwnerRoutes } from "./routes.js";
+import { createSessionRoutes } from "./session-routes.js";
 import { createSessionStartExtras } from "./session-start.js";
 
 export { TASK_FLOW_INDEXES };
@@ -40,7 +41,20 @@ export { TASK_FLOW_INDEXES };
 /** The id the default identity adapter gives the machine's owner (`localOwnerPrincipal`). */
 const LOCAL_OWNER_PERSON_ID = "local-owner";
 
+/**
+ * Where the worker's model calls go (lane L9a, K1: a local model proxy, so the worker never holds a model key). This is the narrow seam L9-wire codes against; the proxy is not built here.
+ * TODO(L9a): K1 fills it. Two things it must settle, found while wiring: the worker asks the broker for a short-lived key with `GET /v1/internal/model-access`, which the callback
+ * listener (POST only) and the egress gateway (relays only `/v1/internal/workspaces/<id>/operations/<id>/<action>`) both refuse, so K1 either moves that call under the operation's
+ * prefix as a POST or opens one more path in both; and the key it issues must be the proxy's own, never the owner's provider key.
+ */
+export interface ModelProxyEndpoint {
+  /** The proxy's address as a worker sees it (`AGENTX_MODEL_PROXY_URL`). */
+  url: string;
+}
+
 export interface LocalAppOptions {
+  /** TODO(L9a): the local model proxy. Absent: a worker has no model access and its Understand and Plan steps fail with a plain reason. */
+  modelProxyEndpoint?: ModelProxyEndpoint;
   registry: AdapterRegistry;
   stateDirectory: string;
   pageSessions: LocalPageSessions;
@@ -50,6 +64,8 @@ export interface LocalAppOptions {
   machinesName?: string;
   /** How a repository credential is made for a worker's grant (the owner's GitHub token, for now). 51 gap: GitHub-specific, from the local runtime. */
   resolveRepositoryCredential?: (credentialRef: string, repositoryUrl: string, access: "clone" | "push") => Promise<RepositoryCredential>;
+  /** The address clients reach the owner's routes at (a session's `link` is its own address). Read when asked, so the server may start after the app. */
+  origin?: () => string;
   /** Port of the review pages (0: a free one). */
   pagesPort?: number;
   /** Run the timers. Tests pass false and call `tick()`. Default true. */
@@ -104,6 +120,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.machinesName === undefined ? {} : { machinesName: options.machinesName }),
     // No code host adapter registered (none is set up on a fresh laptop): a start is not refused for a host nobody knows, and publishing a pull request is simply not offered.
     checkCodeHosts: registry.names("code-host").length > 0,
+    ...(options.modelProxyEndpoint === undefined ? {} : { machineEnvironment: { AGENTX_MODEL_PROXY_URL: options.modelProxyEndpoint.url } }),
     startExtras: createSessionStartExtras(companyId),
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
@@ -145,7 +162,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
-  const routes = createOwnerRoutes({ flow, blobs, pages: () => pages, version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, pages: () => pages, version: options.version });
+  const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, origin: options.origin ?? (() => "http://127.0.0.1") });
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? ownerRoutes(request, caller);
 
   const projector = await startSessionProjector(summaryDeps).catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 

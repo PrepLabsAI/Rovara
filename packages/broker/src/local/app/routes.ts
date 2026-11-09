@@ -55,7 +55,7 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
     try {
       if (path === "/v1/dev/projects" && request.method === "GET") {
         const principal: Principal = caller.principal;
-        const projects = (await listProjects(flow.deps.store, companyId)).map((project) => ({ ...project, access: "granted" as const, channels: [], role: "owner" as const }));
+        const projects = (await listProjects(flow.deps.store, companyId)).map((project) => ({ ...project, access: "granted" as const, channels: [], role: "maintainer" as const }));
         // 51 gap: the contract's sign-in list is closed (slack, oidc, cloud, github, saml) and has no word for the local owner; "oidc" is the nearest and nothing reads it for a decision.
         return json(200, { developer: { id: developerIdFor(principal), name: principal.displayName, provider: "oidc" }, projects, notices: [] });
       }

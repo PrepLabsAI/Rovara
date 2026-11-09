@@ -4,7 +4,7 @@
 // defaults and the built-in adapters are registered; the config's adapters are loaded (a configured storage or queue replaces the
 // in-memory default); the registry is sealed; then the server starts. Nothing in the registry changes after that except channels.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { realpath, stat } from "node:fs/promises";
+import { realpath, rm, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
@@ -40,6 +40,7 @@ import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
 import {
   KEYS_FILE_NAME,
+  SERVER_FILE_NAME,
   SESSION_TOKEN_FILE_NAME,
   STATE_DB_FILE_NAME,
   WORKSPACES_DIRECTORY_NAME,
@@ -142,6 +143,8 @@ export interface LocalRuntime {
   readonly pageSessions: LocalPageSessions;
   /** The review pages' address: `http://127.0.0.1:<port>` (the page links themselves carry a session token and come from `POST /v1/local/pages/link`). */
   readonly pagesUrl: string;
+  /** The address of a review page in the owner's session (the token is in it: for the owner's terminal only). */
+  pageLink(path?: string): string;
   /** The wired task flow, sessions, decisions and pages (lane L9-wire). */
   readonly app: LocalApp;
   /** One pass of what the timers do (tests). */
@@ -249,7 +252,9 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
 
   const identity = registry.require("identity");
   const githubKeys = createLocalGithubKeyStore(stateDirectory);
+  const serverUrl = { current: "http://127.0.0.1" };
   const app = await createLocalApp({
+    origin: () => serverUrl.current,
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
     resolveRepositoryCredential: async () => {
@@ -313,6 +318,10 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   const callbackHandler = (request: BrokerRequest): Promise<BrokerResponse> => app.callbacks(request);
 
   const server: LocalHttpServer = await startLocalHttpServer({ handler, ...(options.port === undefined ? {} : { port: options.port }) });
+  serverUrl.current = server.url;
+  // Tells `rovara open` where to find this process. The file holds no secret: the session token is in its own file.
+  const serverFile = join(stateDirectory, SERVER_FILE_NAME);
+  await writeOwnerFile(serverFile, `${JSON.stringify({ url: server.url, pid: process.pid })}\n`).catch(() => undefined);
   // Workers call back on a listener of their own, not on the owner's server (callback-server.ts).
   callbackServer.current = await startCallbackServer({ handler: callbackHandler, stateDirectory }).catch(async (error: unknown) => {
     await server.close();
@@ -332,12 +341,14 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
     sessionTokenPath,
     pageSessions,
     pagesUrl: app.pages.origin,
+    pageLink: (path) => app.pages.link(path, { label: "terminal" }),
     app,
     tick: () => app.tick(),
     wiring,
     async stop() {
       if (stopped) return;
       stopped = true;
+      await rm(serverFile, { force: true }).catch(() => undefined);
       await server.close();
       await callbackServer.current?.close();
       await app.stop();

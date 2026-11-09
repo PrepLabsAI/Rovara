@@ -155,6 +155,7 @@ describe("rovara up", () => {
       sessionTokenPath: "/state/session-token",
       pageSessions: {} as LocalRuntime["pageSessions"],
       callbackPort: 0,
+      pageLink: (path = "/") => `http://127.0.0.1:0/s/token${path}`,
       pagesUrl: "http://127.0.0.1:0",
       app: {} as LocalRuntime["app"],
       async tick() { /* nothing to do */ },

@@ -18,6 +18,8 @@ export const INVOKE_KEY_FILE_NAME = "invoke-key.pem";
 /** The key the callback capabilities and repository grants are signed with (lane L9-wire). */
 /** The SQLite file the default storage and queue keep everything in (lane L9-wire). */
 export const STATE_DB_FILE_NAME = "state.db";
+/** Where a running `rovara up` says where it listens, for `rovara open` (removed when it stops). */
+export const SERVER_FILE_NAME = "server.json";
 export const CALLBACK_KEY_FILE_NAME = "callback-key";
 export const WORKSPACES_DIRECTORY_NAME = "workspaces";
 
