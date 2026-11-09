@@ -446,6 +446,27 @@ describe.skipIf(!enabled)("a local worker and its sandboxes are walled off (real
       expect(seen.leaked).toBe(false);
     });
 
+    it("does not let a body on a GET route reach the daemon as a second request", async () => {
+      const script = String.raw`
+        const net = require('net');
+        const [image, workspace, key, network] = process.argv.slice(1);
+        const body = JSON.stringify({ User: '1000:1000', Image: image, Cmd: ['sleep', 'infinity'], Labels: { 'agentx.task': 'x', 'agentx.workspace': key },
+          HostConfig: { Binds: ['/:/host'], NetworkMode: 'host', Privileged: true, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges'] } });
+        const smuggled = 'POST /containers/create?name=agentx-task-smuggled HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ' + Buffer.byteLength(body) + '\r\n\r\n' + body;
+        let done = 0; const heads = [];
+        for (const path of ['/_ping', '/version', '/containers/json']) {
+          const socket = net.connect({ host: 'rovara-sock', port: 2375 });
+          let out = '';
+          socket.on('data', (c) => out += c); socket.on('error', () => {});
+          socket.write('GET ' + path + ' HTTP/1.1\r\nHost: x\r\nContent-Length: ' + Buffer.byteLength(smuggled) + '\r\n\r\n' + smuggled);
+          setTimeout(() => { heads.push(out.split('\r\n')[0]); if (++done === 3) { console.log(JSON.stringify(heads)); process.exit(0); } }, 1500);
+        }`;
+      const result = await inWorkerScript(script, IMAGE!, a.workspace, createHash("sha256").update(a.workspace).digest("hex").slice(0, 16), a.names.sandboxNet);
+      const heads = JSON.parse(result.out.trim().split("\n").pop()!) as string[];
+      expect(heads.every((head) => /^HTTP\/1\.1 403 /.test(head))).toBe(true);
+      expect((await docker(["ps", "--all", "--quiet", "--filter", "name=agentx-task-smuggled"])).out.trim()).toBe("");
+    });
+
     it("builds the sandbox from the names it knows, so a lower-case key cannot undo the capability drop or the limits", async () => {
       const script = `
         const http = require('http');

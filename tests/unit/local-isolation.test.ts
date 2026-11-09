@@ -441,7 +441,9 @@ async function fakeDaemon(options: { owner: string; hijack: "101" | "plain"; max
   const containerId = "c".repeat(64);
   const execId = "e".repeat(64);
   const stdin: Buffer[] = [];
+  const connections = { count: 0 };
   const server = createNetServer((socket) => {
+    connections.count += 1;
     let held = Buffer.alloc(0);
     let raw = false;
     socket.on("error", () => undefined);
@@ -480,7 +482,7 @@ async function fakeDaemon(options: { owner: string; hijack: "101" | "plain"; max
     });
   });
   await new Promise<void>((resolve) => server.listen(socketPath, resolve));
-  return { socketPath, requests, stdin, containerId, execId, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+  return { socketPath, requests, stdin, containerId, execId, get connections() { return connections.count; }, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
 }
 
 function rawExchange(port: number, text: string, options: { wait?: number; after?: string } = {}): Promise<string> {
@@ -637,6 +639,53 @@ describe("the Docker socket guard as a server (pipelining, upgrades and case-var
       const sent = JSON.parse(world.daemon.requests.find((request) => request.url.endsWith("/exec"))!.body) as Record<string, unknown>;
       expect(sent).toMatchObject({ User: "1000:1000", Privileged: false, Cmd: ["id"] });
       expect(Object.keys(sent).sort()).toEqual(["AttachStderr", "AttachStdin", "AttachStdout", "Cmd", "Privileged", "Tty", "User"]);
+    } finally {
+      await world.close();
+    }
+  });
+
+  it("refuses a body on a route that takes none, so it cannot reach the daemon as a second request", async () => {
+    const world = await start("plain");
+    try {
+      const smuggled = `POST /containers/create?name=escape HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 40\r\n\r\n{"Image":"x","HostConfig":{"Privileged":1}}`;
+      const id = await world.exec();
+      const before = world.daemon.requests.length;
+      const routes = ["GET /_ping", "HEAD /_ping", "GET /version", "GET /containers/json", `GET /containers/${world.daemon.containerId}/json`, `GET /containers/${world.daemon.containerId}/logs`,
+        `DELETE /containers/${world.daemon.containerId}`, `GET /exec/${id}/json`, "GET /images/worker:test/json", "GET /networks/rovara-snet-dddd", `POST /containers/${world.daemon.containerId}/stop`, `POST /exec/${id}/resize`];
+      for (const route of routes) {
+        const [method, path] = route.split(" ");
+        const withLength = await rawExchange(world.port, `${method} /v1.54${path} HTTP/1.1\r\nHost: x\r\nContent-Length: ${Buffer.byteLength(smuggled)}\r\n\r\n${smuggled}`);
+        expect(withLength, route).toMatch(/^HTTP\/1\.1 403 /);
+        const chunked = await rawExchange(world.port, `${method} /v1.54${path} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n${smuggled.length.toString(16)}\r\n${smuggled}\r\n0\r\n\r\n`);
+        expect(chunked, route).toMatch(/^HTTP\/1\.1 403 /);
+      }
+      const seen = world.daemon.requests.slice(before);
+      expect(seen.filter((request) => request.url.startsWith("/containers/create"))).toEqual([]);
+      // The refusal comes before anything is sent; at most the ownership lookups of the routes that name a container reached the daemon.
+      expect(seen.every((request) => request.method === "GET" && /^\/containers\/[^/]+\/json$/.test(request.url))).toBe(true);
+    } finally {
+      await world.close();
+    }
+  });
+
+  it("sends the daemon one request per connection, so nothing rides behind another", async () => {
+    const world = await start("plain");
+    try {
+      const answer = await rawExchange(world.port, "GET /v1.54/_ping HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n");
+      expect(answer).toMatch(/^HTTP\/1\.1 200 /);
+      expect(world.daemon.requests.at(-1)?.url).toBe("/_ping");
+      expect(world.daemon.connections).toBeGreaterThanOrEqual(1);
+    } finally {
+      await world.close();
+    }
+  });
+
+  it("refuses more memory than the machine has", async () => {
+    const world = await start("plain");
+    try {
+      expect((await world.call("POST", "/v1.54/containers/create?name=agentx-task-m", createBody({ Memory: 1e15 }))).status).toBe(403);
+      expect((await world.call("POST", "/v1.54/containers/create?name=agentx-task-m", createBody({ Memory: 1_000_000, MemorySwap: 1e15 }))).status).toBe(403);
+      expect((await world.call("POST", "/v1.54/containers/create?name=agentx-task-m", createBody({ Memory: 1_000_000 }))).status).toBe(201);
     } finally {
       await world.close();
     }

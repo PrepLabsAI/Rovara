@@ -33,9 +33,9 @@ function log(event, fields) {
 // ---- asking the real daemon ourselves (ownership, counts)
 function ask(method, path, body) {
   return new Promise(function (resolve, reject) {
-    const headers = { host: "docker" };
+    const headers = { host: "docker", connection: "close" };
     if (body !== undefined) { headers["content-type"] = "application/json"; headers["content-length"] = String(Buffer.byteLength(body)); }
-    const request = http.request({ socketPath: policy.upstream, method: method, path: path, headers: headers, timeout: 30000 }, function (response) {
+    const request = http.request({ socketPath: policy.upstream, method: method, path: path, headers: headers, timeout: 30000, agent: false }, function (response) {
       const chunks = [];
       response.on("data", function (chunk) { chunks.push(chunk); });
       response.on("end", function () { resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString("utf8") }); });
@@ -91,6 +91,8 @@ const TOP_USED = ["Image", "Cmd", "Entrypoint", "Env", "User", "WorkingDir", "La
 // What a sandbox gets when the worker names no limit: a sandbox is never unlimited.
 const DEFAULT_MEMORY = 4294967296;
 const DEFAULT_PIDS = 4096;
+// The most memory a sandbox may be given: what the machine the daemon runs on has (this container reads the same /proc/meminfo).
+const MEMORY_CEILING = require("os").totalmem();
 
 function knownKeys(object, used, zero, what) {
   Object.keys(object).forEach(function (key) {
@@ -136,6 +138,7 @@ function buildHostConfig(host) {
   });
   const memory = numberOr(host.Memory, 0, "Memory") || DEFAULT_MEMORY;
   const swap = numberOr(host.MemorySwap, 0, "MemorySwap");
+  if (memory > MEMORY_CEILING || swap > 2 * MEMORY_CEILING) deny("the memory limit is higher than this machine has");
   const pids = host.PidsLimit === undefined || host.PidsLimit === null ? DEFAULT_PIDS : host.PidsLimit;
   if (typeof pids !== "number" || pids > 65536) deny("the process limit is not valid");
   if (host.CpusetCpus !== undefined && host.CpusetCpus !== null && (typeof host.CpusetCpus !== "string" || !/^[0-9,-]{0,64}$/.test(host.CpusetCpus))) deny("cpuset is not valid");
@@ -282,13 +285,23 @@ function send(response, status, message) {
   response.writeHead(status, { "content-type": "application/json", connection: "close" });
   response.end(JSON.stringify({ message: "rovara: " + message }));
 }
+// Every request the guard sends the daemon is its own: one request per connection (Connection: close, no shared agent), and a body only
+// when the guard made it. A body the client sent on a route that takes none is refused: Node does not frame a piped body on a GET or a
+// DELETE, so the bytes would reach the daemon as the NEXT request on the connection, one the guard never saw.
 function forward(request, response, path, body, inspectAnswer) {
+  if (body === undefined && (request.headers["transfer-encoding"] !== undefined || (request.headers["content-length"] !== undefined && request.headers["content-length"] !== "0"))) {
+    request.resume();
+    deny("this request takes no body");
+  }
   const finished = new Promise(function (resolve) { response.on("close", resolve); });
   const headers = {};
   Object.keys(request.headers).forEach(function (name) { if (name !== "host" && name !== "connection" && name !== "content-length" && name !== "transfer-encoding") headers[name] = request.headers[name]; });
   headers.host = "docker";
+  headers.connection = "close";
+  delete headers.upgrade;
+  delete headers.expect;
   if (body !== undefined) headers["content-length"] = String(Buffer.byteLength(body));
-  const upstream = http.request({ socketPath: policy.upstream, method: request.method, path: path, headers: headers }, function (answer) {
+  const upstream = http.request({ socketPath: policy.upstream, method: request.method, path: path, headers: headers, agent: false }, function (answer) {
     if (inspectAnswer) {
       const chunks = [];
       answer.on("data", function (chunk) { chunks.push(chunk); });
@@ -307,8 +320,8 @@ function forward(request, response, path, body, inspectAnswer) {
   });
   upstream.on("error", function () { send(response, 502, "the Docker daemon does not answer"); });
   response.on("close", function () { upstream.destroy(); });
-  if (body !== undefined) upstream.end(body);
-  else request.pipe(upstream);
+  upstream.end(body);
+  request.resume();
   return finished;
 }
 function onlyQuery(query, names) {
