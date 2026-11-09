@@ -2,12 +2,16 @@
 // is pushed, the description lists briefly what was changed for which comments, from each approved proposal's summary,
 // and is kept up to date across rounds. The summaries come from a reviewer reading untrusted comments: each is redacted
 // and made inert for GitHub (no mention, link or cross-reference) before it is written.
+import { neutralizeLinearWords } from "../core/proof/linear-close.js";
 import { PULL_REQUEST_BODY_MAX_CHARS, WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WorkflowFeedbackReviewReportSchema, redactText, type WorkflowFeedbackReviewReport, type WorkflowSnapshot } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 
 /** Around the description's lines about the checks and reviews of the code on the pull request (since this release). */
 export const PULL_REQUEST_STATUS_START = "<!-- agentx:checks-and-reviews -->";
 export const PULL_REQUEST_STATUS_END = "<!-- /agentx:checks-and-reviews -->";
+/** Around the same block in a Rovara Code (version 2) description, which never says AgentX. */
+export const ROVARA_STATUS_START = "<!-- rovara:checks-and-reviews -->";
+export const ROVARA_STATUS_END = "<!-- /rovara:checks-and-reviews -->";
 const START = "<!-- agentx:pr-feedback-fixes -->";
 const END = "<!-- /agentx:pr-feedback-fixes -->";
 const HEADING = "### Fixes from PR feedback";
@@ -150,7 +154,8 @@ export function shortFixSummary(summary: string): string | undefined {
 
 function fixLine(fix: FeedbackFix): string {
   // Cut before it is escaped, so no cut lands inside an escape.
-  const summary = inertGitHubText(shortFixSummary(redactText(fix.summary)) ?? summaryFallback(fix.comments.length));
+  // A reviewer model writes this from comments anyone can post: a Linear magic word before an issue key is broken (before the escaping, which would hide the key's hyphen).
+  const summary = inertGitHubText(neutralizeLinearWords(shortFixSummary(redactText(fix.summary)) ?? summaryFallback(fix.comments.length)));
   if (fix.comments.length === 0) return `- ${summary}`;
   const links = fix.comments.slice(0, LINKS_LISTED).map((url, index) => `[comment ${index + 1}](${url})`);
   const more = fix.comments.length > LINKS_LISTED ? ` and ${fix.comments.length - LINKS_LISTED} more` : "";
@@ -221,15 +226,19 @@ const ACCEPTED_ITEM = /^- (?:\[(?:code|security)\] .* \u2014 accepted: .*|and \d
  * new lines have the same Checks line or none; otherwise nothing changes. Undefined when nothing changes.
  */
 export function withStatusLines(body: string, lines: readonly string[]): string | undefined {
-  const start = body.indexOf(PULL_REQUEST_STATUS_START);
-  const end = body.indexOf(PULL_REQUEST_STATUS_END);
+  // A Rovara Code (version 2) description has its own markers; a version 1 description never holds them.
+  const rovara = body.includes(ROVARA_STATUS_START) || body.includes(ROVARA_STATUS_END);
+  const markerStart = rovara ? ROVARA_STATUS_START : PULL_REQUEST_STATUS_START;
+  const markerEnd = rovara ? ROVARA_STATUS_END : PULL_REQUEST_STATUS_END;
+  const start = body.indexOf(markerStart);
+  const end = body.indexOf(markerEnd);
   if (start !== -1 || end !== -1) {
     // Exactly one pair, in order; anything else is not AgentX's block as it wrote it.
-    if (start === -1 || end === -1 || end < start || body.indexOf(PULL_REQUEST_STATUS_START, start + 1) !== -1
-      || body.indexOf(PULL_REQUEST_STATUS_END, end + 1) !== -1) return undefined;
+    if (start === -1 || end === -1 || end < start || body.indexOf(markerStart, start + 1) !== -1
+      || body.indexOf(markerEnd, end + 1) !== -1) return undefined;
     // A description saved from GitHub's website has CRLF line endings: the block keeps them.
     const eol = body.includes("\r\n") ? "\r\n" : "\n";
-    const next = `${body.slice(0, start)}${[PULL_REQUEST_STATUS_START, ...lines, PULL_REQUEST_STATUS_END].join(eol)}${body.slice(end + PULL_REQUEST_STATUS_END.length)}`;
+    const next = `${body.slice(0, start)}${[markerStart, ...lines, markerEnd].join(eol)}${body.slice(end + markerEnd.length)}`;
     return next === body ? undefined : next;
   }
   // An older description: its lines outside the PR feedback section, which is AgentX's too but never holds these.
