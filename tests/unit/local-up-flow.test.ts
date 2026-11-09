@@ -29,6 +29,7 @@ import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/br
 import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
+import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { runDispatchRow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
@@ -165,9 +166,9 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
 }
 
 /** Registers the project, starts a task and answers its preparation, Understand and Plan, so it waits for the owner's approval. */
-async function toPlanReview(h: Awaited<ReturnType<typeof launch>>, requestId = "11111111-1111-4111-8111-111111111111") {
+async function toPlanReview(h: Awaited<ReturnType<typeof launch>>, requestId = "11111111-1111-4111-8111-111111111111", instructions = "Add a /health endpoint") {
   await h.api("/v1/admin/projects", { method: "POST", body: h.project });
-  const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId, project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+  const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId, project: "payments", instructions, workflow: true } });
   expect(started.status, JSON.stringify(started.body)).toBe(201);
   const taskId = started.body.task.taskId;
   const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
@@ -1199,6 +1200,19 @@ describe("rovara up: an open pull request is fixed and kept up to date, against 
     await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch: branch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
     await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: 7, url: h.model.crUrl("7"), headBranch: branch, baseBranch: "main", commit, checks: [], reconciled: false } });
     expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "PULL_REQUEST", state: "BLOCKED" });
+  });
+
+  it("grades the plan waiting for approval from the request text and the task's cost estimate, through the wiring", async () => {
+    const tier = async (instructions: string, estimate?: number) => {
+      const h = await launch();
+      const { taskId } = await toPlanReview(h, "11111111-1111-4111-8111-111111111111", instructions);
+      if (estimate !== undefined) await h.runtime.registry.require("storage").update({ key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ops: [change.set("runEstimate", { lowUsd: 100, highUsd: estimate })] });
+      return (await h.runtime.app.gate.requirement(IMPLICIT_COMPANY_ID, WORKFLOW_DOCUMENT_KIND, taskId))?.risk;
+    };
+    // A Markdown plan is unread (medium) whatever it says; the request's words and the estimate raise it.
+    expect(await tier("Add a /health endpoint")).toBe("medium");
+    expect(await tier("Add a /health endpoint and change the IAM policy")).toBe("high");
+    expect(await tier("Add a /health endpoint", 150)).toBe("high");
   });
 
   it("keeps the newest post of checks.json, each under its own digest, and no more than eight posts in one operation", async () => {
