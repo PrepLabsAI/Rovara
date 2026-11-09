@@ -81,8 +81,8 @@ or an absolute path.
   in-memory registries, behind the same login (the owner counts as an administrator, so `POST /v1/admin/projects` works; the state is
   in memory only). Its per-project memberships are empty, so the other project routes answer "not found" until the task-flow lane
   gives the owner membership.
-- A worker's callbacks arrive with `Host: host.docker.internal:<port>`, which the Host check refuses. Callbacks are lane L6's design
-  (a separate listener, or a callback-only allowance); this lane does not serve them.
+- A worker's callbacks do not come here. They arrive with `Host: host.docker.internal:<port>`, which this server's Host check
+  refuses on purpose. They have a listener of their own (see "The callback listener").
 
 ## Worker machines (`WorkerMachines`)
 
@@ -93,42 +93,97 @@ EC2 boot script (`packages/worker/ec2/boot.sh`); the differences are on purpose:
 
 | | EC2 | Local Docker |
 | --- | --- | --- |
-| Worker port | host network, private subnet | published on `127.0.0.1:<random>` only (`--publish 127.0.0.1::8080`) |
+| Worker port | host network, private subnet | the worker publishes nothing; its gateway container publishes it on `127.0.0.1:<random>` only |
 | Worker container | Docker defaults | `--cap-drop ALL`, `--security-opt no-new-privileges`, `--pids-limit 4096`, user `1000:1000`, optional `--memory`/`--cpus`, log rotation |
-| Docker socket | mounted, `--group-add` the socket's group | mounted, group read from the socket by a one-off `stat` in the worker image |
-| Task commands | sandbox containers: no capabilities, no new privileges, only the workspace mounted (`task-sandbox.ts`) | the same containers, started by the worker; `AGENTX_TASK_SHELL` is never set and a spec cannot set it. **The network is weaker, see below.** |
+| Docker socket | mounted, `--group-add` the socket's group | **not mounted in the worker.** A socket guard container holds it and the worker reaches the guard over TCP (`DOCKER_HOST`); see "What a worker can reach" |
+| Network | host network; `boot.sh` walls sandbox bridges off from the host and the private ranges; a DNS firewall allows the default list plus the project's websites | the worker and its sandboxes are on internal Docker networks with no route and no host address; their one way out is the machine's gateway container, which applies the same list; see below |
+| Task commands | sandbox containers: no capabilities, no new privileges, only the workspace mounted (`task-sandbox.ts`) | the same containers, started by the worker through the guard (which rebuilds each one to those rules); `AGENTX_TASK_SHELL` is never set and a spec cannot set it |
 | Invocations | KMS-signed token | ES256 token signed with `invoke-key.pem`; the worker checks it for its own workspace, operation and fence, within 60 s |
 
-The worker holds the Docker socket so that it can start the sandboxes, as on EC2. On Linux that is root-equivalent on the host; on Docker
-Desktop or Colima it is root inside the VM, and the VM shares your home folder, so a compromised worker could also read
-`~/.rovara/keys.json`, `invoke-key.pem` and `~/.ssh`. Task commands themselves run in the sandboxes, not in the worker.
+### What a worker can reach (lane L4b)
 
-**The sandbox network is weaker than EC2's.** On EC2 `boot.sh` (`wall_off_containers`) blocks the sandbox bridge from 127.0.0.0/8,
-the private ranges and the host. Nothing does that here: the worker makes the plain `agentx-task` bridge, shared by every local worker.
-A task's commands therefore have the internet and also your computer's loopback services (databases, admin pages, this very server,
-other workers' published ports) and your home network, and sandboxes of different workspaces can reach each other. Treat a local
-task's code as having your network. A per-worker network behind a firewall or an allow-listing proxy needs a worker change and is the
-next step before tasks run through this adapter (an open decision for both owners).
+Task code is a repository's code, so a local worker is built as if it were hostile. A machine is five containers' worth of walls:
+
+```
+ your computer ──127.0.0.1:random──▶ gateway ─(external bridge)─▶ the internet, allow-listed names only
+                                      │   │
+                  worker network ─────┘   └───── sandbox network
+              (internal, no host address)     (internal, no host address)
+                worker   socket guard           the task sandboxes (and no one else)
+                  │          │ holds /var/run/docker.sock
+                  └─ DOCKER_HOST=tcp://rovara-sock:2375
+```
+
+- **Two internal networks.** `--internal` removes the route out, and `com.docker.network.bridge.inhibit_ipv4` removes the bridge's
+  own address. Without that option a container on an internal network still reaches every service the host (or, on Docker Desktop
+  and Colima, the VM) listens on at a wildcard address, through the bridge's gateway address; we saw the VM's sshd answer from an
+  internal network. With it, a container reaches only the containers on its own network. Your computer's loopback, your LAN, the
+  cloud metadata address and the other workers' networks have no path at all. This needs Docker 23 or newer; an older daemon makes
+  a start fail rather than start unwalled. A start also checks a network of that name is as made and replaces it if not.
+- **The gateway** (`isolation/egress-gateway-source.ts`, one per machine) is the way out. It is the name server of both networks and
+  answers only the allowed names (the default list of a cloud install, `DEFAULT_AGENT_ALLOW_DOMAINS`, without the cloud network's
+  own names, plus `allowedDomains` you pass); every other name is NXDOMAIN, as the cloud's DNS firewall does. Port 443 is forwarded by the
+  server name in the TLS hello and port 80 by each request's `Host`; the gateway resolves the name itself and connects only to a public
+  address (no loopback, private, link-local, shared, metadata, multicast or reserved address; one bad answer refuses the name), so DNS
+  rebinding and an address in a hello do nothing. Other ports (ssh, databases) do not leave. A wildcard entry covers subdomains at
+  any depth and not the bare domain. As in the cloud, an allowed name is allowed for everything behind it: `*.amazonaws.com` includes
+  anyone's bucket, `github.com` includes anyone's repository, and a CDN can host a different site on the same address as an allowed one.
+- **The socket guard** (`isolation/docker-socket-guard-source.ts`, one per machine) is the only container that holds the socket. It lets
+  the worker create, start, stop, kill, restart, inspect, read the logs of, run commands in (as the sandbox user, never privileged) and
+  remove its own sandboxes, and inspect its own image and sandbox network. It never forwards what the worker sent: it checks every
+  field and builds the body it passes on from nothing, under Docker's exact field names (Docker's JSON decoder ignores case and lets
+  a later key win, so a name that is not exactly one the guard knows is refused). A sandbox is the worker's image, user 1000, the
+  workspace as the only mount (plus tmpfs masks inside it, never executable), the sandbox network and name server, with
+  `CapDrop: ["ALL"]`, no-new-privileges, no privileged mode and a process and memory limit forced on it (4096 and 4 GiB when the
+  worker names none), and the guard's own labels; "own" is a label the guard puts on every container it creates, which the worker
+  cannot set or remove. Host namespaces, devices, ports, links, added hosts, sysctls and every other setting are refused. A command's
+  input and output travel over an upgraded connection; the guard reads the start body itself, sends the daemon a request of its own
+  making and passes bytes on only after the daemon has answered `101`, so nothing a worker pipelines behind a start ever reaches the
+  daemon. Creates are made one at a time, so the limit of 16 sandboxes holds. Everything else is refused: other containers (yours
+  included), images, pulls, builds, volumes, networks, events, info, prune, copy. So a project's devcontainer, test services and the
+  setup run (which need those) do not work locally yet.
+- **The worker never sees the socket**, so `~/.rovara`, `~/.ssh` and the rest of your home folder are not one `docker run -v` away. The
+  worker's `sweepWorkspaceContainers` (which removes every other container before a push) also finds no socket and skips; with the raw
+  socket on a daemon you share with your own containers it would have removed all of them.
+
+What is still reachable, on purpose or not: the internet by allowed name (above); on Linux the gateway, which has an ordinary bridge to
+reach the internet, sits on a bridge whose gateway address is the host, so a gateway bug could reach host services bound to a wildcard
+address (the gateway is about 450 lines, runs as an unprivileged user with no capability, a read-only root, IP forwarding off and a 512 MiB limit, and
+each of its services answers only peers of the one network it was opened for);
+the Docker daemon itself acts on the guard's requests, so a daemon bug is still a bug; and anything an allowed site serves.
+
+#### The callback listener
+
+A worker reports back to the broker (`/v1/internal/workspaces/<id>/operations/<id>/...`). It does not call the owner's server. The
+broker serves a second listener (`callback-server.ts`) that answers only `POST /v1/internal/...` for `Host: host.docker.internal:<port>`
+and never a browser; the worker's own gateway relays to it, and only the paths the worker calls and only for the worker's own workspace
+id. On macOS and Windows (Docker Desktop, Colima) the listener is on `127.0.0.1`: Docker carries `host.docker.internal` to the computer's
+loopback, and only the gateway (on an ordinary bridge, never the worker or a sandbox) can use it. On Linux `host.docker.internal` is the
+bridge's address, where a loopback listener is not reachable, so the broker also serves a Unix socket in the 0700 `~/.rovara/run`
+folder that is mounted read-only into the gateway; nothing listens on any network address and the broker is not open to the LAN. The
+gateway tries the socket first and the loopback port second.
 
 - `start` is idempotent on the key and wakes a stopped container. It refuses an image reference that could be a Docker flag, a key
   or environment name that is not plain, and more than 4 running workers (`maxConcurrentMachines`).
 - The environment goes in a `0600` file passed with `--env-file`, deleted right after `docker create` (a crash's leftovers are swept
   after a minute); it is never in the argument list. A spec cannot override the names the worker sets itself
-  (`AGENTX_WORKSPACE_ID`, `AGENTX_INVOKE_PUBLIC_KEY`, `AGENTX_CONTROL_PLANE_URL`, `AGENTX_TASK_SHELL`, `PATH`, `HOME`, ...) or use
-  `NODE_*`, `LD_*`, `DYLD_*` or `DOCKER_*` names (the worker holds the socket), and values with line breaks are refused. Labels
+  (`AGENTX_WORKSPACE_ID`, `AGENTX_INVOKE_PUBLIC_KEY`, `AGENTX_CONTROL_PLANE_URL`, `AGENTX_SANDBOX_NETWORK`, `AGENTX_TASK_SHELL`, `PATH`, `HOME`, ...) or use
+  `NODE_*`, `LD_*`, `DYLD_*` or `DOCKER_*` names (they decide how the worker loads code and where its Docker calls go), and values with line breaks are refused. Labels
   cannot use the `rovara.`, `agentx.` or `com.docker.` prefixes. The `docker` program itself sees only PATH, HOME, DOCKER_*, XDG_*,
   SSH_AUTH_SOCK, not your keys.
-- Each container carries the state folder it belongs to, a digest of its image, environment and callback address, and a random session
-  generation. Starting a key whose container has a different digest (a restart of `rovara up` on a new port, a new image) removes and
-  re-creates it, keeping the workspace folder, so callbacks never go to an old address and a token for an earlier container is
-  refused. The running workers of another state folder are never counted or stopped.
+- Each container carries the state folder it belongs to, a digest of its image, environment, website list and callback port, and (the
+  worker) a random session generation. Starting a key whose digest differs (a restart of `rovara up` on a new port, a new image) removes
+  the worker, its gateway and its guard and makes them again, keeping the workspace folder, so callbacks never go to an old address and a
+  token for an earlier container is refused. A stopped machine is woken only when its helpers are as made and the gateway came back on
+  the addresses the worker and guard were given; otherwise it is rebuilt. The running workers of another state folder are never counted
+  or stopped. A start that fails halfway removes what it made.
 - Starts are serialized in this process, and waking a stopped worker obeys the same limit as a new one.
 - `health` reads `docker inspect` and the worker's `/ping`: `starting` until it answers (up to 2 minutes), then `unhealthy`; `ready`
   or `busy` by its active count; `stopped` after a clean stop; `unhealthy` after a crash exit; `terminated` when the container is gone.
 - `deliver` refuses a job for another workspace than the machine's, a job over 1 MiB, and a machine that is not ready; it maps the
   worker's answers to `unauthorized`, `rejected`, `unavailable`.
-- `stop` keeps the container and the workspace; `terminate` removes the container, then its task sandboxes (found by the workspace
-  label), then the workspace folder, and stops with an error, keeping the folder, if Docker cannot confirm either removal. On a Linux
+- `stop` keeps the containers, networks and workspace; `terminate` removes the worker, gateway and guard, then its task sandboxes (found
+  by the guard's owner label), its three networks, then the workspace folder, and stops with an error, keeping the folder, if Docker cannot confirm either removal. On a Linux
   host whose user is not 1000 the folder's files belong to the worker's user; removing them fails with a message and they must be
   removed by hand.
 - `rovara up` stops the running workers on Ctrl-C and keeps their workspaces.
@@ -148,8 +203,9 @@ you start with `rovara up --this-machine`; even then it is not built, and every 
 ## Not in this lane
 
 See the report of lane L4 for the list with file and line. In short: how the model key reaches the worker (the adapter takes a
-non-secret `environment` only), the broker's callback listener (workers call `http://host.docker.internal:<port>`, which a loopback
-bind does not serve on Linux), the published worker image, the SQLite store and queue, and the task flow and pages.
+non-secret `environment` only), the published worker image, the SQLite store and queue, and the task flow and pages. Devcontainers,
+test services and the setup run need Docker calls the guard refuses; they are not available locally until each is given a place in
+the guard's rules.
 
 ## Tests
 
@@ -158,3 +214,9 @@ bind does not serve on Linux), the published worker image, the SQLite store and 
 - `tests/integration/local-docker-worker-machines.test.ts`: the same conformance suite against real Docker and a real worker image.
   `ROVARA_LOCAL_DOCKER_IMAGE=<image> vitest run tests/integration/local-docker-worker-machines.test.ts`. It is skipped without
   Docker or the variable, and removes every container and folder it makes.
+- `tests/unit/local-isolation.test.ts`: the allow-list, and the gateway and the guard programs driven as libraries (the same text that
+  runs in the containers).
+- `tests/integration/local-sandbox-isolation.test.ts` (same variable, and an image with `node`, `curl` and `docker`): a malicious
+  repository's view. From inside a sandbox, and inside the worker, it tries your loopback and LAN services, the broker, another
+  worker, the metadata address, and every way to ask Docker for more than a sandbox, and checks each is refused, and that allowed sites,
+  the worker's callbacks and its own sandboxes work.

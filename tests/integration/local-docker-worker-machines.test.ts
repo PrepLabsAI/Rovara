@@ -53,7 +53,7 @@ describe.skipIf(!enabled)("local docker worker machines (real Docker)", () => {
       const machines = new DockerWorkerMachines({
         image: IMAGE!,
         stateDirectory,
-        controlPlaneUrl: "http://host.docker.internal:9",
+        callback: () => ({ tcpPort: 9 }),
         signer: createEphemeralInvokeSigner(),
         docker,
         startupGraceMs: 120_000,

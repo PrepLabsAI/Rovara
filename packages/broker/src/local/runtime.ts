@@ -28,6 +28,7 @@ import { MemoryQueueService } from "../ports/memory-queue.js";
 import { OUTBOX_PENDING_INDEX } from "@agentx/contracts";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
 import { localSessionProofVerifier } from "../core/decisions/local-session.js";
+import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
@@ -106,6 +107,8 @@ export interface LocalRuntimeOptions {
   thisMachine?: boolean | undefined;
   docker?: DockerRunner;
   version: string;
+  /** Websites workers and their sandboxes may reach beyond the default list (docs/local.md, "What a worker can reach"). */
+  allowedDomains?: readonly string[] | undefined;
   /** Stop the running workers when the runtime stops. Default true. */
   stopWorkersOnClose?: boolean;
 }
@@ -177,12 +180,16 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   registry.register("storage", "memory", new MemoryDocumentStore({ indexes: [OUTBOX_PENDING_INDEX] }), { isDefault: true });
   registry.register("queue", "memory", new MemoryQueueService(), { isDefault: true });
 
-  // Worker machines. The port number is not known until the server listens, so the callback address is read when a machine starts.
-  let listeningPort = 0;
+  // Worker machines. The callback listener's port is not known until the handler exists, so it is read when a machine starts.
+  const callbackServer: { current?: CallbackServer } = {};
   const docker = new DockerWorkerMachines({
     image: options.workerImage,
     stateDirectory,
-    controlPlaneUrl: () => `http://host.docker.internal:${listeningPort}`,
+    callback: () => {
+      if (callbackServer.current === undefined) throw new Error("the callback listener is not running yet");
+      return { tcpPort: callbackServer.current.tcpPort, socketDirectory: callbackServer.current.socketDirectory };
+    },
+    ...(options.allowedDomains === undefined ? {} : { allowedDomains: options.allowedDomains }),
     signer: await loadInvokeSigner(stateDirectory),
     docker: options.docker ?? createDockerRunner(options.environment),
   });
@@ -237,7 +244,11 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   };
 
   const server: LocalHttpServer = await startLocalHttpServer({ handler, ...(options.port === undefined ? {} : { port: options.port }) });
-  listeningPort = server.port;
+  // Workers call back on a listener of their own, not on the owner's server (callback-server.ts).
+  callbackServer.current = await startCallbackServer({ handler, stateDirectory }).catch(async (error: unknown) => {
+    await server.close();
+    throw error;
+  });
 
   let stopped = false;
   return {
@@ -253,6 +264,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
       if (stopped) return;
       stopped = true;
       await server.close();
+      await callbackServer.current?.close();
       if (options.stopWorkersOnClose !== false) await docker.stopAll().catch(() => 0);
     },
   };
