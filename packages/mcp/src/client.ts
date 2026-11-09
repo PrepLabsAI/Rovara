@@ -10,7 +10,13 @@ import {
   DeveloperPullRequestResponseSchema,
   DeveloperTaskListResponseSchema,
   DeveloperTaskResponseSchema,
+  TASK_VIEW_HEADER,
+  TASK_VIEW_VERSION,
+  SessionListReaderSchema,
+  SessionMessageSchema,
+  SessionResponseReaderSchema,
   TaskPeopleChangeResponseSchema,
+  NeedsConfirmationSchema,
   TaskPeopleViewResponseSchema,
   type AgentXConfigurationConfirm,
   type ContinueDeveloperTaskRequest,
@@ -21,9 +27,8 @@ import {
   type DeveloperTaskListItem,
   type DeveloperTaskStatus,
   type DeveloperTaskClientView,
-  type DeveloperTaskView,
-  knownTaskView,
   type ShareDeveloperTaskRequest,
+  type RunInput,
   type StartDeveloperTaskRequest,
   type TaskPeopleChangeResult,
   type TaskPeopleRoleRequest,
@@ -34,12 +39,47 @@ import {
   type WorkflowFeedbackReviewRetryRequest,
   type WorkflowPublishRetryRequest,
   type WorkflowResolveFindingsInput,
+  forwardReader,
 } from "@agentx/contracts";
 import { z } from "zod";
 import { CLOSE_BUSY_STEP, NEXT_STEPS, SHARE_BUSY_STEP, START_BUSY_STEP, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
 
-/** An answer that carries a task, with the task read strictly (the tolerant reader's "unknown" markers are refused, as the strict schema refused them). */
-export type StrictTask<T extends { task: unknown }> = Omit<T, "task"> & { task: DeveloperTaskView };
+/** What the session routes answer, read leniently: a newer server's extra fields and values are kept, not refused. */
+const SessionMessageReaderSchema = forwardReader(SessionMessageSchema);
+export type SessionListRead = z.output<typeof SessionListReaderSchema>;
+export type SessionViewRead = z.output<typeof SessionResponseReaderSchema>["session"];
+/** Session ownership confirmations do not advertise an expiry on the wire. */
+export type TaskOwnershipResult = Exclude<TaskPeopleChangeResult, { status: "PENDING" }> | {
+  status: "PENDING"; requestId: string; confirmationUrl: string; expiresAt?: string;
+};
+export type SessionMessageRead = z.output<typeof SessionMessageReaderSchema>;
+
+/**
+ * A local review page's address carries a session token in its path (`/s/<43 characters>/...`). Whoever holds it can approve what the page shows, and the
+ * agent that reads a tool result runs on the same machine, so such an address is never passed on: a person asks for it in their own terminal.
+ */
+const PAGE_TOKEN_PATH = /^\/s\/[A-Za-z0-9_-]{43}(?:\/|$)/;
+
+/** The hosts of a Code install on this machine: its local pages are plain http on one of these, so a link there is not refused for its scheme. */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * A link the server sent, only when it is an https address (or an http address on this machine's loopback, where Code serves its local pages) on the
+ * control plane's own origin with no user name or password, printable ASCII, and at most 1,000 characters (so the tools' cleaning never cuts one in
+ * two). Anything else becomes "": the tools leave that field out.
+ */
+function pinnedLink(value: unknown, baseUrl: string): string {
+  if (typeof value !== "string" || value.length > 1_000 || !/^[\x21-\x7e]+$/.test(value)) return "";
+  try {
+    const url = new URL(value);
+    const base = new URL(baseUrl);
+    const schemeOk = url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname) && base.protocol === "http:" && LOOPBACK_HOSTS.has(base.hostname));
+    return schemeOk && !PAGE_TOKEN_PATH.test(url.pathname) && url.username === "" && url.password === "" && url.origin === base.origin ? value : "";
+  } catch {
+    return "";
+  }
+}
+
 export interface ControlPlaneSession { baseUrl: string; accessToken: string; signInCommand: string }
 
 /** For a read inside a wait: its own deadline, and the tool call's signal, so a cancel ends it at once. */
@@ -54,39 +94,80 @@ export interface ControlPlaneClient {
   /** The environment's agentx-configuration, read without a token. */
   configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string; confirm?: AgentXConfigurationConfirm }>;
   projects(): Promise<DeveloperProjectsResponse>;
-  startTask(request: StartDeveloperTaskRequest): Promise<DeveloperTaskView>;
-  getTask(taskId: string, events: number, options?: CallOptions): Promise<DeveloperTaskView>;
+  startTask(request: StartDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
+  getTask(taskId: string, events: number, options?: CallOptions): Promise<DeveloperTaskClientView>;
   /** PLANFULLDOC: one stored version of the task's plan, whole (the latest when `version` is left out). */
   getTaskPlan(taskId: string, query: { document?: "requirements" | "design" | "plan"; version?: number }): Promise<TaskPlanView>;
   listTasks(query: { project?: string; status?: DeveloperTaskStatus; limit: number }): Promise<DeveloperTaskListItem[]>;
-  continueTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
-  decideWorkflowTask(taskId: string, request: WorkflowDecisionRequest): Promise<DeveloperTaskView>;
-  startWorkflowReviewTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
-  retryWorkflowTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
+  continueTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
+  decideWorkflowTask(taskId: string, request: WorkflowDecisionRequest): Promise<DeveloperTaskClientView>;
+  startWorkflowReviewTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
+  retryWorkflowTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
   /** Task 16: sends blocked work back to coding with the problems found; expectedRevision is required. */
-  sendWorkflowBack(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
+  sendWorkflowBack(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
   /** Accepts (with a reason) or sends to coding each blocking review finding; expectedRevision and candidateDigest are required. */
-  resolveWorkflowFindings(taskId: string, request: WorkflowResolveFindingsInput): Promise<DeveloperTaskView>;
+  resolveWorkflowFindings(taskId: string, request: WorkflowResolveFindingsInput): Promise<DeveloperTaskClientView>;
   /** Task 12/16: asks AgentX to open the workflow's draft pull request again. */
-  retryWorkflowPublish(taskId: string, request: WorkflowPublishRetryRequest): Promise<DeveloperTaskView>;
+  retryWorkflowPublish(taskId: string, request: WorkflowPublishRetryRequest): Promise<DeveloperTaskClientView>;
   /** After an approved PR feedback fix changed nothing: keep the pull request as it is and wait for its merge again. */
-  keepWorkflowPullRequests(taskId: string, request: WorkflowPublishRetryRequest): Promise<DeveloperTaskView>;
+  keepWorkflowPullRequests(taskId: string, request: WorkflowPublishRetryRequest): Promise<DeveloperTaskClientView>;
   /** The pending PR feedback proposal, as the feedback page shows it (GitHub and reviewer text: untrusted data). */
   getWorkflowFeedback(taskId: string): Promise<Record<string, unknown>>;
   /** The owner's decision on the pending PR feedback proposal, the same transition the Slack buttons make. */
-  decideWorkflowFeedback(taskId: string, request: WorkflowFeedbackFindingsDecisionRequest): Promise<DeveloperTaskView>;
+  decideWorkflowFeedback(taskId: string, request: WorkflowFeedbackFindingsDecisionRequest): Promise<DeveloperTaskClientView>;
   /** The owner's Retry review of a PR feedback review that could not finish. */
-  retryWorkflowFeedbackReview(taskId: string, request: WorkflowFeedbackReviewRetryRequest): Promise<{ task: DeveloperTaskView; started: boolean }>;
-  cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskView>;
-  closeTask(taskId: string, requestId: string, discardUnpublished?: boolean): Promise<StrictTask<DeveloperCloseResponse>>;
-  openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<StrictTask<DeveloperPullRequestResponse>>;
+  retryWorkflowFeedbackReview(taskId: string, request: WorkflowFeedbackReviewRetryRequest): Promise<{ task: DeveloperTaskClientView; started: boolean }>;
+  cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskClientView>;
+  closeTask(taskId: string, requestId: string, discardUnpublished?: boolean): Promise<DeveloperCloseResponse>;
+  openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<DeveloperPullRequestResponse>;
   /** Spec 025 FR-030: shares the task, or changes a shared task's mode (API 1.2). */
-  shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskView>;
+  shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
   getTaskPeople(taskId: string): Promise<TaskPeopleView>;
   getTaskPeopleRequest(taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
   setTaskPerson(taskId: string, request: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
-  takeTaskOwnership(taskId: string, request: TaskPeopleTakeOwnershipRequest): Promise<TaskPeopleChangeResult>;
+  takeTaskOwnership(taskId: string, request: TaskPeopleTakeOwnershipRequest): Promise<TaskOwnershipResult>;
+  /** Plan 3 Task 35a: the agents the person can see, or those that work on a project. */
+  listAgents(query: { project?: string }): Promise<AgentSummary[]>;
+  /** Plan 3 Task 35a: starts a run of an agent on a project; the run is a task. */
+  runAgent(agentId: string, request: { requestId: string; project: string; version?: number | "draft"; input: RunInput }): Promise<DeveloperTaskClientView>;
+  /**
+   * Plan 3 Task 35a: the approvals that wait for the person, one with its full arguments, and its confirmation page's link (ticketed when they
+   * may decide it). There is no call that decides one: a person decides on the page (R3-4, R66).
+   */
+  listApprovals(): Promise<ApprovalSummary[]>;
+  getApproval(approvalId: string): Promise<ApprovalSummary>;
+  approvalConfirmLink(approvalId: string): Promise<{ confirmUrl: string; ticketed: boolean }>;
+  /**
+   * Plan 5 Task 23: sessions. Exactly one of owner, shared and project names the list. There is no call here that takes a session over, retries it or
+   * shares it: a person does those on the CLI or in a browser.
+   */
+  listSessions(query: { owner?: "me"; shared?: "me"; project?: string; status?: "open" | "ended"; cursor?: string; limit?: number }): Promise<SessionListRead>;
+  getSession(sessionId: string): Promise<SessionViewRead>;
+  commentOnSession(sessionId: string, request: { requestId: string; text: string }): Promise<SessionMessageRead>;
+  /** A message to the session's agent; the caller needs "can use". */
+  tellSessionAgent(sessionId: string, request: { requestId: string; text: string }): Promise<SessionMessageRead>;
+  /** `nothingRunning` is the server's words when the stop found nothing to stop (so the tool never says "Stop requested"). */
+  stopSession(sessionId: string, requestId: string): Promise<SessionViewRead & { nothingRunning?: string }>;
+  /** Rovara Code (Plan 6 Task 5): answers the questions a task waits on, in one call (every question needs an answer). The caller needs "can use" on the session. */
+  answerTaskQuestions(sessionId: string, request: { requestId: string; round: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }): Promise<SessionViewRead>;
 }
+
+/** An agent as the agent routes list it; the tool reads only the fields it shows. */
+const AgentSummarySchema = z.object({
+  agentId: z.string(), name: z.string(), description: z.string().optional(), builtin: z.boolean(), status: z.string(), access: z.string(),
+  currentVersion: z.number().optional(), pinnedVersion: z.number().optional(), disabled: z.boolean().optional(),
+}).passthrough();
+export type AgentSummary = z.infer<typeof AgentSummarySchema>;
+/** An approval as the approval routes show it; `arguments` only when one approval is read. */
+const ApprovalSummarySchema = z.object({
+  approvalId: z.string(), kind: z.string(), status: z.string(), confirmUrl: z.string(), summary: z.string().optional(), prompt: z.string().optional(),
+  changes: z.array(z.string()).optional(), project: z.string().optional(), connector: z.string().optional(), tool: z.string().optional(), scope: z.string().optional(), repository: z.string().optional(),
+  expiresAt: z.string().optional(), arguments: z.unknown().optional(),
+}).passthrough();
+export type ApprovalSummary = z.infer<typeof ApprovalSummarySchema>;
+
+/** The answer to a run whose version waits for the agent's owner (`202 NEEDS_OWNER_APPROVAL`): where the owner confirms it. */
+const OwnerApprovalWaitSchema = z.object({ status: z.literal("NEEDS_OWNER_APPROVAL"), confirmUrl: z.string(), changes: z.array(z.string()) });
 
 /** Spec 025 A1: adminApiVersion is absent from a control plane from before 25d. */
 /** Spec 025 E16 (C22): confirm is absent from a control plane from before 25e. */
@@ -185,7 +266,7 @@ export function httpControlPlaneClient(options: {
     };
     for (let attempt = 1; ; attempt += 1) {
       if (isCancelled()) throw cancelled();
-      const headers: Record<string, string> = { "x-agentx-trace-id": options.traceId?.() ?? randomUUID() };
+      const headers: Record<string, string> = { "x-agentx-trace-id": options.traceId?.() ?? randomUUID(), [TASK_VIEW_HEADER]: TASK_VIEW_VERSION };
       if (authorized) headers.authorization = `Bearer ${current.accessToken}`;
       if (body !== undefined) headers["content-type"] = "application/json";
       // Each try gets what is left of the deadline, at most 30 seconds, to answer in full.
@@ -245,14 +326,13 @@ export function httpControlPlaneClient(options: {
     }
   }
 
-  // The contracts now read a task tolerantly (a stage or outcome a newer server added reads as "unknown"); this client keeps its strict view and refuses such an answer
-  // exactly as the strict schema did before (the same ToolError).
-  const task = (response: { task: DeveloperTaskClientView }): DeveloperTaskView => {
-    const known = knownTaskView(response.task);
-    if (known === undefined) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", UNREADABLE, NEXT_STEPS.UPGRADE_REQUIRED);
-    return known;
+  const task = (response: { task: DeveloperTaskClientView }) => response.task;
+  /** A session view with its own link and its decision links kept only when they are the control plane's. */
+  const pinned = async (view: SessionViewRead): Promise<SessionViewRead> => {
+    const { baseUrl } = await session();
+    return { ...view, link: pinnedLink(view.link, baseUrl), approvals: view.approvals.map((approval) => ({ ...approval, confirmUrl: pinnedLink(approval.confirmUrl, baseUrl) })) };
   };
-  const withStrictTask = <T extends { task: DeveloperTaskClientView }>(answer: T): StrictTask<T> => ({ ...answer, task: task(answer) });
+  const sessionPath = (sessionId: string, rest = "") => `/v1/app/sessions/${encodeURIComponent(sessionId)}${rest}`;
   const path = (taskId: string, rest = "") => `/v1/dev/tasks/${encodeURIComponent(taskId)}${rest}`;
   return {
     configuration: async () => {
@@ -291,15 +371,50 @@ export function httpControlPlaneClient(options: {
     decideWorkflowFeedback: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/feedback-decision"), request)),
     retryWorkflowFeedbackReview: async (taskId, request) => {
       const answer = await call(DeveloperTaskResponseSchema.extend({ started: z.boolean() }), "POST", path(taskId, "/workflow/feedback-retry"), request);
-      return { task: task(answer), started: answer.started };
+      return { task: answer.task, started: answer.started };
     },
     cancelTask: async (taskId, requestId) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/cancel"), { requestId })),
-    closeTask: async (taskId, requestId, discardUnpublished = false) => withStrictTask(await call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP })),
-    openPullRequest: async (taskId, request) => withStrictTask(await call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request)),
+    closeTask: (taskId, requestId, discardUnpublished = false) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP }),
+    openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
     getTaskPeople: async (taskId) => (await call(TaskPeopleViewResponseSchema, "GET", path(taskId, "/people"))).view,
     getTaskPeopleRequest: async (taskId, requestId) => (await call(TaskPeopleChangeResponseSchema, "GET", path(taskId, `/people/requests/${encodeURIComponent(requestId)}`))).change,
     setTaskPerson: async (taskId, request) => (await call(TaskPeopleChangeResponseSchema, "POST", path(taskId, "/people/role"), request)).change,
-    takeTaskOwnership: async (taskId, request) => (await call(TaskPeopleChangeResponseSchema, "POST", path(taskId, "/people/take-ownership"), request)).change,
+    takeTaskOwnership: async (taskId, request) => {
+      const answer = await call(z.union([TaskPeopleChangeResponseSchema, NeedsConfirmationSchema.extend({ requestId: z.string().optional() })]), "POST", path(taskId, "/people/take-ownership"), request);
+      return "change" in answer ? answer.change : { status: "PENDING", requestId: request.requestId, confirmationUrl: answer.confirmUrl };
+    },
+    listAgents: async (query) => (await call(z.object({ agents: z.array(AgentSummarySchema) }), "GET", `/v1/app/agents${query.project === undefined ? "" : `?project=${encodeURIComponent(query.project)}`}`)).agents,
+    runAgent: async (agentId, request) => {
+      const answer = await call(z.union([DeveloperTaskResponseSchema, OwnerApprovalWaitSchema]), "POST", `/v1/app/agents/${encodeURIComponent(agentId)}/runs`, request, true, { busyStep: START_BUSY_STEP });
+      if ("status" in answer) {
+        // Owner decision 2026-10-22: a version less safe than the one that runs now waits for the agent's owner; this is not a started run.
+        throw new ToolError("OWNER_APPROVAL_NEEDED", `That version of the agent is less safe than the one that runs now, so the agent's owner has to OK this run first. Nothing started. Give this link to the owner, who approves it signed in: ${plainText(answer.confirmUrl, "")}${answer.changes.length === 0 ? "" : ` (${answer.changes.map((change) => plainText(change, "")).join("; ")})`}`);
+      }
+      return task(answer);
+    },
+    listApprovals: async () => (await call(z.object({ approvals: z.array(ApprovalSummarySchema) }), "GET", "/v1/app/approvals?status=PENDING")).approvals,
+    getApproval: async (approvalId) => (await call(z.object({ approval: ApprovalSummarySchema }), "GET", `/v1/app/approvals/${encodeURIComponent(approvalId)}`)).approval,
+    // A POST without a body: repeatable() keeps it to one try, so a ticket is minted at most once per call.
+    listSessions: (query) => {
+      const search = new URLSearchParams();
+      if (query.owner !== undefined) search.set("owner", query.owner);
+      if (query.shared !== undefined) search.set("shared", query.shared);
+      if (query.project !== undefined) search.set("project", query.project);
+      if (query.status !== undefined) search.set("status", query.status);
+      if (query.cursor !== undefined) search.set("cursor", query.cursor);
+      if (query.limit !== undefined) search.set("limit", String(query.limit));
+      return call(SessionListReaderSchema, "GET", `/v1/app/sessions?${search.toString()}`);
+    },
+    getSession: async (sessionId) => pinned((await call(SessionResponseReaderSchema, "GET", sessionPath(sessionId))).session),
+    commentOnSession: (sessionId, request) => call(SessionMessageReaderSchema, "POST", sessionPath(sessionId, "/messages"), { requestId: request.requestId, kind: "comment", text: request.text }),
+    tellSessionAgent: (sessionId, request) => call(SessionMessageReaderSchema, "POST", sessionPath(sessionId, "/messages"), { requestId: request.requestId, kind: "steer", text: request.text }),
+    stopSession: async (sessionId, requestId) => {
+      const answer = await call(SessionResponseReaderSchema, "POST", sessionPath(sessionId, "/stop"), { requestId });
+      const view = await pinned(answer.session);
+      return answer.stop === "NOTHING_RUNNING" ? { ...view, nothingRunning: answer.message ?? "Nothing was running to stop." } : view;
+    },
+    answerTaskQuestions: async (sessionId, request) => pinned((await call(SessionResponseReaderSchema, "POST", sessionPath(sessionId, "/answers"), request)).session),
+    approvalConfirmLink: (approvalId) => call(z.object({ confirmUrl: z.string(), ticketed: z.boolean() }), "POST", `/v1/app/approvals/${encodeURIComponent(approvalId)}/confirm-link`),
   };
 }

@@ -47,9 +47,11 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
     const { tools } = await (await connect({})).listTools();
     expect(tools.map((tool) => tool.name)).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
     expect(tools.map((tool) => tool.name)).toEqual([
-      "agentx_whoami", "agentx_list_projects", "agentx_start_task", "agentx_start_workflow", "agentx_get_task", "agentx_get_plan", "agentx_wait_for_task",
-      "agentx_list_tasks", "agentx_continue_task", "agentx_decide_workflow", "agentx_review_workflow_candidate", "agentx_retry_workflow",
+      "agentx_whoami", "agentx_list_projects", "agentx_start", "agentx_start_task", "agentx_start_workflow", "agentx_get_task", "agentx_get_plan", "agentx_wait_for_task",
+      "agentx_list_tasks", "agentx_continue_task", "agentx_decide_workflow", "agentx_answer_task_questions", "agentx_review_workflow_candidate", "agentx_retry_workflow",
       "agentx_send_workflow_back", "agentx_resolve_review_findings", "agentx_retry_workflow_publish", "agentx_keep_pull_request", "agentx_get_pr_feedback", "agentx_decide_pr_feedback", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request", "agentx_get_task_people", "agentx_get_task_people_request", "agentx_set_task_person", "agentx_take_task_ownership",
+      "agentx_list_agents", "agentx_run_agent", "agentx_list_approvals", "agentx_open_approval",
+      "agentx_list_sessions", "agentx_get_session", "agentx_comment_on_session", "agentx_tell_session_agent", "agentx_stop_session",
     ]);
     for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
     expect(JSON.stringify(tools)).not.toContain("\u2014");
@@ -193,6 +195,82 @@ describe("ordered work approval digest (Spec059)", () => {
       expected_revision: 3, decision: "REQUEST_CHANGES", reason: "Please revise", artifact_digest: "a".repeat(64) } });
     expect(requestChanges.isError).not.toBe(true);
     expect(decideWorkflowTask.mock.calls.at(-1)?.[1]).not.toHaveProperty("workBreakdownDigest");
+  });
+
+  it("says in its text, which is all some clients show the model, the digest, revision and work breakdown digest the decide tool needs (blind test 02)", async () => {
+    const graph = { schemaVersion: 1 as const, taskId: TASK, version: 1, items: [
+      { id: "11111111-1111-4111-8111-111111111111", title: "Implement", description: "Implement the change", repository: "demo", dependsOn: [] },
+    ] };
+    const workflow = { stage: "PLAN_REVIEW", state: "WAITING", revision: 7, path: "QUICK", reviewPhase: "PLAN", workBreakdownDigest: taskGraphDigest(graph),
+      artifacts: [{ id: "plan-artifact", type: "plan", version: 2, sha256: "b".repeat(64), producer: "agentx", objectKey: "plan.json", createdAt: "2026-10-12T12:00:00.000Z" }],
+      planContent: planAnswer(planDocument({ workBreakdown: graph })) } as never;
+    const mcp = await connect({ getTask: async () => view("SUCCEEDED", { workflow }) });
+    const observed = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(text(observed)).toContain(`artifact_digest ${"b".repeat(64)}`);
+    expect(text(observed)).toContain("expected_revision 7");
+    expect(text(observed)).toContain(`work_breakdown_digest ${taskGraphDigest(graph)}`);
+    // The structured answer already had them; the text and the structure agree.
+    expect(observed.structuredContent).toMatchObject({ workflow: { revision: 7, approval_document: { sha256: "b".repeat(64) }, work_breakdown_digest: taskGraphDigest(graph) } });
+  });
+
+  describe("QA6-12b: the plan-approval tool shows and takes the run limit it raises", () => {
+    const workflow = { stage: "PLAN_REVIEW", state: "WAITING", revision: 5, path: "QUICK", reviewPhase: "PLAN",
+      artifacts: [{ id: "plan-artifact", type: "plan", version: 1, sha256: "d".repeat(64), producer: "agentx", objectKey: "plan.json", createdAt: "2026-10-12T12:00:00.000Z" }] } as never;
+    const approve = { task_id: TASK, request_id: "33333333-3333-4333-8333-333333333336", expected_revision: 5, decision: "APPROVE", reason: "Approved", artifact_digest: "d".repeat(64) };
+    it("the tool's description and input name the amount to pass back", async () => {
+      const tool = DEVELOPER_TOOLS.find((candidate) => candidate.name === "agentx_decide_workflow")!;
+      expect(tool.description).toContain("This raises the run limit from $A to $B");
+      expect(tool.description).toContain("acknowledged_run_limit_usd");
+      expect(Object.keys(tool.inputSchema)).toContain("acknowledged_run_limit_usd");
+    });
+    it("the plan it returns says 'This raises the run limit from $A to $B' in its text and its structure when approving raises the limit, and nothing when it does not", async () => {
+      const raising = await (await connect({ getTask: async () => view("SUCCEEDED", { workflow, planRunLimit: { currentUsd: 2, proposedUsd: 12.5, raises: true } }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+      expect(text(raising)).toContain("This raises the run limit from $2 to $12.50.");
+      expect(text(raising)).toContain("acknowledged_run_limit_usd 12.5");
+      expect(raising.structuredContent).toMatchObject({ run_limit_change: { current_usd: 2, proposed_usd: 12.5, raises: true, text: "This raises the run limit from $2 to $12.50" } });
+      const flat = await (await connect({ getTask: async () => view("SUCCEEDED", { workflow, planRunLimit: { currentUsd: 12, proposedUsd: 12, raises: false } }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+      expect(text(flat)).not.toContain("raises the run limit");
+      expect(text(flat)).not.toContain("acknowledged_run_limit_usd");
+      expect(flat.structuredContent).toMatchObject({ run_limit_change: { raises: false } });
+      expect((flat.structuredContent as Record<string, unknown>).run_limit_change).not.toHaveProperty("text");
+      const none = await (await connect({ getTask: async () => view("SUCCEEDED", { workflow }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+      expect(none.structuredContent).not.toHaveProperty("run_limit_change");
+    });
+    it("passes the amount to the broker on APPROVE only; Request changes and an approval without it send none", async () => {
+      const decideWorkflowTask = vi.fn(async (...args: Parameters<ControlPlaneClient["decideWorkflowTask"]>) => { void args; return view("RUNNING", { workflow }); });
+      const mcp = await connect({ decideWorkflowTask });
+      expect((await mcp.callTool({ name: "agentx_decide_workflow", arguments: { ...approve, acknowledged_run_limit_usd: 12.5 } })).isError).not.toBe(true);
+      expect(decideWorkflowTask.mock.calls.at(-1)?.[1]).toMatchObject({ decision: "APPROVE", acknowledgedRunLimitUsd: 12.5 });
+      await mcp.callTool({ name: "agentx_decide_workflow", arguments: approve });
+      expect(decideWorkflowTask.mock.calls.at(-1)?.[1]).not.toHaveProperty("acknowledgedRunLimitUsd");
+      await mcp.callTool({ name: "agentx_decide_workflow", arguments: { ...approve, request_id: "33333333-3333-4333-8333-333333333337", decision: "REQUEST_CHANGES", acknowledged_run_limit_usd: 12.5 } });
+      expect(decideWorkflowTask.mock.calls.at(-1)?.[1]).not.toHaveProperty("acknowledgedRunLimitUsd");
+    });
+    it("a refusal for a missing or wrong amount reaches the model with the broker's words (the amounts)", async () => {
+      const words = "This raises the run limit from $2 to $12. Approve again with the run limit acknowledged as $12 (acknowledgedRunLimitUsd 12).";
+      const decideWorkflowTask = vi.fn(async () => { throw new ToolError("INVALID_REQUEST", words); });
+      const result = await (await connect({ decideWorkflowTask: decideWorkflowTask })).callTool({ name: "agentx_decide_workflow", arguments: approve });
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain("This raises the run limit from $2 to $12.");
+    });
+    it("a negative or absurd amount is not accepted as an argument", async () => {
+      const decideWorkflowTask = vi.fn(async () => view("RUNNING", { workflow }));
+      const mcp = await connect({ decideWorkflowTask: decideWorkflowTask });
+      for (const bad of [-1, 100_001, "12"]) expect((await mcp.callTool({ name: "agentx_decide_workflow", arguments: { ...approve, acknowledged_run_limit_usd: bad } })).isError, String(bad)).toBe(true);
+      expect(decideWorkflowTask).not.toHaveBeenCalled();
+    });
+  });
+
+  it("leaves the work breakdown digest out of the text when the plan has none, and shows nothing to approve once the gate is past", async () => {
+    const plain = { stage: "PLAN_REVIEW", state: "WAITING", revision: 4, path: "QUICK", reviewPhase: "PLAN",
+      artifacts: [{ id: "plan-artifact", type: "plan", version: 1, sha256: "c".repeat(64), producer: "agentx", objectKey: "plan.json", createdAt: "2026-10-12T12:00:00.000Z" }] } as never;
+    const waiting = text(await (await connect({ getTask: async () => view("SUCCEEDED", { workflow: plain }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }));
+    expect(waiting).toContain(`artifact_digest ${"c".repeat(64)}`);
+    expect(waiting).toContain("expected_revision 4");
+    expect(waiting).not.toContain("work_breakdown_digest c");
+    const running = { ...(plain as object), stage: "IMPLEMENT", state: "RUNNING", revision: 5 } as never;
+    const past = text(await (await connect({ getTask: async () => view("RUNNING", { workflow: running }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }));
+    expect(past).not.toContain("artifact_digest");
   });
 });
 
@@ -667,7 +745,9 @@ describe("the other task tools (FR-030)", () => {
       const cancelTask = vi.fn(async () => view(status));
       const result = await (await connect({ cancelTask })).callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
       expect(result.structuredContent).toMatchObject({ status });
-      expect(text(result), status).toContain(`The task had already finished as ${status}, so nothing was cancelled.`);
+      // UX2 slice 2: the status in words, never the raw code.
+      expect(text(result), status).toMatch(/The task had already finished \((Finished its run|Failed: the run stopped with an error)\), so nothing was cancelled\./u);
+      expect(text(result)).not.toContain(status);
     }
   });
 
@@ -746,7 +826,7 @@ describe("the error and progress caps (Task 15 fix round 1)", () => {
     const getTask = vi.fn().mockResolvedValueOnce(view("RUNNING", { events: [{ at: "t", kind: "tool", text: "p".repeat(5_000) }] })).mockResolvedValueOnce(view("SUCCEEDED"));
     const progress: Array<{ message?: string }> = [];
     await (await connect({ getTask })).callTool({ name: "agentx_wait_for_task", arguments: { task_id: TASK, wait_seconds: 30 } }, undefined, { onprogress: (update) => progress.push(update as { message?: string }) });
-    expect(progress[0]?.message?.startsWith("RUNNING: ppp")).toBe(true);
+    expect(progress[0]?.message?.startsWith("Working: ppp")).toBe(true);
     expect(progress[0]?.message?.length).toBe(300);
   });
 });
@@ -916,5 +996,71 @@ describe("agentx_get_plan (PLANFULLDOC)", () => {
     const result = await (await connect({ getTaskPlan })).callTool({ name: "agentx_get_plan", arguments: { task_id: TASK, document: "design" } });
     expect(getTaskPlan).toHaveBeenCalledWith(TASK, { document: "design" });
     expect(toolError(result)).toMatchObject({ code: "TASK_NOT_FOUND" });
+  });
+});
+
+describe("slice 5: one start, and the web link on every task", () => {
+  const SESSION = "ses_aaaaaaaaaaaaaaaaaaaa";
+  const counter = () => { let next = 0; return () => `00000000-0000-4000-8000-${String(++next).padStart(12, "0")}`; };
+  const linked = (status: DeveloperTaskView["status"]) => view(status, { sessionId: SESSION, sessionUrl: `https://app.rovara.test/s/${SESSION}` });
+
+  it("agentx_start starts a task, the plan-first workflow, or an agent run, and answers the session link", async () => {
+    const startTask = vi.fn(async () => linked("STARTING"));
+    const runAgent = vi.fn(async () => linked("STARTING"));
+    const mcp = await connect({ startTask, runAgent, getTask: async () => linked("STARTING") }, { newRequestId: counter() });
+    const plain = await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "Fix retry handling" } });
+    expect(startTask).toHaveBeenNthCalledWith(1, expect.not.objectContaining({ workflow: true }));
+    expect(plain.structuredContent).toMatchObject({ task_id: TASK, session: SESSION, session_url: `https://app.rovara.test/s/${SESSION}` });
+    expect(text(plain)).toContain(`Open it in Rovara: https://app.rovara.test/s/${SESSION}`);
+    await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "Full scope", workflow_path: "full" } });
+    expect(startTask).toHaveBeenNthCalledWith(2, expect.objectContaining({ workflow: true, workflowPath: "FULL" }));
+    await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "Look at the build", agent: { agent_id: "code-reviewer", version: "draft" }, run_agent: true } });
+    expect(runAgent).toHaveBeenCalledWith("code-reviewer", expect.objectContaining({ project: "payments", version: "draft", input: { text: "Look at the build" } }));
+  });
+
+  it("refuses an agent run with no agent, or with a task's options, without calling Rovara", async () => {
+    const runAgent = vi.fn();
+    const mcp = await connect({ runAgent });
+    expect((await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "x", run_agent: true } })).isError).toBe(true);
+    expect((await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "x", run_agent: true, agent: { agent_id: "a" }, workflow_path: "quick" } })).isError).toBe(true);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("is the same start under any of its names: a retry through an alias sends the same request id (review M9)", async () => {
+    const startTask = vi.fn(async () => linked("STARTING"));
+    const runAgent = vi.fn(async () => linked("STARTING"));
+    const mcp = await connect({ startTask, runAgent }, { newRequestId: counter() });
+    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix retry handling" } });
+    await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "Fix retry handling" } });
+    await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Plan it", workflow_path: "full" } });
+    await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "Plan it", workflow_path: "full" } });
+    const ids = (startTask.mock.calls as unknown as Array<[{ requestId: string }]>).map(([request]) => request.requestId);
+    expect(ids[1]).toBe(ids[0]);
+    expect(ids[3]).toBe(ids[2]);
+    expect(ids[2]).not.toBe(ids[0]);
+    await mcp.callTool({ name: "agentx_run_agent", arguments: { agent_id: "code-reviewer", project: "payments", input: "Look at the build" } });
+    await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "Look at the build", agent: { agent_id: "code-reviewer" }, run_agent: true } });
+    const runs = (runAgent.mock.calls as unknown as Array<[string, { requestId: string }]>).map(([, request]) => request.requestId);
+    expect(runs[1]).toBe(runs[0]);
+  });
+
+  it("keeps the old start tools as aliases that say so", async () => {
+    const { tools } = await (await connect({})).listTools();
+    for (const name of ["agentx_start_task", "agentx_start_workflow", "agentx_run_agent"]) expect(tools.find((tool) => tool.name === name)?.description, name).toMatch(/^Alias of agentx_start/u);
+  });
+
+  it("agentx_get_task and agentx_list_tasks give the session and its link; a link that is not plain https is left out", async () => {
+    const mcp = await connect({
+      getTask: async () => linked("RUNNING"),
+      listTasks: async () => [
+        { taskId: TASK, title: "A", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-09-27T12:00:00.000Z", updatedAt: "2026-09-27T12:00:00.000Z", sessionId: SESSION, sessionUrl: `https://app.rovara.test/s/${SESSION}` },
+        { taskId: TASK, title: "B", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-09-27T12:00:00.000Z", updatedAt: "2026-09-27T12:00:00.000Z", sessionId: SESSION, sessionUrl: "javascript:alert(1)" },
+      ] as never,
+    });
+    expect((await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } })).structuredContent).toMatchObject({ session: SESSION, session_url: `https://app.rovara.test/s/${SESSION}` });
+    const listed = (await mcp.callTool({ name: "agentx_list_tasks", arguments: {} })).structuredContent as { tasks: Array<Record<string, unknown>> };
+    expect(listed.tasks[0]).toMatchObject({ session: SESSION, session_url: `https://app.rovara.test/s/${SESSION}` });
+    expect(listed.tasks[1]).toMatchObject({ session: SESSION });
+    expect(listed.tasks[1]!["session_url"]).toBeUndefined();
   });
 });

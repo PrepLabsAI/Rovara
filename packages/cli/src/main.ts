@@ -45,6 +45,7 @@ import { chatGptConnect, chatGptConnectionText, chatGptDisconnect, chatGptDiscon
 import { developerLogin } from "./developer/login.js";
 import { fetchDeveloperWorkspaces, type DeveloperWorkspacesResult } from "./developer/workspaces.js";
 import { runWorkspacesCommand } from "./workspaces-ui/index.js";
+import { registerSessionCommands } from "./session/register.js";
 import { listAdminWorkspaces } from "./admin/workspaces.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstallDeps } from "./mcp/install.js";
@@ -1338,6 +1339,9 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     const stored = await storedAdminSignIn(name);
     return stored === undefined ? undefined : { env: name, expiresAt: stored.expiresAt };
   };
+
+  // Lane L8: `sessions` and `session *`.
+  registerSessionCommands(program, { developerSession, developerEnv, globalOptions, write: (text) => services.stdout.write(text) });
 
   const mcp = program
     .command("mcp")

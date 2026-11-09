@@ -4,6 +4,7 @@ export * from "./cli-distribution.js";
 export * from "./action-policy-node.js";
 export * from "./action-class.js";
 export * from "./comment-commands.js";
+export * from "./rovara-comment.js";
 export * from "./item-paths.js";
 export * from "./mcp-connector.js";
 export * from "./models-node.js";
