@@ -269,12 +269,14 @@ describe("the press", () => {
     const pr = world.prs[0]!;
     for (const proof of [
       world.proofFor(prepared, { token: "a-guess" }),
-      world.proofFor(prepared, { artifactDigest: "0".repeat(64) }),
       world.proofFor(prepared, { requestId: "55555555-5555-4555-8555-555555555555" }),
-      world.proofFor(prepared, { revision: 8 }),
       world.proofFor(prepared, { method: "browser-step-up" }),
     ]) {
       expect((await rejects(() => pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof }))).code).toBe("FORBIDDEN");
+    }
+    // A proof for other content or another revision of the task is "it changed": the person looks again and approves again.
+    for (const proof of [world.proofFor(prepared, { artifactDigest: "0".repeat(64) }), world.proofFor(prepared, { revision: 8 })]) {
+      expect(await rejects(() => pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof }))).toMatchObject({ code: "MERGE_NOT_READY", message: M.changedAfterConfirm });
     }
     expect(pr.model.getChangeRequest(String(pr.number)).state).toBe("open");
     expect(await world.auditRows()).toHaveLength(0);

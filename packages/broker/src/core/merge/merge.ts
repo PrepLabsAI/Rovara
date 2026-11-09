@@ -420,7 +420,11 @@ export async function pressMerge(
 ): Promise<MergePressResult> {
   const prepared = await prepareMerge(deps, input);
   const verdict = await deps.approvers.verify(prepared.request, input.proof);
-  if (!verdict.approved) throw agentXError("FORBIDDEN", NOT_APPROVED);
+  if (!verdict.approved) {
+    // A proof for what the person saw, when what would be merged is something else now, is "it changed", not "nobody approved": the person checks and approves again.
+    if (verdict.reason === "other_content" || verdict.reason === "other_revision") throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
+    throw agentXError("FORBIDDEN", NOT_APPROVED);
+  }
   const task = await deps.host.loadTask(input.taskId);
   if (task === undefined || task.orgId === undefined || !tracksMerge(task.workflow)) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   const merged = await mergeTask(deps, task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, prepared.subject, {
