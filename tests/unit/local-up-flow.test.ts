@@ -13,6 +13,7 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
 import { modelProxyWorkerUrl } from "../../packages/broker/src/local/docker-worker-machines.js";
+import { OPENS_PER_MINUTE } from "../../packages/broker/src/local/app/routes.js";
 import { assertGithubCloneAccess } from "../../packages/broker/src/local/github-access.js";
 import { artifactObjectKey } from "../../packages/broker/src/local/app/callbacks.js";
 import { DOCUMENT_CHANGED } from "../../packages/broker/src/local/app/documents.js";
@@ -565,6 +566,33 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const answered = await h.api(`/v1/app/sessions/${task.sessionId!}/answers`, { method: "POST", body: { requestId: "20202020-2020-4020-8020-202020202020", round: 1, answers: [{ questionId: "q1", optionId: "a" }] } });
     expect(answered.status).toBeGreaterThanOrEqual(400);
     expect(JSON.stringify(answered.body)).toContain("closed");
+  });
+
+  it("limits how often the browser is opened, and opens one page at a time (N6)", async () => {
+    const h = await launch();
+    const open = () => h.api("/v1/local/pages/open", { method: "POST", body: { path: "/" } });
+    for (let index = 0; index < OPENS_PER_MINUTE; index += 1) expect((await open()).status).toBe(200);
+    const sixth = await open();
+    expect(sixth.status).toBe(429);
+    expect(h.opened).toHaveLength(OPENS_PER_MINUTE);
+    expect(sixth.body.error?.code).toBe("TOO_MANY_REQUESTS");
+  });
+
+  it("opens one page at a time: a second request while the first is still starting the browser is refused (N6)", async () => {
+    let release!: () => void;
+    const slow = new Promise<void>((resolve) => { release = resolve; });
+    const root = await mkdtemp(join(tmpdir(), "rovara-l9-open-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    await mkdir(join(root, "state"), { recursive: true, mode: 0o700 });
+    const runtime = await startLocalRuntime({ stateDirectory: join(root, "state"), cwd: join(root, "p"), environment: {}, gh: async () => undefined, workerImage: "w", docker: new FakeDocker(), version: "1", timers: false, storage: "memory", openBrowser: () => slow });
+    cleanup.push(() => runtime.stop());
+    const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
+    const post = () => fetch(`${runtime.url}/v1/local/pages/open`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: "{}" });
+    const first = post();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect((await post()).status).toBe(429);
+    release();
+    expect((await first).status).toBe(200);
   });
 });
 

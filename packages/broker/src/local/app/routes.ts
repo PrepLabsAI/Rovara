@@ -16,6 +16,8 @@ import { createLocalSessionControl, createSessionControlHost } from "./host.js";
 import { listProjects, registerProject } from "./projects.js";
 import { developerTaskListItem, developerTaskView } from "./task-view.js";
 
+export const OPENS_PER_MINUTE = 5;
+const OPEN_WINDOW_MS = 60_000;
 export const APPROVE_ON_THE_PAGE = "A plan is approved on its local review page, by you. Run `rovara open <task>` to open it; an assistant cannot approve for you.";
 
 export interface OwnerRoutesDeps {
@@ -47,6 +49,8 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
     const task = await loadOwnedTask(flow.deps, caller, taskId);
     return developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs);
   };
+  const opens: number[] = [];
+  let opening = false;
   const host = createSessionControlHost(flow.deps);
   const sessionControl = createLocalSessionControl(flow.deps);
   /** A stop or a retry goes through the session control, so it is audited, written on the session's timeline and answered again (not run twice) for the same request id. */
@@ -82,10 +86,18 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         // The server opens the page in the owner's browser; the address (which carries the page session and can approve) never leaves this process.
         const body = bodyOf(request) as { path?: unknown };
         const target = typeof body.path === "string" && /^\/[A-Za-z0-9/_-]{0,200}$/u.test(body.path) ? body.path : "/";
+        // A few a minute, one at a time: a holder of the API token cannot open a pile of browser tabs and processes.
+        const now = (flow.deps.now?.() ?? new Date()).getTime();
+        while (opens.length > 0 && opens[0]! <= now - OPEN_WINDOW_MS) opens.shift();
+        if (opening || opens.length >= OPENS_PER_MINUTE) throw agentXError("TOO_MANY_REQUESTS", "Rovara is already opening pages for you. Wait a moment, then try again.");
+        opens.push(now);
+        opening = true;
         try {
           await deps.openPage(target);
         } catch {
           throw agentXError("RUNTIME_UNAVAILABLE", "Rovara could not open a browser. Open the review pages from the terminal where `rovara up` runs.");
+        } finally {
+          opening = false;
         }
         return json(200, { opened: true });
       }
