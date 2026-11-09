@@ -5,9 +5,10 @@ import { request as httpRequest } from "node:http";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AdapterRegistry, AuditEvent, AuditSink } from "@agentx/contracts";
 import { DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, type WorkerInvocation } from "@agentx/contracts";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { listSessions, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
+import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
@@ -33,10 +34,17 @@ const PROJECT = {
 interface TaskJson { taskId: string; sessionId?: string; workflow: { stage: string; state: string; planContent?: string; decisions: Array<{ decision: string }> } }
 interface ApiBody { task: TaskJson; tasks: TaskJson[]; url: string; projects: Array<{ name: string; latestRevision: number }>; error?: { code: string; message: string } }
 interface CallbackBody { accepted?: number; error?: { code: string } }
+/** An audit sink that keeps what it is told, as a transactional one would (the event is a put in the caller's transaction). */
+function recordingAudit(events: AuditEvent[]): AuditSink {
+  return {
+    stage(event) { events.push(event); return [{ kind: "put", item: { pk: `AUDIT#${event.companyId}`, sk: `EVENT#${event.eventId}`, entityType: "AUDIT", action: event.action, at: event.at }, condition: { op: "notExists", path: ["pk"] } }]; },
+    async record(event) { events.push(event); },
+  };
+}
 const GITHUB_PROJECT = { ...PROJECT, name: "ghproject", repositories: [{ ...PROJECT.repositories[0]!, url: "https://github.com/example/demo.git" }] };
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 
-async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv } = {}) {
+async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; environment?: NodeJS.ProcessEnv; audit?: AuditEvent[] } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-l9-"));
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -45,7 +53,8 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
   /** The addresses the server asked the browser to open: the only place a page address goes. */
   const opened: string[] = [];
   const runtime: LocalRuntime = await startLocalRuntime({
-    stateDirectory, cwd: join(root, "project"), environment: extra.environment ?? {}, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false, openBrowser: async (url) => { opened.push(url); }, ...(extra.storage === undefined ? {} : { storage: extra.storage }),
+    stateDirectory, cwd: join(root, "project"), environment: extra.environment ?? {}, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false,
+    ...(extra.audit === undefined ? {} : { registerAdapters: (registry: AdapterRegistry) => registry.register("audit-sink", "recording", recordingAudit(extra.audit!)) }), openBrowser: async (url) => { opened.push(url); }, ...(extra.storage === undefined ? {} : { storage: extra.storage }),
   });
   cleanup.push(() => runtime.stop());
   const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
@@ -426,8 +435,37 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     for (const url of ["http://github.com/a/b.git", "https://github.com.evil.example/a/b.git", "https://user:pw@github.com/a/b.git", "https://github.com:444/a/b.git", "https://GITHUB.COM.evil.example/a/b.git", "https://api.github.com/a/b.git"]) expect(assertGithubCloneAccessFor(url, "clone"), url).toBe(false);
     expect(assertGithubCloneAccessFor("https://github.com/a/b.git", "push")).toBe(false);
   });
+
+  it("stops and retries over /v1/dev/tasks through the session control: audited, on the timeline, and once per request id (M2)", async () => {
+    const audit: AuditEvent[] = [];
+    const h = await launch({ audit });
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const task = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "15151515-1515-4515-8515-151515151515", project: "payments", instructions: "x", workflow: true } })).body.task;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${task.taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: {} });
+    await h.nextJob(workspaceId, seen);
+    const before = audit.length;
+    // A request with no id is refused: a repeat could not be told from a new request.
+    expect((await h.api(`/v1/dev/tasks/${task.taskId}/cancel`, { method: "POST", body: {} })).status).toBe(400);
+    const stopId = "16161616-1616-4616-8616-161616161616";
+    expect((await h.api(`/v1/dev/tasks/${task.taskId}/cancel`, { method: "POST", body: { requestId: stopId } })).status).toBe(200);
+    expect(audit.length).toBeGreaterThan(before);
+    expect(audit.slice(before).map((event) => event.action).join(",")).toMatch(/session\./);
+    const events = await readSessionEvents(h.runtime.registry.require("storage"), IMPLICIT_COMPANY_ID, task.sessionId!);
+    expect(events.events.map((event) => event.type)).toContain("stopped");
+    // The retry runs the step once, however often the same request id is sent.
+    const retryId = "17171717-1717-4717-8717-171717171717";
+    for (let attempt = 0; attempt < 3; attempt += 1) expect((await h.api(`/v1/dev/tasks/${task.taskId}/workflow/retry`, { method: "POST", body: { requestId: retryId } })).status).toBe(200);
+    const next = await h.nextJob(workspaceId, seen);
+    expect(next).toMatchObject({ payload: { workflowMode: "UNDERSTAND" } });
+    await h.runtime.tick();
+    const operations = (await h.api(`/v1/dev/tasks/${task.taskId}`)).body.task as unknown as { workflow: { revision: number } };
+    expect(operations.workflow.revision).toBeGreaterThan(0);
+    expect(audit.filter((event) => event.action.startsWith("session.")).length).toBeGreaterThanOrEqual(2);
+  });
 });
 
 function assertGithubCloneAccessFor(url: string, access: "clone" | "push"): boolean {
-  try { assertGithubCloneAccess(url, access); return true; } catch { return false; }
+  try { assertGithubCloneAccess(url, access); return true; } catch { return false;  }
 }

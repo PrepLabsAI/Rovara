@@ -12,9 +12,8 @@ import { developerIdOf } from "../../core/sessions/create.js";
 import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
-import { createSessionControlHost } from "./host.js";
+import { createLocalSessionControl, createSessionControlHost } from "./host.js";
 import { listProjects, registerProject } from "./projects.js";
-import { retryBlockedStep } from "./retry.js";
 import { developerTaskListItem, developerTaskView } from "./task-view.js";
 
 export const APPROVE_ON_THE_PAGE = "A plan is approved on its local review page, by you. Run `rovara open <task>` to open it; an assistant cannot approve for you.";
@@ -48,7 +47,21 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
     const task = await loadOwnedTask(flow.deps, caller, taskId);
     return developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs);
   };
-  const control = createSessionControlHost(flow.deps);
+  const host = createSessionControlHost(flow.deps);
+  const sessionControl = createLocalSessionControl(flow.deps);
+  /** A stop or a retry goes through the session control, so it is audited, written on the session's timeline and answered again (not run twice) for the same request id. */
+  const controlled = async (caller: TaskCaller, taskId: string, action: "stop" | "retry", body: unknown): Promise<void> => {
+    const task = await loadOwnedTask(flow.deps, caller, taskId);
+    const requestId = (body as { requestId?: unknown } | null)?.requestId;
+    if (task.sessionId === undefined) {
+      // A task from before sessions has no session to record on: the direct call, as before.
+      await (action === "stop" ? host.cancelTask(taskId, "") : host.retryWorkflow(taskId, ""));
+      return;
+    }
+    if (typeof requestId !== "string") throw agentXError("CONFIG_INVALID", "requestId: name this request with a UUID, so a repeat does not run twice");
+    const result = await (action === "stop" ? sessionControl.stop(caller.principal, companyId, task.sessionId, { requestId }) : sessionControl.retry(caller.principal, companyId, task.sessionId, { requestId }));
+    if (result.status === "refused") throw agentXError(result.reason === "not_found" ? "NOT_FOUND" : result.reason === "forbidden" ? "FORBIDDEN" : "CONFIG_INVALID", result.message);
+  };
   return async (request, caller) => {
     const path = request.path.split("?")[0] ?? request.path;
     const isOurs = path === "/v1/dev/projects" || path === "/v1/admin/projects" || path === "/v1/dev/tasks" || TASK.test(path) || path === "/v1/local/pages/open";
@@ -110,13 +123,11 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
           return json(200, { task: await viewOf(caller, task.taskId), closed: true });
         }
         if (action === "cancel" && request.method === "POST") {
-          await loadOwnedTask(flow.deps, caller, taskId);
-          await control.cancelTask(taskId, "");
+          await controlled(caller, taskId, "stop", bodyOf(request));
           return json(200, { task: await viewOf(caller, taskId) });
         }
         if (action === "workflow/retry" && request.method === "POST") {
-          await loadOwnedTask(flow.deps, caller, taskId);
-          await retryBlockedStep(flow.deps, taskId);
+          await controlled(caller, taskId, "retry", bodyOf(request));
           return json(200, { task: await viewOf(caller, taskId) });
         }
         if (action === "workflow/decision" && request.method === "POST") {

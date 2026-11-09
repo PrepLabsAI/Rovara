@@ -1,6 +1,6 @@
 // Lane L9-wire: the task flow's side of a session's stop, retry and message (L6b's `SessionControlHost`). Each runs only after the sessions module checked who is asking.
 import { change, when } from "@agentx/contracts";
-import type { SessionControlHost } from "../../core/sessions/control.js";
+import { createSessionControl, type SessionControlHost } from "../../core/sessions/control.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { operationKey, workspaceKey } from "../../core/task-flow/keys.js";
 import { readTask } from "../../core/task-flow/reads.js";
@@ -65,3 +65,8 @@ export function createSessionControlHost(deps: TaskFlowDeps): SessionControlHost
   };
 }
 
+
+/** The session control (who may stop, retry or message; the request recorded once under its id, with the event and the audit step) over this install's flow. Every route that stops or retries uses this one. */
+export function createLocalSessionControl(deps: TaskFlowDeps) {
+  return createSessionControl({ store: deps.store, audit: deps.audit, host: createSessionControlHost(deps), now: deps.now ?? (() => new Date()) });
+}

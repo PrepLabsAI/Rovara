@@ -6,7 +6,7 @@ import {
   type AgentSessionRecord, type OrgId,
 } from "@agentx/contracts";
 import { AGENT_SESSION_CONTRACT_VERSION } from "@agentx/contracts";
-import { createSessionControl, type ControlResult } from "../../core/sessions/control.js";
+import type { ControlResult } from "../../core/sessions/control.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import { listSessions, sessionSnapshot } from "../../core/sessions/read.js";
 import { SessionStore } from "../../core/sessions/store.js";
@@ -18,7 +18,7 @@ import { readTask, taskViewOf } from "../../core/task-flow/reads.js";
 import { commitWorkflow, runDispatchRow } from "../../core/task-flow/stage-machine.js";
 import { iso } from "../../core/task-flow/support.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
-import { createSessionControlHost } from "./host.js";
+import { createLocalSessionControl } from "./host.js";
 import { developerTaskView } from "./task-view.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -46,10 +46,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
   const { flow } = deps;
   const store = flow.deps.store;
   const sessions = new SessionStore(store);
-  const control = createSessionControl({
-    store, audit: flow.deps.audit, host: createSessionControlHost(flow.deps), now: flow.deps.now ?? (() => new Date()),
-    // The sessions module checks the caller is the owner (a Code install has one); the identity adapter authenticated them before the route ran.
-  });
+  const control = createLocalSessionControl(flow.deps);
   const tile = (session: AgentSessionRecord): Record<string, unknown> => JSON.parse(JSON.stringify({
     contractVersion: AGENT_SESSION_CONTRACT_VERSION, sessionId: session.sessionId, kind: session.kind, title: session.title, project: session.project, agent: session.agent, owner: session.owner,
     where: session.where, level: "edit", revision: session.revision, summary: session.summary, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
