@@ -89,8 +89,7 @@ describe("the prepare payload", () => {
     expect(JSON.stringify(registries)).not.toContain("corp-pypi-reader");
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { project: PROJECT, repositoryGrant: "g", registries } }).success).toBe(true);
     expect(PrepareRegistriesSchema.safeParse([{ ...registries[0], credentialRef: "x" }]).success).toBe(false);
-    // Lane L1: the public worker does not implement this yet, so its advertised list lacks it; lane L5 flips this to toContain when it ports the feature.
-    expect(WORKER_INVOCATION_FEATURES).not.toContain(PREPARE_REGISTRIES_FEATURE);
+    expect(WORKER_INVOCATION_FEATURES).toContain(PREPARE_REGISTRIES_FEATURE);
   });
 });
 

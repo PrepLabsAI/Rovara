@@ -312,8 +312,7 @@ describe("the task invocation payload", () => {
 
   it("lists the three features", () => {
     expect([AGENT_STEP_FEATURE, AGENT_RUN_FEATURE, MODEL_ROUTE_FEATURE]).toEqual(["task.agentStep", "task.agentRun", "model.route"]);
-    // Lane L1: the public worker does not implement this yet, so its advertised list lacks it; lane L5 flips this to toContain when it ports the feature.
-    for (const feature of ["task.agentStep", "task.agentRun", "model.route"]) expect(WORKER_INVOCATION_FEATURES).not.toContain(feature);
+    for (const feature of ["task.agentStep", "task.agentRun", "model.route"]) expect(WORKER_INVOCATION_FEATURES).toContain(feature);
   });
 
   it("carries agentStep and modelRoute, and parses without them", () => {
