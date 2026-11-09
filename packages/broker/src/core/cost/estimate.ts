@@ -96,6 +96,8 @@ export interface RecordRunCostInput {
   costUsd: number;
   /** A task with a purpose (a setup draft, a diagnosis) never feeds the estimates. */
   purpose?: string | undefined;
+  /** The cost is a floor (a call had no price, or the money is not in dollars): the run is marked but never teaches the estimator, which would otherwise think runs cheap. */
+  partial?: true | undefined;
 }
 
 /**
@@ -109,7 +111,7 @@ export async function recordRunCost(deps: { store: Pick<DocumentStore, "transact
   const agentId = input.agentId ?? ROVARA_CODE_AGENT_ID;
   const mark: TransactItem = {
     kind: "update", key: taskKey, ops: [{ op: "set", path: ["runCostRecordedAt"], value: input.endedAt }],
-    condition: when.and(when.present(), when.notExists("runCostRecordedAt")),
+    condition: when.and(when.present(), when.eq("orgId", input.orgId), when.notExists("runCostRecordedAt")),
   };
   const item: TransactItem = {
     kind: "put",
@@ -120,10 +122,17 @@ export async function recordRunCost(deps: { store: Pick<DocumentStore, "transact
     },
     condition: when.absent(),
   };
-  const result = await deps.store.transact(input.costUsd > 0 ? [item, mark] : [mark]);
-  if (result.applied) return input.costUsd > 0 ? "recorded" : "skipped";
+  const feeds = input.costUsd > 0 && input.partial !== true;
+  const result = await deps.store.transact(feeds ? [item, mark] : [mark]);
+  if (result.applied) return feeds ? "recorded" : "skipped";
   // The mark is the claim: another end got there first when it is on the task now. Anything else (a task that does not exist, a lost race on the item) is for the next end to tell again.
   const fresh = await deps.store.get(taskKey);
   if (fresh?.["runCostRecordedAt"] !== undefined) return "already_recorded";
   throw new Error("the run's cost could not be recorded");
+}
+
+/** What to record for a run from the cost ledger's total: the dollars, and whether they are a floor (some call unpriced, or not in dollars). Undefined dollars (another currency) cannot feed an estimate in dollars. */
+export function runCostInputOf(cost: { micros: number; currency: string | undefined; unpricedEntries: number }): { costUsd: number; partial?: true } {
+  const inDollars = cost.currency === undefined || cost.currency === "USD";
+  return { costUsd: inDollars ? cost.micros / 1_000_000 : 0, ...(!inDollars || cost.unpricedEntries > 0 ? { partial: true as const } : {}) };
 }

@@ -25,7 +25,7 @@ function waiting(): WorkflowSnapshot {
   });
 }
 
-async function setup(risk: "low" | "medium" | "high") {
+async function setup(risk: "low" | "medium" | "high", options: { bound?: boolean } = {}) {
   const memory = new MemoryDocumentStore();
   const workflow = waiting();
   await memory.put({ item: { ...workflowTaskKey(TASK_ID), orgId: IMPLICIT_COMPANY_ID, project: "web", workflow: JSON.parse(JSON.stringify(workflow)) } });
@@ -33,10 +33,11 @@ async function setup(risk: "low" | "medium" | "high") {
   const gate = createDecisionGate({ store: memory, approvers, audit: createNoopAuditSink(), subjects: [createWorkflowDocumentSubject({ store: memory, riskOf: () => risk })], now: () => new Date(NOW) });
   const digest = waitingDocumentDigest(workflow)!;
   const item: DecisionItem = {
-    kind: "approve_plan", subjectId: TASK_ID, taskId: TASK_ID, project: "web", title: "Add retry", createdAt: "2026-11-09T10:00:00.000Z", contentVersion: digest, openPath: `/app/sessions/ses_${"a".repeat(20)}`,
+    kind: "approve_plan", subjectId: TASK_ID, taskId: TASK_ID, project: "web", title: "Add retry", createdAt: "2026-11-09T10:00:00.000Z", contentVersion: digest, binding: { revision: workflow.revision, artifactDigest: digest }, openPath: `/app/sessions/ses_${"a".repeat(20)}`,
     path: "quick", files: risk === "high" ? ["infra/main.tf"] : ["src/retry.ts"], claims: 2, untestedClaims: risk === "medium" ? 1 : 0,
   };
-  const sources: DecisionSources<ProvingCaller> = { list: async () => [item], locks: async () => ({}) };
+  const drawn: DecisionItem = options.bound === false ? { ...item, binding: undefined } : item;
+  const sources: DecisionSources<ProvingCaller> = { list: async () => [drawn], locks: async () => ({}) };
   const performer = createDecisionPerformer<ProvingCaller>({ approve_plan: workflowDocumentHandler(gate) });
   const store = documentDecisionStore({ store: memory, now: () => NOW });
   const deps = { sources, performer, store, now: () => NOW, highOnCard: new Set<string>(WORKFLOW_DOCUMENT_CARD_KINDS), evidenceFirstOnHigh: new Set<string>(WORKFLOW_DOCUMENT_CARD_KINDS) };
@@ -100,5 +101,19 @@ describe("a card's Approve goes through the approval gate", () => {
     const reply = await t.call(t.caller([{ method: LOCAL_SESSION_METHOD, token: SESSION }]), "POST", t.path("request-changes"), { requestId: randomUUID(), shownDigest, reason: "Use the other table." });
     expect(reply?.statusCode === 200 || reply === undefined).toBe(true);
     expect((await t.stored()).stage).toBe("PLAN");
+  });
+
+  it("a card drawn without its revision is refused, and a card drawn at an older revision of the same document is stale", async () => {
+    const unbound = await setup("low", { bound: false });
+    const digest = (await unbound.view()).digests[unbound.cardId]!;
+    await expect(unbound.call(unbound.caller([{ method: LOCAL_SESSION_METHOD, token: SESSION }]), "POST", unbound.path("approve"), { requestId: randomUUID(), shownDigest: digest })).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    expect((await unbound.stored()).stage).toBe("PLAN_REVIEW");
+    // The workflow moves on (same document, later revision) after the card was drawn at the earlier one.
+    const moved = await setup("low");
+    const shownDigest = (await moved.view()).digests[moved.cardId]!;
+    const later = JSON.parse(JSON.stringify(waiting())) as WorkflowSnapshot;
+    await moved.memory.put({ item: { ...workflowTaskKey(TASK_ID), orgId: IMPLICIT_COMPANY_ID, project: "web", workflow: JSON.parse(JSON.stringify({ ...later, revision: later.revision + 3 })) } });
+    await expect(moved.call(moved.caller([{ method: LOCAL_SESSION_METHOD, token: SESSION }]), "POST", moved.path("approve"), { requestId: randomUUID(), shownDigest })).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    expect((await moved.stored()).decisions).toHaveLength(0);
   });
 });

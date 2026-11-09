@@ -9,7 +9,7 @@ import {
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createNoopAuditSink, localOwnerPrincipal, type VerifiedComment } from "../../packages/broker/src/ports/policy-defaults.js";
-import { approvalProofMarkerKey, approvalRecordKey, createDecisionGate, type DecisionAttempt, type DecisionSubject } from "../../packages/broker/src/core/decisions/approval-gate.js";
+import { approvalBindingId, approvalProofMarkerKey, approvalRecordKey, createDecisionGate, type DecisionAttempt, type DecisionSubject } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;
@@ -33,6 +33,8 @@ function waiting(version = 1, sha = "b".repeat(64)): WorkflowSnapshot {
 }
 
 const R0 = waiting().revision;
+/** What a proof is bound to for the plan waiting at revision R0. */
+const binding = (revision = R0, digest = waitingDocumentDigest(waiting())!) => approvalBindingId(COMPANY, "workflow-document", TASK_ID, revision, digest);
 
 function world(options: { workflow?: WorkflowSnapshot; approvers?: Approvers; risk?: "low" | "medium" | "high"; audit?: AuditSink; companyOnTask?: string; requestedBy?: Principal; expiresAt?: string; comment?: (id: string) => VerifiedComment | undefined } = {}) {
   const store = new MemoryDocumentStore();
@@ -76,7 +78,7 @@ describe("the approval gate: a right approval", () => {
     expect(after.stage).toBe("IMPLEMENT");
     expect(after.decisions.at(-1)).toMatchObject({ requestId: request.requestId, decision: "APPROVE", actorId: OWNER_HEX });
     expect(await store.get(approvalRecordKey(COMPANY, request.requestId))).toMatchObject({ outcome: "approve", artifactDigest: request.seen.artifactDigest });
-    expect(await store.get(approvalProofMarkerKey(COMPANY, approvalProofKey({ method: LOCAL_SESSION_METHOD, token: SESSION, requestId: request.requestId })))).toBeDefined();
+    expect(await store.get(approvalProofMarkerKey(COMPANY, approvalProofKey({ method: LOCAL_SESSION_METHOD, token: SESSION, requestId: binding() })))).toBeDefined();
     expect(await store.get({ pk: `AUDIT#approval:${request.requestId}`, sk: "EVENT" })).toMatchObject({ action: "decision.approved", actor: OWNER.personId });
   });
 
@@ -205,8 +207,8 @@ describe("the approval gate: a stale revision or digest", () => {
     await ready;
     const racing: DecisionSubject = {
       ...subject,
-      async apply(loaded, request, approver, at) {
-        const applied = await subject.apply(loaded, request, approver, at);
+      async apply(loaded, request, approvers, at) {
+        const applied = await subject.apply(loaded, request, approvers, at);
         // Someone else changes the task after the read and before the commit.
         const revised = waiting(2, "f".repeat(64));
         await put({ ...revised, revision: revised.revision + 1 });
@@ -218,7 +220,7 @@ describe("the approval gate: a stale revision or digest", () => {
     expect(await gate.decide(request)).toMatchObject({ status: "refused", reason: "stale" });
     // Nothing of the lost decision is left: no record, no used proof.
     expect(await store.get(approvalRecordKey(COMPANY, request.requestId))).toBeUndefined();
-    expect(await store.get(approvalProofMarkerKey(COMPANY, approvalProofKey({ method: LOCAL_SESSION_METHOD, token: SESSION, requestId: request.requestId })))).toBeUndefined();
+    expect(await store.get(approvalProofMarkerKey(COMPANY, approvalProofKey({ method: LOCAL_SESSION_METHOD, token: SESSION, requestId: binding() })))).toBeUndefined();
     expect((await taskWorkflow(store)).decisions).toHaveLength(0);
   });
 
@@ -271,7 +273,7 @@ describe("the approval gate: replayed proofs and lost races", () => {
     await ready;
     const request = attempt();
     // Another process used this exact proof for this request: its marker exists, but no decision does (it died between the two writes of an earlier design; the gate writes them together).
-    await store.put({ item: { ...approvalProofMarkerKey(COMPANY, approvalProofKey({ method: LOCAL_SESSION_METHOD, token: SESSION, requestId: request.requestId })), entityType: "APPROVAL_PROOF_USED" } });
+    await store.put({ item: { ...approvalProofMarkerKey(COMPANY, approvalProofKey({ method: LOCAL_SESSION_METHOD, token: SESSION, requestId: binding() })), entityType: "APPROVAL_PROOF_USED" } });
     expect(await gate.decide(request)).toMatchObject({ status: "refused", reason: "proof_already_used" });
     expect((await taskWorkflow(store)).revision).toBe(R0);
   });
@@ -297,7 +299,8 @@ describe("the approval gate: replayed proofs and lost races", () => {
     const request = attempt();
     expect(await world2.decide(request)).toMatchObject({ status: "decided" });
     // The proof the gate built names the request, revision and digest of the stored state, not anything else.
-    expect(seen[0]!.proof).toMatchObject({ requestId: request.requestId, revision: R0, artifactDigest: request.seen.artifactDigest });
+    expect(seen[0]!.proof.requestId.startsWith(binding())).toBe(true);
+    expect(seen[0]!.proof).toMatchObject({ requestId: seen[0]!.request.requestId, revision: R0, artifactDigest: request.seen.artifactDigest });
     expect(seen[0]!.request).toMatchObject({ companyId: COMPANY, subject: { type: "task", id: TASK_ID }, revision: R0, artifactDigest: request.seen.artifactDigest });
     void gate;
   });
@@ -374,5 +377,79 @@ describe("the approval gate: a failing store never half-decides", () => {
     expect(await store.get(approvalRecordKey(COMPANY, request.requestId))).toBeUndefined();
     expect((await taskWorkflow(store)).revision).toBe(R0);
     void when;
+  });
+});
+
+describe("the approval gate: what the review of round 1 found", () => {
+  const FIRST = "11111111-1111-4111-8111-111111111111";
+  const SECOND = "22222222-2222-4222-8222-222222222222";
+  const permissive = (store: MemoryDocumentStore) => createWorkflowDocumentSubject({ store, riskOf: () => "low", actorFor: (approver, workflow) => ({ actorId: workflow.ownerId, role: "TASK_OWNER" as const, ...(approver.personId === "" ? {} : {}) }) });
+  const putTask = (store: MemoryDocumentStore, taskId: string) => store.put({ item: { ...workflowTaskKey(taskId), orgId: COMPANY, project: "web", workflow: JSON.parse(JSON.stringify({ ...waiting(), taskId })) } });
+
+  it("one comment is good for one decision anywhere: a fresh request id for another task or revision cannot reuse it", async () => {
+    const store = new MemoryDocumentStore();
+    await putTask(store, FIRST);
+    await putTask(store, SECOND);
+    const approvers = createLocalOwnerApprovers({ owner: OWNER, now: () => NOW, verifyComment: (id) => (id === COMMENT ? { author: COLLABORATOR, permission: "write", approves: true } : undefined) });
+    const gate = createDecisionGate({ store, approvers, audit: createNoopAuditSink(), subjects: [permissive(store)], now: () => NOW });
+    const workflowOf = async (id: string) => (await store.get(workflowTaskKey(id)))!["workflow"] as unknown as WorkflowSnapshot;
+    const comment = [{ method: CODE_HOST_COMMENT_METHOD, token: COMMENT }];
+    expect(await gate.decide(attempt({ subjectId: FIRST, workflow: await workflowOf(FIRST), credentials: comment }))).toMatchObject({ status: "decided" });
+    // The same comment, another task, a new request id.
+    expect(await gate.decide(attempt({ subjectId: SECOND, workflow: await workflowOf(SECOND), credentials: comment }))).toMatchObject({ status: "refused", reason: "proof_already_used" });
+    expect((await workflowOf(SECOND)).decisions).toHaveLength(0);
+  });
+
+  it("the same session secret may decide different tasks (a session is long-lived), but only once per exact revision", async () => {
+    const store = new MemoryDocumentStore();
+    await putTask(store, FIRST);
+    await putTask(store, SECOND);
+    const approvers = createLocalOwnerApprovers({ owner: OWNER, now: () => NOW, verifySession: (token) => token === SESSION });
+    const gate = createDecisionGate({ store, approvers, audit: createNoopAuditSink(), subjects: [createWorkflowDocumentSubject({ store, riskOf: () => "low" })], now: () => NOW });
+    const workflowOf = async (id: string) => (await store.get(workflowTaskKey(id)))!["workflow"] as unknown as WorkflowSnapshot;
+    expect(await gate.decide(attempt({ subjectId: FIRST, workflow: await workflowOf(FIRST) }))).toMatchObject({ status: "decided" });
+    expect(await gate.decide(attempt({ subjectId: SECOND, workflow: await workflowOf(SECOND) }))).toMatchObject({ status: "decided" });
+  });
+
+  it("a store fault after the proof was checked does not burn it: the same request retried is decided", async () => {
+    const { store, gate, ready } = world();
+    await ready;
+    const request = attempt();
+    store.injectFault(new (await import("@agentx/contracts")).DocumentStoreError("unavailable", "down"), 1);
+    // The first calls read the store, so the fault lands on the first read; retry until the attempt gets as far as its commit once.
+    for (let tries = 0; tries < 6; tries += 1) {
+      try { const result = await gate.decide(request); if (result.status === "decided") break; } catch { /* retried */ }
+    }
+    expect((await taskWorkflow(store)).revision).toBe(R0 + 1);
+    expect(await gate.decide(request)).toMatchObject({ status: "replayed" });
+  });
+
+  it("a repeat needs the credential to be vouched for again: a revoked session is refused", async () => {
+    let valid = true;
+    const approvers = createLocalOwnerApprovers({ owner: OWNER, now: () => NOW, verifySession: (token) => token === SESSION && valid });
+    const { gate, ready } = world({ approvers });
+    await ready;
+    const request = attempt();
+    expect(await gate.decide(request)).toMatchObject({ status: "decided" });
+    valid = false;
+    expect(await gate.decide(request)).toMatchObject({ status: "refused", reason: "request_id_reused" });
+  });
+
+  it("with two approvers, the subject's own rule holds for each: the second must be someone the engine accepts", async () => {
+    const stranger: Principal = { ...OWNER, provider: "other-idp", personId: "stranger", roles: ["owner"] };
+    const approvers: Approvers = {
+      async requirement() { return { methods: [LOCAL_SESSION_METHOD], minApprovers: 2, selfApprovalAllowed: true }; },
+      async verify(_request, proof) { return { approved: true, approver: proof.token === "second" ? stranger : OWNER, method: proof.method, proofId: proof.proofId }; },
+    };
+    const { store, gate, ready } = world({ approvers });
+    await ready;
+    expect(await gate.decide(attempt({ credentials: [{ method: LOCAL_SESSION_METHOD, token: "first" }, { method: LOCAL_SESSION_METHOD, token: "second" }] }))).toMatchObject({ status: "refused", reason: "not_the_approver" });
+    expect((await taskWorkflow(store)).revision).toBe(R0);
+  });
+
+  it("an expiry that cannot be read is an expired request", async () => {
+    const { gate, ready } = world({ expiresAt: "not a time" });
+    await ready;
+    expect(await gate.decide(attempt())).toMatchObject({ status: "refused", reason: "expired" });
   });
 });

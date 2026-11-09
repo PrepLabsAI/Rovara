@@ -8,8 +8,9 @@
 //   3. the decision's effect is the engine's: this subject writes the snapshot `decideWorkflow` returns. Starting the next run (coding, planning again) is the stage machine's job on seeing the new
 //      state; `onDecided` lets it add its own steps (an outbox message, comment locks, a run-limit record) to the same transaction.
 import { createHash } from "node:crypto";
+import { LOCAL_OWNER_PROVIDER } from "../../ports/policy-defaults.js";
 import {
-  WorkflowDecisionRequestSchema, WorkflowSnapshotSchema, WorkflowTransitionError, change, decideWorkflow, when,
+  IMPLICIT_COMPANY_ID, WorkflowDecisionRequestSchema, WorkflowSnapshotSchema, WorkflowTransitionError, change, decideWorkflow, when,
   type DecisionRisk, type DocumentKey, type DocumentStore, type PolicySubject, type Principal, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "./approval-gate.js";
@@ -48,6 +49,8 @@ export interface WorkflowSubjectOptions {
   expiresAt?: (task: Record<string, unknown>, workflow: WorkflowSnapshot) => string | undefined;
   /** More steps for the decision's transaction, from the stage machine. They must not name the task's own key. */
   onDecided?: (context: { taskId: string; task: Record<string, unknown>; before: WorkflowSnapshot; after: WorkflowSnapshot; attempt: DecisionAttempt; approver: Principal; at: string }) => readonly TransactItem[] | Promise<readonly TransactItem[]>;
+  /** The identity provider whose `owner` is the owner of every task (default: Code's local owner). Ignored when `actorFor` is given. */
+  ownerProvider?: string;
   /** The id the engine knows a person by. Default: the local owner decides as the task's owner (a one-developer install owns every task). */
   actorFor?: (approver: Principal, workflow: WorkflowSnapshot) => { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" } | undefined;
 }
@@ -66,9 +69,10 @@ export function waitingDocumentDigest(workflow: WorkflowSnapshot): string | unde
 
 const jsonOf = <T>(value: T): never => JSON.parse(JSON.stringify(value)) as never;
 
-/** The default mapping: the local owner is the owner of every task on this install. Anyone else is not who the engine knows. */
-function defaultActorFor(approver: Principal, workflow: WorkflowSnapshot): { actorId: string; role: "TASK_OWNER" } | undefined {
-  return approver.provider === "local-owner" && approver.roles.includes("owner") ? { actorId: workflow.ownerId, role: "TASK_OWNER" } : undefined;
+/** The default mapping: the local owner is the owner of every task on this install. Anyone else is not who the engine knows. An install with another identity adapter names its owner provider (or supplies `actorFor`). */
+function defaultActorFor(ownerProvider: string) {
+  return (approver: Principal, workflow: WorkflowSnapshot): { actorId: string; role: "TASK_OWNER" } | undefined =>
+    approver.provider === ownerProvider && approver.roles.includes("owner") ? { actorId: workflow.ownerId, role: "TASK_OWNER" } : undefined;
 }
 
 /** A stable 64-hex id for a person who is not the owner, for an engine that knows only hex ids. Not used by the default mapping. */
@@ -77,7 +81,7 @@ export function hexActorId(approver: Pick<Principal, "provider" | "personId">): 
 }
 
 export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): DecisionSubject {
-  const actorFor = options.actorFor ?? defaultActorFor;
+  const actorFor = options.actorFor ?? defaultActorFor(options.ownerProvider ?? LOCAL_OWNER_PROVIDER);
   return {
     kind: WORKFLOW_DOCUMENT_KIND,
 
@@ -86,7 +90,8 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       const task = await options.store.get(workflowTaskKey(taskId));
       if (task === undefined) return undefined;
       // A task of another company reads as absent, the same as a missing one.
-      if (task["orgId"] !== undefined && task["orgId"] !== companyId) return undefined;
+      // A task with no company is only the implicit company's.
+      if (task["orgId"] !== companyId && !(task["orgId"] === undefined && companyId === IMPLICIT_COMPANY_ID)) return undefined;
       const parsed = WorkflowSnapshotSchema.safeParse(task["workflow"]);
       if (!parsed.success) return undefined;
       const workflow = parsed.data;
@@ -111,10 +116,13 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       };
     },
 
-    async apply(loaded, attempt, approver, at): Promise<AppliedDecision> {
+    async apply(loaded, attempt, approvers, at): Promise<AppliedDecision> {
       const { task, workflow } = loaded.state as { task: Record<string, unknown>; workflow: WorkflowSnapshot };
-      const actor = actorFor(approver, workflow);
-      if (actor === undefined) throw new SubjectRefusal("not_the_approver", "That person cannot decide this task.");
+      // The engine knows one decider: every approver who proved themselves must be someone it accepts, and the first is recorded.
+      const actors = approvers.map((entry) => actorFor(entry, workflow));
+      const actor = actors[0];
+      if (actor === undefined || actors.some((entry) => entry === undefined)) throw new SubjectRefusal("not_the_approver", "That person cannot decide this task.");
+      const approver = approvers[0]!;
       const details = (attempt.details ?? {}) as WorkflowDecisionDetails;
       const decision = attempt.outcome === "approve" ? "APPROVE" : attempt.outcome === "reject" ? "REJECT" : "REQUEST_CHANGES";
       const request = WorkflowDecisionRequestSchema.safeParse({

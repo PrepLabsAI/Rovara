@@ -5,6 +5,8 @@
 export const RISK_SENSITIVE_PATH_PATTERNS: readonly RegExp[] = [
   /(^|\/)(migrations|auth|authn|authz|security|oauth|saml|sso|jwt|crypto|permissions|credentials|payments|billing|secrets|iam|infra|terraform|cdk)(\/|$)/,
   /(^|\/)\.github\/workflows(\/|$)/,
+  // What decides what is checked before a merge, on any code host: other hosts' pipelines too.
+  /(^|\/)(\.gitlab-ci\.ya?ml|\.gitlab\/|bitbucket-pipelines\.ya?ml|\.circleci\/|azure-pipelines\.ya?ml|jenkinsfile|\.buildkite\/)/,
   // Who must approve and how a branch is protected: a change to them changes the rules every later merge follows.
   /(^|\/)codeowners$/,
   /(^|\/)\.github\/(settings\.ya?ml|rulesets?(\/|$)|branch[-_]protection[^/]*)$/,

@@ -2,7 +2,7 @@
 // control host (lane L6a fills it: the task's own cancel, its workflow retry, its notes and live steer), after this module checked who is asking. The request is recorded once under its request id, with the
 // event and the audit steps, in ONE transaction, so a repeat answers what was answered and writes nothing.
 //
-// Who may act: the session's owner. A Code install has one owner; an adapter for a company with members supplies `authorize` (it is the seam the hosted product's session levels plug into). The caller is a
+// Who may act: the company's owner (on a Code install that is the session's owner too: it has one). A Code install has one owner; an adapter for a company with members supplies `authorize` (it is the seam the hosted product's session levels plug into). The caller is a
 // `Principal` the surface already authenticated through the Identity seam; nothing here believes an id it is handed.
 //
 // What a message to the agent is: information for the model, never an instruction that can decide an approval, change a tool or a budget. It is stored as the session's message with its fate
@@ -26,6 +26,8 @@ export interface SessionControlHost {
    * `messageId`. Never carries authority: the text is information.
    */
   deliverMessage(taskId: string, message: { messageId: string; text: string }): Promise<{ state: "queued" | "delivered" | "not_delivered"; reason?: string }>;
+  // REQUIREMENT on the host (the hosted product's STEER_RATE and note cap are not in this module): it limits how often one person may message a session in an hour and how many notes a task keeps, and answers
+  // `not_delivered` with a reason when a limit is hit. A live message can mean paid model work.
 }
 
 export interface ControlDependencies {

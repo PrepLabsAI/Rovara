@@ -21,7 +21,7 @@ export interface TaskCost {
 }
 
 export interface CostLedger {
-  /** Records one usage. Telling it again (the same `entryId` for the same company) records nothing more and answers the first answer. */
+  /** Records one usage. Telling it again (the same `entryId` for the same company, under any task) records nothing more and answers the first answer. */
   recordUsage(entry: MeterEntry): Promise<MeterResult & { counted: boolean }>;
   /** The task's total so far (zero when nothing was recorded). */
   taskCost(companyId: string, taskId: string): Promise<TaskCost>;
@@ -45,7 +45,9 @@ export function createCostLedger(deps: { store: DocumentStore; metering: Meterin
     if (entry.taskId === undefined || ![tokens.input, tokens.output, tokens.cacheRead, tokens.cacheWrite].every(natural)) throw new Error("a usage names its task and counts its tokens in whole numbers");
     const partition = costPartition(entry.companyId, entry.taskId);
     const entryKey = { pk: partition, sk: `ENTRY#${entry.entryId}` };
-    const earlier = await deps.store.get(entryKey);
+    // One usage is one usage in the company: told again under another task it is still counted once.
+    const onceKey = { pk: companyScoped(entry.companyId, "COST_ENTRY"), sk: entry.entryId };
+    const earlier = await deps.store.get(onceKey);
     if (earlier !== undefined) {
       const cost = typeof earlier["micros"] === "number" && typeof earlier["currency"] === "string" ? { micros: earlier["micros"], currency: earlier["currency"] } : null;
       return { cost, source: earlier["source"] === "price-table" || earlier["source"] === "provider-reported" ? earlier["source"] : "unknown", counted: false };
@@ -65,6 +67,7 @@ export function createCostLedger(deps: { store: DocumentStore; metering: Meterin
     };
     const committed = await deps.store.transact([
       { kind: "put", item: entryDoc, condition: when.absent() },
+      { kind: "put", item: { ...onceKey, entityType: "COST_ENTRY_ONCE", taskId: entry.taskId, source: result.source, ...(result.cost === null ? {} : { micros: result.cost.micros, currency: result.cost.currency }), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(at.getTime() / 1000) + ENTRY_KEPT_SECONDS }, condition: when.absent() },
       {
         kind: "update", key: { pk: partition, sk: "TOTAL" },
         ops: [
@@ -81,7 +84,7 @@ export function createCostLedger(deps: { store: DocumentStore; metering: Meterin
     ]);
     if (committed.applied) return { ...result, counted: true };
     // Lost to the same usage told at the same time (its entry is there now), or to the first usage that fixed the currency: tell the first case as already counted, and ask again for the second.
-    if (await deps.store.get(entryKey) !== undefined) return { ...result, counted: false };
+    if (await deps.store.get(onceKey) !== undefined) return { ...result, counted: false };
     if (attempt >= 3) throw new Error("the cost of this usage could not be recorded");
     return recordUsage(entry, attempt + 1);
   }

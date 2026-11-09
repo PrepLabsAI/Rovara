@@ -13,7 +13,7 @@
 //     says nothing about a rejection); a request that does not allow self-approval refuses the person who asked; `minApprovers` distinct approvers are needed.
 //   - nothing a caller can send widens it: an unknown kind, subject or method is a refusal, not a default.
 // It never throws for a refusal (a refusal is an answer); it throws only for a fault of the store.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   INDEX_EXPIRY_ATTRIBUTE, approvalProofKey, companyScoped, when,
   type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type Approvers, type AuditSink, type Condition, type DocumentKey, type DocumentStore, type ExternalAccountRef, type Principal,
@@ -57,8 +57,8 @@ export interface DecisionSubject {
   /** The kind of subject: `workflow-document`. A caller names it; an unknown name is refused. */
   readonly kind: string;
   load(companyId: string, subjectId: string): Promise<LoadedSubject | undefined>;
-  /** Works out what the decision changes. Throws `SubjectRefusal`. Pure apart from reading `loaded`. */
-  apply(loaded: LoadedSubject, attempt: DecisionAttempt, approver: Principal, at: string): AppliedDecision | Promise<AppliedDecision>;
+  /** Works out what the decision changes. Gets EVERY verified approver (the first is the one the decision is recorded under); the subject's own rule must hold for each. Throws `SubjectRefusal`. Pure apart from reading `loaded`. */
+  apply(loaded: LoadedSubject, attempt: DecisionAttempt, approvers: readonly Principal[], at: string): AppliedDecision | Promise<AppliedDecision>;
 }
 
 /** What a person presents. The token is checked by the method's issuer and is never stored or logged. */
@@ -99,6 +99,10 @@ export interface ApprovalRecord {
   artifactDigest: string;
   risk: string;
   decidedAt: string;
+  /** What the Approvers seam was asked about, kept so a repeat can be verified again. */
+  subjectType: string;
+  approvalKind: string;
+  projectName?: string;
   approvers: ReadonlyArray<{ provider: string; personId: string; method: string }>;
   reason?: string;
 }
@@ -116,6 +120,11 @@ export interface DecisionGatePolicy {
   rejectMethods?: readonly string[];
   /** How long the used-proof markers are kept. Default: 400 days. */
   proofKeepSeconds?: number;
+  /**
+   * The methods whose credential is a long-lived session, good for many decisions (the local session). Every other method (a code host comment) is good for ONE decision, anywhere: its (method, token) is
+   * marked used with no request in it, so one comment cannot approve a second revision or subject. Default: the local session.
+   */
+  reusableMethods?: readonly string[];
 }
 
 export interface DecisionGateDependencies {
@@ -138,8 +147,19 @@ const refuse = (reason: GateRefusalReason, detail: string): GateResult => ({ sta
 
 /** Where a decision's record lives: one per request id and company. */
 export function approvalRecordKey(companyId: string, requestId: string): DocumentKey {
-  return { pk: companyScoped(companyId, `APPROVAL#${requestId}`), sk: "DECISION" };
+  return { pk: companyScoped(companyId, `APPROVAL_DECISION#${requestId}`), sk: "DECISION" };
 }
+
+/**
+ * What a proof is bound to, worked out by the server from the stored state, never taken from the caller: the company, the kind of subject, the subject, and the exact revision and content digest. The caller's
+ * request id only names the decision record (idempotency); it is NOT what a proof is used up under, so a proof cannot be re-spent under a fresh request id.
+ */
+export function approvalBindingId(companyId: string, kind: string, subjectId: string, revision: number, artifactDigest: string): string {
+  return `bind_${createHash("sha256").update(JSON.stringify([companyId, kind, subjectId, revision, artifactDigest]), "utf8").digest("hex")}`;
+}
+
+/** What the Approvers seam sees as the request id: the binding, plus a fresh part so an adapter's own memory of proofs it accepted can never burn a retry (the gate's markers are the single-use rule). */
+const adapterRequestId = (bindingId: string): string => `${bindingId}.${randomUUID()}`;
 
 /** Where a used proof's marker lives: one per (method, token, request). The token itself is never stored, only its hash. */
 export function approvalProofMarkerKey(companyId: string, proofKey: string): DocumentKey {
@@ -155,7 +175,8 @@ function recordOf(document: StoredDocument): ApprovalRecord | undefined {
   if (outcome !== "approve" && outcome !== "reject" && outcome !== "request_changes") return undefined;
   const reason = text("reason");
   return {
-    requestId, kind, subjectId, outcome, revision, artifactDigest, risk, decidedAt,
+    requestId, kind, subjectId, outcome, revision, artifactDigest, risk, decidedAt, subjectType: text("subjectType") ?? "task", approvalKind: text("approvalKind") ?? kind,
+    ...(text("projectName") === undefined ? {} : { projectName: text("projectName")! }),
     approvers: approvers.flatMap((entry) => (typeof entry === "object" && entry !== null && !Array.isArray(entry) && typeof entry["provider"] === "string" && typeof entry["personId"] === "string" && typeof entry["method"] === "string"
       ? [{ provider: entry["provider"], personId: entry["personId"], method: entry["method"] }] : [])),
     ...(reason === undefined ? {} : { reason }),
@@ -166,7 +187,8 @@ function recordOf(document: StoredDocument): ApprovalRecord | undefined {
 function recordDocument(companyId: string, record: ApprovalRecord, expires: number): StoredDocument {
   return {
     ...approvalRecordKey(companyId, record.requestId), entityType: "APPROVAL_DECISION", companyId, requestId: record.requestId, kind: record.kind, subjectId: record.subjectId, outcome: record.outcome,
-    revision: record.revision, artifactDigest: record.artifactDigest, risk: record.risk, decidedAt: record.decidedAt,
+    revision: record.revision, artifactDigest: record.artifactDigest, risk: record.risk, decidedAt: record.decidedAt, subjectType: record.subjectType, approvalKind: record.approvalKind,
+    ...(record.projectName === undefined ? {} : { projectName: record.projectName }),
     approvers: record.approvers.map((entry) => ({ provider: entry.provider, personId: entry.personId, method: entry.method })),
     ...(record.reason === undefined ? {} : { reason: record.reason }), [INDEX_EXPIRY_ATTRIBUTE]: expires,
   };
@@ -184,25 +206,41 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
   const highRiskMethods = deps.policy?.highRiskMethods ?? [LOCAL_SESSION_METHOD_NAME];
   const rejectMethods = deps.policy?.rejectMethods ?? [LOCAL_SESSION_METHOD_NAME];
   const proofKeepSeconds = deps.policy?.proofKeepSeconds ?? PROOF_KEEP_SECONDS;
+  const reusableMethods = deps.policy?.reusableMethods ?? [LOCAL_SESSION_METHOD_NAME];
+  const markerOf = (companyId: string, method: string, token: string, bindingId: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: bindingId }));
+  /** The marker of a one-decision credential (a comment) that names no request: it is spent once, anywhere. */
+  const spentOnceKey = (companyId: string, method: string, token: string): DocumentKey => approvalProofMarkerKey(companyId, approvalProofKey({ method, token, requestId: "*" }));
 
   const sameDecision = (record: ApprovalRecord, attempt: DecisionAttempt): boolean =>
     record.kind === attempt.kind && record.subjectId === attempt.subjectId && record.outcome === attempt.outcome && record.revision === attempt.seen.revision && record.artifactDigest === attempt.seen.artifactDigest;
 
   /**
-   * A repeat of a finished decision is answered again, and only to someone who holds the proof that made it: the used-proof marker of one of the presented credentials must be there for this request. A person who
-   * only knows the request id (or presents another credential) is refused, never told "decided" by someone else's approval.
+   * A repeat of a finished decision is answered again, and only to someone who still holds the proof that made it: a used-proof marker of one of the presented credentials must be there for this decision, and the
+   * Approvers seam must vouch for that credential again (a revoked session or a deleted comment is refused), as the person who made the decision. A person who only knows the request id is refused.
    */
   async function replayOf(attempt: DecisionAttempt): Promise<GateResult | undefined> {
     const earlier = await deps.store.get(approvalRecordKey(attempt.companyId, attempt.requestId));
     if (earlier === undefined) return undefined;
     const record = recordOf(earlier);
     // A row that cannot be read is not a decision this gate made: it cannot be answered, and the id stays used.
-    if (record === undefined || !sameDecision(record, attempt)) return refuse("request_id_reused", "That request ID was already used for a different decision.");
+    const reused = refuse("request_id_reused", "That request ID was already used for a different decision.");
+    if (record === undefined || !sameDecision(record, attempt)) return reused;
+    const bindingId = approvalBindingId(attempt.companyId, record.kind, record.subjectId, record.revision, record.artifactDigest);
     for (const credential of attempt.credentials) {
-      const marker = await deps.store.get(approvalProofMarkerKey(attempt.companyId, approvalProofKey({ method: credential.method, token: credential.token, requestId: attempt.requestId })));
-      if (marker !== undefined && marker["requestId"] === attempt.requestId) return { status: "replayed", record };
+      const marker = await deps.store.get(markerOf(attempt.companyId, credential.method, credential.token, bindingId));
+      if (marker === undefined || marker["requestId"] !== attempt.requestId) continue;
+      const request: ApprovalRequest = {
+        companyId: attempt.companyId, requestId: adapterRequestId(bindingId), kind: record.approvalKind, subject: { type: record.subjectType, id: record.subjectId }, revision: record.revision, artifactDigest: record.artifactDigest,
+        ...(record.projectName === undefined ? {} : { projectName: record.projectName }),
+      };
+      const verdict = await deps.approvers.verify(request, {
+        proofId: randomUUID(), method: credential.method, requestId: request.requestId, revision: record.revision, artifactDigest: record.artifactDigest, token: credential.token,
+        ...(credential.claimedAccount === undefined ? {} : { claimedAccount: credential.claimedAccount }),
+      });
+      // A comment is spent once, so the adapter may remember it; the marker above is what proved this person made the decision.
+      if (verdict.approved && verdict.approver.companyId === attempt.companyId && record.approvers.some((entry) => entry.provider === verdict.approver.provider && entry.personId === verdict.approver.personId)) return { status: "replayed", record };
     }
-    return refuse("request_id_reused", "That request ID was already used for a different decision.");
+    return reused;
   }
 
   return {
@@ -233,10 +271,12 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
       if (!loaded.waiting) return refuse("not_waiting", "This is no longer waiting for a decision.");
       if (loaded.request.revision !== attempt.seen.revision || loaded.request.artifactDigest !== attempt.seen.artifactDigest) return refuse("stale", "This changed since you looked at it. Open it again to see the current version.");
       const at = now();
-      if (loaded.request.expiresAt !== undefined && at.getTime() >= Date.parse(loaded.request.expiresAt)) return refuse("expired", "This request has expired.");
+      // A time that cannot be read never lets a request live for ever.
+      if (loaded.request.expiresAt !== undefined && !(at.getTime() < Date.parse(loaded.request.expiresAt))) return refuse("expired", "This request has expired.");
 
       // ---- who may answer, and how
-      const request: ApprovalRequest = { ...loaded.request, companyId: attempt.companyId, requestId: attempt.requestId };
+      const bindingId = approvalBindingId(attempt.companyId, attempt.kind, attempt.subjectId, loaded.request.revision, loaded.request.artifactDigest);
+      const request: ApprovalRequest = { ...loaded.request, companyId: attempt.companyId, requestId: adapterRequestId(bindingId) };
       const requirement = await deps.approvers.requirement(request);
       const risk = loaded.request.risk ?? "high";
       const policyMethods = attempt.outcome !== "approve" ? rejectMethods : risk === "high" ? highRiskMethods : undefined;
@@ -250,14 +290,14 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
         presented.add(identity);
       }
       const proofs: ApprovalProof[] = attempt.credentials.map((credential) => ({
-        proofId: randomUUID(), method: credential.method, requestId: attempt.requestId, revision: attempt.seen.revision, artifactDigest: attempt.seen.artifactDigest, token: credential.token,
+        proofId: randomUUID(), method: credential.method, requestId: request.requestId, revision: attempt.seen.revision, artifactDigest: attempt.seen.artifactDigest, token: credential.token,
         ...(credential.claimedAccount === undefined ? {} : { claimedAccount: credential.claimedAccount }),
       }));
       const approvers: Principal[] = [];
       for (const proof of proofs) {
         const verdict = await deps.approvers.verify(request, proof);
         if (!verdict.approved) {
-          // The adapter remembers proofs it accepted. A repeat of a decision that has just committed is answered, not refused.
+          // An adapter that remembers proofs it accepted may still say so: a repeat of a decision that has just committed is answered, not refused.
           if (verdict.reason === "proof_already_used") return (await replayOf(attempt)) ?? refuse("proof_already_used", "That proof was already used.");
           return refuse(verdict.reason === "expired" ? "expired" : "not_approved", `Not approved: ${verdict.reason}.`);
         }
@@ -275,18 +315,19 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
 
       // ---- what the decision changes
       const decidedAt = at.toISOString();
+      const reason = attempt.reason === undefined ? undefined : [...attempt.reason].slice(0, REASON_MAX).join("");
       let applied: AppliedDecision;
       try {
-        applied = await subject.apply(loaded, attempt, approver, decidedAt);
+        applied = await subject.apply(loaded, reason === undefined ? attempt : { ...attempt, reason }, approvers, decidedAt);
       } catch (error) {
         if (error instanceof SubjectRefusal) return refuse(error.code, error.message);
         throw error;
       }
 
       // ---- one transaction: the change under the subject's guard, the decision, the used proofs, the audit
-      const reason = attempt.reason === undefined ? undefined : [...attempt.reason].slice(0, REASON_MAX).join("");
       const record: ApprovalRecord = {
         requestId: attempt.requestId, kind: attempt.kind, subjectId: attempt.subjectId, outcome: attempt.outcome, revision: attempt.seen.revision, artifactDigest: attempt.seen.artifactDigest, risk, decidedAt,
+        subjectType: request.subject.type, approvalKind: request.kind, ...(request.projectName === undefined ? {} : { projectName: request.projectName }),
         approvers: approvers.map((entry, index) => ({ provider: entry.provider, personId: entry.personId, method: proofs[index]!.method })),
         ...(reason === undefined ? {} : { reason }),
       };
@@ -296,7 +337,13 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
         { kind: "put", item: recordDocument(attempt.companyId, record, expires), condition: when.absent() },
         ...proofs.map((proof): TransactItem => ({
           kind: "put",
-          item: { ...approvalProofMarkerKey(attempt.companyId, approvalProofKey(proof)), entityType: "APPROVAL_PROOF_USED", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
+          item: { ...markerOf(attempt.companyId, proof.method, proof.token, bindingId), entityType: "APPROVAL_PROOF_USED", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
+          condition: when.absent(),
+        })),
+        // A credential that is good for one decision (a comment) is also spent for every other request, so it cannot approve a later revision or another subject.
+        ...proofs.filter((proof) => !reusableMethods.includes(proof.method)).map((proof): TransactItem => ({
+          kind: "put",
+          item: { ...spentOnceKey(attempt.companyId, proof.method, proof.token), entityType: "APPROVAL_PROOF_SPENT", requestId: attempt.requestId, method: proof.method, usedAt: decidedAt, [INDEX_EXPIRY_ATTRIBUTE]: expires },
           condition: when.absent(),
         })),
         ...(applied.extra ?? []),
@@ -311,7 +358,8 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
 
       // ---- a lost race: say which rule lost
       const proofStart = 2;
-      const proofEnd = proofStart + proofs.length;
+      const onceCount = proofs.filter((proof) => !reusableMethods.includes(proof.method)).length;
+      const proofEnd = proofStart + proofs.length + onceCount;
       if (committed.failed.some((index) => index >= proofStart && index < proofEnd)) return refuse("proof_already_used", "That proof was already used.");
       if (committed.failed.includes(1)) {
         const again = await replayOf(attempt);

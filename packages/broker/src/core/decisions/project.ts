@@ -16,6 +16,9 @@ import { reviewCoverage, type DesignCardFacts } from "./design-facts.js";
 import { cardDigest } from "./digest.js";
 import { isSafeRelativePath, plainLine } from "./text.js";
 
+/** What the card's digest covers of an item's version: its content version and, when the source bound the card to a revision, that revision too (a plan that moved on with the same document is another card). */
+const versionOf = (item: ItemBase): string => (item.binding === undefined ? item.contentVersion : `${item.contentVersion}@${String(item.binding.revision)}`);
+
 const SUBJECT_ID = /^[A-Za-z0-9_-]{1,150}$/u;
 
 /** What every pending item carries. */
@@ -512,7 +515,7 @@ export function projectDecisionCards(items: readonly DecisionItem[], options: Pr
       tabSubjects[pair.card.id] = { requirements: first, design: second };
       subjects[pair.card.id] = first;
       details[pair.card.id] = [...detailsOfItem(first.item, first.card, "requirements"), ...detailsOfItem(second.item, second.card, "design")].slice(0, 12);
-      digests[pair.card.id] = cardDigest(pair.card, pair.tabs, detailsOf(pair.card.id), [first.item.contentVersion, second.item.contentVersion]);
+      digests[pair.card.id] = cardDigest(pair.card, pair.tabs, detailsOf(pair.card.id), [versionOf(first.item), versionOf(second.item)]);
     }
   }
   const choices: Record<string, DecisionPlanChoices> = {};
@@ -524,7 +527,7 @@ export function projectDecisionCards(items: readonly DecisionItem[], options: Pr
     const chosen = choicesOfItem(entry.item, entry.card);
     if (chosen !== undefined) choices[entry.card.id] = chosen;
     // A card without choices keeps the digest it had; one with choices adds them, so the person approves the questions, checks and comments they were shown.
-    digests[entry.card.id] = cardDigest(entry.card, undefined, detailsOf(entry.card.id), chosen === undefined ? [entry.item.contentVersion] : [entry.item.contentVersion, canonicalJson(chosen)]);
+    digests[entry.card.id] = cardDigest(entry.card, undefined, detailsOf(entry.card.id), chosen === undefined ? [versionOf(entry.item)] : [versionOf(entry.item), canonicalJson(chosen)]);
   }
   cards.sort((a, b) => RISK_RANK[a.risk] - RISK_RANK[b.risk] || b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
   const unconfirmed = cards.filter((card) => card.risk === "high" && card.status === "pending" && !(card.actions.find((action) => action.kind === "open")?.href ?? "").startsWith("/v1/app/approve/")).map((card) => card.id);
