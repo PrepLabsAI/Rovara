@@ -561,9 +561,10 @@ describe("H1: parallel calls cannot get past the cap or the budget", () => {
     w.provider.mode = "slow";
     w.budgets.set(OPERATION, { micros: 10_000, currency: "USD" });
     const token = await tokenOf(w);
-    // Each call could use 400 output tokens (6,000 micros) and more: two cannot both fit under 10,000.
+    // Each call could use 400 output tokens (6,000 micros) and more: two cannot both fit under 10,000. The others fit alone, so they are told to wait (429), not that the budget is spent.
     const answers = await Promise.all(Array.from({ length: 8 }, () => w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ max_tokens: 400 }) })));
-    expect(answers.map((answer) => answer.status).sort()).toEqual([200, 422, 422, 422, 422, 422, 422, 422]);
+    expect(answers.map((answer) => answer.status).sort()).toEqual([200, 429, 429, 429, 429, 429, 429, 429]);
+    expect(answers.filter((answer) => answer.status === 429).every((answer) => answer.headers["retry-after"] === "2" && errorOf(answer).code === "budget_held")).toBe(true);
     expect(w.provider.calls).toHaveLength(1);
     expect(w.proxy.tokens.ledger(OPERATION)).toMatchObject({ spentMicros: 9_000, reservedMicros: 0, inFlight: 0 });
   });
@@ -761,5 +762,51 @@ describe("L4: a finished operation's spend record is freed", () => {
     expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(403);
     expect(w.proxy.tokens.ledgerCount()).toBe(0);
     expect(w.proxy.tokens.liveTokens()).toBe(0);
+  });
+});
+
+// ---- review round 2 leftovers
+
+describe("a call that does not fit the budget: wait, or the budget is spent", () => {
+  it("says 429 with Retry-After while other calls hold the budget, and 422 once it is spent or cannot pay for the call alone", async () => {
+    const w = await world();
+    w.budgets.set(OPERATION, { micros: 10_000, currency: "USD" });
+    w.provider.mode = "slow";
+    const token = await tokenOf(w);
+    const first = w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ max_tokens: 400 }) });
+    for (let attempt = 0; attempt < 100 && w.proxy.tokens.ledger(OPERATION).reservedMicros === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    const waiting = await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ max_tokens: 400 }) });
+    expect(waiting.status).toBe(429);
+    expect(waiting.headers["retry-after"]).toBe("2");
+    expect(errorOf(waiting)).toMatchObject({ code: "budget_held" });
+    expect((await first).status).toBe(200);
+    // Spent 9,000 of 10,000: nothing running now, and a call that could cost 6,000 does not fit even alone: the budget is spent for it.
+    const spent = await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ max_tokens: 400 }) });
+    expect(spent.status).toBe(422);
+    expect(errorOf(spent)).toMatchObject({ type: "budget_exceeded" });
+    expect(w.proxy.tokens.ledger(OPERATION).reservedMicros).toBe(0);
+  });
+});
+
+describe("the reservation estimate", () => {
+  it("reserves one token to each byte of the request for input, at most two million, and the named output limit", async () => {
+    const { worstCaseUsage, ASSUMED_MAX_INPUT_TOKENS } = await import("../../packages/broker/src/local/model-proxy/index.js");
+    expect(worstCaseUsage({ max_tokens: 64 }, 1_000)).toEqual({ input: 1_000, output: 64, cacheRead: 0, cacheWrite: 0 });
+    expect(worstCaseUsage({}, 10_000_000).input).toBe(ASSUMED_MAX_INPUT_TOKENS);
+    expect(worstCaseUsage({ max_output_tokens: 300 }, 1).output).toBe(300);
+    expect(worstCaseUsage({}, 1).output).toBe(64_000);
+  });
+});
+
+describe("an operation that settles", () => {
+  it("frees its tokens and spend record at once when the task flow says it ended", async () => {
+    const w = await world();
+    const token = await tokenOf(w);
+    await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() });
+    expect(w.proxy.tokens.ledgerCount()).toBe(1);
+    w.proxy.operationEnded(OPERATION);
+    expect(w.proxy.tokens.ledgerCount()).toBe(0);
+    expect(w.proxy.tokens.lookup(token)).toEqual({ ok: false, reason: "unknown" });
+    w.proxy.operationEnded(OPERATION); // twice is nothing
   });
 });

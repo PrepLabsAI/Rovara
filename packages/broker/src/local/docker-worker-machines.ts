@@ -92,8 +92,8 @@ const RESERVED_ENVIRONMENT = new Set([
  * either, nor point a provider's client at another address. The names are the ones the model libraries read.
  */
 const MODEL_KEY_ENVIRONMENT = /^(ANTHROPIC|OPENAI|OPENROUTER|GEMINI|GOOGLE|MISTRAL|COHERE|GROQ|XAI|DEEPSEEK|AZURE_OPENAI)_(API_KEY|AUTH_TOKEN|BASE_URL|API_BASE|ENDPOINT)$/iu;
-/** The whole AWS_ family (keys, a profile, a credentials file, a web identity or container credential, an endpoint override) and the proxy variables that move a client's traffic. */
-const AMBIENT_CLOUD_ENVIRONMENT = /^AWS_|^(HTTPS?|ALL|NO)_PROXY$/iu;
+/** The whole AWS_ family except the two region names, which are not secret and which the setup agent reads (keys, a profile, a credentials file, a web identity or container credential, an endpoint override) and the proxy variables that move a client's traffic. */
+const AMBIENT_CLOUD_ENVIRONMENT = /^AWS_(?!(?:DEFAULT_)?REGION$)|^(HTTPS?|ALL|NO)_PROXY$/iu;
 /** Names that change how a program loads or where the Docker socket is: the worker holds the socket, so none may come from a spec. */
 const RESERVED_ENVIRONMENT_PREFIXES = ["NODE_", "LD_", "DYLD_", "DOCKER_"];
 const RESERVED_LABEL_PREFIXES = ["rovara.", "agentx.", "com.docker.", "org.opencontainers."];

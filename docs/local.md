@@ -214,17 +214,29 @@ the worker's own workspace on each, and removes any such header the worker sent,
   the worker sees it, and an answer that contains the key is cut off. A spec's environment may not carry a model key, a provider's address or
   AWS credentials (`DockerWorkerMachines` refuses them).
 - A task budget is held in the proxy, and held before the money is spent: with a price table (`metering` adapter) and a budget on the operation's grant, each call's
-  worst case (its output limit, or 64,000 tokens when it names none, and an input of two tokens to the byte) is reserved against the budget before the call is
-  forwarded, in the same step as the check, and settled to what the call really used afterwards. Parallel calls therefore cannot get past the budget or the
-  per-operation cap (8 calls). A call that did not finish cleanly (the worker cut it off, the stream broke, the time ran out) or whose provider reported no usage
-  is charged that worst case. A call over the budget is refused with the words the worker reads as "the task's budget is spent". A model with no price, or priced
-  in another currency than the budget, cannot be held to it and is refused. Code's default price table is empty, so a budget needs a price table first.
+  worst case is reserved against the budget before the call is forwarded, in the same step as the check, and settled to what the call really used afterwards. The
+  worst case is the call's output limit (64,000 tokens when it names none) plus an input of ONE token to each byte of the request (no tokenizer produces more tokens
+  than bytes; capped at 2,000,000 tokens, since a request of base64 pictures is far bigger in bytes than in tokens). That is a high bound on purpose: it can refuse a
+  call a little earlier than the real cost would, never later. Parallel calls therefore cannot get past the budget or the per-operation cap (8 calls). A call that
+  does not fit beside the calls running now but would fit alone is answered 429 with `Retry-After: 2` (`budget_held`), and its reservation is tried again when the
+  worker retries; a budget that is spent, or that cannot pay for the call even alone, is answered with the 422 `budget_exceeded` the worker reads as "the task's
+  budget is spent". A call that did not finish cleanly (the worker cut it off, the stream broke, the time ran out) or whose provider reported no usage is charged that
+  worst case. A model with no price, or priced in another currency than the budget, cannot be held to the budget and is refused. Code's default price table is
+  empty, so a budget needs a price table first.
 - Each operation may have three live tokens (minting a fourth ends the oldest). Only the worker's own function tools are served: a tool the provider would run
   (web search, code execution, MCP, computer use, file search) is refused, as it is in Cloud's guard, and so is a `tool_choice` that names one.
-- A spec's environment may not carry a model key, a provider's address, any `AWS_*` name or a proxy variable (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+- A spec's environment may not carry a model key, a provider's address, any `AWS_*` name except `AWS_REGION` and `AWS_DEFAULT_REGION` (not secret; the setup agent reads them), or a proxy variable (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`).
 - Budgets are kept in memory, per operation: a restarted broker starts every operation's spend at zero, and a new operation of the same task starts at zero too, so the
   task flow must pass the task's REMAINING budget in the grant it describes (not its full budget). A spend record is freed when the proxy sees its operation has ended
-  (the task flow can also call `modelProxy.tokens.forgetOperation`). Both are remaining gaps until a durable ledger exists.
+  (`modelProxy.operationEnded(operationId)`, which the task flow calls when an operation settles, frees it at once). Both budget limits are remaining gaps until a
+  durable ledger exists.
+- Tool definitions are checked wherever they travel: the top-level `tools`, lists nested in Responses `input` items, Anthropic `messages` and `system` (a `tool_addition` may
+  only hold a `tool_definition`), and `include` on the Responses route may only be `reasoning.encrypted_content`. These are Cloud's guard rules (`rovara-guard.ts`, fix/0512-guard-tool-types) case for case.
+
+Wiring checklist for the task flow (nothing below happens until it is wired): pass `modelGrants` (`capabilityModelGrants`) to `startLocalRuntime`; list `"model-access"` in the
+dispatch capability's `extraActions`; put `localRoute(...).workerRoute` in the invocation payload as `modelRoute`; give the grant the task's REMAINING budget; call
+`runtime.modelProxy.operationEnded(operationId)` when an operation settles; give the folder object storage a folder on a local disk (it needs hard links, and says so with
+`FolderHardLinksUnsupportedError` when the file system has none).
 - Not here: Bedrock (it needs the computer's AWS sign-in; list it in the 51 gaps) and design-review key slots.
 - The task flow turns it on: its dispatch lists the `model-access` action in the worker's capability and gives `startLocalRuntime` a
   `modelGrants` source (`capabilityModelGrants`) that says which models and what budget an operation has (`localRoute` makes a model's route).

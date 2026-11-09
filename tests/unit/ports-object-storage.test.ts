@@ -9,7 +9,7 @@ import { ObjectConflictError, ObjectKeyError, PLUGIN_POINTS, PLUGIN_POINT_CARDIN
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DOCUMENT_BLOB_MAX_BYTES, createDocumentEvidenceBlobStore, createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { FolderObjectStorage, spellPart, unspellPart } from "../../packages/local-adapters/src/folder-object-storage.js";
+import { FolderHardLinksUnsupportedError, FolderObjectStorage, spellPart, unspellPart } from "../../packages/local-adapters/src/folder-object-storage.js";
 import * as folderModule from "../../packages/local-adapters/src/object-storage-plugin.js";
 import { evidencePrefixesOf, eraseTaskEvidence } from "../../packages/broker/src/core/proof/evidence-erase.js";
 import { storeEvidenceArtifacts } from "../../packages/broker/src/core/proof/evidence-artifacts.js";
@@ -266,5 +266,29 @@ describe("objects are immutable by default (L9-wire review O3)", () => {
     now += 31 * DAY;
     await blobs.put("k", new Uint8Array([3]), META);
     expect(Array.from((await blobs.get("k", 10))!)).toEqual([3]);
+  });
+});
+
+describe("a folder on a file system without hard links", () => {
+  const META = { contentType: "x/y", metadata: {}, retention: "r" };
+  it("says so with a typed error, stores nothing and leaves nothing behind, for every error a missing link feature gives", async () => {
+    for (const code of ["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV"]) {
+      const root = join(await tempFolder(), "store");
+      const store = new FolderObjectStorage({ root, linkFile: async () => { throw Object.assign(new Error("no links here"), { code }); } });
+      const failure = await store.put("k", new Uint8Array([1]), META).catch((error: unknown) => error);
+      expect(failure, code).toBeInstanceOf(FolderHardLinksUnsupportedError);
+      expect((failure as Error).message).toMatch(/does not support hard links/);
+      expect(await store.get("k", 10)).toBeUndefined();
+      expect(await readdir(join(root, "tmp"))).toEqual([]);
+    }
+  });
+
+  it("does not need links to overwrite on purpose, and does not mistake a taken name for a missing feature", async () => {
+    const root = join(await tempFolder(), "store");
+    const noLinks = new FolderObjectStorage({ root, linkFile: async () => { throw Object.assign(new Error("x"), { code: "EPERM" }); } });
+    await noLinks.put("k", new Uint8Array([1]), META, { overwrite: true });
+    expect(Array.from((await noLinks.get("k", 10))!)).toEqual([1]);
+    const real = new FolderObjectStorage({ root });
+    await expect(real.put("k", new Uint8Array([2]), META)).rejects.toBeInstanceOf(ObjectConflictError);
   });
 });

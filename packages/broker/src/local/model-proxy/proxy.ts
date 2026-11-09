@@ -59,6 +59,8 @@ export interface LocalModelProxy {
   readonly tokens: ModelTokenBook;
   /** `GET /v1/internal/model-access`. */
   access(request: { path: string; headers: Readonly<Record<string, string | undefined>> }): Promise<BrokerResponse>;
+  /** The task flow calls this when an operation settles (finished, failed, cancelled): its tokens and its spend record are freed at once and not at its next refused call. */
+  operationEnded(operationId: string): void;
   /** `POST /v1/internal/model-proxy/...`: writes the whole answer, streamed. Never throws. */
   handle(request: IncomingMessage, response: ServerResponse): Promise<void>;
 }
@@ -124,10 +126,16 @@ async function readBody(request: IncomingMessage, limit: number): Promise<Buffer
 /** Used when a request names no output limit (OpenAI's routes may not): the most output a call is assumed to be able to use. */
 export const ASSUMED_MAX_OUTPUT_TOKENS = 64_000;
 
-/** The most a request could use: the output limit it names (or the assumed one) and an input of two tokens to the byte of the request, which no tokenizer exceeds. */
+/** The most input a call is assumed to be able to use: no model reads more, and a request of base64 pictures is far bigger in bytes than in tokens. */
+export const ASSUMED_MAX_INPUT_TOKENS = 2_000_000;
+
+/**
+ * The most a request could use: the output limit it names (or the assumed one) and an input of ONE token to each byte of the request (no tokenizer produces more tokens
+ * than bytes), at most `ASSUMED_MAX_INPUT_TOKENS`. A reservation this high refuses a call earlier than the real cost would, never later.
+ */
 export function worstCaseUsage(body: Readonly<Record<string, unknown>>, requestBytes: number): TokenUsage {
   const asked = [body.max_tokens, body.max_output_tokens, body.max_completion_tokens].find((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
-  return { input: Math.ceil(requestBytes / 2), output: Math.min(Math.floor(asked ?? ASSUMED_MAX_OUTPUT_TOKENS), 1_000_000), cacheRead: 0, cacheWrite: 0 };
+  return { input: Math.min(Math.ceil(requestBytes), ASSUMED_MAX_INPUT_TOKENS), output: Math.min(Math.floor(asked ?? ASSUMED_MAX_OUTPUT_TOKENS), 1_000_000), cacheRead: 0, cacheWrite: 0 };
 }
 
 export function createLocalModelProxy(options: LocalModelProxyOptions): LocalModelProxy {
@@ -311,8 +319,10 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
         const maximum = await worstCaseCost(route, worst);
         if (maximum === null) throw new Refusal(403, "model_not_allowed", "this model has no price on this computer, so the task budget cannot be held");
         if (maximum.currency !== token.budget.currency) throw new Refusal(403, "model_not_allowed", "this model is priced in another currency than the task's budget");
-        // Nothing awaits between this check and the reservation below.
-        if (ledger.spentMicros + ledger.reservedMicros + maximum.micros > token.budget.micros) throw budgetRefusal();
+        // Nothing awaits between this check and the reservation below. A budget that is spent, or cannot pay for this call even with nothing else running, ends the task (422).
+        // A call that would fit alone but not beside the calls running now is told to wait (429): their reservations come back when they settle.
+        if (ledger.spentMicros + maximum.micros > token.budget.micros) throw budgetRefusal();
+        if (ledger.spentMicros + ledger.reservedMicros + maximum.micros > token.budget.micros) throw new Refusal(429, "budget_held", "other model calls of this task hold the budget for now; try again shortly", { "retry-after": "2" });
         reserved = maximum.micros;
         ledger.reservedMicros += reserved;
       }
@@ -430,7 +440,7 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
     return new Refusal(outgoing, "provider_error", cleaned === "" ? `the provider answered HTTP ${String(status)}` : `the provider answered HTTP ${String(status)}: ${cleaned}`, headers);
   }
 
-  return { tokens, access, handle };
+  return { tokens, access, handle, operationEnded: (operationId) => tokens.forgetOperation(operationId) };
 }
 
 async function readBounded(upstream: Response, limit: number, keyBytes?: Buffer): Promise<string> {

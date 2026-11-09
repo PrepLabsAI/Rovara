@@ -33,7 +33,20 @@ const HEADER_MAX_BYTES = 16_384;
 const SPELLED_PART_MAX = 250;
 export const FOLDER_OBJECT_DEFAULT_MAX_BYTES = 256 * 1_048_576;
 
+/**
+ * The folder's file system cannot make a hard link (a network share, some FAT or exFAT volumes, a folder on another device). A new object is published with a hard link, which is
+ * the one step that fails if the name is taken, so the adapter will not fall back to a write that two writers could both win. Put the folder on a local disk.
+ */
+export class FolderHardLinksUnsupportedError extends Error {
+  constructor() {
+    super("the object folder's file system does not support hard links, which immutable objects need; choose a folder on a local disk (APFS, ext4, NTFS)");
+    this.name = "FolderHardLinksUnsupportedError";
+  }
+}
+
 export interface FolderObjectStorageOptions {
+  /** Test hook: the call that makes a hard link. Default: the file system's. */
+  linkFile?: typeof link;
   /** The folder the store owns. It is made (0700) if it is not there. Nothing else should be kept in it. */
   root: string;
   /** The largest object `put` accepts. Default 256 MiB. */
@@ -102,6 +115,7 @@ export class FolderObjectStorage implements ObjectStorage {
   readonly #max: number;
   readonly #now: () => number;
   readonly #days: Readonly<Record<string, number>>;
+  readonly #link: typeof link;
   #realRoot: string | undefined;
 
   constructor(options: FolderObjectStorageOptions) {
@@ -111,6 +125,7 @@ export class FolderObjectStorage implements ObjectStorage {
     this.#max = options.maxObjectBytes ?? FOLDER_OBJECT_DEFAULT_MAX_BYTES;
     this.#now = options.now ?? Date.now;
     this.#days = options.retentionDays ?? {};
+    this.#link = options.linkFile ?? link;
     if (!Number.isInteger(this.#max) || this.#max < 1) throw new RangeError("maxObjectBytes is a whole number of bytes, at least 1");
   }
 
@@ -228,11 +243,13 @@ export class FolderObjectStorage implements ObjectStorage {
   async #publishNew(key: string, temporary: string, file: string): Promise<void> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        await link(temporary, file);
+        await this.#link(temporary, file);
         await rm(temporary, { force: true });
         return;
       } catch (error) {
-        if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "EEXIST") throw error;
+        const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+        if (code === "EPERM" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "EXDEV") throw new FolderHardLinksUnsupportedError();
+        if (code !== "EEXIST") throw error;
         if ((await this.#read(key, false, 0)) !== undefined) break;
       }
     }

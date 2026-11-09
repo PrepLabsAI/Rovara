@@ -191,6 +191,66 @@ describe("the request guard (Cloud's proxy rules)", () => {
     for (const choice of [{ name: "x" }, ["auto"], 3, { type: 3 }]) expect(() => checkRequestBody("openai-completions", { ...BASE["openai-completions"], tools: [fnTool], tool_choice: choice }), JSON.stringify(choice)).toThrow(/tool_choice type 'unknown'/);
   });
 
+  // Cloud's nested cases (fix/0512-guard-tool-types e604da8ab), plus the system, tool_addition and path-length checks added after it.
+  const nestedBase = { "anthropic-messages": BASE["anthropic-messages"], "openai-responses": BASE["openai-responses"], "openai-completions": BASE["openai-completions"] };
+  const sys = (definition: unknown) => ({ role: "system", content: [{ type: "text", text: "t" }, { type: "tool_addition", tool: { type: "tool_definition", definition } }] });
+  const refusedNested: Array<{ api: keyof typeof BASE; data: Record<string, unknown>; shown: string }> = [
+    { api: "openai-responses", shown: "tool type 'mcp'", data: { ...nestedBase["openai-responses"], input: [{ type: "additional_tools", role: "developer", tools: [{ type: "mcp", server_url: "https://attacker.example/x", require_approval: "never" }] }, { role: "user", content: "hi" }] } },
+    { api: "openai-responses", shown: "tool type 'web_search'", data: { ...nestedBase["openai-responses"], input: [{ type: "tool_search_call", call_id: "c", execution: "client", arguments: {} }, { type: "tool_search_output", call_id: "c", execution: "client", tools: [{ type: "web_search" }] }] } },
+    { api: "anthropic-messages", shown: "tool type 'web_search_20250305'", data: { ...nestedBase["anthropic-messages"], messages: [sys({ type: "web_search_20250305", name: "web_search" })] } },
+    { api: "openai-responses", shown: "tool type 'code_interpreter'", data: { ...nestedBase["openai-responses"], input: [{ role: "user", content: [{ type: "input_text", text: "x", extra: { tools: [responsesFn, { type: "code_interpreter" }] } }] }] } },
+    { api: "anthropic-messages", shown: "tool type 'web_fetch_20250910'", data: { ...nestedBase["anthropic-messages"], messages: [{ role: "user", content: [{ type: "tool_addition", tool: { type: "tool_definition", definition: { type: "web_fetch_20250910", name: "w" } } }] }] } },
+    { api: "anthropic-messages", shown: "is not a function tool", data: { ...nestedBase["anthropic-messages"], messages: [{ role: "user", content: [{ type: "tool_addition", tool: { type: "tool_definition" } }] }] } },
+    { api: "openai-completions", shown: "tool type 'web_search'", data: { ...nestedBase["openai-completions"], messages: [{ role: "user", content: "x", tools: [{ type: "web_search" }] }] } },
+    // the top-level system, and a tool_addition that does not hold a tool_definition
+    { api: "anthropic-messages", shown: "tool type 'web_search_20250305'", data: { ...nestedBase["anthropic-messages"], system: [{ type: "tool_addition", tool: { type: "tool_definition", definition: { type: "web_search_20250305", name: "w" } } }] } },
+    { api: "anthropic-messages", shown: "is not a tool_definition", data: { ...nestedBase["anthropic-messages"], messages: [{ role: "user", content: [{ type: "tool_addition", tool: { type: "web_search_20250305", name: "w" } }] }] } },
+    { api: "anthropic-messages", shown: "is not a tool_definition", data: { ...nestedBase["anthropic-messages"], messages: [{ role: "user", content: [{ type: "tool_addition" }] }] } },
+  ];
+  const allowedNested: Array<{ api: keyof typeof BASE; data: Record<string, unknown> }> = [
+    { api: "openai-responses", data: { ...nestedBase["openai-responses"], input: [{ type: "additional_tools", role: "developer", tools: [responsesFn, { ...responsesFn, strict: false, defer_loading: true }] }] } },
+    { api: "openai-responses", data: { ...nestedBase["openai-responses"], input: [{ type: "tool_search_call", call_id: "c", execution: "client", status: "completed", arguments: { query: "read_file", limit: 1 } }, { type: "tool_search_output", call_id: "c", execution: "client", status: "completed", tools: [{ ...responsesFn, defer_loading: true }] }] } },
+    { api: "anthropic-messages", data: { ...nestedBase["anthropic-messages"], messages: [sys(clientTool), sys({ ...clientTool, type: "custom", cache_control: { type: "ephemeral" } }), { role: "system", content: [{ type: "tool_removal", tool: { type: "tool_reference", name: "read_file" } }] }] } },
+    { api: "anthropic-messages", data: { ...nestedBase["anthropic-messages"], system: [{ type: "text", text: "be brief" }, { type: "tool_addition", tool: { type: "tool_definition", definition: clientTool } }] } },
+    { api: "anthropic-messages", data: { ...nestedBase["anthropic-messages"], system: "be brief" } },
+    // a model's own tool arguments may hold a key named tools: not a definition
+    { api: "anthropic-messages", data: { ...nestedBase["anthropic-messages"], messages: [{ role: "assistant", content: [{ type: "tool_use", id: "t", name: "x", input: { tools: [{ type: "web_search" }] } }] }] } },
+    { api: "openai-responses", data: { ...nestedBase["openai-responses"], input: [{ type: "function_call", call_id: "c", name: "x", arguments: "{\"tools\":[{\"type\":\"mcp\"}]}" }, { type: "function_call_output", call_id: "c", output: "ok" }] } },
+  ];
+
+  it("holds tool definitions nested in Responses input items, Anthropic messages and system to the same rule", () => {
+    for (const { api, data, shown } of refusedNested) {
+      let message = "";
+      try { checkRequestBody(api, data); } catch (error) { message = error instanceof RequestNotAllowed ? error.message : `wrong error: ${String(error)}`; }
+      expect(message, JSON.stringify(data).slice(0, 120)).toContain(shown);
+    }
+    for (const { api, data } of allowedNested) expect(() => checkRequestBody(api, data), JSON.stringify(data).slice(0, 120)).not.toThrow();
+    expect(() => checkRequestBody("openai-responses", refusedNested[0]!.data)).toThrow(/input\[0\]\.tools\[0\]/);
+    expect(() => checkRequestBody("anthropic-messages", refusedNested[2]!.data)).toThrow(/messages\[0\]\.content\[1\]\.tool\.definition/);
+  });
+
+  it("walks a deeply nested body without overflowing, and caps the place it names in a refusal", () => {
+    let nested: unknown = { tools: [{ type: "web_search" }] };
+    for (let depth = 0; depth < 20_000; depth += 1) nested = { next: nested };
+    let message = "";
+    try { checkRequestBody("openai-responses", { ...BASE["openai-responses"], input: [nested] }); } catch (error) { message = (error as Error).message; }
+    expect(message).toContain("tool type 'web_search'");
+    expect(message.length).toBeLessThan(700);
+    expect(message).toContain("...");
+  });
+
+  it("serves only reasoning.encrypted_content in a Responses include, as Cloud's guard does", () => {
+    const run = (include: unknown) => () => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: [responsesFn], include });
+    expect(run(["reasoning.encrypted_content"])).not.toThrow();
+    expect(run([])).not.toThrow();
+    for (const include of [["web_search_call.action.sources"], ["file_search_call.results"], ["code_interpreter_call.outputs"], ["reasoning.encrypted_content", "message.output_text.logprobs"], "reasoning.encrypted_content", [["x"]]]) expect(run(include), JSON.stringify(include)).toThrow(/field include/);
+  });
+
+  it("refuses a tool_choice whose type is not a string, and accepts the shapes pi-ai sends", () => {
+    for (const choice of [{ type: ["auto"] }, { type: { a: 1 } }, ["auto"]]) expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: [responsesFn], tool_choice: choice }), JSON.stringify(choice)).toThrow(/tool_choice type 'unknown'/);
+    for (const choice of [{ type: "any" }, { type: "tool", name: "read_file" }, { type: "function", name: "read_file" }, "required", "none"]) expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: [responsesFn], tool_choice: choice }), JSON.stringify(choice)).not.toThrow();
+  });
+
   it("refuses proxy-control and billing headers, and a beta it does not know", () => {
     for (const name of ["x-litellm-api-key", "x-litellm-metadata", "openai-organization", "openai-project", "x-api-key-override"]) expect(() => checkRequestHeaders({ [name]: "x" }), name).toThrow(/header/);
     expect(() => checkRequestHeaders({ "anthropic-beta": [...ALLOWED_BETAS].join(", ") })).not.toThrow();

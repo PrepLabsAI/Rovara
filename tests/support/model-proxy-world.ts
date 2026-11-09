@@ -82,7 +82,13 @@ export async function startFakeProvider(): Promise<{ url: string; calls: Provide
       response.writeHead(200, { "content-type": "text/event-stream" });
       const filler = `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "x".repeat(60_000) } })}\n\n`;
       for (let index = 0; index < 600 && !response.destroyed; index += 1) {
-        if (!response.write(filler)) await new Promise<void>((resolve) => { response.once("drain", resolve); response.once("close", resolve); });
+        if (!response.write(filler)) {
+          await new Promise<void>((resolve) => {
+            const done = (): void => { response.off("drain", done); response.off("close", done); resolve(); };
+            response.once("drain", done);
+            response.once("close", done);
+          });
+        }
       }
       return void response.end();
     }
