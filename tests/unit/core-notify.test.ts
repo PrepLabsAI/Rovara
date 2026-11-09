@@ -7,7 +7,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionTaskFacts, type SummaryDependencies } from "../../packages/broker/src/core/sessions/index.js";
+import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId, type SessionChange, type SessionTaskFacts, type SummaryDependencies } from "../../packages/broker/src/core/sessions/index.js";
 import {
   ATTENTION_RETRY_BASE_MS, ATTENTION_TARGET_TRIES_MAX, attentionKindOf, attentionText, batchEventId, deliverAttention, queueAttention, readNotifyPrefs, writeNotifyPrefs, PENDING_PK,
 } from "../../packages/broker/src/core/notify/index.js";
@@ -35,7 +35,7 @@ async function world() {
   const adapter = new FakeChannelAdapter();
   registry.register("channel", "examplechat", adapter);
   const pending = async () => (await store.query({ pk: PENDING_PK })).items;
-  const move = async (facts: Partial<SessionTaskFacts>) => { state.facts = { ...state.facts, ...facts }; clock.ms += 1_000; return refreshSessionSummary(deps, ORG, SESSION); };
+  const move = async (facts: Partial<SessionTaskFacts>, onChange?: SummaryDependencies["onChange"]) => { state.facts = { ...state.facts, ...facts }; clock.ms += 1_000; return refreshSessionSummary(onChange === undefined ? deps : { ...deps, onChange }, ORG, SESSION); };
   const deliver = (overrides: Record<string, unknown> = {}) => deliverAttention({ store, registry, now: () => clock.ms, log: () => undefined, link: (session) => `https://example.test/sessions/${session.sessionId}`, ...overrides });
   const prefs = (targets: unknown[], muted = false) => writeNotifyPrefs({ store, now: () => new Date(clock.ms) }, ORG, OWNER_ID, { targets, muted });
   return { store, state, deps, registry, adapter, pending, move, deliver, prefs, logs };
@@ -78,8 +78,20 @@ describe("queueing", () => {
     await w.move({});
     await w.move({ workflow: { stage: "MERGED", state: "COMPLETE" }, step: "Merged" });
     expect((await w.pending()).map((row) => row["kind"])).toEqual(["done"]);
-    const broken = await queueAttention({ store: { put: async () => { throw new Error("down"); } }, log: () => undefined }, { session: { subject: { kind: "task" } }, summary: { status: "needs_person", display: undefined }, previous: {} } as never);
+    // A real committed change into Needs you, on a session whose previous summary has a `display`, so queueAttention reaches the store write.
+    const live = await world();
+    await live.move({ workflow: { stage: "PLAN_REVIEW", state: "WAITING" } });
+    await live.move({ workflow: { stage: "IMPLEMENT", state: "RUNNING" } });
+    const changes: SessionChange[] = [];
+    await live.move({ workflow: { stage: "PLAN_REVIEW", state: "WAITING" } }, [async (change) => { changes.push(change); }]);
+    expect(changes).toHaveLength(1);
+    expect((changes[0]!.previous as { display?: unknown }).display).toBeDefined();
+    const logs: Array<Record<string, unknown>> = [];
+    let writes = 0;
+    const broken = await queueAttention({ store: { put: async () => { writes += 1; throw new Error("down"); } }, log: (entry) => logs.push(entry) }, changes[0]!);
+    expect(writes).toBeGreaterThan(0);
     expect(broken).toBe(0);
+    expect(logs).toEqual([expect.objectContaining({ event: "attention.queue_failed" })]);
   });
 });
 
