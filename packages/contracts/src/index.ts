@@ -90,3 +90,4 @@ export * from "./e2e-agent-models.js";
 export * from "./e2e-replay.js";
 export * from "./workflow-publication-context.js";
 export * from "./test-proof.js";
+export * from "./ports/index.js";
