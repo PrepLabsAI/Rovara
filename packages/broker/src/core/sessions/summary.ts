@@ -12,6 +12,7 @@ import {
   type AgentSessionRecord, type DocumentStore, type OrgId, type SessionEvent, type SessionId, type SessionStatus, type SessionSummary, type TaskStatus, type TransactItem,
 } from "@agentx/contracts";
 import { AgentSessionRecordSchema } from "@agentx/contracts";
+import { defaultTaskDisplay } from "./display.js";
 import type { SessionCostSource, SessionTaskFacts, TaskFactsSource } from "./facts.js";
 import { SessionStore, jsonOf, sessionEventItem } from "./store.js";
 
@@ -133,7 +134,7 @@ export function computeTaskState(facts: SessionTaskFacts, costUsd: number, previ
 
   const ended = endedOf(facts, at);
   if (ended !== undefined) {
-    return { ended, summary: assemble({ status: ended.status, step, display: facts.display, ...costs }, nowMs) };
+    return { ended, summary: assemble({ status: ended.status, step, display: facts.display ?? defaultTaskDisplay(facts, ended.status, { ended: true }), ...costs }, nowMs) };
   }
 
   // Open: the workflow stage decides first, then the last run.
@@ -177,7 +178,8 @@ export function computeTaskState(facts: SessionTaskFacts, costUsd: number, previ
   if ((workflow?.stage === "PLAN_REVIEW" || workflow?.stage === "UNDERSTAND") && workflow.state === "WAITING" && !needsPeople.includes(facts.ownerDeveloperId)) needsPeople.push(facts.ownerDeveloperId);
   // A run whose events can't be read keeps the peek the summary had: a missing line is not a reason to blank it.
   const peek = facts.peek === undefined ? previous?.peek : peekText(facts.peek);
-  return { summary: assemble({ status, step: openStep, peek, lastRunFailed, workflowBlocked, needsPeople, pendingApprovals: facts.pendingApprovals ?? 0, display: facts.display, ...costs }, nowMs) };
+  const display = facts.display ?? defaultTaskDisplay(facts, status, { lastRunFailed, step: openStep });
+  return { summary: assemble({ status, step: openStep, peek, lastRunFailed, workflowBlocked, needsPeople, pendingApprovals: facts.pendingApprovals ?? 0, display, ...costs }, nowMs) };
 }
 
 /**

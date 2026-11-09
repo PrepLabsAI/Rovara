@@ -1,4 +1,5 @@
 export * from "./facts.js";
+export * from "./display.js";
 export * from "./store.js";
 export * from "./create.js";
 export * from "./summary.js";
