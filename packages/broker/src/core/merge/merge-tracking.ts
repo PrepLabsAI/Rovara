@@ -29,6 +29,12 @@ import {
   type TransactItem,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
+import {
+  MERGE_ACTION_ORDER, type FailingCheck, type MergeActionContext, type MergeActionDecider, type MergeActionRequest, type MergeActionSlot, type MergeDispatchKind, type RegisterMergeActionDecider,
+} from "../branch-sync/merge-action.js";
+import { noteBranchHead } from "../branch-sync/branch-writers.js";
+import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
+import type { DispatchKind } from "../task-flow/records.js";
 import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } from "./budget.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
 import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryResolver } from "./host-port.js";
@@ -37,6 +43,12 @@ import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, Mer
 import type { MergePeople } from "./people.js";
 import { prHeadItems, publicTrackingItem, readMergeTracking, readTrackingItem, recoveryRowKey, trackingItemOf, trackingWriteItem, workflowUpdateItem } from "./store.js";
 
+/** The default row for a decider's dispatch: the task-flow core's row. Its runner knows UNDERSTAND and PLAN today; IMPLEMENT and SYNC rows are written as the decider asked and wait for the runner that learns them. */
+function defaultDispatchRow(request: { companyId: OrgId; taskId: string; kind: MergeDispatchKind; workflowRevision: number; at: string }, now: string): TransactItem {
+  return dispatchRowItem({ companyId: request.companyId }, request.taskId, request.workflowRevision, request.kind as DispatchKind, now, request.at);
+}
+
+export { MERGE_ACTION_ORDER };
 export { publicTrackingItem, readMergeTracking, trackingItemOf, trackingWriteItem };
 
 /** The definition version whose tasks are tracked (Rovara Code version 2). Version 1 tasks keep their kind-less merge-recovery rows and today's behaviour. */
@@ -104,6 +116,8 @@ export interface MergeTrackingDependencies {
   log?(event: string, fields: Record<string, unknown>): void;
   /** The write of the task's next workflow snapshot, guarded by the revision read. The task-flow lane owns the record, so it can say how it is written; the default is `workflowUpdateItem`. */
   workflowWrite?(taskId: string, next: WorkflowSnapshot, expectedRevision: number): TransactItem;
+  /** Turns a decider's dispatch request into the row the task-flow core runs (default: its `dispatchRowItem`). */
+  dispatchRow?(request: { companyId: OrgId; taskId: string; kind: MergeDispatchKind; workflowRevision: number; at: string }, now: string): TransactItem;
   /** Hooks at the end of a pass (the track record, the reviewers' reminders): best effort, outside the merge core. */
   hooks?: MergePassHooks;
 }
@@ -144,17 +158,6 @@ export function tracksMerge(workflow: WorkflowSnapshot | undefined): workflow is
 // ---- the checks
 
 const FAILED_CONCLUSIONS: ReadonlySet<string> = new Set(["failure", "timed_out", "cancelled", "startup_failure", "error", "stale"]);
-
-/** A failing check that counts, as a CI fix is told of it. */
-export interface FailingCheck {
-  name: string;
-  conclusion: string;
-  url: string;
-  /** The check run's id: the job id when the check is a GitHub Actions job. */
-  jobId?: string;
-  /** The system that made the check (a GitHub App's id as text). */
-  source?: string;
-}
 
 export interface CiReading {
   ci: MergeTrackingItem["ci"];
@@ -312,49 +315,21 @@ function withDigest(fields: Omit<MergeTrackingItem, "version" | "decisionDigest"
 }
 
 // ---- the actions
-
-export const MERGE_ACTION_ORDER = ["conflict", "ci_fix", "feedback", "sync"] as const;
-export type MergeActionSlot = typeof MERGE_ACTION_ORDER[number];
-
-/** What a decider asks for: the task's next workflow snapshot, and the items (a dispatch row, an audit item, ...) that commit with it and with the tracking item. */
-export interface MergeActionRequest {
-  slot: MergeActionSlot;
-  workflow: WorkflowSnapshot;
-  items: TransactItem[];
-  /**
-   * The pull request's day count of merges of the base (Plan 6 Task 17), when the action uses one. It is written to the tracking item in the same transaction (the pass writes that item, so an
-   * action cannot also write it), which is what keeps the count from being used twice.
-   */
-  syncs?: MergeTrackingItem["syncs"];
-}
-
+//
+// The shapes a pass hands the deciders and what they hand back are lane L7b's (`branch-sync/merge-action.ts`): a decider returns DATA (the next workflow, the steps it owns, the dispatch the
+// new state is due for, the milestones), and THIS pass turns it into rows and commits all of it with the tracking item in one transaction.
 export type MergeAction =
   | MergeActionRequest
   | {
     slot: "none";
     reason: "not_open" | "someone_else_pushed" | "in_flight" | "owner_card" | "no_action";
-    /** While an owner's card waits: the failing checks seen, for the card to show (Tasks 15 and 16 fold them into it). */
+    /** While an owner's card waits: the failing checks seen, for the card to show (the feedback slot folds them into it). */
     ciFailures?: string[];
   };
 
-/** What a decider may read beside the tracking item (Plan 6 Task 15): where the pull request is, which checks fail and how to read a failing job's log. Every GitHub read counts against the pass's allowance. */
-export interface MergeActionContext {
-  store: DocumentStore;
-  orgId: OrgId;
-  taskId: string;
-  sessionId?: string | undefined;
-  repositoryId: string;
-  pullRequestNumber: number;
-  pullRequestUrl: string;
-  headSha: string;
-  /** The failing checks that count (at most ten). */
-  failing: readonly FailingCheck[];
-  /** The end of a job's log, or undefined where there is none or this provider cannot read logs. Throws what GitHub's failure throws; a rate limit and a spent allowance are the sweep's to handle. */
-  readJobLog?: ((jobId: string) => Promise<string | undefined>) | undefined;
-  /** GitHub itself calls the branch `behind` (its `mergeable_state`), which it does only for a base that requires up-to-date branches: a branch a commit behind a base that does not care is not. */
-  behindRequired?: boolean | undefined;
-  log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
-  /** Who the person is on the repository, read live and counted in the pass's allowance (once a pass for each person); undefined where this provider cannot ask. */
+/** What this pass adds to the deciders' context for the slots that need more (the feedback slot's standing lookups and its soundness check). The deciders of L7b read the base `MergeActionContext`. */
+export interface MergeActionPassContext extends MergeActionContext {
+  /** Who the person is on the repository, read live and counted in the pass's allowance (once a pass for each person). */
   standingOf?: ((login: string, repositoryId: string) => Promise<RepositoryStanding>) | undefined;
   /** The digest of the recipe that gave the task its autonomy. */
   recipeDigest?: string | undefined;
@@ -364,24 +339,14 @@ export interface MergeActionContext {
   noteCapped?: (() => void) | undefined;
 }
 
-export interface MergeActionInput {
-  item: MergeTrackingItem;
-  workflow: WorkflowSnapshot;
-  settings: CodeSettings;
-  autonomy: Autonomy;
-  now: number;
-  context?: MergeActionContext | undefined;
-}
-
-type MergeActionDecider = (input: MergeActionInput) => MergeActionRequest | undefined | Promise<MergeActionRequest | undefined>;
 const deciders = new Map<MergeActionSlot, MergeActionDecider>();
 
-/** Fills a slot (Tasks 15, 16 and 17 each fill theirs). Returns the function that empties it again. One decider per slot. */
-export function registerMergeActionDecider(slot: MergeActionSlot, decide: MergeActionDecider): () => void {
+/** Fills a slot (CI fix, conflict and sync are L7b's; feedback is a later lane's). Returns the function that empties it again. One decider per slot. */
+export const registerMergeActionDecider: RegisterMergeActionDecider = (slot, decide) => {
   if (deciders.has(slot)) throw new Error(`the ${slot} slot already has a decider`);
   deciders.set(slot, decide);
   return () => { if (deciders.get(slot) === decide) deciders.delete(slot); };
-}
+};
 
 /** Whether the owner has a feedback card waiting (being prepared, or waiting for their decision). */
 export function ownerCardPending(workflow: WorkflowSnapshot): boolean {
@@ -393,7 +358,7 @@ export function ownerCardPending(workflow: WorkflowSnapshot): boolean {
  * while someone else's push stands, while the task is doing something else (a fix or push in flight, or not waiting for the merge), or while the owner's card waits (it
  * blocks every action, a conflict included). Each slot is filled by its own task; an empty slot decides nothing.
  */
-export async function nextMergeAction(item: MergeTrackingItem, workflow: WorkflowSnapshot, settings: CodeSettings, autonomy: Autonomy, now: number = Date.now(), context?: MergeActionContext): Promise<MergeAction> {
+export async function nextMergeAction(item: MergeTrackingItem, workflow: WorkflowSnapshot, autonomy: Autonomy, now: number = Date.now(), context?: MergeActionPassContext): Promise<MergeAction> {
   if (item.state !== "open") return { slot: "none", reason: "not_open" };
   if (!item.headByRovara) return { slot: "none", reason: "someone_else_pushed" };
   // A head the pull request record has and the workflow has not recorded yet (a push whose result is still to be judged) is not acted on: nothing is fixed, merged or asked about it until the workflow knows it.
@@ -402,12 +367,12 @@ export async function nextMergeAction(item: MergeTrackingItem, workflow: Workflo
   if (workflow.stage !== "WAIT_FOR_MERGE" || workflow.state !== "WAITING") return { slot: "none", reason: "in_flight" };
   if (ownerCardPending(workflow)) {
     // The owner's card blocks every action but its own: the feedback slot may add the failing checks to the card, or decide a card that waits (Plan 6 Task 16).
-    const request = await deciders.get("feedback")?.({ item, workflow, settings, autonomy, now, ...(context === undefined ? {} : { context }) });
+    const request = await deciders.get("feedback")?.({ item, workflow, autonomy, now, ...(context === undefined ? {} : { context }) });
     if (request !== undefined) return request;
     return { slot: "none", reason: "owner_card", ...(item.failingChecks.length === 0 ? {} : { ciFailures: item.failingChecks }) };
   }
   for (const slot of MERGE_ACTION_ORDER) {
-    const request = await deciders.get(slot)?.({ item, workflow, settings, autonomy, now, ...(context === undefined ? {} : { context }) });
+    const request = await deciders.get(slot)?.({ item, workflow, autonomy, now, ...(context === undefined ? {} : { context }) });
     if (request !== undefined) return request;
   }
   return { slot: "none", reason: "no_action" };
@@ -553,6 +518,13 @@ async function trackOne(
   const permission = async (login: string): Promise<"admin" | "write" | "read" | "none"> => (await standing(login)).permission;
   const recordedHead = await deps.recordedHead?.(task.workspaceId, pullRequest.repositoryId, pullRequest.number);
   const now = deps.now();
+  // Owner decision D1 (branch writers): a head that is NOT one of the commits Rovara itself recorded pushing makes the branch a person's, for good. The fact is strict (the workflow's recorded head or the
+  // pull request record's), never `headByRovara`, which reads "mine" while a Rovara push is pending. It is written before anything else is decided from the pass, and a failure to write it fails the
+  // pass (it is tried again): a branch whose person-push was not recorded could be force-pushed over later.
+  if (status.headRevision !== pullRequest.headSha && (recordedHead === undefined || status.headRevision !== recordedHead)) {
+    const details = await codeHost.getChangeRequest(ref, scope);
+    await noteBranchHead(deps.store, { orgId: task.orgId, repositoryId: pullRequest.repositoryId, branch: details.sourceBranch }, { headIsRecordedRovaraPush: false, now: new Date(now).toISOString() });
+  }
   const reviewsOf = (reviews: ReviewReading) => deriveTrackingFields({ task, pullRequest, status, prior, recordedHead, reviews, now });
   // What does not depend on the reviews comes first: whether to mark ready needs only the checks and the head. The effects come before the reviews' permission lookups so
   // that a pass that runs out of requests there has already done what it could.
@@ -668,8 +640,8 @@ async function trackOne(
     const bound = deps.autonomyBinding !== undefined ? await deps.autonomyBinding(task) : { autonomy: await (deps.autonomy?.(task) ?? "prepare") };
     const recipeDigest = bound.recipeDigest;
     let ranOut = false;
-    const decision = await nextMergeAction(unchanged && current !== undefined ? current : nextItem, task.workflow, settings, bound.autonomy, now, {
-      store: deps.store, orgId: task.orgId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }),
+    const decision = await nextMergeAction(unchanged && current !== undefined ? current : nextItem, task.workflow, bound.autonomy, now, {
+      ...(deps.store.ttlAttribute === undefined ? {} : { ttlAttribute: deps.store.ttlAttribute }), orgId: task.orgId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }),
       repositoryId: pullRequest.repositoryId, pullRequestNumber: pullRequest.number, pullRequestUrl: pullRequest.url, headSha: status.headRevision, failing: ci.failingDetails,
       behindRequired: status.mergeableState === "behind",
       ...(readLog === undefined ? {} : { readJobLog: readLog }),
@@ -700,7 +672,10 @@ async function trackOne(
       if (merged.headByRovara) items.push(...prHeadItems({ orgId: task.orgId, repositoryKey, headSha: status.headRevision, taskId: task.taskId, repositoryId: pullRequest.repositoryId, number: pullRequest.number }, now).slice(0, 1));
     }
     if (action !== undefined) {
-      items.push((deps.workflowWrite ?? workflowUpdateItem)(task.taskId, action.workflow, task.workflow.revision), ...action.items);
+      items.push((deps.workflowWrite ?? workflowUpdateItem)(task.taskId, action.workflow, task.workflow.revision), ...action.steps);
+      // The dispatch the new workflow state is due for becomes a row through the task-flow core, and its milestones rows through the milestone hook: all in this one commit.
+      if (action.dispatch !== undefined) items.push((deps.dispatchRow ?? defaultDispatchRow)({ companyId: task.orgId, taskId: task.taskId, ...action.dispatch }, stamp));
+      for (const requested of action.milestones) items.push(...deps.milestones.items(requested.milestone, requested.n, { definitionVersion: action.workflow.definitionVersion }));
     }
     if (justReady) {
       const index = Math.max(0, (task.workflow.pullRequests ?? []).findIndex((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number));

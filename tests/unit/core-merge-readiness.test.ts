@@ -141,6 +141,8 @@ describe("mergeReadiness", () => {
   it("needs a linked account for whoever presses, unless the install turns that off; and the only approver cannot press when self-approval is off", () => {
     expect(refused({ presser: { githubUserId: undefined } })).toBe(M.linkGithub);
     expect(refused({ presser: { githubUserId: undefined }, requirePresserAccount: false })).toBe("ready");
+    // With self-approval off the presser must be known whatever the flag says, or "the only approver cannot press" could not be checked.
+    expect(refused({ presser: { githubUserId: undefined }, requirePresserAccount: false, allowSelfApproval: false })).toBe(M.linkGithub);
     expect(refused({ allowSelfApproval: false, requesterName: "Priya", approvals: new Map([["app#7", { ...approved.get("app#7")!, approvers: [{ githubUserId: "1", login: "ana" }] }]]), presser: { githubUserId: "1" } })).toBe(M.presserApproved);
     expect(refused({ allowSelfApproval: false, presser: { githubUserId: "9" } })).toBe("ready");
   });

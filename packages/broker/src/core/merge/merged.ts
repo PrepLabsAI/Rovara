@@ -6,7 +6,7 @@
 import { SessionIdSchema, mergeTrackingDecisionDigest, sessionEventId, type CodeMilestone, type DocumentStore, type MergeTrackingItem, type OrgId, type TransactItem, type WorkflowSnapshot } from "@agentx/contracts";
 import { change } from "@agentx/contracts";
 import { mergedLines } from "./merged-lines.js";
-import { changeRequestAddress, mergeCommitIndexItem } from "./merge-commit-index.js";
+import { githubPullRequestAddress, mergeCommitIndexStep } from "../proof/revert/merge-commit-index.js";
 import type { CodeMilestones, SessionBindingsReader, SessionTimeline } from "./seams.js";
 import { readMergeTracking, trackingWriteItem } from "./store.js";
 
@@ -71,11 +71,11 @@ const isMerged = (workflow: WorkflowSnapshot, repositoryId: string, number: numb
 /**
  * The items that bring the merge-tracking row and the pull request record of each pull request this save moves to MERGED up to date, the merge commit's index row, and the timeline line for one
  * merged on the host with no approval recorded. None for a pull request already merged in `before`. Reads failing are logged and leave the merge recorded without them: recording the merge
- * never waits on this. `hostKind` is the code host's kind (it says how a pull request address is read).
+ * never waits on this.
  */
 export async function mergedStateItems(
   deps: { store: DocumentStore; timeline: SessionTimeline; log?: (event: string, fields: Record<string, unknown>) => void },
-  task: MergedStateTask, hostKind: string, before: WorkflowSnapshot, after: WorkflowSnapshot, now: string, observed: readonly MergedObservation[] = [],
+  task: MergedStateTask, before: WorkflowSnapshot, after: WorkflowSnapshot, now: string, observed: readonly MergedObservation[] = [],
   recordsWrittenByCaller: readonly MergedRecordWrittenByCaller[] = [],
 ): Promise<TransactItem[]> {
   const newly = (after.pullRequests ?? []).filter((pullRequest) => pullRequest.state === "MERGED" && !isMerged(before, pullRequest.repositoryId, pullRequest.number));
@@ -109,9 +109,9 @@ export async function mergedStateItems(
     }
     // SRL-3: the index from the merge commit to this task, in the same transaction, so a revert of the commit is matched to the pull request. No commit, or an address the index cannot hold: no row (logged).
     const mergeCommit = observed.find((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number)?.mergeCommit;
-    const address = changeRequestAddress(hostKind, pullRequest.url);
+    const address = githubPullRequestAddress(pullRequest.url);
     const indexed = mergeCommit === undefined || address === undefined ? undefined
-      : mergeCommitIndexItem({ orgId, repositoryFullName: address.repositoryFullName, repositoryId: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url, taskId: task.taskId, mergeCommit, now });
+      : mergeCommitIndexStep({ orgId, repositoryFullName: address.repositoryFullName, repositoryId: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url, taskId: task.taskId, mergeCommit, now }, deps.store.ttlAttribute);
     if (indexed !== undefined) items.push(indexed);
     else if (address !== undefined) missed[mergeCommit === undefined ? "no_merge_commit" : "bad_merge_commit"] += 1;
     // Merged on the host (not by Rovara's Merge, which claims the pull request first) with no approval that counts: a fact for the timeline, not an error.

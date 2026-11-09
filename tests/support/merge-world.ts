@@ -11,9 +11,10 @@ import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/b
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import {
-  fixedCodeSettings, linkedChangeRequestItem, plain, prepareMerge, soleOwnerPeople, storeLinkedChangeRequests, taskRecordKey,
+  fixedCodeSettings, plain, prepareMerge, soleOwnerPeople, storeLinkedChangeRequests, taskRecordKey,
   type CodeMergeHost, type CodeMilestones, type MergeDependencies, type MergeTask, type MergeTrackingDependencies, type PreparedMerge, type SessionTimeline,
 } from "../../packages/broker/src/core/merge/index.js";
+import { linkedChangeRequestStep } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
 
 export const ORG = IMPLICIT_COMPANY_ID;
 export const TASK_ID = "11111111-1111-4111-8111-111111111111";
@@ -125,7 +126,7 @@ export async function mergeWorld(options: MergeWorldOptions = {}): Promise<Merge
     ownerId: "owner-1", ownerName: "Priya", workflow,
   }) });
   for (const pr of prs) {
-    const item = linkedChangeRequestItem({
+    const item = linkedChangeRequestStep({
       hostKind: "github", repositoryAddress: urlOf(pr.repositoryId), changeRequestId: String(pr.number), repositoryId: pr.repositoryId, number: pr.number, url: pr.model.crUrl(String(pr.number)),
       taskId: TASK_ID, workspaceId: "ws-1", candidateDigest: CANDIDATE, createdAt: stamp,
     })!;

@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { MERGE_NOT_READY_MESSAGES as M, hostRateLimitRetryAt, mergeTrackingKey, approvalProofKey } from "../../packages/contracts/src/index.js";
 import {
-  TrackingRequestCapError, pressMerge, prepareMerge, trackPullRequest, trackTask, reconcileTrackingTask, readMergeTracking, mergeViewOf, trackingRequestCap,
+  TrackingRequestCapError, registerMergeActionDecider, pressMerge, prepareMerge, trackPullRequest, trackTask, reconcileTrackingTask, readMergeTracking, mergeViewOf, trackingRequestCap,
   type MergeReadBudget,
 } from "../../packages/broker/src/core/merge/index.js";
 import { ORG, OWNER_SESSION, TASK_ID, githubShapedHost, mergeWorld, wrapStore, type MergeWorld } from "../support/merge-world.js";
@@ -197,26 +197,56 @@ describe("merge tracking", () => {
     expect(observed).toBe(3);
   });
 
-  it("commits an action's workflow with the tracking item in one transaction", async () => {
+  it("commits a decider's workflow, steps, dispatch row and milestones with the tracking item in one transaction, and the store's expiry attribute reaches the decider", async () => {
     const world = await mergeWorld();
-    const { registerMergeActionDecider } = await import("../../packages/broker/src/core/merge/index.js");
     const task = await world.task();
-    const release = registerMergeActionDecider("sync", ({ workflow }) => ({ slot: "sync", workflow: { ...workflow, revision: workflow.revision + 1, updatedAt: "2026-11-09T10:00:01.000Z" }, items: [{ kind: "put", item: { pk: "ACTION#1", sk: "A", ok: true } }] }));
+    let seenTtl: string | undefined = "unset";
+    const request = (workflow: typeof task.workflow, revision: number) => ({
+      slot: "sync" as const, workflow: { ...workflow, revision: workflow.revision + 1, updatedAt: "2026-11-09T10:00:01.000Z" },
+      steps: [{ kind: "put" as const, item: { pk: "ACTION#1", sk: "A", ok: true } }],
+      dispatch: { kind: "SYNC" as const, workflowRevision: revision, candidateDigest: "0".repeat(64), at: "2026-11-09T10:00:01.000Z" },
+      milestones: [{ milestone: { kind: "fixing" as const, orgId: ORG, taskId: TASK_ID, at: "2026-11-09T10:00:01.000Z", text: "Bringing the branch up to date." }, n: revision }],
+    });
+    const release = registerMergeActionDecider("sync", ({ workflow, context }) => { seenTtl = (context as { ttlAttribute?: string } | undefined)?.ttlAttribute; return request(workflow, workflow.revision + 1); });
     try {
       await trackPullRequest(world.tracking, TASK_ID);
+      expect(seenTtl).toBe("indexExpiresAt");
       expect((await world.task()).workflow.revision).toBe(task.workflow.revision + 1);
       expect(await world.store.get({ pk: "ACTION#1", sk: "A" })).toBeDefined();
+      expect(await world.store.get({ pk: `ORG#${ORG}#WORKFLOW_DISPATCH`, sk: `${TASK_ID}#${String(task.workflow.revision + 1)}` })).toMatchObject({ kind: "SYNC", taskId: TASK_ID });
+      expect(world.milestones.written.map((m) => m.kind)).toContain("fixing");
       expect(await world.trackingOf(world.prs[0]!)).toBeDefined();
     } finally { release(); }
-    // The same action against a workflow that moved underneath it writes none of its parts.
+    // The same decider against a workflow that moved underneath it writes none of its parts: no tracking item, no step, no dispatch row, no milestone.
     const lost = await mergeWorld();
-    const release2 = registerMergeActionDecider("sync", ({ workflow }) => ({ slot: "sync", workflow: { ...workflow, revision: workflow.revision + 1 }, items: [{ kind: "put", item: { pk: "ACTION#2", sk: "A" } }] }));
+    const release2 = registerMergeActionDecider("sync", ({ workflow }) => request(workflow, workflow.revision + 1));
     try {
       await lost.setWorkflow({ revision: 10 });
       const stale = async () => { const t = await lost.host.loadTask(TASK_ID); return { ...t!, workflow: { ...t!.workflow!, revision: 9 } }; };
       await rejects(() => trackPullRequest({ ...lost.tracking, loadTask: stale }, TASK_ID));
-      expect(await lost.store.get({ pk: "ACTION#2", sk: "A" })).toBeUndefined();
+      expect(await lost.store.get({ pk: "ACTION#1", sk: "A" })).toBeUndefined();
+      expect(await lost.store.query({ pk: `ORG#${ORG}#WORKFLOW_DISPATCH` }).then((page) => page.items)).toEqual([]);
+      expect(await lost.trackingOf(lost.prs[0]!)).toBeUndefined();
     } finally { release2(); }
+  });
+
+  it("records a head that is not one of Rovara's recorded pushes as a person's push, strictly: even while a Rovara push is pending, and never for a recorded head", async () => {
+    const world = await mergeWorld();
+    const pr = world.prs[0]!;
+    const writers = { pk: `ORG#${ORG}#BRANCH_WRITERS`, sk: `app#${pr.model.getChangeRequest(String(pr.number)).sourceBranch}` };
+    // The recorded head: nothing is written.
+    await trackPullRequest(world.tracking, TASK_ID);
+    expect(await world.store.get(writers)).toBeUndefined();
+    // A new head nobody recorded, while a Rovara push is pending (the optimistic reading says "mine"): the branch is a person's anyway.
+    await world.setWorkflow({ stage: "IMPLEMENT", state: "RUNNING" });
+    pr.model.commit(pr.model.getChangeRequest(String(pr.number)).sourceBranch, { "src/b.ts": "x\n" });
+    await trackPullRequest({ ...world.tracking, recordedHead: async () => undefined }, TASK_ID);
+    expect((await world.trackingOf(pr))!["headByRovara"]).toBe(true);
+    expect(await world.store.get(writers)).toMatchObject({ personPushed: true });
+    // A failure to write the fact fails the pass: it is tried again, never skipped.
+    const failing = wrapStore(world.store, { update: async () => { throw new Error("store down"); } });
+    pr.model.commit(pr.model.getChangeRequest(String(pr.number)).sourceBranch, { "src/c.ts": "x\n" });
+    expect((await rejects(() => trackPullRequest({ ...world.tracking, store: failing, recordedHead: async () => undefined }, TASK_ID))).message).toContain("store down");
   });
 });
 
@@ -245,7 +275,7 @@ describe("the press", () => {
     const item = (await world.trackingOf(pr))!;
     expect(item["mergeClaim"]).toMatchObject({ headSha: pr.head });
     expect(world.audit.events).toHaveLength(1);
-    expect(world.audit.events[0]).toMatchObject({ action: "pull_request.merge_requested", companyId: ORG, actor: { type: "person" }, details: { repository: "acme/app", number: pr.number, method: "squash" } });
+    expect(world.audit.events[0]).toMatchObject({ action: "pull_request.merge_requested", companyId: ORG, actor: { type: "person" }, details: { repository: "acme/app", number: pr.number, method: "squash", requestId: prepared.request.requestId, proofId: proof.proofId } });
     expect(await world.store.get({ pk: `ORG#${ORG}#MERGE_PROOF`, sk: approvalProofKey(proof) })).toBeDefined();
   });
 

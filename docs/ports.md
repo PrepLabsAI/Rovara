@@ -261,7 +261,8 @@ review, item. A caller reads an adapter's `capabilities` and never branches on i
   is minted with `contents: read` and a push credential with `contents: write`, nothing else, for the one repository, and no call mints a token for more than one repository or
   a write for a read; every request refuses redirects and has a timeout, and a redirect is never followed to another host; GitHub's rate limit is the neutral error; an unsafe branch or
   path never reaches an address. The suite found five Cloud requests (create, update and read of a pull request, a commit tree, the open-pull-request lookup) with no redirect refusal
-  and no timeout; `client.ts` now has both there (marked `L7a`), and Cloud should take the same fix.
+  and no timeout; `client.ts` now has both there (marked `L7a`; the suite fails with any one of the five removed), and Cloud should take the same fix. It also pins the exact
+  permission set each method may mint a token with, so a widened scope (not only a write) fails, and fails when a method never reaches the repository (a path it cannot see).
 - **The merge core calls the routing.** `core/merge/` (lane L7a) reaches a repository through `registryRepositoryResolver(registry, ...)`, which picks the code host by the
   repository record's `host.kind` (`codeHostForRecord`). The task flow's other calls to `github-app.ts` move in their own lanes.
 - **Untrusted text** from a code host or tracker (comments, logs, item bodies) is data: it reaches a model only inside a labelled block, and
@@ -341,7 +342,10 @@ claim, and the single merge path that re-reads the code host and merges at the c
 - **The proof of a person is the Approvers seam.** `prepareMerge` makes an `ApprovalRequest` (kind `merge`, bound to the workflow's revision and to a digest of the exact pull
   requests, heads, merge method and risk level the person sees); the surface collects an `ApprovalProof` (the local owner's session, or a repository collaborator's comment);
   `pressMerge` verifies it with `Approvers.verify` and only then merges. A proof is used once: its `approvalProofKey` is stored with `when.absent()` in the first claim's
-  transaction. Rovara never merges by itself.
+  transaction; a proof whose token names one act (a code-host comment) is also used up by method and token, so the same comment cannot approve a second request. `pressMerge`
+  enforces the adapter's `requirement` (a method it does not list is refused; `minApprovers` other than 1 is refused until collecting several verdicts exists). Rovara never merges by itself.
+  **What this core does not enforce:** who is calling. Cloud's rule that a token (the CLI, an AI tool) never merges is not here; keeping the local session secret away from tokens and
+  agent tools is the job of the surface that collects the proof (lane L8), and a stronger proof for a high-risk merge is a rule of the Approvers adapter (`request.risk` tells it).
 - **The audit fact commits with the claim** through `AuditSink.stage`, as Cloud's ledger row did.
 - **Seams the neighbouring lanes fill** (`seams.ts`): the task record (`MergeTask`, read by `MergeHost.loadTask`), the session timeline (`SessionTimeline`), the milestone hook
   (`CodeMilestones`), the session bindings, the project's code settings (`CodeSettingsReader`; Code's default has self-approval ON, one owner), the reverse link from a change request
