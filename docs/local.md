@@ -206,13 +206,15 @@ ports and not each other, and this is the only place that knows all of them.
 
 | What | Where it comes from |
 | --- | --- |
-| Records and queue | one SQLite file, `~/.rovara/state.db` (lane L3's adapters, registered as the `storage` and `queue` defaults; a configured plug-in replaces them and must keep the task flow's indexes, `TASK_FLOW_INDEXES`) |
+| Records and queue | one SQLite file, `~/.rovara/state.db` (lane L3's adapters, registered as the `storage` and `queue` defaults; a configured plug-in replaces them and must keep the task flow's indexes, `TASK_FLOW_INDEXES`, and set `ttlAttribute` to `indexExpiresAt`, the attribute the records expire by) |
 | Task flow | lane L6a over the registry's `storage`, `queue`, `worker-machines`, `admission` and `audit-sink`; a timer (2 s) relays the outbox, dispatches to the worker machine, and sweeps the dispatch rows |
 | Sessions | lane L6b; the session is created in the task's own start transaction (`startExtras`), kept current by the store's change feed, and swept on the same timer |
 | Decisions | lane L6b's approval gate over the task's workflow document; a plan is approved only with a proof a local page signs for that one request, revision and digest |
-| Pages | lane L8's server on its own port (`runtime.pagesUrl`); a page address carries the owner's page session and is printed by `rovara up` and by `rovara open [task]` |
+| Pages | lane L8's server on its own port (`runtime.pagesUrl`); a page address carries the owner's page session and can approve, so it never leaves the server process: `rovara open [task]` asks the running server to open the page in your browser (`POST /v1/local/pages/open`, which answers `{ opened: true }` and nothing else), and `rovara up` prints only the pages' origin |
 | Worker callbacks | `app/callbacks.ts` on the callback listener: events, artifacts, the terminal result, and the repository credential exchange |
 | Owner routes | `/v1/dev/projects`, `/v1/admin/projects`, `/v1/dev/tasks...` and `/v1/app/sessions...`, behind the session token (the routes the MCP tools and the CLI's `session` commands call) |
+
+**One `rovara up` per state folder** (a lock file, `up.lock`, holds the pid; a lock whose process is gone is replaced). **Worker output** is taken only while an operation runs: an artifact is kept once (the same bytes again are the same artifact, other bytes are refused), nothing but a repeat of the result is taken after the operation ends, and a plan is shown only if its bytes match the digest the approval binds. The two kinds of signed token (callback capabilities, repository grants) use different keys derived from `callback-key`.
 
 **Projects.** `POST /v1/admin/projects` (the owner) registers a project definition on the store; a repeat of the latest revision is a 200, a change is the next
 revision. A code host adapter is not needed to start a task: with none registered a start does not check the repository's host (and no pull request can be opened yet).
@@ -223,10 +225,10 @@ plan's `plan.md` (kept as a Markdown plan). An unreadable answer blocks the step
 changes is planned again with the owner's words in the prompt.
 
 **Approving.** The session token that logs a tool in is not an approval. `POST /v1/dev/tasks/<id>/workflow/decision` answers that a plan is approved on its page; the owner
-runs `rovara open <task>` (or opens the link `rovara up` printed) and decides there. Keep that address out of chats and pull requests: whoever holds it can approve.
+runs `rovara open <task>`, which opens the page in their browser, and decides there. No API or MCP answer carries a page address (a test reads every answer of the journey for one).
 
 **The 10-minute laptop test.** `tests/unit/local-up-flow.test.ts` is the journey with the worker simulated: project, task, preparation, Understand, Plan, the plan on the page,
-approval, a restart in the middle, a failed step and its Retry, questions and their answers, Stop, a message, the page address from `rovara open`, and the real Docker adapter
+approval, a restart in the middle, a failed step and its Retry, questions and their answers, Stop, a message, `rovara open`, and the real Docker adapter
 (simulated Docker) accepting the job with the real worker's token check. With real Docker it is:
 
 ```sh
@@ -247,7 +249,7 @@ Today this stops at the approved plan (see "Not wired yet"). The model proxy is 
   are not ported. So `installCiFixDecider` and `installBranchSyncDeciders` are NOT installed (L7A-3), `openBranchWriters` has no publish path to sit on, and the merge, proof and
   pull request comment commands (L7a, L7b, L8) are not reachable from `rovara up`.
 - **A GitHub client for the laptop.** No `GitHubCodeHostProvider` exists for a personal token or `gh` (L7A-4): Cloud's client is a GitHub App client. Until one passes
-  `runGitHubClientConformance`, no `code-host` adapter is registered, and a worker's clone credential is the owner's token itself (clone and push are the same token).
+  `runGitHubClientConformance`, no `code-host` adapter is registered, and a worker's clone credential is the owner's token itself, given only for a repository on github.com over https and only to clone (no push credential is given yet; lane L11 brings a scoped one).
 - **A model for the worker.** `modelProxyEndpoint` (lane L9a). The worker's `GET /v1/internal/model-access` is refused by the callback listener (POST only) and by the egress
   gateway (it relays only `/v1/internal/workspaces/<id>/operations/<id>/<action>`).
 - **Lessons**, **design review** and the **proof report** page answer "nothing there"; **notifications** need a `channel` adapter (none on a laptop).

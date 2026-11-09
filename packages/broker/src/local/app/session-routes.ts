@@ -126,6 +126,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
     const task = taskId === undefined ? undefined : await readTask(flow.deps, taskId);
     const workflow = task?.workflow;
     if (task === undefined || workflow === undefined) throw agentXError("NOT_FOUND", "There is no such session.");
+    if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", "This task is closed, so it takes no more answers.");
     const round = typeof body["round"] === "number" ? body["round"] : -1;
     const now = iso(flow.deps);
     const next = answerIntentQuestions(workflow, {

@@ -2,7 +2,7 @@
 // the fake worker answers the preparation, Understand and Plan through the REAL callback listener and the capability the flow issued; the plan appears on the local page and the owner approves
 // it there. Docker is simulated (the worker machines are the W0 fake), so nothing here needs Docker.
 import { request as httpRequest } from "node:http";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AdapterRegistry, AuditEvent, AuditSink } from "@agentx/contracts";
@@ -463,6 +463,67 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const operations = (await h.api(`/v1/dev/tasks/${task.taskId}`)).body.task as unknown as { workflow: { revision: number } };
     expect(operations.workflow.revision).toBeGreaterThan(0);
     expect(audit.filter((event) => event.action.startsWith("session.")).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("signs a repository grant and a callback capability with different keys, so one is never good as the other (L1)", async () => {
+    const h = await launch();
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "18181818-1818-4818-8818-181818181818", project: "payments", instructions: "x", workflow: true } })).body.task.taskId;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const prepare = await h.nextJob(workspaceId, new Set()) as WorkerInvocation & { payload: { repositoryGrant: string } };
+    // A grant presented as a capability is a 403 (the signature fails first), not a server error.
+    const asCapability = await h.callback({ ...prepare, callbackCapability: prepare.payload.repositoryGrant }, "result", { status: "SUCCEEDED" });
+    expect(asCapability.body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(asCapability.status).toBeLessThan(500);
+    // A capability presented as a grant is refused too.
+    const asGrant = await h.runtime.app.callbacks({
+      method: "POST", path: `/v1/internal/workspaces/${prepare.workspaceId}/operations/${prepare.operationId}/repository-credentials`,
+      headers: { "x-agentx-repository-grant": prepare.callbackCapability }, body: JSON.stringify({ credentialRef: "host-app", repositoryUrl: PROJECT.repositories[0]!.url, access: "clone" }),
+    });
+    expect(asGrant.statusCode).toBe(403);
+  });
+
+  it("holds one rovara up per state folder, takes over a lock whose process is gone, and releases it when start fails (L2)", async () => {
+    const first = await launch();
+    await expect(launch({ root: first.root })).rejects.toThrow(/another rovara up/);
+    // The refused start did not disturb the running one.
+    expect((await first.api("/v1/dev/tasks")).status).toBe(200);
+    await first.runtime.stop();
+    // A lock left by a process that is gone is replaced.
+    await writeFile(join(first.stateDirectory, "up.lock"), "999999:stale\n", { mode: 0o600 });
+    const second = await launch({ root: first.root });
+    expect((await second.api("/v1/dev/tasks")).status).toBe(200);
+    await second.runtime.stop();
+    // A start that fails (a callback key others can read) gives the lock back.
+    await chmod(join(first.stateDirectory, "callback-key"), 0o644);
+    await expect(launch({ root: first.root })).rejects.toThrow();
+    await chmod(join(first.stateDirectory, "callback-key"), 0o600);
+    const third = await launch({ root: first.root });
+    expect((await third.api("/v1/dev/tasks")).status).toBe(200);
+  });
+
+  it("keeps the callback key in a 0600 file and refuses to start on one others can read", async () => {
+    const h = await launch();
+    expect((await lstat(join(h.stateDirectory, "callback-key"))).mode & 0o777).toBe(0o600);
+    await h.runtime.stop();
+    await chmod(join(h.stateDirectory, "callback-key"), 0o640);
+    await expect(launch({ root: h.root })).rejects.toThrow(/readable by other users|callback key/);
+  });
+
+  it("takes no answers on a closed task", async () => {
+    const h = await launch();
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const task = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "19191919-1919-4919-8919-191919191919", project: "payments", instructions: "x", workflow: true } })).body.task;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${task.taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: {} });
+    const understand = await h.nextJob(workspaceId, seen);
+    await h.callback(understand, "artifacts", { name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify({ kind: "questions", restatement: "x", questions: [{ id: "q1", text: "Which?", options: [{ id: "a", label: "A" }, { id: "b", label: "B" }] }] }) });
+    await h.callback(understand, "result", { status: "SUCCEEDED" });
+    expect((await h.api(`/v1/dev/tasks/${task.taskId}/close`, { method: "POST", body: {} })).status).toBe(200);
+    const answered = await h.api(`/v1/app/sessions/${task.sessionId!}/answers`, { method: "POST", body: { requestId: "20202020-2020-4020-8020-202020202020", round: 1, answers: [{ questionId: "q1", optionId: "a" }] } });
+    expect(answered.status).toBeGreaterThanOrEqual(400);
+    expect(JSON.stringify(answered.body)).toContain("closed");
   });
 });
 

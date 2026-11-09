@@ -4,10 +4,10 @@
 // defaults and the built-in adapters are registered; the config's adapters are loaded (a configured storage or queue replaces the
 // in-memory default); the registry is sealed; then the server starts. Nothing in the registry changes after that except channels.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { realpath, rm, stat } from "node:fs/promises";
+import { open, readFile, realpath, rm, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
@@ -42,6 +42,8 @@ import { loadInvokeSigner } from "./invoke-signer.js";
 import {
   KEYS_FILE_NAME,
   SERVER_FILE_NAME,
+  STATE_LOCK_FILE_NAME,
+  LocalStateError,
   SESSION_TOKEN_FILE_NAME,
   STATE_DB_FILE_NAME,
   WORKSPACES_DIRECTORY_NAME,
@@ -178,7 +180,10 @@ function ownerName(): string {
   }
 }
 
-/** The surface the request came from, for the session's origin: the MCP tools and the CLI name themselves. */
+/**
+ * The surface the request came from, for the session's origin and the answer's source: the MCP tools and the CLI name themselves. The header is self-declared by whoever holds the
+ * session token, so it is a LABEL only. Nothing may decide who is allowed to do what from it.
+ */
 function clientOf(request: BrokerRequest): string {
   const named = request.headers["x-agentx-client"];
   return named === "mcp" || named === "cli" ? named : "app";
@@ -188,8 +193,54 @@ function json(statusCode: number, value: unknown): BrokerResponse {
   return { statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) };
 }
 
+/**
+ * One `rovara up` per state folder. A second would rewrite the session token and the server file, and either one's Ctrl-C would stop the other's workers. The lock is a file made with
+ * O_EXCL holding the pid; a lock whose process is gone is taken over.
+ */
+async function acquireStateLock(stateDirectory: string): Promise<() => Promise<void>> {
+  const path = join(stateDirectory, STATE_LOCK_FILE_NAME);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const handle = await open(path, "wx", 0o600);
+      const mine = `${String(process.pid)}:${randomBytes(8).toString("hex")}`;
+      await handle.writeFile(`${mine}\n`);
+      await handle.close();
+      let released = false;
+      return async () => {
+        // Only our own lock is removed, and only once (a second runtime in this process has a lock of its own).
+        if (released) return;
+        released = true;
+        const held = await readFile(path, "utf8").catch(() => undefined);
+        if (held?.trim() === mine) await rm(path, { force: true });
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const pid = Number((await readFile(path, "utf8").catch(() => "")).trim().split(":")[0]);
+      let alive = false;
+      if (Number.isInteger(pid) && pid > 0) {
+        try { process.kill(pid, 0); alive = true; } catch (killError) { alive = (killError as NodeJS.ErrnoException).code === "EPERM"; }
+      }
+      if (alive) throw new LocalStateError(`another rovara up (process ${String(pid)}) is using ${stateDirectory}; stop it first, or use another --state-dir`);
+      await rm(path, { force: true });
+    }
+  }
+  throw new LocalStateError(`could not take the lock on ${stateDirectory}`);
+}
+
 export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<LocalRuntime> {
   const stateDirectory = await ensureStateDirectory(options.stateDirectory, { cwd: options.cwd });
+  const release = await acquireStateLock(stateDirectory);
+  try {
+    const runtime = await startLocked(options, stateDirectory);
+    const stop = runtime.stop.bind(runtime);
+    return Object.assign(runtime, { async stop() { await stop(); await release(); } });
+  } catch (error) {
+    await release();
+    throw error;
+  }
+}
+
+async function startLocked(options: LocalRuntimeOptions, stateDirectory: string): Promise<LocalRuntime> {
   const location = resolveConfigLocation({ stateDirectory, configPath: options.configPath, cwd: options.cwd });
   let configText: string;
   try {
@@ -227,7 +278,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   } else {
     const databasePath = join(stateDirectory, STATE_DB_FILE_NAME);
     if (!configured("storage")) {
-      const store = SqliteDocumentStore.open({ path: databasePath, indexes: TASK_FLOW_INDEXES, migrate: true });
+      const store = SqliteDocumentStore.open({ path: databasePath, indexes: TASK_FLOW_INDEXES, ttlAttribute: INDEX_EXPIRY_ATTRIBUTE, migrate: true });
       closers.push(() => store.close());
       registry.register("storage", "sqlite", store, { isDefault: true });
     }

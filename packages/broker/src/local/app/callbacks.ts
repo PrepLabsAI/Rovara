@@ -7,7 +7,7 @@
 // evidence, the plan self-check and critique, and everything after the plan is approved. A plan the worker saves as `plan.md` is kept as a Markdown plan.
 import { createHash, randomUUID } from "node:crypto";
 import {
-  AgentXError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
+  AgentXError, INDEX_EXPIRY_ATTRIBUTE, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
 } from "@agentx/contracts";
 import { CallbackCapabilities, type CallbackAction } from "../../callbacks.js";
 import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
@@ -104,7 +104,7 @@ async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body
   const last = typeof item?.["eventSequence"] === "number" ? item["eventSequence"] : parsed.length;
   const expiresAt = Math.floor((deps.flow.now?.() ?? new Date()).getTime() / 1000) + EVENT_KEEP_SECONDS;
   await Promise.all(parsed.map((event, index) => deps.flow.store.put({
-    item: { pk: `WORKSPACE#${operation.workspaceId}`, sk: `EVENT#${operation.id}#${String(last - parsed.length + index + 1).padStart(10, "0")}`, entityType: "OPERATION_EVENT", operationId: operation.id, sequence: last - parsed.length + index + 1, expiresAt, ...JSON.parse(JSON.stringify(event)) as Record<string, never> },
+    item: { pk: `WORKSPACE#${operation.workspaceId}`, sk: `EVENT#${operation.id}#${String(last - parsed.length + index + 1).padStart(10, "0")}`, entityType: "OPERATION_EVENT", operationId: operation.id, sequence: last - parsed.length + index + 1, [INDEX_EXPIRY_ATTRIBUTE]: expiresAt, ...JSON.parse(JSON.stringify(event)) as Record<string, never> },
   })));
   return { accepted: parsed.length };
 }

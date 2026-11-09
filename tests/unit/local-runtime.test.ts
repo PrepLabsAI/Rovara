@@ -93,7 +93,7 @@ describe("rovara up runtime", () => {
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const indexes = TASK_FLOW_INDEXES.map(({ name, partitionAttribute, sortAttribute, sortType }) => ({ name, partitionAttribute, ...(sortAttribute === undefined ? {} : { sortAttribute }), ...(sortType === undefined ? {} : { sortType }) }));
     const { runtime, stateDirectory } = await launch({
-      config: { version: 1, plugins: [{ point: "storage", name: "sqlite", module: "@agentx/local-adapters/storage", settings: { path: join(root, "custom.db"), indexes } }] },
+      config: { version: 1, plugins: [{ point: "storage", name: "sqlite", module: "@agentx/local-adapters/storage", settings: { path: join(root, "custom.db"), indexes, ttlAttribute: "indexExpiresAt" } }] },
     });
     expect(runtime.wiring().storage).toEqual(["sqlite"]);
     // The configured store is the one at the configured path; the default was not opened beside it.

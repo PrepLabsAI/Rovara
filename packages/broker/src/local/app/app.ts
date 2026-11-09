@@ -7,7 +7,7 @@
 //
 // Decision 51: nothing here names a provider; it asks the registry for `storage`, `queue`, `worker-machines`, `admission`, `audit-sink`, `approvers`, `identity` and `metering`.
 // Decision 53: the object (artifact) store is the one port W0 lacks; lane L9a builds it. TODO(L9a): replace `createDocumentEvidenceBlobStore` below with the registry's `object-storage` adapter.
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { IMPLICIT_COMPANY_ID, type AdapterRegistry, type OrgId, type Principal } from "@agentx/contracts";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
@@ -102,6 +102,11 @@ async function loadCallbackKey(stateDirectory: string): Promise<Buffer> {
   return Buffer.from(written.text.trim(), "base64url");
 }
 
+/** A purpose-bound key from the root key: HMAC-SHA256(root, purpose), 32 bytes. */
+export function deriveKey(root: Buffer, purpose: string): Buffer {
+  return createHmac("sha256", root).update(`rovara-local\0${purpose}`).digest();
+}
+
 export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp> {
   const { registry } = options;
   const companyId = options.companyId ?? IMPLICIT_COMPANY_ID;
@@ -111,8 +116,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // TODO(L9a): the `object-storage` plug-in point. Until it lands, artifacts are kept as documents (the evidence store's own adapter); a plan is small.
   const blobs = createDocumentEvidenceBlobStore(store, { companyId, ...(options.now === undefined ? {} : { now: () => options.now!().getTime() }), retentionDays: { "evidence-std": 180 } });
 
-  const signingKey = await loadCallbackKey(options.stateDirectory);
-  const grants = new RepositoryGrantService(signingKey, options.resolveRepositoryCredential ?? (async () => { throw new Error("no GitHub access is set up: run `gh auth login` or set GH_TOKEN"); }));
+  const rootKey = await loadCallbackKey(options.stateDirectory);
+  // Two kinds of token, two keys: a repository grant is not good as a callback capability, nor the other way round (the signature fails first, so a mix-up is a 403).
+  const signingKey = deriveKey(rootKey, "callback-capability");
+  const grants = new RepositoryGrantService(deriveKey(rootKey, "repository-grant"), options.resolveRepositoryCredential ?? (async () => { throw new Error("no GitHub access is set up: run `gh auth login` or set GH_TOKEN"); }));
 
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
