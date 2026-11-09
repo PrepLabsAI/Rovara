@@ -92,7 +92,7 @@ class Lane {
     git(this.dir, "branch", "base");
     git(this.dir, "switch", "-q", "-c", "lane");
   }
-  write(path: string, text: string): void {
+  write(path: string, text: string | Buffer): void {
     const full = join(this.dir, path);
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, text);
@@ -325,6 +325,16 @@ describe("port-guard on a temp repository", () => {
       lane.write("packages/worker/src/engine.dat", text);
       lane.commit();
       expect(rules(lane.guard())).toContain("cloud-import");
+    });
+
+    it("still finds a name next to an invalid byte or a NUL, which stripping would otherwise glue to its neighbour", () => {
+      const name = "zorblaxcorp";
+      lane.write("docs/a.txt", Buffer.concat([Buffer.from("Soci\xe9t\xe9\xa0", "latin1"), Buffer.from(`${name} pilot\n`)]));
+      lane.write("docs/b.txt", Buffer.concat([Buffer.from("ab\xff", "latin1"), Buffer.from(`${name}\n`)]));
+      lane.write("docs/c.txt", `ab\0${name}\n`);
+      lane.commit();
+      const files = lane.guard().filter((f) => f.rule === "private-name").map((f) => f.file).sort();
+      expect(files).toEqual(["docs/a.txt", "docs/b.txt", "docs/c.txt"]);
     });
 
     it("finds a private name in a UTF-16 file, with or without a byte-order mark", () => {

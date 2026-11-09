@@ -830,7 +830,8 @@ function scanChange(collector: Collector, input: ScanInput): void {
     if (lines.length > 0) collector.mergePatches.set(input.commit, lines.join("\n") + "\n");
   }
   // A UTF-16 file reads as text with a NUL between the letters: without them the name and secret checks see the words (the earlier patch passes see the raw bytes).
-  const added = parse(patch).map((line) => (line.text.includes("\0") || line.text.includes("\uFFFD") ? { ...line, text: withoutNul(line.text).replaceAll("\uFFFD", "") } : line));
+  const rawAdded = parse(patch);
+  const added = rawAdded.map((line) => (line.text.includes("\0") || line.text.includes("\uFFFD") ? { ...line, text: withoutNul(line.text).replaceAll("\uFFFD", "") } : line));
   // The second gitleaks pass reads what the range adds to every file, under a neutral name: its default config skips files by name
   // (lockfiles, images, vendor directories and more). Only added lines, so a file that already held a public fixture is not re-judged.
   const perFile = new Map<string, string[]>();
@@ -844,21 +845,26 @@ function scanChange(collector: Collector, input: ScanInput): void {
     const text = texts.join("\n") + "\n";
     collector.addedText.set(createHash("sha1").update(path).update("\0").update(text).digest("hex"), { path, text });
   }
-  // A name broken over two added lines: the lines of one hunk, joined.
-  for (let start = 0; start < added.length; ) {
-    let end = start + 1;
-    while (end < added.length && added[end]!.file === added[start]!.file && added[end]!.line === added[end - 1]!.line + 1) end += 1;
-    if (end - start > 1) {
-      const first = added[start]!;
-      for (const detail of splitNameFindings(added.slice(start, end).map((a) => a.text), collector.names)) {
-        add({ rule: "private-name", file: first.file, line: first.line, detail: `${detail} (split over lines)` });
+  // A name broken over two added lines: the lines of one hunk, joined. Read on the raw lines and, when stripping changed any, on the cleaned lines too
+  // (stripping joins the text either side of a bad byte, which can hide a name that the raw line shows).
+  for (const lines of added.some((line, index) => line.text !== rawAdded[index]!.text) ? [rawAdded, added] : [added]) {
+    for (let start = 0; start < lines.length; ) {
+      let end = start + 1;
+      while (end < lines.length && lines[end]!.file === lines[start]!.file && lines[end]!.line === lines[end - 1]!.line + 1) end += 1;
+      if (end - start > 1) {
+        const first = lines[start]!;
+        for (const detail of splitNameFindings(lines.slice(start, end).map((a) => a.text), collector.names)) {
+          add({ rule: "private-name", file: first.file, line: first.line, detail: `${detail} (split over lines)` });
+        }
       }
+      start = end;
     }
-    start = end;
   }
   // The same decision for the added text of each file, which is all a single commit's scan has: by name, or by the text of the file's added lines.
   for (const [path, texts] of perFile) if (!codeLike.has(path) && looksLikeCode(path, texts.join("\n"))) codeLike.add(path);
-  for (const { file, line, text } of added) {
+  for (const [index, { file, line, text }] of added.entries()) {
+    const raw = rawAdded[index]!.text;
+    if (raw !== text) for (const detail of lineFindings(raw, collector.names)) add({ rule: "private-name", file, line, detail });
     for (const detail of lineFindings(text, collector.names)) add({ rule: "private-name", file, line, detail });
     if (INLINE_ALLOW.test(text)) add({ rule: "scan-bypass", file, line, detail: "an inline allow comment for gitleaks" });
     // Every line of an import is checked in the added text too, so an import added and later removed is still caught.
