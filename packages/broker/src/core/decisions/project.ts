@@ -41,6 +41,8 @@ export interface ItemBase {
    * digest, so a revised plan or a new push (same title, same counts) makes an earlier "evidence opened" worthless.
    */
   contentVersion: string;
+  /** What a decision on this item is bound to, read when the source drew the card: the revision the task waits at and the digest of the document. The approval gate checks both against the stored state again. */
+  binding?: { revision: number; artifactDigest: string } | undefined;
   /** Evidence lines that are not on the card's front (names, not counts): shown in the panel a medium card makes the person open. */
   details?: ReadonlyArray<{ title: string; lines: readonly string[] }> | undefined;
   /** Set when a standing rule answered the item (a high card ignores it). */
