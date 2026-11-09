@@ -128,7 +128,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
 }
 
 /** Applies one workflow transition with no operation (a result recorded, a block), fenced on the revision it was computed from. False when the task moved on. */
-async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, extra: readonly TransactItem[] = []): Promise<boolean> {
+export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next: WorkflowSnapshot, extra: readonly TransactItem[] = []): Promise<boolean> {
   const current = task.workflow;
   if (current === undefined) return false;
   const result = await deps.store.transact([
@@ -154,6 +154,16 @@ export async function blockTaskWorkflow(deps: TaskFlowDeps, taskId: string, expe
 }
 
 // ---- The dispatch rows: the steps that start with no one asking ----
+
+/** The changes the owner asked for in earlier plans of this task, oldest first (`PLAN_FEEDBACK#<revision>` items written with the decision). */
+export const PLAN_FEEDBACK_SK_PREFIX = "PLAN_FEEDBACK#";
+export const planFeedbackKey = (taskId: string, revision: number): DocumentKey => ({ pk: `DEVTASK#${taskId}`, sk: `${PLAN_FEEDBACK_SK_PREFIX}${String(revision).padStart(8, "0")}` });
+export const PLAN_FEEDBACK_MAX = 20;
+/** The newest `PLAN_FEEDBACK_MAX` requests for changes, oldest first: after a long back-and-forth the latest words are never the ones left out. */
+export async function planFeedbackOf(deps: Pick<TaskFlowDeps, "store">, taskId: string): Promise<string[]> {
+  const page = await deps.store.query({ pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: PLAN_FEEDBACK_SK_PREFIX }, descending: true, limit: PLAN_FEEDBACK_MAX });
+  return page.items.reverse().flatMap((item) => (typeof item["text"] === "string" ? [item["text"]] : []));
+}
 
 /** Cloud's `startTaskWorkflowUnderstandFromSystem` and `startTaskWorkflowPlanFromSystem`, on the ports. */
 export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind">): Promise<StepStart> {
@@ -183,7 +193,8 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
       const assessment = workflow.intent?.assessment;
       if (workflow.stage !== "PLAN" || workflow.state !== "READY" || assessment?.kind !== "ready") return stale();
       next = startWorkflowPlanAfterUnderstand(workflow, iso(deps));
-      prompt = prompts.plan({ requestText: task.requestText ?? "", path: workflow.path, restatement: assessment.restatement, assumptions: assessment.assumptions });
+      const feedback = await planFeedbackOf(deps, task.taskId);
+      prompt = prompts.plan({ requestText: task.requestText ?? "", path: workflow.path, restatement: assessment.restatement, assumptions: assessment.assumptions, ...(feedback.length === 0 ? {} : { feedback }) });
       mode = "PLAN";
       requestId = workflowRequestId("agentx-plan-after-understand", task.taskId, workflow.revision);
     }

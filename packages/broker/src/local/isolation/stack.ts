@@ -20,7 +20,7 @@ export const HELPER_LABEL = "rovara.local.helper";
 export const SANDBOX_LABEL = "rovara.local.sandbox";
 export const ISOLATION_CONFIG_LABEL = "rovara.local.isolation";
 /** Bumped when the networks or helpers change shape, so a container made by an older build is replaced. */
-export const ISOLATION_VERSION = "1";
+export const ISOLATION_VERSION = "2";
 
 export const GATEWAY_INGRESS_PORT = 8080;
 export const CALLBACK_RELAY_PORT = 8081;

@@ -6,6 +6,7 @@ import type {
   AuditSink,
   DocumentStore,
   OrgId,
+  InvocationModelRoute,
   Principal,
   ProjectDefinition,
   QueueService,
@@ -59,7 +60,25 @@ export interface TaskAccess {
 /** The text of the first request to each step. Cloud builds these in `rovara-code/understand.ts` and `developer-tasks/workflow-inputs.ts` (not ported yet: a 51 gap). */
 export interface StepPrompts {
   understand(input: { requestText: string }): string;
-  plan(input: { requestText: string; path: WorkflowPath; restatement?: string; assumptions?: readonly string[] }): string;
+  plan(input: { requestText: string; path: WorkflowPath; restatement?: string; assumptions?: readonly string[]; /** What the owner asked to change in the earlier plans, oldest first (lane L9-wire writes them with the decision). */ feedback?: readonly string[] }): string;
+}
+
+/**
+ * What the wiring lane adds to a start: more steps for the start's own transaction (the task's session, whose records must exist if and only if the task does)
+ * and the session's id, which the task record then carries so the projector can find it.
+ */
+export interface StartExtras {
+  items: readonly TransactItem[];
+  sessionId?: string;
+}
+
+export interface StartExtrasInput {
+  taskId: string;
+  project: string;
+  title: string;
+  principal: Principal;
+  client: string;
+  receivedAt: string;
 }
 
 export interface TaskFlowDeps {
@@ -89,6 +108,15 @@ export interface TaskFlowDeps {
   newId?: () => string;
   log?: (entry: Record<string, unknown>) => void;
   prompts?: StepPrompts;
+  /**
+   * Lane L9a / L9-wire: the model a task step calls, through the install's model proxy (the worker holds no key). The route is what the worker is told (`modelRoute`); the capability it
+   * gets lists the `model-access` action. Undefined from `route()`: no provider key is set up, and the step gets neither (the worker then has no model access and fails with its own reason).
+   */
+  modelAccess?: { route(): Promise<InvocationModelRoute | undefined> };
+  /** Called once an operation reached a terminal status (the model proxy frees its tokens and spend record). Never throws into the flow. */
+  onOperationEnded?: (operationId: string) => void;
+  /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
+  startExtras?: (input: StartExtrasInput) => StartExtras;
 }
 
 export const DEFAULT_DISPATCH_QUEUE = "task-dispatch";

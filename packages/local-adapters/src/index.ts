@@ -6,3 +6,5 @@ export * from "./sqlite-queue.js";
 export { plugin as sqliteStoragePlugin } from "./storage-plugin.js";
 export { plugin as sqliteQueuePlugin } from "./queue-plugin.js";
 export { SettingsError } from "./settings.js";
+export * from "./folder-object-storage.js";
+export { plugin as folderObjectStoragePlugin } from "./object-storage-plugin.js";

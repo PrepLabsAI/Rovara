@@ -3,7 +3,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { agentXError } from "@agentx/contracts";
-import { createDockerRunner, defaultStateDirectory, startLocalRuntime, type DockerRunner, type LocalRuntime, type LocalRuntimeOptions } from "@agentx/broker/local";
+import { SERVER_FILE_NAME, SESSION_TOKEN_FILE_NAME, createDockerRunner, defaultStateDirectory, readOwnerFile, startLocalRuntime, type DockerRunner, type LocalRuntime, type LocalRuntimeOptions } from "@agentx/broker/local";
 import type { Command } from "commander";
 import type { TextWriter } from "../init/prompts.js";
 import { runUpChecks, upChecksText, type UpCheck, type UpCheckServices } from "./checks.js";
@@ -53,6 +53,39 @@ function untilSignal(): Promise<void> {
   });
 }
 
+/**
+ * `rovara open [task]`: asks the running `rovara up` to open the review page in your browser (a task's plan, or the list of what waits for you). The address carries your page session and can
+ * approve, so it is never sent here or printed: the running process opens the browser itself.
+ */
+export function registerOpenCommand(program: Command, context: Pick<UpCommandContext, "home" | "stdout" | "fetch">): void {
+  program
+    .command("open [task]")
+    .description("open the local review page for a task (or for everything that waits for you) in your browser; `rovara up` must be running")
+    .option("--state-dir <path>", "the folder `rovara up` uses (default: ~/.rovara)")
+    .action(async (task: string | undefined, options: { stateDir?: string }, command: Command) => {
+      const globals = command.optsWithGlobals<{ json: boolean }>();
+      if (task !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(task)) throw agentXError("CONFIG_INVALID", "name a task by its id (a UUID), or leave it out");
+      const stateDirectory = options.stateDir ?? defaultStateDirectory(context.home ?? homedir());
+      const server = await readOwnerFile(join(stateDirectory, SERVER_FILE_NAME), { private: false, label: "server file" }).catch(() => undefined);
+      const secret = await readOwnerFile(join(stateDirectory, SESSION_TOKEN_FILE_NAME), { private: true, label: "session token" }).catch(() => undefined);
+      let url: string | undefined;
+      try { url = server === undefined ? undefined : (JSON.parse(server.text) as { url?: unknown }).url as string | undefined; } catch { url = undefined; }
+      if (url === undefined || secret === undefined || !/^http:\/\/127\.0\.0\.1:\d+$/.test(url)) throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is not running here. Start it with `rovara up` first.");
+      let response: Response;
+      try {
+        response = await context.fetch(`${url}/v1/local/pages/open`, {
+          method: "POST", headers: { authorization: `Bearer ${secret.text.trim()}`, "content-type": "application/json" },
+          body: JSON.stringify({ path: task === undefined ? "/" : `/plan/${task}` }), signal: AbortSignal.timeout(15_000),
+        });
+      } catch {
+        throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is not answering at its address. Start it again with `rovara up`.");
+      }
+      const body = (await response.json().catch(() => ({}))) as { opened?: unknown; error?: { message?: unknown } };
+      if (!response.ok || body.opened !== true) throw agentXError("RUNTIME_UNAVAILABLE", typeof body.error?.message === "string" ? body.error.message : "Rovara would not open the page; is `rovara up` running with this state folder?");
+      context.stdout.write(globals.json ? `${JSON.stringify({ ok: true, data: { opened: true } })}\n` : "Opened in your browser.\n");
+    });
+}
+
 export function registerUpCommand(program: Command, context: UpCommandContext): void {
   program
     .command("up")
@@ -96,7 +129,7 @@ export function registerUpCommand(program: Command, context: UpCommandContext): 
         thisMachine: options.thisMachine === true,
         docker,
         version: context.version,
-        gh: context.checkServices?.gh,
+        ...(context.checkServices?.gh === undefined ? {} : { gh: context.checkServices.gh }),
         fetch: context.fetch,
       });
       const summary = {
@@ -108,7 +141,7 @@ export function registerUpCommand(program: Command, context: UpCommandContext): 
       };
       context.stdout.write(globals.json
         ? `${JSON.stringify({ ok: true, data: summary })}\n`
-        : `Rovara is running at ${runtime.url} (this computer only).\nconfig:        ${runtime.configPath}\nsession token: ${runtime.sessionTokenPath} (send it as "Authorization: Bearer <token>")\nworker image:  ${workerImage}\nPress Ctrl-C to stop; running workers are stopped and their workspaces kept.\n`);
+        : `Rovara is running at ${runtime.url} (this computer only).\nconfig:        ${runtime.configPath}\nsession token: ${runtime.sessionTokenPath} (send it as "Authorization: Bearer <token>")\nworker image:  ${workerImage}\nreview pages:  ${runtime.pagesUrl} (run \`rovara open\` to open them in your browser; a plan is approved there, by you)\nPress Ctrl-C to stop; running workers are stopped and their workspaces kept.\n`);
       try {
         await (context.waitForShutdown ?? untilSignal)();
       } finally {

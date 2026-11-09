@@ -5,7 +5,7 @@
 // A page write is one verified form: the session token is in the path, the form token binds the exact content shown, and an approval is not
 // decided here. The server builds an `ApprovalProof` from the page session (`local-session`) and hands it, with the action, to the task flow, whose
 // `Approvers` seam decides. The proof is good for the one request, revision and digest the form names.
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import type { ApprovalProof } from "@agentx/contracts";
@@ -23,6 +23,11 @@ export interface LocalPagesServer {
   link(path?: string, options?: { ttlMs?: number; label?: string; fresh?: boolean }): string;
   /** The same, for a session that already exists. */
   linkIn(token: string, path?: string): string;
+  /**
+   * An address for a browser to be opened on, that holds no session: `<origin>/s/once/<code>`. The code is good for ONE request within `ttlMs` (30 s by default); that request is
+   * answered with a redirect to the real address. So the address that sits in the process list while the browser starts is spent by the time anyone reads it.
+   */
+  onceLink(path?: string, options?: { ttlMs?: number; label?: string }): string;
   close(): Promise<void>;
 }
 
@@ -76,6 +81,8 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
   const now = options.now ?? Date.now;
   const sessions = options.sessions ?? new LocalPageSessions(now);
   const forms = new FormTokens(randomBytes(32), now);
+  // Single-use codes for `onceLink`: only a hash is kept, and at most a few at a time.
+  const onceCodes = new Map<string, { path: string; label: string | undefined; expires: number }>();
   const limiter = new FailureLimiter(60, 60_000, now);
   let origin = "";
   let ownerToken: string | undefined;
@@ -227,6 +234,19 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
     } catch {
       return send(response, notFound(), head);
     }
+    // /s/once/<code>: a single-use code (onceLink) is spent by the first GET and answered with a redirect to the owner's real page address. HEAD, POST and a spent, expired or unknown code are
+    // answered like a path that does not exist.
+    const once = /^\/s\/once\/([A-Za-z0-9_-]{32,64})$/.exec(url.pathname);
+    if (once !== null) {
+      const key = createHash("sha256").update(once[1] as string).digest("hex");
+      const entry = request.method === "GET" ? onceCodes.get(key) : undefined;
+      if (entry !== undefined) onceCodes.delete(key);
+      if (entry === undefined || entry.expires <= now()) {
+        if (limiter.failed()) return send(response, { status: 429, type: "text/plain; charset=utf-8", body: "slow down\n" }, head);
+        return send(response, notFound(), head);
+      }
+      return send(response, redirect(ownerLink(entry.path, { label: entry.label })), head);
+    }
     // /s/<token>/<rest>. A wrong token is answered like a path that does not exist.
     const match = /^\/s\/([A-Za-z0-9_-]{43})(\/.*)?$/.exec(url.pathname);
     const session = sessions.find(match?.[1]);
@@ -271,12 +291,23 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
   origin = `http://127.0.0.1:${address.port}`;
 
   const linkIn = (token: string, path = "/"): string => `${origin}/s/${token}${path.startsWith("/") ? path : `/${path}`}`;
+  const ownerLink = (path = "/", sessionOptions: { ttlMs?: number; label?: string | undefined; fresh?: boolean } = {}): string => {
+    // One session serves the owner's links until it ends, so opening a second link does not push the first tab's session out of the cap.
+    const mintOptions = { ...(sessionOptions.ttlMs === undefined ? {} : { ttlMs: sessionOptions.ttlMs }), ...(sessionOptions.label === undefined ? {} : { label: sessionOptions.label }) };
+    if (sessionOptions.fresh !== true && (ownerToken === undefined || !sessions.isValidSecret(ownerToken))) ownerToken = sessions.mint(mintOptions).token;
+    return linkIn(sessionOptions.fresh === true ? sessions.mint(mintOptions).token : (ownerToken as string), path);
+  };
   return {
     origin, port: address.port, sessions,
-    link: (path = "/", sessionOptions = {}) => {
-      // One session serves the owner's links until it ends, so opening a second link does not push the first tab's session out of the cap.
-      if (sessionOptions.fresh !== true && (ownerToken === undefined || !sessions.isValidSecret(ownerToken))) ownerToken = sessions.mint(sessionOptions).token;
-      return linkIn(sessionOptions.fresh === true ? sessions.mint(sessionOptions).token : (ownerToken as string), path);
+    link: (path = "/", sessionOptions = {}) => ownerLink(path, sessionOptions),
+    onceLink: (path = "/", onceOptions = {}) => {
+      const code = randomBytes(24).toString("base64url");
+      const at = now();
+      for (const [key, entry] of onceCodes) if (entry.expires <= at) onceCodes.delete(key);
+      // A few at a time: opening more than that in 30 seconds drops the oldest.
+      while (onceCodes.size >= 8) onceCodes.delete(onceCodes.keys().next().value as string);
+      onceCodes.set(createHash("sha256").update(code).digest("hex"), { path: path.startsWith("/") ? path : `/${path}`, label: onceOptions.label, expires: at + (onceOptions.ttlMs ?? 30_000) });
+      return `${origin}/s/once/${code}`;
     },
     linkIn,
     async close() {

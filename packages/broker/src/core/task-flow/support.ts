@@ -16,10 +16,11 @@ export function hashJson(value: unknown): string {
 
 export const DEFAULT_PROMPTS: StepPrompts = {
   understand: ({ requestText }) => `Read the request and the code, then say what is being asked and what you assume. Change nothing.\n\nRequest:\n${requestText}`,
-  plan: ({ requestText, path, restatement, assumptions }) => [
+  plan: ({ requestText, path, restatement, assumptions, feedback }) => [
     path === "FULL" ? "Write the requirements for this request." : "Write a plan for this request.",
     ...(restatement === undefined ? [] : [`Understood as: ${restatement}`]),
     ...(assumptions === undefined || assumptions.length === 0 ? [] : ["Assumptions:", ...assumptions.map((line) => `- ${line}`)]),
+    ...(feedback === undefined || feedback.length === 0 ? [] : ["The owner read an earlier plan and asked for these changes. Make them:", ...feedback.map((line) => `- ${line}`)]),
     `Request:\n${requestText}`,
   ].join("\n\n"),
 };

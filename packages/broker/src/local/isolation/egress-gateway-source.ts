@@ -356,8 +356,27 @@ function startPlainForwarder(ip, cidr) {
 }
 
 // ---- the callback relay: the worker's calls to the broker, and only those
+// Three families. (1) The operation callbacks, POST. (2) The model proxy (lane L9a): POST to the three model routes; the broker's proxy holds the
+// model key and the worker holds only a short-lived token. (3) GET /v1/internal/model-access, where the worker asks for that token with its callback
+// capability. The relay stamps the worker's own workspace id on (2) and (3) and removes any such header the worker sent, so a token taken from one
+// worker is refused when another worker's relay carries it.
 const CALLBACK_PATH = /^\/v1\/internal\/(workspaces|project-setups)\/([A-Za-z0-9-]{1,64})\/operations\/([A-Za-z0-9._-]{1,128})\/([a-z0-9][a-z0-9\/_-]{0,120})$/;
+const MODEL_ACCESS_PATH = /^\/v1\/internal\/model-access(\?slot=[a-z0-9][a-z0-9_-]{0,31})?$/;
+const MODEL_PROXY_PATH = /^\/v1\/internal\/model-proxy\/v1\/(messages|responses|chat\/completions)(\?beta=true)?$/;
+const WORKSPACE_STAMP = "x-rovara-workspace";
+const MODEL_TIMEOUT_MS = 600000;
 const HOP = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade", "host", "content-length"];
+// What a request may be: { kind } when relayed, { status, reason } when refused.
+function callbackRoute(method, url, workspaceId) {
+  const target = url || "";
+  if (MODEL_ACCESS_PATH.test(target)) return method === "GET" ? { kind: "model-access" } : { status: 405, reason: "method_not_allowed" };
+  if (MODEL_PROXY_PATH.test(target)) return method === "POST" ? { kind: "model-call" } : { status: 405, reason: "method_not_allowed" };
+  if (method !== "POST") return { status: 405, reason: "method_not_allowed" };
+  const match = CALLBACK_PATH.exec(target);
+  if (match === null) return { status: 404, reason: "path_not_allowed" };
+  if (match[1] === "workspaces" && match[2] !== workspaceId) return { status: 403, reason: "other_workspace" };
+  return { kind: "callback" };
+}
 function relayCallback(request, response) {
   if (!peerIn(request.socket.remoteAddress, config.nets.worker)) return request.socket.destroy();
   const refuse = function (status, reason) {
@@ -365,10 +384,8 @@ function relayCallback(request, response) {
     response.writeHead(status, { "content-type": "application/json", connection: "close" });
     response.end(JSON.stringify({ error: { code: reason } }));
   };
-  if (request.method !== "POST") return refuse(405, "method_not_allowed");
-  const match = CALLBACK_PATH.exec(request.url || "");
-  if (match === null) return refuse(404, "path_not_allowed");
-  if (match[1] === "workspaces" && match[2] !== config.callback.workspaceId) return refuse(403, "other_workspace");
+  const route = callbackRoute(request.method, request.url, config.callback.workspaceId);
+  if (route.status) return refuse(route.status, route.reason);
   const chunks = [];
   let size = 0;
   request.on("data", function (chunk) {
@@ -380,7 +397,8 @@ function relayCallback(request, response) {
   request.on("end", function () {
     const body = Buffer.concat(chunks);
     const headers = {};
-    Object.keys(request.headers).forEach(function (name) { if (HOP.indexOf(name) === -1) headers[name] = request.headers[name]; });
+    Object.keys(request.headers).forEach(function (name) { if (HOP.indexOf(name) === -1 && name !== WORKSPACE_STAMP) headers[name] = request.headers[name]; });
+    if (route.kind !== "callback") headers[WORKSPACE_STAMP] = config.callback.workspaceId;
     headers.host = config.callback.hostHeader;
     headers["content-length"] = String(body.length);
     headers.connection = "close";
@@ -388,10 +406,15 @@ function relayCallback(request, response) {
     const attempt = function (index) {
       if (index >= targets.length) return refuse(502, "broker_unreachable");
       const target = targets[index];
-      const options = Object.assign({ method: "POST", path: request.url, headers: headers, agent: false, timeout: 60000 }, target.unix ? { socketPath: target.unix } : { host: target.host, port: target.port });
+      const options = Object.assign({ method: request.method, path: request.url, headers: headers, agent: false, timeout: route.kind === "model-call" ? MODEL_TIMEOUT_MS : 60000 }, target.unix ? { socketPath: target.unix } : { host: target.host, port: target.port });
       const upstream = http.request(options, function (answer) {
-        response.writeHead(answer.statusCode || 502, { "content-type": answer.headers["content-type"] || "application/json", connection: "close" });
+        const out = { "content-type": answer.headers["content-type"] || "application/json", connection: "close" };
+        if (answer.headers["retry-after"]) out["retry-after"] = answer.headers["retry-after"];
+        if (answer.headers["cache-control"]) out["cache-control"] = answer.headers["cache-control"];
+        response.writeHead(answer.statusCode || 502, out);
         answer.pipe(response);
+        // A worker that goes away ends the broker's call, which stops the provider's.
+        response.on("close", function () { answer.destroy(); upstream.destroy(); });
       });
       upstream.on("timeout", function () { upstream.destroy(new Error("timeout")); });
       upstream.on("error", function () { if (!response.headersSent) attempt(index + 1); else response.destroy(); });
@@ -407,6 +430,7 @@ function startCallbackRelay(ip) {
   server.on("clientError", function (error, socket) { socket.destroy(); });
   server.on("error", function (error) { log("listen_error", { port: config.callback.port, reason: error.code }); });
   server.listen(config.callback.port, ip);
+  return server;
 }
 
 // ---- the published port: the broker reaches the worker through here
@@ -441,7 +465,7 @@ function main() {
 }
 
 if (process.env.ROVARA_GW_LIBRARY === "1") {
-  module.exports = { hostAllowed: hostAllowed, validName: validName, publicAddress: publicAddress, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
+  module.exports = { callbackRoute: callbackRoute, startCallbackRelay: startCallbackRelay, hostAllowed: hostAllowed, validName: validName, publicAddress: publicAddress, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
 } else {
   main();
 }

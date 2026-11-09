@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { IMPLICIT_COMPANY_ID, PluginRegistryError } from "@agentx/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
+import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -46,8 +47,8 @@ describe("rovara up runtime", () => {
     expect((await lstat(join(stateDirectory, "config.json"))).mode & 0o777).toBe(0o600);
     expect(JSON.parse(await readFile(join(stateDirectory, "config.json"), "utf8"))).toEqual({ version: 1, plugins: [] });
     expect(runtime.wiring()).toMatchObject({
-      storage: ["memory"],
-      queue: ["memory"],
+      storage: ["sqlite"],
+      queue: ["sqlite"],
       "worker-machines": ["docker", "this-machine"],
       approvers: ["local-owner"],
       identity: ["local-owner"],
@@ -89,16 +90,29 @@ describe("rovara up runtime", () => {
     await expect(loose.runtime.registry.require("model-keys").get(IMPLICIT_COMPANY_ID, "openai")).rejects.toThrow(/readable by other users/);
   });
 
-  it("lets a configured storage plug-in replace the in-memory default, and seals the registry afterwards", async () => {
-    const plugin = `export const plugin = { point: "storage", name: "custom", create: (context) => ({ marker: context.settings.marker }) };\n`;
-    const { runtime } = await launch({
-      config: { version: 1, plugins: [{ point: "storage", name: "custom", module: "./storage-plugin.mjs", settings: { marker: "yes" } }] },
-      files: { "storage-plugin.mjs": plugin },
+  it("lets a configured storage plug-in replace the default, and seals the registry afterwards", async () => {
+    // A configured store must keep the indexes the task flow needs; the SQLite plug-in takes them as a setting.
+    const root = await mkdtemp(join(tmpdir(), "rovara-l4-db-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const indexes = TASK_FLOW_INDEXES.map(({ name, partitionAttribute, sortAttribute, sortType }) => ({ name, partitionAttribute, ...(sortAttribute === undefined ? {} : { sortAttribute }), ...(sortType === undefined ? {} : { sortType }) }));
+    const { runtime, stateDirectory } = await launch({
+      config: { version: 1, plugins: [{ point: "storage", name: "sqlite", module: "@agentx/local-adapters/storage", settings: { path: join(root, "custom.db"), indexes, ttlAttribute: "indexExpiresAt" } }] },
     });
-    expect(runtime.wiring().storage).toEqual(["custom"]);
-    expect((runtime.registry.require("storage") as unknown as { marker: string }).marker).toBe("yes");
+    expect(runtime.wiring().storage).toEqual(["sqlite"]);
+    // The configured store is the one at the configured path; the default was not opened beside it.
+    await expect(lstat(join(root, "custom.db"))).resolves.toBeDefined();
+    await expect(lstat(join(stateDirectory, "state.db"))).resolves.toBeDefined(); // the queue still lives in the state folder
     expect(() => runtime.registry.register("approvers", "evil", {} as never)).toThrow(PluginRegistryError);
     expect(() => runtime.registry.unregister("identity", "local-owner")).toThrow(PluginRegistryError);
+  });
+
+  it("refuses a configured storage plug-in that expires records by another attribute, saying what to set (N5)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rovara-l4-db-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const indexes = TASK_FLOW_INDEXES.map(({ name, partitionAttribute, sortAttribute, sortType }) => ({ name, partitionAttribute, ...(sortAttribute === undefined ? {} : { sortAttribute }), ...(sortType === undefined ? {} : { sortType }) }));
+    // The plug-in's own default is "expiresAt", which no record the core writes uses.
+    await expect(launch({ config: { version: 1, plugins: [{ point: "storage", name: "sqlite", module: "@agentx/local-adapters/storage", settings: { path: join(root, "a.db"), indexes } }] } })).rejects.toThrow(/"expiresAt".*set "ttlAttribute": "indexExpiresAt"/);
+    await expect(launch({ config: { version: 1, plugins: [{ point: "storage", name: "sqlite", module: "@agentx/local-adapters/storage", settings: { path: join(root, "b.db"), indexes, ttlAttribute: null } }] } })).rejects.toThrow(/expires records by nothing/);
   });
 
   it("refuses a plug-in module under the task workspaces, and a state folder inside the project folder", async () => {
@@ -212,5 +226,26 @@ describe("rovara up runtime", () => {
     // It is passed to the code host: a runtime started with it allowed does not refuse on token kind (its repository is still checked).
     const { runtime } = await launch({ environment: { GH_TOKEN: "classic-or-cli-shaped" }, config: { version: 1, allowBroadTokenForWorker: true, plugins: [] } });
     expect(runtime.wiring()["code-host"]).toEqual(["github"]);
+  });
+
+  it("serves the model proxy on the callback listener, tells workers where it is, and grants nothing until a task flow is wired (lane L9a)", async () => {
+    const { runtime, docker } = await launch({ environment: { ANTHROPIC_API_KEY: ["sk-ant", "test", "never", "real", "0123456789"].join("-") } });
+    expect(runtime.wiring()).toMatchObject({ "object-storage": ["document"] });
+    const handle = await runtime.registry.require("worker-machines", "docker").start({ machineKey: "ws-proxy", companyId: IMPLICIT_COMPANY_ID });
+    const environment = docker.containers.get(handle.machineId)!.environment;
+    expect(environment.AGENTX_MODEL_PROXY_URL).toBe("http://rovara-broker:8081/v1/internal/model-proxy");
+    // The key the broker holds is nowhere in the worker's container or in the arguments Docker was given.
+    expect(JSON.stringify([...docker.containers.values()].map((container) => container.environment))).not.toContain("sk-ant-test");
+    expect(JSON.stringify(docker.calls)).not.toContain("sk-ant-test");
+    const answer = await runtime.modelProxy.access({ path: "/v1/internal/model-access", headers: { "x-agentx-callback-capability": "c".repeat(48), "x-rovara-workspace": "w" } });
+    expect(answer.statusCode).toBe(403);
+    expect(answer.body).not.toContain("sk-ant");
+  });
+
+  it("keeps objects as documents by default", async () => {
+    const { runtime } = await launch();
+    const objects = runtime.registry.require("object-storage");
+    await objects.put("private/o/w/evidence/t/x", new Uint8Array([1, 2, 3]), { contentType: "text/plain", metadata: {}, retention: "evidence-std" });
+    expect(Array.from((await objects.get("private/o/w/evidence/t/x", 10))!)).toEqual([1, 2, 3]);
   });
 });
