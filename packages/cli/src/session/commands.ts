@@ -166,7 +166,7 @@ export async function sessionTakeOver(deps: DeveloperSessionDeps, env: string | 
 
 export async function sessionShare(deps: DeveloperSessionDeps, env: string | undefined, id: string, input: { with?: string; level?: string }): Promise<AppResult> {
   sessionIdOf(id);
-  if (input.with === undefined || input.with.trim() === "") throw agentXError("CONFIG_INVALID", "say who with --with <email|project:<name>|company>");
+  if (input.with === undefined || input.with.trim() === "") throw agentXError("CONFIG_INVALID", "say who with --with <developer ID|project:<name>|company>");
   if (input.level === undefined || !(SESSION_LEVELS as readonly string[]).includes(input.level)) throw agentXError("CONFIG_INVALID", `say how much with --level ${SESSION_LEVELS.join("|")}`);
   const level = input.level as SessionLevel;
   const target = input.with.trim();

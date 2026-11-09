@@ -112,7 +112,7 @@ export interface VerifiedComment {
 export interface LocalOwnerApproversOptions {
   /** The local owner, for the `local-session` proof. */
   owner?: Principal;
-  /** Checks a local session secret with its issuer (the same check the identity adapter uses). Absent: `local-session` proofs are refused. */
+  /** Checks a `local-session` proof token against the request it is for. The local review pages issue tokens signed over one request, revision and digest (`LocalPageSessions.verifyProof`); wire that here. Absent: `local-session` proofs are refused. */
   verifySession?: (token: string, request: ApprovalRequest) => boolean | Promise<boolean>;
   /**
    * Looks a comment up by id at the code host and says who wrote it and what they may do. The code host adapter provides it; the core
