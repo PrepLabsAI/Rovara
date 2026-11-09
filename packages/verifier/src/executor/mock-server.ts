@@ -1,14 +1,15 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { createSocket } from "node:dgram";
-import { closeSync, openSync, writeFileSync, writeSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { createServer, type IncomingMessage, type Server } from "node:http";
 import { networkInterfaces } from "node:os";
-import type { Socket } from "node:net";
 import type { E2EApiMockFixture } from "@agentx/contracts";
+import { CORE_LEDGER_MAX_LINES, clip, startCore, type CoreAnswer, type CoreStrategy, type RunningCore } from "../service-mocks/fake-core.js";
 
 // This file imports no package: it runs in a container with a 128 MiB limit and half a CPU, where loading the contracts barrel takes ten seconds and most of that memory. It
 // holds its own copy of the two small things it would take from there (canonical JSON, and the check of a fixture's shape); the tests compare both with the contracts' own.
+// Test services TS23: the sockets, the limits and the request ledger are the shared fake core's (`service-mocks/fake-core.ts`, equally package-free); what is left here is what THIS mock
+// answers (the E2E checker's GET variants) and the sinkhole's resolver. The same fixture served as a FixtureSet v2 by the fake server answers the same variants (a test holds the two together).
 
 /**
  * The in-network mock of one approved external origin, and the sinkhole every other declared origin points at. Both run from the executor image
@@ -16,13 +17,12 @@ import type { E2EApiMockFixture } from "@agentx/contracts";
  * picks the variant whose `inputValue` equals the query parameter named by `inputField`. Anything else, and every call to the sinkhole (which has no fixture), is answered
  * 599 and recorded as a call no approved mock matched. Every request is written to the ledger before it is answered, so no answer can be seen without its record.
  */
-export const MOCK_LEDGER_MAX_LINES = 2048;
+export const MOCK_LEDGER_MAX_LINES = CORE_LEDGER_MAX_LINES;
 export const MOCK_UNMOCKED_STATUS = 599;
 export const MOCK_UNMOCKED_BODY = '{"error":"rovara-unmocked"}';
 const MAX_PATH_CHARS = 512;
 const MAX_METHOD_CHARS = 16;
 const MAX_INPUT_CHARS = 128;
-const MAX_CONNECTIONS = 64;
 const SAFE_ORIGIN = /^[A-Za-z0-9][A-Za-z0-9-]{0,40}$/;
 
 /** One recorded request, exactly as it is appended to `/out/mock/<originRef>.jsonl`. */
@@ -39,7 +39,6 @@ export const mockRequestDigest = (request: { method: string; path: string; input
 export const mockResponseDigest = (response: { status: number; body: unknown }): string => sha(canonicalJson({ status: response.status, body: response.body }));
 export const MOCK_UNMOCKED_RESPONSE_DIGEST = mockResponseDigest({ status: MOCK_UNMOCKED_STATUS, body: { error: "rovara-unmocked" } });
 
-const clip = (value: string, max: number) => (value.length <= max ? value : value.slice(0, max));
 
 /** JSON text with the keys of every object in alphabetical order, as `canonicalJson` in the contracts writes it. */
 function sortKeys(value: unknown): unknown {
@@ -95,160 +94,57 @@ export type MockServerOptions = Readonly<{
   onFatal?: (error: unknown) => void;
 }>;
 
-export type RunningMockServer = Readonly<{ server: Server; servers: readonly Server[]; port: number; ports: readonly number[]; close(): Promise<void> }>;
+export type RunningMockServer = RunningCore;
+
+const UNMOCKED_ANSWER = { status: MOCK_UNMOCKED_STATUS, contentType: "application/json", text: MOCK_UNMOCKED_BODY, headers: { connection: "close" } } as const;
+
+/** The one query parameter the fixture selects by, only when it is given once: an extra parameter is a request the approved fixture does not describe. */
+function describeQuery(fixture: E2EApiMockFixture | null, rawQuery: string): { input: string | null; alone: boolean } {
+  const query = new URLSearchParams(rawQuery);
+  const values = fixture === null ? [] : query.getAll(fixture.inputField);
+  const input = values.length === 1 ? values[0]! : null;
+  return { input, alone: input !== null && [...query.keys()].length === 1 };
+}
 
 /**
- * How long a connection may be quiet, without having become a request, before it is recorded as an unparsed call (and, at three times this, however much it sends).
- * A connection is also recorded when it closes. The host stops a mock with `docker kill` before it reads the ledger, so the one gap is a connection still open and unparsed at
- * that moment: it is within 1 s of its last byte and 3 s of its opening, so only a connection the app opened in the last seconds before the executor finished can be lost, and it never
- * parsed as a request, so it was never answered.
+ * What the E2E checker's mock answers (the first strategy of the shared fake core, `service-mocks/fake-core.ts`): the fixture's method and path, and the variant whose `inputValue` equals the one query
+ * parameter. The ledger line keeps its own shape (`inputValue`, `variantId`, and the two content hashes) because the host reads it back against the approved fixture.
  */
-const CONNECTION_GRACE_MS = 1_000;
-type SocketState = { parsed: boolean; recorded: boolean };
-/** The address a connection came from, as the host compares it with the application container's. */
-const addressOf = (raw: string | undefined): string => clip(raw === undefined ? "unknown" : raw.startsWith("::ffff:") ? raw.slice(7) : raw, 64);
+function e2eStrategy(fixture: E2EApiMockFixture | null): CoreStrategy {
+  const unmatchedLine = (call: { method: string; rawPath: string; input: string | null }): CoreAnswer => {
+    const recorded = { method: clip(call.method, MAX_METHOD_CHARS), path: clip(call.rawPath, MAX_PATH_CHARS), inputValue: call.input === null ? null : clip(call.input, MAX_INPUT_CHARS) };
+    return { ...UNMOCKED_ANSWER, ledger: { inputValue: recorded.inputValue, variantId: null, requestSha256: mockRequestDigest(recorded), responseSha256: MOCK_UNMOCKED_RESPONSE_DIGEST } };
+  };
+  return {
+    maxBodyBytes: 0,
+    decide(request, context) {
+      const { input, alone } = describeQuery(fixture, request.rawQuery);
+      // At the ledger bound nothing is answered from the fixture any more: a flood is never silent.
+      const variant = !context.full && fixture !== null && request.originForm && request.method === fixture.method && request.rawPath === fixture.path && alone
+        ? fixture.variants.find((candidate) => candidate.inputValue === input) ?? null : null;
+      if (variant === null) return unmatchedLine({ method: request.method, rawPath: request.rawPath, input });
+      const recorded = { method: clip(request.method, MAX_METHOD_CHARS), path: clip(request.rawPath, MAX_PATH_CHARS), inputValue: input === null ? null : clip(input, MAX_INPUT_CHARS) };
+      return { status: variant.status, contentType: "application/json", text: JSON.stringify(variant.body ?? null), headers: { connection: "close" },
+        ledger: { inputValue: recorded.inputValue, variantId: variant.id, requestSha256: mockRequestDigest(recorded), responseSha256: mockResponseDigest({ status: variant.status, body: variant.body ?? null }) } };
+    },
+    refuse(call) { return unmatchedLine({ method: call.method, rawPath: call.rawPath, input: describeQuery(fixture, call.rawQuery).input }); },
+  };
+}
 
 /**
  * Starts the server. The ledger is opened for appending first, so a ledger that cannot be written never serves a request. Every connection ends up in the ledger: a parsed request as
  * the request it was, and anything that never becomes one (TLS, h2c, CONNECT, an Upgrade, a malformed or oversized request, a header timeout, a silent connection, a connection past the
- * cap) as a call no mock matched. Nothing here is ever a consumption unless it is a parsed, plain request that matches the fixture exactly.
+ * cap) as a call no mock matched. Nothing here is ever a consumption unless it is a parsed, plain request that matches the fixture exactly. The sockets and the ledger are the shared core's.
  */
 export async function startMockServer(options: MockServerOptions): Promise<RunningMockServer> {
   const fixture = options.fixture === null ? null : parseMockFixture(options.fixture);
-  const maxLines = options.maxLines ?? MOCK_LEDGER_MAX_LINES;
-  const grace = options.connectionGraceMs ?? CONNECTION_GRACE_MS;
-  const ceilingMs = options.connectionCeilingMs ?? grace * 3;
-  const now = options.now ?? (() => new Date());
-  const fd = openSync(options.ledgerPath, "a", 0o644);
-  let lines = 0;
-  let overflowed = false;
-  let failed = false;
-  const servers: Server[] = [];
-  const states = new WeakMap<Socket, SocketState>();
-
-  const stop = (error: unknown): void => {
-    if (failed) return;
-    failed = true;
-    for (const server of servers) server.close();
-    options.onFatal?.(error);
-  };
-  /** Writes one line and returns what to answer; null when the ledger could not be written (the server has then stopped). */
-  const record = (input: { method: string; rawPath: string; inputValue: string | null; variant: NonNullable<typeof fixture>["variants"][number] | null; remote: string | undefined }) => {
-    const recorded = { method: clip(input.method, MAX_METHOD_CHARS), path: clip(input.rawPath, MAX_PATH_CHARS), inputValue: input.inputValue === null ? null : clip(input.inputValue, MAX_INPUT_CHARS) };
-    // At the ledger bound the last slot records the overflow as an unmatched call, and nothing is answered from the fixture any more: a flood is never silent.
-    const full = lines >= maxLines - 1;
-    const served = !full && input.variant !== null ? input.variant : null;
-    const answer = served !== null ? { status: served.status, body: (served.body ?? null) as unknown, text: JSON.stringify(served.body ?? null) }
-      : { status: MOCK_UNMOCKED_STATUS, body: { error: "rovara-unmocked" } as unknown, text: MOCK_UNMOCKED_BODY };
-    try {
-      if (!full || !overflowed) {
-        const line: MockLedgerLine = { requestId: `req-${randomUUID()}`, ...recorded, variantId: served === null ? null : served.id, status: answer.status,
-          requestSha256: mockRequestDigest(recorded), responseSha256: mockResponseDigest(answer), observedAt: now().toISOString(), remoteAddress: addressOf(input.remote) };
-        writeSync(fd, `${JSON.stringify(line)}\n`);
-        lines += 1;
-        if (full) overflowed = true;
-      }
-    } catch (error) { stop(error); return null; }
-    return answer;
-  };
-  /** What a request is: its method, its raw path (no decoding, no normalising), and the value of the one query parameter the fixture selects by, only when that is the only parameter. */
-  const describe = (request: IncomingMessage) => {
-    const rawUrl = String(request.url ?? "");
-    const originForm = rawUrl.startsWith("/") && !rawUrl.startsWith("//");
-    const queryStart = rawUrl.indexOf("?");
-    const rawPath = !originForm ? clip(rawUrl, MAX_PATH_CHARS) : queryStart === -1 ? rawUrl : rawUrl.slice(0, queryStart);
-    const query = !originForm || queryStart === -1 ? new URLSearchParams() : new URLSearchParams(rawUrl.slice(queryStart + 1));
-    const values = fixture === null ? [] : query.getAll(fixture.inputField);
-    // The input is the one selecting parameter given once and alone: an extra parameter is a request the approved fixture does not describe.
-    const input = values.length === 1 ? values[0]! : null;
-    const alone = input !== null && [...query.keys()].length === 1;
-    return { method: String(request.method ?? ""), rawPath, originForm, input, alone };
-  };
-  const unparsed = (socket: Socket, method: string, force = false): void => {
-    const state = states.get(socket);
-    if (state !== undefined && (state.recorded || (state.parsed && !force))) return;
-    if (state !== undefined) state.recorded = true;
-    record({ method, rawPath: "/", inputValue: null, variant: null, remote: socket.remoteAddress });
-  };
-
-  const build = (): Server => {
-    const server = createServer((request, response) => {
-      // The body is never read; it is drained so the connection ends, and the answer closes the connection.
-      request.resume();
-      const state = states.get(request.socket);
-      if (state !== undefined) state.parsed = true;
-      if (failed) { response.destroy(); return; }
-      const call = describe(request);
-      const variant = fixture !== null && call.originForm && call.method === fixture.method && call.rawPath === fixture.path && call.alone
-        ? fixture.variants.find((candidate) => candidate.inputValue === call.input) ?? null : null;
-      const answer = record({ method: call.method, rawPath: call.rawPath, inputValue: call.input, variant, remote: request.socket.remoteAddress });
-      if (answer === null) { response.destroy(); return; }
-      response.writeHead(answer.status, { "content-type": "application/json", "content-length": Buffer.byteLength(answer.text), connection: "close" });
-      response.end(answer.text);
-    });
-    server.maxConnections = options.maxConnections ?? MAX_CONNECTIONS;
-    server.requestTimeout = 10_000;
-    server.headersTimeout = 10_000;
-    server.keepAliveTimeout = 1_000;
-    server.maxHeadersCount = 64;
-    server.on("connection", (socket: Socket) => {
-      states.set(socket, { parsed: false, recorded: false });
-      // The connection is a call that never became a request when it has been quiet for the grace after its last byte, or has been open for the ceiling whatever it sends.
-      // The check is made after the loop has read what is waiting: a stall that outlasts the timer must not turn a request already in the socket into an unparsed call.
-      const fire = (): void => { setImmediate(() => unparsed(socket, "UNPARSED")); };
-      const quiet = setTimeout(fire, grace);
-      const ceiling = setTimeout(fire, ceilingMs);
-      quiet.unref(); ceiling.unref();
-      socket.on("data", () => { quiet.refresh(); });
-      socket.once("close", () => { clearTimeout(quiet); clearTimeout(ceiling); unparsed(socket, "UNPARSED"); });
-      socket.on("error", () => undefined);
-    });
-    // Anything the HTTP parser refuses (TLS, h2c, a malformed or oversized request) is a call, not a silence.
-    server.on("clientError", (_error: Error, socket: Socket) => {
-      unparsed(socket, "UNPARSED", true);
-      if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\r\n"); else socket.destroy();
-    });
-    // CONNECT and Upgrade are never answered from the fixture, however well the rest of the request matches it.
-    const refuse = (request: IncomingMessage, socket: Socket): void => {
-      const state = states.get(socket);
-      if (state !== undefined) state.parsed = true;
-      const call = describe(request);
-      record({ method: call.method, rawPath: call.rawPath, inputValue: call.input, variant: null, remote: socket.remoteAddress });
-      if (socket.writable) socket.end(`HTTP/1.1 ${MOCK_UNMOCKED_STATUS} Unmocked\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(MOCK_UNMOCKED_BODY)}\r\nconnection: close\r\n\r\n${MOCK_UNMOCKED_BODY}`);
-      else socket.destroy();
-    };
-    server.on("connect", refuse);
-    server.on("upgrade", refuse);
-    // A connection past the cap is dropped by the server; the drop is recorded.
-    server.on("drop", (data?: { remoteAddress?: string }) => {
-      record({ method: "DROPPED", rawPath: "/", inputValue: null, variant: null, remote: data?.remoteAddress });
-    });
-    servers.push(server);
-    return server;
-  };
-
-  const ports = [options.port ?? 8080, ...(options.additionalPorts ?? [])];
-  const listening: number[] = [];
-  try {
-    for (const port of ports) {
-      const server = build();
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(port, options.host ?? "0.0.0.0", () => { server.off("error", reject); resolve(); });
-      });
-      const address = server.address();
-      if (address === null || typeof address === "string") throw new Error("mock server has no listening port");
-      listening.push(address.port);
-    }
-  } catch (error) {
-    for (const server of servers) server.close();
-    try { closeSync(fd); } catch { /* already closed */ }
-    throw error;
-  }
-  return Object.freeze({ server: servers[0]!, servers: Object.freeze([...servers]), port: listening[0]!, ports: Object.freeze(listening), close: async () => {
-    await Promise.all(servers.map((server) => new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); })));
-    try { closeSync(fd); } catch { /* already closed */ }
-  } });
+  return startCore({
+    strategy: e2eStrategy(fixture), ledgerPath: options.ledgerPath, host: options.host ?? "0.0.0.0", port: options.port ?? 8080,
+    ...(options.additionalPorts === undefined ? {} : { additionalPorts: options.additionalPorts }),
+    ...(options.maxLines === undefined ? {} : { maxLines: options.maxLines }), ...(options.maxConnections === undefined ? {} : { maxConnections: options.maxConnections }),
+    ...(options.connectionGraceMs === undefined ? {} : { connectionGraceMs: options.connectionGraceMs }), ...(options.connectionCeilingMs === undefined ? {} : { connectionCeilingMs: options.connectionCeilingMs }),
+    ...(options.now === undefined ? {} : { now: options.now }), ...(options.onFatal === undefined ? {} : { onFatal: options.onFatal }),
+  });
 }
 
 /** The address of this container on its network: the one the sinkhole's resolver gives for every name. */

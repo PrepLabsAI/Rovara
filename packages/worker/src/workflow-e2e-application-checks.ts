@@ -97,7 +97,7 @@ function utf8Head(bytes: Uint8Array, maxBytes: number): string {
   return Buffer.from(bytes.subarray(0, end)).toString("utf8");
 }
 
-type CaptureArtifactEntry = { caseId: string; kind: "screenshot"; sha256: string; bytes: number; omitted?: "budget" | "credential-match" };
+type CaptureArtifactEntry = { caseId: string; kind: "screenshot" | "api-sample"; sha256: string; bytes: number; omitted?: "budget" | "credential-match"; step?: number };
 /**
  * Raw output of a run, kept whatever its verdict and for operators only (the application's own output, with account credentials redacted). The shard report and the
  * observations are verdict inputs for a group that was qualified, so they stay in its collection and this only says where; for a group that was not, the report is in
@@ -174,7 +174,10 @@ export function fitGroupEvidence(group: GroupEvidenceCandidate): GroupEvidenceAl
   if (whole === null) return { operator: null, evidence: plain };
   const full = group.build(whole);
   if (full.byteLength <= group.limit) return { operator: whole, evidence: full };
-  const files = [...(whole.captures?.files ?? [])].sort((a, b) => (b.bytes - a.bytes) || b.name.localeCompare(a.name));
+  // Strip frames (`case-<i>-step-<j>-screenshot.jpg`, proof and evidence B1) go before the screenshot of a failed case, which is the one a reader cannot do without.
+  // API samples (B2) go first of all: small, and the diff is already in the pack.
+  const stripFirst = (name: string) => (/-api-\d+\.json$/u.test(name) ? -1 : /-step-\d+-screenshot\.jpg$/u.test(name) ? 0 : 1);
+  const files = [...(whole.captures?.files ?? [])].sort((a, b) => (stripFirst(a.name) - stripFirst(b.name)) || (b.bytes - a.bytes) || b.name.localeCompare(a.name));
   const observations = whole.observations.map((item, index) => ({ item, index })).sort((a, b) => (b.item.byteLength - a.item.byteLength) || (b.index - a.index));
   const shape = (droppedFiles: number, droppedObservations: number, logKept: boolean): OperatorEvidence => {
     const gone = new Set(files.slice(0, droppedFiles).map((file) => file.name));

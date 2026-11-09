@@ -1,4 +1,4 @@
-// the agent's file tools run in the task's own container, never in the worker. A
+// Task 1 (Projects plan 2), ruling R56: the agent's file tools run in the task's own container, never in the worker. A
 // session's `read`, `write`, `edit`, `grep`, `find` and `ls` each go through `docker exec -i` to the helper
 // (sandbox-file-ops.ts) in the task sandbox, or in the project's devcontainer. A fake Docker answers as a small
 // in-memory filesystem would, so these tests see exactly which calls the tools make, and prove that none touches the
@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installFileOpsHelper } from "../../packages/worker/src/devcontainer.js";
 import { devcontainerMounts, notMountedMessage, toContainerPath, toHostPath, virtualDirectoryEntries } from "../../packages/worker/src/devcontainer-file-paths.js";
 import { FILE_OPS_NODE_FLAGS, fileOpsExec, type FileOpsTarget } from "../../packages/worker/src/file-ops-exec.js";
 import {
@@ -26,7 +27,7 @@ import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "../../packages/worker/src/verification/review.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
-const IMAGE = "registry.example.test/agentx/worker@sha256:" + "b".repeat(64);
+const IMAGE = "123456789012.dkr.ecr.us-west-2.amazonaws.com/agentx-staging/worker@sha256:" + "b".repeat(64);
 const NODE = "/usr/local/bin/node";
 const HELPER = "/opt/agentx/packages/worker/dist/sandbox-file-ops.js";
 const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
@@ -433,6 +434,29 @@ describe("the devcontainer's file tools", () => {
     const reply = await fileOpsExec(target, { root: "/workspaces/web", op: "readFile", path: "/workspaces/web/b.ts" });
     expect(reply.ok && Buffer.from(reply.result.contentBase64, "base64").toString()).toBe("web file\n");
   });
+
+  it("copies the helper into the devcontainer, locks it, and probes it as the devcontainer's user", async () => {
+    const fake = fakeDocker({ "/workspaces/api": "" });
+    const installed = await installFileOpsHelper(fake.docker, { containerId: "dev-container-id", user: "vscode", workspaceFolder: "/workspaces/api", helperSource: "/worker/dist/sandbox-file-ops.js" });
+    expect(installed).toMatchObject({ target: { container: "dev-container-id", user: "vscode", node: "/opt/agentx-file-ops/node", helper: "/opt/agentx-file-ops/sandbox-file-ops.js", root: "/workspaces/api" } });
+    expect(fake.runs).toEqual([
+      ["exec", "--user", "0", "dev-container-id", "mkdir", "-p", "/opt/agentx-file-ops"],
+      ["cp", "/usr/local/bin/node", "dev-container-id:/opt/agentx-file-ops/node"],
+      ["cp", "/worker/dist/sandbox-file-ops.js", "dev-container-id:/opt/agentx-file-ops/sandbox-file-ops.js"],
+      ["exec", "--user", "0", "dev-container-id", "chmod", "0555", "/opt/agentx-file-ops", "/opt/agentx-file-ops/node", "/opt/agentx-file-ops/sandbox-file-ops.js"],
+      ["exec", "--user", "vscode", "dev-container-id", "/opt/agentx-file-ops/node", "--version"],
+    ]);
+    expect(fake.execs).toHaveLength(1);
+    expect(fake.execs[0]!.args.slice(0, 12)).toEqual(["exec", "-i", "--user", "vscode", "-e", "NODE_OPTIONS=", "-e", "NODE_PATH=", "dev-container-id", "/opt/agentx-file-ops/node", ...FILE_OPS_NODE_FLAGS, "/opt/agentx-file-ops/sandbox-file-ops.js"]);
+  });
+
+  it("refuses, with the reason, when the copied Node cannot start in the devcontainer", async () => {
+    const calls: string[][] = [];
+    const docker: DockerCli = { async run(args) { calls.push([...args]); return args.includes("--version") ? { exitCode: 127, stdout: "", stderr: "exec /opt/agentx-file-ops/node: no such file or directory" } : { exitCode: 0, stdout: "", stderr: "" }; } };
+    const installed = await installFileOpsHelper(docker, { containerId: "c", user: "vscode", workspaceFolder: "/workspaces/api", helperSource: "/h.js" });
+    expect(installed).toHaveProperty("refused");
+    expect((installed as { refused: string }).refused).toContain("starting the copied Node");
+  });
 });
 
 describe("sessions of reviews", () => {
@@ -473,15 +497,15 @@ describe("sessions of reviews", () => {
     };
     const target: FileOpsTarget = { container: "task-sandbox", user: "1000:1000", node: NODE, helper: HELPER, root: rootPath };
     const reports = await runWorkflowReviews({
-      operationId: randomUUID(), rootPath, model: { provider: "test", modelId: "review-v1" }, candidate, repositories,
-      piAdapter: adapter, fileTools: target, ruleFileBaseCommits: [],
+      ruleFileBaseCommits: [], operationId: randomUUID(), rootPath, model: { provider: "test", modelId: "review-v1" }, candidate, repositories,
+      piAdapter: adapter, fileTools: target,
     });
     expect(reports.map(({ role, status }) => ({ role, status }))).toEqual([{ role: "CRITIC", status: "PASS" }, { role: "SECURITY", status: "PASS" }]);
     expect(seen).toEqual([target, target]);
   });
 });
 
-describe("candidate snapshots and the file tools' leftover temporary files", () => {
+describe("candidate snapshots and the file tools' leftover temporary files (ruling C3)", () => {
   async function repository() {
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");

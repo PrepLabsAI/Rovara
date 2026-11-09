@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import { E2EApplicationBuildSourceManifestSchema, E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, canonicalJson, type CandidateManifest, type E2EApplicationBuildSourceManifest } from "@agentx/contracts";
 import { encodeE2EApplicationBuildSourceArchive } from "@agentx/verifier";
+import { makeWorkerScratch } from "./worker-scratch.js";
 import { BuildSourceCapError, createProcessCandidateGit, type CandidateBuildSourceGit } from "./e2e-candidate-source.js";
 
 /** A candidate whose manifest would be larger is refused, never trimmed (the bound is shared with the broker, which refuses to store a larger one). */
@@ -66,7 +65,7 @@ export async function exportCandidateBuildSourceInScratch(input: { repositoryRoo
   maxManifestBytes?: number; makeScratch?: () => Promise<string> }): Promise<CandidateBuildSourceExport> {
   let scratch: string | undefined;
   try {
-    scratch = await (input.makeScratch ?? (() => mkdtemp(join(tmpdir(), "agentx-build-source-"))))();
+    scratch = await (input.makeScratch ?? (() => makeWorkerScratch("agentx-build-source-")))();
     return await exportCandidateBuildSource({ git: createProcessCandidateGit(scratch), repositoryRoot: input.repositoryRoot, candidate: input.candidate, signal: input.signal,
       ...(input.maxManifestBytes === undefined ? {} : { maxManifestBytes: input.maxManifestBytes }) });
   } catch (error) {

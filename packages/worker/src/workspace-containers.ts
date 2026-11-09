@@ -8,7 +8,7 @@ import { workspaceProcessScope, type WorkspaceProcessScope } from "./workspace-p
 /**
  * Before a push token exists, every container other than the worker's own is removed (stopped and deleted).
  *
- * On EC2 workers task code runs in a container: the project's dev container, or the task sandbox (task-sandbox.ts)
+ * On EC2 workers task code runs in a container: the project's dev container, or the task sandbox (task-sandbox.ts, R56)
  * for a project without one. Stopping the worker's processes (workspace-processes.ts) does not reach a container. The
  * sandbox is removed when its operation ends; this sweep is the backstop. The instance serves this one workspace, and
  * boot.sh starts exactly one container, the worker (`agentx-worker`). So the only container allowed to stay is the worker's own, known by its container ID
@@ -56,6 +56,8 @@ export interface SweepWorkspaceContainersOptions {
   selfContainerId?: () => Promise<string | undefined>;
   log?: (event: Record<string, unknown>) => void;
   rounds?: number;
+  /** Whether this process is inside the worker's container (workspace-processes.ts). */
+  inContainer?: () => boolean;
 }
 
 /** The containers to remove: all but the worker's own, each marked when the devcontainer CLI started it for this workspace. */
@@ -76,7 +78,7 @@ export function containersToRemove(
  * it is removed. Returns how many it removed.
  */
 export async function sweepWorkspaceContainers(options: SweepWorkspaceContainersOptions): Promise<{ removed: number }> {
-  const scope = options.scope ?? workspaceProcessScope();
+  const scope = options.scope ?? workspaceProcessScope(process.env, options.inContainer);
   const log = options.log ?? ((event: Record<string, unknown>) => console.log(JSON.stringify({ component: "worker", ...event })));
   if (scope !== "container") return { removed: 0 };
   if (!(await (options.socketMounted ?? (() => socketMounted(DOCKER_SOCKET_PATH)))())) {

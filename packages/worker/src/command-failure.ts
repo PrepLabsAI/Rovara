@@ -7,6 +7,10 @@ export const COMMAND_SHOWN_MAX = 120;
 const CWD_SHOWN_MAX = 80;
 const TAIL_LINES = 20;
 const TAIL_HEADING = "\nLast lines:\n";
+const FIRST_ERROR_HEADING = "\nFirst error line: ";
+const FIRST_ERROR_MAX = 200;
+/** What an error line looks like in the output of installers, shells and test runners (npm ERR!, "vitest: not found", "Cannot find module"). */
+const ERROR_LINE = /\bnot found\b|\bcannot find\b|\bno such file\b|\berr!|(?<!\b0 )\berrors?\b|\bE(?:NOENT|ACCES|404|TIMEDOUT|RESOLVE)\b|\bTraceback\b|\bfatal:/iu;
 
 export type CommandStage = "setup step" | "readiness check";
 
@@ -32,8 +36,17 @@ export function describeCommandFailure(
         ? `exited ${result.exitCode}`
         : "could not run";
   const head = `${stage} ${index} (${shownCommand(command)} in ${cut(redactText(command.cwd), CWD_SHOWN_MAX)}) ${how}${suffix}`;
-  const tail = lastLines(redactText(result.stdout), redactText(result.stderr), DEVELOPER_FAILURE_MESSAGE_MAX - head.length - TAIL_HEADING.length);
-  return tail === "" ? head : `${head}${TAIL_HEADING}${tail}`;
+  const stdout = redactText(result.stdout);
+  const stderr = redactText(result.stderr);
+  const room = DEVELOPER_FAILURE_MESSAGE_MAX - head.length - TAIL_HEADING.length;
+  let tail = lastLines(stdout, stderr, room);
+  if (tail === "") return head;
+  // The first error line, when the last lines cut it off: "vitest: not found" says more than an installer's final chatter (Bug F).
+  const first = firstErrorLine(stdout, stderr);
+  if (first === undefined || tail.split("\n").includes(first)) return `${head}${TAIL_HEADING}${tail}`;
+  const shown = `${FIRST_ERROR_HEADING}${cut(first, FIRST_ERROR_MAX)}`;
+  tail = lastLines(stdout, stderr, room - shown.length);
+  return tail === "" ? head : `${head}${shown}${TAIL_HEADING}${tail}`;
 }
 
 /** The executable and its arguments, redacted as an argv array (so `--token x` hides x) and as text. */
@@ -48,6 +61,11 @@ function cut(text: string, limit: number): string {
 }
 
 const nonBlankLines = (text: string): string[] => text.split(/\r?\n/).map((line) => line.trimEnd()).filter((line) => line !== "");
+
+/** The first line that looks like an error, from the error output, else from the printed output; whole, redacted, unbounded. */
+function firstErrorLine(stdout: string, stderr: string): string | undefined {
+  return nonBlankLines(stderr).find((line) => ERROR_LINE.test(line)) ?? nonBlankLines(stdout).find((line) => ERROR_LINE.test(line));
+}
 
 /**
  * The last TAIL_LINES non-blank lines of the error output, preceded by as many of the printed

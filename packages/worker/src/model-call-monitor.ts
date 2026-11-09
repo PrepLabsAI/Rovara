@@ -1,5 +1,5 @@
-import { MODEL_PROVIDERS, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
-import { classifyProviderFailure } from "@agentx/model-runtime";
+import { MODEL_PROVIDERS, canonicalModelName, editionFromEnvironment, modelNotEnabledSentence, type Edition, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { MODEL_NOT_ENABLED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime";
 import type { WorkerLogSink } from "./worker-log.js";
 
 /**
@@ -16,7 +16,8 @@ import type { WorkerLogSink } from "./worker-log.js";
 export const MODEL_REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{1,64}$/;
 
 export type ModelCallNote =
-  | { outcome: "failed"; class: E2EModelFailureClass; signal: string | null; attempt: number; provider?: ModelProvider; requestId?: string; durationMs?: number; status?: number; chatgpt?: true }
+  /** `model` is set only for `ModelNotEnabled`: the name (`claude-opus-5-5`) of the model Rovara asked for (never read from the provider's text), so the owner is told which model to enable. */
+  | { outcome: "failed"; class: E2EModelFailureClass; signal: string | null; attempt: number; provider?: ModelProvider; requestId?: string; durationMs?: number; status?: number; chatgpt?: true; model?: string }
   | { outcome: "stopped"; attempt: number; provider?: ModelProvider; durationMs?: number }
   /** Pi scheduled retry `attempt` of `maxAttempts` (both are retries, not model calls) after `delayMs`. */
   | { outcome: "retrying"; attempt: number; maxAttempts: number; delayMs: number }
@@ -70,8 +71,11 @@ const PI_RETRY_CANCELLED = "Retry cancelled";
  * What AgentX's own keyed-provider transport (packages/model-runtime `safeError`) writes after "<Label> request failed; ": one fixed sentence chosen from the HTTP status alone. Each is matched whole, and only a
  * status comes out of it: `classify` is the status the classifier decides on, `report` the status that is certain (a class of statuses has none). None of the text is copied.
  */
-const TRANSPORT_DETAILS: ReadonlyMap<string, { classify: number; report?: number; chatgpt?: true }> = new Map([
+const TRANSPORT_DETAILS: ReadonlyMap<string, { classify: number; report?: number; chatgpt?: true; signal?: string }> = new Map([
   ["check the API key and its permissions", { classify: 401 }],
+  // The model proxy's 403 whose body says the account cannot use the model (model-runtime MODEL_NOT_ENABLED_DETAIL): read as `key-rejected ModelNotEnabled` below.
+  ["the model is not available for this account", { classify: 403, report: 403, signal: MODEL_NOT_ENABLED_SIGNAL }],
+  ["the API key was refused; check that it is valid and has not expired", { classify: 401, report: 401 }],
   ["check the key's credit balance and spending limit", { classify: 402, report: 402 }],
   ["check model availability and the provider allowlist", { classify: 404, report: 404 }],
   ["check the model ID and that the key's organization can use it", { classify: 404, report: 404 }],
@@ -88,6 +92,10 @@ const TRANSPORT_FAILURE = /^[A-Za-z][A-Za-z0-9 ._-]{0,30} request failed; ([^\n]
 /** A status the provider SDKs put first: "401 {json}", "402: {json}", or "OpenAI API error (401): ...". */
 const LEADING_STATUS = [/^([4-5]\d\d)(?=[\s:]|$)/u, /^[A-Za-z][A-Za-z0-9 ._-]{0,40} API error \(([4-5]\d\d)\)/u];
 const BODY_TOKEN = /"(?:type|code)"\s*:\s*"([a-z0-9_]{1,64})"/gu;
+/** The model proxy's 403 for a model the account has not enabled ("<model> is not available for this account"). Matched, never copied, and only near the start of the message with a 403 (or no status) so a body that echoes text cannot pose as it. */
+const MODEL_NOT_ENABLED_TEXT = /\bis not available for this account\b/u;
+/** A model id as Rovara sends it: letters, digits and . _ : / - only. Anything else is dropped. */
+const MODEL_ID_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u;
 
 /**
  * What a keyed provider's failed message shows without diagnostics (only Bedrock adds them): a leading HTTP status, AgentX's own fixed transport sentence, and error tokens in a JSON body.
@@ -103,12 +111,13 @@ function keyedFacts(provider: ModelProvider, message: Record<string, unknown>): 
   if (found.status === undefined) {
     const detail = TRANSPORT_FAILURE.exec(text)?.[1];
     const known = detail === undefined ? undefined : TRANSPORT_DETAILS.get(detail);
-    if (known !== undefined) { found.classifyStatus = known.classify; if (known.report !== undefined) found.status = known.report; if (known.chatgpt === true) found.chatgpt = true; }
+    if (known !== undefined) { found.classifyStatus = known.classify; if (known.report !== undefined) found.status = known.report; if (known.chatgpt === true) found.chatgpt = true; if (known.signal !== undefined) found.signal = known.signal; }
   }
-  for (const match of text.matchAll(BODY_TOKEN)) {
+  for (const match of found.signal === undefined ? text.matchAll(BODY_TOKEN) : []) {
     const token = match[1]!;
     if (classifyProviderFailure({ provider, signal: token }).class !== "unknown") { found.signal = token; break; }
   }
+  if (provider === "amazon-bedrock" && found.signal === undefined && (found.status === undefined || found.status === 403) && MODEL_NOT_ENABLED_TEXT.test(text.slice(0, 1_000))) found.signal = MODEL_NOT_ENABLED_SIGNAL;
   return found;
 }
 
@@ -130,7 +139,8 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
     }
     if (message.stopReason !== "error") return undefined;
     const facts: { signal?: string; status?: number; requestId?: string; classifyStatus?: number; chatgpt?: true } = failureFacts(message);
-    if (provider !== undefined && provider !== "amazon-bedrock") {
+    // Bedrock's own SDK errors carry diagnostics, which decide. A Bedrock model called through the model proxy has none (the proxy answers like a keyed provider: a status and a JSON body), so it is read like one.
+    if (provider !== undefined && (provider !== "amazon-bedrock" || (facts.signal === undefined && facts.status === undefined))) {
       const keyed = keyedFacts(provider, message);
       if (facts.signal === undefined && keyed.signal !== undefined) facts.signal = keyed.signal;
       if (facts.status === undefined && keyed.status !== undefined) facts.status = keyed.status;
@@ -149,6 +159,7 @@ export function sanitizeModelCallEvent(event: unknown, attempt = 1): ModelCallNo
         ...(facts.requestId === undefined ? {} : { requestId: facts.requestId }),
         ...(facts.status === undefined ? {} : { status: facts.status }),
         ...(facts.chatgpt === true && failure.class === "key-rejected" ? { chatgpt: true as const } : {}),
+        ...(failure.signal === MODEL_NOT_ENABLED_SIGNAL && typeof message.model === "string" && MODEL_ID_TOKEN.test(message.model) ? { model: canonicalModelName({ provider: "amazon-bedrock", modelId: message.model }) } : {}),
         ...(durationMs === undefined ? {} : { durationMs }),
       },
     };
@@ -186,7 +197,8 @@ export function describeModelCallNote(note: ModelCallNote): string {
 }
 
 /** What a person should do next, from a failed call's class and status: fixed text. Used for the operation's error, beside `describeModelCallNote`. */
-export function modelFailureNextAction(note: Extract<ModelCallNote, { outcome: "failed" }>): string {
+export function modelFailureNextAction(note: Extract<ModelCallNote, { outcome: "failed" }>, edition: Edition | undefined = editionFromEnvironment()): string {
+  if (note.signal === MODEL_NOT_ENABLED_SIGNAL) return modelNotEnabledSentence(note.model, edition);
   if (note.status === 402) return "add credits to the model account, then retry";
   switch (note.class) {
     case "key-rejected": return note.chatgpt === true ? "connect ChatGPT again, then retry" : "check the model key and its permissions, then retry";

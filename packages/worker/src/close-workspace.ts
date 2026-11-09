@@ -73,3 +73,12 @@ function assertContained(rootPath: string, candidate: string): void {
     throw agentXError("CONFIG_INVALID", "repository path escapes the workspace root");
   }
 }
+
+/**
+ * The worker's answer to a close invocation (058-stop-close): the check judges a workspace nothing is writing to. While another operation is active here (an old run whose stop did not land, say), its
+ * answer could be stale a moment later, so it refuses, and the close fails without deleting anything.
+ */
+export async function closeInvocationResult(rootPath: string, otherOperationActive: () => boolean): Promise<WorkspaceClosePreflightResult> {
+  if (otherOperationActive()) throw agentXError("WORKSPACE_BUSY", "another operation is still active in this workspace; the close check cannot judge it");
+  return inspectWorkspaceForClose(rootPath);
+}

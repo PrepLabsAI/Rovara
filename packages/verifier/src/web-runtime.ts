@@ -23,6 +23,7 @@ import { runIsolatedE2EApplication, type E2EApplicationRuntimePorts } from "./ap
 import { createE2EApplicationRuntimePorts } from "./application-services.js";
 import type { E2ERunInput, ProjectSetupRunnerToolchain } from "@agentx/contracts";
 import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
+import { stripStepIndexes } from "./executor/capture.js";
 
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const utc = () => new Date().toISOString();
@@ -33,8 +34,10 @@ const utc = () => new Date().toISOString();
  */
 export type E2EWebCapturePorts = Readonly<{
   screenshots: boolean;
-  /** Stores one capture of one case under the executor's budget and credential scan. */
-  record(input: { caseId: string; kind: "screenshot"; bytes: Uint8Array }): Promise<unknown>;
+  /** "all" (proof and evidence B1): every case also gets a strip, one screenshot at the end of each of its steps (`stripStepIndexes`), whatever its outcome. Absent: failed cases only. */
+  mode?: "failed" | "all";
+  /** Stores one capture of one case under the executor's budget and credential scan. `step` marks a strip frame (the declared step it follows). */
+  record(input: { caseId: string; kind: "screenshot"; bytes: Uint8Array; step?: number }): Promise<unknown>;
 }>;
 /** What the case adapter made of the case, for capture: a failed assertion is FAILED, a case that could not be observed is UNKNOWN. */
 export type WebCaseCaptureOutcome = "passed" | "failed" | "unknown";
@@ -55,6 +58,61 @@ export async function finishWebCaseCapture(input: { capture: E2EWebCapturePorts 
 }
 
 /**
+ * Video and trace of a case (proof and evidence B4). Supplied only by the executor host, only when the plan proves every account of the round run-scoped and the admitted policy asks for the kind (`admittedMediaPolicy`):
+ * absent otherwise, and then nothing below runs. Best effort like every capture, so it changes no verdict.
+ */
+export type E2EWebMediaPorts = Readonly<{
+  trace: boolean;
+  /** Where Playwright writes the case's trace, and a bounded read of it afterwards. The file is removed by the host with the rest of the case's scratch. */
+  tracePath(caseId: string): string;
+  readFile(path: string): Promise<Uint8Array>;
+  /** The case's video, when the engine recorded one (its context option belongs to the engine); undefined when it did not. */
+  readVideo?(caseId: string): Promise<Uint8Array | undefined>;
+  /** Stores one file under the executor's gate, scrub, scan and caps. */
+  record(input: { caseId: string; kind: "video" | "trace"; bytes: Uint8Array }): Promise<unknown>;
+}>;
+
+/** Starts the trace of a case on its owned context. Call it only after the case's authentication is applied (see the call site). Best effort. Returns whether a trace is running. */
+export async function startWebCaseTrace(input: { media: E2EWebMediaPorts | undefined; context: Pick<BrowserContext, "tracing"> | null }): Promise<boolean> {
+  if (!input.media?.trace || !input.context) return false;
+  try { await input.context.tracing.start({ screenshots: true, snapshots: true }); return true; } catch { return false; }
+}
+
+/** Stops the case's trace, hands it (and the case's video, if there is one) to the recorder, which scrubs and scans it. Best effort: a missing or unreadable file leaves none. */
+export async function finishWebCaseMedia(input: { media: E2EWebMediaPorts | undefined; caseId: string; context: Pick<BrowserContext, "tracing"> | null; tracing: boolean }): Promise<void> {
+  const { media, caseId, context, tracing } = input;
+  if (media === undefined) return;
+  if (tracing && context) {
+    try {
+      const path = media.tracePath(caseId);
+      await context.tracing.stop({ path });
+      const bytes = await media.readFile(path);
+      if (bytes.byteLength > 0) await media.record({ caseId, kind: "trace", bytes });
+    } catch { /* a trace that cannot be stopped or read leaves none */ }
+  }
+  if (media.readVideo !== undefined) {
+    try {
+      const bytes = await media.readVideo(caseId);
+      if (bytes !== undefined && bytes.byteLength > 0) await media.record({ caseId, kind: "video", bytes });
+    } catch { /* a video that cannot be read leaves none */ }
+  }
+}
+
+/**
+ * Takes the strip frame a step earns, after the step's action window is finished: only in mode "all", only for the steps `stripStepIndexes` picks for a case of this many steps (so the same scenario on the
+ * unchanged code and on the candidate is photographed at the same steps), and best effort like every capture: a page that cannot be photographed or a recorder that refuses (its budget, a credential in the
+ * picture) leaves no frame and changes no verdict.
+ */
+export async function finishWebStepCapture(input: { capture: E2EWebCapturePorts | undefined; caseId: string; stepIndex: number; stepCount: number; page: Pick<Page, "screenshot"> | null }): Promise<void> {
+  const { capture, caseId, stepIndex, stepCount, page } = input;
+  if (!capture?.screenshots || capture.mode !== "all" || !page || !stripStepIndexes(stepCount).includes(stepIndex)) return;
+  try {
+    const bytes = await page.screenshot({ type: "jpeg", quality: SCREENSHOT_QUALITY, timeout: SCREENSHOT_TIMEOUT_MS });
+    if (bytes.byteLength > 0) await capture.record({ caseId, kind: "screenshot", bytes: Uint8Array.from(bytes), step: stepIndex });
+  } catch { /* a page that cannot be photographed leaves no frame */ }
+}
+
+/**
  * How an agent step ended, as the executor's ledger recorded it: `concluded` when `agent.act` resolved, `failed` when it threw an `AgentError` (the stop code says which). Both are facts
  * about the executor's own run; whether the case passes is the deterministic assertions' (and Task 4.4's).
  */
@@ -72,8 +130,12 @@ export type E2EWebAgentPorts = Readonly<{
 export type E2EWebRuntimePorts = Readonly<{
   /** Screenshots of failed cases; absent when the admission approves none. */
   capture?: E2EWebCapturePorts;
+  /** Video and trace; absent unless the plan proves the round's accounts run-scoped and the policy asks (B4). */
+  media?: E2EWebMediaPorts;
   /** Present only when the executor was given a model channel (a group with an agent step). */
   agent?: E2EWebAgentPorts;
+  /** One line for the executor's own log (redacted by the host); absent in a run that has none. Never a verdict input. */
+  log?(line: string): void;
   casePlans: E2EApplicationCliCasePlanReader;
   caseObservations: E2EApplicationProtectedCaseObservationReader;
   evidence: E2EApplicationCliEvidenceWriter;
@@ -204,6 +266,14 @@ export type WebAgentDownloadStatus = "captured" | "agent-no-download" | "ambiguo
 /** How long an agent step that concluded is given for a download it caused to start, after its last action returned. */
 const AGENT_DOWNLOAD_GRACE_MS = 2_000;
 const AGENT_STEP_MAX_MS = 90_000;
+/** The stop code of an agent step that threw: the code the model driver's own ledger gives a step that ended in a fault. */
+const AGENT_FAULT_STOP_CODE = "ACTION_FAILED";
+/** What a fault is called in the executor log: its name and a short, single-line, bounded message (the log is redacted of credentials when it is written). */
+function faultNote(error: unknown): string {
+  const name = error instanceof Error ? error.name : typeof error;
+  const message = error instanceof Error ? error.message.replace(/\s+/g, " ").slice(0, 200) : "";
+  return `${name}${message === "" ? "" : `: ${message}`}`;
+}
 class NoAgentDownload extends Error { constructor() { super("the agent step caused no download"); this.name = "NoAgentDownload"; } }
 
 /** Counts the downloads the owned page, and any page it opens, starts while it is watched. */
@@ -236,6 +306,8 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
   let agentDownloadStatus: WebAgentDownloadStatus | null = null;
   /** Set when an agent step did not conclude: the case stops there (Task 4.4a), with the step recorded as it ended and no assertion observed on a page it left half-way. */
   let agentStopCode: string | null | undefined;
+  /** What an agent step threw instead of ending (an executor fault): the case still ends there with the step recorded, and the fault travels with the error it fails with. */
+  let agentFault: unknown;
   let pendingChooser: { chooser: FileChooser; page: Page; triggerIndex: number; triggerActionDigest: string; triggerActionId: string } | null = null;
   for (let stepIndex = 0; stepIndex < input.scenario.steps.length; stepIndex += 1) {
     if (agentStopCode !== undefined) break;
@@ -311,6 +383,18 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
       let outcome: E2EWebAgentStepOutcome | undefined;
       let captured: { suggestedFilename: string; bytes: Uint8Array; contentRef: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>> } | null = null;
       let status: WebAgentDownloadStatus | null = null;
+      // An agent step that THROWS (a fault of the executor, the browser or the runner that is not the runner's own answer) is an agent step that did not conclude, and is recorded as one: the
+      // case ends there exactly as it does for a step that failed, with the step in its capture. Letting the throw leave the case would write no capture at all, and the identity evidence
+      // recorded before the step would then be bytes no capture reaches, which the collector can only call "extra or unreferenced bytes" (FLK-1) instead of naming the case's own reason.
+      // Only the call of the agent step (and the download wait around it) is held to this: the evidence writer, the download read and the invariants below still throw out of the case.
+      // A cancelled case (its signal) is not a step that failed, and an outcome the step already reported (a failed step with its own stop code) is never replaced.
+      const heldAsFault = (error: unknown): void => {
+        if (signal.aborted) throw error;
+        agentFault = error;
+        const kept: E2EWebAgentStepOutcome = outcome === undefined || outcome.verdict === "concluded" ? { verdict: "failed", stopCode: AGENT_FAULT_STOP_CODE, receiptIds: [] } : outcome;
+        outcome = kept;
+        input.ports.log?.(`agent step fault: step ${stepIndex} of case ${input.caseId} ended ${kept.stopCode ?? "without a stop code"} after it threw ${faultNote(error)}`);
+      };
       if (csvAssertions.length > 0 && stepIndex === finalDownloadTrigger) {
         if (download !== null) throw new Error("CSV download trigger association is ambiguous");
         // The download is the one the step caused. The pinned browser fixture arms its waiter before the step runs and keeps it for the whole step, then saves the first download it saw;
@@ -324,7 +408,9 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
             await watching.first(AGENT_DOWNLOAD_GRACE_MS);
             if (watching.count() === 0) throw new NoAgentDownload();
           }, { timeout: timeoutMs + 10_000 });
-        } catch (error) { if (!(error instanceof NoAgentDownload)) throw error; }
+        } catch (error) {
+          if (!(error instanceof NoAgentDownload)) { heldAsFault(error); saved = undefined; }
+        }
         finally { watching.stop(); }
         if (outcome === undefined) throw new Error("the agent step did not report how it ended");
         if (outcome.verdict === "failed") status = null;
@@ -337,8 +423,9 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
           status = "captured";
         }
       } else {
-        outcome = await runAgent();
+        try { outcome = await runAgent(); } catch (error) { heldAsFault(error); }
       }
+      if (outcome === undefined) throw new Error("the agent step did not report how it ended");
       // A step that did not conclude stops the case here: its facts are in the ledger and the report, and no assertion is observed on a page it left half-way. The step is recorded as
       // it ended, so the case's capture can name it and the collector can say why the case is UNKNOWN; the case still fails (the caller throws once the capture is written).
       if (outcome.verdict === "failed") {
@@ -425,6 +512,8 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
         const finished = await input.ports.actionWindows.finish(action, signal);
         if (!finished || finished.confirmed !== true) finishError = new Error("protected action window finish was not confirmed");
       } catch (error) { finishError = error; }
+      // The end of a step that went through (a `continue` or a `break` above passes here too): its strip frame, when the admission asks for a strip.
+      if (actionError === undefined && finishError === undefined) await finishWebStepCapture({ capture: input.ports.capture, caseId: input.caseId, stepIndex, stepCount: input.scenario.steps.length, page: input.page });
     }
     if (finishError !== undefined) throw new Error("protected action result is uncertain because its action window could not be durably finished", { cause: finishError });
     if (actionError instanceof Error) throw actionError;
@@ -432,7 +521,8 @@ export async function executeWebSteps(input: { caseId: string; scenario: E2EScen
   }
   if (pendingChooser !== null) throw new Error("owned file chooser was opened without its exact following approved fixture selection");
   if (agentStopCode === undefined && csvAssertions.length > 0 && !download && agentDownloadStatus === null) throw new Error("CSV assertion has no exact preceding admitted download trigger");
-  return { download, steps, agentDownloadStatus, agentStopped: agentStopCode !== undefined ? { stopCode: agentStopCode } : null };
+  return { download, steps, agentDownloadStatus,
+    agentStopped: agentStopCode !== undefined ? { stopCode: agentStopCode, ...(agentFault === undefined ? {} : { fault: agentFault }) } : null };
 }
 
 async function observeWebAssertions(input: { caseId: string; scenario: E2EScenario; fixtures: WebFixtures; engine: EngineHandle;
@@ -546,6 +636,8 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
       let sessionClosed: boolean;
       // For capture only: the live page once the case has one, and what the case turned out to be.
       let ownedPage = null as Page | null;
+      let ownedContext = null as BrowserContext | null;
+      let tracing = false;
       let captureOutcome: WebCaseCaptureOutcome = "unknown";
       try {
         const chain = await runInsideAssertionSteps(fixtures[ASSERTION_FIXTURE], scenario.assertions.length, async () => {
@@ -556,7 +648,11 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
         if (!surface) throw new Error("web engine live surface is unavailable before approved authentication can be applied");
         const context = surface.context();
         const page = surface.page();
+        ownedContext = context;
         await ports.applyToOwnedBrowserContext(session.sessionRef, context, operationSignal);
+        // The trace starts only AFTER the approved authentication is applied (Opus review C2): applying it adds the session's cookies and its localStorage entries as an init script, and a trace records the
+        // arguments of every call made while it runs, so a trace started first would hold every session token in the clear.
+        tracing = await startWebCaseTrace({ media: ports.media, context });
         ownedPage = page;
         const protectedObservation = await readValidatedE2EApplicationCaseObservation({ reader: ports.caseObservations,
           launchContext, plan, ownedClientRef: session.sessionRef, expectedSubjectKind: "browser", signal: operationSignal });
@@ -593,7 +689,7 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
         const { failedIndex, unavailableIndex, agentStopped } = chain.outcome;
         captureOutcome = failedIndex >= 0 ? "failed" : unavailableIndex >= 0 ? "unknown" : "passed";
         // The capture of a case whose agent step did not conclude is written (so the collector can name why the case is UNKNOWN), and the case fails all the same.
-        if (agentStopped != null) throw new Error(`the web agent step did not conclude (${agentStopped.stopCode ?? "unknown"})`);
+        if (agentStopped != null) throw new Error(`the web agent step did not conclude (${agentStopped.stopCode ?? "unknown"})`, agentStopped.fault === undefined ? undefined : { cause: agentStopped.fault });
         if (failedIndex >= 0) throw new Error(`web assertion ${failedIndex} failed against the actual owned browser observation`);
         if (unavailableIndex >= 0) throw new Error(`web assertion ${unavailableIndex} is unavailable on the installed fixed browser surface`);
       } catch (error) {
@@ -602,6 +698,7 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
       } finally {
         // Before the session closes, while the page is still the case's own; best effort, so it can change neither the verdict nor the cleanup below.
         await finishWebCaseCapture({ capture: ports.capture, caseId, outcome: captureOutcome, page: ownedPage });
+        await finishWebCaseMedia({ media: ports.media, caseId, context: ownedContext, tracing });
         try { sessionClosed = (await ports.closeCaseSession(session.sessionRef, AbortSignal.timeout(5_000))).confirmed; }
         catch { sessionClosed = false; }
       }

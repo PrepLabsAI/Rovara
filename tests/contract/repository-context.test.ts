@@ -115,8 +115,8 @@ describe("repository context files", () => {
   });
 });
 
-// the task controls AGENTS.md and can flip it between a real file and a link while the worker reads it. The read needs
-// /proc/self/fd, so this runs on Linux (CI).
+// R56: the task controls AGENTS.md and can flip it between a real file and a link while the worker reads it. The read needs
+// /proc/self/fd, so this runs on Linux (CI, and the cloud test runner).
 (process.platform === "linux" ? describe : describe.skip)("a context file the task flips to a link that leaves the repository", () => {
   it("never reads anything outside the repository, however the flips fall", async () => {
     const rootPath = await workspace();

@@ -24,3 +24,20 @@ export function inertContextText(text: string): { text: string; removed: number 
   });
   return { text: cleaned, removed };
 }
+
+/**
+ * A JSON string literal, with the line separators JSON leaves raw escaped as well, and the angle
+ * brackets that could close the tag Pi wraps context files in.
+ */
+export function quotedContextText(value: string): string {
+  return JSON.stringify(value)
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029")
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e");
+}
+
+/** A name or path as one inert piece of text: no hidden characters, and the angle brackets that could close Pi's tag escaped. */
+export function inertLabel(value: string): string {
+  return quotedContextText(inertContextText(value).text).slice(1, -1);
+}

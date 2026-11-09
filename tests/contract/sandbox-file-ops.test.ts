@@ -1,6 +1,6 @@
-// the file-tool helper that runs inside the task's container. Its second layer never lets the
+// Task 1 (Projects plan 2): the file-tool helper that runs inside the task's container. Its second layer never lets the
 // kernel follow a symlink: a link the task flips between a check and the open must not reach a file outside the root.
-// The walk uses /proc/self/fd, so the filesystem tests run on Linux only (CI); elsewhere
+// The walk uses /proc/self/fd, so the filesystem tests run on Linux only (CI, and the cloud test runner); elsewhere
 // they are skipped with a printed reason, and the platform-free tests below still run.
 import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
@@ -19,7 +19,7 @@ import {
 } from "../../packages/worker/src/sandbox-file-ops.js";
 
 const linux = process.platform === "linux";
-if (!linux) console.log("sandbox-file-ops.test.ts: filesystem tests skipped, they need /proc/self/fd (Linux); they run in CI");
+if (!linux) console.log("sandbox-file-ops.test.ts: filesystem tests skipped, they need /proc/self/fd (Linux); they run in CI and on the cloud test runner");
 const onLinux = linux ? describe : describe.skip;
 
 const OUTSIDE_SECRET = "TOP-SECRET-OUTSIDE-CONTENT";

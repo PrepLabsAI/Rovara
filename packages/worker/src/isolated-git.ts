@@ -1,13 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { constants } from "node:fs";
-import { copyFile, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, open, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { agentXError } from "@agentx/contracts";
 import { candidateWriteStep, commitLock, kindIn, lockIn, openDirectory, readFileIn, releaseLock, workTreeByDescriptor, type DirectoryLock, type HeldDirectory } from "./candidate-fs.js";
+import { makeWorkerScratch } from "./worker-scratch.js";
 import { assertNoEmbeddedRepositories, assertNoLfsFiles, isolatedGitEnvironment } from "./git.js";
 
 const execFile = promisify(execFileCallback);
@@ -67,8 +67,7 @@ export async function readSmallFile(path: string, limit: number): Promise<Buffer
 }
 
 /** The plain-value settings (see KEPT_CONFIG_KEYS) of the candidate's config, read from a private copy of the file. Any other key, and `include`, is never looked at. */
-async function candidateConfigValues(layout: CandidateLayout, scratch: string, gitDir: string): Promise<Array<readonly [string, string]>> {
-  const bytes = await readSmallFile(join(layout.gitDirectory, "config"), SMALL_FILE_BYTES);
+async function candidateConfigValues(layout: CandidateLayout, scratch: string, gitDir: string, bytes: Buffer | undefined): Promise<Array<readonly [string, string]>> {
   if (bytes === undefined) return [];
   const copy = join(scratch, "candidate-config");
   await writeFile(copy, bytes, { mode: 0o600 });
@@ -138,15 +137,34 @@ export interface IsolatedGit {
 }
 
 /**
- * Runs `use` against a throwaway bare repository this worker created under the temporary directory, then removes it on every path. Git reads the candidate's
+ * Runs `use` against a throwaway bare repository this worker created in its scratch directory (worker-scratch.ts, never on the workspace volume), then removes it on every path. Git reads the candidate's
  * objects through `objects/info/alternates` and writes the objects it creates (the tree of a snapshot, a commit, a fetched pack) to the throwaway repository's own
  * object directory. `"write"` then copies them into the candidate's object directory, where the candidate repository and later reviews read them, through the
  * worker's own descriptor-relative writes (candidate-fs.ts) rather than through Git, which would follow a symlink the agent put in `objects/`. `"read"` writes
  * nothing to the candidate.
  */
-export async function withIsolatedGit<T>(directory: string, mode: "read" | "write", use: (git: IsolatedGit) => Promise<T>): Promise<T> {
+export async function withIsolatedGit<T>(
+  directory: string,
+  mode: "read" | "write",
+  use: (git: IsolatedGit) => Promise<T>,
+  /**
+   * `objectsDirectory`: the object directory Git reads instead of the candidate's own. Only for a folder the agent wrote that the worker must not read objects from (a
+   * parallel part's): Git then sees the project repository's objects and the files of `directory`, and nothing from the part's own `.git/objects`. `"write"` still exports to the
+   * candidate's layout, so use it with `"read"` and export the throwaway repository's objects where they belong.
+   */
+  options: {
+    objectsDirectory?: string;
+    /**
+     * Settings applied AFTER the candidate's own plain-value ones, so they win: for a caller that must not let the agent's config decide what a file is (the setup run's tracked-file check
+     * forces `core.filemode=true` and switches line-ending conversion off).
+     */
+    config?: ReadonlyArray<readonly [string, string]>;
+    /** Leave out the candidate's `.git/info/attributes` (the agent's own, untracked): only the attributes committed in the repository apply. */
+    ignoreInfoAttributes?: boolean;
+  } = {},
+): Promise<T> {
   const layout = await candidateLayout(directory);
-  const scratch = await mkdtemp(join(tmpdir(), "agentx-candidate-git-"));
+  const scratch = await makeWorkerScratch("agentx-candidate-git-");
   let workTreeHeld: HeldDirectory | undefined;
   try {
     const gitDir = join(scratch, "worker.git");
@@ -154,11 +172,26 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
     await execFile("git", ["init", "--bare", "--quiet", "--template=", gitDir], { cwd: scratch, env: initEnv });
     await mkdir(join(gitDir, "info"), { recursive: true });
     await mkdir(join(gitDir, "objects", "info"), { recursive: true });
-    await writeFile(join(gitDir, "objects", "info", "alternates"), `${layout.objects}\n`, { mode: 0o600 });
-    // Ignore patterns and attributes are plain text: the files carry no command, and the agent's own exclusions and attributes keep deciding what `add` stages.
-    for (const name of ["exclude", "attributes"]) {
-      const bytes = await readSmallFile(join(layout.gitDirectory, "info", name), SMALL_FILE_BYTES).catch(() => undefined);
-      if (bytes !== undefined) await writeFile(join(gitDir, "info", name), bytes, { mode: 0o600 });
+    await writeFile(join(gitDir, "objects", "info", "alternates"), `${options.objectsDirectory ?? layout.objects}\n`, { mode: 0o600 });
+    // The candidate's `.git` is opened once, without following a symlink, and its plain-text files are read through that descriptor: a `.git` path the agent swaps for a link to a
+    // host folder after the check above is not what is read.
+    const gitHeld = await openDirectory(layout.gitDirectory);
+    let configBytes: Buffer | undefined;
+    try {
+      await candidateWriteStep("read git files");
+      // Ignore patterns and attributes are plain text: the files carry no command, and the agent's own exclusions and attributes keep deciding what `add` stages.
+      const infoHeld = await gitHeld.subdirectory("info", false).catch(() => undefined);
+      try {
+        for (const name of options.ignoreInfoAttributes === true ? ["exclude"] : ["exclude", "attributes"]) {
+          const bytes = infoHeld === undefined ? undefined : await readFileIn(infoHeld, name, SMALL_FILE_BYTES).catch(() => undefined);
+          if (bytes !== undefined) await writeFile(join(gitDir, "info", name), bytes, { mode: 0o600 });
+        }
+      } finally {
+        await infoHeld?.close();
+      }
+      configBytes = await readFileIn(gitHeld, "config", SMALL_FILE_BYTES);
+    } finally {
+      await gitHeld.close();
     }
     // On Linux the work tree is held open and Git is started in it, with no `--work-tree` path: `git` then takes its working directory as the work tree. A path
     // swapped for a symlink afterwards cannot redirect what Git reads or writes, because Git's working directory is the directory that was opened, not a path.
@@ -166,7 +199,7 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
     // Git reads `core.bare` from the repository's own config file while it sets itself up (a setting from the environment comes too late), so the throwaway
     // repository, whose config is the worker's, is made non-bare for it to take its working directory as the work tree.
     if (workTreeHeld !== undefined) await execFile("git", [`--git-dir=${gitDir}`, "config", "core.bare", "false"], { cwd: scratch, env: initEnv });
-    const config = await candidateConfigValues(layout, scratch, gitDir);
+    const config = [...await candidateConfigValues(layout, scratch, gitDir, configBytes), ...(options.config ?? [])];
     const temporaryIndex = join(scratch, "index");
     const workIndex = join(scratch, "work-index");
     const realIndex = join(layout.gitDirectory, "index");
@@ -204,6 +237,12 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
 
 /** Leaves a file tool's leftover temporary file (`.agentx-file-ops-*`, from a write the helper was killed in) out of every snapshot. */
 export const CANDIDATE_EXCLUDE_PATHSPEC = ":(exclude,glob)**/.agentx-file-ops-*";
+/**
+ * Leaves the sandbox's Python user site (`.agentx-python`, task-sandbox.ts; a drift test pins the name) out of every snapshot, at the top of the work tree only (C67). Its own `.gitignore` of
+ * `*` is the first line of defence; a task that deletes that file, or force-adds the folder to the index, must not get a program of its own into the candidate that way. A task that commits
+ * the folder to HEAD keeps it in the snapshot (it is then in the reviewed diff, so nothing is hidden), and later edits to a tracked folder are not captured.
+ */
+export const CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC = ":(top,exclude,literal).agentx-python";
 
 /**
  * The tree of `commit` plus the work tree as it is now, computed in `git`'s temporary index (never the candidate's real one): `read-tree`, then `add --all`, then
@@ -231,10 +270,10 @@ export async function addWorkTree(git: IsolatedGit, index: IndexKind, gitlinks: 
       throw agentXError("CONFIG_INVALID", `the repository has a submodule at ${path} that is no longer a directory. AgentX tasks do not yet support changes to a project's submodules.`);
     }
   }
-  if (gitlinks.length === 0) await git.text(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PATHSPEC], { index, maxBuffer: 1024 * 1024 });
+  if (gitlinks.length === 0) await git.text(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC], { index, maxBuffer: 1024 * 1024 });
   else {
     const pathspecs = join(git.scratch, "pathspecs");
-    await writeFile(pathspecs, [".", CANDIDATE_EXCLUDE_PATHSPEC, ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
+    await writeFile(pathspecs, [".", CANDIDATE_EXCLUDE_PATHSPEC, CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
     await git.text(["add", "--all", `--pathspec-from-file=${pathspecs}`, "--pathspec-file-nul"], { index, maxBuffer: 1024 * 1024 });
   }
 }
@@ -260,7 +299,7 @@ async function copyInto(directory: HeldDirectory, source: string, name: string):
 }
 
 /** Copies the loose objects and packs in `source` (an object directory the worker owns) that the candidate's object directory does not have yet. Packs go in with their index last. */
-async function copyObjectsOut(source: string, layout: CandidateLayout): Promise<void> {
+export async function copyObjectsOut(source: string, layout: CandidateLayout): Promise<void> {
   const target = await openDirectory(layout.objects);
   try {
     for (const entry of await readdir(source, { withFileTypes: true })) {

@@ -11,6 +11,10 @@
     "./executor": {
       "types": "./dist/executor/index.d.ts",
       "default": "./dist/executor/index.js"
+    },
+    "./service-mocks": {
+      "types": "./dist/service-mocks/index.d.ts",
+      "default": "./dist/service-mocks/index.js"
     }
   },
   "types": "./dist/index.d.ts",

@@ -17,9 +17,11 @@
 // (--outputFile, --junitxml): then it is per test, for the tests in the changed files. AgentX never alters a customer's command.
 import { lstat, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
-import { isTestCommandHead, redactText, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict } from "@agentx/contracts";
+import { isTestCommandHead, isValidTestId, redactText, testIdOf, type CheckEntry, type ProjectCommand, type TestProof, type TestProofItem, type TestProofReason, type TestProofVerdict } from "@agentx/contracts";
 import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
 import { isTestPath } from "./test-paths.js";
+import { testIdResolver } from "./test-ids.js";
+import { displayLine } from "./test-report.js";
 import { AgentFilesRestoreError, git, gitOriginalCode, type OriginalCode, type OriginalCodeRepository } from "./original-code.js";
 
 /** The whole run on the original code gets this long, inside what is left of the check round's budget. */
@@ -174,6 +176,7 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
 
   const perCheck: TestProofItem[] = [];
   const perTest = new Map<string, TestProofItem[]>();
+  const pending: Array<{ index: number; base: { checkId: string; label: string }; entry: CheckEntry }> = [];
   runIndexes.forEach((index, position) => {
     const entry = ran.entries[position];
     const base = { checkId: `readiness:${index}`, label: labelOf(entryOf(index), commands[index]!) };
@@ -182,10 +185,13 @@ export async function runTestProof(options: RunTestProofOptions): Promise<TestPr
       return;
     }
     perCheck.push({ ...base, granularity: "check", ...classifyEntry(entry, options.signal.aborted) });
-    const tests = entry.after === "passed" || entry.after === "failed"
-      ? perTestItems(base, reports.get(index), ran.oldReports.get(index), changedPresent, entry.after === "passed") : undefined;
-    if (tests !== undefined) perTest.set(base.checkId, tests);
+    pending.push({ index, base, entry });
   });
+  for (const { index, base, entry } of pending) {
+    const tests = entry.after === "passed" || entry.after === "failed"
+      ? await perTestItems(base, reports.get(index), ran.oldReports.get(index), changedPresent, entry.after === "passed", testIdResolver({ root: options.rootPath, cwd: commands[index]!.cwd })) : undefined;
+    if (tests !== undefined) perTest.set(base.checkId, tests);
+  }
   // Per test where a report allows it; past the item limit, one summary item per check instead (never dropped).
   const testCount = [...perTest.values()].reduce((total, tests) => total + tests.length, 0);
   const useTests = items.length + perCheck.length - perTest.size + testCount <= ITEMS_MAX;
@@ -262,7 +268,7 @@ export function failureVerdict(output: string): { verdict: TestProofVerdict; rea
 // ---- Per-test verdicts, only from a report the check's own command already writes ----
 
 interface ReportSpec { kind: "json" | "junit"; argument: string }
-interface TestRecord { file: string | undefined; name: string; status: "passed" | "failed" | "skipped"; message: string }
+interface TestRecord { file: string | undefined; name: string; status: "passed" | "failed" | "skipped"; message: string; classname?: string; fileGiven?: boolean }
 
 /** A report path and format the command's arguments name (vitest and jest --outputFile, pytest --junitxml). The command is never altered. */
 export function reportSpecOf(command: ProjectCommand): ReportSpec | undefined {
@@ -324,6 +330,19 @@ async function readBytes(path: string): Promise<ReadResult> {
   }
 }
 
+/**
+ * Proof and evidence: the report file a check's own command already writes (see `reportSpecOf`), read as it stands now, within the size cap and only through a path inside the workspace that is not a link. Nothing is
+ * written, moved or run; undefined when the command names no report, the path is unsafe, or the file is missing or unreadable.
+ */
+export async function readCheckReport(root: string, command: ProjectCommand): Promise<{ kind: "json" | "junit"; text: string } | undefined> {
+  const spec = reportSpecOf(command);
+  if (spec === undefined) return undefined;
+  const path = await safeReportPath(root, command, spec);
+  if (path === undefined) return undefined;
+  const read = await readBytes(path);
+  return read.state === "ok" ? { kind: spec.kind, text: read.bytes.toString("utf8") } : undefined;
+}
+
 /** Puts a report file back as the candidate's run left it: its bytes, or gone when it was not there. A link the run left in its place is replaced, never followed. */
 async function restoreFile(report: ReportFile): Promise<void> {
   try {
@@ -338,13 +357,14 @@ async function restoreFile(report: ReportFile): Promise<void> {
   } catch { /* A report file that cannot be put back is only a stale report. */ }
 }
 
-function perTestItems(
+async function perTestItems(
   base: { checkId: string; label: string },
   report: ReportFile | undefined,
   old: ReadResult | undefined,
   changedPaths: readonly string[],
   checkPassed: boolean,
-): TestProofItem[] | undefined {
+  resolve: ReturnType<typeof testIdResolver>,
+): Promise<TestProofItem[] | undefined> {
   if (report === undefined || report.before.state !== "ok" || old === undefined || old.state !== "ok") return undefined;
   // The very bytes the new run wrote: the old run did not write a report of its own, so this says nothing about the old code.
   if (old.bytes.equals(report.before.bytes)) return undefined;
@@ -356,15 +376,21 @@ function perTestItems(
   const oldTests = parse(old.bytes.toString("utf8"));
   // The report must agree with the check's own exit code: a failed check with no failing test (or a passed one with a failing test) is not a report to trust.
   if (oldTests.length === 0 || oldTests.some((record) => record.status === "failed") === checkPassed) return undefined;
-  const keyOf = (record: TestRecord): string => `${inChanged(record) ?? record.file ?? ""}::${record.name}`;
-  const oldByKey = new Map(oldTests.map((record) => [keyOf(record), record]));
-  return newTests.map((record): TestProofItem => {
-    const found = oldByKey.get(keyOf(record));
-    const item = { ...base, granularity: "test" as const, test: redactText(record.name).slice(0, 200) || "test" };
-    if (found === undefined || found.status === "skipped") return { ...item, verdict: "could_not_run_on_old", reason: "test_missing_on_old" };
-    if (found.status === "passed") return { ...item, verdict: "does_not_prove", reason: "passed_on_old" };
-    return { ...item, ...failureVerdict(found.message) };
-  });
+  // A test is named by its ID (contracts `testIdOf`): the same string the nightly run, the evidence pack and the marks use, so the pull request's "fail on the original code" count and a mark name the same test.
+  const idOf = async (record: TestRecord): Promise<string> => testIdOf(await resolve(record));
+  const oldByKey = new Map<string, TestRecord>();
+  for (const record of oldTests) oldByKey.set(await idOf(record), record);
+  const items: TestProofItem[] = [];
+  for (const record of newTests) {
+    const id = await idOf(record);
+    const found = oldByKey.get(id);
+    // An id that is not valid is shown as a plain line and is never in the set the broker matches.
+    const item = { ...base, granularity: "test" as const, test: isValidTestId(id) ? redactText(id) : displayLine(id) };
+    if (found === undefined || found.status === "skipped") items.push({ ...item, verdict: "could_not_run_on_old", reason: "test_missing_on_old" });
+    else if (found.status === "passed") items.push({ ...item, verdict: "does_not_prove", reason: "passed_on_old" });
+    else items.push({ ...item, ...failureVerdict(found.message) });
+  }
+  return items;
 }
 
 /** A report's file (absolute, relative, or a dotted module path with no extension) against a changed path relative to the repository. */
@@ -401,6 +427,7 @@ function parseJunitReport(text: string): TestRecord[] {
     records.push({
       file: attributes.get("file") ?? (classname !== undefined && /[/\\]/.test(classname) ? classname : classname?.replaceAll(".", "/")),
       name: attributes.get("name") ?? "", status, message: unescapeXml(body),
+      ...(classname === undefined || classname === "" ? {} : { classname }), ...(attributes.get("file") === undefined ? {} : { fileGiven: true }),
     });
   }
   return records;

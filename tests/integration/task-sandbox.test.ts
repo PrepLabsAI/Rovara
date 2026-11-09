@@ -1,4 +1,4 @@
-// a task in a project without a devcontainer runs the agent's shell, the project's setup and readiness
+// Ruling R56: a task in a project without a devcontainer runs the agent's shell, the project's setup and readiness
 // commands and AgentX's checks in the task sandbox, never as children of the worker.
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -17,7 +17,7 @@ import type { DockerCli } from "../../packages/worker/src/swebench/containers.js
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
 
 const run = promisify(execFile);
-const IMAGE = "registry.example.test/agentx/worker@sha256:" + "b".repeat(64);
+const IMAGE = "123456789012.dkr.ecr.us-west-2.amazonaws.com/agentx-staging/worker@sha256:" + "b".repeat(64);
 const SANDBOX = { kind: "sandbox" as const, image: IMAGE };
 
 /** A fake Docker CLI that records every call. A `docker exec` answers with `exec(args)`. */
@@ -115,7 +115,7 @@ describe("a task in a project without a devcontainer", () => {
     await expect(stat(marker)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("starts exactly one sandbox with the sandbox arguments and without the socket, the host network or privileges", async () => {
+  it("starts exactly one sandbox with the R56 arguments and without the socket, the host network or privileges", async () => {
     const { root } = await workspace();
     const fake = fakeDocker();
     await runTaskInvocation(taskInvocation(), dependencies(root, adapterOf([]), { taskShell: { ...SANDBOX, docker: fake.docker } }));

@@ -703,7 +703,7 @@ describe("PR feedback review after publication moved HEAD", () => {
     expect(result).toMatchObject({ workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult: { candidateDigest: state.preDigest, status: "COMPLETE" } });
   });
 
-  it("starts the task sandbox before the review session and gives the session the sandbox's file tools", async () => {
+  it("starts the task sandbox before the review session and gives the session the sandbox's file tools (R56)", async () => {
     const state = await published();
     const order: string[] = [];
     const calls: string[][] = [];
@@ -1300,6 +1300,32 @@ describe("the push token never meets code the agent or a project controls (final
       .rejects.toThrow(/could not stop every process/);
     expect(credentialProvider).not.toHaveBeenCalled();
     await expect(git(fixture.bare, ["rev-parse", `refs/heads/${refusedBranch.payload.headBranch}`])).rejects.toThrow();
+  });
+
+  it("fetches no credential and pushes nothing while another operation is still running in the worker", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    const invocation = await checkedInvocation(fixture);
+    const credentialProvider = vi.fn(async () => ({}));
+    const stop = vi.fn(async () => ({ stopped: 0 }));
+    await expect(publishWorkspace({ rootPath: fixture.root, invocation, pullRequestSink: sink, credentialProvider, stopWorkspaceProcesses: stop,
+      sweepWorkspaceContainers: async () => ({ removed: 0 }), otherOperationActive: () => true, otherOperationWait: { timeoutMs: 60, pollMs: 5 } }))
+      .rejects.toThrow(/another operation still running.*did not push/);
+    expect(credentialProvider).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+    await expect(git(fixture.bare, ["rev-parse", `refs/heads/${invocation.payload.headBranch}`])).rejects.toThrow();
+  });
+
+  it("waits for an operation that is ending, then pushes: a cancel reports before the cancelled run has left the worker", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    const invocation = await checkedInvocation(fixture);
+    let polls = 0;
+    const credentialProvider = vi.fn(async () => ({}));
+    await publishWorkspace({ rootPath: fixture.root, invocation, pullRequestSink: sink, credentialProvider, stopWorkspaceProcesses: async () => ({ stopped: 0 }),
+      sweepWorkspaceContainers: async () => ({ removed: 0 }), otherOperationActive: () => { polls += 1; return polls <= 3; }, otherOperationWait: { timeoutMs: 2_000, pollMs: 5 } });
+    expect(polls).toBeGreaterThan(3);
+    expect(credentialProvider).toHaveBeenCalled();
   });
 
   it("removes every container but the worker's and stops every process, repeating until neither finds anything, before it asks for the push credential; and pushes nothing when either fails (docker containment)", async () => {

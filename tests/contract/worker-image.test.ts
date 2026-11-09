@@ -18,6 +18,15 @@ describe("the worker image", () => {
     expect(finalStage).toContain("rm -rf /var/lib/apt/lists/*");
   });
 
+  // TS-SEAL-5 (b): the sealed round's resolver guard runs `iptables-nft` from this image (packages/worker/src/check-sandbox.ts RESOLVER_GUARD_BINARY and RESOLVER_GUARD_STEPS).
+  it("carries the iptables package, which provides the iptables-nft the sealed round's resolver guard runs by absolute path", () => {
+    const install = /apt-get install --yes --no-install-recommends ([^\n\\]+)/.exec(finalStage)?.[1] ?? "";
+    expect(install.split(/\s+/)).toContain("iptables");
+    const guard = readFileSync("packages/worker/src/check-sandbox.ts", "utf8");
+    expect(guard).toContain('export const RESOLVER_GUARD_BINARY = "/usr/sbin/iptables-nft";');
+    expect(guard).toContain('insert: ["-w", "5", "-I", "OUTPUT", "1", "-d", `${EMBEDDED_RESOLVER_ADDRESS}/32`, "-j", "DROP"]');
+  });
+
   // a project without a devcontainer runs its commands in a container of this image.
   it("carries what the task sandbox needs: curl, git, python3, bash, a POSIX shell, and the node user (uid 1000) it runs as", () => {
     const install = /apt-get install --yes --no-install-recommends ([^\n\\]+)/.exec(finalStage)?.[1] ?? "";
