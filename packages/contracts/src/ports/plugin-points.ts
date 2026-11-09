@@ -233,8 +233,8 @@ export type PluginConfigEntry = z.infer<typeof PluginConfigEntrySchema>;
 /** The config file's content. Entries are created in order, so list a queue's store before the queue. */
 export const PluginConfigSchema = z.object({
   version: z.literal(PLUGIN_CONFIG_VERSION),
-  /** The company Code runs as (decision 45.6). Absent: the implicit company. */
-  companyId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/).optional(),
+  /** The company Code runs as (decision 45.6). Absent: the implicit company. It has the shape of Cloud's organization id, because plug-in calls carry it as their scope (`HostScope`). */
+  companyId: z.string().regex(/^org_[0-9a-z]{20}$/, "a company id looks like org_ and 20 lower-case letters or digits (the id Cloud uses; code-host and tracker calls are scoped by it)").optional(),
   plugins: z.array(PluginConfigEntrySchema).max(64),
 }).strict().superRefine((config, context) => {
   const seen = new Set<string>();

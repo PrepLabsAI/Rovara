@@ -8,7 +8,7 @@ import { linearIssueCreated, normalizeIssueKey, verifyLinearSignature } from "..
 import { runContract } from "../support/ports/plugin-contract-kit.js";
 import { SCOPE } from "../support/ports/plugin-fake-worlds.js";
 import { trackerChecks, type TrackerWorld } from "../support/ports/tracker-conformance.js";
-import { HOOK, SECRET, linearBody, signedLinear } from "../support/ports/linear-fixtures.js";
+import { HOOK, NOW, SECRET, linearBody, signedLinear } from "../support/ports/linear-fixtures.js";
 
 type OrgId = Extract<HostScope, { orgId: string }>["orgId"];
 const ORG: OrgId = "org_aaaaaaaaaaaaaaaaaaaa";
@@ -142,6 +142,12 @@ describe("a Linear delivery", () => {
     // The same issue and labels the webhook rules find in the same body.
     const existing = linearIssueCreated(body, HOOK);
     expect("events" in existing && existing.events[0]).toMatchObject({ identifier: "ENG-1", labels: ["rovara", "bug"], actorId: "user-dana" });
+    // Pinned: exactly these events for this body, so a change to the rules shows up here (until the trigger framework's copy is reconciled with this one).
+    expect(events).toEqual([
+      { eventId: events[0]!.eventId, tracker: "linear", item: { tracker: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1/x" }, type: "item.labelled", label: "rovara", labelledBy: "user-dana", occurredAt: new Date(NOW - 5_000).toISOString() },
+      { eventId: events[1]!.eventId, tracker: "linear", item: { tracker: "linear", id: "ENG-1", url: "https://linear.app/acme/issue/ENG-1/x" }, type: "item.labelled", label: "bug", labelledBy: "user-dana", occurredAt: new Date(NOW - 5_000).toISOString() },
+    ]);
+    expect(events[0]!.eventId).toMatch(/^linear:issue:3f2b1c4e-0000-4000-8000-000000000001:create:label:[0-9a-f]{16}$/);
     // The same delivery again is the same events (a redelivery is held once by the intake engine, by these ids).
     expect((await normalise(w, signedLinear(body))).map((event) => event.eventId)).toEqual(events.map((event) => event.eventId));
   });
@@ -207,6 +213,8 @@ describe("the Linear webhook rules the adapter carries", () => {
     const empty = createHmac("sha256", "").update(raw).digest("hex");
     expect(verifyLinearSignature(raw, { "linear-signature": empty }, "")).toBe(false);
     expect(verifyLinearSignature(Buffer.from(`${delivery.rawBody} `, "utf8"), delivery.headers, SECRET)).toBe(false);
+    // Two signature headers: the first one counts (as in the hosted product), so a later one cannot stand in for it.
+    expect(verifyLinearSignature(raw, { "linear-signature": "0".repeat(64), "Linear-Signature": delivery.headers["linear-signature"] }, SECRET)).toBe(false);
   });
 
   it("reads an issue key in capitals and nothing else", () => {

@@ -1,12 +1,12 @@
-// Enterprise foundations, task P3: the GitHub CodeHost adapter. It wraps `GitHubAppCredentialProvider` one method to one method, mapping its types to the
-// neutral ones (`mapping.ts`); `github-app.ts` is not edited, and no behaviour changes. This is the port's first implementation and the proof that the port
-// fits: the contract suite (tests/plugins/code-host.contract.ts) runs against it with GitHub-shaped fixtures.
+// The GitHub CodeHost adapter (Cloud's P3, ported in lane L2). It maps a GitHub client (`GitHubCodeHostProvider`, see `provider.ts`) one method to one method to the
+// neutral port (`mapping.ts`). The conformance suite (tests/support/ports/code-host-conformance.ts) runs against it with GitHub-shaped fixtures.
 //
-// What GitHub's provider restricts stays restricted here, and is stated rather than hidden:
-//  - `branchHead` reads Rovara's own working branches only (`agentx/<uuid>`): the provider refuses any other name.
-//  - `listBranches` is org-scoped and needs the installation binding (cloud installs); a system scope is refused.
+// What GitHub restricts stays restricted, and is stated rather than hidden. The adapter holds these itself, whatever client sits under it:
+//  - `branchHead` reads Rovara's own working branches only (`agentx/<uuid>`); the branch goes into an API address.
+//  - `listBranches` is org-scoped (a system scope is refused) and takes pages 1 to 1000.
 //  - `reply` posts Rovara's own fixed text only (200 characters, one line, no mention).
-//  - `events.normalise` (task P6, `events.ts`) exists only when the adapter is given the install's webhook secret; without one it verifies nothing and offers no normaliser.
+//  - `events.normalise` (`events.ts`) exists only when the adapter is given the install's webhook secret; without one it verifies nothing and offers no normaliser.
+// The client holds the rest (see the rules on `GitHubCodeHostProvider`): tenant binding, least-privilege tokens, no redirects.
 import {
   agentXError, ChangeRequestInputSchema, ChangeRequestUpdateSchema, HostScopeSchema,
   type BranchPage, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
@@ -19,6 +19,10 @@ import { detailsOf, feedbackOf, fileOf, mergeResultOf, pullRequestNumber, refOf,
 import { type GitHubCodeHostProvider } from "./provider.js";
 
 export const GITHUB_HOST_KIND = "github";
+
+/** Rovara's working branches: `agentx/<uuid>`. */
+const WORKING_BRANCH = /^agentx\/[0-9a-f-]{36}$/iu;
+const MAX_BRANCH_PAGE = 1_000;
 
 export const GITHUB_CODE_HOST_CAPABILITIES: CodeHostCapabilities = {
   drafts: true, threadedComments: true, requiredApprovals: true, codeOwners: true, webhooks: true,
@@ -99,6 +103,8 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
     },
 
     async branchHead(repository: RepositoryRef, branch: string, scope: HostScope): Promise<string> {
+      // Rovara's own working branches only. The branch goes into an API address, so the shape is held here whatever client sits under the adapter.
+      if (!WORKING_BRANCH.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
       return provider.getBranchHead(repository.url, branch, checkedScope(scope));
     },
 
@@ -112,6 +118,9 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
 
     async listBranches(repository: RepositoryRef, page: number, scope: HostScope): Promise<BranchPage> {
       const checked = checkedScope(scope);
+      // The listing is one organization's: a system scope names none. Held here, whatever client sits under the adapter.
+      if (!("orgId" in checked)) throw agentXError("CONFIG_INVALID", "the branch listing needs an organization scope");
+      if (!Number.isSafeInteger(page) || page < 1 || page > MAX_BRANCH_PAGE) throw agentXError("CONFIG_INVALID", "the page is invalid");
       const identity = await provider.getRepositoryIdentity(repository.url, checked);
       const parsed = parseGitHubRepository(repository.url);
       const installation = await provider.installationForRepository(parsed.owner, parsed.name);

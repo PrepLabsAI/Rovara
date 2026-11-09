@@ -11,4 +11,4 @@ export { codeBuildCheckRunner, checkOfBuild, CODEBUILD_CAPABILITIES, CODEBUILD_R
 export { codeBuildPlugin, type CodeBuildPluginOptions } from "./check-runner/codebuild/plugin.js";
 export { linearTracker, LINEAR_TRACKER_KIND, type LinearTrackerAccess, type LinearIssueRead, type LinearReplyPort } from "./tracker/linear/index.js";
 export { linearTrackerPlugin, type LinearTrackerPluginOptions } from "./tracker/linear/plugin.js";
-export * from "./fake/index.js";
+// The fakes are not exported here: their webhook secrets are public constants, so a production build must not be able to enable one by accident. Tests import `./fake/` by path.

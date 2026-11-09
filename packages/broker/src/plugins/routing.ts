@@ -34,7 +34,9 @@ export function codeHostForKind(registry: RegistryView, kind: PluginKind): CodeH
  * fixed sentence when that kind has no registered host; never falls back to another host.
  */
 export function codeHostForRecord(registry: RegistryView, repository: { host?: { kind: PluginKind } | undefined }): CodeHost {
-  const host = registry.get("code-host", repository.host?.kind ?? LEGACY_CODE_HOST_KIND);
+  const kind = repository.host?.kind ?? LEGACY_CODE_HOST_KIND;
+  requireKind(kind);
+  const host = registry.get("code-host", kind);
   if (host === undefined) throw agentXError("CONFIG_INVALID", NO_HOST_MESSAGE);
   return host;
 }

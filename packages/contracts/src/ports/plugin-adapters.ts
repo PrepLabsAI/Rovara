@@ -11,7 +11,8 @@ export interface CheckRunnerContext {
 
 /**
  * The `check-runner` point holds a factory, not a runner: a runner such as CodeBuild is built for the repositories of one project. The
- * registry name is `kind`. `create` is called for each project, so it must be cheap and must not keep state between projects.
+ * registry name is `kind`. `create` is called for each project, so it must be cheap, synchronous and must not keep state between projects. `allowedRepositories` is
+ * advisory for a runner that has no scope of its own (GitHub Actions leaves the repository check to its client's installation binding); CodeBuild enforces it.
  */
 export interface CheckRunnerAdapter {
   readonly kind: PluginKind;

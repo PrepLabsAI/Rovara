@@ -106,6 +106,21 @@ describe("GitHub adapter specifics", () => {
     expect(world.api.calls.length).toBe(before);
   });
 
+  it("holds the input rules itself, whatever client sits under it: working branches only, an organization scope and a bounded page for the branch listing", async () => {
+    const world = githubCodeHostWorld();
+    world.model.commit("feature/x", { "x.txt": "x\n" });
+    const before = world.api.calls.length;
+    for (const branch of ["feature/x", "agentx/x", "agentx/../../etc", `agentx/${"0".repeat(35)}/`, ""]) {
+      await expect(world.host.branchHead(world.repository, branch, world.scope), branch).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    }
+    await expect(world.host.listBranches(world.repository, 1, { system: "private-install" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    for (const page of [0, -1, 1.5, 1_001, Number.NaN]) await expect(world.host.listBranches(world.repository, page, world.scope), String(page)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(world.api.calls.length).toBe(before);
+    expect((await world.host.listBranches(world.repository, 1_000, world.scope)).page).toBe(1_000);
+    world.model.commit(WORKING_BRANCH(1), { "y.txt": "y\n" });
+    await expect(world.host.branchHead(world.repository, WORKING_BRANCH(1), world.scope)).resolves.toMatch(/^[a-f0-9]{40}$/);
+  });
+
   it("checks reply text before anything, and sends only to a comment in a thread", () => {
     expect(replyTargetOf("review_comment:12")).toEqual({ kind: "thread", id: "12" });
     expect(replyTargetOf("12")).toEqual({ kind: "thread", id: "12" });

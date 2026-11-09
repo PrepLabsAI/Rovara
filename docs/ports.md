@@ -171,7 +171,8 @@ review, item. A caller reads an adapter's `capabilities` and never branches on i
 - **A plug-in module needs its client.** A config entry names a small module that exports `plugin` built by a factory, which is told how the
   install reaches the outside system: `githubCodeHostPlugin({ createProvider })`, `githubActionsPlugin({ createProvider })`,
   `codeBuildPlugin({ createGateway })`, `linearTrackerPlugin({ createAccess })`. The settings block holds names and options, never a secret:
-  a secret is `{ "env": "NAME" }` or `{ "file": "/path" }`, read when it is used.
+  a secret is `{ "env": "NAME" }` or `{ "file": "/absolute/path" }`, read when it is used. A file is opened without following a link, must be
+  a plain file of at most 64 KiB and not readable by other users (the model key file's rules).
 
   ```json
   { "point": "code-host", "name": "github", "module": "./adapters/github.js",
@@ -179,16 +180,28 @@ review, item. A caller reads an adapter's `capabilities` and never branches on i
   ```
 
   where `./adapters/github.js` is `export const plugin = githubCodeHostPlugin({ createProvider: () => myGitHubClient })`.
+- **The company in the config is an organization id** (`org_` and 20 lower-case letters or digits, `IMPLICIT_COMPANY_ID` by default),
+  because code-host and tracker calls carry it as their scope (`HostScope`).
+- **The fakes** (`plugins/fake/`) are test helpers with public webhook secrets; they are not in the broker's exports.
 - **The GitHub client is a seam of its own** (`code-host/github/provider.ts`, `GitHubCodeHostProvider`). The GitHub adapters are bound to that
   interface, not to `github-app.ts`: this tree's `GitHubAppCredentialProvider` is the older client and lacks 15 of the 24 methods (status,
   feedback, merge, working branches, code owners, standing, path kinds, credential expiry). The plug-in module refuses a client that lacks
   any method when the process starts, naming the missing methods. Cloud's client, a client built on `gh` or a personal token for the local
-  runtime, and the test fixture can all sit under the adapters.
+  runtime, and the test fixture can all sit under the adapters. The adapter holds the cheap input rules itself (working branches `agentx/<uuid>`
+  only, an organization scope and pages 1 to 1000 for the branch listing); the rest (tenant binding on every call, least-privilege tokens per
+  repository, no redirects) are rules the client must keep, written on `GitHubCodeHostProvider`. They have no client conformance suite yet;
+  the lane that brings a real client must write and run one (DEFERRED-CHECKS.md).
+- **Nothing in the broker calls the routing yet.** The task flow still calls `github-app.ts` directly; the lanes that move it (L6, L7) switch it
+  to `codeHostForRecord` and friends. Until then the registry is proven by its tests, not by the core.
 - **Untrusted text** from a code host or tracker (comments, logs, item bodies) is data: it reaches a model only inside a labelled block, and
   the GitHub mapping cuts every text to the port's bounds so a long comment never fails a read.
 - **Linear.** The adapter carries its own copy of the Linear webhook rules (`tracker/linear/webhook.ts`: the signature check, the issue key
   rule and the issue-created mapping) because Cloud's adapter imports the trigger framework, which is not ported. The install gives the
   adapter what it may do (read an issue, post a comment, the hook's signing secret); what it is not given, it does not offer.
+
+Two comments in the copied contracts are out of date for Code: `plugins/common.ts` says adapters are "registered at build time; never loaded from
+outside". Code loads the adapters its owner's config names (decision 40). The file stays identical to the hosted product's copy so lane L1 has no
+conflict; read those comments as superseded by this page.
 
 Not ported with these points (they are in Cloud's `plugins/` and belong to later lanes): the event intake and poller
 (`events/`, which keep their state in DynamoDB and move onto the document store), the tracker start path (`tracker/start.ts`, which feeds

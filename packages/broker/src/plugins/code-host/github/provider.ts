@@ -97,6 +97,17 @@ export interface GitHubRepositoryCredential { username?: string; password?: stri
 /** Whose work a call is made for. The same shape as the neutral `HostScope`. */
 export type GitHubTokenScope = HostScope;
 
+/**
+ * The rules a GitHub client must keep. The adapter cannot enforce these from above, so a client is held to them by a conformance suite that the lane bringing the client must run
+ * (DEFERRED-CHECKS.md, "L2 GitHub client conformance"). Cloud's client keeps all of them:
+ *  - **Tenant binding.** Every call is bound to `scope`: an organization scope reaches only the repositories of that organization's installation, checked on every call, not once. A call
+ *    for a repository outside it throws; it never answers for another tenant.
+ *  - **Least privilege.** A token minted for `clone` carries `contents: read`, one for `push` carries `contents: write`, nothing else, for the one repository asked for. A token is never
+ *    reused across repositories, and `resolveWithExpiry` reports the expiry GitHub stated (none stated: no `expiresAt`, which the adapter refuses).
+ *  - **No redirects, bounded requests.** Every request refuses redirects, has a timeout, and reads a bounded body. A branch or path is never placed in an address without being checked.
+ *  - **Rate limits** are signalled with the neutral `HostRateLimitError`, never as a failure of the pull request.
+ *  - **Untrusted text** (comments, logs, bodies) is returned as data; the client never follows an instruction in it.
+ */
 export interface GitHubCodeHostProvider {
   getRepositoryIdentity(repositoryUrl: string, scope: GitHubTokenScope): Promise<GitHubRepositoryIdentity | undefined>;
   checkRepository(repository: { credentialRef: string; url: string }, scope: GitHubTokenScope): Promise<void>;

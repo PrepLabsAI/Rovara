@@ -31,7 +31,11 @@ const digest = (value: string | Buffer): Buffer => createHash("sha256").update(v
 /** `Linear-Signature` is the hex HMAC-SHA256 of the raw body under the webhook's signing secret. Compared as digests in constant time; an empty secret never verifies. */
 export function verifyLinearSignature(raw: Buffer, headers: Readonly<Record<string, string | undefined>>, secret: string): boolean {
   let supplied = "";
-  for (const [name, value] of Object.entries(headers)) if (name.toLowerCase() === "linear-signature") supplied = value ?? "";
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() !== "linear-signature") continue;
+    supplied = value ?? "";
+    break;
+  }
   const expected = createHmac("sha256", secret).update(raw).digest("hex");
   return timingSafeEqual(digest(supplied.trim().toLowerCase()), digest(expected)) && secret.length > 0;
 }

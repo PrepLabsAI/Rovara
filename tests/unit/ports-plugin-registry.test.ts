@@ -1,12 +1,16 @@
 // Port lane L2: the code-host, tracker and check-runner plug-in points in the ONE registry: routing, loading from the plug-in config, the settings
 // of each module, and the proof that a second provider plugs in with no core change.
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { PluginRegistryError, type CodeHost, type PluginModule, type RepositoryRef } from "@agentx/contracts";
+import { HostScopeSchema, IMPLICIT_COMPANY_ID, PluginRegistryError, type CodeHost, type PluginModule, type RepositoryRef } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
 import {
   NO_CHECK_RUNNER_MESSAGE, NO_CODE_HOST_MESSAGE, NO_HOST_MESSAGE, NO_TRACKER_MESSAGE, assertRepositoryHostsKnown, checkRunnerForKind, checkRunnerKinds, codeHostForKind, codeHostForRecord,
   codeHostForRepository, codeHostKinds, trackerForKind, trackerKinds,
 } from "../../packages/broker/src/plugins/routing.js";
+import { SECRET_FILE_MAX_BYTES, SecretSourceSchema, secretReader } from "../../packages/broker/src/plugins/module-support.js";
 import { codeBuildPlugin } from "../../packages/broker/src/plugins/check-runner/codebuild/plugin.js";
 import { githubActionsPlugin } from "../../packages/broker/src/plugins/check-runner/github-actions/plugin.js";
 import { githubCodeHostPlugin } from "../../packages/broker/src/plugins/code-host/github/plugin.js";
@@ -49,8 +53,13 @@ describe("routing over the one registry", () => {
   it("refuses a kind with no adapter with a fixed sentence that does not echo it, and never falls back to another adapter", () => {
     const registry = createAdapterRegistry();
     registry.register("code-host", "github", hostCalled("github", new FakeCodeHost(model())));
+    const message = (run: () => unknown): string => { try { run(); } catch (error) { return (error as Error).message; } return ""; };
     expect(() => codeHostForKind(registry, "gitea-secret-name")).toThrowError(expect.objectContaining({ code: "CONFIG_INVALID", message: expect.stringContaining(NO_CODE_HOST_MESSAGE) as string }));
     expect(() => codeHostForRecord(registry, { host: { kind: "gitea-secret-name" } })).toThrowError(expect.objectContaining({ code: "CONFIG_INVALID", message: expect.stringContaining(NO_HOST_MESSAGE) as string }));
+    for (const run of [() => codeHostForKind(registry, "gitea-secret-name"), () => codeHostForRecord(registry, { host: { kind: "gitea-secret-name" } }), () => trackerForKind(registry, "gitea-secret-name"), () => checkRunnerForKind(registry, "gitea-secret-name", { allowedRepositories: [] }), () => assertRepositoryHostsKnown(registry, [{ host: { kind: "gitea-secret-name" } }])]) {
+      expect(message(run)).not.toContain("gitea-secret-name");
+    }
+    expect(() => codeHostForRecord(registry, { host: { kind: "Not A Name" } })).toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
     expect(() => codeHostForKind(registry, "Not A Name")).toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
     expect(() => trackerForKind(registry, "linear")).toThrowError(expect.objectContaining({ message: expect.stringContaining(NO_TRACKER_MESSAGE) as string }));
     expect(() => checkRunnerForKind(registry, "codebuild", { allowedRepositories: [] })).toThrowError(expect.objectContaining({ message: expect.stringContaining(NO_CHECK_RUNNER_MESSAGE) as string }));
@@ -182,5 +191,61 @@ describe("loading code hosts, trackers and check runners from the plug-in config
     await loadAdapters(entries(["code-host", "fake", "./a.js"], ["code-host", "examplehost", "./b.js"]), { registry, importModule: importerOf({ "./a.js": second.codeHost, "./b.js": examplehost }) });
     expect(codeHostForRecord(registry, { host: { kind: "examplehost" } }).kind).toBe("examplehost");
     expect(codeHostForRecord(registry, { host: { kind: "fake" } }).kind).toBe("fake");
+  });
+});
+
+describe("the settings helpers of the plug-in modules", () => {
+  const fixtureDir = async () => mkdtemp(join(tmpdir(), "rovara-l2-"));
+  const secretValue = ["fixture", "signing", "value"].join("-");
+
+  it("reads a secret from an environment variable by name, each time, and says nothing about the name's absence beyond one sentence", async () => {
+    const environment: NodeJS.ProcessEnv = { L2_SECRET: ` ${secretValue}\n` };
+    const read = secretReader({ env: "L2_SECRET" }, environment);
+    expect(await read()).toBe(secretValue);
+    environment.L2_SECRET = "rotated";
+    expect(await read()).toBe("rotated");
+    delete environment.L2_SECRET;
+    await expect(read()).rejects.toThrow("the secret is not available");
+  });
+
+  it("reads a secret file only when it is a plain, small, owner-only file; a link, a loose mode or a big file is refused with one sentence", async () => {
+    const dir = await fixtureDir();
+    try {
+      const file = join(dir, "secret");
+      await writeFile(file, secretValue, { mode: 0o600 });
+      expect(await secretReader({ file })()).toBe(secretValue);
+      await chmod(file, 0o644);
+      await expect(secretReader({ file })()).rejects.toThrow("the secret is not available");
+      await chmod(file, 0o600);
+      const link = join(dir, "link");
+      await symlink(file, link);
+      await expect(secretReader({ file: link })()).rejects.toThrow("the secret is not available");
+      const big = join(dir, "big");
+      await writeFile(big, "x".repeat(SECRET_FILE_MAX_BYTES + 1), { mode: 0o600 });
+      await expect(secretReader({ file: big })()).rejects.toThrow("the secret is not available");
+      await expect(secretReader({ file: dir })()).rejects.toThrow("the secret is not available");
+      await expect(secretReader({ file: join(dir, "missing") })()).rejects.toThrow("the secret is not available");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a secret file by absolute path only, and an environment name in capitals only", () => {
+    expect(SecretSourceSchema.safeParse({ file: "relative/secret" }).success).toBe(false);
+    expect(SecretSourceSchema.safeParse({ file: "/etc/rovara/secret" }).success).toBe(true);
+    expect(SecretSourceSchema.safeParse({ env: "lower" }).success).toBe(false);
+    expect(SecretSourceSchema.safeParse({ env: "A", file: "/x" }).success).toBe(false);
+  });
+});
+
+describe("the company the config names is the scope of the plug-in calls", () => {
+  it("accepts only an id that is a valid organization scope, so every company the config allows can be used in a HostScope", () => {
+    for (const companyId of [IMPLICIT_COMPANY_ID, "org_aaaaaaaaaaaaaaaaaaaa"]) {
+      expect(() => parsePluginConfig({ version: 1, companyId, plugins: [] })).not.toThrow();
+      expect(HostScopeSchema.safeParse({ orgId: companyId }).success).toBe(true);
+    }
+    for (const companyId of ["acme", "org_abc", "ORG_AAAAAAAAAAAAAAAAAAAA", "org_aaaaaaaaaaaaaaaaaaaa#x"]) {
+      expect(() => parsePluginConfig({ version: 1, companyId, plugins: [] })).toThrowError(expect.objectContaining({ code: "bad_config" }));
+    }
   });
 });
