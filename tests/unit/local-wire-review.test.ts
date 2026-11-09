@@ -1,5 +1,7 @@
 // Lane L9-wire, review round 1: the lower-level cases (plan feedback, keys, the state folder lock, the message limit, the start transaction).
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { createLocalPagesServer, type LocalPagesServer } from "../../packages/broker/src/core/local-pages/index.js";
+import { fakeWorld, raw } from "../support/local-pages-fakes.js";
 import { when } from "@agentx/contracts";
 import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED, createSessionControlHost } from "../../packages/broker/src/local/app/host.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
@@ -61,5 +63,30 @@ describe("the start transaction", () => {
     h.deps.startExtras = () => ({ items: [{ kind: "put", item: { pk: "SESSION#taken", sk: "META", entityType: "AGENT_SESSION" }, condition: when.absent() }], sessionId: "ses_taken" });
     await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true })).rejects.toThrow();
     expect((await h.flow.list(h.owner)).tasks).toHaveLength(0);
+  });
+});
+
+describe("N3: an address in the process list holds no session and is good once", () => {
+  let server: LocalPagesServer | undefined;
+  afterEach(async () => { await server?.close(); server = undefined; });
+
+  it("redirects the first GET to the owner's page, then answers like a path that does not exist; a code expires; HEAD and a wrong code spend nothing", async () => {
+    let clock = 1_000_000;
+    const world = fakeWorld();
+    server = await createLocalPagesServer({ data: world.data, actions: world.actions, now: () => clock });
+    const host = new URL(server.origin).host;
+    const get = (path: string, method = "GET") => raw(server!.origin, { method, path, headers: { host } });
+    const address = new URL(server.onceLink(`/plan/${TASK}`));
+    expect(address.pathname).not.toMatch(/\/s\/[A-Za-z0-9_-]{43}(\/|$)/);
+    expect((await get(address.pathname, "HEAD")).status).toBe(404);
+    expect((await get("/s/once/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")).status).toBe(404);
+    const hop = await get(address.pathname);
+    expect(hop.status).toBe(303);
+    expect(hop.headers["location"]).toMatch(new RegExp(`^http://127\\.0\\.0\\.1:\\d+/s/[A-Za-z0-9_-]{43}/plan/${TASK}$|^/s/[A-Za-z0-9_-]{43}/plan/${TASK}$`));
+    expect((await get(address.pathname)).status).toBe(404);
+    // A code left unused for longer than its time is dead.
+    const late = new URL(server.onceLink("/", { ttlMs: 30_000 }));
+    clock += 30_001;
+    expect((await get(late.pathname)).status).toBe(404);
   });
 });

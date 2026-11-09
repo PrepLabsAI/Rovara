@@ -199,7 +199,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, openPage: (path) => (options.openBrowser ?? openInSystemBrowser)(pages.link(path, { label: "browser" })), version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, openPage: (path) => (options.openBrowser ?? openInSystemBrowser)(pages.onceLink(path, { label: "browser" })), version: options.version });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, origin: options.origin ?? (() => "http://127.0.0.1") });
   const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? ownerRoutes(request, caller);
 

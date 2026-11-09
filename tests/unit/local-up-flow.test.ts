@@ -70,13 +70,23 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
     bodies.push(text);
     return { status: response.status, body: JSON.parse(text) as ApiBody };
   };
-  /** The owner's "open in browser": the server opens the page, and the address reaches only the browser (here, the recorder). */
+  /**
+   * The owner's "open in browser": the server opens the page, and what reaches the browser is a single-use address with no session in it. The "browser" here is the recorder; it follows the
+   * address once (as a browser would) and lands on the real page address.
+   */
   const browse = async (path: string): Promise<URL> => {
     const before = opened.length;
     const answer = await api("/v1/local/pages/open", { method: "POST", body: { path } });
     expect(answer.status).toBe(200);
     expect(opened.length).toBe(before + 1);
-    return new URL(opened.at(-1)!);
+    const once = new URL(opened.at(-1)!);
+    // What went through the process list holds no page session.
+    expect(once.pathname).toMatch(/^\/s\/once\/[A-Za-z0-9_-]{32,64}$/);
+    const hop = await raw(runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } });
+    expect(hop.status).toBe(303);
+    // ... and it is spent: the same address a second time is a page that does not exist.
+    expect((await raw(runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).status).toBe(404);
+    return new URL(hop.headers["location"] as string, runtime.pagesUrl);
   };
   /** A worker's callback, through the callback listener exactly as the worker's gateway relays it. */
   const callback = (invocation: WorkerInvocation, action: string, body: unknown) => new Promise<{ status: number; body: CallbackBody }>((resolve, reject) => {
@@ -316,7 +326,9 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     await run(h.stateDirectory, taskId);
     expect(printed.join("")).toBe("Opened in your browser.\n");
     expect(printed.join("")).not.toMatch(/\/s\//);
-    const link = new URL(h.opened.at(-1)!);
+    const once = new URL(h.opened.at(-1)!);
+    expect(once.pathname).toMatch(/^\/s\/once\//);
+    const link = new URL((await raw(h.runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).headers["location"] as string, h.runtime.pagesUrl);
     const page = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
     expect(page.status).toBe(200);
     expect(page.body).toContain("Add a /health endpoint that answers 200.");
