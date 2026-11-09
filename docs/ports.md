@@ -253,10 +253,18 @@ review, item. A caller reads an adapter's `capabilities` and never branches on i
   any method when the process starts, naming the missing methods. Cloud's client, a client built on `gh` or a personal token for the local
   runtime, and the test fixture can all sit under the adapters. The adapter holds the cheap input rules itself (working branches `agentx/<uuid>`
   only, an organization scope and pages 1 to 1000 for the branch listing); the rest (tenant binding on every call, least-privilege tokens per
-  repository, no redirects) are rules the client must keep, written on `GitHubCodeHostProvider`. They have no client conformance suite yet;
-  the lane that brings a real client must write and run one (DEFERRED-CHECKS.md).
-- **Nothing in the broker calls the routing yet.** The task flow still calls `github-app.ts` directly; the lanes that move it (L6, L7) switch it
-  to `codeHostForRecord` and friends. Until then the registry is proven by its tests, not by the core.
+  repository, no redirects) are rules the client must keep, written on `GitHubCodeHostProvider`.
+- **Cloud's GitHub client is in this tree** (`code-host/github/client.ts`, a copy of Cloud v0.5.11's `github-app.ts`; `app-client.ts` hands it over as the provider and its
+  assignment is the seam check). The older `github-app.ts` stays for the AWS install until lane L13. Anything put under the adapters runs the **client conformance suite**
+  (`tests/support/ports/github-client-conformance.ts`, run by `tests/unit/github-client.test.ts` over a fake GitHub HTTP server, never the real one): the tenant binding is asked
+  on every call (a repeat and a cached installation or token included) and a refused binding stops the call before a token is minted or a repository is read; a clone credential
+  is minted with `contents: read` and a push credential with `contents: write`, nothing else, for the one repository, and no call mints a token for more than one repository or
+  a write for a read; every request refuses redirects and has a timeout, and a redirect is never followed to another host; GitHub's rate limit is the neutral error; an unsafe branch or
+  path never reaches an address. The suite found five Cloud requests (create, update and read of a pull request, a commit tree, the open-pull-request lookup) with no redirect refusal
+  and no timeout; `client.ts` now has both there (marked `L7a`; the suite fails with any one of the five removed), and Cloud should take the same fix. It also pins the exact
+  permission set each method may mint a token with, so a widened scope (not only a write) fails, and fails when a method never reaches the repository (a path it cannot see).
+- **The merge core calls the routing.** `core/merge/` (lane L7a) reaches a repository through `registryRepositoryResolver(registry, ...)`, which picks the code host by the
+  repository record's `host.kind` (`codeHostForRecord`). The task flow's other calls to `github-app.ts` move in their own lanes.
 - **Untrusted text** from a code host or tracker (comments, logs, item bodies) is data: it reaches a model only inside a labelled block, and
   the GitHub mapping cuts every text to the port's bounds so a long comment never fails a read.
 - **Linear.** The adapter carries its own copy of the Linear webhook rules (`tracker/linear/webhook.ts`: the signature check, the issue key
@@ -324,3 +332,22 @@ The pure transitions stay in `@agentx/contracts` (`task-workflow-node.ts`); this
 - **Sign-in flows.** `IdentityProvider` answers who a credential is; begin/complete/sign-out, authentication freshness and member
   listing for single sign-on are interface additions for the lane that needs them.
 - A SQLite adapter must use UTF-8 text with BINARY collation for the code-point order and refuse lone surrogates in keys.
+
+## Merge and merge tracking (`core/merge/`, lane L7a)
+
+Cloud's B7 merge code on the ports. What is Cloud's and unchanged: the readiness rules and their exact words (`mergeReadiness`), whose approval counts (`humanApprovalOf`),
+what the checks, reviews and branch say (`readCi`, `readReviews`, `readBranch`), the CODEOWNERS rules, tracking items kept only when a decision-relevant fact changes, the merge
+claim, and the single merge path that re-reads the code host and merges at the checked head. What is different in Code:
+
+- **The proof of a person is the Approvers seam.** `prepareMerge` makes an `ApprovalRequest` (kind `merge`, bound to the workflow's revision and to a digest of the exact pull
+  requests, heads, merge method and risk level the person sees); the surface collects an `ApprovalProof` (the local owner's session, or a repository collaborator's comment);
+  `pressMerge` verifies it with `Approvers.verify` and only then merges. A proof is used once: its `approvalProofKey` is stored with `when.absent()` in the first claim's
+  transaction; a proof whose token names one act (a code-host comment) is also used up by method and token, so the same comment cannot approve a second request. `pressMerge`
+  enforces the adapter's `requirement` (a method it does not list is refused; `minApprovers` other than 1 is refused until collecting several verdicts exists). Rovara never merges by itself.
+  **What this core does not enforce:** who is calling. Cloud's rule that a token (the CLI, an AI tool) never merges is not here; keeping the local session secret away from tokens and
+  agent tools is the job of the surface that collects the proof (lane L8), and a stronger proof for a high-risk merge is a rule of the Approvers adapter (`request.risk` tells it).
+- **The audit fact commits with the claim** through `AuditSink.stage`, as Cloud's ledger row did.
+- **Seams the neighbouring lanes fill** (`seams.ts`): the task record (`MergeTask`, read by `MergeHost.loadTask`), the session timeline (`SessionTimeline`), the milestone hook
+  (`CodeMilestones`), the session bindings, the project's code settings (`CodeSettingsReader`; Code's default has self-approval ON, one owner), the reverse link from a change request
+  to its task, and `MergePeople` (who a person is on the code host). Cloud's members, its track record and its reviewer reminders plug into the same seams and hooks.
+- **Keys are Cloud's** (`mergeTrackingKey`, `prHeadKey`, `mergeCommitIndexKey`, the task's own partition), so Cloud consumes the same layout with no migration.
