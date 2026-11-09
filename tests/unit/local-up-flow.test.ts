@@ -5,10 +5,10 @@ import { request as httpRequest } from "node:http";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AdapterRegistry, AuditEvent, AuditSink } from "@agentx/contracts";
+import type { AdapterRegistry, AuditEvent, AuditSink, OrgId } from "@agentx/contracts";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES,
-  change, createCandidateManifest, startWorkflowBranchSync, startWorkflowFix, when, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
+  change, createCandidateManifest, projectMetaKey, startWorkflowBranchSync, startWorkflowFix, when, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
@@ -53,6 +53,22 @@ function recordingAudit(events: AuditEvent[]): AuditSink {
   };
 }
 const GITHUB_PROJECT = { ...PROJECT, name: "ghproject", repositories: [{ ...PROJECT.repositories[0]!, url: "https://github.com/example/demo.git" }] };
+
+/** Lane L11: a fake GitHub API for the laptop code host. It knows one repository, `example/demo`, and answers only to `token`; every request it sees is listed in `calls`. */
+function fakeGithub(token: string, options: { canPush?: boolean } = {}): { fetch: typeof fetch; calls: string[] } {
+  const calls: string[] = [];
+  const fetchImplementation: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    calls.push(`${init?.method ?? "GET"} ${url.pathname}`);
+    if (new Headers(init?.headers).get("authorization") !== `Bearer ${token}`) return Response.json({ message: "Bad credentials" }, { status: 401 });
+    if (url.pathname === "/repos/example/demo") return Response.json({ id: 77, full_name: "example/demo", owner: { login: "example", id: 5, type: "User" }, permissions: { push: options.canPush !== false, pull: true } });
+    return Response.json({ message: "Not Found" }, { status: 404 });
+  };
+  return { fetch: fetchImplementation, calls };
+}
+/** A fine-grained token has this shape (built at runtime; the public repository refuses a real-looking one in a file). */
+const fineGrainedToken = (seed: string): string => ["github", "pat"].join("_") + "_" + seed.repeat(8);
+const classicToken = (seed: string): string => ["gh", "p_"].join("") + seed.repeat(18);
 const PLAN_TEXT = "# Plan\n\nAdd a /health endpoint that answers 200.\n";
 const BASE_COMMIT = "b".repeat(40);
 
@@ -368,8 +384,9 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const docker = new FakeDocker();
     docker.features = ["task.workflowMode"];
     // A key-shaped value is built at runtime (the public repository refuses one in a file).
-    const githubToken = ["gh", "p_"].join("") + "a1".repeat(18);
-    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment: { GH_TOKEN: githubToken }, gh: async () => undefined, workerImage: "worker:test", docker, workerFetch: docker.fetch, version: "9.9.9", timers: false });
+    const githubToken = fineGrainedToken("a1");
+    const github = fakeGithub(githubToken);
+    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment: { GH_TOKEN: githubToken }, gh: async () => undefined, fetch: github.fetch, workerImage: "worker:test", docker, workerFetch: docker.fetch, version: "9.9.9", timers: false });
     cleanup.push(() => runtime.stop());
     const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
     const call = async (path: string, body?: unknown) => (await fetch(`${runtime.url}${path}`, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })).json() as Promise<ApiBody>;
@@ -393,9 +410,75 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const given = await exchange({ credentialRef: "host-app", repositoryUrl: GITHUB_PROJECT.repositories[0]!.url, access: "clone" });
     expect(given.statusCode).toBe(200);
     expect(JSON.parse(given.body)).toEqual({ credential: { token: githubToken } });
+    // The grant covers a clone only; a push credential is not in it (and would come from the code host, too).
     expect((await exchange({ credentialRef: "host-app", repositoryUrl: GITHUB_PROJECT.repositories[0]!.url, access: "push" })).statusCode).toBe(403);
     expect((await exchange({ credentialRef: "host-app", repositoryUrl: "https://examplehost/example/other.git", access: "clone" })).statusCode).toBe(403);
     expect(started.task.workflow.stage).toBe("UNDERSTAND");
+  });
+
+  /** A running `rovara up` with the Docker adapter (simulated), a GitHub token in the environment and a fake GitHub; the project is registered and a task started, and the worker's grant is at hand. */
+  async function githubFlow(input: { token: string; canPush?: boolean; config?: unknown }) {
+    const root = await mkdtemp(join(tmpdir(), "rovara-l11-flow-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const stateDirectory = join(root, "state");
+    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+    if (input.config !== undefined) await writeFile(join(stateDirectory, "config.json"), JSON.stringify(input.config), { mode: 0o600 });
+    const docker = new FakeDocker();
+    docker.features = ["task.workflowMode"];
+    const github = fakeGithub(input.token, input.canPush === undefined ? {} : { canPush: input.canPush });
+    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment: { GH_TOKEN: input.token }, gh: async () => undefined, fetch: github.fetch, workerImage: "worker:test", docker, workerFetch: docker.fetch, version: "9.9.9", timers: false });
+    cleanup.push(() => runtime.stop());
+    const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
+    const call = async (path: string, body?: unknown) => (await fetch(`${runtime.url}${path}`, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })).json() as Promise<ApiBody>;
+    await call("/v1/admin/projects", GITHUB_PROJECT);
+    await call("/v1/dev/tasks", { requestId: "13131313-1313-4313-8313-131313131313", project: "ghproject", instructions: "Add a /health endpoint", workflow: true });
+    for (let attempt = 0; attempt < 8 && docker.invocations.length === 0; attempt += 1) {
+      await runtime.tick();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const prepare = docker.invocations[0] as WorkerInvocation & { payload: { repositoryGrant: string } };
+    const exchange = (access: string, url = GITHUB_PROJECT.repositories[0]!.url) => runtime.app.callbacks({
+      method: "POST", path: `/v1/internal/workspaces/${prepare.workspaceId}/operations/${prepare.operationId}/repository-credentials`,
+      headers: { "x-agentx-repository-grant": prepare.payload.repositoryGrant }, body: JSON.stringify({ credentialRef: "host-app", repositoryUrl: url, access }),
+    });
+    return { runtime, github, exchange };
+  }
+
+  it("does not give a worker a token that reaches every repository, unless the config says so (L11 M1)", async () => {
+    const classic = classicToken("c3");
+    const refused = await githubFlow({ token: classic });
+    const answer = await refused.exchange("clone");
+    expect(answer.statusCode).toBe(403);
+    expect(answer.body).not.toContain(classic);
+    expect(answer.body).toContain("allowBroadTokenForWorker");
+    // The same through the code host the app resolves it with, for a push as well.
+    await expect(refused.runtime.registry.require("code-host", "github").issueGitCredential({ url: GITHUB_PROJECT.repositories[0]!.url }, "push", { orgId: IMPLICIT_COMPANY_ID })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    const allowedToken = classicToken("d4");
+    const allowed = await githubFlow({ token: allowedToken, config: { version: 1, allowBroadTokenForWorker: true, plugins: [] } });
+    expect(JSON.parse((await allowed.exchange("clone")).body)).toEqual({ credential: { token: allowedToken } });
+  });
+
+  it("gives a worker a credential only for a registered project's repository, and stops when the project is archived (L11 M2)", async () => {
+    const token = fineGrainedToken("e5");
+    const h = await githubFlow({ token });
+    expect((await h.exchange("clone")).statusCode).toBe(200);
+    const before = h.github.calls.length;
+    // The project is archived: its repository is no longer a registered one, whatever the token can see and whatever the worker's grant still names.
+    await h.runtime.registry.require("storage").put({ item: { ...projectMetaKey(IMPLICIT_COMPANY_ID as OrgId, "ghproject"), entityType: "PROJECT_META", status: "archived" } });
+    const stopped = await h.exchange("clone");
+    expect(stopped.statusCode).toBe(403);
+    expect(stopped.body).not.toContain(token);
+    expect(h.github.calls.slice(before)).toEqual([]);
+  });
+
+  it("refuses a push credential from the registered code host when the token cannot push, and gives one when it can (L11)", async () => {
+    const scope = { orgId: IMPLICIT_COMPANY_ID };
+    const repository = { url: GITHUB_PROJECT.repositories[0]!.url };
+    const cannot = await githubFlow({ token: fineGrainedToken("f6"), canPush: false });
+    expect(await cannot.runtime.registry.require("code-host", "github").issueGitCredential(repository, "clone", scope)).toMatchObject({ kind: "basic" });
+    await expect(cannot.runtime.registry.require("code-host", "github").issueGitCredential(repository, "push", scope)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    const can = await githubFlow({ token: fineGrainedToken("a7") });
+    expect(await can.runtime.registry.require("code-host", "github").issueGitCredential(repository, "push", scope)).toMatchObject({ kind: "basic", username: "x-access-token" });
   });
 
   it("limits how often the owner can message a session in an hour, and says so", async () => {

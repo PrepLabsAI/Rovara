@@ -10,12 +10,11 @@ import {
   LOCAL_WORKER_IMAGE_BUILD_HINT,
   LOCAL_HOST,
   assertStateDirectoryLocation,
-  createLocalGithubKeyStore,
+  createLocalCodeHosts,
   createLocalModelKeyStore,
   parsePluginConfigText,
   readOwnerFile,
   resolveConfigLocation,
-  resolveGithubAccess,
   type DockerRunner,
   type GhRunner,
 } from "@agentx/broker/local";
@@ -100,35 +99,34 @@ async function checkModelKey(services: UpCheckServices): Promise<UpCheck> {
   };
 }
 
-async function checkGithub(services: UpCheckServices): Promise<UpCheck> {
-  const keyFile = services.keys ?? createLocalGithubKeyStore(services.stateDirectory);
-  let access;
+/**
+ * "Find my sign-in" and "test my connection" are the code host's own (`resolveCredentials`, `checkAccess`; port lane L11, item C3). GitHub is the one code host a laptop can sign in to today; a
+ * second one is another entry in this list. The quick check only looks for the sign-in; `--check` also tests it.
+ */
+/** The owner's `allowBroadTokenForWorker` setting, read without writing anything; a config that cannot be read means "not allowed" (the config check says why). */
+async function broadTokenAllowed(services: UpCheckServices): Promise<boolean> {
   try {
-    access = await resolveGithubAccess({ companyId: IMPLICIT_COMPANY_ID, keyFile, environment: services.environment, reveal: services.verifyGithub, ...(services.gh === undefined ? {} : { gh: services.gh }) });
-  } catch (error) {
-    return { id: "github", status: "fail", summary: error instanceof Error ? error.message : "the key file could not be read", fix: `Fix the file's permissions with \`chmod 600 ${join(services.stateDirectory, KEYS_FILE_NAME)}\`.` };
-  }
-  if (access === undefined) {
-    return { id: "github", status: "fail", summary: "No GitHub access was found.", fix: 'Run `gh auth login` (https://cli.github.com), or put a personal access token in GH_TOKEN, or in keys.json as {"github": "<token>"}.' };
-  }
-  const where = access.source === "gh-cli" ? "the GitHub CLI" : access.source === "environment" ? "the environment" : "the key file";
-  if (!services.verifyGithub) return { id: "github", status: "ok", summary: `A GitHub token is available from ${where}.` };
-  try {
-    // The token goes to api.github.com and nowhere else.
-    const response = await services.fetch("https://api.github.com/user", {
-      headers: { authorization: `Bearer ${access.token.reveal()}`, accept: "application/vnd.github+json", "user-agent": "rovara-up-check" },
-      redirect: "error",
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (response.status === 401) {
-      return { id: "github", status: "fail", summary: `GitHub rejected the token from ${where}.`, fix: access.source === "gh-cli" ? "Run `gh auth login` again." : "Make a new personal access token with the `repo` scope and replace the old one." };
-    }
-    if (!response.ok) return { id: "github", status: "warn", summary: `GitHub answered HTTP ${response.status} when the token was checked.`, fix: "Try again in a minute." };
-    const body = (await response.json().catch(() => ({}))) as { login?: unknown };
-    return { id: "github", status: "ok", summary: `GitHub access works${typeof body.login === "string" && /^[A-Za-z0-9-]{1,39}$/.test(body.login) ? ` as ${body.login}` : ""} (token from ${where}).` };
+    const location = resolveConfigLocation({ stateDirectory: services.stateDirectory, configPath: services.configPath, cwd: services.cwd ?? process.cwd() });
+    const file = await readOwnerFile(location.path, { private: false, label: "plug-in config" });
+    return file !== undefined && parsePluginConfigText(file.text).allowBroadTokenForWorker === true;
   } catch {
-    return { id: "github", status: "warn", summary: "GitHub could not be reached to check the token.", fix: "Check your internet connection. Rovara needs GitHub only when a task starts." };
+    return false;
   }
+}
+
+async function checkGithub(services: UpCheckServices): Promise<UpCheck> {
+  const hosts = createLocalCodeHosts({ allowBroadTokenForWorker: await broadTokenAllowed(services), stateDirectory: services.stateDirectory, environment: services.environment, fetch: services.fetch, ...(services.keys === undefined ? {} : { keyFile: services.keys }), ...(services.gh === undefined ? {} : { gh: services.gh }) });
+  const results: UpCheck[] = [];
+  for (const host of hosts) {
+    if (services.verifyGithub && host.checkAccess !== undefined) {
+      const access = await host.checkAccess();
+      results.push({ id: "github", status: access.status, summary: access.summary, ...(access.fix === undefined ? {} : { fix: access.fix }) });
+    } else if (host.resolveCredentials !== undefined) {
+      const found = await host.resolveCredentials();
+      results.push(found.found ? { id: "github", status: "ok", summary: found.summary } : { id: "github", status: "fail", summary: found.summary, ...(found.fix === undefined ? {} : { fix: found.fix }) });
+    }
+  }
+  return results[0] ?? { id: "github", status: "fail", summary: "No code host is set up.", fix: "Run `gh auth login`." };
 }
 
 async function checkPort(services: UpCheckServices): Promise<UpCheck> {

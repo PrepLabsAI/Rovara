@@ -129,6 +129,8 @@ export function registerUpCommand(program: Command, context: UpCommandContext): 
         thisMachine: options.thisMachine === true,
         docker,
         version: context.version,
+        ...(context.checkServices?.gh === undefined ? {} : { gh: context.checkServices.gh }),
+        fetch: context.fetch,
       });
       const summary = {
         url: runtime.url,

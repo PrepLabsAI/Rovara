@@ -7,7 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
 import { InMemoryRegistry } from "../registry.js";
@@ -35,9 +35,13 @@ import { configurationAnswer } from "./app/routes.js";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
 import { localSessionProofVerifier } from "../core/decisions/local-session.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
+import { createLocalCodeHosts } from "./github-code-host.js";
+import { listProjects } from "./app/projects.js";
+import { createStoreProjectSource } from "../core/task-flow/project-source.js";
+import { codeHostForKind } from "../plugins/routing.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines } from "./docker-worker-machines.js";
-import { assertGithubCloneAccess, resolveGithubAccess, type GhRunner } from "./github-access.js";
+import { assertGithubRepositoryAddress, type GhRunner } from "./github-access.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
 import { createLocalModelProxy, type LocalModelProxy, type ModelGrantSource, type ProviderEndpoints } from "./model-proxy/index.js";
@@ -136,6 +140,8 @@ export interface LocalRuntimeOptions {
   openBrowser?: BrowserOpener;
   /** How `gh` is run to find the owner's GitHub token (tests give a stub, so a real login on the machine is never used). */
   gh?: GhRunner;
+  /** Port lane L11: the fetch the GitHub code host uses (tests give a recorder). */
+  fetch?: typeof fetch | undefined;
   /** The fetch the Docker adapter uses to reach its workers (tests give the simulated Docker's). */
   workerFetch?: typeof fetch;
   /** Run the dispatch, sweep and session timers. Default true; tests call `runtime.tick()`. */
@@ -340,6 +346,19 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   if (options.machines !== undefined) registry.register("worker-machines", INJECTED_ADAPTER_NAME, options.machines);
   registry.register("worker-machines", THIS_MACHINE_ADAPTER_NAME, new ThisMachineWorkerMachines({ enabled: options.thisMachine === true }));
 
+  // Port lane L11: each code host the owner has a sign-in for (a GitHub token from the key file, GH_TOKEN or the GitHub CLI) is registered under its own kind; a configured `code-host` plug-in of that name
+  // replaces it. The repositories a host may be used for are the registered projects' (the store the app registers them in, read when asked, so a plug-in storage works too).
+  const companyOrg = OrgIdSchema.parse(config.companyId ?? IMPLICIT_COMPANY_ID);
+  const registeredRepositories = async (): Promise<string[]> => {
+    const store = registry.require("storage");
+    const source = createStoreProjectSource(store, companyOrg);
+    const latest = await Promise.all((await listProjects(store, companyOrg)).map((project) => source.latest(project.name)));
+    return latest.flatMap((revision) => (revision === undefined || revision.archived === true ? [] : revision.definition.repositories.map((repository) => repository.url)));
+  };
+  for (const host of createLocalCodeHosts({ stateDirectory, environment: options.environment, companyId: config.companyId, gh: options.gh, fetch: options.fetch, registeredRepositories, allowBroadTokenForWorker: config.allowBroadTokenForWorker })) {
+    if ((await host.resolveCredentials?.())?.found === true) registry.register("code-host", host.kind, host, { isDefault: true });
+  }
+
   options.registerAdapters?.(registry);
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
   // Every record the core writes expires by `indexExpiresAt`. A store that sweeps another attribute (the SQLite plug-in's own default is `expiresAt`) would keep them for ever without a word,
@@ -355,7 +374,6 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   registry.seal();
 
   const identity = registry.require("identity");
-  const githubKeys = createLocalGithubKeyStore(stateDirectory);
   const serverUrl = { current: "http://127.0.0.1" };
   const modelProxyHolder: { current?: LocalModelProxy } = {};
   const app = await createLocalApp({
@@ -365,11 +383,13 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
+    // A worker's clone or push credential comes from the registered code host's own `issueGitCredential`, so its rules always apply: only registered projects' repositories, a push only where the token can push,
+    // and a token that reaches every repository its owner can only when the config allows it. The address rules below (github.com, plain characters) run first.
     resolveRepositoryCredential: async (_credentialRef, repositoryUrl, accessKind) => {
-      assertGithubCloneAccess(repositoryUrl, accessKind);
-      const access = await resolveGithubAccess({ companyId: config.companyId ?? IMPLICIT_COMPANY_ID, keyFile: githubKeys, environment: options.environment, ...(options.gh === undefined ? {} : { gh: options.gh }) });
-      if (access === undefined) throw new Error("no GitHub access is set up: run `gh auth login`, set GH_TOKEN, or put a github token in keys.json");
-      return { token: access.token.reveal() };
+      assertGithubRepositoryAddress(repositoryUrl);
+      const credential = await codeHostForKind(registry, "github").issueGitCredential({ url: repositoryUrl }, accessKind, { orgId: companyOrg });
+      if (credential.kind !== "basic") throw agentXError("CONFIG_INVALID", "the code host gave a credential the worker cannot use");
+      return { token: credential.password };
     },
     ...(options.timers === undefined ? {} : { timers: options.timers }),
   });

@@ -37,6 +37,8 @@ export const HARDENED_GIT_CONFIG: ReadonlyArray<readonly [string, string]> = [
   // HTTPS_PROXY/https_proxy: workers reach GitHub directly (egress via NAT), and no proxy may see the
   // push token. A repository's http.*, url.* and remote.* keys are refused for network calls.
   ["http.sslVerify", "true"], ["http.proxy", ""],
+  // A server's redirect is never followed: git would send the credential (or ask for it) at an address the registered repository does not name.
+  ["http.followRedirects", "false"],
   // Never recurse into a nested repository, whose own config AgentX has not neutralised.
   ["submodule.recurse", "false"], ["fetch.recurseSubmodules", "false"], ["push.recurseSubmodules", "no"],
   ["diff.ignoreSubmodules", "dirty"], ["status.submoduleSummary", "false"],

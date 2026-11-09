@@ -3,6 +3,7 @@ export * from "./callback-server.js";
 export * from "./docker-runner.js";
 export * from "./docker-worker-machines.js";
 export * from "./github-access.js";
+export * from "./github-code-host.js";
 export * from "./http-server.js";
 export * from "./invoke-signer.js";
 export * from "./model-proxy/index.js";

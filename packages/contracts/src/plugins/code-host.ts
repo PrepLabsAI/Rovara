@@ -351,6 +351,29 @@ export interface CodeHostEvents {
   normalise?(delivery: RawDelivery, scope: HostScope): Promise<CodeHostEvent[]>;
 }
 
+// ---- sign-in and the setup check (port lane L11, BOTH-OWNERS-INTERFACE-ITEMS C3; optional, so a host without a local sign-in is unchanged)
+
+/** Where an owner's sign-in for a host was found. Never holds the secret itself. */
+export interface CodeHostSignInResult {
+  found: boolean;
+  /** A short phrase for where it came from ("the GitHub CLI", "the environment", "the key file"); present when `found`. */
+  source?: string;
+  /** One plain sentence for the owner. */
+  summary: string;
+  /** What to do, in plain words; present when not `found`. */
+  fix?: string;
+}
+
+/** The answer of a live test of the owner's connection to a host. `warn` is "could not tell" (offline); `fail` is "will not work". */
+export interface CodeHostAccessCheck {
+  status: "ok" | "warn" | "fail";
+  summary: string;
+  /** What to do, in plain words; present for every warn and fail. */
+  fix?: string;
+  /** The account the sign-in belongs to, when the host says. */
+  account?: string;
+}
+
 // ---- the port
 
 export interface CodeHost {
@@ -408,6 +431,14 @@ export interface CodeHost {
   requestReviewers?(ref: ChangeRequestRef, reviewers: readonly string[], scope: HostScope, budget?: ReadBudget): Promise<"requested" | "refused">;
   /** Only after a person approves and presses Merge. Rovara never merges by itself. */
   merge?(ref: ChangeRequestRef, input: { revision: string; method: MergeMethod }, scope: HostScope): Promise<MergeResult>;
+
+  /**
+   * Optional (L11, item C3): for a host the owner reaches with their own sign-in on a laptop. Finds that sign-in (a stored token, the environment, the host's command line tool) and says where it was found; it
+   * starts no network call and never returns the secret. A host that is reached some other way leaves it out.
+   */
+  resolveCredentials?(): Promise<CodeHostSignInResult>;
+  /** Optional (L11, item C3): tests the connection once, live ("test my connection"). It never throws for a host that is down or a sign-in that is refused: it answers `warn` or `fail` with the fix in words. */
+  checkAccess?(): Promise<CodeHostAccessCheck>;
 
   readonly events: CodeHostEvents;
 }
