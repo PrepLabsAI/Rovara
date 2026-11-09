@@ -328,3 +328,28 @@ describe("the SQLite connection", () => {
     expect(() => db.run("SELECT 1")).toThrow(/closed/);
   });
 });
+
+describe("the SQLite store: closing from inside a handler, and an older file", () => {
+  it("lets a handler stop its own subscription and close the store without waiting for itself", async () => {
+    const store = open(join(await folder(), "s.db"));
+    let calls = 0;
+    const subscription = await store.changes!.subscribe("self", async () => {
+      calls += 1;
+      await subscription.stop();
+      await store.close();
+    });
+    await store.put({ item: { pk: PK, sk: "1" } });
+    for (let waited = 0; calls === 0 && waited < 5_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(calls).toBe(1);
+  });
+
+  it("opens a file whose layout has no generation yet (written before generations existed)", async () => {
+    const path = join(await folder(), "s.db");
+    await open(path).close();
+    const raw = new SqliteDatabase({ path });
+    raw.run("DELETE FROM rv_doc_meta WHERE key = 'generation'");
+    raw.close();
+    const store = open(path);
+    expect((await store.put({ item: { pk: PK, sk: "1" } })).applied).toBe(true);
+  });
+});

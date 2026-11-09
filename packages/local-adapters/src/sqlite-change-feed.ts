@@ -4,6 +4,7 @@
 // same transaction, so the log and the data cannot disagree. A consumer reads the log after its checkpoint, calls its handler, and
 // stores the new checkpoint; a crash between the two means the batch is delivered again (at least once). The sequence number is the
 // log's row number: it only grows, so order is commit order across all keys.
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   DocumentStoreError,
   type ChangeSubscription,
@@ -91,6 +92,9 @@ export function translateFailure<T>(body: () => T, mode: "read" | "write" = "rea
     throw error;
   }
 }
+
+/** Marks the call chain of a handler, so a handler that stops its own consumer (or closes the store) does not wait for itself. */
+const handlerOf = new AsyncLocalStorage<object>();
 
 export const sequenceOf = (seq: number | bigint): string => String(seq).padStart(20, "0");
 
@@ -199,7 +203,7 @@ export class SqliteChangeFeed implements DocumentChangeFeed {
     entry.stopped = true;
     entry.wake?.();
     // The name stays taken until the handler in flight has finished, so a resubscribe cannot run two handlers on one checkpoint.
-    await entry.running;
+    if (handlerOf.getStore() !== entry) await entry.running;
     this.#release(entry);
   }
 
@@ -261,7 +265,7 @@ export class SqliteChangeFeed implements DocumentChangeFeed {
     for (let attempt = 1; attempt <= this.#maxAttempts; attempt += 1) {
       if (entry.stopped) return false;
       try {
-        await entry.handler(changes);
+        await handlerOf.run(entry, () => entry.handler(changes));
         return true;
       } catch (error) {
         if (attempt === this.#maxAttempts) {

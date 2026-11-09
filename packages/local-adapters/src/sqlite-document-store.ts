@@ -518,6 +518,7 @@ export class SqliteDocumentStore implements DocumentStore {
         const generation = db.get("SELECT value FROM rv_doc_meta WHERE key = 'generation'");
         db.run("INSERT OR REPLACE INTO rv_doc_meta (key, value) VALUES ('generation', ?)", String(Number(generation?.value ?? 0) + 1));
       }
+      db.run("INSERT OR IGNORE INTO rv_doc_meta (key, value) VALUES ('generation', '1')");
       this.#generation = db.get("SELECT value FROM rv_doc_meta WHERE key = 'generation'")!.value as string;
     });
   }
