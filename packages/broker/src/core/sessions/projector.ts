@@ -19,7 +19,7 @@ export function sessionTargetsOf(changes: readonly DocumentChange[]): SessionTar
   for (const change of changes) {
     if (!change.key.pk.startsWith("DEVTASK#")) continue;
     for (const document of [change.after, change.before]) {
-      const orgId = document?.["orgId"];
+      const orgId = document?.["companyId"] ?? document?.["orgId"];
       const sessionId = document?.["sessionId"];
       if (typeof orgId === "string" && typeof sessionId === "string") targets.set(`${orgId}\u0000${sessionId}`, { orgId: orgId, sessionId: sessionId });
     }

@@ -2,7 +2,7 @@
 // engine's own transition (`decideWorkflow`, in the contracts), so the engine's rules (a stale revision, a wrong digest, a repeat, who may decide) are the ones that already hold in the hosted product.
 //
 // ASSUMPTIONS about the task flow lane (L6a), the only coupling to it, listed so the lanes can be checked against each other:
-//   1. the task is one document at `{ pk: "DEVTASK#<taskId>", sk: "META" }` (the hosted product's key), carrying `orgId` (when present it must equal the company asked for), `project`, `workflow`
+//   1. the task is one document at `{ pk: "DEVTASK#<taskId>", sk: "META" }` (the hosted product's key, which the task flow keeps), carrying `companyId` or `orgId` (when present it must equal the company asked for), `project`, `workflow`
 //      (a `WorkflowSnapshot`) and optionally `closedAt`;
 //   2. a task waiting for a plan decision has `workflow.stage === "PLAN_REVIEW"` and `workflow.state === "WAITING"`;
 //   3. the decision's effect is the engine's: this subject writes the snapshot `decideWorkflow` returns. Starting the next run (coding, planning again) is the stage machine's job on seeing the new
@@ -98,8 +98,9 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       const task = await options.store.get(workflowTaskKey(taskId));
       if (task === undefined) return undefined;
       // A task of another company reads as absent, the same as a missing one.
-      // A task with no company is only the implicit company's.
-      if (task["orgId"] !== companyId && !(task["orgId"] === undefined && companyId === IMPLICIT_COMPANY_ID)) return undefined;
+      // The task flow writes `companyId`; the hosted product's record says `orgId`. A task with neither is only the implicit company's.
+      const taskCompany = task["companyId"] ?? task["orgId"];
+      if (taskCompany !== companyId && !(taskCompany === undefined && companyId === IMPLICIT_COMPANY_ID)) return undefined;
       const parsed = WorkflowSnapshotSchema.safeParse(task["workflow"]);
       if (!parsed.success) return undefined;
       const workflow = parsed.data;

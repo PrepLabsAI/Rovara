@@ -461,6 +461,15 @@ describe("the approval gate: what the review of round 1 found", () => {
     expect((await taskWorkflow(store)).revision).toBe(R0);
   });
 
+  it("a task record that names its company as `companyId` (the task flow's) is read the same as one with `orgId`", async () => {
+    const store = new MemoryDocumentStore();
+    await store.put({ item: { ...workflowTaskKey(TASK_ID), companyId: COMPANY, workflow: JSON.parse(JSON.stringify(waiting())) } });
+    const gate = createDecisionGate({ store, approvers: createLocalOwnerApprovers({ owner: OWNER, verifySession: (token) => token === SESSION }), audit: createNoopAuditSink(), subjects: [createWorkflowDocumentSubject({ store, riskOf: () => "low" })], now: () => NOW });
+    expect(await gate.decide(attempt())).toMatchObject({ status: "decided" });
+    await store.put({ item: { ...workflowTaskKey(TASK_ID), companyId: "org_zzzzzzzzzzzzzzzzzzzz", workflow: JSON.parse(JSON.stringify(waiting())) } });
+    expect(await gate.decide(attempt())).toMatchObject({ status: "refused", reason: "not_found" });
+  });
+
   it("an expiry that cannot be read is an expired request", async () => {
     const { gate, ready } = world({ expiresAt: "not a time" });
     await ready;
