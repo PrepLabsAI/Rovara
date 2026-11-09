@@ -29,7 +29,7 @@ import type { TaskFlowDeps } from "./deps.js";
 import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js";
 import { dispatchRowKey, operationRequestKey, taskKey, taskPointerKey, workspaceKey } from "./keys.js";
 import { readTask } from "./reads.js";
-import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
+import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
 import type { StepOutcome } from "./outcome.js";
 
@@ -75,11 +75,13 @@ export interface StepInput {
    * What kind of operation the step is: a workflow task step (the default), or the publication of the checked code (lane L10), which carries its own payload and no prompt. A workflow task's
    * workspace takes a publication without a workflow mode, since a publication is the flow's own step and not an ordinary run.
    */
-  kind?: "task" | "publish";
+  kind?: "task" | "publish" | "maintain";
   /** More of the worker's payload (a coding run's check commands and base, a publication's branch and tree). Never a secret: grants and capabilities are issued at delivery. */
   payload?: Record<string, JsonValue>;
   /** A publication's expectation, kept on the operation for the pull request callback to be held to. */
   publication?: PublicationExpectation;
+  /** A push to an open pull request's expectation, kept on the operation for the update callback to be held to. */
+  maintenance?: MaintenanceExpectation;
   /** Callback actions beyond the three every operation has. */
   extraActions?: readonly string[];
   /** The id the operation is made with, when the caller needs it before the operation exists (a publication names its branch after it). */
@@ -111,9 +113,10 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     conversationId: task.conversationId,
     ...(workflowRevision === undefined ? {} : { workflowRevision }),
     ...(input.publication === undefined ? {} : { publication: input.publication }),
+    ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
     dispatch: {
       kind: operationKind, projectRevision: workspace.projectRevision,
-      payload: operationKind === "publish"
+      payload: operationKind !== "task"
         ? { ...input.payload }
         : { conversationId: task.conversationId, prompt: input.prompt, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }), ...input.payload },
       ...(input.requires === undefined ? {} : { requires: input.requires }),

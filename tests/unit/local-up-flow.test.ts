@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DeveloperProjectsResponseSchema, DeveloperTaskListResponseSchema, DeveloperTaskResponseSchema, IMPLICIT_COMPANY_ID, SessionListReaderSchema, SessionResponseReaderSchema, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES,
-  createCandidateManifest, type WorkerInvocation,
+  change, createCandidateManifest, startWorkflowBranchSync, startWorkflowFix, when, type TransactItem, type WorkerInvocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { listSessions, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
@@ -20,6 +20,9 @@ import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { readBranchWriters } from "../../packages/broker/src/core/branch-sync/branch-writers.js";
+import { ciEvidenceItem, ciOutputBlock } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
+import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
+import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
@@ -554,5 +557,93 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
     const blocked = await taskRecord(h, taskId);
     expect(blocked.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
     expect(blocked.workflow.blockReason).toContain("starting point changed");
+  });
+});
+
+describe("rovara up: an open pull request is fixed and kept up to date, against a fake worker and a fake code host", () => {
+  /** A task through publication: the pull request is open on the host and the task waits for the merge. */
+  async function toWaitForMerge(h: Awaited<ReturnType<typeof launch>>) {
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    await h.callback(coding, "result", builtResult(tree, h.base, commit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const publish = await h.nextJob(workspaceId, seen);
+    const payload = publish.payload as Record<string, unknown>;
+    const headBranch = String(payload["headBranch"]);
+    h.model.branches.set(headBranch, commit);
+    await h.callback(publish, "pull-request", { repository: "demo", repositoryUrl: h.project.repositories[0]!.url, headBranch, baseBranch: "main", commit, title: payload["title"], body: payload["body"] });
+    await h.callback(publish, "result", { status: "SUCCEEDED", result: { repository: "demo", number: 1, url: h.model.crUrl("1"), headBranch, baseBranch: "main", commit, checks: [], reconciled: false, draft: true } });
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    return { taskId, workspaceId, seen, headBranch, commit, tree };
+  }
+
+  /** What merge tracking's deciders commit for a round: the next workflow, the rows it owns, and the row of the step the new state is due for (the pass commits them together). */
+  async function commitRound(h: Awaited<ReturnType<typeof launch>>, taskId: string, next: (workflow: WorkflowSnapshot) => WorkflowSnapshot, kind: "IMPLEMENT" | "SYNC", rows: (after: WorkflowSnapshot) => TransactItem[] = () => []): Promise<WorkflowSnapshot> {
+    const store = h.runtime.registry.require("storage");
+    const task = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!;
+    const workflow = task["workflow"] as unknown as WorkflowSnapshot;
+    const after = next(workflow);
+    const written = await store.transact([
+      { kind: "update", key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ops: [change.set("workflow", toDocument(after))], condition: when.eq(["workflow", "revision"], workflow.revision) },
+      dispatchRowItem(h.runtime.app.flow.deps, taskId, after.revision, kind, new Date().toISOString()), ...rows(after),
+    ]);
+    expect(written.applied).toBe(true);
+    return after;
+  }
+
+  it("fixes failing CI: the coding run is told what CI said, and the reviewed fix is pushed as exactly the reviewed tree onto the open pull request", async () => {
+    const h = await launch({ host: true });
+    const { taskId, workspaceId, seen, headBranch, commit } = await toWaitForMerge(h);
+    const now = new Date().toISOString();
+    await commitRound(h, taskId, (workflow) => startWorkflowFix(workflow, { source: "ci", problems: ["unit-tests"], now }), "IMPLEMENT", (after) => [
+      ciEvidenceItem({ orgId: IMPLICIT_COMPANY_ID, taskId, revision: after.revision, block: ciOutputBlock([{ name: "unit-tests", conclusion: "failure", log: "1 failing: health answers 500" }]), now: Date.now() }),
+    ]);
+    // The sweep starts the row. The run starts from the head the pull request has, and is told what CI said, not the plan again.
+    const fix = await h.nextJob(workspaceId, seen);
+    expect(fix).toMatchObject({ payload: { workflowMode: "IMPLEMENT", workflowFix: { source: "ci", startFrom: commit } } });
+    expect((fix.payload as { prompt: string }).prompt).toContain("health answers 500");
+    // The fix is a commit on top of the pull request's head (made in the worker's workspace; the host does not have it yet).
+    h.model.branches.set("fix", commit);
+    const fixCommit = h.model.commit("fix", { "src/health.ts": "export const health = 200; // CI fixed\n" });
+    const fixTree = h.model.revision(fixCommit).tree;
+    await h.callback(fix, "result", builtResult(fixTree, h.base, fixCommit));
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, fixTree, "pass", h.base, fixCommit));
+    // Every repository already has its pull request, so the reviewed fix is pushed to it (a `maintain` run), as exactly the reviewed tree on the pinned base and onto the recorded head.
+    const update = await h.nextJob(workspaceId, seen);
+    expect(update).toMatchObject({ kind: "maintain", payload: { action: "append", repository: "demo", pullRequestNumber: 1, headBranch, expectedHeadCommit: commit, workflowCandidateTreeSha: fixTree, workflowBaseCommit: h.base, workflowFix: { source: "ci" } } });
+    expect(typeof (update.payload as { repositoryGrant?: unknown }).repositoryGrant).toBe("string");
+    const call = { repository: "demo", pullRequestNumber: 1, action: "append", headBranch, baseBranch: "main", previousCommit: commit, commit: fixCommit };
+    // A push that is not what the operation was started with is refused, and so is one the host does not show.
+    expect((await h.callback(update, "pull-request-update", { ...call, previousCommit: "f".repeat(40) })).body).toMatchObject({ error: { code: "STALE_FENCE" } });
+    expect((await h.callback(update, "pull-request-update", call)).body).toMatchObject({ error: { code: "STALE_FENCE" } });
+    h.model.branches.set(headBranch, fixCommit);
+    expect((await h.callback(update, "pull-request-update", call)).status).toBe(200);
+    const result = { action: "append", repository: "demo", number: 1, url: h.model.crUrl("1"), state: "open", headBranch, baseBranch: "main", previousCommit: commit, commit: fixCommit, treeSha: fixTree, checks: [], reconciled: false };
+    expect((await h.callback(update, "result", { status: "SUCCEEDED", result })).status).toBe(200);
+    const after = await taskRecord(h, taskId) as unknown as { workflow: { stage: string; state: string; pullRequests: Array<{ headSha: string; headTreeSha: string }> } };
+    expect(after.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ headSha: fixCommit, headTreeSha: fixTree }] });
+  });
+
+  it("merges the base branch into the pull request's branch when merge tracking asks, and records the merge the host shows", async () => {
+    const h = await launch({ host: true });
+    const { taskId, workspaceId, seen, headBranch, commit } = await toWaitForMerge(h);
+    const base = h.model.commit("main", { "README.md": "# demo, moved on\n" });
+    await commitRound(h, taskId, (workflow) => startWorkflowBranchSync(workflow, { repositoryId: "demo", number: 1, reason: "behind", now: new Date().toISOString() }), "SYNC");
+    const sync = await h.nextJob(workspaceId, seen);
+    expect(sync).toMatchObject({ kind: "maintain", payload: { action: "sync", pullRequestNumber: 1, expectedHeadCommit: commit, workflowSync: { baseCommit: base, expectedHeadCommit: commit } } });
+    // The worker's merge commit: the recorded head first, the base commit second.
+    const merge = "8".repeat(40);
+    const mergeTree = "9".repeat(40);
+    h.model.revisions.set(merge, { sha: merge, tree: mergeTree, parents: [commit, base], files: new Map() });
+    h.model.branches.set(headBranch, merge);
+    expect((await h.callback(sync, "pull-request-update", { repository: "demo", pullRequestNumber: 1, action: "sync", headBranch, baseBranch: "main", previousCommit: commit, commit: merge })).status).toBe(200);
+    const result = { action: "sync", repository: "demo", number: 1, url: h.model.crUrl("1"), state: "open", headBranch, baseBranch: "main", previousCommit: commit, commit: merge, treeSha: mergeTree, checks: [], reconciled: false };
+    expect((await h.callback(sync, "result", { status: "SUCCEEDED", result })).status).toBe(200);
+    const after = await taskRecord(h, taskId) as unknown as { workflow: { stage: string; state: string; branchSync?: unknown; pullRequests: Array<{ headSha: string }> } };
+    expect(after.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", pullRequests: [{ headSha: merge }] });
+    expect(after.workflow.branchSync).toBeUndefined();
   });
 });

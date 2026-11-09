@@ -224,12 +224,12 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
       }),
     };
   }
-  if (spec.kind === "publish") {
-    // A publication pushes one repository's branch: the grant names that one repository, with push access (the only operation that is ever given it).
+  if (spec.kind === "publish" || spec.kind === "maintain") {
+    // A publication or a push to an open pull request pushes one repository's branch: the grant names that one repository, with push access (the only operation that is ever given it).
     const project = await deps.projects.revision(workspace.projectName, workspace.projectRevision);
     if (project === undefined) return "the project revision this task was started on is gone";
     const repository = project.definition.repositories.find((candidate) => candidate.name === payload["repository"]);
-    if (repository === undefined) return "the repository to publish is not part of the project";
+    if (repository === undefined) return "the repository to push is not part of the project";
     payload = {
       ...payload,
       project: workerProjectDefinition(project.definition),

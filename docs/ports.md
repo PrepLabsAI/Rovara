@@ -317,6 +317,30 @@ The pure transitions stay in `@agentx/contracts` (`task-workflow-node.ts`); this
 - **Not in this lane:** plan decisions and approval (L6b), sessions, cost, notifications, merge, proof, branch sync, CI fix, the callback endpoints, the
   Cloud close operation (discard unpublished work, pull-request checks), the stuck-step watchdog, test environments and saved environments.
 
+## The build step (`core/build-step/`, lane L10)
+
+Everything after the plan is approved: coding, the checks, the reviews, Rovara's own fixing of a block, the draft pull request, the push of a fix to it and the merge of the base into it.
+It is Cloud's `workflow-items.ts` and `terminal-result.ts` (and the starts in `developer-tasks/`) on the document store, the queue and the code-host port. The task flow reaches it through
+`TaskFlowDeps.buildSteps` (`BuildSteps`: `runRow` for a dispatch row of kind IMPLEMENT, REVIEW, PUBLISH, SYNC or AUTOFIX, `onEnded` for the end of a coding run, rerun of the checks, review,
+publication or push); `createTaskFlow` fills it. The worker's result reaches it as a `StepOutcome` (`built`, `reviewed`, `published`) that the callback layer did not read: it is the worker's word,
+and the build step reads it against the contracts' schemas and the task's own record of where it started (`recordWorkflowVerification`, `submitWorkflowReview`).
+
+- **Coding** (`startImplementation`): from the approved plan (read back through `developer/plan-document-reader.ts`, which checks the digest and reads a Markdown or a structured plan; it
+  needs `deps.artifacts`), from a send-back (the problems, as untrusted tagged text) or from a fix round for failing CI or a conflict (what CI said, or the conflicting files). The checks are
+  the plan's selected ones; a task whose policy selects none is "review only".
+- **Checks** are run by the worker inside the coding run and read here: the candidate (the code the run ended on) must be the code its checks ran on, in every repository, starting from the
+  commit preparation recorded (confirmed at the code host before the first pin). A rerun is a CHECKS run.
+- **Reviews** start by themselves on the checked code; each report must be for this code, from this run, and exactly the reviews asked for.
+- **Fixing a block** (`runAutofix`, the policy in `@agentx/contracts` `workflow-autofix.ts`): a code fault goes back to coding at most twice per approved plan; a hiccup of the checks or reviews is
+  retried once; anything unclear, a person's job or a reached limit is an ask (`autofixAsk` on the task), with what failed. `deps.taskSpendUsd` says what the task cost; **nothing priced counts as
+  nothing spent**, so with no price table the count limits alone bound the rounds (a decision for the owner under "Needs both owners").
+- **Publishing** (`startPublication`, `openPullRequest`, `recordPublished`): the worker pushes the checked tree; the code host, not the worker, says what the branch holds (its head, its tree, that it
+  stands on the pinned base); the draft is opened through `reconcileChangeRequest`; its own head is read again and one that is not the checked code is closed and recorded nowhere. The result is
+  linked back to the task (the neutral link row), the head indexed, merge tracking enrolled and `openBranchWriters` called.
+- **Open pull requests** (`maintain.ts`): the reviewed fix is appended as exactly the reviewed tree onto the recorded head; the base branch is merged in on merge tracking's request. A head that
+  moved (a person's push) is never overwritten. Both are `maintain` operations with the `pull-request-update` callback.
+- The uploads a coding run makes besides its result (`candidate-export` and friends) feed only the browser and API checks (E2E), which Code does not run yet: they are shape-checked and not kept.
+
 ## What is not here
 
 - **Artifact (object) storage.** Cloud keeps proofs, plan documents and evidence in an object store. No port is defined yet; the lanes

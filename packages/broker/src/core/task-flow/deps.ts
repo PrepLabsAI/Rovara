@@ -18,6 +18,7 @@ import type {
 import type { RepositoryGrantService } from "../../repository-access.js";
 import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.js";
 import type { StepOutcome } from "./outcome.js";
+import type { CodeMilestones } from "../merge/seams.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
 export interface TaskCaller {
@@ -136,6 +137,8 @@ export interface TaskFlowDeps {
    */
   autofix?: { enabled?: boolean; capUsd?: number; roundEstimateUsd?: number };
   taskSpendUsd?: (taskId: string) => Promise<number | undefined>;
+  /** Lane L10: records a milestone ("fixing", "stuck") in the transaction of the change that caused it. Absent: none is recorded (the workflow change still is). */
+  milestones?: CodeMilestones;
   /** Lane L10: the steps after the plan is approved. `createTaskFlow` fills it with the build step when absent. */
   buildSteps?: BuildSteps;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */

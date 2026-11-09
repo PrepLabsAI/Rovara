@@ -4,7 +4,7 @@
 import { agentXError, when, type Operation, type TransactItem } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
 import { operationKey, operationRequestKey } from "./keys.js";
-import { toDocument, type DispatchSpec, type OperationRecord, type PublicationExpectation, type WorkspaceRecord } from "./records.js";
+import { toDocument, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type WorkspaceRecord } from "./records.js";
 import { dispatchQueueName, hashJson, iso, newId } from "./support.js";
 
 export interface AcceptInput {
@@ -19,6 +19,8 @@ export interface AcceptInput {
   workflowRevision?: number;
   /** A publish operation's expectation, which its pull request callback is held to. */
   publication?: PublicationExpectation;
+  /** A maintain operation's expectation, which its update callback is held to. */
+  maintenance?: MaintenanceExpectation;
   now?: string;
   /** Whether to write the request's idempotency record (a start does not: the start's own record covers it). */
   recordRequest?: boolean;
@@ -55,6 +57,7 @@ export function buildOperation(deps: TaskFlowDeps, input: AcceptInput): { operat
     ...(input.workflowRevision === undefined ? {} : { workflowRevision: input.workflowRevision }),
     ...(input.requester === undefined ? {} : { requester: input.requester }),
     ...(input.publication === undefined ? {} : { publication: input.publication }),
+    ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
   };
   const message: DispatchMessage = { v: 1, workspaceId: input.workspace.id, operationId: id };
   return {

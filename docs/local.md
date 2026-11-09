@@ -226,8 +226,9 @@ changes is planned again with the owner's words in the prompt.
 runs `rovara open <task>` (or opens the link `rovara up` printed) and decides there. Keep that address out of chats and pull requests: whoever holds it can approve.
 
 **The 10-minute laptop test.** `tests/unit/local-up-flow.test.ts` is the journey with the worker simulated: project, task, preparation, Understand, Plan, the plan on the page,
-approval, a restart in the middle, a failed step and its Retry, questions and their answers, Stop, a message, the page address from `rovara open`, and the real Docker adapter
-(simulated Docker) accepting the job with the real worker's token check. With real Docker it is:
+approval, coding, the checks, the code and security reviews, Rovara's own send-backs (twice, then it asks), the draft pull request on a fake code host, a CI fix and a merge of the
+base pushed to that pull request, a restart in the middle, a failed step and its Retry, questions and their answers, Stop, a message, the page address from `rovara open`, and the real
+Docker adapter (simulated Docker) accepting the job with the real worker's token check. With real Docker it is:
 
 ```sh
 docker build -f environments/base/Dockerfile -t rovara-worker:local .
@@ -238,14 +239,15 @@ curl -s -H "Authorization: Bearer $(cat ~/.rovara/session-token)" -X POST <url>/
 rovara open <task-id>             # read the plan, approve it
 ```
 
-Today this stops at the approved plan (see "Not wired yet"). The model proxy is lane L9a's: `modelProxyEndpoint` in `createLocalApp` is the seam, marked `TODO(L9a)`.
+Today the journey runs to a pull request that waits for its merge (see "Not wired yet"). The model proxy is lane L9a's: `modelProxyEndpoint` in `createLocalApp` is the seam, marked `TODO(L9a)`.
 
 ## Not wired yet
 
-- **Coding, checks, send-backs, publishing, merge, proof.** After approval the workflow is at `IMPLEMENT`. L6a's dispatch knows `UNDERSTAND` and `PLAN` only (`DispatchKind`),
-  and Cloud's coding step, its candidate export, verification, review, publish and merge-tracking hooks (`workflow-items.ts`, `terminal-result.ts`, about 2,000 lines)
-  are not ported. So `installCiFixDecider` and `installBranchSyncDeciders` are NOT installed (L7A-3), `openBranchWriters` has no publish path to sit on, and the merge, proof and
-  pull request comment commands (L7a, L7b, L8) are not reachable from `rovara up`.
+- **Merge tracking's sweep, merge and proof from `rovara up`.** After the plan is approved the task is coded, checked, reviewed and published by the build step (`core/build-step/`, lane
+  L10; see docs/ports.md), and `installCiFixDecider` and `installBranchSyncDeciders` are installed, so a tracking pass that decides a CI fix, a conflict or a sync gets its coding run or
+  merge. What nothing runs yet is the pass itself: the publish step enrols the task (`WORKFLOW_MERGE_RECOVERY`, `kind: "tracking"`), but no timer reads due tracking rows and calls
+  `reconcileTrackingTask`, and `MergeTrackingDependencies` (settings, people, links, scope) has no wiring. So the merge, proof and pull request comment commands (L7a, L7b, L8) are not reachable from
+  `rovara up`, and the milestone hook (`CodeMilestones`, `deps.milestones`) and the session timeline are not filled, so a "fixing" or "stuck" line is not recorded.
 - **A GitHub client for the laptop.** No `GitHubCodeHostProvider` exists for a personal token or `gh` (L7A-4): Cloud's client is a GitHub App client. Until one passes
   `runGitHubClientConformance`, no `code-host` adapter is registered, and a worker's clone credential is the owner's token itself (clone and push are the same token).
 - **A model for the worker.** `modelProxyEndpoint` (lane L9a). The worker's `GET /v1/internal/model-access` is refused by the callback listener (POST only) and by the egress

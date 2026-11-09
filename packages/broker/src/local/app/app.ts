@@ -21,6 +21,9 @@ import { textReaderOf } from "../../core/build-step/plan-input.js";
 import { planFactsOf, planRiskOf } from "../../core/decisions/plan-risk.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { WorkflowArtifactSchema } from "@agentx/contracts";
+import { installBranchSyncDeciders } from "../../core/branch-sync/branch-sync.js";
+import { installCiFixDecider } from "../../core/ci-fix/ci-fix.js";
+import { registerMergeActionDecider } from "../../core/merge/merge-tracking.js";
 import { startSessionProjector } from "../../core/sessions/projector.js";
 import { sweepOpenSessions } from "../../core/sessions/sweep.js";
 import type { SummaryDependencies } from "../../core/sessions/summary.js";
@@ -134,6 +137,11 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
   });
+
+  // Merge tracking's action slots (L7A-3): a failing CI, a conflict and a branch that is behind are decided by the deciders of the code, which ask for a coding run (an IMPLEMENT row) or a merge of the
+  // base (a SYNC row). They are installed only here, where the dispatch runner knows both kinds (the build step), and once per process.
+  installCiFixDecider(registerMergeActionDecider);
+  installBranchSyncDeciders(registerMergeActionDecider);
 
   // Sessions: facts over the task records, the cost ledger over the metering seam.
   const summaryDeps: SummaryDependencies = {

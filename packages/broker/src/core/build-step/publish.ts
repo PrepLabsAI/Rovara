@@ -18,30 +18,19 @@ import { requireRepositoryKey } from "../merge/repository-key.js";
 import { prHeadItems, recoveryRowKey } from "../merge/store.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { dispatchRowItem, resolveRowItem } from "../task-flow/dispatch-rows.js";
-import { taskPointerKey } from "../task-flow/keys.js";
 import { newId } from "../task-flow/support.js";
-import { readTask } from "../task-flow/reads.js";
 import { fromDocument, toDocument, type OperationRecord, type PublicationExpectation, type TaskRecord } from "../task-flow/records.js";
 import { workspaceOperations } from "../task-flow/reads.js";
 import { acceptStep, commitWorkflow, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
+import { startPullRequestUpdate } from "./maintain.js";
 import { approvedCodingPlan } from "./plan-input.js";
+import { pullRequestRecordKey, taskOfOperation, type PullRequestRecord } from "./records.js";
 import { jsonOf, locate, settled, type RowRef } from "./start.js";
 import type { Ended } from "./results.js";
 
 /** The branch a publication pushes: named after the operation, so two publications never share one. */
 export const headBranchOf = (operationId: string): string => `agentx/${operationId}`;
-
-export const pullRequestRecordKey = (workspaceId: string, repository: string, number: number): { pk: string; sk: string } =>
-  ({ pk: `WORKSPACE#${workspaceId}`, sk: `PULL_REQUEST#${repository}#${String(number).padStart(10, "0")}` });
-
-/** The pull request the broker opened for a publication: what `recordPublished` and merge tracking (`recordedHead`) read back. */
-export interface PullRequestRecord {
-  pk: string; sk: string; entityType: "PULL_REQUEST";
-  workspaceId: string; repository: string; repositoryUrl: string; number: number; url: string; state: "open";
-  headBranch: string; baseBranch: string; expectedHeadCommit: string; title: string; body: string;
-  createdByOperationId: string; updatedAt: string;
-}
 
 const scopeOf = (deps: Pick<TaskFlowDeps, "companyId">) => ({ orgId: deps.companyId });
 
@@ -137,11 +126,6 @@ async function blockUncheckedPublication(deps: TaskFlowDeps, operation: Operatio
   } catch (error) {
     log(deps, { event: "build_step.unchecked_publication_block_failed", operationId: operation.id, error: error instanceof Error ? error.name : "unknown" });
   }
-}
-
-async function taskOfOperation(deps: TaskFlowDeps, operation: OperationRecord): Promise<TaskRecord | undefined> {
-  const pointer = await deps.store.get(taskPointerKey(operation.workspaceId));
-  return typeof pointer?.["taskId"] === "string" ? readTask(deps, pointer["taskId"]) : undefined;
 }
 
 const objectOf = (value: unknown): Record<string, unknown> => {
@@ -280,12 +264,4 @@ export async function recordPublished(deps: TaskFlowDeps, task: TaskRecord, oper
     log(deps, { event: "build_step.publication_not_recorded", taskId: task.taskId, operationId: operation.id, error: error instanceof Error ? error.name : "unknown" });
     await commitWorkflow(deps, task, blockWorkflow(workflow, WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, now));
   }
-}
-
-// ---- the push of an approved fix to an open pull request
-
-/** The fix of an open pull request is pushed by the `maintain` operation (lane L10 slice 3b). */
-export async function startPullRequestUpdate(deps: TaskFlowDeps, row: RowRef, _located: unknown): Promise<StepStart> {
-  void _located;
-  return settled(deps, row, "STALE");
 }

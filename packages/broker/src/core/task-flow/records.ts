@@ -76,11 +76,28 @@ export interface OperationRecord extends Operation {
   workflowRevision?: number;
   /** Who asked for it (the identity adapter's person id and name for itself); Cloud's closed `requestedBy` list cannot hold a Code principal. */
   requester?: { personId: string; provider: string };
+  /** A `maintain` operation's expectation (lane L10): the push of an approved fix to an open pull request, or the merge of the base branch into it. The update callback is held to it. */
+  maintenance?: MaintenanceExpectation;
   /** A publish operation's expectation (lane L10): what the worker may open a pull request with, fixed by the broker when the publication started. The pull request callback is held to it. */
   publication?: PublicationExpectation;
   /** The worker machine and delivery time, once the operation was handed to a machine. */
   deliveredAt?: string;
   machineId?: string;
+}
+
+/** What a push to an open pull request was started with. */
+export interface MaintenanceExpectation {
+  action: "append" | "sync";
+  repository: string;
+  pullRequestNumber: number;
+  headBranch: string;
+  baseBranch: string;
+  /** The head the workflow recorded: the push is onto it, and a callback that names another head is stale. */
+  expectedHeadCommit: string;
+  /** An approved fix: the reviewed tree it must hold, on the base the task pinned (and, for a conflict round, the base commit merged as the second parent). */
+  workflowCandidate?: { candidateDigest: string; treeSha: string; baseCommitSha: string; mergeBaseCommit?: string };
+  /** A merge of the base branch: exactly this base commit, onto the head named. */
+  workflowSync?: { baseCommit: string; expectedHeadCommit: string };
 }
 
 /** What a publication was started with: the callback of the worker is refused unless it names exactly this (Cloud's `operation.publication`). */
