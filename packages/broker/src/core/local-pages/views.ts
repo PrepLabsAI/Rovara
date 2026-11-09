@@ -137,7 +137,8 @@ export interface DesignDecisionInput {
 export interface LocalPageActions {
   decidePlan(input: PlanDecisionInput): Promise<LocalActionResult>;
   decideDesign(input: DesignDecisionInput): Promise<LocalActionResult>;
-  addComment(input: { taskId: string; target: string; text: string }): Promise<LocalActionResult>;
+  /** `revision` is the revision of the plan the person was reading; the action may refuse a comment on one that has moved on. */
+  addComment(input: { taskId: string; target: string; text: string; revision: number }): Promise<LocalActionResult>;
   /** `wrong`: the lesson did not apply or was harmful; it is retired and the reason kept. */
   lessonAction(input: { lessonId: string; action: "approve" | "retire" | "wrong" }): Promise<LocalActionResult>;
 }

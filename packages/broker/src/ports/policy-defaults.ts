@@ -113,7 +113,7 @@ export interface LocalOwnerApproversOptions {
   /** The local owner, for the `local-session` proof. */
   owner?: Principal;
   /** Checks a local session secret with its issuer (the same check the identity adapter uses). Absent: `local-session` proofs are refused. */
-  verifySession?: (token: string) => boolean | Promise<boolean>;
+  verifySession?: (token: string, request: ApprovalRequest) => boolean | Promise<boolean>;
   /**
    * Looks a comment up by id at the code host and says who wrote it and what they may do. The code host adapter provides it; the core
    * knows nothing about GitHub. Absent: comment proofs are refused.
@@ -148,7 +148,7 @@ export function createLocalOwnerApprovers(options: LocalOwnerApproversOptions = 
       if (used.has(approvalProofKey(proof))) return refuse("proof_already_used");
       let verdict: ApprovalVerdict;
       if (proof.method === LOCAL_SESSION_METHOD) {
-        verdict = options.verifySession !== undefined && (await options.verifySession(proof.token))
+        verdict = options.verifySession !== undefined && (await options.verifySession(proof.token, request))
           ? { approved: true, approver: owner, method: proof.method, proofId: proof.proofId }
           : refuse("not_the_local_owner");
       } else if (proof.method === CODE_HOST_COMMENT_METHOD) {

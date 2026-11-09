@@ -19,6 +19,8 @@ afterEach(async () => { await server.close(); });
 
 const host = () => new URL(server.origin).host;
 const get = (path: string, headers: Record<string, string> = {}) => raw(server.origin, { path, headers: { host: host(), ...headers } });
+/** The form as drawn now: each form answers once, so a test that submits twice draws it twice. */
+const formNow = async (path: string, suffix: string) => formOf((await get(`${base}${path}`)).body, suffix);
 const post = (path: string, fields: Record<string, string>, headers: Record<string, string> = {}) =>
   raw(server.origin, { method: "POST", path, body: formBody(fields), headers: { host: host(), origin: server.origin, "content-type": "application/x-www-form-urlencoded", ...headers } });
 
@@ -61,7 +63,7 @@ describe("who may reach the pages", () => {
     for (const reply of [await get(`${base}/`), await get("/nothing"), await get(`${base}/`, { origin: "http://evil.example" })]) {
       expect(reply.headers["access-control-allow-origin"]).toBeUndefined();
       expect(reply.headers["cache-control"]).toBe("no-store");
-      expect(reply.headers["referrer-policy"]).toBe("no-referrer");
+      expect(reply.headers["referrer-policy"]).toBe("same-origin");
       expect(reply.headers["x-content-type-options"]).toBe("nosniff");
       expect(reply.headers["x-frame-options"]).toBe("DENY");
     }
@@ -162,7 +164,7 @@ describe("what a write must carry", () => {
 
 describe("approving a plan", () => {
   it("sends the approval with a local-session proof for exactly the revision and digest shown, and the approvers seam accepts it once", async () => {
-    const approvers = createLocalOwnerApprovers({ verifySession: (secret) => server.sessions.isValidSecret(secret) });
+    const approvers = createLocalOwnerApprovers({ verifySession: (token, request) => server.sessions.verifyProof(token, { requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest }) });
     const { action, fields } = formOf((await get(`${base}/plan/${TASK}`)).body, "/decide");
     expect(action).toBe(`${base}/plan/${TASK}/decide`);
     const reply = await post(action, { ...fields, decision: "approve" });
@@ -172,7 +174,10 @@ describe("approving a plan", () => {
     expect(call.name).toBe("decidePlan");
     const input = call.input as { taskId: string; decision: string; approval: typeof OFFER; proof: { method: string; token: string; requestId: string; revision: number; artifactDigest: string; proofId: string } };
     expect(input).toMatchObject({ taskId: TASK, decision: "approve", approval: OFFER });
-    expect(input.proof).toMatchObject({ method: LOCAL_SESSION_METHOD, requestId: OFFER.requestId, revision: OFFER.revision, artifactDigest: OFFER.artifactDigest, token: token });
+    expect(input.proof).toMatchObject({ method: LOCAL_SESSION_METHOD, requestId: OFFER.requestId, revision: OFFER.revision, artifactDigest: OFFER.artifactDigest });
+    // The proof is a signed token for this approval only: the page session's own secret is never in it.
+    expect(input.proof.token).toMatch(/^p1\./);
+    expect(input.proof.token).not.toContain(token);
     const request = { companyId: "org_00000000000000000000", requestId: OFFER.requestId, kind: "plan", subject: { type: "task", id: TASK }, revision: OFFER.revision, artifactDigest: OFFER.artifactDigest };
     expect(await approvers.verify(request, input.proof)).toMatchObject({ approved: true });
     // The same proof cannot decide again, and a proof for another revision is refused.
@@ -180,8 +185,28 @@ describe("approving a plan", () => {
     expect(await approvers.verify({ ...request, revision: 4 }, input.proof)).toEqual({ approved: false, reason: "other_revision" });
   });
 
+  it("does not accept a proof for another request, revision or content, or one forged without the server's key", async () => {
+    const { action, fields } = formOf((await get(`${base}/plan/${TASK}`)).body, "/decide");
+    await post(action, { ...fields, decision: "approve" });
+    const proof = (world.actions.calls[0]!.input as { proof: { token: string } }).proof;
+    const binding = { requestId: OFFER.requestId, revision: OFFER.revision, artifactDigest: OFFER.artifactDigest };
+    expect(server.sessions.verifyProof(proof.token, binding)).toBe(true);
+    for (const other of [{ ...binding, requestId: "card-2" }, { ...binding, revision: 4 }, { ...binding, artifactDigest: "sha256-cccc" }]) expect(server.sessions.verifyProof(proof.token, other)).toBe(false);
+    expect(server.sessions.verifyProof(token, binding)).toBe(false);
+    expect(server.sessions.verifyProof(`${proof.token.slice(0, -2)}xx`, binding)).toBe(false);
+    expect(server.sessions.verifyProof("p1.abc.def", binding)).toBe(false);
+    expect(server.sessions.verifyProof("", binding)).toBe(false);
+  });
+
+  it("answers a form once: a second click or a replay finds the token used", async () => {
+    const { action, fields } = formOf((await get(`${base}/plan/${TASK}`)).body, "/decide");
+    expect(String((await post(action, { ...fields, decision: "approve" })).headers.location)).toContain("n=approved");
+    expect(String((await post(action, { ...fields, decision: "approve" })).headers.location)).toContain("n=form");
+    expect(world.actions.calls).toHaveLength(1);
+  });
+
   it("does not accept a proof once its session is revoked", async () => {
-    const approvers = createLocalOwnerApprovers({ verifySession: (secret) => server.sessions.isValidSecret(secret) });
+    const approvers = createLocalOwnerApprovers({ verifySession: (token, request) => server.sessions.verifyProof(token, { requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest }) });
     const { action, fields } = formOf((await get(`${base}/plan/${TASK}`)).body, "/decide");
     await post(action, { ...fields, decision: "approve" });
     server.sessions.revoke(token);
@@ -191,27 +216,29 @@ describe("approving a plan", () => {
   });
 
   it("asks for changes only with a note, and sends the note", async () => {
-    const { action, fields } = formOf((await get(`${base}/plan/${TASK}`)).body, "/decide");
+    const { action, fields } = await formNow(`/plan/${TASK}`, "/decide");
     expect(String((await post(action, { ...fields, decision: "changes", note: "   " })).headers.location)).toContain("n=invalid");
     expect(world.actions.calls).toEqual([]);
-    const reply = await post(action, { ...fields, decision: "changes", note: "Cap the wait at 30 seconds." });
+    const again = await formNow(`/plan/${TASK}`, "/decide");
+    const reply = await post(again.action, { ...again.fields, decision: "changes", note: "Cap the wait at 30 seconds." });
     expect(String(reply.headers.location)).toContain("n=changes");
     expect(world.actions.calls[0]).toMatchObject({ name: "decidePlan", input: { decision: "changes", note: "Cap the wait at 30 seconds." } });
   });
 
   it("refuses a decision value it does not know, and a missing request id", async () => {
-    const { action, fields } = formOf((await get(`${base}/plan/${TASK}`)).body, "/decide");
+    const { action, fields } = await formNow(`/plan/${TASK}`, "/decide");
     expect(String((await post(action, { ...fields, decision: "merge" })).headers.location)).toContain("n=invalid");
     expect(String((await post(action, { ...fields, decision: "approve", requestId: "" })).headers.location)).toContain("n=invalid");
     expect(world.actions.calls).toEqual([]);
   });
 
   it("tells the person when the plan moved on, or the action refused", async () => {
-    const { action, fields } = formOf((await get(`${base}/plan/${TASK}`)).body, "/decide");
     world.actions.next = { ok: false, reason: "stale", message: "moved" };
-    expect(String((await post(action, { ...fields, decision: "approve" })).headers.location)).toContain("n=stale");
+    const first = await formNow(`/plan/${TASK}`, "/decide");
+    expect(String((await post(first.action, { ...first.fields, decision: "approve" })).headers.location)).toContain("n=stale");
     world.actions.next = { ok: false, reason: "refused", message: "not you" };
-    expect(String((await post(action, { ...fields, decision: "approve" })).headers.location)).toContain("n=refused");
+    const second = await formNow(`/plan/${TASK}`, "/decide");
+    expect(String((await post(second.action, { ...second.fields, decision: "approve" })).headers.location)).toContain("n=refused");
     const page = await get(`${base}/plan/${TASK}?n=stale`);
     expect(page.body).toContain("It changed while you were looking");
     expect((await get(`${base}/plan/${TASK}?n=<script>alert(1)</script>`)).body).not.toContain("<script>");
@@ -226,12 +253,16 @@ describe("approving a plan", () => {
 
 describe("comments", () => {
   it("adds a comment on a claim or the whole plan, and refuses an odd target", async () => {
-    const { action, fields } = formOf((await get(`${base}/plan/${TASK}`)).body, "/comment");
+    const { action, fields } = await formNow(`/plan/${TASK}`, "/comment");
     expect(String((await post(action, { ...fields, target: "1.1", text: "Why not two tries?" })).headers.location)).toContain("n=commented");
-    expect(world.actions.calls[0]).toMatchObject({ name: "addComment", input: { taskId: TASK, target: "1.1", text: "Why not two tries?" } });
-    expect(String((await post(action, { ...fields, target: "", text: "Overall: good." })).headers.location)).toContain("n=commented");
-    expect(String((await post(action, { ...fields, target: "../../x", text: "hi" })).headers.location)).toContain("n=invalid");
-    expect(String((await post(action, { ...fields, target: "1", text: "  " })).headers.location)).toContain("n=invalid");
+    expect(world.actions.calls[0]).toMatchObject({ name: "addComment", input: { taskId: TASK, target: "1.1", text: "Why not two tries?", revision: 3 } });
+    const second = await formNow(`/plan/${TASK}`, "/comment");
+    expect(String((await post(second.action, { ...second.fields, target: "", text: "Overall: good." })).headers.location)).toContain("n=commented");
+    expect(String((await post(second.action, { ...second.fields, target: "../../x", text: "hi" })).headers.location)).toContain("n=form");
+    const third = await formNow(`/plan/${TASK}`, "/comment");
+    expect(String((await post(third.action, { ...third.fields, target: "../../x", text: "hi" })).headers.location)).toContain("n=invalid");
+    const fourth = await formNow(`/plan/${TASK}`, "/comment");
+    expect(String((await post(fourth.action, { ...fourth.fields, target: "1", text: "  " })).headers.location)).toContain("n=invalid");
     expect(world.actions.calls).toHaveLength(2);
   });
 });
@@ -250,12 +281,14 @@ describe("design review", () => {
   });
 
   it("approves or rejects with the proof, and a rejection needs a reason", async () => {
-    const { action, fields } = formOf((await get(`${base}/design/${TASK}`)).body, "/decide");
-    expect(String((await post(action, { ...fields, decision: "reject" })).headers.location)).toContain("n=invalid");
-    expect(String((await post(action, { ...fields, decision: "reject", note: "Too cramped." })).headers.location)).toContain("n=rejected");
-    expect(String((await post(action, { ...fields, decision: "approve" })).headers.location)).toContain("n=approved");
+    const first = await formNow(`/design/${TASK}`, "/decide");
+    expect(String((await post(first.action, { ...first.fields, decision: "reject" })).headers.location)).toContain("n=invalid");
+    const second = await formNow(`/design/${TASK}`, "/decide");
+    expect(String((await post(second.action, { ...second.fields, decision: "reject", note: "Too cramped." })).headers.location)).toContain("n=rejected");
+    const third = await formNow(`/design/${TASK}`, "/decide");
+    expect(String((await post(third.action, { ...third.fields, decision: "approve" })).headers.location)).toContain("n=approved");
     expect(world.actions.calls.map((call) => call.name)).toEqual(["decideDesign", "decideDesign"]);
-    expect(world.actions.calls[1]!.input).toMatchObject({ approval: DESIGN_OFFER, proof: { method: LOCAL_SESSION_METHOD, requestId: DESIGN_OFFER.requestId, token } });
+    expect(world.actions.calls[1]!.input).toMatchObject({ approval: DESIGN_OFFER, proof: { method: LOCAL_SESSION_METHOD, requestId: DESIGN_OFFER.requestId, token: expect.stringMatching(/^p1\./) as string } });
   });
 
   it("a design form does not work on the plan route", async () => {
@@ -278,6 +311,14 @@ describe("lessons", () => {
     expect(String((await post(action, { ...fields, action: "retire" })).headers.location)).toContain("n=form");
     expect(String((await post(action, { ...fields, lessonId: "L2" })).headers.location)).toContain("n=form");
     expect(world.actions.calls).toHaveLength(1);
+  });
+
+  it("refuses a lesson form after the lesson changed state, so an old form cannot bring a retired lesson back", async () => {
+    const { action, fields } = formOf((await get(`${base}/lessons`)).body, "/lessons/act");
+    world.data.lessons = world.data.lessons.map((lesson) => (lesson.id === "L1" ? { ...lesson, status: "retired" as const } : lesson));
+    expect(String((await post(action, fields)).headers.location)).toContain("n=form");
+    expect(String((await post(action, { ...fields, lessonId: "L404" })).headers.location)).toContain("n=missing");
+    expect(world.actions.calls).toEqual([]);
   });
 });
 
@@ -330,11 +371,17 @@ describe("what the pages show", () => {
     expect((await get(`${base}/proof/${OTHER_TASK}`)).status).toBe(404);
   });
 
-  it("builds links that carry a fresh session", async () => {
-    const link = server.link(`/plan/${TASK}`);
-    const url = new URL(link);
-    expect(url.origin).toBe(server.origin);
-    expect((await get(`${url.pathname}`)).status).toBe(200);
+  it("builds links in one owner session, so a second link does not push the first out, and a fresh one on request", async () => {
+    const first = new URL(server.link(`/plan/${TASK}`));
+    expect(first.origin).toBe(server.origin);
+    expect((await get(first.pathname)).status).toBe(200);
+    for (let index = 0; index < 20; index += 1) server.link("/lessons");
+    expect((await get(first.pathname)).status).toBe(200);
+    expect(new URL(server.link("/", { fresh: true })).pathname).not.toBe(new URL(server.link("/")).pathname);
     expect(server.linkIn(token, "lessons")).toBe(`${server.origin}/s/${token}/lessons`);
+  });
+
+  it("does not read a notice code from the object prototype", async () => {
+    expect((await get(`${base}/?n=constructor`)).body).not.toContain("class=\"notice\"");
   });
 });

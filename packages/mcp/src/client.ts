@@ -54,6 +54,12 @@ export type TaskOwnershipResult = Exclude<TaskPeopleChangeResult, { status: "PEN
 };
 export type SessionMessageRead = z.output<typeof SessionMessageReaderSchema>;
 
+/**
+ * A local review page's address carries a session token in its path (`/s/<43 characters>/...`). Whoever holds it can approve what the page shows, and the
+ * agent that reads a tool result runs on the same machine, so such an address is never passed on: a person asks for it in their own terminal.
+ */
+const PAGE_TOKEN_PATH = /^\/s\/[A-Za-z0-9_-]{43}(?:\/|$)/;
+
 /** The hosts of a Code install on this machine: its local pages are plain http on one of these, so a link there is not refused for its scheme. */
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
@@ -68,7 +74,7 @@ function pinnedLink(value: unknown, baseUrl: string): string {
     const url = new URL(value);
     const base = new URL(baseUrl);
     const schemeOk = url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname) && base.protocol === "http:" && LOOPBACK_HOSTS.has(base.hostname));
-    return schemeOk && url.username === "" && url.password === "" && url.origin === base.origin ? value : "";
+    return schemeOk && !PAGE_TOKEN_PATH.test(url.pathname) && url.username === "" && url.password === "" && url.origin === base.origin ? value : "";
   } catch {
     return "";
   }

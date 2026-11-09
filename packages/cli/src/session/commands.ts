@@ -21,6 +21,8 @@ type Body = Record<string, unknown>;
 const TEXT_MAX = 10_000;
 /** The characters a web address may hold. Anything else (a space, a control or bidi character, a quote) is not printed. */
 const SAFE_URL = /^https?:\/\/[A-Za-z0-9._~:/?#@!$&'()*+,;=%[\]-]+$/;
+/** A local review page's address carries a session token in its path; whoever reads it can approve, and an agent reads terminal output, so it is never printed. */
+const PAGE_TOKEN_PATH = /^\/s\/[A-Za-z0-9_-]{43}(?:\/|$)/;
 /** The hosts of an install on this computer, whose local pages are plain http. */
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const URL_MAX = 2048;
@@ -36,7 +38,7 @@ export function safeUrl(value: unknown, origin: string): string | undefined {
     const url = new URL(value);
     const base = new URL(origin);
     const schemeOk = url.protocol === "https:" || (url.protocol === "http:" && base.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname) && LOOPBACK_HOSTS.has(base.hostname));
-    return schemeOk && url.username === "" && url.password === "" && url.origin === base.origin ? value : undefined;
+    return schemeOk && !PAGE_TOKEN_PATH.test(url.pathname) && url.username === "" && url.password === "" && url.origin === base.origin ? value : undefined;
   } catch {
     return undefined;
   }

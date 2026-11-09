@@ -313,7 +313,7 @@ describe("an install on this computer links to its local pages over plain http",
   };
 
   it("keeps an http link on the same loopback origin", async () => {
-    expect(await overLoopback(LOCAL, `${LOCAL}/s/abc/plan/1`)).toMatchObject({ link: `${LOCAL}/s/abc/plan/1` });
+    expect(await overLoopback(LOCAL, `${LOCAL}/app/sessions/${SES}`)).toMatchObject({ link: `${LOCAL}/app/sessions/${SES}` });
   });
 
   it.each([
@@ -323,6 +323,14 @@ describe("an install on this computer links to its local pages over plain http",
     ["a name that resolves to loopback", "http://localhost:4410/s/abc"],
   ])("leaves out %s", async (_name, bad) => {
     expect(await overLoopback(LOCAL, bad)).not.toHaveProperty("link");
+  });
+
+  it("never passes on a local page address, which carries a session token that can approve", async () => {
+    const token = "A".repeat(43);
+    for (const base of [LOCAL, CELL]) {
+      expect(await overLoopback(base, `${base}/s/${token}/plan/0b4f2b1e-3c6a-4d2e-9a77-5f1d8c0a1e11`)).not.toHaveProperty("link");
+      expect(await overLoopback(base, `${base}/s/${token}`)).not.toHaveProperty("link");
+    }
   });
 
   it("does not turn a hosted install's origin into one that allows http", async () => {

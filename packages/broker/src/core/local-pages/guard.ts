@@ -14,6 +14,9 @@
 // No response carries a CORS header. Nothing here logs a path, because the path holds the token.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
+/** What an approval proof is bound to: exactly the request, revision and content the person decided. */
+export interface ProofBinding { requestId: string; revision: number; artifactDigest: string }
+
 /** How long a session lasts when its creator does not say. */
 export const DEFAULT_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 /** How long a drawn form stays good. */
@@ -36,6 +39,9 @@ const sha256 = (value: string): string => createHash("sha256").update(value).dig
  */
 export class LocalPageSessions {
   private readonly sessions = new Map<string, LocalPageSession>();
+  private readonly byId = new Map<string, string>();
+  /** Signs approval proofs. It never leaves this object, so a proof cannot be made without it. */
+  private readonly proofKey = randomBytes(32);
 
   constructor(private readonly now: () => number = Date.now, private readonly random: (bytes: number) => Buffer = randomBytes) {}
 
@@ -45,12 +51,13 @@ export class LocalPageSessions {
     while (this.sessions.size >= MAX_SESSIONS) {
       const oldest = this.sessions.keys().next().value;
       if (oldest === undefined) break;
-      this.sessions.delete(oldest);
+      this.drop(oldest);
     }
     const token = this.random(32).toString("base64url");
     const key = sha256(token);
     const session: LocalPageSession = { id: key.slice(0, 12), expiresAt: this.now() + (options.ttlMs ?? DEFAULT_SESSION_TTL_MS), label: options.label ?? "" };
     this.sessions.set(key, session);
+    this.byId.set(session.id, key);
     return { token, session };
   }
 
@@ -61,7 +68,7 @@ export class LocalPageSessions {
     const session = this.sessions.get(key);
     if (session === undefined) return undefined;
     if (session.expiresAt <= this.now()) {
-      this.sessions.delete(key);
+      this.drop(key);
       return undefined;
     }
     return session;
@@ -72,16 +79,47 @@ export class LocalPageSessions {
   }
 
   revoke(token: string): void {
-    this.sessions.delete(sha256(token));
+    this.drop(sha256(token));
   }
 
   revokeAll(): void {
     this.sessions.clear();
+    this.byId.clear();
+  }
+
+  /**
+   * The proof token an approval carries: it names the session and is signed over that session and exactly this request, revision and digest. The page
+   * session's secret never leaves the server, and a proof for one approval is no use for another. Single use is the approvers' (`approvalProofKey`).
+   */
+  issueProof(sessionId: string, binding: ProofBinding): string {
+    return `p1.${sessionId}.${this.proofMac(sessionId, binding)}`;
+  }
+
+  /** True when the token is a proof issued here for exactly this binding, and its session is still alive. */
+  verifyProof(token: string, binding: ProofBinding): boolean {
+    const parts = token.split(".");
+    if (parts.length !== 3 || parts[0] !== "p1" || parts[1] === undefined || parts[2] === undefined) return false;
+    const key = this.byId.get(parts[1]);
+    const session = key === undefined ? undefined : this.sessions.get(key);
+    if (session === undefined || session.expiresAt <= this.now()) return false;
+    const given = Buffer.from(parts[2], "utf8");
+    const want = Buffer.from(this.proofMac(parts[1], binding), "utf8");
+    return given.length === want.length && timingSafeEqual(given, want);
+  }
+
+  private proofMac(sessionId: string, binding: ProofBinding): string {
+    return createHmac("sha256", this.proofKey).update(JSON.stringify(["local-session", sessionId, binding.requestId, binding.revision, binding.artifactDigest])).digest("base64url");
+  }
+
+  private drop(key: string): void {
+    const session = this.sessions.get(key);
+    if (session !== undefined) this.byId.delete(session.id);
+    this.sessions.delete(key);
   }
 
   private sweep(): void {
     const now = this.now();
-    for (const [key, session] of this.sessions) if (session.expiresAt <= now) this.sessions.delete(key);
+    for (const [key, session] of this.sessions) if (session.expiresAt <= now) this.drop(key);
   }
 }
 
@@ -148,29 +186,48 @@ const bindingText = (binding: FormBinding, expiresAt: number): string =>
   JSON.stringify([binding.sessionId, binding.action, binding.taskId ?? "", binding.requestId ?? "", binding.revision ?? -1, binding.artifactDigest ?? "", binding.subject ?? "", expiresAt]);
 
 export class FormTokens {
+  /** Tokens already used, with the time each stops being good anyway. A form is answered once: a second click or a replay is refused. */
+  private readonly used = new Map<string, number>();
+
   constructor(private readonly key: Buffer = randomBytes(32), private readonly now: () => number = Date.now) {}
+
+  /** Marks a verified token as used. False when it was already used. */
+  consume(token: string): boolean {
+    const now = this.now();
+    for (const [used, expiresAt] of this.used) if (expiresAt <= now) this.used.delete(used);
+    if (this.used.has(token)) return false;
+    const dot = token.indexOf(".");
+    this.used.set(token, Number(token.slice(0, dot)));
+    return true;
+  }
 
   issue(binding: FormBinding): string {
     const expiresAt = this.now() + FORM_TOKEN_TTL_MS;
-    return `${expiresAt}.${createHmac("sha256", this.key).update(bindingText(binding, expiresAt)).digest("base64url")}`;
+    // Each form is its own: the nonce makes two forms for the same content different tokens, so one being used does not use the other.
+    const nonce = randomBytes(9).toString("base64url");
+    return `${expiresAt}.${nonce}.${this.mac(binding, expiresAt, nonce)}`;
   }
 
   /** True only when the token was issued for exactly this binding and has not expired. */
   verify(token: string | undefined, binding: FormBinding): boolean {
     if (token === undefined) return false;
-    const dot = token.indexOf(".");
-    if (dot < 1) return false;
-    const expiresAt = Number(token.slice(0, dot));
+    const [expires, nonce, mac, ...extra] = token.split(".");
+    if (expires === undefined || nonce === undefined || mac === undefined || extra.length > 0) return false;
+    const expiresAt = Number(expires);
     if (!Number.isSafeInteger(expiresAt) || expiresAt <= this.now()) return false;
-    const given = Buffer.from(token.slice(dot + 1), "utf8");
-    const want = Buffer.from(createHmac("sha256", this.key).update(bindingText(binding, expiresAt)).digest("base64url"), "utf8");
+    const given = Buffer.from(mac, "utf8");
+    const want = Buffer.from(this.mac(binding, expiresAt, nonce), "utf8");
     return given.length === want.length && timingSafeEqual(given, want);
+  }
+
+  private mac(binding: FormBinding, expiresAt: number, nonce: string): string {
+    return createHmac("sha256", this.key).update(`${bindingText(binding, expiresAt)}\0${nonce}`).digest("base64url");
   }
 }
 
 // ---- failed attempts
 
-/** Counts requests that named a session that does not exist, so a loop guessing tokens is slowed to a stop. */
+/** Counts requests that named a session that does not exist. Past the limit each such request is answered 429 until the window ends; a good token is never affected. */
 export class FailureLimiter {
   private count = 0;
   private windowStart = 0;
@@ -188,7 +245,4 @@ export class FailureLimiter {
     return this.count > this.limit;
   }
 
-  blocked(): boolean {
-    return this.now() - this.windowStart < this.windowMs && this.count > this.limit;
-  }
 }

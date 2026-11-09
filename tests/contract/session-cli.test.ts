@@ -41,8 +41,15 @@ async function cli(script: Script) {
 describe("printing a link", () => {
   it("accepts https and, for an install on this computer, http on the same loopback origin", () => {
     expect(safeUrl("https://app.example.test/app/sessions/x", "https://app.example.test")).toBeDefined();
-    expect(safeUrl("http://127.0.0.1:4410/s/abc/plan/1", ORIGIN)).toBe("http://127.0.0.1:4410/s/abc/plan/1");
+    expect(safeUrl("http://127.0.0.1:4410/app/sessions/x", ORIGIN)).toBe("http://127.0.0.1:4410/app/sessions/x");
     expect(safeUrl("http://localhost:4410/x", "http://localhost:4410")).toBeDefined();
+  });
+
+  it("never prints a local page address, which carries a session token that can approve", () => {
+    const token = "B".repeat(43);
+    expect(safeUrl(`${ORIGIN}/s/${token}/plan/1`, ORIGIN)).toBeUndefined();
+    expect(safeUrl(`https://app.example.test/s/${token}`, "https://app.example.test")).toBeUndefined();
+    expect(safeUrl(`${ORIGIN}/s/short/plan/1`, ORIGIN)).toBeDefined();
   });
 
   it("refuses http anywhere else, another port or host, and credentials", () => {
@@ -66,10 +73,10 @@ describe("the session commands", () => {
   });
 
   it("starts work on a project and prints the link to the local page", async () => {
-    const h = await cli(() => ({ body: { task: { taskId: "0b4f2b1e-3c6a-4d2e-9a77-5f1d8c0a1e11", sessionId: SESSION, sessionUrl: `${ORIGIN}/s/token/plan/0b4f2b1e-3c6a-4d2e-9a77-5f1d8c0a1e11` } } }));
+    const h = await cli(() => ({ body: { task: { taskId: "0b4f2b1e-3c6a-4d2e-9a77-5f1d8c0a1e11", sessionId: SESSION, sessionUrl: `${ORIGIN}/app/sessions/${SESSION}` } } }));
     expect(await h.run(["session", "start", "fix the flaky retry test", "--project", "payments", "--workflow", "full"]), h.errors()).toBe(0);
     expect(h.calls[0]).toMatchObject({ method: "POST", path: "/v1/dev/tasks", body: { project: "payments", instructions: "fix the flaky retry test", workflow: true, workflowPath: "FULL" } });
-    expect(h.text()).toContain(`${ORIGIN}/s/token/plan/`);
+    expect(h.text()).toContain(`${ORIGIN}/app/sessions/${SESSION}`);
   });
 
   it("refuses a link from the server that points elsewhere, and falls back to the session's own address", async () => {

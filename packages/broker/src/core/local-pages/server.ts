@@ -19,8 +19,8 @@ export interface LocalPagesServer {
   origin: string;
   port: number;
   sessions: LocalPageSessions;
-  /** Opens a session and returns the address of a page in it (the index when no path is given). The token is in the address: show it to the person only. */
-  link(path?: string, options?: { ttlMs?: number; label?: string }): string;
+  /** The address of a page in the owner's session, opened on the first call and reused until it ends (`fresh` opens another). The token is in the address: a person's terminal only, never an MCP result, a file or a pull request, since whoever holds it can approve. */
+  link(path?: string, options?: { ttlMs?: number; label?: string; fresh?: boolean }): string;
   /** The same, for a session that already exists. */
   linkIn(token: string, path?: string): string;
   close(): Promise<void>;
@@ -54,7 +54,7 @@ const NOTICES: Record<string, string> = {
   refused: "That was not accepted.",
   invalid: "That was not understood.",
   missing: "That is no longer there.",
-  form: "That form has expired. Read the page again.",
+  form: "That form has expired or was already used. Read the page again.",
 };
 
 type Route = { method: "GET" | "POST"; pattern: RegExp; handle: (request: Req, match: RegExpExecArray) => Promise<Reply> };
@@ -67,7 +67,7 @@ const notFound = (): Reply => ({ status: 404, type: "text/plain; charset=utf-8",
 
 function noticeOf(url: URL): string | undefined {
   const code = url.searchParams.get("n");
-  return code === null ? undefined : NOTICES[code];
+  return code === null || !Object.hasOwn(NOTICES, code) ? undefined : NOTICES[code];
 }
 
 const outcomeCode = (result: LocalActionResult, success: string): string => (result.ok ? success : result.reason === "stale" ? "stale" : result.reason === "not_found" ? "missing" : result.reason === "invalid" ? "invalid" : "refused");
@@ -78,6 +78,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
   const forms = new FormTokens(randomBytes(32), now);
   const limiter = new FailureLimiter(60, 60_000, now);
   let origin = "";
+  let ownerToken: string | undefined;
 
   const contextFor = (request: Req): PageContext => {
     const notice = noticeOf(request.url);
@@ -92,11 +93,17 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
 
   /** The proof an approval form carries: the page session is the evidence that the local owner is here. */
   const proofFor = (request: Req, offer: ApprovalOffer): ApprovalProof => ({
-    proofId: randomUUID(), method: LOCAL_SESSION_METHOD, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest, token: request.session.token,
+    proofId: randomUUID(), method: LOCAL_SESSION_METHOD, requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest,
+    // Not the session's secret: a token signed over this session and exactly this request, revision and digest.
+    token: sessions.issueProof(request.session.id, { requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest }),
   });
 
   /** The values a write form named, and whether its form token binds them. Every value a write uses comes from here, never from the form unchecked. */
-  const verified = (request: Req, binding: Omit<FormBinding, "sessionId">): boolean => forms.verify(request.form?.get("ft") ?? undefined, { ...binding, sessionId: request.session.id });
+  const verified = (request: Req, binding: Omit<FormBinding, "sessionId">): boolean => {
+    const given = request.form?.get("ft") ?? undefined;
+    // A form answers once: a second click on the same form, or a replay, finds its token used.
+    return forms.verify(given, { ...binding, sessionId: request.session.id }) && forms.consume(given as string);
+  };
   const text = (request: Req, name: string): string => {
     const value = request.form?.get(name) ?? "";
     return [...value].length > TEXT_MAX ? [...value].slice(0, TEXT_MAX).join("") : value;
@@ -135,7 +142,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const target = (request.form?.get("target") ?? "").trim();
       const body = text(request, "text").trim();
       if (body === "" || !/^(|[0-9]{1,3}(\.[0-9]{1,3}){0,2}|[A-Za-z0-9_-]{1,40})$/.test(target)) return redirect(`${request.base}/plan/${taskId}?n=invalid`);
-      const result = await options.actions.addComment({ taskId, target, text: body });
+      const result = await options.actions.addComment({ taskId, target, text: body, revision });
       return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "commented")}#comments`);
     } },
     { method: "GET", pattern: new RegExp(`^/design/(${TASK_ID})$`), handle: async (request, match) => {
@@ -167,7 +174,10 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       const lessonId = request.form?.get("lessonId") ?? "";
       const action = request.form?.get("action");
       if (!new RegExp(`^${ID}$`).test(lessonId) || (action !== "approve" && action !== "retire" && action !== "wrong")) return redirect(`${request.base}/lessons?n=invalid`);
-      if (!verified(request, { action: "lesson.act", subject: `${lessonId}:${action}` })) return redirect(`${request.base}/lessons?n=form`);
+      // The form is good only for the lesson as it was drawn: its state is part of what the token binds.
+      const lesson = (await options.data.listLessons()).find((candidate) => candidate.id === lessonId);
+      if (lesson === undefined) return redirect(`${request.base}/lessons?n=missing`);
+      if (!verified(request, { action: "lesson.act", subject: `${lessonId}:${action}:${lesson.status}` })) return redirect(`${request.base}/lessons?n=form`);
       const result = await options.actions.lessonAction({ lessonId, action });
       return redirect(`${request.base}/lessons?n=${outcomeCode(result, "lesson")}`);
     } },
@@ -180,7 +190,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
   const send = (response: ServerResponse, reply: Reply, head: boolean): void => {
     const body = typeof reply.body === "string" ? Buffer.from(reply.body, "utf8") : Buffer.from(reply.body);
     response.writeHead(reply.status, {
-      "cache-control": "no-store", pragma: "no-cache", "referrer-policy": "no-referrer", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
+      "cache-control": "no-store", pragma: "no-cache", "referrer-policy": "same-origin", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
       "x-robots-tag": "noindex, nofollow", "cross-origin-resource-policy": "same-origin", "cross-origin-opener-policy": "same-origin",
       "content-security-policy": "default-src 'none'; frame-ancestors 'none'", ...reply.headers,
       "content-type": reply.type, "content-length": body.byteLength,
@@ -263,7 +273,11 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
   const linkIn = (token: string, path = "/"): string => `${origin}/s/${token}${path.startsWith("/") ? path : `/${path}`}`;
   return {
     origin, port: address.port, sessions,
-    link: (path = "/", sessionOptions = {}) => linkIn(sessions.mint(sessionOptions).token, path),
+    link: (path = "/", sessionOptions = {}) => {
+      // One session serves the owner's links until it ends, so opening a second link does not push the first tab's session out of the cap.
+      if (sessionOptions.fresh !== true && (ownerToken === undefined || !sessions.isValidSecret(ownerToken))) ownerToken = sessions.mint(sessionOptions).token;
+      return linkIn(sessionOptions.fresh === true ? sessions.mint(sessionOptions).token : (ownerToken as string), path);
+    },
     linkIn,
     async close() {
       sessions.revokeAll();

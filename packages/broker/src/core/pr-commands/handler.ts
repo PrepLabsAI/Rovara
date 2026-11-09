@@ -3,7 +3,7 @@
 // is this comment good enough to act on? A comment is a claim, not a fact, so:
 //
 //   - only a freshly created comment runs; an edit never does (a person could approve a plan, then edit the comment into something else);
-//   - the permission of its author comes from the code host, looked up by the comment's id, never from the event's own payload;
+//   - the comment itself (text, author, time, permission) is read back from the code host by id; the webhook only names it;
 //   - an approval is a W0 `ApprovalProof` with method `code-host-comment` and the comment id as its token: the task flow hands it to the `Approvers`
 //     seam, which looks the comment up again and checks that it names this request, revision and digest;
 //   - a comment posted before the plan it would approve was posted does not approve that plan (the plan moved on; the person is asked again);
@@ -17,7 +17,7 @@ import {
 import { CODE_HOST_COMMENT_METHOD } from "../../ports/policy-defaults.js";
 import type { ApprovalOffer, LocalActionResult } from "../local-pages/views.js";
 
-/** A comment on a pull request or an issue, as the code host adapter reports it. */
+/** What the webhook says happened. Only the reference is believed: everything else is read back from the host (`PrCommentHost.lookupComment`). */
 export interface PrCommentEvent {
   companyId: string;
   /** Only `created` runs. */
@@ -26,20 +26,28 @@ export interface PrCommentEvent {
   repository: string;
   number: number;
   commentId: string;
-  body: string;
-  /** When the comment was posted (ISO time), as the code host recorded it. */
-  createdAt: string;
-  author: ExternalAccountRef;
-  /** The author is an automation account (including Rovara's own). */
-  authorIsBot: boolean;
 }
 
 export type CommentPermission = "none" | "read" | "write" | "admin";
 
-/** The code host adapter's answers. Each looks the comment up at the host; none believes the event. */
+/** A comment as the code host itself reports it. */
+export interface LookedUpComment {
+  body: string;
+  /** When the host recorded the comment (ISO time). */
+  createdAt: string;
+  author: ExternalAccountRef;
+  /** The author's permission on the comment's repository. */
+  authorPermission: CommentPermission;
+  /** The author is an automation account. */
+  authorIsBot: boolean;
+  /** Rovara posted it (with its own token, or the owner's: the adapter knows the comment ids Rovara wrote). */
+  postedByRovara: boolean;
+}
+
+/** The code host adapter's side. */
 export interface PrCommentHost {
-  /** The permission the comment's author holds on the comment's repository, looked up by the comment's id. */
-  authorPermission(event: PrCommentEvent): Promise<CommentPermission>;
+  /** Reads the comment back by repository and id, so no text, author or time comes from the webhook payload. Undefined when it is gone. */
+  lookupComment(ref: { repository: string; number: number; commentId: string }): Promise<LookedUpComment | undefined>;
   /** Posts a short reply under the comment. A failure to reply never undoes a command. */
   reply(event: PrCommentEvent, text: string): Promise<void>;
 }
@@ -64,7 +72,7 @@ export interface PrCommandWorld {
 }
 
 export type PrCommandOutcome =
-  | { handled: false; reason: "not_a_command" | "not_created" | "bot" | "no_permission" | "duplicate" | "other_command" }
+  | { handled: false; reason: "not_a_command" | "not_created" | "bot" | "own_comment" | "gone" | "no_permission" | "duplicate" | "other_command" }
   | { handled: true; command: "approve" | "changes" | "lesson" | "stop" | "invalid"; result: "done" | LocalActionResult };
 
 export interface PrCommandsOptions {
@@ -95,12 +103,14 @@ export function createPrCommentCommands(options: PrCommandsOptions): { handle(ev
   return {
     async handle(event) {
       if (event.action !== "created") return { handled: false, reason: "not_created" };
-      if (event.authorIsBot) return { handled: false, reason: "bot" };
-      const parsed = parseRovaraComment(event.body);
+      const comment = await options.host.lookupComment({ repository: event.repository, number: event.number, commentId: event.commentId });
+      if (comment === undefined) return { handled: false, reason: "gone" };
+      if (comment.postedByRovara) return { handled: false, reason: "own_comment" };
+      if (comment.authorIsBot) return { handled: false, reason: "bot" };
+      const parsed = parseRovaraComment(comment.body);
       if (parsed.kind === "reply") return { handled: false, reason: "not_a_command" };
       if (parsed.kind === "other" || parsed.kind === "file") return { handled: false, reason: "other_command" };
-      const permission = await options.host.authorPermission(event);
-      if (!SPEAKS.has(permission)) return { handled: false, reason: "no_permission" };
+      if (!SPEAKS.has(comment.authorPermission)) return { handled: false, reason: "no_permission" };
 
       // One comment, one run. The claim is taken first; a failure that the host could retry gives it back.
       const key = { pk: companyScoped(event.companyId === "" ? IMPLICIT_COMPANY_ID : event.companyId, CLAIMS), sk: `${event.repository}#${event.commentId}` };
@@ -132,15 +142,23 @@ export function createPrCommentCommands(options: PrCommandsOptions): { handle(ev
           await say(event, message);
           return { handled: true, command: "approve", result: { ok: false, reason: "refused", message } };
         }
-        // A comment written before the plan was posted answers an older plan.
-        if (Date.parse(event.createdAt) < Date.parse(pending.postedAt)) {
+        // The permission above is on the comment's repository. The task's repository must be that one, or a writer on another repository could decide this task.
+        if (pending.repository.toLowerCase() !== event.repository.toLowerCase()) {
+          const message = "That is not the repository this task works on. Nothing was sent.";
+          await say(event, message);
+          return { handled: true, command: parsed.kind, result: { ok: false, reason: "refused", message } };
+        }
+        // A comment written before the plan was posted answers an older plan. A time that cannot be read counts as before.
+        const wrote = Date.parse(comment.createdAt);
+        const posted = Date.parse(pending.postedAt);
+        if (!Number.isFinite(wrote) || !Number.isFinite(posted) || wrote < posted) {
           const message = "That was written before the latest version was posted, so nothing was sent. Read the latest and say it again.";
           await say(event, message);
           return { handled: true, command: parsed.kind, result: { ok: false, reason: "stale", message } };
         }
         const proof: ApprovalProof = {
           proofId: `pr-comment-${event.commentId}`, method: CODE_HOST_COMMENT_METHOD, requestId: pending.approval.requestId, revision: pending.approval.revision,
-          artifactDigest: pending.approval.artifactDigest, token: event.commentId, claimedAccount: event.author,
+          artifactDigest: pending.approval.artifactDigest, token: event.commentId, claimedAccount: comment.author,
         };
         const result = await options.world.decide({
           taskId: pending.taskId, decision: parsed.kind, ...(parsed.kind === "changes" ? { note: parsed.text } : {}), approval: pending.approval, proof,

@@ -47,7 +47,7 @@ export function layout(input: { title: string; nonce: string; base: string; body
   return [
     "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">",
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
-    "<meta name=\"referrer\" content=\"no-referrer\"><meta name=\"robots\" content=\"noindex, nofollow\">",
+    "<meta name=\"referrer\" content=\"same-origin\"><meta name=\"robots\" content=\"noindex, nofollow\">",
     `<title>${esc(input.title)}</title>`,
     `<style nonce="${esc(input.nonce)}">${TASK_PAGE_STYLE}${EXTRA_STYLE}</style></head><body>`,
     `<nav class="pages" aria-label="Rovara pages"><a href="${esc(input.base)}/">Waiting for you</a><a href="${esc(input.base)}/lessons">Lessons</a></nav>`,

@@ -121,7 +121,7 @@ export function renderDesignReview(context: PageContext, view: DesignReviewView)
 
 export function renderLessons(context: PageContext, lessons: readonly LessonView[]): string {
   const form = (lesson: LessonView, action: "approve" | "retire" | "wrong", label: string, cls = "") =>
-    `<form method="post" action="${esc(context.base)}/lessons/act" class="row">${hidden("lessonId", lesson.id)}${hidden("action", action)}${hidden("ft", context.formToken({ action: "lesson.act", subject: `${lesson.id}:${action}` }))}<button type="submit" class="${cls}">${esc(label)}</button></form>`;
+    `<form method="post" action="${esc(context.base)}/lessons/act" class="row">${hidden("lessonId", lesson.id)}${hidden("action", action)}${hidden("ft", context.formToken({ action: "lesson.act", subject: `${lesson.id}:${action}:${lesson.status}` }))}<button type="submit" class="${cls}">${esc(label)}</button></form>`;
   const rows = lessons.map((lesson) => `<tr><td>${untrusted(lesson.text)}<br><span class="muted">${untrusted(lesson.scope)}</span></td><td>${esc(lesson.status)}</td>`
     + `<td>${lesson.usedIn.length === 0 ? "<span class=\"muted\">not used yet</span>" : lesson.usedIn.slice(0, 5).map((use) => `<a href="${esc(context.base)}/proof/${esc(use.taskId)}">${untrusted(use.title)}</a>`).join("<br>")}</td>`
     + `<td>${lesson.status === "proposed" ? form(lesson, "approve", "Approve", "primary") : ""}${lesson.status !== "retired" ? form(lesson, "wrong", "Wrong", "danger") + form(lesson, "retire", "Retire") : ""}</td></tr>`);
