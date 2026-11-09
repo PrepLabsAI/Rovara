@@ -51,7 +51,7 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string; env
   if (extra.root === undefined) cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-  const machines = new FakeWorkerMachines({ startingChecks: 0, features: ["task.workflowMode"] });
+  const machines = new FakeWorkerMachines({ startingChecks: 0, features: ["task.workflowMode", "model.route"] });
   /** The addresses the server asked the browser to open: the only place a page address goes. */
   const opened: string[] = [];
   const runtime: LocalRuntime = await startLocalRuntime({
@@ -403,6 +403,8 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const plan = await h.nextJob(workspaceId, seen);
     const save = (content: string) => h.callback(plan, "artifacts", { name: "plan.md", mediaType: "text/markdown", content });
     expect((await save(PLAN_TEXT)).status).toBe(200);
+    // N7: an artifact name is kept once per operation. Understand and Plan post each name once, so slice 1 has no name a worker may replace; when the coding step is wired, a name the worker
+    // contract defines as replaceable (a per-round file) must be listed in `callbacks.ts` before it may be posted twice. This pins the refusal until then.
     // Within the run, the same bytes again are the same artifact (a retried post); other bytes are refused.
     expect((await save(PLAN_TEXT)).status).toBe(200);
     expect((await save("# Plan\n\nSomething else.\n")).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
@@ -593,6 +595,41 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect((await post()).status).toBe(429);
     release();
     expect((await first).status).toBe(200);
+  });
+
+  it("gives a step the model proxy: the capability lists model-access, the payload names the route, a token is minted while the operation runs and refused after it ends (L9a wiring)", async () => {
+    const key = ["sk", "ant", "x".repeat(24)].join("-");
+    const h = await launch({ environment: { ANTHROPIC_API_KEY: key } });
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "21212121-2121-4212-8212-212121212121", project: "payments", instructions: "x", workflow: true } })).body.task.taskId;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: {} });
+    const understand = await h.nextJob(workspaceId, seen);
+    expect((understand.payload as { modelRoute?: { alias: string; api: string } }).modelRoute).toMatchObject({ alias: expect.stringMatching(/^anthropic\//) as unknown as string, api: "anthropic-messages" });
+    const access = () => new Promise<{ status: number; text: string }>((resolve, reject) => {
+      const req = httpRequest({
+        host: "127.0.0.1", port: h.runtime.callbackPort, method: "GET", path: "/v1/internal/model-access", setHost: false,
+        // The worker's own egress gateway stamps the workspace the call comes from.
+        headers: { host: `host.docker.internal:${h.runtime.callbackPort}`, "x-agentx-callback-capability": understand.callbackCapability, "x-rovara-workspace": understand.workspaceId },
+      }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => resolve({ status: response.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    const minted = await access();
+    expect(minted.status, minted.text).toBe(200);
+    // The worker gets a token of the proxy's, never the owner's key.
+    expect(minted.text).not.toContain(key);
+    expect(h.bodies.join("")).not.toContain(key);
+    await h.callback(understand, "result", { status: "SUCCEEDED" });
+    const after = await access();
+    expect(after.status).toBeGreaterThanOrEqual(400);
+    expect(after.text).not.toContain(key);
+    // A step the worker cannot route (no model.route) is not sent at all: a route is never dropped.
   });
 });
 
