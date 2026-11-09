@@ -213,11 +213,19 @@ the worker's own workspace on each, and removes any such header the worker sent,
 - The key is never in the worker's environment, in a log, in an event or in an answer. A provider's error text is shortened and scrubbed before
   the worker sees it, and an answer that contains the key is cut off. A spec's environment may not carry a model key, a provider's address or
   AWS credentials (`DockerWorkerMachines` refuses them).
-- A task budget is held in the proxy: with a price table (`metering` adapter) and a budget on the operation's grant, a call is refused with the
-  words the worker reads as "the task's budget is spent" once the spend reaches it. A model with no price cannot be held to a budget and is refused.
-  Code's default price table is empty, so a budget needs a price table first.
-- Not here: Bedrock (it needs the computer's AWS sign-in; list it in the 51 gaps), design-review key slots, and a spend ledger that survives a
-  broker restart (a restarted broker starts each operation's spend at zero).
+- A task budget is held in the proxy, and held before the money is spent: with a price table (`metering` adapter) and a budget on the operation's grant, each call's
+  worst case (its output limit, or 64,000 tokens when it names none, and an input of two tokens to the byte) is reserved against the budget before the call is
+  forwarded, in the same step as the check, and settled to what the call really used afterwards. Parallel calls therefore cannot get past the budget or the
+  per-operation cap (8 calls). A call that did not finish cleanly (the worker cut it off, the stream broke, the time ran out) or whose provider reported no usage
+  is charged that worst case. A call over the budget is refused with the words the worker reads as "the task's budget is spent". A model with no price, or priced
+  in another currency than the budget, cannot be held to it and is refused. Code's default price table is empty, so a budget needs a price table first.
+- Each operation may have three live tokens (minting a fourth ends the oldest). Only the worker's own function tools are served: a tool the provider would run
+  (web search, code execution, MCP, computer use, file search) is refused, as it is in Cloud's guard, and so is a `tool_choice` that names one.
+- A spec's environment may not carry a model key, a provider's address, any `AWS_*` name or a proxy variable (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`).
+- Budgets are kept in memory, per operation: a restarted broker starts every operation's spend at zero, and a new operation of the same task starts at zero too, so the
+  task flow must pass the task's REMAINING budget in the grant it describes (not its full budget). A spend record is freed when the proxy sees its operation has ended
+  (the task flow can also call `modelProxy.tokens.forgetOperation`). Both are remaining gaps until a durable ledger exists.
+- Not here: Bedrock (it needs the computer's AWS sign-in; list it in the 51 gaps) and design-review key slots.
 - The task flow turns it on: its dispatch lists the `model-access` action in the worker's capability and gives `startLocalRuntime` a
   `modelGrants` source (`capabilityModelGrants`) that says which models and what budget an operation has (`localRoute` makes a model's route).
 

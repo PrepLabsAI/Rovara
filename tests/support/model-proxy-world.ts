@@ -37,7 +37,7 @@ export const PRICES: PriceTable = {
 };
 
 export interface ProviderCall { provider: "anthropic" | "openai" | "openrouter"; path: string; headers: Record<string, string>; body: Record<string, unknown> }
-export type ProviderMode = "ok" | "unauthorized-echo" | "rate-limit" | "echo-key-in-stream" | "echo-key-whole" | "redirect" | "server-error" | "no-usage" | "slow";
+export type ProviderMode = "ok" | "split-key-in-stream" | "flood" | "cut" | "unauthorized-echo" | "rate-limit" | "echo-key-in-stream" | "echo-key-whole" | "redirect" | "server-error" | "no-usage" | "slow";
 
 /** One fake server standing in for the three providers (they differ by path). It records what it was sent. */
 export async function startFakeProvider(): Promise<{ url: string; calls: ProviderCall[]; mode: ProviderMode; aborted: number; close(): Promise<void> }> {
@@ -61,6 +61,31 @@ export async function startFakeProvider(): Promise<{ url: string; calls: Provide
       case "redirect": response.writeHead(307, { location: `http://127.0.0.1:1/followed?k=${key}` }); return void response.end();
       default:
     }
+    if (state.mode === "split-key-in-stream") {
+      // The key arrives in two network chunks, with a pause between them.
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      const line = `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: `the key is ${key} ok` } })}\n\n`;
+      const cut = line.indexOf(key) + Math.floor(key.length / 2);
+      response.write(line.slice(0, cut));
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      response.write(line.slice(cut));
+      return void response.end();
+    }
+    if (state.mode === "cut") {
+      // The provider's connection dies in the middle of the answer.
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 1_000, output_tokens: 1 } } })}\n\n`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return void response.destroy();
+    }
+    if (state.mode === "flood") {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      const filler = `data: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "x".repeat(60_000) } })}\n\n`;
+      for (let index = 0; index < 600 && !response.destroyed; index += 1) {
+        if (!response.write(filler)) await new Promise<void>((resolve) => { response.once("drain", resolve); response.once("close", resolve); });
+      }
+      return void response.end();
+    }
     const stream = body.stream === true;
     const text = state.mode === "echo-key-in-stream" || state.mode === "echo-key-whole" ? `here is the key ${key}` : "hello";
     const usage = state.mode === "no-usage";
@@ -78,15 +103,17 @@ export async function startFakeProvider(): Promise<{ url: string; calls: Provide
       return void response.end();
     }
     if (provider === "openai") {
-      if (!stream) return json(200, { id: "r", output: [{ type: "message", content: [{ type: "output_text", text }] }], usage: { input_tokens: 2_000, output_tokens: 300, input_tokens_details: { cached_tokens: 500 } } });
+      if (!stream) return json(200, { id: "r", output: [{ type: "message", content: [{ type: "output_text", text }] }], ...(usage ? {} : { usage: { input_tokens: 2_000, output_tokens: 300, input_tokens_details: { cached_tokens: 500 } } }) });
       response.writeHead(200, { "content-type": "text/event-stream" });
       response.write(`event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", delta: text })}\n\n`);
+      if (state.mode === "slow") await new Promise((resolve) => setTimeout(resolve, 400));
       response.write(`event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { usage: { input_tokens: 2_000, output_tokens: 300, input_tokens_details: { cached_tokens: 500 } } } })}\n\n`);
       return void response.end();
     }
     if (!stream) return json(200, { id: "c", choices: [{ index: 0, message: { role: "assistant", content: text } }], usage: { prompt_tokens: 4_000, completion_tokens: 100, prompt_tokens_details: { cached_tokens: 1_000 } } });
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.write(`data: ${JSON.stringify({ id: "c", choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })}\n\n`);
+    if (state.mode === "slow") await new Promise((resolve) => setTimeout(resolve, 400));
     response.write(`data: ${JSON.stringify({ id: "c", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], ...(usage ? {} : { usage: { prompt_tokens: 4_000, completion_tokens: 100, prompt_tokens_details: { cached_tokens: 1_000 } } }) })}\n\n`);
     response.write("data: [DONE]\n\n");
     response.end();
@@ -126,13 +153,13 @@ export interface ModelProxyWorld {
   directory: string;
 }
 
-export async function startModelProxyWorld(options: { ttlSeconds?: number; now?: () => number; fetch?: typeof fetch; maxConcurrentPerOperation?: number } = {}): Promise<ModelProxyWorld> {
+export async function startModelProxyWorld(options: { ttlSeconds?: number; now?: () => number; fetch?: typeof fetch; maxConcurrentPerOperation?: number; keyDelayMs?: number; requestTimeoutMs?: number } = {}): Promise<ModelProxyWorld> {
   const provider = await startFakeProvider();
   const directory = await mkdtemp(join(tmpdir(), "model-proxy-"));
   const keys = { anthropic: fakeKey("sk-ant"), openai: fakeKey("sk-oai"), openrouter: fakeKey("sk-or") };
   const present = new Map<string, string>(Object.entries(keys));
   const keyStore: ModelKeyStore & { remove(provider: string): void } = {
-    async get(_company, name) { const value = present.get(name); return value === undefined ? undefined : new SecretValue(value); },
+    async get(_company, name) { if (options.keyDelayMs !== undefined) await new Promise((resolve) => setTimeout(resolve, options.keyDelayMs)); const value = present.get(name); return value === undefined ? undefined : new SecretValue(value); },
     async providers() { return [...present.keys()]; },
     remove(name) { present.delete(name); },
   };
@@ -163,6 +190,7 @@ export async function startModelProxyWorld(options: { ttlSeconds?: number; now?:
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     ...(options.maxConcurrentPerOperation === undefined ? {} : { maxConcurrentPerOperation: options.maxConcurrentPerOperation }),
+    ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
   });
   const callback = await startCallbackServer({ handler: async () => ({ statusCode: 404, headers: {}, body: "{}" }), stateDirectory: directory, unixSocket: false, modelProxy: proxy });
   const send: ModelProxyWorld["send"] = (request) => new Promise((resolve, reject) => {

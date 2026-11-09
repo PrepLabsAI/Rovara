@@ -168,13 +168,15 @@ describe("a model call through the proxy", () => {
     expect(w.metered[0]!.result.cost?.micros).toBe(9_000);
   });
 
-  it("records nothing, and says so, when the provider reported no usage", async () => {
+  it("charges the most the call could have cost, and says so, when the provider reported no usage", async () => {
     const w = await world();
     w.provider.mode = "no-usage";
     const token = await tokenOf(w);
     expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ stream: false }) })).status).toBe(200);
-    expect(w.metered).toHaveLength(0);
-    expect(w.events.some((event) => event.event === "unmetered" && event.code === "no_usage_reported")).toBe(true);
+    expect(w.metered).toHaveLength(1);
+    expect(w.metered[0]!.entry.usage.tokens.output).toBe(64);
+    expect(w.metered[0]!.result.cost!.micros).toBeGreaterThanOrEqual(64 * 15);
+    expect(w.events.some((event) => event.event === "unmetered" && event.code === "charged_maximum")).toBe(true);
   });
 });
 
@@ -381,17 +383,17 @@ describe("the provider's answers, and the key", () => {
 });
 
 describe("the task's budget and limits", () => {
-  it("lets calls run while the spend is under the budget, then refuses in the words the worker reads as the task's budget", async () => {
+  it("lets a call run while its worst case fits under the budget, then refuses in the words the worker reads as the task's budget", async () => {
     const w = await world();
     w.budgets.set(OPERATION, { micros: 10_000, currency: "USD" });
     const token = await tokenOf(w);
     expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(200);
-    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(200);
-    expect(w.proxy.tokens.ledger(OPERATION).spentMicros).toBe(18_000);
+    expect(w.proxy.tokens.ledger(OPERATION)).toMatchObject({ spentMicros: 9_000, reservedMicros: 0 });
+    // 9,000 spent, and this call could cost 1,000 or more: it does not fit.
     const over = await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() });
     expect(over.status).toBe(422);
     expect(errorOf(over)).toMatchObject({ type: "budget_exceeded", message: "Budget has been exceeded! Key=task" });
-    expect(w.provider.calls).toHaveLength(2);
+    expect(w.provider.calls).toHaveLength(1);
   });
 
   it("holds the spend across new tokens for the same operation, so asking again does not reset the budget", async () => {
@@ -512,7 +514,7 @@ describe("through the worker's egress gateway, with the worker's own client", ()
   it("tells the worker's client that the budget is spent, as the task's budget, and that no key is set, as the model refusal", async () => {
     const w = await world();
     const gateway = await throughGateway(w);
-    w.budgets.set(OPERATION, { micros: 1, currency: "USD" });
+    w.budgets.set(OPERATION, { micros: 5_000, currency: "USD" });
     const token = await tokenOf(w);
     await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() });
     await expect(modelAccessSource({ controlPlaneUrl: gateway.url, capability: w.capability() })()).rejects.toMatchObject({ name: "ModelBudgetExhaustedError", scope: "task" });
@@ -522,5 +524,242 @@ describe("through the worker's egress gateway, with the worker's own client", ()
     const refused = await modelAccessSource({ controlPlaneUrl: freshGateway.url, capability: fresh.capability() })().catch((error: unknown) => error);
     expect(refused).toMatchObject({ name: "ModelNotAllowedError" });
     expect((refused as { text: string }).text).toMatch(/key is set on this computer/u);
+  });
+});
+
+// ---- review round 1 (Opus): H1, M1-M3, L1-L4
+
+/** Sends a streamed call and drops the connection at the first bytes of the answer, the way a worker that gives up does. */
+function dropAtFirstBytes(w: ModelProxyWorld, path: string, headers: Record<string, string>, body: unknown): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const outgoing = httpRequest({ host: "127.0.0.1", port: w.callback.tcpPort, method: "POST", path, headers: { host: `host.docker.internal:${w.callback.tcpPort}`, "content-type": "application/json", ...headers } }, (incoming) => {
+      incoming.once("data", () => { outgoing.destroy(); resolve(); });
+    });
+    outgoing.on("error", () => resolve());
+    outgoing.end(JSON.stringify(body));
+    setTimeout(() => reject(new Error("no first bytes")), 5_000);
+  });
+}
+async function until(check: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 300 && !check(); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(check(), what).toBe(true);
+}
+
+describe("H1: parallel calls cannot get past the cap or the budget", () => {
+  it("lets exactly the cap through when a burst arrives while the key is still being read", async () => {
+    const w = await world({ maxConcurrentPerOperation: 1, keyDelayMs: 5 });
+    w.provider.mode = "slow";
+    const token = await tokenOf(w);
+    const answers = await Promise.all(Array.from({ length: 6 }, () => w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })));
+    expect(answers.map((answer) => answer.status).sort()).toEqual([200, 429, 429, 429, 429, 429]);
+    expect(w.provider.calls).toHaveLength(1);
+    expect(w.proxy.tokens.ledger(OPERATION).inFlight).toBe(0);
+  });
+
+  it("holds each running call's worst case against the budget, so a burst cannot spend more than the budget allows", async () => {
+    const w = await world({ keyDelayMs: 5 });
+    w.provider.mode = "slow";
+    w.budgets.set(OPERATION, { micros: 10_000, currency: "USD" });
+    const token = await tokenOf(w);
+    // Each call could use 400 output tokens (6,000 micros) and more: two cannot both fit under 10,000.
+    const answers = await Promise.all(Array.from({ length: 8 }, () => w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ max_tokens: 400 }) })));
+    expect(answers.map((answer) => answer.status).sort()).toEqual([200, 422, 422, 422, 422, 422, 422, 422]);
+    expect(w.provider.calls).toHaveLength(1);
+    expect(w.proxy.tokens.ledger(OPERATION)).toMatchObject({ spentMicros: 9_000, reservedMicros: 0, inFlight: 0 });
+  });
+
+  it("gives the reservation back when a call fails, is refused by the provider, or never reaches it", async () => {
+    const w = await world();
+    w.budgets.set(OPERATION, { micros: 100_000, currency: "USD" });
+    const token = await tokenOf(w);
+    w.provider.mode = "server-error";
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ max_tokens: 400 }) })).status).toBe(503);
+    w.keyStore.remove("anthropic");
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ max_tokens: 400 }) })).status).toBe(403);
+    expect(w.proxy.tokens.ledger(OPERATION)).toMatchObject({ reservedMicros: 0, spentMicros: 0, inFlight: 0 });
+  });
+});
+
+describe("M1: a call that did not finish cleanly is charged the most it could have cost", () => {
+  it("charges an Anthropic stream the worker cut off after the content, at its output limit and not the one token seen", async () => {
+    const w = await world();
+    w.provider.mode = "slow";
+    const token = await tokenOf(w);
+    await dropAtFirstBytes(w, MESSAGES, asWorker(token), anthropicBody());
+    await until(() => w.metered.length === 1, "the call was metered");
+    expect(w.metered[0]!.entry.usage.tokens.output).toBe(64);
+    expect(w.proxy.tokens.ledger(OPERATION).spentMicros).toBeGreaterThanOrEqual(64 * 15);
+    expect(w.events.some((event) => event.event === "unmetered" && event.code === "charged_maximum")).toBe(true);
+  });
+
+  it("charges an OpenAI-shaped stream the worker cut off, which carries no usage until its last event", async () => {
+    const w = await world();
+    w.provider.mode = "slow";
+    const token = await tokenOf(w);
+    await dropAtFirstBytes(w, CHAT, { authorization: `Bearer ${token}`, [WORKSPACE_HEADER]: WORKSPACE }, { model: "openrouter/vendor/model-test", max_tokens: 100, stream: true, messages: [{ role: "user", content: "hi" }] });
+    await until(() => w.metered.length === 1, "the chat call was metered");
+    expect(w.metered[0]!.entry.usage.tokens.output).toBe(100);
+    await dropAtFirstBytes(w, RESPONSES, { authorization: `Bearer ${token}`, [WORKSPACE_HEADER]: WORKSPACE }, { model: "openai/gpt-test", max_output_tokens: 300, stream: true, input: [] });
+    await until(() => w.metered.length === 2, "the responses call was metered");
+    expect(w.metered[1]!.entry.usage.tokens.output).toBe(300);
+  });
+
+  it("charges a stream the provider cut off, and a call that names no output limit at the assumed one", async () => {
+    const w = await world();
+    const token = await tokenOf(w);
+    w.provider.mode = "cut";
+    await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() }).catch(() => undefined);
+    await until(() => w.metered.length === 1, "the cut stream was metered");
+    expect(w.metered[0]!.entry.usage.tokens.output).toBe(64);
+    w.provider.mode = "no-usage";
+    await w.send({ path: RESPONSES, headers: { authorization: `Bearer ${token}`, [WORKSPACE_HEADER]: WORKSPACE }, body: { model: "openai/gpt-test", input: [], stream: false } });
+    expect(w.metered[1]!.entry.usage.tokens.output).toBe(64_000);
+  });
+
+  it("does not charge an error answer", async () => {
+    const w = await world();
+    w.provider.mode = "server-error";
+    const token = await tokenOf(w);
+    await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() });
+    expect(w.metered).toHaveLength(0);
+  });
+});
+
+describe("M2: one operation cannot fill the token book", () => {
+  it("keeps at most three live tokens per operation, the newest ones, and leaves room for every other operation", async () => {
+    const w = await world();
+    w.active.add(`${WORKSPACE}:${OTHER_OPERATION}:1`);
+    const minted: string[] = [];
+    for (let count = 0; count < 60; count += 1) minted.push(await tokenOf(w));
+    expect(w.proxy.tokens.liveTokensOf(OPERATION)).toBe(3);
+    expect(w.proxy.tokens.lookup(minted[0]!).ok).toBe(false);
+    expect(w.proxy.tokens.lookup(minted[56]!).ok).toBe(false);
+    for (const token of minted.slice(-3)) expect(w.proxy.tokens.lookup(token).ok).toBe(true);
+    expect((await askForToken(w, w.capability({ operationId: OTHER_OPERATION }))).status).toBe(200);
+    expect(w.proxy.tokens.liveTokens()).toBe(4);
+  });
+});
+
+describe("M3: only the worker's own tools are served", () => {
+  it("refuses a tool the provider would run on its side, on every route, before anything is forwarded", async () => {
+    const w = await world();
+    const token = await tokenOf(w);
+    const openai = { authorization: `Bearer ${token}`, [WORKSPACE_HEADER]: WORKSPACE };
+    const refused: Array<[string, Record<string, string>, unknown, string]> = [
+      ["openai mcp", openai, { model: "openai/gpt-test", input: [], tools: [{ type: "mcp", server_label: "x", server_url: "https://attacker.example/mcp" }] }, RESPONSES],
+      ["openai web_search", openai, { model: "openai/gpt-test", input: [], tools: [{ type: "function", name: "ok" }, { type: "web_search" }] }, RESPONSES],
+      ["openai code_interpreter", openai, { model: "openai/gpt-test", input: [], tools: [{ type: "code_interpreter", container: { type: "auto" } }] }, RESPONSES],
+      ["openrouter web", openai, { model: "openrouter/vendor/model-test", messages: [], tools: [{ type: "openrouter:web_search" }] }, CHAT],
+      ["anthropic web_search", asWorker(token), anthropicBody({ tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }] }), MESSAGES],
+      ["anthropic code execution", asWorker(token), anthropicBody({ tools: [{ type: "code_execution_20250522", name: "code_execution" }] }), MESSAGES],
+      ["anthropic bash", asWorker(token), anthropicBody({ tools: [{ type: "bash_20250124", name: "bash" }] }), MESSAGES],
+      ["a tool that is not an object", asWorker(token), anthropicBody({ tools: ["web_search"] }), MESSAGES],
+      ["tools that are not a list", asWorker(token), anthropicBody({ tools: { type: "web_search" } }), MESSAGES],
+    ];
+    for (const [what, headers, body, path] of refused) {
+      const answer = await w.send({ path, headers, body });
+      expect(answer.status, what).toBe(400);
+      expect(errorOf(answer).code, what).toBe("request_not_allowed");
+    }
+    const words = errorOf(await w.send({ path: RESPONSES, headers: openai, body: refused[0]![2] })).message;
+    expect(words).toContain("tool type 'mcp' at tools[0]");
+    expect(words).toContain("only function tools are served");
+    expect(w.provider.calls).toHaveLength(0);
+  });
+
+  it("serves the worker's own function tools", async () => {
+    const w = await world();
+    const token = await tokenOf(w);
+    const openai = { authorization: `Bearer ${token}`, [WORKSPACE_HEADER]: WORKSPACE };
+    const fn = { type: "function", name: "read_file", parameters: { type: "object" } };
+    expect((await w.send({ path: RESPONSES, headers: openai, body: { model: "openai/gpt-test", input: [], stream: false, tools: [fn] } })).status).toBe(200);
+    expect((await w.send({ path: CHAT, headers: openai, body: { model: "openrouter/vendor/model-test", messages: [], stream: false, tools: [{ type: "function", function: { name: "read_file" } }] } })).status).toBe(200);
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody({ stream: false, tools: [{ name: "read_file", description: "d", input_schema: { type: "object" } }, { type: "custom", name: "other", input_schema: { type: "object" } }] }) })).status).toBe(200);
+    expect(w.provider.calls).toHaveLength(3);
+  });
+});
+
+describe("L1: no byte of a key reaches the worker, even when the key is split across chunks", () => {
+  it("holds back the end of every chunk until the next arrives, finds the key whole, and cuts the stream before any part of it was written", async () => {
+    const w = await world();
+    w.provider.mode = "split-key-in-stream";
+    const token = await tokenOf(w);
+    const received: string[] = [];
+    await new Promise<void>((resolve) => {
+      const outgoing = httpRequest({ host: "127.0.0.1", port: w.callback.tcpPort, method: "POST", path: MESSAGES, headers: { host: `host.docker.internal:${w.callback.tcpPort}`, "content-type": "application/json", ...asWorker(token) } }, (incoming) => {
+        incoming.on("data", (chunk: Buffer) => received.push(chunk.toString("utf8")));
+        incoming.on("end", () => resolve());
+        incoming.on("error", () => resolve());
+        incoming.on("close", () => resolve());
+      });
+      outgoing.on("error", () => resolve());
+      outgoing.end(JSON.stringify(anthropicBody()));
+    });
+    const seen = received.join("");
+    // Not the key, and not even the first half of it that went out in the first chunk.
+    expect(seen).not.toContain(w.keys.anthropic.slice(0, 10));
+    expect(seen).not.toContain("the key is sk-");
+    expect(w.events.some((event) => event.event === "stream_stopped")).toBe(true);
+  });
+
+  it("still delivers an ordinary stream whole, including its last bytes", async () => {
+    const w = await world();
+    const token = await tokenOf(w);
+    const answer = await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() });
+    expect(answer.text.trimEnd().endsWith('data: {"type":"message_stop"}')).toBe(true);
+    expect(answer.text).toContain("message_delta");
+  });
+});
+
+describe("L2: a worker that stops reading does not hold a call open", () => {
+  it("ends the copy when the time runs out, frees the slot and charges the call", async () => {
+    const w = await world({ requestTimeoutMs: 400, maxConcurrentPerOperation: 1 });
+    w.provider.mode = "flood";
+    const token = await tokenOf(w);
+    const outgoing = httpRequest({ host: "127.0.0.1", port: w.callback.tcpPort, method: "POST", path: MESSAGES, headers: { host: `host.docker.internal:${w.callback.tcpPort}`, "content-type": "application/json", ...asWorker(token) } }, (incoming) => {
+      incoming.pause(); // reads nothing: the proxy's writes back up
+    });
+    outgoing.on("error", () => undefined);
+    outgoing.end(JSON.stringify(anthropicBody()));
+    try {
+      await until(() => w.proxy.tokens.ledger(OPERATION).inFlight === 1, "the call started");
+      await until(() => w.proxy.tokens.ledger(OPERATION).inFlight === 0, "the stalled copy ended at the timeout");
+      await until(() => w.metered.length === 1, "and was charged");
+    } finally {
+      outgoing.destroy();
+    }
+  });
+});
+
+describe("L3: the budget's currency is checked when a token is asked for too", () => {
+  it("refuses a token request whose budget is in another currency than the spend, and a call priced in another currency than its budget", async () => {
+    const w = await world();
+    w.budgets.set(OPERATION, { micros: 1_000_000, currency: "USD" });
+    const token = await tokenOf(w);
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(200);
+    w.budgets.set(OPERATION, { micros: 1_000_000, currency: "EUR" });
+    const again = await w.send({ method: "GET", path: "/v1/internal/model-access", headers: { [CAPABILITY_HEADER]: w.capability() } });
+    expect(again.status).toBe(403);
+    expect(errorOf(again).message).toMatch(/another currency/u);
+    const fresh = await world();
+    fresh.budgets.set(OPERATION, { micros: 1_000_000, currency: "EUR" });
+    const eur = await tokenOf(fresh);
+    const priced = await fresh.send({ path: MESSAGES, headers: asWorker(eur), body: anthropicBody() });
+    expect(priced.status).toBe(403);
+    expect(errorOf(priced).message).toMatch(/another currency/u);
+    expect(fresh.provider.calls).toHaveLength(0);
+  });
+});
+
+describe("L4: a finished operation's spend record is freed", () => {
+  it("forgets the operation's ledger and tokens when it is seen to have ended", async () => {
+    const w = await world();
+    const token = await tokenOf(w);
+    await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() });
+    expect(w.proxy.tokens.ledgerCount()).toBe(1);
+    w.active.clear();
+    expect((await w.send({ path: MESSAGES, headers: asWorker(token), body: anthropicBody() })).status).toBe(403);
+    expect(w.proxy.tokens.ledgerCount()).toBe(0);
+    expect(w.proxy.tokens.liveTokens()).toBe(0);
   });
 });

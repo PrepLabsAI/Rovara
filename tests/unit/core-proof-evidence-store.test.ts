@@ -228,9 +228,10 @@ describe("the read rule", () => {
   it("is 404 when the object differs from what the pack says (size, digest or kind), and nothing leaves", async () => {
     const { deps, m } = await setup(all);
     const key = evidenceArtifactKey("owner-1", "ws-1", "t-1", sha(JPEG));
-    await m.blobs.put(key, Buffer.concat([JPEG, Buffer.from("x")]), { contentType: "image/jpeg", metadata: {}, retention: "evidence-std" });
+    // The test tampers with a stored object, so it overwrites on purpose (objects are immutable otherwise).
+    await m.blobs.put(key, Buffer.concat([JPEG, Buffer.from("x")]), { contentType: "image/jpeg", metadata: {}, retention: "evidence-std" }, { overwrite: true });
     expect(await readEvidenceArtifact(deps, sha(JPEG))).toEqual({ status: 404 });
-    await m.blobs.put(key, Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(JPEG.length - 4, 9)]), { contentType: "image/jpeg", metadata: {}, retention: "evidence-std" });
+    await m.blobs.put(key, Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(JPEG.length - 4, 9)]), { contentType: "image/jpeg", metadata: {}, retention: "evidence-std" }, { overwrite: true });
     expect(await readEvidenceArtifact(deps, sha(JPEG))).toEqual({ status: 404 });
   });
 

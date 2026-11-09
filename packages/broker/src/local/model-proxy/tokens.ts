@@ -13,6 +13,8 @@ export const TOKEN_PREFIX = "rvm_";
 export const DEFAULT_TOKEN_TTL_SECONDS = 15 * 60;
 export const MIN_TOKEN_TTL_SECONDS = 150;
 const MAX_TOKENS = 2_000;
+/** The worker needs one live token per operation (it asks again a minute before expiry). Minting another beyond this revokes the oldest, so one operation can never fill the book. */
+export const MAX_LIVE_TOKENS_PER_OPERATION = 3;
 
 export interface TokenRecord {
   workspaceId: string;
@@ -30,6 +32,8 @@ export interface TokenRecord {
 export interface OperationLedger {
   currency: string | undefined;
   spentMicros: number;
+  /** The worst-case cost of the calls running now, held against the budget until each settles to what it really used. */
+  reservedMicros: number;
   /** Calls whose cost could not be priced (an unknown model): they are counted, never guessed. */
   unpriced: number;
   inFlight: number;
@@ -54,6 +58,9 @@ export class ModelTokenBook {
 
   mint(grant: ModelGrant): { token: string; expiresAt: number } {
     this.#purge();
+    // Oldest first (a Map keeps insertion order): keep room for the one being minted.
+    const mine = [...this.#tokens].filter(([, record]) => record.operationId === grant.operationId);
+    for (const [hash] of mine.slice(0, Math.max(0, mine.length - (MAX_LIVE_TOKENS_PER_OPERATION - 1)))) this.#tokens.delete(hash);
     if (this.#tokens.size >= MAX_TOKENS) throw new RangeError("too many proxy tokens are live");
     const token = TOKEN_PREFIX + randomBytes(32).toString("base64url");
     const expiresAt = this.#now() + this.#ttlMs;
@@ -61,7 +68,7 @@ export class ModelTokenBook {
       workspaceId: grant.workspaceId, operationId: grant.operationId, fence: grant.fence, taskId: grant.taskId, projectName: grant.projectName,
       routes: new Map(grant.routes.map((route) => [route.alias, route])), budget: grant.budget, expiresAt,
     });
-    if (!this.#ledgers.has(grant.operationId)) this.#ledgers.set(grant.operationId, { currency: undefined, spentMicros: 0, unpriced: 0, inFlight: 0 });
+    if (!this.#ledgers.has(grant.operationId)) this.#ledgers.set(grant.operationId, { currency: undefined, spentMicros: 0, reservedMicros: 0, unpriced: 0, inFlight: 0 });
     return { token, expiresAt };
   }
 
@@ -79,7 +86,7 @@ export class ModelTokenBook {
   ledger(operationId: string): OperationLedger {
     let ledger = this.#ledgers.get(operationId);
     if (ledger === undefined) {
-      ledger = { currency: undefined, spentMicros: 0, unpriced: 0, inFlight: 0 };
+      ledger = { currency: undefined, spentMicros: 0, reservedMicros: 0, unpriced: 0, inFlight: 0 };
       this.#ledgers.set(operationId, ledger);
     }
     return ledger;
@@ -101,6 +108,18 @@ export class ModelTokenBook {
   forgetOperation(operationId: string): void {
     this.revokeOperation(operationId);
     this.#ledgers.delete(operationId);
+  }
+
+  /** How many operations have a spend record (a ledger is freed when its operation is seen to end: `forgetOperation`). */
+  ledgerCount(): number {
+    return this.#ledgers.size;
+  }
+
+  liveTokensOf(operationId: string): number {
+    this.#purge();
+    let count = 0;
+    for (const record of this.#tokens.values()) if (record.operationId === operationId) count += 1;
+    return count;
   }
 
   liveTokens(): number {

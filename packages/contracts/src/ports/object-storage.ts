@@ -26,9 +26,22 @@ export interface ObjectStat {
   metadata: Readonly<Record<string, string>>;
 }
 
+/** What a caller may ask of a `put` beyond the object itself. */
+export interface ObjectPutOptions {
+  /**
+   * Objects are immutable by default: a `put` on a key that already holds an object (that has not expired) throws `ObjectConflictError` and changes nothing, even when
+   * two writers race for the key (exactly one wins). A caller that really means to replace an object says so with `overwrite: true`, and names why where it does.
+   */
+  overwrite?: true;
+}
+
 export interface ObjectStorage {
-  /** Stores the object, replacing one at the same key. All of it is stored or none (a reader never sees half an object). Throws `ObjectTooBigError` for an object this store cannot hold, `ObjectKeyError` for a bad key and `ObjectMetaError` for metadata that is too large. */
-  put(key: string, bytes: Uint8Array, meta: ObjectMeta): Promise<void>;
+  /**
+   * Stores the object. All of it is stored or none (a reader never sees half an object). An existing object is never replaced unless `options.overwrite` is set (see
+   * `ObjectPutOptions`). Throws `ObjectConflictError` for a key that is taken, `ObjectTooBigError` for an object this store cannot hold, `ObjectKeyError` for a bad key and
+   * `ObjectMetaError` for metadata that is too large.
+   */
+  put(key: string, bytes: Uint8Array, meta: ObjectMeta, options?: ObjectPutOptions): Promise<void>;
   /** The object, or undefined when there is none, it has expired, or it is bigger than `maxBytes` (never cut). */
   get(key: string, maxBytes: number): Promise<Uint8Array | undefined>;
   /** The size and metadata the store holds for the key, or undefined (none, or expired). */
@@ -49,6 +62,14 @@ export class ObjectTooBigError extends Error {
   }
 }
 
+/** The key already holds an object and the `put` did not ask to overwrite it. Nothing was changed. */
+export class ObjectConflictError extends Error {
+  constructor(readonly key: string) {
+    super("an object is already stored at this key (objects are immutable unless a put asks to overwrite)");
+    this.name = "ObjectConflictError";
+  }
+}
+
 export class ObjectKeyError extends Error {
   constructor(message: string) {
     super(message);
@@ -64,8 +85,12 @@ export class ObjectMetaError extends Error {
 }
 
 export const OBJECT_KEY_MAX_CHARS = 1_024;
-/** Longest part between two slashes. A folder adapter spells a part with up to three characters per character, and a file name stops at 255 bytes. */
-export const OBJECT_KEY_SEGMENT_MAX_CHARS = 80;
+/**
+ * Longest part between two slashes: 128, the same as the plain-id rule of the evidence erase (`PLAIN` in core/proof/evidence-erase.ts), so any id that erase accepts can be a part.
+ * A folder adapter keeps a part as one file name of at most 255 bytes and spells a capital letter with two characters, so it refuses a part of 128 characters that is mostly capitals
+ * (a lower-case id of 128 characters fits). Other adapters have no such limit.
+ */
+export const OBJECT_KEY_SEGMENT_MAX_CHARS = 128;
 const SEGMENT = /^[A-Za-z0-9._=:@+,~-]+$/;
 
 /**

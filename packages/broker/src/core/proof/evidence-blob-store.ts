@@ -1,7 +1,7 @@
 // Proof and evidence: where kept evidence lives. In Cloud this was an S3 bucket (objects tagged with a retention class, expired by a lifecycle rule); Code keeps it behind this small port so the
 // core never names a bucket (decision 51). The document-store adapter below is the default: it keeps each object as one document, so it holds only what fits a document (the pack and the output
 // tails, which is all this path stores; video and trace belong to the capture lane and a file-backed adapter). The keys are Cloud's object keys, unchanged.
-import { assertObjectKey, assertObjectMeta, assertObjectPrefix, companyScoped, DOCUMENT_STORE_LIMITS, INDEX_EXPIRY_ATTRIBUTE, EVIDENCE_RETENTION_DAYS, ObjectTooBigError, queryAll, type DocumentStore, type EvidenceRetentionClass, type ObjectMeta, type ObjectStorage } from "@agentx/contracts";
+import { when, assertObjectKey, assertObjectMeta, assertObjectPrefix, companyScoped, DOCUMENT_STORE_LIMITS, INDEX_EXPIRY_ATTRIBUTE, EVIDENCE_RETENTION_DAYS, ObjectConflictError, ObjectTooBigError, queryAll, type DocumentStore, type EvidenceRetentionClass, type ObjectMeta, type ObjectPutOptions, type ObjectStorage } from "@agentx/contracts";
 
 /**
  * Port lane L9a (provisional, owner decision 58): the evidence blob store IS the `object-storage` port now (`ObjectStorage` in
@@ -15,7 +15,7 @@ export interface EvidenceBlobMeta extends ObjectMeta {
 
 export type EvidenceBlobStore = Omit<ObjectStorage, "put"> & {
   /** Stores the object, replacing one at the same key. Throws `EvidenceObjectTooBigError` for an object this store cannot hold. */
-  put(key: string, bytes: Uint8Array, meta: EvidenceBlobMeta): Promise<void>;
+  put(key: string, bytes: Uint8Array, meta: EvidenceBlobMeta, options?: ObjectPutOptions): Promise<void>;
 };
 
 export const EvidenceObjectTooBigError = ObjectTooBigError;
@@ -37,14 +37,20 @@ export function createDocumentEvidenceBlobStore(store: Pick<DocumentStore, "get"
   const ttlAttribute = store.ttlAttribute ?? INDEX_EXPIRY_ATTRIBUTE;
   const expired = (row: { [key: string]: unknown }): boolean => typeof row[ttlAttribute] === "number" && row[ttlAttribute] <= now() / 1000;
   return {
-    async put(key, bytes, meta) {
+    async put(key, bytes, meta, options) {
       assertObjectKey(key);
       assertObjectMeta(meta);
       if (bytes.byteLength > DOCUMENT_BLOB_MAX_BYTES) throw new EvidenceObjectTooBigError(bytes.byteLength, DOCUMENT_BLOB_MAX_BYTES);
-      await store.put({ item: {
-        ...keyOf(key), entityType: "EVIDENCE_BLOB", bytes: bytes.byteLength, body: Buffer.from(bytes).toString("base64"), contentType: meta.contentType, metadata: { ...meta.metadata }, retention: meta.retention,
-        ...(days(meta.retention) === undefined ? {} : { [ttlAttribute]: Math.floor(now() / 1000) + days(meta.retention)! * DAY_SECONDS }),
-      } });
+      // Immutable by default: the write is conditional on the key being new, or its row having expired (not yet swept). One conditional write, so two writers racing for a key cannot both win.
+      const free = { op: "or", conditions: [when.absent(), { op: "lte", path: [ttlAttribute], value: Math.floor(now() / 1000) }] } as const;
+      const written = await store.put({
+        ...(options?.overwrite === true ? {} : { condition: free }),
+        item: {
+          ...keyOf(key), entityType: "EVIDENCE_BLOB", bytes: bytes.byteLength, body: Buffer.from(bytes).toString("base64"), contentType: meta.contentType, metadata: { ...meta.metadata }, retention: meta.retention,
+          ...(days(meta.retention) === undefined ? {} : { [ttlAttribute]: Math.floor(now() / 1000) + days(meta.retention)! * DAY_SECONDS }),
+        },
+      });
+      if (!written.applied) throw new ObjectConflictError(key);
     },
     async get(key, maxBytes) {
       assertObjectKey(key);

@@ -401,7 +401,7 @@ describe("local docker worker machines and the model proxy (lane L9a)", () => {
 
   it("refuses a model key, a provider's address or cloud credentials in a spec's environment: the worker holds none", async () => {
     const { machines } = await build({ modelProxy: true });
-    for (const name of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GEMINI_API_KEY"]) {
+    for (const name of ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GEMINI_API_KEY", "AWS_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "AWS_REGION", "HTTPS_PROXY", "http_proxy", "ALL_PROXY", "NO_PROXY"]) {
       await expect(machines.start({ machineKey: `ws-${name.toLowerCase().replaceAll("_", "-")}`, companyId: COMPANY, environment: { [name]: "x" } }), name).rejects.toMatchObject({ code: "rejected" });
     }
   });

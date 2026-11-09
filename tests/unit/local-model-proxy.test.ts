@@ -105,7 +105,7 @@ describe("reading usage from the provider's answer", () => {
 
 describe("the request guard (Cloud's proxy rules)", () => {
   it("lets through the fields each wire shape allows, field for field", () => {
-    expect(() => checkRequestBody("anthropic-messages", { model: "a", messages: [], max_tokens: 1, stream: true, system: "s", temperature: 1, thinking: {}, output_config: {}, tool_choice: {}, tools: [], metadata: { user_id: "u" } })).not.toThrow();
+    expect(() => checkRequestBody("anthropic-messages", { model: "a", messages: [], max_tokens: 1, stream: true, system: "s", temperature: 1, thinking: {}, output_config: {}, tool_choice: { type: "auto" }, tools: [], metadata: { user_id: "u" } })).not.toThrow();
     expect(() => checkRequestBody("openai-responses", { model: "a", input: [], stream: true, store: false, max_output_tokens: 1, reasoning: {}, include: [], prompt_cache_key: "k" })).not.toThrow();
     expect(() => checkRequestBody("openai-completions", { model: "a", messages: [], stream_options: { include_usage: true }, reasoning_effort: "low", provider: { allow_fallbacks: false, only: ["x"] } })).not.toThrow();
   });
@@ -131,6 +131,64 @@ describe("the request guard (Cloud's proxy rules)", () => {
     ];
     for (const [api, body, message] of refused) expect(() => checkRequestBody(api, body), JSON.stringify(body)).toThrow(message);
     expect(() => checkRequestBody("openai-completions", { model: "a", metadata: {} })).toThrow(RequestNotAllowed);
+  });
+
+  // Cloud's guard (rovara-guard.ts, fix/0512-guard-tool-types) refuses exactly these shapes; the two editions must agree, case for case.
+  const fnTool = { type: "function", function: { name: "read_file", parameters: { type: "object" } } };
+  const responsesFn = { type: "function", name: "read_file", parameters: { type: "object" } };
+  const clientTool = { name: "read_file", description: "d", input_schema: { type: "object", properties: {}, required: [] } };
+  const BASE = { "anthropic-messages": { model: "m", messages: [], max_tokens: 8 }, "openai-responses": { model: "m", input: "hi" }, "openai-completions": { model: "m", messages: [] } } as const;
+  const own = (api: keyof typeof BASE): unknown => (api === "openai-responses" ? responsesFn : api === "openai-completions" ? fnTool : clientTool);
+
+  it("refuses a provider-side tool on every route and names its type and place, the refused cases of Cloud's guard", () => {
+    const refused: Array<[keyof typeof BASE, unknown, string]> = [
+      ["openai-responses", { type: "mcp", server_label: "x", server_url: "https://attacker.example/x" }, "mcp"],
+      ["openai-responses", { type: "web_search" }, "web_search"],
+      ["openai-responses", { type: "web_search_preview" }, "web_search_preview"],
+      ["openai-responses", { type: "code_interpreter", container: { type: "auto" } }, "code_interpreter"],
+      ["openai-responses", { type: "file_search", vector_store_ids: ["v"] }, "file_search"],
+      ["openai-responses", { type: "image_generation" }, "image_generation"],
+      ["openai-responses", { type: "computer_use_preview" }, "computer_use_preview"],
+      ["openai-responses", { type: "custom", name: "n" }, "custom"],
+      ["openai-responses", { name: "no_type" }, "NoneType"],
+      ["anthropic-messages", { type: ["web_search"], name: "x" }, "list"],
+      ["openai-completions", { type: "web_search" }, "web_search"],
+      ["openai-completions", { type: "mcp" }, "mcp"],
+      ["openai-completions", { type: "custom", custom: { name: "n" } }, "custom"],
+      ["anthropic-messages", { type: "web_search_20250305", name: "web_search" }, "web_search_20250305"],
+      ["anthropic-messages", { type: "web_fetch_20250910", name: "web_fetch" }, "web_fetch_20250910"],
+      ["anthropic-messages", { type: "code_execution_20250522", name: "code_execution" }, "code_execution_20250522"],
+      ["anthropic-messages", { type: "computer_20250124", name: "computer" }, "computer_20250124"],
+      ["anthropic-messages", { type: "bash_20250124", name: "bash" }, "bash_20250124"],
+      ["anthropic-messages", { type: "mcp_toolset", mcp_server_name: "s" }, "mcp_toolset"],
+      ["anthropic-messages", { type: "function", name: "x" }, "function"],
+    ];
+    for (const [api, tool, shown] of refused) {
+      expect(() => checkRequestBody(api, { ...BASE[api], tools: [own(api), tool] }), JSON.stringify([api, tool])).toThrow(RequestNotAllowed);
+      let message = "";
+      try { checkRequestBody(api, { ...BASE[api], tools: [own(api), tool] }); } catch (error) { message = (error as Error).message; }
+      expect(message).toContain("request not allowed: tool type");
+      expect(message).toContain(`'${shown}'`);
+      expect(message).toContain("tools[1]");
+    }
+  });
+
+  it("serves plain function tools on every route, no tools, and an empty list", () => {
+    expect(() => checkRequestBody("anthropic-messages", { ...BASE["anthropic-messages"], tools: [clientTool, { ...clientTool, type: "custom" }], tool_choice: { type: "tool", name: "read_file" } })).not.toThrow();
+    expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: [responsesFn], tool_choice: "auto" })).not.toThrow();
+    expect(() => checkRequestBody("openai-completions", { ...BASE["openai-completions"], tools: [fnTool], tool_choice: { type: "function", function: { name: "read_file" } } })).not.toThrow();
+    expect(() => checkRequestBody("openai-completions", { ...BASE["openai-completions"] })).not.toThrow();
+    expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: [] })).not.toThrow();
+    expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: null, tool_choice: null })).not.toThrow();
+  });
+
+  it("refuses tools that are not a list of objects, and a tool_choice that names a provider-side tool", () => {
+    expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: { type: "web_search" } })).toThrow(/field tools/);
+    expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: ["web_search"] })).toThrow(/tools\[0\] is not a function tool/);
+    expect(() => checkRequestBody("openai-responses", { ...BASE["openai-responses"], tools: [responsesFn], tool_choice: { type: "web_search_preview" } })).toThrow(/tool_choice type 'web_search_preview'/);
+    expect(() => checkRequestBody("anthropic-messages", { ...BASE["anthropic-messages"], tools: [clientTool], tool_choice: { type: "web_search_20250305" } })).toThrow(/tool_choice type 'web_search_20250305'/);
+    expect(() => checkRequestBody("openai-completions", { ...BASE["openai-completions"], tools: [fnTool], tool_choice: { type: "auto" } })).not.toThrow();
+    for (const choice of [{ name: "x" }, ["auto"], 3, { type: 3 }]) expect(() => checkRequestBody("openai-completions", { ...BASE["openai-completions"], tools: [fnTool], tool_choice: choice }), JSON.stringify(choice)).toThrow(/tool_choice type 'unknown'/);
   });
 
   it("refuses proxy-control and billing headers, and a beta it does not know", () => {

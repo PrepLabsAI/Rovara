@@ -94,11 +94,61 @@ export function checkRequestBody(api: ProxyApi, body: Record<string, unknown>): 
     const value = body.metadata;
     if (value === null || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((name) => name !== "user_id")) throw new RequestNotAllowed("metadata");
   }
+  checkTools(api, body.tools);
+  checkToolChoice(body.tool_choice);
   if (api === "openai-completions" && "provider" in body) {
     const provider = body.provider;
     if (provider === null || typeof provider !== "object" || Array.isArray(provider)
       || Object.keys(provider).some((name) => !OPENROUTER_PROVIDER_KEYS.has(name)) || (provider as Record<string, unknown>).allow_fallbacks !== false) {
       throw new RequestNotAllowed("provider routing (allow_fallbacks must be false)");
     }
+  }
+}
+
+/**
+ * The one tool type each route serves, field for field as Cloud's guard (`ROUTE_TOOL_TYPES` and `_check_tools` in packages/model-proxy rovara-guard.ts, fix/0512-guard-tool-types).
+ * Anthropic: a client tool has no `type` or `custom`; every typed tool (web_search_*, web_fetch_*, code_execution_*, computer_*, bash_*, text_editor_*, mcp_toolset, ...) is run or defined by
+ * the provider. OpenAI chat and Responses: `function` only (refuses mcp, web_search*, code_interpreter, file_search, image_generation, computer_use*, custom, ...). A provider-side tool
+ * would fetch pages or run code from the provider's side of the network, around the egress allow-list, and bill per use outside the token counts the budget reads.
+ */
+const ROUTE_TOOL_TYPES: Readonly<Record<ProxyApi, readonly (string | undefined)[]>> = {
+  "anthropic-messages": [undefined, "custom"],
+  "openai-responses": ["function"],
+  "openai-completions": ["function"],
+};
+const TOOL_CHOICE_TYPES: ReadonlySet<string> = new Set(["auto", "any", "none", "required", "tool", "function"]);
+
+/** Python's name for a JSON value's type, as Cloud's refusal text shows it. */
+function kindName(value: unknown): string {
+  if (value === null || value === undefined) return "NoneType";
+  if (Array.isArray(value)) return "list";
+  if (typeof value === "object") return "dict";
+  if (typeof value === "boolean") return "bool";
+  if (typeof value === "number") return Number.isInteger(value) ? "int" : "float";
+  return "str";
+}
+
+function checkTools(api: ProxyApi, tools: unknown): void {
+  if (tools === undefined || tools === null) return;
+  if (!Array.isArray(tools)) throw new RequestNotAllowed("field tools (must be a list of function tools)");
+  const allowed = ROUTE_TOOL_TYPES[api];
+  tools.forEach((tool: unknown, index) => {
+    if (tool === null || typeof tool !== "object" || Array.isArray(tool)) throw new RequestNotAllowed(`tools[${String(index)}] is not a function tool`);
+    // A missing type and a JSON null both read as "no type" in Cloud's guard (Python `None`).
+    const raw = (tool as Record<string, unknown>).type;
+    const kind = raw === null ? undefined : raw;
+    if ((kind !== undefined && typeof kind !== "string") || !allowed.includes(kind)) {
+      const shown = typeof kind === "string" ? kind.slice(0, 64) : kindName(raw);
+      throw new RequestNotAllowed(`tool type '${shown}' at tools[${String(index)}] (only function tools are served: provider-side tools such as web search, code execution, MCP, computer use and file search are refused)`);
+    }
+  });
+}
+
+/** A tool_choice may name a function, never a provider-side tool type (Cloud's `_check_tool_choice`). */
+function checkToolChoice(choice: unknown): void {
+  if (choice === undefined || choice === null || typeof choice === "string") return;
+  const type = choice !== null && typeof choice === "object" && !Array.isArray(choice) ? (choice as Record<string, unknown>).type : undefined;
+  if (typeof type !== "string" || !TOOL_CHOICE_TYPES.has(type)) {
+    throw new RequestNotAllowed(`tool_choice type '${typeof type === "string" ? type.slice(0, 64) : "unknown"}' (only auto, any, none, required, tool and function are served)`);
   }
 }

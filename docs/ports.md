@@ -216,8 +216,12 @@ adapts the port to its secret store and proxy.
 The `object-storage` point (one adapter) is where files live that are too big or too plain for the document store: proof evidence, plan documents, a
 worker's results. It is lane L7b's `EvidenceBlobStore` promoted to the registry: `ObjectStorage` in `packages/contracts/src/ports/object-storage.ts`
 has `put`, `get` (with a size cap; an object over it is `undefined`, never cut), `stat`, `delete` and `deletePrefix`. Keys are paths of letters, digits and
-`. _ = : @ + , ~ -` (`isValidObjectKey`), at most 1024 characters, no `.` or `..` part, so no adapter can turn a key into a place outside its store. An
+`. _ = : @ + , ~ -` (`isValidObjectKey`), at most 1024 characters and at most 128 per part (the evidence erase's plain-id rule), no `.` or `..` part, so no adapter can turn a key into a place outside its store. An
 object carries a content type, a few small text facts and a retention class (the caller's word, such as `evidence-std`; the adapter maps it to days).
+- **Immutable by default (L9-wire review).** A `put` on a key that holds an object refuses with `ObjectConflictError` and changes nothing; of two writers racing for a key exactly one wins (a
+  conditional write in the document adapter, a hard link in the folder adapter). `put(..., { overwrite: true })` replaces on purpose. The proof evidence callers that rewrite a key
+  pass it: `storeEvidenceArtifacts` (the key is the content's SHA-256, so a retried capture rewrites the same bytes) and `keepEvidence` (one pack per task and candidate digest, rewritten by a re-check).
+  An object that has expired does not hold its key. The folder adapter keeps a part as one file name of at most 255 bytes, so a 128-character part that is mostly capitals is refused (`ObjectKeyError`).
 - **Adapters in Code.** The document-store adapter (`createDocumentObjectStorage`, `core/proof/evidence-blob-store.ts`) is the default `rovara up` registers
   and holds only what fits a document. The folder adapter (`@agentx/local-adapters/object-storage`, `FolderObjectStorage`) keeps one file per object
   under a folder (default `~/.rovara/objects`), written by one rename after a sync, read through O_NOFOLLOW, with every folder checked to lie under the

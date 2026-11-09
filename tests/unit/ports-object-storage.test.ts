@@ -1,16 +1,18 @@
 // Port lane L9a: the object-storage adapters pass one conformance suite (provisional, owner decision 58): the document-store adapter (the
 // default) and the folder adapter, plus what only the folder adapter has to prove: atomic writes, traversal and link safety, the plug-in.
 import { constants } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ObjectKeyError, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, isAllowedModuleSpecifier, isValidObjectKey, type ObjectStorage } from "@agentx/contracts";
+import { ObjectConflictError, ObjectKeyError, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, isAllowedModuleSpecifier, isValidObjectKey, type ObjectStorage } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { DOCUMENT_BLOB_MAX_BYTES, createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
+import { DOCUMENT_BLOB_MAX_BYTES, createDocumentEvidenceBlobStore, createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { FolderObjectStorage, spellPart, unspellPart } from "../../packages/local-adapters/src/folder-object-storage.js";
 import * as folderModule from "../../packages/local-adapters/src/object-storage-plugin.js";
+import { evidencePrefixesOf, eraseTaskEvidence } from "../../packages/broker/src/core/proof/evidence-erase.js";
+import { storeEvidenceArtifacts } from "../../packages/broker/src/core/proof/evidence-artifacts.js";
 import { runObjectStorageConformance } from "../support/ports/object-storage-conformance.js";
 
 const folders: string[] = [];
@@ -182,5 +184,87 @@ describe("the folder plug-in", () => {
     await expect(load({ pth: "/x" })).rejects.toThrow(/could not be created/);
     await expect(load({ retentionDays: { x: 0 } })).rejects.toThrow(/could not be created/);
     expect(registry.names("object-storage")).toEqual([]);
+  });
+});
+
+describe("the folder adapter after the review (L6, L7)", () => {
+  const META = { contentType: "x/y", metadata: {}, retention: "r" };
+
+  it("accepts every id the evidence erase accepts, and erases with it", async () => {
+    const owner = "a".repeat(128);
+    const workspace = `W${"0".repeat(127)}`;
+    const prefixes = evidencePrefixesOf({ ownerKey: owner, workspaceId: workspace, taskId: "t".repeat(128) })!;
+    expect(prefixes).toHaveLength(2);
+    for (const make of [async () => new FolderObjectStorage({ root: join(await tempFolder(), "store") }), async () => createDocumentObjectStorage(new MemoryDocumentStore(), { companyId: COMPANY })]) {
+      const store = await make();
+      const key = `${prefixes[1]!}${"c".repeat(64)}`;
+      await store.put(key, new Uint8Array([1]), META);
+      expect(await eraseTaskEvidence(store, { ownerKey: owner, workspaceId: workspace, taskId: "t".repeat(128) })).toBe(true);
+      expect(await store.get(key, 10)).toBeUndefined();
+    }
+  });
+
+  it("refuses, as a bad key, a long part of capitals that would not fit one file name, and puts nothing on disk", async () => {
+    const root = join(await tempFolder(), "store");
+    const store = new FolderObjectStorage({ root });
+    const key = `p/${"A".repeat(128)}/x`;
+    await expect(store.put(key, new Uint8Array([1]), META)).rejects.toBeInstanceOf(ObjectKeyError);
+    await expect(store.get(key, 10)).rejects.toBeInstanceOf(ObjectKeyError);
+    await expect(store.stat(key)).rejects.toBeInstanceOf(ObjectKeyError);
+    await expect(store.delete(key)).rejects.toBeInstanceOf(ObjectKeyError);
+    expect(await readdir(join(root, "objects")).catch(() => [])).toEqual([]);
+  });
+
+  it("answers a key whose path is longer than the disk allows with a key error, not a disk error", async () => {
+    const store = new FolderObjectStorage({ root: join(await tempFolder(), "store") });
+    const key = Array.from({ length: 200 }, () => "abcde").join("/");
+    const outcome = await store.put(key, new Uint8Array([1]), META).then(() => "stored", (error: unknown) => error);
+    if (outcome !== "stored") expect(outcome).toBeInstanceOf(ObjectKeyError);
+  });
+
+  it("checks each folder before making it, so a link in the middle of a key makes nothing outside the store", async () => {
+    const outside = await tempFolder();
+    const root = join(await tempFolder(), "store");
+    const store = new FolderObjectStorage({ root });
+    await store.put("seed", new Uint8Array([1]), META);
+    await symlink(outside, join(root, "objects", "D_link"));
+    await expect(store.put("link/new/deeper/x", new Uint8Array([1]), META)).rejects.toThrow(/outside the store/);
+    expect(await readdir(outside)).toEqual([]);
+  });
+
+  it("refuses a folder other users can write to, where links could be planted", async () => {
+    const parent = await tempFolder();
+    const root = join(parent, "store");
+    await mkdir(root, { mode: 0o700 });
+    await chmod(root, 0o777);
+    const store = new FolderObjectStorage({ root });
+    await expect(store.put("k", new Uint8Array([1]), META)).rejects.toThrow(/not be writable by others/);
+    await chmod(root, 0o700);
+    await store.put("k", new Uint8Array([1]), META);
+  });
+});
+
+describe("objects are immutable by default (L9-wire review O3)", () => {
+  const META = { contentType: "x/y", metadata: {}, retention: "evidence-std" as const };
+
+  it("keeps the evidence callers that write the same key again working, by an explicit overwrite, and refuses everyone else", async () => {
+    const documents = new MemoryDocumentStore();
+    const blobs = createDocumentEvidenceBlobStore(documents, { companyId: COMPANY });
+    const owner = { ownerKey: "owner-1", workspaceId: "ws-1", taskId: "t-1" };
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(100, 3)]);
+    await storeEvidenceArtifacts({ blobs }, owner, [{ kind: "jpeg", bytes: jpeg }]);
+    const again = await storeEvidenceArtifacts({ blobs }, owner, [{ kind: "jpeg", bytes: jpeg }]);
+    expect(again.size).toBe(1);
+    await expect(blobs.put([...again.keys()].map((digest) => `private/owner-1/ws-1/evidence/t-1/${digest}`)[0]!, jpeg, META)).rejects.toBeInstanceOf(ObjectConflictError);
+  });
+
+  it("frees a key whose document row has expired but not been swept", async () => {
+    let now = Date.parse("2026-11-09T00:00:00.000Z");
+    const blobs = createDocumentObjectStorage(new MemoryDocumentStore(), { companyId: COMPANY, now: () => now });
+    await blobs.put("k", new Uint8Array([1]), META);
+    await expect(blobs.put("k", new Uint8Array([2]), META)).rejects.toBeInstanceOf(ObjectConflictError);
+    now += 31 * DAY;
+    await blobs.put("k", new Uint8Array([3]), META);
+    expect(Array.from((await blobs.get("k", 10))!)).toEqual([3]);
   });
 });

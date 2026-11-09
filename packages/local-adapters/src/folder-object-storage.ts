@@ -11,14 +11,17 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
-import { lstat, mkdir, open, readdir, realpath, rename, rm, rmdir } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, realpath, rename, rm, rmdir } from "node:fs/promises";
 import { join, sep } from "node:path";
 import {
+  ObjectConflictError,
+  ObjectKeyError,
   ObjectTooBigError,
   assertObjectKey,
   assertObjectMeta,
   assertObjectPrefix,
   type ObjectMeta,
+  type ObjectPutOptions,
   type ObjectStat,
   type ObjectStorage,
 } from "@agentx/contracts";
@@ -26,6 +29,8 @@ import {
 const FOLDER = "D_";
 const FILE = "F_";
 const HEADER_MAX_BYTES = 16_384;
+/** A file name may be 255 bytes; its two-character prefix leaves this much for the spelled part. */
+const SPELLED_PART_MAX = 250;
 export const FOLDER_OBJECT_DEFAULT_MAX_BYTES = 256 * 1_048_576;
 
 export interface FolderObjectStorageOptions {
@@ -80,6 +85,14 @@ export function unspellPart(name: string): string | undefined {
   return part === "" ? undefined : part;
 }
 
+/** A part as a file name, or `ObjectKeyError` when it would not fit in one (a long part of capitals, or of punctuation, which takes two or three characters each). */
+function spelled(part: string): string {
+  const name = spellPart(part);
+  if (name.length > SPELLED_PART_MAX) throw new ObjectKeyError("this part of the key is too long to be one file name here (a part of 128 characters must be mostly lower case)");
+  return name;
+}
+
+const isExists = (error: unknown): boolean => typeof error === "object" && error !== null && "code" in error && error.code === "EEXIST";
 const isMissing = (error: unknown): boolean => typeof error === "object" && error !== null && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR");
 
 export class FolderObjectStorage implements ObjectStorage {
@@ -107,6 +120,8 @@ export class FolderObjectStorage implements ObjectStorage {
     await mkdir(this.#root, { recursive: true, mode: 0o700 });
     const details = await lstat(this.#root);
     if (details.isSymbolicLink() || !details.isDirectory()) throw new Error("the object folder must be a plain folder, not a link");
+    // A folder other users can write to (a worker's workspace is one) could have links planted in it: refused.
+    if (process.platform !== "win32" && ((details.mode & 0o022) !== 0 || (typeof process.getuid === "function" && details.uid !== process.getuid()))) throw new Error("the object folder must belong to you and not be writable by others");
     for (const folder of [this.#objects, this.#temp]) await mkdir(folder, { recursive: true, mode: 0o700 });
     this.#realRoot = await realpath(this.#root);
     // A crash between the write and the rename leaves a part file behind; ones an hour old belong to no running write.
@@ -125,7 +140,7 @@ export class FolderObjectStorage implements ObjectStorage {
   }
 
   #folderOf(parts: readonly string[]): string {
-    return join(this.#objects, ...parts.map((part) => FOLDER + spellPart(part)));
+    return join(this.#objects, ...parts.map((part) => FOLDER + spelled(part)));
   }
 
   #fileOf(key: string): { folder: string; file: string } {
@@ -133,11 +148,50 @@ export class FolderObjectStorage implements ObjectStorage {
     const parts = key.split("/");
     const leaf = parts.pop() as string;
     const folder = this.#folderOf(parts);
-    return { folder, file: join(folder, FILE + spellPart(leaf)) };
+    return { folder, file: join(folder, FILE + spelled(leaf)) };
   }
 
-  async put(key: string, bytes: Uint8Array, meta: ObjectMeta): Promise<void> {
-    const { folder, file } = this.#fileOf(key);
+  /**
+   * Makes the folders of a key one level at a time, looking at each before going in: a link or a file where a folder belongs ends the write, so no
+   * folder is ever made through a link that leads out of the store. (The check and the rename after it are not one step; a root only its owner can write is what makes that safe.)
+   */
+  async #makeFolders(key: string): Promise<void> {
+    const parts = key.split("/").slice(0, -1);
+    let current = this.#objects;
+    for (const part of parts) {
+      current = join(current, FOLDER + spelled(part));
+      try {
+        await lstat(current);
+      } catch (error) {
+        if (!isMissing(error)) throw error;
+        try {
+          await mkdir(current, { mode: 0o700 });
+        } catch (failure) {
+          if (!isExists(failure)) throw failure;
+        }
+      }
+      const now = await lstat(current);
+      if (now.isSymbolicLink() || !now.isDirectory()) throw new Error("the object folder lies outside the store");
+    }
+    if (!(await this.#insideRoot(current))) throw new Error("the object folder lies outside the store");
+  }
+
+  put(key: string, bytes: Uint8Array, meta: ObjectMeta, options?: ObjectPutOptions): Promise<void> {
+    return this.#longPaths(() => this.#put(key, bytes, meta, options));
+  }
+
+  /** A key whose folders and file would make a path longer than the disk allows is a bad key, not a disk error. */
+  async #longPaths<T>(run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENAMETOOLONG") throw new ObjectKeyError("this key is too long to be kept as a path here");
+      throw error;
+    }
+  }
+
+  async #put(key: string, bytes: Uint8Array, meta: ObjectMeta, options: ObjectPutOptions | undefined): Promise<void> {
+    const { file } = this.#fileOf(key);
     assertObjectMeta(meta);
     if (bytes.byteLength > this.#max) throw new ObjectTooBigError(bytes.byteLength, this.#max);
     await this.#ready();
@@ -148,8 +202,7 @@ export class FolderObjectStorage implements ObjectStorage {
     };
     const headerLine = Buffer.from(`${JSON.stringify(header)}\n`);
     if (headerLine.byteLength > HEADER_MAX_BYTES) throw new RangeError("the object's header is too large");
-    await mkdir(folder, { recursive: true, mode: 0o700 });
-    if (!(await this.#insideRoot(folder))) throw new Error("the object folder lies outside the store");
+    await this.#makeFolders(key);
     const temporary = join(this.#temp, `${randomBytes(12).toString("hex")}.part`);
     let handle: FileHandle | undefined;
     try {
@@ -159,12 +212,31 @@ export class FolderObjectStorage implements ObjectStorage {
       await handle.sync();
       await handle.close();
       handle = undefined;
-      await rename(temporary, file);
+      if (options?.overwrite === true) await rename(temporary, file);
+      else await this.#publishNew(key, temporary, file);
     } catch (error) {
       await handle?.close().catch(() => undefined);
       await rm(temporary, { force: true });
       throw error;
     }
+  }
+
+  /**
+   * Puts a finished temporary file at a key that must be new. A hard link fails if the name is taken and makes it appear whole otherwise, in one step, so of two
+   * writers racing for a key exactly one wins. A taken name that holds an expired object is cleared (reading it does that) and the link tried again.
+   */
+  async #publishNew(key: string, temporary: string, file: string): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await link(temporary, file);
+        await rm(temporary, { force: true });
+        return;
+      } catch (error) {
+        if (typeof error !== "object" || error === null || !("code" in error) || error.code !== "EEXIST") throw error;
+        if ((await this.#read(key, false, 0)) !== undefined) break;
+      }
+    }
+    throw new ObjectConflictError(key);
   }
 
   /** Reads the header of the file at `file` and, when asked, the bytes after it. Undefined for no such object, an expired one or a file this store did not write. */
@@ -214,20 +286,22 @@ export class FolderObjectStorage implements ObjectStorage {
   }
 
   async get(key: string, maxBytes: number): Promise<Uint8Array | undefined> {
-    return (await this.#read(key, true, maxBytes))?.body;
+    return (await this.#longPaths(() => this.#read(key, true, maxBytes)))?.body;
   }
 
   async stat(key: string): Promise<ObjectStat | undefined> {
-    const found = await this.#read(key, false, 0);
+    const found = await this.#longPaths(() => this.#read(key, false, 0));
     return found === undefined ? undefined : { bytes: found.header.bytes, metadata: { ...found.header.metadata } };
   }
 
   async delete(key: string): Promise<void> {
     const { folder, file } = this.#fileOf(key);
-    await this.#ready();
-    if (!(await this.#insideRoot(folder))) return;
-    await rm(file, { force: true });
-    await this.#pruneFolders(folder);
+    await this.#longPaths(async () => {
+      await this.#ready();
+      if (!(await this.#insideRoot(folder))) return;
+      await rm(file, { force: true });
+      await this.#pruneFolders(folder);
+    });
   }
 
   async deletePrefix(prefix: string): Promise<boolean> {

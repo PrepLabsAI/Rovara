@@ -1,7 +1,7 @@
 // Port lane L9a: the conformance suite every `object-storage` adapter must pass (provisional, owner decision 58): the document-store adapter,
 // the folder adapter, and later Cloud's S3 adapter.
 import { describe, expect, it } from "vitest";
-import { ObjectKeyError, ObjectMetaError, ObjectTooBigError, type ObjectMeta, type ObjectStorage } from "@agentx/contracts";
+import { ObjectConflictError, ObjectKeyError, ObjectMetaError, ObjectTooBigError, type ObjectMeta, type ObjectStorage } from "@agentx/contracts";
 
 export interface ObjectStorageUnderTest {
   store: ObjectStorage;
@@ -46,9 +46,32 @@ export function runObjectStorageConformance(name: string, harness: ObjectStorage
       expect((await store.stat("empty"))?.bytes).toBe(0);
     }));
 
-    it("replaces an object at the same key whole", () => withStore(async ({ store }) => {
+    it("never replaces an object unless the put asks to: a second put on a taken key is a conflict and changes nothing", () => withStore(async ({ store }) => {
+      await store.put("k", bytes("first"), { ...META, metadata: { a: "1" } });
+      await expect(store.put("k", bytes("second and longer"), { ...META, metadata: { b: "2" } })).rejects.toBeInstanceOf(ObjectConflictError);
+      await expect(store.put("k", bytes("third"), { ...META, metadata: { b: "2" } }, {})).rejects.toBeInstanceOf(ObjectConflictError);
+      expect(text(await store.get("k", 100))).toBe("first");
+      expect(await store.stat("k")).toEqual({ bytes: 5, metadata: { a: "1" } });
+      // The same bytes again are a conflict too: a caller that retries a write says so with overwrite.
+      await expect(store.put("k", bytes("first"), META)).rejects.toBeInstanceOf(ObjectConflictError);
+      // A key that was deleted is free again.
+      await store.delete("k");
+      await store.put("k", bytes("fresh"), META);
+      expect(text(await store.get("k", 100))).toBe("fresh");
+    }));
+
+    it("lets exactly one of several writers racing for a new key win, and the object is that writer's whole", () => withStore(async ({ store }) => {
+      const results = await Promise.allSettled(Array.from({ length: 8 }, (_, index) => store.put("raced", new Uint8Array(10_000).fill(index + 1), META)));
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      for (const result of results) if (result.status === "rejected") expect(result.reason).toBeInstanceOf(ObjectConflictError);
+      const back = (await store.get("raced", 100_000)) as Uint8Array;
+      expect(back.byteLength).toBe(10_000);
+      expect(new Set(back).size).toBe(1);
+    }));
+
+    it("replaces an object at the same key whole when the put says overwrite", () => withStore(async ({ store }) => {
       await store.put("k", bytes("first and longer"), { ...META, metadata: { a: "1" } });
-      await store.put("k", bytes("second"), { ...META, metadata: { b: "2" } });
+      await store.put("k", bytes("second"), { ...META, metadata: { b: "2" } }, { overwrite: true });
       expect(text(await store.get("k", 100))).toBe("second");
       expect(await store.stat("k")).toEqual({ bytes: 6, metadata: { b: "2" } });
     }));
@@ -116,7 +139,7 @@ export function runObjectStorageConformance(name: string, harness: ObjectStorage
     }));
 
     it("refuses a key that could name a place outside the store, or that other adapters cannot keep", () => withStore(async ({ store }) => {
-      const bad = ["", "/abs", "a//b", "a/", "../x", "a/../b", "a/./b", ".", "..", "a\\b", "a\u0000b", "a b", "a/b?c", "é", "x".repeat(81), `${"a/".repeat(600)}z`, "a/%2e%2e/b"];
+      const bad = ["", "/abs", "a//b", "a/", "../x", "a/../b", "a/./b", ".", "..", "a\\b", "a\u0000b", "a b", "a/b?c", "é", "x".repeat(129), `${"a/".repeat(600)}z`, "a/%2e%2e/b"];
       for (const key of bad) {
         await expect(store.put(key, bytes("x"), META), JSON.stringify(key)).rejects.toBeInstanceOf(ObjectKeyError);
         await expect(store.get(key, 10), JSON.stringify(key)).rejects.toBeInstanceOf(ObjectKeyError);
@@ -132,6 +155,14 @@ export function runObjectStorageConformance(name: string, harness: ObjectStorage
       expect(await store.get("k", 10)).toBeUndefined();
     }));
 
+    it("keeps a part of 128 characters, the longest id the evidence erase accepts", () => withStore(async ({ store }) => {
+      const key = `private/${"a1".repeat(64)}/${"b".repeat(128)}/evidence/t/${"0".repeat(64)}`;
+      await store.put(key, bytes("long"), META);
+      expect(text(await store.get(key, 10))).toBe("long");
+      expect(await store.deletePrefix(`private/${"a1".repeat(64)}/`)).toBe(true);
+      expect(await store.get(key, 10)).toBeUndefined();
+    }));
+
     it("keeps a punctuated key as itself", () => withStore(async ({ store }) => {
       const key = "private/Owner.1/ws=2/evidence/t_3/sha256:ab+cd,e@f~g-h";
       await store.put(key, bytes("ok"), META);
@@ -143,7 +174,8 @@ export function runObjectStorageConformance(name: string, harness: ObjectStorage
     it("lets two writers replace the same key at once and leaves one whole object", () => withStore(async ({ store }) => {
       const a = new Uint8Array(20_000).fill(1);
       const b = new Uint8Array(30_000).fill(2);
-      await Promise.all([store.put("race", a, META), store.put("race", b, META), store.put("race", a, META), store.put("race", b, META)]);
+      const again = { overwrite: true } as const;
+      await Promise.all([store.put("race", a, META, again), store.put("race", b, META, again), store.put("race", a, META, again), store.put("race", b, META, again)]);
       const back = await store.get("race", 100_000);
       expect(back).toBeDefined();
       const whole = back as Uint8Array;
@@ -160,6 +192,9 @@ export function runObjectStorageConformance(name: string, harness: ObjectStorage
       expect(await store.get("short", 10)).toBeUndefined();
       expect(await store.stat("short")).toBeUndefined();
       expect(text(await store.get("forever", 10))).toBe("y");
+      // An expired object does not hold its key.
+      await store.put("short", bytes("again"), { ...META, retention: "no-such-class" });
+      expect(text(await store.get("short", 10))).toBe("again");
     }));
   });
 }

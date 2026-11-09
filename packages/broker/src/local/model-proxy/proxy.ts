@@ -20,7 +20,7 @@ import {
 } from "./providers.js";
 import { ModelTokenBook } from "./tokens.js";
 import type { ModelGrantSource, ModelProxyEvent, ProxyApi, ProxyProvider, ProxyRoute } from "./types.js";
-import { UsageCollector } from "./usage.js";
+import { UsageCollector, type TokenUsage } from "./usage.js";
 
 export const MODEL_ACCESS_PATH = "/v1/internal/model-access";
 export const MODEL_PROXY_PREFIX = "/v1/internal/model-proxy";
@@ -121,6 +121,15 @@ async function readBody(request: IncomingMessage, limit: number): Promise<Buffer
   return Buffer.concat(chunks);
 }
 
+/** Used when a request names no output limit (OpenAI's routes may not): the most output a call is assumed to be able to use. */
+export const ASSUMED_MAX_OUTPUT_TOKENS = 64_000;
+
+/** The most a request could use: the output limit it names (or the assumed one) and an input of two tokens to the byte of the request, which no tokenizer exceeds. */
+export function worstCaseUsage(body: Readonly<Record<string, unknown>>, requestBytes: number): TokenUsage {
+  const asked = [body.max_tokens, body.max_output_tokens, body.max_completion_tokens].find((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+  return { input: Math.ceil(requestBytes / 2), output: Math.min(Math.floor(asked ?? ASSUMED_MAX_OUTPUT_TOKENS), 1_000_000), cacheRead: 0, cacheWrite: 0 };
+}
+
 export function createLocalModelProxy(options: LocalModelProxyOptions): LocalModelProxy {
   const now = options.now ?? Date.now;
   const tokens = new ModelTokenBook({ now, ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }) });
@@ -132,9 +141,12 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
     try { options.onEvent?.(event); } catch { /* a listener failing changes nothing here */ }
   };
 
-  /** Whether the cost of this route can be known, so a budget can be held. */
-  async function priced(route: ProxyRoute): Promise<boolean> {
-    return (await options.metering.price({ provider: route.provider, modelId: route.model, tokens: { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0 } })) !== null;
+  /** The most a call could cost, or null when its model has no price. Input is priced at the dearer of the plain and the cache-write rate. */
+  async function worstCaseCost(route: ProxyRoute, worst: TokenUsage): Promise<Cost | null> {
+    const plain = await options.metering.price({ provider: route.provider, modelId: route.model, tokens: worst });
+    const written = await options.metering.price({ provider: route.provider, modelId: route.model, tokens: { input: 0, output: worst.output, cacheRead: 0, cacheWrite: worst.input } });
+    if (plain === null || written === null) return null;
+    return { micros: Math.max(plain.micros, written.micros), currency: plain.currency };
   }
 
   async function access(request: { path: string; headers: Readonly<Record<string, string | undefined>> }): Promise<BrokerResponse> {
@@ -174,7 +186,10 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
     }
     if (!held.some((entry) => entry.has)) return notAllowed(`no ${providers.join(" or ")} key is set on this computer; put it in ~/.rovara/keys.json or the ${providers[0]!.toUpperCase()}_API_KEY variable and restart rovara up`);
     const ledger = tokens.ledger(grant.operationId);
-    if (grant.budget !== undefined && ledger.spentMicros >= grant.budget.micros) return budgetAccessRefusal();
+    if (grant.budget !== undefined) {
+      if (ledger.currency !== undefined && ledger.currency !== grant.budget.currency) return notAllowed("this task's budget is in another currency than its spend");
+      if (ledger.spentMicros + ledger.reservedMicros >= grant.budget.micros) return budgetAccessRefusal();
+    }
     let minted;
     try {
       minted = tokens.mint(grant);
@@ -228,87 +243,117 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
     const token = found.record;
     // The gateway stamps the workspace; a token used from another workspace's worker (or with no stamp) is refused.
     if (headers[WORKSPACE_HEADER] !== token.workspaceId) throw new Refusal(403, "other_workspace", "this token belongs to another workspace");
-    if (!(await options.grants.active({ workspaceId: token.workspaceId, operationId: token.operationId, fence: token.fence }))) {
-      tokens.revokeOperation(token.operationId);
-      throw new Refusal(403, "operation_ended", "this operation no longer runs");
-    }
 
-    // ---- what it asks for
-    const raw = await readBody(request, MODEL_PROXY_REQUEST_MAX_BYTES);
-    let body: Record<string, unknown>;
-    try {
-      const parsed: unknown = JSON.parse(raw.toString("utf8"));
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
-      body = parsed as Record<string, unknown>;
-    } catch {
-      throw new Refusal(400, "invalid_json", "the request is not a JSON object");
-    }
-    checkRequestBody(api, body);
-    const alias = body.model;
-    const route = typeof alias === "string" ? token.routes.get(alias) : undefined;
-    if (route === undefined) throw new Refusal(403, "model_not_allowed", "this task may not call that model");
-    if (route.api !== api) throw new Refusal(400, "request_not_allowed", "request not allowed: that model speaks another route");
-    const target = upstreamUrl(endpoints, route.provider, route.api);
-    if (target === undefined) throw new Refusal(400, "request_not_allowed", "request not allowed: that provider does not serve this route");
-    note({ operationId: token.operationId, provider: route.provider });
-
-    // ---- the budget and the limits
+    // ---- the concurrency cap: checked and taken in one synchronous step, before the first await, so a burst cannot all pass the check
     const ledger = tokens.ledger(token.operationId);
-    if (token.budget !== undefined) {
-      if (ledger.currency !== undefined && ledger.currency !== token.budget.currency) throw new Refusal(403, "model_not_allowed", "this task's budget is in another currency than its spend");
-      if (ledger.spentMicros >= token.budget.micros) throw budgetRefusal();
-      if (!(await priced(route))) throw new Refusal(403, "model_not_allowed", "this model has no price on this computer, so the task budget cannot be held");
-    }
     if (ledger.inFlight >= maxConcurrent) throw new Refusal(429, "too_many_requests", "this task has too many model calls running", { "retry-after": "2" });
-
-    // ---- the key, only now
-    const secret = await options.keys.get(options.companyId, route.provider);
-    if (secret === undefined) throw new Refusal(403, "model_not_allowed", `no ${route.provider} key is set on this computer`);
-    const key = secret.reveal();
-
-    const stream = body.stream === true;
-    const forwarded: Record<string, unknown> = { ...body, model: route.model };
-    if (stream && api === "openai-completions") {
-      const asked = body.stream_options;
-      forwarded.stream_options = { ...(asked !== null && typeof asked === "object" && !Array.isArray(asked) ? asked : {}), include_usage: true };
-    }
-    const upstreamHeaders: Record<string, string> = {
-      "content-type": "application/json",
-      accept: stream ? "text/event-stream" : "application/json",
-      "user-agent": "rovara-local-model-proxy",
+    ledger.inFlight += 1;
+    let reserved = 0;
+    const release = (): void => {
+      ledger.reservedMicros -= reserved;
+      reserved = 0;
     };
-    if (route.provider === "anthropic") {
-      upstreamHeaders["x-api-key"] = key;
-      upstreamHeaders["anthropic-version"] = /^\d{4}-\d{2}-\d{2}$/u.test(headers["anthropic-version"] ?? "") ? headers["anthropic-version"]! : ANTHROPIC_VERSION;
-      if (headers["anthropic-beta"] !== undefined) upstreamHeaders["anthropic-beta"] = headers["anthropic-beta"].split(",").map((value) => value.trim()).join(",");
-    } else {
-      upstreamHeaders.authorization = `Bearer ${key}`;
-    }
-
     const controller = new AbortController();
+    let provider: ProxyProvider | undefined;
+    let upstreamOk = false;
+    let requestSent = false;
+    let complete = false;
+    let settled = false;
+    let worst: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    const collector = new UsageCollector(api);
     const abortOnClose = (): void => { if (!response.writableEnded) controller.abort(); };
     response.once("close", abortOnClose);
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const collector = new UsageCollector(api);
-    ledger.inFlight += 1;
-    let upstreamOk = false;
-    let settled = false;
-    // Recorded before the answer ends, so the next call from the worker sees this one's cost in the budget.
-    const settle = async (): Promise<void> => {
-      if (settled || !upstreamOk) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    /**
+     * Records what the call used and adds its cost to the operation's spend, before the answer ends, so the worker's next call sees it. A call that sent a request and did not
+     * finish cleanly (the worker cut it off, the stream broke, the time ran out), or whose provider never said what it used, is charged the most it could have cost: the
+     * request's output limit and an input of its size.
+     */
+    const settle = async (route: ProxyRoute | undefined): Promise<void> => {
+      if (settled || route === undefined || !requestSent || !(upstreamOk || controller.signal.aborted)) return;
       settled = true;
-      await record(token, route, collector.finish(), ledger).catch(() => tell({ event: "unmetered", code: "meter_failed", operationId: token.operationId, provider: route.provider }));
+      const seen = complete ? collector.finish() : undefined;
+      if (seen === undefined) tell({ event: "unmetered", code: "charged_maximum", operationId: token.operationId, provider: route.provider });
+      await record(token, route, seen ?? worst, ledger).catch(() => tell({ event: "unmetered", code: "meter_failed", operationId: token.operationId, provider: route.provider }));
     };
+    let route: ProxyRoute | undefined;
     try {
+      if (!(await options.grants.active({ workspaceId: token.workspaceId, operationId: token.operationId, fence: token.fence }))) {
+        // The operation is over: its tokens and its spend record go with it.
+        tokens.forgetOperation(token.operationId);
+        throw new Refusal(403, "operation_ended", "this operation no longer runs");
+      }
+
+      // ---- what it asks for
+      const raw = await readBody(request, MODEL_PROXY_REQUEST_MAX_BYTES);
+      let body: Record<string, unknown>;
+      try {
+        const parsed: unknown = JSON.parse(raw.toString("utf8"));
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+        body = parsed as Record<string, unknown>;
+      } catch {
+        throw new Refusal(400, "invalid_json", "the request is not a JSON object");
+      }
+      checkRequestBody(api, body);
+      const alias = body.model;
+      route = typeof alias === "string" ? token.routes.get(alias) : undefined;
+      if (route === undefined) throw new Refusal(403, "model_not_allowed", "this task may not call that model");
+      if (route.api !== api) throw new Refusal(400, "request_not_allowed", "request not allowed: that model speaks another route");
+      const target = upstreamUrl(endpoints, route.provider, route.api);
+      if (target === undefined) throw new Refusal(400, "request_not_allowed", "request not allowed: that provider does not serve this route");
+      provider = route.provider;
+      note({ operationId: token.operationId, provider });
+
+      // ---- the budget: the most this call could cost is held against it until the call settles to what it used
+      worst = worstCaseUsage(body, raw.byteLength);
+      if (token.budget !== undefined) {
+        if (ledger.currency !== undefined && ledger.currency !== token.budget.currency) throw new Refusal(403, "model_not_allowed", "this task's budget is in another currency than its spend");
+        const maximum = await worstCaseCost(route, worst);
+        if (maximum === null) throw new Refusal(403, "model_not_allowed", "this model has no price on this computer, so the task budget cannot be held");
+        if (maximum.currency !== token.budget.currency) throw new Refusal(403, "model_not_allowed", "this model is priced in another currency than the task's budget");
+        // Nothing awaits between this check and the reservation below.
+        if (ledger.spentMicros + ledger.reservedMicros + maximum.micros > token.budget.micros) throw budgetRefusal();
+        reserved = maximum.micros;
+        ledger.reservedMicros += reserved;
+      }
+
+      // ---- the key, only now
+      const secret = await options.keys.get(options.companyId, route.provider);
+      if (secret === undefined) throw new Refusal(403, "model_not_allowed", `no ${route.provider} key is set on this computer`);
+      const key = secret.reveal();
+
+      const stream = body.stream === true;
+      const forwarded: Record<string, unknown> = { ...body, model: route.model };
+      if (stream && api === "openai-completions") {
+        const asked = body.stream_options;
+        forwarded.stream_options = { ...(asked !== null && typeof asked === "object" && !Array.isArray(asked) ? asked : {}), include_usage: true };
+      }
+      const upstreamHeaders: Record<string, string> = {
+        "content-type": "application/json",
+        accept: stream ? "text/event-stream" : "application/json",
+        "user-agent": "rovara-local-model-proxy",
+      };
+      if (route.provider === "anthropic") {
+        upstreamHeaders["x-api-key"] = key;
+        upstreamHeaders["anthropic-version"] = /^\d{4}-\d{2}-\d{2}$/u.test(headers["anthropic-version"] ?? "") ? headers["anthropic-version"]! : ANTHROPIC_VERSION;
+        if (headers["anthropic-beta"] !== undefined) upstreamHeaders["anthropic-beta"] = headers["anthropic-beta"].split(",").map((value) => value.trim()).join(",");
+      } else {
+        upstreamHeaders.authorization = `Bearer ${key}`;
+      }
+
+      timer = setTimeout(() => controller.abort(), timeoutMs);
       let upstream: Response;
       try {
         // redirect "manual": a redirect is never followed (the next address would get the key); it is an error.
+        requestSent = true;
         upstream = await transport(target, { method: "POST", headers: upstreamHeaders, body: JSON.stringify(forwarded), redirect: "manual", signal: controller.signal });
       } catch {
         throw new Refusal(controller.signal.aborted ? 504 : 502, "provider_unreachable", `the ${route.provider} provider could not be reached`);
       }
       tell({ event: "call_forwarded", operationId: token.operationId, provider: route.provider, status: upstream.status });
       if (upstream.status < 200 || upstream.status >= 300) {
+        // An error answer is not billed.
+        requestSent = false;
         const text = await readBounded(upstream, ERROR_BODY_MAX_BYTES).catch(() => "");
         throw providerRefusal(upstream.status, upstream.headers.get("retry-after"), text, key);
       }
@@ -317,40 +362,42 @@ export function createLocalModelProxy(options: LocalModelProxyOptions): LocalMod
       if (stream && contentType.toLowerCase().startsWith("text/event-stream") && upstream.body !== null) {
         upstreamOk = true;
         response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
-        const clean = await pump(upstream.body, response, (chunk) => collector.push(chunk), keyBytes);
-        if (!clean) {
+        const outcome = await pump(upstream.body, response, (chunk) => collector.push(chunk), keyBytes, controller.signal);
+        if (outcome === "key") {
           tell({ event: "stream_stopped", code: "key_in_answer", operationId: token.operationId, provider: route.provider });
+          await settle(route);
           response.destroy();
+        } else if (outcome === "aborted") {
+          await settle(route);
         } else {
-          await settle();
+          complete = true;
+          await settle(route);
           response.end();
         }
       } else {
+        upstreamOk = true;
         const whole = await readBounded(upstream, WHOLE_ANSWER_MAX_BYTES, keyBytes);
         let parsed: unknown;
         try { parsed = JSON.parse(whole); } catch { parsed = undefined; }
         if (parsed === undefined) throw new Refusal(502, "provider_answer_unreadable", `the ${route.provider} provider answered with something that is not JSON`);
         collector.whole(parsed);
-        upstreamOk = true;
-        await settle();
+        complete = true;
+        await settle(route);
         response.writeHead(200, { ...JSON_HEADERS });
         response.end(whole);
       }
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
       response.off("close", abortOnClose);
+      await settle(route);
+      release();
       ledger.inFlight -= 1;
-      await settle();
-      tell({ event: "call_finished", operationId: token.operationId, provider: route.provider });
+      if (route !== undefined) tell({ event: "call_finished", operationId: token.operationId, provider: route.provider });
     }
   }
 
   /** Records what the call used and adds its cost to the operation's spend. Recording the same entry twice counts once (the port's rule). */
-  async function record(token: { operationId: string; taskId: string | undefined; projectName: string | undefined; budget: Cost | undefined }, route: ProxyRoute, usage: ReturnType<UsageCollector["finish"]>, ledger: { currency: string | undefined; spentMicros: number; unpriced: number }): Promise<void> {
-    if (usage === undefined) {
-      tell({ event: "unmetered", code: "no_usage_reported", operationId: token.operationId, provider: route.provider });
-      return;
-    }
+  async function record(token: { operationId: string; taskId: string | undefined; projectName: string | undefined; budget: Cost | undefined }, route: ProxyRoute, usage: TokenUsage, ledger: { currency: string | undefined; spentMicros: number; unpriced: number }): Promise<void> {
     const result = await options.metering.record({
       companyId: options.companyId,
       entryId: `${token.operationId}:${randomUUID()}`,
@@ -414,28 +461,52 @@ async function readBounded(upstream: Response, limit: number, keyBytes?: Buffer)
   return Buffer.concat(chunks).toString("utf8");
 }
 
-/** Copies a streamed answer to the worker, reading its usage on the way. False when the key showed up in it and the copy was stopped. */
-async function pump(body: ReadableStream<Uint8Array>, response: ServerResponse, onChunk: (chunk: Uint8Array) => void, keyBytes: Buffer | undefined): Promise<boolean> {
+/** Resolves when the response has drained, closed, or the call was aborted (the worker went away, or the time ran out), so a worker that stops reading cannot hold a call open. */
+function drained(response: ServerResponse, signal: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (response.destroyed || signal.aborted) return resolve();
+    const done = (): void => {
+      response.off("drain", done);
+      response.off("close", done);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    response.once("drain", done);
+    response.once("close", done);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+/**
+ * Copies a streamed answer to the worker, reading its usage on the way. The last `key length - 1` bytes of everything read are held back and written only with
+ * the next chunk (or at a clean end), so a key split across two chunks is found before any byte of it has left: "key" when it showed up and the copy was stopped,
+ * "aborted" when the call was aborted or the worker went away, "clean" when the whole answer was copied.
+ */
+async function pump(body: ReadableStream<Uint8Array>, response: ServerResponse, onChunk: (chunk: Uint8Array) => void, keyBytes: Buffer | undefined, signal: AbortSignal): Promise<"clean" | "key" | "aborted"> {
   const reader: ReadableStreamDefaultReader<Uint8Array> = body.getReader();
+  const hold = keyBytes === undefined ? 0 : keyBytes.length - 1;
   let tail: Buffer = Buffer.alloc(0);
+  const send = async (bytes: Buffer): Promise<boolean> => {
+    if (bytes.length > 0) {
+      onChunk(bytes);
+      if (!response.write(bytes)) await drained(response, signal);
+    }
+    return !(signal.aborted || response.destroyed);
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      if (done) return true;
-      const chunk = Buffer.from(value);
-      if (keyBytes !== undefined) {
-        const window = Buffer.concat([tail, chunk]);
-        if (window.includes(keyBytes)) {
-          await reader.cancel();
-          return false;
-        }
-        tail = window.subarray(Math.max(0, window.length - (keyBytes.length - 1)));
-      }
-      onChunk(chunk);
-      if (!response.write(chunk)) await new Promise<void>((resolve) => { response.once("drain", resolve); response.once("close", resolve); });
-      if (response.destroyed) {
+      if (done) return (await send(tail)) ? "clean" : "aborted";
+      const window = Buffer.concat([tail, Buffer.from(value)]);
+      if (keyBytes !== undefined && window.includes(keyBytes)) {
         await reader.cancel();
-        return true;
+        return "key";
+      }
+      const cut = Math.max(0, window.length - hold);
+      tail = window.subarray(cut);
+      if (!(await send(window.subarray(0, cut)))) {
+        await reader.cancel();
+        return "aborted";
       }
     }
   } finally {
