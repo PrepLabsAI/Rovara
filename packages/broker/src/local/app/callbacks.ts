@@ -5,19 +5,19 @@
 //
 // What the result reader does NOT do yet (the Cloud reader, `terminal-result.ts` and `workflow-items.ts`, is about 2,000 lines of AWS-shaped code): a structured plan document, plan
 // evidence, the plan self-check and critique, and everything after the plan is approved. A plan the worker saves as `plan.md` is kept as a Markdown plan.
+import type { ObjectStorage } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  AgentXError, INDEX_EXPIRY_ATTRIBUTE, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
+  AgentXError, INDEX_EXPIRY_ATTRIBUTE, ObjectConflictError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
 } from "@agentx/contracts";
 import { CallbackCapabilities, type CallbackAction } from "../../callbacks.js";
-import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { currentDocumentType } from "../../core/decisions/workflow-subject.js";
 import { operationKey, taskPointerKey } from "../../core/task-flow/keys.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import type { StepOutcome } from "../../core/task-flow/outcome.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../../core/task-flow/records.js";
-import { recordOperationResult } from "../../core/task-flow/results.js";
+import { isTerminalStatus, recordOperationResult } from "../../core/task-flow/results.js";
 import { iso } from "../../core/task-flow/support.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { readVerifiedText } from "./documents.js";
@@ -25,6 +25,8 @@ import type { RepositoryCredential, RepositoryGrantService } from "../../reposit
 
 const ROUTE = /^\/v1\/internal\/workspaces\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/([a-z-]+)$/u;
 export const CAPABILITY_HEADER = "x-agentx-callback-capability";
+/** A retention class the object-storage adapters do not know, so a task's documents are kept until deleted (a plan can wait for its owner for longer than evidence is kept). */
+export const PLAN_RETENTION = "task-document";
 export const PLAN_ARTIFACT_NAME = "plan.md";
 export const PLAN_MAX_BYTES = 200_000;
 const ARTIFACT_NAME = /^[A-Za-z0-9._-]{1,120}$/u;
@@ -36,7 +38,7 @@ export const artifactKey = (workspaceId: string, operationId: string, name: stri
 
 export interface CallbackDeps {
   flow: TaskFlowDeps;
-  blobs: EvidenceBlobStore;
+  blobs: ObjectStorage;
   /** The repository grants this process issued; a worker exchanges one for a clone or push credential. */
   grants: Pick<RepositoryGrantService, "exchange">;
 }
@@ -56,7 +58,6 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
   return operation;
 }
 
-const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
@@ -85,8 +86,13 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
     if (earlier === undefined || earlier["sha256"] !== sha256 || typeof earlier["id"] !== "string") throw agentXError("CALLBACK_FORBIDDEN", "this artifact was already saved and cannot be replaced");
     artifactId = earlier["id"];
   }
-  // A repeat of the same bytes (or a crash between the row and the bytes) leaves the object in place or puts the same bytes back.
-  if ((await deps.blobs.stat(objectKey)) === undefined) await deps.blobs.put(objectKey, bytes, { contentType: mediaType, metadata: { sha256, name }, retention: "evidence-std" });
+  // A repeat of the same bytes (or a crash between the row and the bytes) puts the same bytes where they belong; an object already there is kept (objects are immutable, and readers
+  // check the bytes against the digest, so only these bytes are ever shown).
+  try {
+    await deps.blobs.put(objectKey, bytes, { contentType: mediaType, metadata: { sha256, name }, retention: PLAN_RETENTION });
+  } catch (error) {
+    if (!(error instanceof ObjectConflictError)) throw error;
+  }
   return { artifactId };
 }
 
@@ -185,7 +191,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
       // Cloud's rule: once an operation has ended, only a repeat of its result is taken. Late output could rewrite what the workflow already read.
-      if (action !== "result" && TERMINAL_STATUSES.has(operation.status)) throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
+      if (action !== "result" && isTerminalStatus(operation.status)) throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
       const body = bodyOf(request);
       if (action === "events") return json(200, await recordEvents(deps, operation, body));
       if (action === "artifacts") return json(200, await recordArtifact(deps, operation, body));

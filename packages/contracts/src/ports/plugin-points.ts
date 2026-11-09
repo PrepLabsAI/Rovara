@@ -16,6 +16,7 @@ import type { Tracker } from "../plugins/tracker.js";
 import type { DocumentStore } from "./document-store.js";
 import type { JsonObject } from "./json.js";
 import type { ModelKeyStore } from "./model-keys.js";
+import type { ObjectStorage } from "./object-storage.js";
 import type { CheckRunnerAdapter } from "./plugin-adapters.js";
 import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.js";
 import type { AuditSink } from "./audit-sink.js";
@@ -41,6 +42,8 @@ export const PLUGIN_POINTS = [
   "approvers",
   "metering",
   "model-keys",
+  /** Provisional (owner decision 58): files too big for the document store, behind `ObjectStorage`. */
+  "object-storage",
 ] as const;
 export const PluginPointSchema = z.enum(PLUGIN_POINTS);
 export type PluginPoint = z.infer<typeof PluginPointSchema>;
@@ -67,6 +70,7 @@ export const PLUGIN_POINT_CARDINALITY: Readonly<Record<PluginPoint, "one" | "man
   approvers: "one",
   metering: "one",
   "model-keys": "one",
+  "object-storage": "one",
 };
 
 /**
@@ -131,6 +135,7 @@ export interface PluginPointTypes {
   approvers: Approvers;
   metering: Metering;
   "model-keys": ModelKeyStore;
+  "object-storage": ObjectStorage;
 }
 
 export type AdapterOf<P extends PluginPoint> = PluginPointTypes[P];

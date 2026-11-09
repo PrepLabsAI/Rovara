@@ -3,8 +3,8 @@
 //
 // Plan decisions are NOT here: an approval is authority, and the only proof the local owner can give is the one a local page signs for exactly one request, revision and digest
 // (decisions/local-session.ts). The session token that logs a tool in is not an approval proof, so a tool that asks to approve is told to open the page.
+import type { ObjectStorage } from "@agentx/contracts";
 import { AgentXError, agentXError, type Principal } from "@agentx/contracts";
-import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import { loadOwnedTask, taskViewOf } from "../../core/task-flow/reads.js";
@@ -20,7 +20,7 @@ export const APPROVE_ON_THE_PAGE = "A plan is approved on its local review page,
 
 export interface OwnerRoutesDeps {
   flow: TaskFlow;
-  blobs: EvidenceBlobStore;
+  blobs: ObjectStorage;
   /** Opens a review page in the owner's browser, from this process. Resolves when the browser was asked; the address is not returned. */
   openPage: (path: string) => Promise<void>;
   version: string;

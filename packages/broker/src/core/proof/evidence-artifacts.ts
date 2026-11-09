@@ -58,7 +58,9 @@ export async function storeEvidenceArtifacts(store: EvidenceArtifactStore, owner
     const retentionClass = EVIDENCE_ARTIFACT_RETENTION[item.kind];
     if (retentionClass === "evidence-record") continue;
     try {
-      await store.blobs.put(keyOf(owner, digest), item.bytes, { contentType: EVIDENCE_ARTIFACT_CONTENT_TYPES[item.kind], metadata: { sha256: digest, kind: item.kind }, retention: retentionClass });
+      await store.blobs.put(keyOf(owner, digest), item.bytes, { contentType: EVIDENCE_ARTIFACT_CONTENT_TYPES[item.kind], metadata: { sha256: digest, kind: item.kind }, retention: retentionClass },
+        // The key is the content's own SHA-256 under this task, so a second write of the same key is the same bytes (a retried capture): the one deliberate overwrite.
+        { overwrite: true });
     } catch (error) {
       // An object this store cannot hold is left out like any other that is not storable: the pack builder loses its link.
       if (error instanceof EvidenceObjectTooBigError) continue;

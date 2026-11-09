@@ -1,6 +1,7 @@
 // Lane L9-wire: the session routes the MCP tools and the CLI's `session` commands call (`/v1/app/sessions...`), over L6b's session store, summary and control. A session here is a
 // task's session; the read is L6b's `sessionSnapshot` and the task flow's view of the same task. Comments between people are not here (one owner): a comment is refused, a message
 // to the agent goes through the control host (L9-wire's `host.ts`), which says plainly that a running step does not take it yet.
+import type { ObjectStorage } from "@agentx/contracts";
 import {
   AgentXError, IntentAnswerRefusal, SESSION_ACTIONS, SessionIdSchema, WorkflowTransitionError, agentXError, answerIntentQuestions,
   type AgentSessionRecord, type OrgId,
@@ -10,7 +11,6 @@ import type { ControlResult } from "../../core/sessions/control.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import { listSessions, sessionSnapshot } from "../../core/sessions/read.js";
 import { SessionStore } from "../../core/sessions/store.js";
-import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import { dispatchRowItem } from "../../core/task-flow/dispatch-rows.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
@@ -28,7 +28,7 @@ const STATUS_OF_REFUSAL: Record<string, number> = { not_found: 404, forbidden: 4
 
 export interface SessionRoutesDeps {
   flow: TaskFlow;
-  blobs: EvidenceBlobStore;
+  blobs: ObjectStorage;
   companyId: OrgId;
   /** The URL clients reach this install at: the session's `link` is its own address. */
   origin: () => string;

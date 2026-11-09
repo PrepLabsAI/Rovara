@@ -6,6 +6,7 @@ import type {
   AuditSink,
   DocumentStore,
   OrgId,
+  InvocationModelRoute,
   Principal,
   ProjectDefinition,
   QueueService,
@@ -107,8 +108,13 @@ export interface TaskFlowDeps {
   newId?: () => string;
   log?: (entry: Record<string, unknown>) => void;
   prompts?: StepPrompts;
-  /** Environment every worker machine of this install is started with (lane L9-wire: where the model proxy is). Never a secret. */
-  machineEnvironment?: Readonly<Record<string, string>>;
+  /**
+   * Lane L9a / L9-wire: the model a task step calls, through the install's model proxy (the worker holds no key). The route is what the worker is told (`modelRoute`); the capability it
+   * gets lists the `model-access` action. Undefined from `route()`: no provider key is set up, and the step gets neither (the worker then has no model access and fails with its own reason).
+   */
+  modelAccess?: { route(): Promise<InvocationModelRoute | undefined> };
+  /** Called once an operation reached a terminal status (the model proxy frees its tokens and spend record). Never throws into the flow. */
+  onOperationEnded?: (operationId: string) => void;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
 }

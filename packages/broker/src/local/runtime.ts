@@ -24,12 +24,13 @@ import {
   registerCodeDefaults,
 } from "../ports/index.js";
 import { MemoryDocumentStore } from "../ports/memory-document-store.js";
+import { createDocumentObjectStorage } from "../core/proof/evidence-blob-store.js";
 import { MemoryQueueService } from "../ports/memory-queue.js";
 import { SqliteDocumentStore, SqliteQueueService } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
 import type { BrowserOpener } from "./open-browser.js";
-import { createLocalApp, type LocalApp, type ModelProxyEndpoint } from "./app/app.js";
+import { createLocalApp, type LocalApp } from "./app/app.js";
 import { configurationAnswer } from "./app/routes.js";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
 import { localSessionProofVerifier } from "../core/decisions/local-session.js";
@@ -39,6 +40,8 @@ import { DockerWorkerMachines } from "./docker-worker-machines.js";
 import { assertGithubCloneAccess, resolveGithubAccess, type GhRunner } from "./github-access.js";
 import { startLocalHttpServer, type LocalHttpServer } from "./http-server.js";
 import { loadInvokeSigner } from "./invoke-signer.js";
+import { createLocalModelProxy, type LocalModelProxy, type ModelGrantSource, type ProviderEndpoints } from "./model-proxy/index.js";
+import { modelProxyWorkerUrl } from "./docker-worker-machines.js";
 import {
   KEYS_FILE_NAME,
   SERVER_FILE_NAME,
@@ -129,8 +132,6 @@ export interface LocalRuntimeOptions {
   machines?: WorkerMachines;
   /** Called with the registry after Code's defaults and before the config's adapters, to register more (an embedding product, tests). */
   registerAdapters?: (registry: AdapterRegistry) => void;
-  /** TODO(L9a): the local model proxy's address (lane K1). Absent: workers have no model access yet. */
-  modelProxyEndpoint?: ModelProxyEndpoint;
   /** Opens a review page in the owner's browser (default: the system browser). A test gives a recorder, which stands for the browser. */
   openBrowser?: BrowserOpener;
   /** How `gh` is run to find the owner's GitHub token (tests give a stub, so a real login on the machine is never used). */
@@ -139,6 +140,13 @@ export interface LocalRuntimeOptions {
   workerFetch?: typeof fetch;
   /** Run the dispatch, sweep and session timers. Default true; tests call `runtime.tick()`. */
   timers?: boolean;
+  /**
+   * Lane L9a (K1): what a worker's callback capability entitles it to in the model proxy. The task flow supplies it (`capabilityModelGrants`); until
+   * it is wired nothing is granted, and a worker asking for model access is refused.
+   */
+  modelGrants?: ModelGrantSource | undefined;
+  /** Where the model proxy calls each provider (tests point these at a fake). Absent: the providers' own addresses. */
+  modelProviderEndpoints?: Partial<ProviderEndpoints> | undefined;
 }
 
 export interface LocalRuntime {
@@ -160,6 +168,8 @@ export interface LocalRuntime {
   readonly app: LocalApp;
   /** One pass of what the timers do (tests). */
   tick(): Promise<void>;
+  /** Lane L9a (K1): the model proxy workers call. Its `tokens` end a finished operation's tokens (`revokeOperation`). */
+  readonly modelProxy: LocalModelProxy;
   /** The adapters registered at each plug-in point, by name. */
   wiring(): Record<string, string[]>;
   stop(): Promise<void>;
@@ -299,6 +309,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
       return { tcpPort: callbackServer.current.tcpPort, socketDirectory: callbackServer.current.socketDirectory };
     },
     ...(options.allowedDomains === undefined ? {} : { allowedDomains: options.allowedDomains }),
+    modelProxy: true,
     signer: await loadInvokeSigner(stateDirectory),
     docker: options.docker ?? createDockerRunner(options.environment),
     ...(options.workerFetch === undefined ? {} : { fetch: options.workerFetch }),
@@ -309,15 +320,21 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
 
   options.registerAdapters?.(registry);
   await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
+  // Lane L9a (S1): objects are kept as documents unless a plug-in names another object storage (the folder adapter).
+  if (registry.names("object-storage").length === 0) {
+    registry.register("object-storage", "document", createDocumentObjectStorage(registry.require("storage"), { companyId: config.companyId ?? IMPLICIT_COMPANY_ID }), { isDefault: true });
+  }
   registry.seal();
 
   const identity = registry.require("identity");
   const githubKeys = createLocalGithubKeyStore(stateDirectory);
   const serverUrl = { current: "http://127.0.0.1" };
+  const modelProxyHolder: { current?: LocalModelProxy } = {};
   const app = await createLocalApp({
     origin: () => serverUrl.current,
     ...(options.openBrowser === undefined ? {} : { openBrowser: options.openBrowser }),
-    ...(options.modelProxyEndpoint === undefined ? {} : { modelProxyEndpoint: options.modelProxyEndpoint }),
+    // The model proxy is made after the servers (it is served on the callback listener); the app asks it, late, to forget an operation that ended.
+    operationEnded: (operationId) => modelProxyHolder.current?.operationEnded(operationId),
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
     resolveRepositoryCredential: async (_credentialRef, repositoryUrl, accessKind) => {
@@ -387,7 +404,18 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   const serverFile = join(stateDirectory, SERVER_FILE_NAME);
   await writeOwnerFile(serverFile, `${JSON.stringify({ url: server.url, pid: process.pid })}\n`).catch(() => undefined);
   // Workers call back on a listener of their own, not on the owner's server (callback-server.ts).
-  callbackServer.current = await startCallbackServer({ handler: callbackHandler, stateDirectory }).catch(async (error: unknown) => {
+  // Lane L9a (K1): the model proxy is served on that same listener, so a worker reaches it only through its own egress gateway.
+  const modelProxy = createLocalModelProxy({
+    keys: registry.require("model-keys"),
+    metering: registry.require("metering"),
+    companyId: config.companyId ?? IMPLICIT_COMPANY_ID,
+    // What a worker may call is the task flow's decision (the grants over the flow's operations); a caller's own source (tests) replaces it.
+    grants: options.modelGrants ?? app.modelGrants,
+    workerUrl: modelProxyWorkerUrl(),
+    ...(options.modelProviderEndpoints === undefined ? {} : { endpoints: options.modelProviderEndpoints }),
+  });
+  modelProxyHolder.current = modelProxy;
+  callbackServer.current = await startCallbackServer({ handler: callbackHandler, stateDirectory, modelProxy }).catch(async (error: unknown) => {
     await server.close();
     await app.stop();
     for (const close of closers) await close();
@@ -408,6 +436,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
     pageLink: (path) => app.pages.link(path, { label: "terminal" }),
     app,
     tick: () => app.tick(),
+    modelProxy,
     wiring,
     async stop() {
       if (stopped) return;

@@ -1,8 +1,8 @@
 // Lane L9-wire: the task as the clients read it (`DeveloperTaskView`, which the MCP tools and the CLI parse), over the task flow's own smaller view (L6a's `TaskView`). Only what the records
 // hold is filled; the optional parts (events, summary, proof, evidence, testing, run limits) are left out until their lanes are wired.
+import type { ObjectStorage } from "@agentx/contracts";
 import type { DeveloperTaskListItem } from "@agentx/contracts";
 import { readVerifiedText } from "./documents.js";
-import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import { waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { TaskView } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
@@ -10,7 +10,7 @@ import type { TaskRecord } from "../../core/task-flow/records.js";
 /** The plan text a client may read: the waiting document, cut to what the tools carry (the whole document is on the local page). */
 const PLAN_CONTENT_MAX_BYTES = 32_768;
 
-export async function developerTaskView(task: TaskRecord, view: TaskView, blobs: EvidenceBlobStore): Promise<Record<string, unknown>> {
+export async function developerTaskView(task: TaskRecord, view: TaskView, blobs: ObjectStorage): Promise<Record<string, unknown>> {
   const workflow = task.workflow;
   let planContent: string | undefined;
   if (workflow !== undefined && workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {

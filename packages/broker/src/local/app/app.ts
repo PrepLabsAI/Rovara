@@ -6,24 +6,30 @@
 //   the callback endpoints a worker posts to, and the timers that keep the dispatch, the recovery sweep and the outbox relay going.
 //
 // Decision 51: nothing here names a provider; it asks the registry for `storage`, `queue`, `worker-machines`, `admission`, `audit-sink`, `approvers`, `identity` and `metering`.
-// Decision 53: the object (artifact) store is the one port W0 lacks; lane L9a builds it. TODO(L9a): replace `createDocumentEvidenceBlobStore` below with the registry's `object-storage` adapter.
+// Decision 53: artifacts live in the registry's `object-storage` adapter (lane L9a); a worker's model calls go through the model proxy (lane L9a), which the task flow grants per operation.
 import { createHmac, randomBytes } from "node:crypto";
+import { DEFAULT_DIRECT_MODELS } from "@agentx/model-runtime/config";
 import { join } from "node:path";
-import { IMPLICIT_COMPANY_ID, type AdapterRegistry, type OrgId, type Principal } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, type AdapterRegistry, type ObjectStorage, type OrgId, type Principal } from "@agentx/contracts";
+import { CallbackCapabilities } from "../../callbacks.js";
+import { capabilityModelGrants, localRoute, type ModelGrantSource } from "../model-proxy/index.js";
 import { createCostLedger, costUsdOf } from "../../core/cost/ledger.js";
 import { createDecisionGate, type DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createDecisionActions } from "../../core/decisions/local-actions.js";
 import { createWorkflowDocumentSubject } from "../../core/decisions/workflow-subject.js";
 import type { LocalPageSessions } from "../../core/local-pages/guard.js";
 import { createLocalPagesServer, type LocalPagesServer } from "../../core/local-pages/server.js";
-import { createDocumentEvidenceBlobStore, type EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import { startSessionProjector } from "../../core/sessions/projector.js";
 import { sweepOpenSessions } from "../../core/sessions/sweep.js";
 import type { SummaryDependencies } from "../../core/sessions/summary.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import { dispatchRowItem } from "../../core/task-flow/dispatch-rows.js";
 import { createTaskFlowFromRegistry, TASK_FLOW_INDEXES, type TaskFlow } from "../../core/task-flow/flow.js";
+import { operationKey, taskPointerKey, workspaceKey } from "../../core/task-flow/keys.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
+import { readTask } from "../../core/task-flow/reads.js";
+import { fromDocument, type TaskPointerRecord } from "../../core/task-flow/records.js";
+import { isTerminalStatus } from "../../core/task-flow/results.js";
 import { planFeedbackKey } from "../../core/task-flow/stage-machine.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { localOwnerPrincipal } from "../../ports/policy-defaults.js";
@@ -42,20 +48,11 @@ export { TASK_FLOW_INDEXES };
 /** The id the default identity adapter gives the machine's owner (`localOwnerPrincipal`). */
 const LOCAL_OWNER_PERSON_ID = "local-owner";
 
-/**
- * Where the worker's model calls go (lane L9a, K1: a local model proxy, so the worker never holds a model key). This is the narrow seam L9-wire codes against; the proxy is not built here.
- * TODO(L9a): K1 fills it. Two things it must settle, found while wiring: the worker asks the broker for a short-lived key with `GET /v1/internal/model-access`, which the callback
- * listener (POST only) and the egress gateway (relays only `/v1/internal/workspaces/<id>/operations/<id>/<action>`) both refuse, so K1 either moves that call under the operation's
- * prefix as a POST or opens one more path in both; and the key it issues must be the proxy's own, never the owner's provider key.
- */
-export interface ModelProxyEndpoint {
-  /** The proxy's address as a worker sees it (`AGENTX_MODEL_PROXY_URL`). */
-  url: string;
-}
-
 export interface LocalAppOptions {
-  /** TODO(L9a): the local model proxy. Absent: a worker has no model access and its Understand and Plan steps fail with a plain reason. */
-  modelProxyEndpoint?: ModelProxyEndpoint;
+  /** Tells the model proxy an operation ended (it frees the operation's tokens and spend record). Set by the runtime, which makes the proxy after the servers. */
+  operationEnded?: (operationId: string) => void;
+  /** The model a task step calls: absent, the first of Anthropic and OpenAI that has a key. Tests and a later settings file say otherwise. */
+  modelChoice?: { provider: "anthropic" | "openai"; model: string };
   registry: AdapterRegistry;
   stateDirectory: string;
   pageSessions: LocalPageSessions;
@@ -81,7 +78,9 @@ export interface LocalApp {
   readonly flow: TaskFlow;
   readonly pages: LocalPagesServer;
   readonly gate: DecisionGate;
-  readonly blobs: EvidenceBlobStore;
+  readonly blobs: ObjectStorage;
+  /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
+  readonly modelGrants: ModelGrantSource;
   /** The owner's routes. `undefined` when the path is not one of them. The caller authenticated the principal. */
   routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
   /** The worker's callbacks (`/v1/internal/...`). */
@@ -113,13 +112,23 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const store = registry.require("storage");
   const log = options.log ?? (() => undefined);
   const owner: Principal = (await registry.require("identity").getPrincipal(companyId, LOCAL_OWNER_PERSON_ID).catch(() => undefined)) ?? localOwnerPrincipal({ companyId });
-  // TODO(L9a): the `object-storage` plug-in point. Until it lands, artifacts are kept as documents (the evidence store's own adapter); a plan is small.
-  const blobs = createDocumentEvidenceBlobStore(store, { companyId, ...(options.now === undefined ? {} : { now: () => options.now!().getTime() }), retentionDays: { "evidence-std": 180 } });
+  // Lane L9a's `object-storage` point: the folder adapter if the config names one, else objects kept as documents.
+  const blobs = registry.require("object-storage");
 
   const rootKey = await loadCallbackKey(options.stateDirectory);
   // Two kinds of token, two keys: a repository grant is not good as a callback capability, nor the other way round (the signature fails first, so a mix-up is a 403).
   const signingKey = deriveKey(rootKey, "callback-capability");
   const grants = new RepositoryGrantService(deriveKey(rootKey, "repository-grant"), options.resolveRepositoryCredential ?? (async () => { throw new Error("no GitHub access is set up: run `gh auth login` or set GH_TOKEN"); }));
+
+  // The model a task step calls: the owner's choice, else the first provider (Anthropic, then OpenAI) that has a key. No key: no route, and the worker has no model access.
+  const keys = registry.require("model-keys");
+  const chosen = async (): Promise<{ provider: "anthropic" | "openai"; model: string } | undefined> => {
+    if (options.modelChoice !== undefined) return options.modelChoice;
+    const have = await keys.providers(companyId);
+    const provider = (["anthropic", "openai"] as const).find((candidate) => have.includes(candidate));
+    return provider === undefined ? undefined : { provider, model: DEFAULT_DIRECT_MODELS[provider].worker };
+  };
+  const modelRoute = async () => { const choice = await chosen(); return choice === undefined ? undefined : localRoute(choice.provider, choice.model).workerRoute; };
 
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
@@ -130,10 +139,28 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.machinesName === undefined ? {} : { machinesName: options.machinesName }),
     // No code host adapter registered (none is set up on a fresh laptop): a start is not refused for a host nobody knows, and publishing a pull request is simply not offered.
     checkCodeHosts: registry.names("code-host").length > 0,
-    ...(options.modelProxyEndpoint === undefined ? {} : { machineEnvironment: { AGENTX_MODEL_PROXY_URL: options.modelProxyEndpoint.url } }),
+    modelAccess: { route: modelRoute },
+    ...(options.operationEnded === undefined ? {} : { onOperationEnded: options.operationEnded }),
     startExtras: createSessionStartExtras(companyId),
     ...(options.now === undefined ? {} : { now: options.now }),
     log,
+  });
+
+  // The model proxy asks, per call, what this operation's capability entitles it to. The models are the install's own choice, never the worker's; no budget is held yet (the flow has no
+  // run limit before a price table exists, and Code's price table is empty), and the proxy keeps no spend record without one.
+  const modelGrants = capabilityModelGrants({
+    capabilities: new CallbackCapabilities(signingKey),
+    async describe(operation) {
+      const choice = await chosen();
+      if (choice === undefined) return undefined;
+      const pointer = fromDocument<TaskPointerRecord>(await store.get(taskPointerKey(operation.workspaceId)));
+      const task = pointer === undefined ? undefined : await readTask(flow.deps, pointer.taskId);
+      return { routes: [localRoute(choice.provider, choice.model).route], ...(task === undefined ? {} : { taskId: task.taskId, projectName: task.project }) };
+    },
+    async holds(operation) {
+      const [record, workspace] = await Promise.all([store.get(operationKey(operation.workspaceId, operation.operationId)), store.get(workspaceKey(operation.workspaceId))]);
+      return record !== undefined && !isTerminalStatus(String(record["status"])) && record["fence"] === operation.fence && workspace?.["activeOperationId"] === operation.operationId && workspace["fence"] === operation.fence;
+    },
   });
 
   // Sessions: facts over the task records, the cost ledger over the metering seam.
@@ -196,7 +223,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs,
+    flow, pages, gate, blobs, modelGrants,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

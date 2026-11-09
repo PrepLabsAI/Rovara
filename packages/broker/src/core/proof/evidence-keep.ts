@@ -133,7 +133,9 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     if (!checked.success) return { kept: false, reason: "invalid" };
     if (deps.late?.() === true) return { kept: false, reason: "fault" };
     // The stored pack is kept like the tails (`evidence-std`): it expires with them and is deleted with them on erasure.
-    await deps.store.blobs.put(evidencePackKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(checked.data), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" });
+    await deps.store.blobs.put(evidencePackKey(input.task, input.candidateDigest), Buffer.from(JSON.stringify(checked.data), "utf8"), { contentType: "application/json", metadata: { kind: "evidence-pack" }, retention: "evidence-std" },
+      // One pack per task and candidate digest: re-keeping the same candidate (a re-check, a retried keep) writes the pack again, so this caller overwrites on purpose.
+      { overwrite: true });
     return { kept: true, problems: built.problems, guardedParts: guarded };
   } catch (error) {
     deps.log?.("evidence.keep_failed", { error: error instanceof Error ? error.name : "unknown" });

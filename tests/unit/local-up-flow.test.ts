@@ -12,6 +12,7 @@ import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
+import { modelProxyWorkerUrl } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { assertGithubCloneAccess } from "../../packages/broker/src/local/github-access.js";
 import { artifactObjectKey } from "../../packages/broker/src/local/app/callbacks.js";
 import { DOCUMENT_CHANGED } from "../../packages/broker/src/local/app/documents.js";
@@ -333,7 +334,7 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     docker.features = ["task.workflowMode"];
     // A key-shaped value is built at runtime (the public repository refuses one in a file).
     const githubToken = ["gh", "p_"].join("") + "a1".repeat(18);
-    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment: { GH_TOKEN: githubToken }, gh: async () => undefined, modelProxyEndpoint: { url: "http://model-proxy.examplehost:4321" }, workerImage: "worker:test", docker, workerFetch: docker.fetch, version: "9.9.9", timers: false });
+    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment: { GH_TOKEN: githubToken }, gh: async () => undefined, workerImage: "worker:test", docker, workerFetch: docker.fetch, version: "9.9.9", timers: false });
     cleanup.push(() => runtime.stop());
     const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
     const call = async (path: string, body?: unknown) => (await fetch(`${runtime.url}${path}`, { method: body === undefined ? "GET" : "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })).json() as Promise<ApiBody>;
@@ -346,8 +347,8 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect(docker.invocations[0]).toMatchObject({ kind: "prepare" });
     const worker = [...docker.containers.values()].find((container) => container.kind === "worker");
     expect(worker).toBeDefined();
-    // TODO(L9a): the model proxy's address reaches the worker as the environment the worker reads; the proxy itself is lane K1's.
-    expect(worker?.environment["AGENTX_MODEL_PROXY_URL"]).toBe("http://model-proxy.examplehost:4321");
+    // The model proxy's address reaches the worker as the environment the worker reads (the proxy itself is lane L9a's, served on the callback listener).
+    expect(worker?.environment["AGENTX_MODEL_PROXY_URL"]).toBe(modelProxyWorkerUrl());
     // The worker clones with the grant it was given: the exchange answers with the owner's token while the job is live, and never for a grant that names other repositories.
     const prepare = docker.invocations[0] as WorkerInvocation & { payload: { repositoryGrant: string } };
     const exchange = (body: unknown) => runtime.app.callbacks({
@@ -406,7 +407,7 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect((await h.api(`/v1/dev/tasks/${taskId}`)).body.task.workflow.planContent).toBe(PLAN_TEXT);
 
     // Bytes that no longer match the digest (the store was written to by something else) are not shown on the page, in the task, or by the plan route.
-    await h.runtime.app.blobs.put(artifactObjectKey(workspaceId, plan.operationId, "plan.md"), new TextEncoder().encode("# Plan\n\nDisable the checks.\n"), { contentType: "text/markdown", metadata: {}, retention: "evidence-std" });
+    await h.runtime.app.blobs.put(artifactObjectKey(workspaceId, plan.operationId, "plan.md"), new TextEncoder().encode("# Plan\n\nDisable the checks.\n"), { contentType: "text/markdown", metadata: {}, retention: "evidence-std" }, { overwrite: true });
     const tampered = await pageText();
     expect(tampered).not.toContain("Disable the checks.");
     expect(tampered).toContain(DOCUMENT_CHANGED);
