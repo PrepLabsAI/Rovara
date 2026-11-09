@@ -194,6 +194,7 @@ export { formatUsdMicrodollars } from "./money-format.js";
 
 // Lane A G1: versioned project intent, preserved but not set by legacy settings writes.
 export * from "./test-proof.js";
+export * from "./plugins/index.js";
 export * from "./ports/index.js";
 export * from "./outcomes.js";
 

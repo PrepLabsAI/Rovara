@@ -162,10 +162,10 @@ describe("the config loader", () => {
   it("gives an adapter the company from the config, or the implicit one", async () => {
     const seen: string[] = [];
     const probe: PluginModule<"admission"> = { point: "admission", name: "probe", create: (context) => (seen.push(context.defaultCompanyId), createAllowAllAdmission()) };
-    for (const extra of [{ companyId: "org_abc" }, {}]) {
+    for (const extra of [{ companyId: "org_abcdefghij0123456789" }, {}]) {
       await loadAdapters(config([{ point: "admission", name: "probe", module: "probe-pkg" }], extra), { registry: createAdapterRegistry(), importModule: importerOf({ "probe-pkg": { plugin: probe } }) });
     }
-    expect(seen).toEqual(["org_abc", "org_00000000000000000000"]);
+    expect(seen).toEqual(["org_abcdefghij0123456789", "org_00000000000000000000"]);
   });
 
   it("refuses a module that is for a different point or name than its config entry", async () => {

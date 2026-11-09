@@ -11,9 +11,12 @@ import { z } from "zod";
 import { PluginKindSchema } from "../plugins/common.js";
 import type { ChannelCapabilities, ChannelDecision, ChannelEvent, StepUpKind } from "../channel-adapter.js";
 import type { InboundMessage } from "../conversation.js";
+import type { CodeHost } from "../plugins/code-host.js";
+import type { Tracker } from "../plugins/tracker.js";
 import type { DocumentStore } from "./document-store.js";
 import type { JsonObject } from "./json.js";
 import type { ModelKeyStore } from "./model-keys.js";
+import type { CheckRunnerAdapter } from "./plugin-adapters.js";
 import type { Admission, Approvers, IdentityProvider, Metering } from "./policy.js";
 import type { AuditSink } from "./audit-sink.js";
 import type { QueueService } from "./queue.js";
@@ -102,8 +105,8 @@ export interface ChannelAdapter {
 }
 
 /**
- * The thing an adapter of a point not yet specified in W0 must be. The lane that defines the point's port (L1 brings code host,
- * tracker and check runner) narrows its line in `PluginPointTypes` to the real interface. Until then only the name is known.
+ * The thing an adapter of a point that has no port yet must be (monitoring, learning, team-record-source, build-system). The lane
+ * that defines the point's port narrows its line in `PluginPointTypes` to the real interface. Until then only the name is known.
  */
 export interface UnspecifiedAdapter {
   readonly kind?: string;
@@ -111,9 +114,9 @@ export interface UnspecifiedAdapter {
 
 /** The adapter type for each point. A lane that adds a port edits its own line here. */
 export interface PluginPointTypes {
-  "code-host": UnspecifiedAdapter;
-  tracker: UnspecifiedAdapter;
-  "check-runner": UnspecifiedAdapter;
+  "code-host": CodeHost;
+  tracker: Tracker;
+  "check-runner": CheckRunnerAdapter;
   channel: ChannelAdapter;
   "worker-machines": WorkerMachines;
   storage: DocumentStore;
@@ -234,8 +237,8 @@ export type PluginConfigEntry = z.infer<typeof PluginConfigEntrySchema>;
 /** The config file's content. Entries are created in order, so list a queue's store before the queue. */
 export const PluginConfigSchema = z.object({
   version: z.literal(PLUGIN_CONFIG_VERSION),
-  /** The company Code runs as (decision 45.6). Absent: the implicit company. */
-  companyId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/).optional(),
+  /** The company Code runs as (decision 45.6). Absent: the implicit company. It has the shape of Cloud's organization id, because plug-in calls carry it as their scope (`HostScope`). */
+  companyId: z.string().regex(/^org_[0-9a-z]{20}$/, "a company id looks like org_ and 20 lower-case letters or digits (the id Cloud uses; code-host and tracker calls are scoped by it)").optional(),
   plugins: z.array(PluginConfigEntrySchema).max(64),
 }).strict().superRefine((config, context) => {
   const seen = new Set<string>();

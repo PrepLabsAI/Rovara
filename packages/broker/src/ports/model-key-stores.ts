@@ -37,7 +37,7 @@ export function createFileModelKeyStore(path: string): ModelKeyStore {
   async function read(): Promise<Record<string, string>> {
     let handle;
     try {
-      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
       throw new Error("the model key file could not be opened (it must be a plain file, not a link)", { cause: error });
