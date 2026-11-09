@@ -4,6 +4,7 @@ import type {
   Admission,
   AgentXErrorCode,
   AuditSink,
+  CheckEntry,
   DocumentStore,
   OrgId,
   InvocationModelRoute,
@@ -15,6 +16,7 @@ import type {
   TransactionalOutbox,
   WorkerMachines,
   WorkflowPath,
+  WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { RepositoryGrantService } from "../../repository-access.js";
 import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.js";
@@ -140,6 +142,11 @@ export interface TaskFlowDeps {
   taskSpendUsd?: (taskId: string) => Promise<number | undefined>;
   /** Lane L10: records a milestone ("fixing", "stuck") in the transaction of the change that caused it. Absent: none is recorded (the workflow change still is). */
   milestones?: CodeMilestones;
+  /**
+   * Lane L12: keeps the evidence of a run whose checks were just recorded for a candidate (the proof page and the pull request read it). Informational: called best effort after the verification is recorded, and
+   * a fault or a slow store changes nothing about the task. Absent: no evidence is kept.
+   */
+  keepEvidence?: (input: { task: TaskRecord; operation: OperationRecord; workflow: WorkflowSnapshot; candidateDigest: string; checks: readonly CheckEntry[] }) => Promise<unknown>;
   /** Lane L10: the steps after the plan is approved. `createTaskFlow` fills it with the build step when absent. */
   buildSteps?: BuildSteps;
   /**

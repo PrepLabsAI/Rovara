@@ -10,13 +10,15 @@ import {
 } from "@agentx/contracts";
 import { CHANGED_OUTSIDE_NOTE, checkPullRequestHeads } from "../../core/build-step/head-check.js";
 import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
-import type { ApprovalOffer, CommentView, LocalActionResult, LocalPageActions, LocalPageData, PendingItemView, PlanPageView, PlanVersionView } from "../../core/local-pages/views.js";
+import type { ApprovalOffer, CommentView, LocalActionResult, LocalPageActions, LocalPageData, PendingItemView, PlanPageView, PlanVersionView, ProofReportView } from "../../core/local-pages/views.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { listTasks, readTask } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { iso } from "../../core/task-flow/support.js";
 import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
+import type { LocalEvidence } from "./evidence.js";
 import { stepOf } from "./facts.js";
+import { proofReportOf } from "./proof-report.js";
 
 const PLAN_READ_MAX_BYTES = 200_000;
 const COMMENTS_MAX = 200;
@@ -42,6 +44,8 @@ const KIND: Record<WorkflowArtifact["type"], PlanVersionView["kind"] | undefined
 
 export interface PageDataDeps {
   flow: TaskFlowDeps;
+  /** Lane L12: the evidence kept for a task's checked code (the proof report reads it). Absent: the report shows the recorded checks and reviews only. */
+  evidence?: Pick<LocalEvidence, "packOf">;
   blobs: ObjectStorage;
   /** The owner of the install: the pages are the owner's. */
   owner: Principal;
@@ -111,7 +115,13 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
     async getDesignReview() { return undefined; },
     async readMockup() { return undefined; },
     async listLessons() { return []; },
-    async getProofReport() { return undefined; },
+    async getProofReport(taskId): Promise<ProofReportView | undefined> {
+      const task = await taskOf(taskId);
+      const workflow = task?.workflow;
+      if (task === undefined || workflow === undefined) return undefined;
+      const pack = workflow.candidate === undefined ? undefined : await deps.evidence?.packOf(task, workflow.candidate.digest);
+      return proofReportOf(task, workflow, pack);
+    },
   };
 }
 

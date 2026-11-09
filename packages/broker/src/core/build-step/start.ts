@@ -3,7 +3,7 @@
 // the candidate, so a recovered or repeated row is the first one's duplicate.
 import { createHash } from "node:crypto";
 import {
-  abandonWorkflowFix, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
+  EVIDENCE_CAPTURE_FEATURE, abandonWorkflowFix, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
   type JsonValue, type ProjectDefinition, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { readCiEvidence, ciFixPrompt, ciFixPromptWithoutOutput } from "../ci-fix/ci-fix.js";
@@ -173,11 +173,13 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
     updatedAt: receivedAt,
   };
   const readiness = selected.map((check) => check.command);
-  const payload = jsonOf({ ...(readiness.length === 0 ? {} : { readiness }), ...baseOf(task, workflow) });
+  // Lane L12: a rerun of the checks also saves the raw parts of its evidence (test reports, coverage) for the pack, when this install keeps evidence.
+  const capture = deps.keepEvidence !== undefined;
+  const payload = jsonOf({ ...(readiness.length === 0 ? {} : { readiness }), ...(capture ? { evidenceCapture: true } : {}), ...baseOf(task, workflow) });
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: workflowRequestId("agentx-checks", task.taskId, workflow.revision), prompt: "Run the task's selected checks again on the current code. Do not edit files.", workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
-    requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"])],
+    requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : [])],
   });
   return settled(deps, row, accepted.result);
 }

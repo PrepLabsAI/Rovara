@@ -44,6 +44,7 @@ import { RepositoryGrantService, type RepositoryCredential } from "../../reposit
 import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
 import { createCallbackHandler } from "./callbacks.js";
+import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalMilestones, createLocalTracking, sessionTimeline, type LocalTracking } from "./tracking.js";
 import { createTaskFactsSource } from "./facts.js";
@@ -90,6 +91,8 @@ export interface LocalApp {
   readonly blobs: ObjectStorage;
   /** Merge tracking on this laptop: the timer's pass over the tracked pull requests (lane L12). */
   readonly tracking: LocalTracking;
+  /** The evidence kept for a task's checked code (lane L12): the proof page and the pull request read it. */
+  readonly evidence: LocalEvidence;
   /** Pull request comment commands on this laptop: polled, fetched by the code host and checked by the core (lane L12, decision 66). */
   readonly comments: LocalComments;
   /** What a worker's capability entitles it to in the model proxy: the models of this install and no budget held yet (see docs/local.md). */
@@ -150,6 +153,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   const ledger = createCostLedger({ store, metering: registry.require("metering"), ...(options.now === undefined ? {} : { now: options.now }) });
 
+  // Lane L12: the evidence of a run whose checks were recorded is kept in the object storage point (the proof page and the pull request read it).
+  const evidence = createLocalEvidence({ flow: { store, companyId, log }, blobs });
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
     projects: createStoreProjectSource(store, companyId),
@@ -163,6 +168,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.operationEnded === undefined ? {} : { onOperationEnded: options.operationEnded }),
     startExtras: createSessionStartExtras(companyId),
     milestones,
+    keepEvidence: (input) => evidence.keepAfterChecks(input),
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),
@@ -234,7 +240,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, now: () => clock().getTime(), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
   const pages = await createLocalPagesServer({
-    data: createLocalPageData({ flow: flow.deps, blobs, owner, companyId }),
+    data: createLocalPageData({ flow: flow.deps, blobs, owner, companyId, evidence }),
     actions: { decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, ...createPageExtraActions({ flow: flow.deps, companyId, owner }) },
     sessions: options.pageSessions,
     ...(options.pagesPort === undefined ? {} : { port: options.pagesPort }),
@@ -280,7 +286,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   }
 
   return {
-    flow, pages, gate, blobs, tracking, comments, modelGrants,
+    flow, pages, gate, blobs, tracking, evidence, comments, modelGrants,
     routes: (request, caller) => routes(request, caller),
     callbacks: callbackHandler,
     tick,

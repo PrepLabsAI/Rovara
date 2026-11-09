@@ -274,6 +274,13 @@ tracking) the conversation of each thread through the code host's optional `comm
 - **What a comment cannot do.** It cannot approve a high-risk plan (the owner's page session only), reject (the session only), or merge. Asking for changes by comment is allowed (decision 62).
 - **Not wired:** `/rovara lesson` (no lessons on this install) answers so. A host without `comments` offers no comment way of approving.
 
+## Proof (lane L12)
+
+When a run's checks are recorded for a candidate (a coding run's check report, or a rerun of the checks), the broker keeps the **evidence** of that run (`local/app/evidence.ts`, Cloud's `keepEvidenceAfterChecks`): the worker's `evidence-raw.json` (a rerun of the checks
+asks for it; a coding run saves none, and the pack then says "test details were not captured"), the synthetic-data guard over everything, then one **pack** per task and candidate, plus the output tails, in the `object-storage` point. Objects there are write-once: the
+tails are content-addressed, and the pack is the one object a re-check of the same code replaces (the documented `overwrite` opt-in). Keeping evidence is informational: a fault or a slow store (6 s at most) only means there is none. The local **proof page**
+(`/proof/<task>`, linked from the plan page) lists the recorded checks, the reviews, the risk the broker judged and the pack's test counts and "not tested" list, in the broker's words; with no pack it says so.
+
 ## Not wired yet
 
 - **Merge from `rovara up`.** A person merges a draft pull request on the code host (or with their proof); merge tracking never presses Merge (owner decision 1). The owner's own Merge button on the local page is not built;
@@ -281,7 +288,7 @@ tracking) the conversation of each thread through the code host's optional `comm
 - **A GitHub client for the laptop.** No `GitHubCodeHostProvider` exists for a personal token or `gh` (L7A-4): Cloud's client is a GitHub App client. Until one passes
   `runGitHubClientConformance`, no `code-host` adapter is registered, and a worker's clone credential is the owner's token itself, given only for a repository on github.com over https and only to clone (no push credential is given yet; lane L11 brings a scoped one).
 - **A budget on the model proxy.** The task flow grants a step the install's model (the first of Anthropic and OpenAI with a key) and no budget: the flow has no run limit before a price table exists, and Code's price table is empty. See "Model calls" below; `operationEnded` is called when an operation settles.
-- **Lessons**, **design review** and the **proof report** page answer "nothing there"; **notifications** need a `channel` adapter (none on a laptop).
+- **Lessons** and **design review** answer "nothing there"; **notifications** need a `channel` adapter (none on a laptop).
 - **A CLI sign-in to the local runtime.** The CLI and the MCP server sign in the way a hosted install does (an environment and refresh tokens); a local profile for them is not
   written. The routes work with `Authorization: Bearer <session token>`.
 - **A message to a running step** is saved and reported as not delivered; the step does not take it.

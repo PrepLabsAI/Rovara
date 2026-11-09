@@ -785,6 +785,8 @@ function reviewsOf(job: WorkerInvocation, tree: string, verdict: "pass" | "findi
   return { status: "SUCCEEDED", result: { conversationId: "conversation", workflowCandidateRepositories: candidateOf(tree, base, commit), workflowReviews: [report("CRITIC"), report("SECURITY")] } };
 }
 
+/** A page of the local review server, fetched as the browser the owner was sent to. */
+const raw_ = (h: Awaited<ReturnType<typeof launch>>, link: URL) => raw(h.runtime.pagesUrl, { path: link.pathname + link.search, headers: { host: link.host } });
 const taskRecord = async (h: Awaited<ReturnType<typeof launch>>, taskId: string) =>
   (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" })) as unknown as { workflow: { stage: string; state: string; revision: number; blockReason?: string; reviewBase?: unknown[]; verification?: { reviewOnly?: boolean }; decisions: Array<{ source?: string; actorRole?: string }> }; autofixAsk?: { reason: string } };
 
@@ -1456,6 +1458,46 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     await h.callback(rerun, "result", withCheck({ ...failedCheck, after: "passed", class: "passing", exitCode: 0, output: "" }, "verified"));
     const review = await h.nextJob(workspaceId, seen);
     expect(review).toMatchObject({ payload: { workflowMode: "REVIEW" } });
+  });
+
+  it("keeps the evidence of a run's checks when they are recorded (write-once, the pack replaced only on a re-check of the same code), and the proof page shows it (lane L12 slice 3)", async () => {
+    const h = await launch({ host: true, readiness: true });
+    const { taskId, workspaceId, seen, coding } = await toCoding(h);
+    const commit = h.model.commit("work", { "src/health.ts": "export const health = 200;\n" });
+    const tree = h.model.revision(commit).tree;
+    const digest = createCandidateManifest(candidateOf(tree, h.base, commit)).digest;
+    const check = (after: string, cls: string) => ({ id: "readiness:0", label: "npm test", source: "project", before: "passed", after, class: cls, output: after === "failed" ? "1 failing" : "", durationMs: 5, exitCode: after === "failed" ? 1 : 0 });
+    const withCheck = (entry: object, status: string) => { const r = builtResult(tree, h.base, commit); (r.result as Record<string, unknown>)["checks"] = { ...CHECK_REPORT, status, source: "project", notVerifiedReason: undefined, checks: [entry] }; return r; };
+    const owner = (await taskRecord(h, taskId)) as unknown as { ownerKey: string };
+    // A coding run whose check failed: the verification is recorded (as failed), and so is its evidence, which says "failed" and that no test details were captured.
+    await h.callback(coding, "result", withCheck(check("failed", "regression"), "regression"));
+    const first = await h.runtime.app.evidence.packOf({ ownerKey: owner.ownerKey, workspaceId, taskId }, digest);
+    expect(first).toMatchObject({ checks: [{ checkId: "readiness:0", after: "failed" }] });
+    expect(first?.checks[0]?.tests).toBeUndefined();
+    expect(first?.notTested.some((item) => item.id === "evidence_capture")).toBe(true);
+    // The owner retries; the rerun of the checks (the same code) asks the worker to save the raw parts of its evidence, and the worker does.
+    expect((await h.api(`/v1/dev/tasks/${taskId}/workflow/retry`, { method: "POST", body: { requestId: "abababab-abab-4bab-8bab-abababababab" } })).status).toBe(200);
+    const rerun = await h.nextJob(workspaceId, seen);
+    expect(rerun).toMatchObject({ payload: { workflowMode: "CHECKS", evidenceCapture: true } });
+    const raw = { schemaVersion: 1, candidateDigest: digest, checks: [{ checkId: "readiness:0", tests: { total: 12, passed: 12, failed: 0, skipped: 0, errored: 0, names: [], newTests: [] } }] };
+    expect((await h.callback(rerun, "artifacts", { name: "evidence-raw.json", mediaType: "application/json", content: JSON.stringify(raw) })).status).toBe(200);
+    await h.callback(rerun, "result", withCheck(check("passed", "passing"), "verified"));
+    const pack = await h.runtime.app.evidence.packOf({ ownerKey: owner.ownerKey, workspaceId, taskId }, digest);
+    // ... and replaces the earlier pack for that code (the one object the keeper overwrites on purpose).
+    expect(pack).toMatchObject({ candidateDigest: digest, checks: [{ checkId: "readiness:0", kind: "test", after: "passed", tests: { total: 12, passed: 12 } }] });
+    // The proof page of the task shows the checks, the reviews' absence and the evidence, in the broker's words.
+    const review = await h.nextJob(workspaceId, seen);
+    await h.callback(review, "result", reviewsOf(review, tree, "pass", h.base, commit));
+    const link = await h.browse(`/proof/${taskId}`);
+    const page = await raw_(h, link);
+    expect(page.status).toBe(200);
+    expect(page.body).toContain("npm test");
+    expect(page.body).toContain("Evidence kept for this code");
+    expect(page.body).toContain("Code review");
+    expect(page.body).toContain("12 passed");
+    // Objects are write-once: the same pack key cannot be written again without the opt-in that the keeper itself uses for a re-check of the same code.
+    const key = `private/${owner.ownerKey}/${workspaceId}/evidence-pack/${taskId}/${digest}.json`;
+    await expect(h.runtime.app.blobs.put(key, new Uint8Array([1]), { contentType: "application/json", metadata: {}, retention: "evidence-std" })).rejects.toThrow(/already stored/);
   });
 
   it("retries a review whose run was lost once by itself, and asks when it is lost again; a review that failed for its own reasons is asked about at once", async () => {

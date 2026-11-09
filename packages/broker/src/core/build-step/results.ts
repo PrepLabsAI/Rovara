@@ -169,6 +169,8 @@ export async function recordBuilt(deps: TaskFlowDeps, task: TaskRecord, operatio
       checks: { candidateDigest: candidate.digest, producer: "agentx-worker-checks", environmentId: task.workspaceId, recordedAt: now, results, ...(reviewOnly ? { reviewOnly: true } : {}) },
       now,
     });
+    // Proof and evidence (lane L12): the verification is recorded, so the run's evidence is assembled for this code. Informational and bounded; a fault changes nothing.
+    await deps.keepEvidence?.({ task, operation, workflow, candidateDigest: candidate.digest, checks: checks.data.checks }).catch((error: unknown) => log(deps, { event: "build_step.evidence_not_kept", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
   } catch (error) {
     log(deps, { event: "build_step.verification_blocked", taskId: task.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown", reason: failure, ...(detail === undefined ? {} : { detail }) });
     if (failure === WORKFLOW_BLOCK_REASONS.fixChangedNothing && workflow.fixSource === "ci") {
