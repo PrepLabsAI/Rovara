@@ -4,7 +4,7 @@ import { agentXError } from "@agentx/contracts";
 import { DOCKER_DATA_DIRECTORY, RUNTIME_BACKING_DIRECTORY } from "./devcontainer-policy.js";
 
 /**
- * What the worker keeps on the workspace volume that is not the project's: its manifest, conversation index,
+ * What the worker keeps on the workspace volume that is not the project's (ruling R56): its manifest, conversation index,
  * operation journal and check history (`.agentx`) and Pi's saved transcripts (`agent-sessions`). The worker reads these
  * as its own state. Task code runs as the same user in a container that mounts the workspace, so each task container
  * hides them behind an empty mount, or code could forge what the worker then trusts.

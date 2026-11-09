@@ -6,6 +6,9 @@ import {
   AgentXError,
   WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE,
   agentXError,
+  commitSubject,
+  withAttributionTrailers,
+  type ActingAttribution,
   type CheckEntry,
   type ProjectCommand,
   type PublicationCheckResult,
@@ -15,7 +18,7 @@ import {
 } from "@agentx/contracts";
 import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME } from "./git.js";
 import { assertCredentialFreeRemote, pushCommitFromIsolatedRepository, type CredentialedGitRunner } from "./git-auth.js";
-import { candidateLayout, snapshotTree, withIsolatedGit } from "./isolated-git.js";
+import { CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC, candidateLayout, snapshotTree, withIsolatedGit } from "./isolated-git.js";
 import { assertWorkspaceIsPlain, runIsolatedGit, withIsolatedRepository } from "./isolated-repository.js";
 import { stopWorkspaceProcesses } from "./workspace-processes.js";
 import { sweepWorkspaceContainers } from "./workspace-containers.js";
@@ -26,6 +29,7 @@ import { runProjectCommand, type PreparationCommandRunner, type PreparationManif
 import { storedCommandOutput } from "./command-failure.js";
 import { planChecks, publicationCheckEntries } from "./verification/checks.js";
 import type { CommandResult } from "./readiness.js";
+import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
 import { taskSandboxFor, taskShellSelection, type TaskShellSelection } from "./task-sandbox.js";
 import {
   createDevcontainerCli,
@@ -47,7 +51,7 @@ export interface PublishWorkspaceOptions {
   codeBuildSink?: CodeBuildSink;
   /** The `devcontainer` CLI, as a seam for tests. */
   devcontainerCli?: DevcontainerCli;
-  /** Where readiness checks run in a project without a devcontainer. Default: from the worker's environment. */
+  /** Where readiness checks run in a project without a devcontainer (R56). Default: from the worker's environment. */
   taskShell?: TaskShellSelection;
   /**
    * Stops every process left running from the workspace before the push credential is fetched, failing when it cannot
@@ -59,11 +63,33 @@ export interface PublishWorkspaceOptions {
    * workspace-containers.ts). A seam for tests; the default removes them for real in the worker container.
    */
   sweepWorkspaceContainers?: (rootPath: string) => Promise<{ removed: number }>;
+  /**
+   * Whether another operation is still running in this worker (server.ts). The push waits for it to end for a bounded time (`otherOperationWait`, 30 s by default, since a cancel reports
+   * before the cancelled run has left the list) and fails closed if it has not. Default: none.
+   */
+  otherOperationActive?: () => boolean;
+  /** How long the push waits for it. A seam for tests. */
+  otherOperationWait?: OtherOperationWait;
   /** Host-only Git transport seam for an isolated local integration fixture. */
   run?: CredentialedGitRunner;
 }
 
 const CONTAINMENT_ROUNDS = 4;
+
+export interface OtherOperationWait { timeoutMs: number; pollMs: number }
+/** A cancelled run reports its result before it has left the worker's list of running operations, so a step that follows a cancel waits this long for it before it fails closed. */
+export const OTHER_OPERATION_WAIT: OtherOperationWait = { timeoutMs: 30_000, pollMs: 250 };
+
+/** Polls `active` until it is false (true is returned) or the wait is over (false: another operation is still running). */
+export async function waitForOtherOperations(active: () => boolean, wait: OtherOperationWait = OTHER_OPERATION_WAIT): Promise<boolean> {
+  const deadline = Date.now() + wait.timeoutMs;
+  while (active()) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(wait.pollMs, remaining)));
+  }
+  return true;
+}
 
 /**
  * Removes the containers, then stops the processes, until one round finds neither and a last check finds no container
@@ -72,8 +98,21 @@ const CONTAINMENT_ROUNDS = 4;
  */
 export async function containWorkspace(
   rootPath: string,
-  steps: { sweep: (rootPath: string) => Promise<{ removed: number }>; stop: (rootPath: string) => Promise<{ stopped: number } | void> },
+  steps: {
+    sweep: (rootPath: string) => Promise<{ removed: number }>;
+    stop: (rootPath: string) => Promise<{ stopped: number } | void>;
+    /**
+     * Whether another operation is still running in this worker. Stopping its children would not stop its own code, which keeps writing the workspace, so nothing is stopped and the
+     * caller fails closed.
+     */
+    otherOperationActive?: () => boolean;
+    /** How long to wait for it to end before failing closed. Default: OTHER_OPERATION_WAIT. */
+    otherOperationWait?: OtherOperationWait;
+  },
 ): Promise<void> {
+  if (steps.otherOperationActive !== undefined && !(await waitForOtherOperations(steps.otherOperationActive, steps.otherOperationWait))) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "AgentX found another operation still running in this workspace, so it did not push");
+  }
   for (let round = 0; round < CONTAINMENT_ROUNDS; round += 1) {
     const { removed } = await steps.sweep(rootPath);
     const stopped = (await steps.stop(rootPath))?.stopped ?? 0;
@@ -133,6 +172,8 @@ export async function publishWorkspace(
     await containWorkspace(rootPath, {
       sweep: options.sweepWorkspaceContainers ?? ((root: string) => sweepWorkspaceContainers({ rootPath: root })),
       stop: options.stopWorkspaceProcesses ?? ((root: string) => stopWorkspaceProcesses({ rootPath: root })),
+      ...(options.otherOperationActive === undefined ? {} : { otherOperationActive: options.otherOperationActive }),
+      ...(options.otherOperationWait === undefined ? {} : { otherOperationWait: options.otherOperationWait }),
     });
     return options.credentialProvider(repository);
   };
@@ -148,6 +189,7 @@ export async function publishWorkspace(
         title: invocation.payload.title,
         candidateTreeSha,
         retrying: retryingCommittedPublication,
+        attribution: invocation.payload.attribution,
       });
     } else {
       const candidateCommitSha = invocation.payload.candidateCommitSha;
@@ -200,6 +242,7 @@ export async function publishWorkspace(
       preparationCommit: manifestRepository.resolvedCommit,
       headBranch: invocation.payload.headBranch,
       title: invocation.payload.title,
+      attribution: invocation.payload.attribution,
       credential: await fetchCredential(),
     });
   }
@@ -287,14 +330,18 @@ export async function publishWorkspace(
   });
 }
 
-/** Legacy, server-selected checked-tree protocol: preserve the exact verified tree on the pinned base. */
-async function prepareCandidatePublicationCommit(input: {
+/**
+ * Legacy, server-selected checked-tree protocol: preserve the exact verified tree on the pinned base. Exported for its own test (the trailers it writes); the worker calls it from
+ * `publishWorkspace` only.
+ */
+export async function prepareCandidatePublicationCommit(input: {
   git: RepositoryGit;
   preparationCommit: string;
   headBranch: string;
   title: string;
   candidateTreeSha: string;
   retrying: boolean;
+  attribution?: ActingAttribution | undefined;
 }): Promise<string> {
   await input.git(["cat-file", "-e", `${input.preparationCommit}^{commit}`]).catch(() => {
     throw agentXError("WORKSPACE_NOT_READY", "the task's base commit is missing from the workspace");
@@ -317,7 +364,7 @@ async function prepareCandidatePublicationCommit(input: {
   if (workspaceTree === preparedTree) throw agentXError("CONFIG_INVALID", "repository has no changes to publish");
   const commit = (await input.git([
     "-c", `user.name=${AGENTX_GIT_NAME}`, "-c", `user.email=${AGENTX_GIT_EMAIL}`,
-    "commit-tree", workspaceTree, "-p", input.preparationCommit, "-m", `AgentX: ${input.title}`,
+    "commit-tree", workspaceTree, "-p", input.preparationCommit, "-m", withAttributionTrailers(`AgentX: ${commitSubject(input.title)}`, input.attribution),
   ])).trim();
   await input.git(["checkout", "--force", "-B", input.headBranch, commit]);
   return commit;
@@ -416,6 +463,7 @@ async function prepareCleanPublicationCommit(input: {
   preparationCommit: string;
   headBranch: string;
   title: string;
+  attribution?: ActingAttribution | undefined;
   credential: Awaited<ReturnType<RepositoryCredentialProvider>>;
 }): Promise<string> {
   try {
@@ -424,7 +472,7 @@ async function prepareCleanPublicationCommit(input: {
     if (error instanceof AgentXError) throw error;
     throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
   }
-  await input.git(["add", "--all"]);
+  await input.git(["add", "--all", "--", ".", CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC]);
   const workspaceTree = (await input.git(["write-tree"])).trim();
   const workspaceCommit = (await input.git([
     "-c",
@@ -461,7 +509,7 @@ async function prepareCleanPublicationCommit(input: {
     "-p",
     baseCommit,
     "-m",
-    `AgentX: ${input.title}`,
+    withAttributionTrailers(`AgentX: ${commitSubject(input.title)}`, input.attribution),
   ])).trim();
   await input.git(["checkout", "--force", "-B", input.headBranch, commit]);
   return commit;
@@ -530,13 +578,13 @@ export async function runReadinessChecks(
 ): Promise<PublicationCheckResult[]> {
   const readiness = invocation.payload.project.readiness;
   const target = preparedDevcontainerTarget(rootPath, manifest);
-  // Without a devcontainer the checks run in the task sandbox, started with the first command and removed after the last.
+  // Without a devcontainer the checks run in the task sandbox (R56), started with the first command and removed after the last.
   const sandbox = target === undefined && readiness.length > 0
     ? taskSandboxFor(options.taskShell ?? taskShellSelection(), { rootPath, taskId: invocation.operationId })
     : undefined;
   let runner: PreparationCommandRunner = sandbox === undefined
     ? (command, index, root) => runProjectCommand(command, index, root, undefined, true)
-    : (command) => sandbox.runCommand(command);
+    : (command) => executionFor(SANDBOX_TARGET, { sandbox }).runCommand(command);
   try {
     if (target !== undefined && readiness.length > 0) {
       const cli = options.devcontainerCli ?? createDevcontainerCli();
@@ -622,12 +670,12 @@ async function missingCommandDirectory(rootPath: string, cwd: string): Promise<b
  * Git in one repository, each command in a throwaway repository that never reads the workspace repository's config, hooks or attributes files (see
  * isolated-repository.ts): the agent may write those at any moment, so a read of them made once, or just before, would not hold.
  */
-interface RepositoryGit {
+export interface RepositoryGit {
   (args: readonly string[]): Promise<string>;
   readonly directory: string;
 }
 
-function repositoryGit(directory: string): RepositoryGit {
+export function repositoryGit(directory: string): RepositoryGit {
   const run = async (args: readonly string[]): Promise<string> => {
     try {
       // `remote get-url` reads one value of the repository's config, from a private copy of the file; nothing in it is run.

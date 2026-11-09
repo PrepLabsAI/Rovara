@@ -35,8 +35,8 @@ const UP_OUTPUT = [
   "{\"outcome\":\"success\",\"containerId\":\"f832494aef96\",\"remoteUser\":\"node\",\"remoteWorkspaceFolder\":\"/workspaces/sample\"}",
 ].join("\n");
 
-const COMMAND_WRAPPER = 'set -m; (cd -- "$1" && shift 2 && exec "$@") & child=$!; set +m; echo "$child" > "$2"; wait "$child"; status=$?; rm -f "$2"; exit "$status"';
-const SHELL_WRAPPER = 'set -m; (cd -- "$1" && shift 2 && eval "$1") & child=$!; set +m; echo "$child" > "$2"; wait "$child"; status=$?; rm -f "$2"; exit "$status"';
+const COMMAND_WRAPPER = 'set -m; (cd -- "$1" && shift 2 && exec "$@") & child=$!; set +m; echo "$child" > "$2"; wait "$child"; status=$?; command -p rm -f "$2" 2>/dev/null || :; exit "$status"';
+const SHELL_WRAPPER = 'set -m; (cd -- "$1" && shift 2 && eval "$1") & child=$!; set +m; echo "$child" > "$2"; wait "$child"; status=$?; command -p rm -f "$2" 2>/dev/null || :; exit "$status"';
 // TERM waits up to 5 s for the group file, then keeps the group ID in "$1.stop": the wrapper removes
 // the group file once the group leader exits, and KILL still needs the ID (#174 review).
 const KILL_TERM = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null) || exit 0; case "$p" in ""|*[!0-9]*) exit 0;; esac; echo "$p" > "$1.stop"; out=$(kill -TERM -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
@@ -926,7 +926,7 @@ describe("a task in a workspace with a devcontainer", () => {
     return { inputs, progress, hostFolder: join(await realpath(root), "repo/sample") };
   }
 
-  it("copies the file-tool helper into the devcontainer and runs the file tools there, starting no task sandbox", async () => {
+  it("copies the file-tool helper into the devcontainer and runs the file tools there, starting no task sandbox (R56)", async () => {
     const files = fileToolsDocker();
     const { inputs, hostFolder } = await taskWithFileTools(files.docker);
     expect(inputs[0]?.fileTools).toEqual({

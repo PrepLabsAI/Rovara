@@ -1,5 +1,5 @@
-// the worker image sets NODE_ENV=production for the worker itself, and the task sandbox starts from that image, so a
-// project's `npm ci` skipped its devDependencies and `npm test` exited 127 (vitest not found). The sandbox's commands (project
+// Bug F: the worker image sets NODE_ENV=production for the worker itself, and the task sandbox starts from that image, so a
+// customer's `npm ci` skipped its devDependencies and `npm test` exited 127 (vitest not found). The sandbox's commands (project
 // setup and readiness, AgentX's checks, the agent's shell) must not inherit it; a project's own `env` still sets it.
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -14,7 +14,7 @@ import type { DockerCli } from "../../packages/worker/src/swebench/containers.js
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
 
 const run = promisify(execFile);
-const IMAGE = "registry.example.test/agentx/worker@sha256:" + "b".repeat(64);
+const IMAGE = "123456789012.dkr.ecr.us-west-2.amazonaws.com/agentx-staging/worker@sha256:" + "b".repeat(64);
 /** The ENV of environments/base/Dockerfile that a container started from the worker image carries. */
 const IMAGE_ENV = { NODE_ENV: "production", PORT: "8080" };
 const NPM = join(dirname(process.execPath), "npm");
@@ -97,7 +97,7 @@ async function prepare(definition: ProjectDefinition) {
   return { root, home, docker, ...outcome };
 }
 
-describe("a project's Node project in the task sandbox", () => {
+describe("a customer's Node project in the task sandbox (Bug F)", () => {
   it("installs its devDependencies with `npm ci` and passes `npm test`, although the image sets NODE_ENV=production", async () => {
     const { error, manifest } = await prepare(project({ setup: [command("npm", ["ci"])], readiness: [command("npm", ["test"])] }));
     expect(error).toBeUndefined();

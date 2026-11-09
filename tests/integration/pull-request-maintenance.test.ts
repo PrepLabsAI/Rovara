@@ -253,6 +253,23 @@ describe("pull request maintenance", () => {
       expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
     });
 
+    it("fetches no credential and pushes nothing while another operation is still running in the worker", async () => {
+      const fixture = await createFixture("append");
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+      const reviewedTree = await workspaceTree(fixture.checkout);
+      const credential = vi.fn(async () => ({}));
+      await expect(pushFix({
+        rootPath: fixture.root,
+        invocation: failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: fixture.baseCommit }),
+        credentialProvider: credential,
+        pullRequestUpdateSink: sink(),
+        otherOperationActive: () => true,
+        otherOperationWait: { timeoutMs: 60, pollMs: 5 },
+      })).rejects.toThrow(/another operation still running.*did not push/);
+      expect(credential).not.toHaveBeenCalled();
+      expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+    });
+
     it("pushes the reviewed fix tree to the existing PR branch as a fast-forward", async () => {
       const fixture = await createFixture("append");
       await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
@@ -271,6 +288,21 @@ describe("pull request maintenance", () => {
       expect(await git(fixture.bare, ["log", "-1", "--format=%s", result.commit])).toBe("AgentX: address PR feedback\n");
       expect(await git(fixture.bare, ["rev-list", "--count", `${fixture.pullRequestHead}..${result.commit}`])).toBe("1\n");
       expect(update).toHaveBeenCalledWith(expect.objectContaining({ previousCommit: fixture.pullRequestHead, commit: result.commit }));
+    });
+
+    it("says in the commit what the reviewed fix is for, when the broker says; any other fix keeps the usual message (Plan 6 Task 15)", async () => {
+      for (const [source, subject] of [["ci", "Rovara: fix failing CI"], ["conflict", "Rovara: resolve conflict with the base branch"], ["feedback", "AgentX: address PR feedback"], [undefined, "AgentX: address PR feedback"]] as const) {
+        const fixture = await createFixture("append");
+        await writeFile(join(fixture.checkout, "FIX.md"), `fix for ${String(source)}\n`, "utf8");
+        const reviewedTree = await workspaceTree(fixture.checkout);
+        const invocation = failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: fixture.baseCommit });
+        const result = await pushFix({
+          rootPath: fixture.root,
+          invocation: source === undefined || invocation.kind !== "maintain" ? invocation : { ...invocation, payload: { ...invocation.payload, workflowFix: { source } } },
+          credentialProvider: async () => ({}), pullRequestUpdateSink: sink(),
+        });
+        expect(await git(fixture.bare, ["log", "-1", "--format=%s", result.commit]), String(source)).toBe(`${subject}\n`);
+      }
     });
 
     it("refuses to push a fix whose tree differs from the reviewed tree", async () => {

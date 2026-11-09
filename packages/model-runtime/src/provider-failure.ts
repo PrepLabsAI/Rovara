@@ -1,4 +1,4 @@
-import { E2E_MODEL_FAILURE_SIGNAL_PATTERN, type E2EModelFailure, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { E2E_MODEL_FAILURE_SIGNAL_PATTERN, MODEL_NOT_ENABLED_CODE, type E2EModelFailure, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
 
 /**
  * Provider-neutral failure classes (M1.4 Task 4.10B, plan D-5). One pure function from what a failed provider call showed (an HTTP status, the error's own name or code, a network
@@ -9,6 +9,9 @@ import { E2E_MODEL_FAILURE_SIGNAL_PATTERN, type E2EModelFailure, type E2EModelFa
  */
 
 type Cls = E2EModelFailureClass;
+
+/** The signal of a model the account has not enabled (Amazon Bedrock's agreement for it is not in place): class `key-rejected`, shown to the owner with its own words. */
+export const MODEL_NOT_ENABLED_SIGNAL = MODEL_NOT_ENABLED_CODE;
 
 /** A signal is one token: a Bedrock error type is letters only, a keyed provider's error type or code is lower-case letters, digits and underscores. */
 export const BEDROCK_SIGNAL_PATTERN = /^[A-Za-z]{1,64}$/;
@@ -26,7 +29,8 @@ const none = [] as const;
 const SIGNALS: Record<ModelProvider, ReadonlyMap<string, Cls>> = {
   "amazon-bedrock": named({
     "limit-or-rate-limited": ["ThrottlingException", "ServiceQuotaExceededException"],
-    "key-rejected": ["AccessDeniedException", "UnrecognizedClientException", "ExpiredTokenException"],
+    // "ModelNotEnabled" is Rovara's own token (not a Bedrock error type): the model proxy answered 403 "<model> is not available for this account", the account has not enabled that model. A key-rejected failure, told apart so the owner is told what to do.
+    "key-rejected": ["AccessDeniedException", "UnrecognizedClientException", "ExpiredTokenException", MODEL_NOT_ENABLED_SIGNAL],
     "model-not-found": ["ResourceNotFoundException"],
     "request-rejected": ["ValidationException"],
     // ModelNotReadyException comes with a 429 as well: naming it here is what makes it an outage and not a limit.
@@ -73,8 +77,10 @@ export function classifyProviderFailure(facts: ProviderFailureFacts): E2EModelFa
   // unreachable there is). Only a timeout with a response, or with no network code, is the provider's outage.
   if (status === undefined && facts.networkCode !== undefined && isNetworkCode(facts.networkCode)) return { class: "unreachable", signal: facts.networkCode };
   if (facts.timedOut === true) return { class: "provider-outage", signal: "timeout" };
-  const signal = typeof facts.signal === "string" && signalPattern(facts.provider).test(facts.signal) && E2E_MODEL_FAILURE_SIGNAL_PATTERN.test(facts.signal) ? facts.signal : null;
-  const bySignal = signal === null ? undefined : SIGNALS[facts.provider].get(signal);
+  // DR-KEY-1 (B): Rovara's own ModelNotEnabled token (from the model proxy's 403 for a model the account may not use) is the same on every provider's route: the proxy may be spoken to as Anthropic or as Bedrock.
+  const signal = facts.signal === MODEL_NOT_ENABLED_SIGNAL ? MODEL_NOT_ENABLED_SIGNAL
+    : typeof facts.signal === "string" && signalPattern(facts.provider).test(facts.signal) && E2E_MODEL_FAILURE_SIGNAL_PATTERN.test(facts.signal) ? facts.signal : null;
+  const bySignal = signal === null ? undefined : signal === MODEL_NOT_ENABLED_SIGNAL ? "key-rejected" : SIGNALS[facts.provider].get(signal);
   if (bySignal !== undefined) return { class: bySignal, signal };
   if (status !== undefined) {
     const byStatus = STATUSES[facts.provider].find(([, matches]) => matches(status))?.[0];

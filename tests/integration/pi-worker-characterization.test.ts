@@ -26,6 +26,8 @@ import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 const keys = (value: unknown): string[] => Object.keys(value as object).sort();
 // An assistant message ended by an abort carries durationMs only when the abort lands after the message started (timing-dependent): allowed, not required. Every other key stays exact.
 const keysExceptOptionalDuration = (value: unknown): string[] => keys(value).filter((key) => key !== "durationMs");
+// A model-call note for a call cut off by the abort records durationMs 0 or, when the abort lands first, none at all (timing-dependent): allowed, not required.
+const withoutZeroDuration = (notes: readonly unknown[]): Array<Record<string, unknown>> => notes.map((note) => { const { durationMs, ...rest } = note as Record<string, unknown>; return { durationMs, rest }; }).map(({ durationMs, rest }) => { expect(durationMs === undefined || durationMs === 0).toBe(true); return rest; });
 const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
 // structuredClone keeps a key whose value is undefined, so the key pins below see every key Pi sets.
 const snapshot = <T>(value: T): T => structuredClone(value);
@@ -812,7 +814,7 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
       // (its provider text stays out of the task's events); the task's events carry one sanitized note for it instead.
       lastAssistant: { stopReason: "toolUse", errorMessage: undefined },
     });
-    expect(modelCallNotes(run)).toEqual([{ outcome: "failed", class: "unknown", signal: null, attempt: 1, durationMs: 0 }]);
+    expect(withoutZeroDuration(modelCallNotes(run))).toEqual([{ outcome: "failed", class: "unknown", signal: null, attempt: 1 }]);
     expect(run.factoryCalls).toBe(1);
     // The 5 s sleep was killed, not waited out.
     expect(run.elapsed).toBeLessThan(3_000);
@@ -830,7 +832,7 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
       usageOutcome: ["CANCELLED"],
       lastAssistant: { stopReason: "toolUse", errorMessage: undefined },
     });
-    expect(modelCallNotes(run)).toEqual([{ outcome: "failed", class: "unknown", signal: null, attempt: 1, durationMs: 0 }]);
+    expect(withoutZeroDuration(modelCallNotes(run))).toEqual([{ outcome: "failed", class: "unknown", signal: null, attempt: 1 }]);
     expect(run.factoryCalls).toBe(1);
   });
 });

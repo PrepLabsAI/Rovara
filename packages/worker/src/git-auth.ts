@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { gitHardenedEnvironment } from "./git.js";
+import { makeWorkerScratch } from "./worker-scratch.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -11,6 +11,36 @@ export interface GitCredential {
   username?: string;
   password?: string;
   token?: string;
+  /** An ssh key (P8): git talks to `url` (ssh://) wherever it was told to use `forUrl` (the registered https address), pinned to `knownHosts`. */
+  ssh?: { privateKey: string; url: string; knownHosts: string; forUrl: string };
+}
+
+let sshProgram = "ssh";
+/** Test seam: the program git runs as ssh, so a test can stand in a local "server". Returns the undo. */
+export function useSshProgramForTests(program: string): () => void {
+  const previous = sshProgram;
+  sshProgram = program;
+  return () => {
+    sshProgram = previous;
+  };
+}
+
+const shellQuote = (value: string): string => `'${value.replace(/'/gu, "'\\''")}'`;
+
+/**
+ * The ssh the credentialed git command runs: only this key, only the pinned host keys (an unknown or changed host is refused, never asked about), no agent, no config file, no
+ * forwarding, no proxy, no multiplexing, no password. It is a string for GIT_SSH_COMMAND, which names files and holds no secret.
+ */
+function sshCommand(keyPath: string, knownHostsPath: string): string {
+  const options = [
+    "-F", "/dev/null", "-i", keyPath,
+    "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", "-o", "BatchMode=yes",
+    "-o", "StrictHostKeyChecking=yes", "-o", `UserKnownHostsFile=${knownHostsPath}`, "-o", "GlobalKnownHostsFile=/dev/null",
+    "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
+    "-o", "ClearAllForwardings=yes", "-o", "ProxyCommand=none", "-o", "ProxyJump=none", "-o", "PermitLocalCommand=no",
+    "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ConnectTimeout=30",
+  ];
+  return [sshProgram, ...options].map(shellQuote).join(" ");
 }
 
 /** How a credentialed Git command is run; a seam for tests, which see its environment. */
@@ -46,10 +76,12 @@ export async function runGitWithCredential(input: {
   if ((username === undefined) !== (password === undefined)) {
     throw new Error("repository credential must include both username and password");
   }
+  // An ssh key is the whole credential: next to a password it would be two ways in, and which one git used would depend on the server.
+  if (credential.ssh !== undefined && username !== undefined) throw new Error("repository credential must be an ssh key or a password, not both");
 
-  const askPassDirectory = username === undefined
+  const askPassDirectory = username === undefined && credential.ssh === undefined
     ? undefined
-    : await mkdtemp(join(tmpdir(), "agentx-git-askpass-"));
+    : await makeWorkerScratch("agentx-git-askpass-");
   try {
     const environment = await gitHardenedEnvironment(input.directory, { ...input.environment }, { network: true });
     environment.GIT_TERMINAL_PROMPT = "0";
@@ -67,6 +99,24 @@ export async function runGitWithCredential(input: {
         AGENTX_GIT_USERNAME: username,
         AGENTX_GIT_PASSWORD_FILE: passwordPath,
       });
+    }
+    if (askPassDirectory && credential.ssh) {
+      const keyPath = join(askPassDirectory, "key");
+      const knownHostsPath = join(askPassDirectory, "known_hosts");
+      await writeFile(keyPath, credential.ssh.privateKey.endsWith("\n") ? credential.ssh.privateKey : `${credential.ssh.privateKey}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      await writeFile(knownHostsPath, `${credential.ssh.knownHosts.trim()}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      environment.GIT_SSH_COMMAND = sshCommand(keyPath, knownHostsPath);
+      // No agent, no askpass: the key above is the only way in.
+      delete environment.SSH_AUTH_SOCK;
+      delete environment.SSH_ASKPASS;
+      // The registered https address is the one every caller passes; the ssh address is used in its place for this command alone, so the clone's remote stays the https one.
+      const count = Number(environment.GIT_CONFIG_COUNT ?? "0");
+      const extra: ReadonlyArray<readonly [string, string]> = [["protocol.ssh.allow", "always"], [`url.${credential.ssh.url}.insteadOf`, credential.ssh.forUrl]];
+      extra.forEach(([key, value], offset) => {
+        environment[`GIT_CONFIG_KEY_${count + offset}`] = key;
+        environment[`GIT_CONFIG_VALUE_${count + offset}`] = value;
+      });
+      environment.GIT_CONFIG_COUNT = String(count + extra.length);
     }
     return await (input.run ?? runGit)(input.args, {
       timeout: input.timeout ?? 300_000,
@@ -102,7 +152,7 @@ export async function pushCommitFromIsolatedRepository(input: {
   if (!/^[A-Za-z0-9._/-]{1,255}$/u.test(input.branch) || input.branch.includes("..") || input.branch.startsWith("-")) {
     throw new Error("the branch to push is not a valid branch name");
   }
-  const temporary = await mkdtemp(join(tmpdir(), "agentx-push-"));
+  const temporary = await makeWorkerScratch("agentx-push-");
   try {
     const gitDirectory = join(temporary, "repository.git");
     // No template: the repository starts with no hooks, and only the config Git itself writes.

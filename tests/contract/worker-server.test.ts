@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WorkerInvocation } from "@agentx/contracts";
+import { WORKER_INVOCATION_FEATURES, type WorkerInvocation } from "@agentx/contracts";
 import { inspectContainedRuntimeReadinessForHost } from "@agentx/verifier";
 import {
   type JournalStatus,
@@ -117,7 +117,21 @@ describe("worker HTTP contract", () => {
     // Spec 053: what this build parses, so the dispatcher sends the thinking level only to it; spec 051 adds readiness,
     // and publish's reportChecks (P-2), so only this build is asked to publish despite a failing check.
     await expect((await handleWorkerRequest(new Request("http://worker/ping"), state)).json())
-      .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1"] });
+      .resolves.toMatchObject({ invocationFeatures: ["task.modelPolicy", "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "task.workflowReviewers", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2ECaptureExtras.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "model.route", "task.agentStep", "task.agentRun", "task.agentGrounding.v1", "task.workflowUnderstand", "task.workflowPlanCritique", "task.setupDraft", "task.setupProposal.v2", "task.workflowReviewRisk", "task.workflowFix", "task.workflowFeedbackAutonomy", "task.workflowParallelParts", "maintain.workflowSync", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1", "task.liveSteer.v1", "task.setupAgent.v1", "task.setupRecipes.v1", "prepare.metaRepo", "task.contextSources.v1", "task.specWrite.v1", "task.workflowReviewSpec.v1", "task.ownerRedirect.v1", "task.peek.v1", "publish.attribution", "task.diagnosis.v1", "task.evidenceCapture.v1", "task.learnedContext.v1", "task.testEnvDetect.v1", "task.testEnvironment.v1", "task.testEnvCoveragePath.v1", "prepare.registries.v1", "prepare.savedEnv.v1", "prepare.savedEnvBuild.v1", "prepare.pins.v1", "repository.credentialKinds.v1", "task.workflowSecondReviewer.v1", "task.designReview.v1", "task.nightlyRun.v1"] });
+  });
+
+  it("advertises only the invocation features it implements, not those it merely parses", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-features-"));
+    const state = createWorkerServerState(new OperationJournal(root), { execute: async () => undefined });
+    const body = await (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as { invocationFeatures: string[] };
+    // Task 16a knows these three. Task 18 added "task.agentStep", Task 23 "task.agentRun", Task 27 "model.route".
+    for (const feature of ["task.agentStep", "task.agentRun", "model.route"]) expect(WORKER_INVOCATION_FEATURES).toContain(feature);
+    expect(body.invocationFeatures).toContain("task.agentRun");
+    expect(WORKER_INVOCATION_FEATURES).toContain("task.agentGrounding.v1");
+    expect(body.invocationFeatures).toContain("task.agentGrounding.v1");
+    expect(body.invocationFeatures).toContain("task.agentStep");
+    expect(body.invocationFeatures).toContain("model.route");
+    for (const feature of body.invocationFeatures) expect(WORKER_INVOCATION_FEATURES as readonly string[]).toContain(feature);
   });
 
   it("withholds the agent step feature (Task 4.3a) from /ping with its reason exactly as it withholds another feature, and lists it once nothing withholds it", async () => {
@@ -255,6 +269,42 @@ describe("worker HTTP contract", () => {
       expect(terminal[0]).toMatchObject(expected);
       if (!("result" in expected)) expect(terminal[0]).not.toHaveProperty("result");
     }
+  });
+
+  it("F5: a stopped setup run ends cancelled and carries only its partial proposal and summary; nothing else it holds is sent", async () => {
+    const setupRun = { workflowMode: "SETUP_AGENT", setupProposal: { setup: [] }, setupRunSummary: { stop: "infrastructure", partial: true }, conversationId: "c", secret: "x", checks: { status: "regression" } };
+    const journal = new OperationJournal(await mkdtemp(join(tmpdir(), "agentx-terminal-")));
+    const terminal: Array<Record<string, unknown>> = [];
+    const state = createWorkerServerState(journal, { execute: async () => { throw new WorkerOperationCancelledError("op", setupRun); } }, { onTerminal: async (result) => { terminal.push(result as unknown as Record<string, unknown>); } });
+    await handleWorkerRequest(invocationRequest(taskInvocation()), state);
+    await vi.waitFor(() => expect(terminal).toHaveLength(1));
+    expect(terminal[0]).toMatchObject({ status: "CANCELLED", result: { workflowMode: "SETUP_AGENT", setupProposal: { setup: [] }, setupRunSummary: { stop: "infrastructure", partial: true } } });
+    expect(Object.keys(terminal[0]!["result"] as object).sort()).toEqual(["setupProposal", "setupRunSummary", "workflowMode"]);
+    // A cancelled error whose carried value is not a setup run's report sends nothing of it.
+    const other: Array<Record<string, unknown>> = [];
+    const second = createWorkerServerState(new OperationJournal(await mkdtemp(join(tmpdir(), "agentx-terminal-"))), { execute: async () => { throw new WorkerOperationCancelledError("op", { workflowMode: "PLAN", setupProposal: {} }); } }, { onTerminal: async (result) => { other.push(result as unknown as Record<string, unknown>); } });
+    await handleWorkerRequest(invocationRequest(taskInvocation()), second);
+    await vi.waitFor(() => expect(other).toHaveLength(1));
+    expect(other[0]).not.toHaveProperty("result");
+  });
+
+  it("sends the findings of a run that left the code as it was, redacted again, and nothing of them for another failure", async () => {
+    const token = ["ghp_", "Ab12".repeat(9)].join("");
+    const findings = { commands: [{ command: "grep -rn retry app", output: `app/a.ts: ${token}` }], conclusion: "We use retry in one file." };
+    const send = async (thrown: Error) => {
+      const journal = new OperationJournal(await mkdtemp(join(tmpdir(), "agentx-terminal-")));
+      const terminal: Array<Record<string, unknown>> = [];
+      const state = createWorkerServerState(journal, { execute: async () => { throw thrown; } }, { onTerminal: async (result) => { terminal.push(result as unknown as Record<string, unknown>); } });
+      await handleWorkerRequest(invocationRequest(taskInvocation()), state);
+      await vi.waitFor(() => expect(terminal).toHaveLength(1));
+      return terminal[0]!;
+    };
+    const sent = await send(Object.assign(new Error("CONFIG_INVALID: the coding run left the code as it was when the task started"), { noChangeFindings: findings }));
+    expect(sent).toMatchObject({ status: "FAILED", result: { noChangeFindings: { commands: [{ command: "grep -rn retry app" }], conclusion: "We use retry in one file." } } });
+    expect(JSON.stringify(sent)).not.toContain(token);
+    expect(JSON.stringify(sent)).toContain("[REDACTED]");
+    expect(await send(new Error("model down"))).not.toHaveProperty("result");
+    expect(await send(Object.assign(new Error("model down"), { noChangeFindings: "not a block" }))).not.toHaveProperty("result");
   });
 
   it("retries a failed terminal callback three times, waiting 2 s, 8 s and 30 s", async () => {

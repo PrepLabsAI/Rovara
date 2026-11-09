@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { pushCommitFromIsolatedRepository, runGitWithCredential } from "../../packages/worker/src/git-auth.js";
-import { processesToStop, stopWorkspaceProcesses, unstoppableProcesses, workspaceProcessScope, type ProcessEntry } from "../../packages/worker/src/workspace-processes.js";
+import { processesToStop, runningInContainer, stopWorkspaceProcesses, unstoppableProcesses, workspaceProcessScope, type ProcessEntry } from "../../packages/worker/src/workspace-processes.js";
 
 const execFileAsync = promisify(execFile);
 const directories: string[] = [];
@@ -47,8 +47,30 @@ describe("stopping what the workspace left running before a push (final review I
   });
 
   it("reads its scope from the worker image's environment", () => {
-    expect(workspaceProcessScope({ AGENTX_WORKER_PROCESS_SCOPE: "container" })).toBe("container");
-    expect(workspaceProcessScope({})).toBe("workspace");
+    expect(workspaceProcessScope({ AGENTX_WORKER_PROCESS_SCOPE: "container" }, () => true)).toBe("container");
+    expect(workspaceProcessScope({}, () => false)).toBe("workspace");
+  });
+
+  it("refuses the container scope unless the worker is really inside its container, so a developer machine never has all its processes stopped", async () => {
+    expect(() => workspaceProcessScope({ AGENTX_WORKER_PROCESS_SCOPE: "container" }, () => false)).toThrow(/not running in its container/);
+    // The stop itself refuses before it lists or kills anything.
+    const kill = vi.fn();
+    const listProcesses = vi.fn(async () => [entry(1, 0), entry(9, 1), entry(40, 1)]);
+    vi.stubEnv("AGENTX_WORKER_PROCESS_SCOPE", "container");
+    await expect(stopWorkspaceProcesses({ rootPath: "/w", selfPid: 9, uid: 501, kill, listProcesses, inContainer: () => false }))
+      .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringMatching(/not running in its container/) as unknown });
+    expect(kill).not.toHaveBeenCalled();
+    expect(listProcesses).not.toHaveBeenCalled();
+    // Inside the container it goes on as before.
+    await expect(stopWorkspaceProcesses({ rootPath: "/w", selfPid: 9, uid: 501, kill, listProcesses: async () => [entry(1, 0), entry(9, 1)], inContainer: () => true })).resolves.toEqual({ stopped: 0 });
+  });
+
+  it("knows it is in a container only on Linux, by Docker's marker file or its bind-mounted host files", () => {
+    const hosts = `833 820 259:1 /var/lib/docker/containers/${"a".repeat(64)}/hosts /etc/hosts rw - ext4 /dev/x rw`;
+    expect(runningInContainer({ platform: "darwin", dockerEnvExists: true, mountinfo: hosts })).toBe(false);
+    expect(runningInContainer({ platform: "linux", dockerEnvExists: true, mountinfo: "" })).toBe(true);
+    expect(runningInContainer({ platform: "linux", dockerEnvExists: false, mountinfo: hosts })).toBe(true);
+    expect(runningInContainer({ platform: "linux", dockerEnvExists: false, mountinfo: "820 700 0:52 / / rw - overlay overlay rw" })).toBe(false);
   });
 
   it("fails closed when the processes cannot be listed, or keep running", async () => {

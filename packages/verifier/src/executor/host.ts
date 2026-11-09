@@ -225,6 +225,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   } };
   const shared = {
     casePlans, caseObservations: fileLedger.caseObservations, evidence: fileLedger.evidence, actionWindows: fileLedger.actionWindows,
+    // One line in the executor's own log (the parent writes it too), redacted of the run's credentials and session values; best effort, never a verdict input.
+    log: (line: string) => { try { appendFileSync(join(context.outDir, "executor.log"), `${new Date().toISOString()} ${agentRedactor.text(line)}\n`); } catch { /* a log that cannot be written is not a reason to fail a case */ } },
     openCaseSession: async (request: Parameters<E2EWebRuntimePorts["openCaseSession"]>[0], signal: AbortSignal) => {
       const opened = await store.open(request, signal);
       activeSessionRef = opened.sessionRef;
@@ -249,12 +251,13 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     },
   };
 
+  const mediaWanted = resolved.suite.runtimeAdmissionContext.selectionInput.policy.capture.video === true || resolved.suite.runtimeAdmissionContext.selectionInput.policy.capture.traces === true;
   if (launchContext.selectedTarget.kind === "web") {
     // Screenshots and traces of failed cases follow the admitted capture policy and nothing else; with both off the case adapter is given no capture port at all.
     const screenshots = fileLedger.capture.enabled("screenshot");
     const ports: E2EWebRuntimePorts = Object.freeze({ ...shared,
       ...(agent !== null ? { agent: { runStep: agent.runStep } } : replay !== null ? { agent: { runStep: replay.runStep } } : {}),
-      ...(screenshots ? { capture: { screenshots, record: (item: { caseId: string; kind: "screenshot"; bytes: Uint8Array }) => fileLedger.capture.record(item) } } : {}),
+      ...(screenshots ? { capture: { screenshots, ...(fileLedger.capture.stripEnabled() ? { mode: "all" as const } : {}), record: (item: { caseId: string; kind: "screenshot"; bytes: Uint8Array; step?: number }) => fileLedger.capture.record(item) } } : {}),
       resolveOwnedCdpEndpoint: async () => {
         if (!context.cdpEndpoint) throw new Error("the executor launched no browser for this shard");
         return context.cdpEndpoint;
@@ -275,7 +278,12 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         // captures are scanned for. Either way it is registered with the executor parent like any session cookie (this context's responses, and the cookie jar when the case
         // closes), so the parent redacts it wherever it appears as text and a page that echoes it ends the run `credential-leak`; the orders-auth/v1 cookie is a session secret like
         // the form login's, and qualification pins no probe that echoes it.
-        if (screenshots) for (const cookie of state.cookies) fileLedger.registerSessionSecret(cookie.value);
+        // Every secret of the round is told to the ledger whenever something that can carry one is kept: a screenshot, or video and trace (Opus review C2). That is each cookie value and each localStorage value,
+        // so the parent's scan finds them in a trace's blobs and snapshots and in a video; a trace's own scrub learns the rest (login responses, custom auth headers, query tokens) from the trace itself.
+        if (screenshots || mediaWanted) {
+          for (const cookie of state.cookies) fileLedger.registerSessionSecret(cookie.value);
+          for (const item of state.localStorage) for (const entry of item.entries) fileLedger.registerSessionSecret(entry.value);
+        }
         await browserContext.addCookies(state.cookies.map((cookie) => ({ ...cookie })));
         for (const item of state.localStorage) {
           // Once per tab, before the page's own scripts, as Playwright's own storage state does it.
@@ -314,7 +322,9 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   if (launchContext.selectedTarget.kind === "api") {
     if (declaration.target.app !== null) throw new Error("API declaration must keep the compiler's app:null target");
     if (!isPinnedRovaraHttpEngine(declaration.target.engine)) throw new Error("API declaration must name Rovara's pinned HTTP engine");
+    const samples = fileLedger.capture.enabled("api-sample");
     const ports: E2EApiRuntimePorts = Object.freeze({ ...shared, request: store.request,
+      ...(samples ? { samples: { record: (item: { caseId: string; kind: "api-sample"; bytes: Uint8Array; step: number }) => fileLedger.capture.record(item) } } : {}),
       readApprovedJsonSchema: async () => { throw new Error("no JSON schema assets are installed in this executor"); },
       readApprovedStateProbe: async (request: { caseId: string; assertionIndex: number; probeId: string }) => {
         const installed = installedE2EApplicationStateProbeAsset(request.probeId);

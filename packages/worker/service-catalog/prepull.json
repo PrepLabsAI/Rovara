@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "catalogRevision": 3,
+  "images": [
+    {
+      "id": "local-aws@r1",
+      "repository": "svc/local-aws",
+      "digest": "e1e95b4f89d16b8ebd29ed088afabc4c22cf5e7bb62a1508f61ea4bfa9a4a672",
+      "platforms": [
+        "linux/arm64"
+      ]
+    },
+    {
+      "id": "postgres@16",
+      "repository": "svc/postgres",
+      "digest": "d57d57125e5b0d7caa8ab98817005a9460fc092e47d8f1155628b97e9756f106",
+      "platforms": [
+        "linux/arm64",
+        "linux/amd64"
+      ]
+    }
+  ]
+}

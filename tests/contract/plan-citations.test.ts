@@ -168,9 +168,9 @@ describe("citedFileReader", () => {
   });
 });
 
-// The task controls the cited files. In a devcontainer project its code can run while the plan
+// R56 (Projects plan 2, Task 1): the task controls the cited files. In a devcontainer project its code can run while the plan
 // is checked and flip one between a real file and a link to a worker file; the read must never follow that link. The walk
-// needs /proc/self/fd, so this runs on Linux (CI).
+// needs /proc/self/fd, so this runs on Linux (CI, and the cloud test runner).
 (process.platform === "linux" ? describe : describe.skip)("citedFileReader on files the task flips to links", () => {
   async function workspace() {
     const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-citations-flip-")));

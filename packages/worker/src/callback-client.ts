@@ -1,3 +1,5 @@
+import {TaskModelFallbackRequestSchema,type TaskModelFallbackRequest,type TaskModelFallbackAuthorization} from "@agentx/contracts";
+import {parseTaskModelFallbackAuthorization,taskModelPolicyBindingsMatch} from "./model-fallback-authority.js";
 import { createHash } from "node:crypto";
 import {
   CodeBuildCheckResultSchema,
@@ -104,6 +106,13 @@ export function createWorkerCallbackSinks(input: {
   authorizeFeedbackApproval: FeedbackApprovalAuthorizer;
   /** #341: the task owner's ChatGPT access token, for a task that runs on their plan (unparsed; see chatgpt-token.ts). */
   chatGptToken: () => Promise<unknown>;
+  /** SH14: the setup run's one callback action (journal, host ask, poll, command done). The reply is the broker's, unparsed. */
+  setupAgent: (body: unknown) => Promise<unknown>;
+  /** NH-1: the nightly run's one callback action (its result and coverage map). The reply is the broker's, unparsed. */
+  nightlyResult: (body: unknown) => Promise<unknown>;
+  /** Test services (slice 3): a fresh read address of an approved fixture set the run's plan names (`{ digest }` in, the broker's answer out, unparsed). The address is a credential for 15 minutes: only fixture-delivery.ts handles the answer. */
+  fixtureSet: (body: { digest: string }) => Promise<unknown>;
+  authorizeModelFallback:(request:TaskModelFallbackRequest)=>Promise<TaskModelFallbackAuthorization>;
   /** #342: tells the control plane why the task stopped using its owner's ChatGPT plan. */
   chatGptFallback: (reason: "limit" | "revoked" | "model") => Promise<void>;
 } {
@@ -249,6 +258,16 @@ export function createWorkerCallbackSinks(input: {
   return {
     eventSink: async (events) => post("events", { events }),
     chatGptToken: async () => postForResult("chatgpt-token", {}),
+    setupAgent: async (body) => postForResult("setup-agent", body),
+    nightlyResult: async (body) => postForResult("nightly-result", body),
+    fixtureSet: async (body) => postForResult("fixture-set", body),
+    authorizeModelFallback:async(raw)=>{
+      const request=TaskModelFallbackRequestSchema.parse(raw),binding=input.invocation.kind==="task"?input.invocation.payload.modelPolicy:undefined;
+      if(binding===undefined||!taskModelPolicyBindingsMatch(request.binding,binding))throw agentXError("RUNTIME_UNAVAILABLE","The task's fallback authorization binding is unavailable.");
+      const reply=await postForResult("model-fallback",request);
+      const answer=typeof reply==="object"&&reply!==null?Object.fromEntries(Object.entries(reply).filter(([key])=>key!=="requestId")):reply;
+      return parseTaskModelFallbackAuthorization(answer,binding);
+    },
     chatGptFallback: async (reason) => post("chatgpt-status", { reason }),
     artifactSink: async (artifact) => post("artifacts", artifact),
     terminalSink: async (result) => post("result", {

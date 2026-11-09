@@ -72,6 +72,20 @@ function percentDecodeTolerant(bytes: Buffer): Buffer {
   return Buffer.from(out);
 }
 
+/** Whether a recorded field carries a run credential, as recorded or after up to four tolerant percent-decoding passes. */
+export function carriesCredential(value: string | null, containsCredential: (bytes: Uint8Array) => boolean): boolean {
+  if (value === null || value.length === 0) return false;
+  let current: Buffer = Buffer.from(value, "utf8");
+  if (containsCredential(current)) return true;
+  for (let pass = 0; pass < MAX_PERCENT_DECODE_PASSES; pass += 1) {
+    const next = percentDecodeTolerant(current);
+    if (next.equals(current)) return false;
+    if (containsCredential(next)) return true;
+    current = next;
+  }
+  return false;
+}
+
 /** What replaces a ledger field that carried a run credential. */
 export const MOCK_LEDGER_WITHHELD = "[credential]";
 
@@ -86,18 +100,7 @@ export const MOCK_LEDGER_WITHHELD = "[credential]";
  * reversible encoding (or encoded more than four times) is not recognized. The impact is low because each credential is random, per run, and for a throwaway account.
  */
 export function withholdMockLedgerCredentials(ledger: ParsedMockLedger, containsCredential: (bytes: Uint8Array) => boolean): ParsedMockLedger {
-  const carries = (value: string | null): boolean => {
-    if (value === null || value.length === 0) return false;
-    let current: Buffer = Buffer.from(value, "utf8");
-    if (containsCredential(current)) return true;
-    for (let pass = 0; pass < MAX_PERCENT_DECODE_PASSES; pass += 1) {
-      const next = percentDecodeTolerant(current);
-      if (next.equals(current)) return false;
-      if (containsCredential(next)) return true;
-      current = next;
-    }
-    return false;
-  };
+  const carries = (value: string | null): boolean => carriesCredential(value, containsCredential);
   const lines = ledger.lines.map((entry): ConsumptionLine | UnmatchedLine => {
     const { line } = entry;
     const method = carries(line.method); const path = carries(line.path); const input = carries(line.inputValue);

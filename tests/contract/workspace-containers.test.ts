@@ -18,6 +18,7 @@ const DETACHED = "c".repeat(64);
 const directories: string[] = [];
 const servers: Server[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(servers.splice(0).map((server) => new Promise((resolveClose) => server.close(resolveClose))));
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
@@ -46,6 +47,13 @@ const inContainer = (docker: DockerApi, extra: Partial<Parameters<typeof sweepWo
 });
 
 describe("removing containers left from the workspace before a push (docker containment)", () => {
+  it("refuses the container scope unless the worker is really inside its container, and removes nothing", async () => {
+    const { docker, removed } = fakeDocker([container(SELF), container(DEVCONTAINER)]);
+    vi.stubEnv("AGENTX_WORKER_PROCESS_SCOPE", "container");
+    await expect(sweepWorkspaceContainers({ rootPath: "/mnt/workspace", docker, socketMounted: async () => true, selfContainerId: async () => SELF, log: () => undefined, inContainer: () => false })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringMatching(/not running in its container/) as unknown });
+    expect(removed).toEqual([]);
+  });
+
   it("finds the worker's own container ID from Docker's bind mounts, or from a cgroup v1 path", () => {
     const mountinfo = [
       "820 700 0:52 / / rw,relatime master:1 - overlay overlay rw,lowerdir=/mnt/workspace/.docker/overlay2/l/X",

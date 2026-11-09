@@ -99,6 +99,18 @@ export interface WorkerStartedInput {
   invocationFeatures: readonly string[];
 }
 
+/**
+ * The environment detectors normally run in a thread the caller can end (env-detect/guarded.ts). When that thread cannot be started at all (its compiled entry file is missing from the image), the detectors run in the
+ * worker's own thread without a time limit, and this one line says so: a missing file is a packaging fault that would otherwise go unseen. `code` is the thread's error code (`ERR_MODULE_NOT_FOUND`,
+ * `ERR_WORKER_PATH`); anything else is printed as `unspecified`. The message is fixed text.
+ */
+export function logEnvDetectGuardUnavailable(sink: WorkerLogSink, code: unknown): void {
+  write(sink, "error", () => {
+    const reason = typeof code === "string" && /^ERR_[A-Z_]{3,60}$/u.test(code) ? code : "unspecified";
+    return { component: "worker", event: "envdetect.guard_unavailable", reason, message: `env-detect guard unavailable, running unguarded: ${reason}` };
+  });
+}
+
 /** One line, every boot, whatever the runtime state: an empty stream then means the worker never started, not that it was quiet. */
 export function logWorkerStarted(sink: WorkerLogSink, input: WorkerStartedInput): void {
   write(sink, "info", () => {

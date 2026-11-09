@@ -24,9 +24,11 @@ async function workspace(): Promise<DevcontainerTarget> {
 function fakeCli(inspections: ContainerInspection[]) {
   const removed: string[] = [];
   const volumesRemoved: string[][] = [];
+  const calls: string[][] = [];
   let started = 0;
   const cli: DevcontainerCli = {
-    run: async () => {
+    run: async (args) => {
+      calls.push([...args]);
       started += 1;
       return { exitCode: 0, stdout: `{"outcome":"success","containerId":"id-${started}","remoteUser":"node","remoteWorkspaceFolder":"/workspaces/sample"}`, stderr: "" };
     },
@@ -37,10 +39,23 @@ function fakeCli(inspections: ContainerInspection[]) {
       removeVolumes: async (names) => { volumesRemoved.push([...names]); },
     },
   };
-  return { cli, removed, volumesRemoved };
+  return { cli, removed, volumesRemoved, calls };
 }
 
 describe("the mask volumes of a dev container", () => {
+  it("are named for each start, so what one container writes in them is not seen by another", async () => {
+    const target = await workspace();
+    const volumes = async () => {
+      const { cli, calls } = fakeCli([]);
+      await ensureDevcontainer(cli, target);
+      return calls[0]!.filter((arg) => arg.startsWith("type=volume,")).map((arg) => /source=([^,]+),/u.exec(arg)![1]!);
+    };
+    const first = await volumes();
+    const second = await volumes();
+    expect(first).toHaveLength(2);
+    expect(new Set([...first, ...second]).size).toBe(4);
+  });
+
   it("are removed with a started container AgentX refuses", async () => {
     const target = await workspace();
     const refused: ContainerInspection = { HostConfig: { Privileged: true }, Mounts: [

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { E2EReplayTrace } from "@agentx/contracts";
 import { E2E_APPLICATION_ADMISSION_SCHEMA_V2, E2E_HARD_LIMITS, WorkerInvocationSchema, canonicalJson, e2eModelRouteRevision, e2eRuntimeBindingKey, type E2EApplicationExecutionAdmission,
   type E2EModelDayBudgetRequest } from "@agentx/contracts";
+import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { createDockerApplicationHost, DEFAULT_DEADLINE_GRACE_MS, STALE_RUN_SWEEP_AGE_MS, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
@@ -481,7 +482,8 @@ describe("workflow E2E application rounds: the model channel", () => {
     expect(s.createHost.mock.calls[0]![0]).not.toHaveProperty("modelChannel");
     expect(budget.post).not.toHaveBeenCalled();
     expect(opened).not.toHaveBeenCalled();
-    expect(s.fake.argsFor("executor").join(" ")).not.toMatch(/model/i);
+    // Ignore only the exact pinned seccomp path, whose checkout directory may contain "models".
+    expect(s.fake.argsFor("executor").join(" ").replace(`seccomp=${installedExecutorSeccompProfilePath()}`, "seccomp=<pinned-profile>")).not.toMatch(/model/i);
   });
 
   it("the reference's agentSteps must be exactly 'some group has an agent step': an agent admission whose reference omits it, and a plain one whose reference claims it, are refused before anything starts", async () => {

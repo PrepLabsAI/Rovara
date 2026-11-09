@@ -1,10 +1,10 @@
 import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createCandidateManifest } from "@agentx/contracts";
 import { exportCandidateBuildSourceInScratch, type CandidateBuildSourceExport } from "./e2e-build-source-export.js";
 import { createProcessCandidateGit } from "./e2e-candidate-source.js";
 import { withIsolatedGit } from "./isolated-git.js";
+import { makeWorkerScratch } from "./worker-scratch.js";
 import { readCommittedCandidateSourceExport, type CandidateRepositoryInput, type CommittedCandidateSourceExport } from "./verification/candidate.js";
 
 /**
@@ -62,7 +62,7 @@ export async function materializeBaseSource(input: { repositories: readonly Cand
   if (input.repositories.length !== 1 || repository?.baseCommitSha === undefined) return { status: "UNAVAILABLE" };
   let scratch: string | undefined;
   try {
-    scratch = await mkdtemp(join(input.scratchRoot ?? tmpdir(), "agentx-plan-dry-run-git-"));
+    scratch = input.scratchRoot === undefined ? await makeWorkerScratch("agentx-plan-dry-run-git-") : await mkdtemp(join(input.scratchRoot, "agentx-plan-dry-run-git-"));
     await mkdir(input.destination, { mode: 0o755 });
     // The checks run as an unprivileged user through a read-only mount: the folder must be readable whatever the process umask is.
     await chmod(input.destination, 0o755);

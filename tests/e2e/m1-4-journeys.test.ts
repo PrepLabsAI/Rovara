@@ -22,7 +22,7 @@ import { workflowE2EApplicationHostDeps, type WorkflowE2EApplicationRuntimeConfi
 import { ciImage } from "../support/ci-images.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { AGENT_GOAL, FIXED_RUNTIME_AT, ORDERS_M14_APP_FILES, ORDERS_M14_ROOT, createOrdersM14AgentPlan, sha256Hex } from "../support/orders-m14-agent.js";
-import { replaySourceCasesOf, verifyReplayEvidence } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
+import { E2E_REPLAY_PURPOSE, replaySourceCasesOf, verifyReplayEvidence } from "../../packages/broker/src/aws/workflow-e2e-replay.js";
 import type { E2EReplaySourceCase, E2EReplayTrace } from "@agentx/contracts";
 
 /** The task page's section for these rows as text (entities undone, so a sentence is matched as the owner reads it), and the Slack summary of them. */
@@ -165,7 +165,19 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
         aggregate: JSON.parse(aggregateSaved.bytes.toString("utf8")) as unknown, groupEvidence: new Map([[runId, group]]),
         receivedAt: new Map([[runId, group.groupRun.actual?.collection.receivedAt ?? new Date().toISOString()]]), terminalStatus: "SUCCEEDED", replay: admission.replay })?.replay;
     };
-    return { fixture, result, closed, sent, caseId, ledger, agentModel, saved, runId, why, verdict, replayResult, steps: e2eApplicationGroupAgentSteps(fixture.compiled), runRoot };
+    /** What the broker made of a replay's evidence, in words, ahead of the logs: its own reason (never throws, so it can sit in an assertion message). */
+    const replayWhy = () => {
+      try {
+        if (group === undefined || aggregateSaved === undefined || admission.replay === undefined) return why;
+        const verification = verifyApplicationE2EEvidence({ admissionBytes,
+          subject: { taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
+            candidateDigest: admission.candidateDigest, roundId: admission.round.roundId, groupRunIds: [runId], admissionSha256: admissionSha },
+          aggregate: JSON.parse(aggregateSaved.bytes.toString("utf8")) as unknown, groupEvidence: new Map([[runId, group]]),
+          receivedAt: new Map([[runId, group.groupRun.actual?.collection.receivedAt ?? new Date().toISOString()]]), terminalStatus: "SUCCEEDED", purpose: E2E_REPLAY_PURPOSE });
+        return `broker: ${verification.verdict}, ${verification.reason}\n${why}`;
+      } catch (error) { return `broker verification threw ${error instanceof Error ? error.name : "an error"}\n${why}`; }
+    };
+    return { fixture, result, closed, sent, caseId, ledger, agentModel, saved, runId, why, verdict, replayResult, replayWhy, steps: e2eApplicationGroupAgentSteps(fixture.compiled), runRoot };
   }
 
   it("agent-renamed-export: the worker opens the channel, the goal finds 'Download orders', the executor captures one download and the ledger and receipts agree", async () => {
@@ -240,12 +252,13 @@ describe.runIf(dockerReady)("M1.4 native journeys: AI navigation steps", () => {
     expect(replay.ledger).toBeNull();
     expect(replay.fixture.plan.admission.modelRoute).toBeNull();
     expect(replay.result).toMatchObject({ processStatus: "SUCCEEDED" });
-    expect(replay.replayResult(), replay.why).toEqual({ status: "PASS", reproduced: true, downloadSha256Match: true });
+    expect(replay.replayResult(), replay.replayWhy()).toEqual({ status: "PASS", reproduced: true, downloadSha256Match: true });
 
     const stale = await journey([], { replay: { traces, sourceCases }, renamed: true });
     expect(stale.closed).toEqual([]);
     expect(stale.sent).toEqual([]);
-    expect(stale.replayResult(), stale.why).toEqual({ status: "UNKNOWN", reproduced: false, downloadSha256Match: false, reason: "replay-needs-model" });
+    // The broker's own reason goes in the message (FLK-1): a replay-unverified result then says why the evidence was not verified, and the executor log tail names an agent step that threw.
+    expect(stale.replayResult(), stale.replayWhy()).toEqual({ status: "UNKNOWN", reproduced: false, downloadSha256Match: false, reason: "replay-needs-model" });
   }, 900_000);
 
   it("agent-model-outage: the provider fails; the receipt is provider-error, the ledger verdict is failed with MODEL_PROVIDER_FAILED, and nothing was downloaded", async () => {

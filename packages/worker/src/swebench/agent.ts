@@ -101,7 +101,7 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
     model: input.model,
     bashOperations: input.bashOperations,
     devcontainerPaths: input.paths,
-    // The offline evaluation edits a host copy of the repository; its file tools are Pi's own, on purpose (this evaluation is not a task).
+    // The offline evaluation edits a host copy of the repository; its file tools are Pi's own, on purpose (R56 covers tasks).
     localFileTools: true,
   }, input.piAdapter);
   started = now();

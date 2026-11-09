@@ -1,7 +1,7 @@
-// on an EC2 worker, task-controlled code never runs in the worker's own process, network or user. It runs
+// Ruling R56: on an EC2 worker, task-controlled code never runs in the worker's own process, network or user. It runs
 // in a sandbox container with no Docker socket, no host network, no capabilities and only the workspace mounted.
-import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
-import { availableParallelism, tmpdir } from "node:os";
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { availableParallelism, tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -10,14 +10,16 @@ import {
   assertLocalTaskExecutionAllowed,
   removeLeftoverTaskSandboxes,
   sandboxCpuLimit,
+  sandboxMemoryLimit,
   taskSandboxRunArgs,
   taskShellFromEnvironment,
+  taskSandboxFor,
   taskShellSelection,
   workspaceKey,
 } from "../../packages/worker/src/task-sandbox.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 
-const IMAGE = "registry.example.test/agentx/worker@sha256:" + "a".repeat(64);
+const IMAGE = "123456789012.dkr.ecr.us-west-2.amazonaws.com/agentx-staging/worker@sha256:" + "a".repeat(64);
 const TASK = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";
 const EC2 = { AGENTX_WORKER_PROCESS_SCOPE: "container" };
 
@@ -44,10 +46,10 @@ function fakeDocker(behaviour: { networkExists?: boolean; network?: string; stal
   return { docker, calls, verbs: (verb: string) => calls.filter((args) => args[0] === verb) };
 }
 
-describe("the task sandbox's docker run arguments", () => {
+describe("the task sandbox's docker run arguments (R56)", () => {
   const args = taskSandboxRunArgs({ name: "agentx-task-x", taskId: TASK, image: IMAGE, rootPath: "/mnt/workspace", maskedPaths: [] });
 
-  it("carry every hardening flag", () => {
+  it("carry every R56 flag", () => {
     expect(args).toEqual(expect.arrayContaining(["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000"]));
     expect(args[args.indexOf("--cap-drop") + 1]).toBe("ALL");
     expect(args[args.indexOf("--security-opt") + 1]).toBe("no-new-privileges");
@@ -72,6 +74,29 @@ describe("the task sandbox's docker run arguments", () => {
     // Without a count, this machine's own is used, and the limit is always below it.
     const own = taskSandboxRunArgs({ name: "n", taskId: TASK, image: IMAGE, rootPath: "/mnt/workspace", maskedPaths: [] });
     if (own.includes("--cpus")) expect(Number(own[own.indexOf("--cpus") + 1])).toBeLessThan(availableParallelism());
+  });
+
+  it("cap the sandbox's memory and its swap at the same size, sized from the host with a reserve for the worker and the Docker daemon", () => {
+    const GIB = 1024 ** 3;
+    const memory = (hostMemoryBytes: number) => {
+      const given = taskSandboxRunArgs({ name: "n", taskId: TASK, image: IMAGE, rootPath: "/mnt/workspace", maskedPaths: [], hostMemoryBytes });
+      const value = given.includes("--memory") ? given[given.indexOf("--memory") + 1] : undefined;
+      // Swap equal to memory means no swap beyond the limit.
+      expect(given[given.indexOf("--memory-swap") + 1]).toBe(value);
+      return value;
+    };
+    // Reserve: the larger of 1.5 GiB and 20% of the host. Floor: 1 GiB.
+    expect(memory(16 * GIB)).toBe("13107m");
+    expect(memory(8 * GIB)).toBe("6553m");
+    expect(memory(4 * GIB)).toBe("2560m");
+    expect(memory(2 * GIB)).toBe("1024m");
+    expect(memory(GIB)).toBe("1024m");
+    expect([sandboxMemoryLimit(16 * GIB), sandboxMemoryLimit(4 * GIB), sandboxMemoryLimit(GIB / 2), sandboxMemoryLimit(0), sandboxMemoryLimit(Number.NaN)]).toEqual(["13107m", "2560m", "1024m", undefined, undefined]);
+    // Without a size, this machine's own is used, and the limit leaves a reserve.
+    const own = taskSandboxRunArgs({ name: "n", taskId: TASK, image: IMAGE, rootPath: "/mnt/workspace", maskedPaths: [] });
+    expect(own.includes("--memory")).toBe(true);
+    expect(own[own.indexOf("--memory") + 1]).toBe(sandboxMemoryLimit(totalmem()));
+    expect(own[own.indexOf("--memory-swap") + 1]).toBe(own[own.indexOf("--memory") + 1]);
   });
 
   it("mount only the workspace, and never the Docker socket, the host network or privileges", () => {
@@ -99,6 +124,50 @@ describe("the task sandbox's docker run arguments", () => {
       "/mnt/workspace/.docker:ro,noexec,nosuid,size=4k",
       "/mnt/workspace/.agentx-runtime:ro,noexec,nosuid,size=4k",
     ]);
+  });
+});
+
+describe("the sandbox's DNS servers (setup agent, SH9)", () => {
+  const base = { name: "n", taskId: TASK, image: IMAGE, rootPath: "/mnt/workspace", maskedPaths: [] as string[] };
+
+  it("has no --dns flag unless a DNS server is asked for, so every other sandbox resolves as before", () => {
+    expect(taskSandboxRunArgs(base)).not.toContain("--dns");
+    expect(taskSandboxRunArgs({ ...base, dns: [] })).not.toContain("--dns");
+  });
+
+  it("gives the sandbox the DNS servers it is asked for, in order, as --dns pairs on the task network", () => {
+    const args = taskSandboxRunArgs({ ...base, dns: ["172.18.0.1", "fd00::1"] });
+    const pairs = args.flatMap((arg, index) => (arg === "--dns" ? [args[index + 1]] : []));
+    expect(pairs).toEqual(["172.18.0.1", "fd00::1"]);
+    expect(args[args.indexOf("--network") + 1]).toBe(TASK_SANDBOX_NETWORK);
+    expect(args.slice(args.indexOf(IMAGE) - 2)).toEqual(["--entrypoint", "/usr/bin/tini", IMAGE, "--", "sleep", "infinity"]);
+  });
+
+  it("refuses a server that is not an IP address, or more than three, instead of passing a repository-shaped string to docker", () => {
+    for (const bad of ["dns.example.com", "--privileged", "1.2.3.4 --network host", "", "999.1.1.1"]) {
+      expect(() => taskSandboxRunArgs({ ...base, dns: [bad] }), bad).toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
+    }
+    expect(() => taskSandboxRunArgs({ ...base, dns: ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"] })).toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
+  });
+
+  it("starts the container with the DNS option it was constructed with, and without one by default", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-sandbox-dns-")));
+    try {
+      const withDns = fakeDocker();
+      await new TaskSandbox({ rootPath: root, taskId: TASK, docker: withDns.docker, image: IMAGE, dns: ["172.18.0.1"] }).start();
+      const run = withDns.verbs("run")[0]!;
+      expect(run[run.indexOf("--dns") + 1]).toBe("172.18.0.1");
+      const without = fakeDocker();
+      await new TaskSandbox({ rootPath: root, taskId: TASK, docker: without.docker, image: IMAGE }).start();
+      expect(without.verbs("run")[0]).not.toContain("--dns");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("is passed on by a sandbox selection", () => {
+    const sandbox = taskSandboxFor({ kind: "sandbox", docker: fakeDocker().docker, image: IMAGE, dns: ["172.18.0.1"] }, { rootPath: "/mnt/workspace", taskId: TASK });
+    expect(sandbox).toBeInstanceOf(TaskSandbox);
   });
 });
 
@@ -232,14 +301,16 @@ describe("starting and stopping a sandbox", () => {
     const retried = fakeDocker({ failRm: 1 });
     const first = new TaskSandbox({ rootPath: root, taskId: TASK, docker: retried.docker, image: IMAGE, log: (event) => events.push(event) });
     await first.exec(["true"], {});
-    await first.dispose();
+    await expect(first.dispose()).resolves.toBe(true);
     expect(retried.verbs("rm").filter((call) => call.includes(first.name))).toHaveLength(2);
     expect(events).toEqual([]);
 
     const stuck = fakeDocker({ failRm: 5 });
     const second = new TaskSandbox({ rootPath: root, taskId: TASK, docker: stuck.docker, image: IMAGE, log: (event) => events.push(event) });
     await second.exec(["true"], {});
-    await expect(second.dispose()).resolves.toBeUndefined();
+    // I1: the answer says the container is not gone (prepare refuses to call the workspace checked); a second dispose says the same.
+    await expect(second.dispose()).resolves.toBe(false);
+    await expect(second.dispose()).resolves.toBe(false);
     expect(stuck.verbs("rm").filter((call) => call.includes(second.name))).toHaveLength(2);
     expect(events).toEqual([{ event: "task-sandbox.remove.failed", container: second.name, taskId: TASK, reason: "device or resource busy" }]);
   });
@@ -271,7 +342,7 @@ describe("starting and stopping a sandbox", () => {
   });
 });
 
-describe("where the local shell may run", () => {
+describe("where the local shell may run (R56)", () => {
   it("is refused on the EC2 runtime, whatever asks for it, and whichever marker says it is EC2", () => {
     for (const marker of [EC2, { AGENTX_RUNTIME: "ec2" }, { ...EC2, AGENTX_RUNTIME: "ec2" }]) {
       expect(() => assertLocalTaskExecutionAllowed({ ...marker, AGENTX_TASK_SHELL: "local" })).toThrowError(expect.objectContaining({ code: "RUNTIME_UNAVAILABLE" }));
@@ -300,5 +371,66 @@ describe("where the local shell may run", () => {
 
   it("refuses a value it does not know", () => {
     expect(() => taskShellFromEnvironment({ AGENTX_TASK_SHELL: "host" })).toThrowError(expect.objectContaining({ code: "CONFIG_INVALID" }));
+  });
+});
+
+describe("the Python user site's .gitignore is rewritten on every start (C67)", () => {
+  const cleanup: string[] = [];
+  afterEach(async () => {
+    await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  });
+  const workspace = async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-sandbox-gitignore-")));
+    cleanup.push(root);
+    return root;
+  };
+  const start = async (root: string) => new TaskSandbox({ rootPath: root, taskId: TASK, docker: fakeDocker().docker, image: IMAGE }).start();
+
+  it("writes it on the first start", async () => {
+    const root = await workspace();
+    await start(root);
+    expect(await readFile(join(root, ".agentx-python", ".gitignore"), "utf8")).toBe("*\n");
+  });
+
+  it("restores it when a task deleted or changed it", async () => {
+    const root = await workspace();
+    await mkdir(join(root, ".agentx-python"));
+    await writeFile(join(root, ".agentx-python", ".gitignore"), "# nothing is ignored here\n");
+    await start(root);
+    expect(await readFile(join(root, ".agentx-python", ".gitignore"), "utf8")).toBe("*\n");
+    await rm(join(root, ".agentx-python", ".gitignore"));
+    await start(root);
+    expect(await readFile(join(root, ".agentx-python", ".gitignore"), "utf8")).toBe("*\n");
+  });
+
+  it("replaces a directory a task left at its name by moving it aside, never walking into it, and leaves no temporary file behind (L1, N3)", async () => {
+    const root = await workspace();
+    await mkdir(join(root, ".agentx-python", ".gitignore"), { recursive: true });
+    await writeFile(join(root, ".agentx-python", ".gitignore", "inner"), "x");
+    await start(root);
+    expect(await readFile(join(root, ".agentx-python", ".gitignore"), "utf8")).toBe("*\n");
+    const entries = (await readdir(join(root, ".agentx-python"))).sort();
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toBe(".gitignore");
+    const aside = entries[1]!;
+    expect(aside).toMatch(/^\.gitignore\.[0-9a-f-]{36}\.old$/u);
+    // The folder was moved whole: what was in it was not deleted by a walk of it.
+    expect(await readFile(join(root, ".agentx-python", aside, "inner"), "utf8")).toBe("x");
+    // A later start has a plain file at the name and adds nothing.
+    await start(root);
+    expect(await readdir(join(root, ".agentx-python"))).toHaveLength(2);
+  });
+
+  it("replaces a link a task left at its name, without writing through it", async () => {
+    const root = await workspace();
+    const outside = join(await workspace(), "target.txt");
+    await writeFile(outside, "keep me\n");
+    await mkdir(join(root, ".agentx-python"));
+    await symlink(outside, join(root, ".agentx-python", ".gitignore"));
+    await start(root);
+    expect(await readFile(outside, "utf8")).toBe("keep me\n");
+    const found = await lstat(join(root, ".agentx-python", ".gitignore"));
+    expect(found.isFile()).toBe(true);
+    expect(await readFile(join(root, ".agentx-python", ".gitignore"), "utf8")).toBe("*\n");
   });
 });
