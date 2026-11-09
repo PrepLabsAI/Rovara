@@ -14,6 +14,8 @@ export interface FakeContainer {
   environment: Record<string, string>;
   status: "created" | "running" | "exited";
   exitCode: number;
+  oomKilled: boolean;
+  createdAt: number;
   startedAt: number;
   hostPort: number;
   accepted: Set<string>;
@@ -26,6 +28,8 @@ export class FakeDocker implements DockerRunner {
   reachable = true;
   /** Make the simulated worker not answer /ping (still starting). */
   silent = false;
+  /** Removing a container whose name is not a worker's fails, as a stuck sandbox does. */
+  failSandboxRemoval = false;
   #nextPort = 40_000;
 
   async run(args: readonly string[]): Promise<DockerResult> {
@@ -61,6 +65,7 @@ export class FakeDocker implements DockerRunner {
       }
       case "rm": {
         const names = rest.filter((entry) => !entry.startsWith("--"));
+        if (this.failSandboxRemoval && names.some((name) => !name.startsWith("rovara-worker-"))) return fail("removal of container is already in progress");
         let missing = false;
         for (const name of names) if (!this.containers.delete(name)) missing = true;
         return missing && !rest.includes("--force") ? fail("No such container") : ok();
@@ -68,7 +73,10 @@ export class FakeDocker implements DockerRunner {
       case "inspect": {
         const container = this.containers.get(rest[rest.length - 1]!);
         if (container === undefined) return fail("Error response from daemon: No such object: x");
-        return ok(`${container.status}|${container.exitCode}|${new Date(container.startedAt || 0).toISOString()}|${container.status === "running" ? container.hostPort : ""}|${container.labels["rovara.local.workspace"] ?? ""}\n`);
+        return ok([
+          container.status, container.exitCode, container.oomKilled, new Date(container.startedAt || 0).toISOString(), new Date(container.createdAt).toISOString(),
+          container.status === "running" ? container.hostPort : "", container.labels["rovara.local.workspace"] ?? "", container.labels["rovara.local.config"] ?? "", container.labels["rovara.local.generation"] ?? "",
+        ].join("|") + "\n");
       }
       case "ps": {
         const labels = rest.filter((entry, index) => rest[index - 1] === "--filter" && entry.startsWith("label=")).map((entry) => entry.slice(6));
@@ -90,7 +98,7 @@ export class FakeDocker implements DockerRunner {
     if (this.containers.has(name)) return { exitCode: 1, stdout: "", stderr: `Conflict. The container name "${name}" is already in use` };
     const labels = Object.fromEntries(valueOf("--label").map((entry) => [entry.slice(0, entry.indexOf("=")), entry.slice(entry.indexOf("=") + 1)]));
     const environment = Object.fromEntries(readFileSync(valueOf("--env-file")[0]!, "utf8").split("\n").filter((line) => line !== "").map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)]));
-    this.containers.set(name, { name, args: [...args], labels, environment, status: "created", exitCode: 0, startedAt: 0, hostPort: 0, accepted: new Set() });
+    this.containers.set(name, { name, args: [...args], labels, environment, status: "created", exitCode: 0, oomKilled: false, createdAt: Date.now(), startedAt: 0, hostPort: 0, accepted: new Set() });
     return { exitCode: 0, stdout: `${name}\n`, stderr: "" };
   }
 

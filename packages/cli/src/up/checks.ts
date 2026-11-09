@@ -1,17 +1,20 @@
 // Port lane L4: `rovara up --check`, the doctor for the local runtime. It checks what a first run needs (Docker and the worker image,
 // a model key, GitHub access, the port) and, for each problem, says the fix in plain words. It starts nothing and writes nothing.
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { lstat } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { IMPLICIT_COMPANY_ID, type ModelKeyStore } from "@agentx/contracts";
 import {
-  CONFIG_FILE_NAME,
   KEYS_FILE_NAME,
   LOCAL_MODEL_PROVIDERS,
   LOCAL_WORKER_IMAGE_BUILD_HINT,
   LOCAL_HOST,
+  assertStateDirectoryLocation,
+  createLocalGithubKeyStore,
   createLocalModelKeyStore,
   parsePluginConfigText,
   readOwnerFile,
+  resolveConfigLocation,
   resolveGithubAccess,
   type DockerRunner,
   type GhRunner,
@@ -43,6 +46,9 @@ export interface UpCheckServices {
   /** Is this port free on 127.0.0.1? Injectable for tests. */
   portIsFree?: (port: number) => Promise<boolean>;
   keys?: ModelKeyStore;
+  /** The folder the owner is standing in; a state folder or config inside it is refused, as `up` refuses it. */
+  cwd?: string;
+  home?: string;
 }
 
 const lastLine = (text: string): string => text.trim().split("\n").filter((line) => line.trim() !== "").slice(-1)[0]?.slice(0, 200) ?? "no detail";
@@ -95,10 +101,10 @@ async function checkModelKey(services: UpCheckServices): Promise<UpCheck> {
 }
 
 async function checkGithub(services: UpCheckServices): Promise<UpCheck> {
-  const keys = services.keys ?? createLocalModelKeyStore(services.stateDirectory, services.environment);
+  const keyFile = services.keys ?? createLocalGithubKeyStore(services.stateDirectory);
   let access;
   try {
-    access = await resolveGithubAccess({ companyId: IMPLICIT_COMPANY_ID, keys, environment: services.environment, ...(services.gh === undefined ? {} : { gh: services.gh }) });
+    access = await resolveGithubAccess({ companyId: IMPLICIT_COMPANY_ID, keyFile, environment: services.environment, reveal: services.verifyGithub, ...(services.gh === undefined ? {} : { gh: services.gh }) });
   } catch (error) {
     return { id: "github", status: "fail", summary: error instanceof Error ? error.message : "the key file could not be read", fix: `Fix the file's permissions with \`chmod 600 ${join(services.stateDirectory, KEYS_FILE_NAME)}\`.` };
   }
@@ -108,6 +114,7 @@ async function checkGithub(services: UpCheckServices): Promise<UpCheck> {
   const where = access.source === "gh-cli" ? "the GitHub CLI" : access.source === "environment" ? "the environment" : "the key file";
   if (!services.verifyGithub) return { id: "github", status: "ok", summary: `A GitHub token is available from ${where}.` };
   try {
+    // The token goes to api.github.com and nowhere else.
     const response = await services.fetch("https://api.github.com/user", {
       headers: { authorization: `Bearer ${access.token.reveal()}`, accept: "application/vnd.github+json", "user-agent": "rovara-up-check" },
       redirect: "error",
@@ -133,16 +140,20 @@ async function checkPort(services: UpCheckServices): Promise<UpCheck> {
 }
 
 async function checkConfig(services: UpCheckServices): Promise<UpCheck> {
-  const path = services.configPath ?? join(services.stateDirectory, CONFIG_FILE_NAME);
+  const cwd = services.cwd ?? process.cwd();
   try {
-    const file = await readOwnerFile(path, { private: false, label: "plug-in config" });
-    if (file === undefined) return services.configPath === undefined
-      ? { id: "config", status: "ok", summary: `No config yet; ${path} is created on the first run with the built-in storage and queue.` }
-      : { id: "config", status: "fail", summary: `The config ${path} does not exist.`, fix: "Check the --config path." };
+    await assertStateDirectoryLocation(resolve(services.stateDirectory), { cwd, ...(services.home === undefined ? {} : { home: services.home }) });
+    const state = await lstat(services.stateDirectory).catch(() => undefined);
+    if (state !== undefined && process.platform !== "win32" && (state.mode & 0o077) !== 0) throw new Error(`${services.stateDirectory} must be private to you (chmod 700 ${services.stateDirectory})`);
+    const location = resolveConfigLocation({ stateDirectory: services.stateDirectory, configPath: services.configPath, cwd });
+    const file = await readOwnerFile(location.path, { private: false, label: "plug-in config" });
+    if (file === undefined) return location.isDefault
+      ? { id: "config", status: "ok", summary: `No config yet; ${location.path} is created on the first run with the built-in storage and queue.` }
+      : { id: "config", status: "fail", summary: `The config ${location.path} does not exist.`, fix: "Check the --config path." };
     const config = parsePluginConfigText(file.text);
-    return { id: "config", status: "ok", summary: `The config ${path} names ${config.plugins.filter((entry) => entry.enabled).length} plug-in(s).` };
+    return { id: "config", status: "ok", summary: `The config ${location.path} names ${config.plugins.filter((entry) => entry.enabled).length} plug-in(s).` };
   } catch (error) {
-    return { id: "config", status: "fail", summary: error instanceof Error ? error.message : "the config could not be read", fix: `Edit ${path}; it must belong to you and not be writable by others (chmod 600).` };
+    return { id: "config", status: "fail", summary: error instanceof Error ? error.message : "the config could not be read", fix: "Keep the state folder and the config in your own ~/.rovara (mode 700 and 600), never inside a repository." };
   }
 }
 

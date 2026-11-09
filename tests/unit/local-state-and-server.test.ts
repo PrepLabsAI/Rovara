@@ -25,14 +25,33 @@ async function folder(): Promise<string> {
 }
 
 describe("local state folder", () => {
-  it("makes the folder 0700 and refuses a link or a folder others can write to", async () => {
+  it("makes the folder 0700 and refuses a link, or a folder others can enter or write (0755 included)", async () => {
     const root = await folder();
-    const state = await ensureStateDirectory(join(root, "state"));
+    const where = { cwd: "/nowhere", home: root };
+    const state = await ensureStateDirectory(join(root, "state"), where);
     expect((await lstat(state)).mode & 0o777).toBe(0o700);
     await symlink(state, join(root, "link"));
-    await expect(ensureStateDirectory(join(root, "link"))).rejects.toThrow(LocalStateError);
+    await expect(ensureStateDirectory(join(root, "link"), where)).rejects.toThrow(LocalStateError);
+    await chmod(state, 0o755);
+    await expect(ensureStateDirectory(state, where)).rejects.toThrow(/private to you/);
     await chmod(state, 0o777);
-    await expect(ensureStateDirectory(state)).rejects.toThrow(/writable by other users/);
+    await expect(ensureStateDirectory(state, where)).rejects.toThrow(/private to you/);
+  });
+
+  it("refuses a state folder inside the folder the owner is standing in or inside a git work tree, but accepts the default one", async () => {
+    const root = await folder();
+    const project = join(root, "project");
+    await mkdir(join(project, ".git"), { recursive: true });
+    await expect(ensureStateDirectory(join(project, ".rovara"), { cwd: project, home: root })).rejects.toThrow(/inside the folder you are in/);
+    await expect(ensureStateDirectory(join(project, ".rovara"), { cwd: "/nowhere", home: root })).rejects.toThrow(/git work tree/);
+    // The default folder is fine even when the owner stands in the home folder.
+    expect(await ensureStateDirectory(join(root, ".rovara"), { cwd: root, home: root })).toBe(join(root, ".rovara"));
+  });
+
+  it("refuses a config or a plug-in under the task workspaces", async () => {
+    const root = await folder();
+    const state = join(root, ".rovara");
+    expect(() => resolveConfigLocation({ stateDirectory: state, configPath: join(state, "workspaces", "abc", "config.json"), cwd: "/x" })).toThrow(/task workspace/);
   });
 
   it("writes owner files 0600, and refuses to read one that others can read, a link, or a folder", async () => {
@@ -72,7 +91,7 @@ describe("local state folder", () => {
   });
 
   it("makes the first-run config in the state folder (0600), but never invents a config at a path the owner named", async () => {
-    const state = await ensureStateDirectory(join(await folder(), "state"));
+    const state = await ensureStateDirectory(join(await folder(), "state"), { cwd: "/nowhere" });
     const location = resolveConfigLocation({ stateDirectory: state, cwd: "/somewhere/else" });
     expect(location).toEqual({ path: join(state, "config.json"), isDefault: true });
     expect(JSON.parse(await readConfigText(location))).toEqual({ version: 1, plugins: [] });
@@ -91,7 +110,7 @@ describe("local state folder", () => {
   });
 
   it("refuses a config that others can write to", async () => {
-    const state = await ensureStateDirectory(join(await folder(), "state"));
+    const state = await ensureStateDirectory(join(await folder(), "state"), { cwd: "/nowhere" });
     const location = resolveConfigLocation({ stateDirectory: state, cwd: "/x" });
     await readConfigText(location);
     await chmod(location.path, 0o666);

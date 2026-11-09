@@ -4,8 +4,9 @@
 // defaults and the built-in adapters are registered; the config's adapters are loaded (a configured storage or queue replaces the
 // in-memory default); the registry is sealed; then the server starts. Nothing in the registry changes after that except channels.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { realpath, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { PLUGIN_POINTS, agentXError, type AdapterRegistry, type ModelKeyStore, type PluginConfig, type PluginPoint } from "@agentx/contracts";
 import { createBrokerHandler, type BrokerRequest, type BrokerResponse } from "../handler.js";
 import { InMemoryProjectRegistry } from "../projects.js";
@@ -17,6 +18,7 @@ import {
   createFileModelKeyStore,
   createLayeredModelKeyStore,
   createModuleImporter,
+  type ModuleImporter,
   loadAdapters,
   parsePluginConfig,
   registerCodeDefaults,
@@ -31,6 +33,8 @@ import { loadInvokeSigner } from "./invoke-signer.js";
 import {
   KEYS_FILE_NAME,
   SESSION_TOKEN_FILE_NAME,
+  WORKSPACES_DIRECTORY_NAME,
+  isInside,
   ensureStateDirectory,
   readConfigText,
   resolveConfigLocation,
@@ -46,6 +50,30 @@ export function createLocalModelKeyStore(stateDirectory: string, environment: No
     createEnvironmentModelKeyStore(environment, LOCAL_MODEL_PROVIDERS),
     createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME)),
   ]);
+}
+
+/**
+ * W0's importer, plus the local rules: a module is a file only its owner can write, and never one under `workspaces/`, where tasks
+ * write. (A package name goes through Node's resolution as before.)
+ */
+export function createLocalModuleImporter(stateDirectory: string, configDirectory: string): ModuleImporter {
+  const inner = createModuleImporter(configDirectory);
+  const workspaces = join(stateDirectory, WORKSPACES_DIRECTORY_NAME);
+  return async (specifier) => {
+    if (specifier.startsWith("./")) {
+      const target = await realpath(resolve(await realpath(configDirectory), specifier));
+      if (isInside(await realpath(workspaces).catch(() => workspaces), target)) throw new Error("a plug-in module must not lie in a task workspace");
+      const details = await stat(target);
+      const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+      if (process.platform !== "win32" && ((uid !== undefined && details.uid !== uid) || (details.mode & 0o022) !== 0)) throw new Error("a plug-in module must belong to you and not be writable by others");
+    }
+    return inner(specifier);
+  };
+}
+
+/** Where the GitHub token may be stored: the key file only (the environment store would let an unrelated `GITHUB_API_KEY` win). */
+export function createLocalGithubKeyStore(stateDirectory: string): ModelKeyStore {
+  return createFileModelKeyStore(join(stateDirectory, KEYS_FILE_NAME));
 }
 
 /** Parses the config file's text. The errors say what is wrong, never what the file holds. */
@@ -112,7 +140,7 @@ function json(statusCode: number, value: unknown): BrokerResponse {
 }
 
 export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<LocalRuntime> {
-  const stateDirectory = await ensureStateDirectory(options.stateDirectory);
+  const stateDirectory = await ensureStateDirectory(options.stateDirectory, { cwd: options.cwd });
   const location = resolveConfigLocation({ stateDirectory, configPath: options.configPath, cwd: options.cwd });
   let configText: string;
   try {
@@ -153,7 +181,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   registry.register("worker-machines", DOCKER_ADAPTER_NAME, docker);
   registry.register("worker-machines", THIS_MACHINE_ADAPTER_NAME, new ThisMachineWorkerMachines({ enabled: options.thisMachine === true }));
 
-  await loadAdapters(config, { registry, importModule: createModuleImporter(dirname(location.path)) });
+  await loadAdapters(config, { registry, importModule: createLocalModuleImporter(stateDirectory, dirname(location.path)) });
   registry.seal();
 
   const identity = registry.require("identity");

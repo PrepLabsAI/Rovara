@@ -34,7 +34,10 @@ export class ThisMachineWorkerMachines implements WorkerMachines {
     throw this.#refusal();
   }
 
-  async stop(): Promise<void> {}
+  async stop(): Promise<void> {
+    // `canStop` is false: the port says to refuse, so no caller believes a worker was stopped.
+    throw new MachineError("rejected", "this adapter cannot stop a machine; terminate it");
+  }
 
   async terminate(): Promise<void> {}
 

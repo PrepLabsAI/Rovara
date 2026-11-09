@@ -1,6 +1,9 @@
-// Port lane L4: how `rovara up` gets GitHub access with no GitHub App and no Slack: a personal token the owner put in the key store
+// Port lane L4: how `rovara up` gets GitHub access with no GitHub App and no Slack: a personal token the owner put in the key file
 // (`keys.json`, provider `github`), the `GH_TOKEN` or `GITHUB_TOKEN` variable, or the token the GitHub CLI already holds
 // (`gh auth token`). The first one found wins. Nothing here logs or returns the token except as a `SecretValue`.
+//
+// 51 gap: this is GitHub-specific and lives in the local runtime; it belongs behind the `code-host` plug-in point (a credential source
+// and an access check on the adapter) once that port exists (lane L1).
 import { execFile } from "node:child_process";
 import { SecretValue, type ModelKeyStore } from "@agentx/contracts";
 
@@ -11,7 +14,7 @@ export interface GithubAccess {
   source: GithubTokenSource;
 }
 
-/** Runs `gh <args>`; answers undefined when gh is missing or fails. Injectable for tests. */
+/** Runs `gh <args>`; answers the output, or undefined when gh is missing or fails. Injectable for tests. */
 export type GhRunner = (args: readonly string[]) => Promise<string | undefined>;
 
 export const runGh: GhRunner = (args) =>
@@ -19,13 +22,22 @@ export const runGh: GhRunner = (args) =>
     execFile("gh", [...args], { timeout: 10_000, maxBuffer: 64 * 1024, windowsHide: true }, (error, stdout) => resolve(error === null ? stdout : undefined));
   });
 
-export async function resolveGithubAccess(input: { companyId: string; keys: ModelKeyStore; environment: NodeJS.ProcessEnv; gh?: GhRunner }): Promise<GithubAccess | undefined> {
-  const stored = await input.keys.get(input.companyId, "github");
+const GITHUB_HOST = ["--hostname", "github.com"] as const;
+
+/**
+ * `keyFile` must be the key FILE alone, not the layered store: the environment's `GITHUB_API_KEY` would otherwise win over the
+ * file. With `reveal: false` the token is not fetched from `gh` (only whether it is logged in), for a check that only reports.
+ */
+export async function resolveGithubAccess(input: { companyId: string; keyFile: ModelKeyStore; environment: NodeJS.ProcessEnv; gh?: GhRunner; reveal?: boolean }): Promise<GithubAccess | undefined> {
+  const stored = await input.keyFile.get(input.companyId, "github");
   if (stored !== undefined) return { token: stored, source: "key-store" };
   for (const name of ["GH_TOKEN", "GITHUB_TOKEN"]) {
     const value = input.environment[name]?.trim();
     if (value !== undefined && value !== "") return { token: new SecretValue(value), source: "environment" };
   }
-  const fromCli = (await (input.gh ?? runGh)(["auth", "token"]))?.trim();
+  const gh = input.gh ?? runGh;
+  if (input.reveal === false) return (await gh(["auth", "status", ...GITHUB_HOST])) === undefined ? undefined : { token: new SecretValue(""), source: "gh-cli" };
+  // The host is named: with GH_HOST set to another server, gh would otherwise answer that server's token.
+  const fromCli = (await gh(["auth", "token", ...GITHUB_HOST]))?.trim();
   return fromCli === undefined || fromCli === "" ? undefined : { token: new SecretValue(fromCli), source: "gh-cli" };
 }

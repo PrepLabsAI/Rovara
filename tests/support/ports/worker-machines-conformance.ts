@@ -72,9 +72,14 @@ export function runWorkerMachinesConformance(name: string, harness: WorkerMachin
       expect(await under.machines.deliver(machineId, under.invocation(OP1))).toEqual({ duplicate: false });
       expect(await under.machines.deliver(machineId, under.invocation(OP1))).toEqual({ duplicate: true });
       expect(await under.machines.deliver(machineId, under.invocation(OP2))).toEqual({ duplicate: false });
-      const busy = (await under.machines.health(machineId)).activeOperations;
-      if (under.jobsMayFinishAtOnce === true) expect(busy).toBeGreaterThanOrEqual(0);
-      else expect(busy).toBeGreaterThanOrEqual(1);
+      const after = await under.machines.health(machineId);
+      if (under.jobsMayFinishAtOnce === true) {
+        // The job may already be done, but the answer must still be consistent: busy exactly when something is active.
+        expect(["ready", "busy"]).toContain(after.state);
+        expect(after.state === "busy").toBe(after.activeOperations > 0);
+      } else {
+        expect(after.activeOperations).toBeGreaterThanOrEqual(1);
+      }
       await under.machines.terminate(machineId);
     }));
 

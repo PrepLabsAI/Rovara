@@ -98,6 +98,26 @@ describe("rovara up runtime", () => {
     expect(() => runtime.registry.unregister("identity", "local-owner")).toThrow(PluginRegistryError);
   });
 
+  it("refuses a plug-in module under the task workspaces, and a state folder inside the project folder", async () => {
+    const plugin = `export const plugin = { point: "storage", name: "custom", create: () => ({}) };\n`;
+    const root = await mkdtemp(join(tmpdir(), "rovara-l4-run-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const stateDirectory = join(root, "state");
+    await mkdir(join(stateDirectory, "workspaces", "abc"), { recursive: true, mode: 0o700 });
+    await writeFile(join(stateDirectory, "workspaces", "abc", "evil.mjs"), plugin, { mode: 0o600 });
+    await writeFile(join(stateDirectory, "config.json"), JSON.stringify({ version: 1, plugins: [{ point: "storage", name: "custom", module: "./workspaces/abc/evil.mjs" }] }), { mode: 0o600 });
+    await expect(startLocalRuntime({ stateDirectory, cwd: root + "-elsewhere", environment: {}, workerImage: "w", docker: new FakeDocker(), version: "1" })).rejects.toThrow(/could not be loaded/);
+    // A module another user can write is refused too.
+    await writeFile(join(stateDirectory, "loose.mjs"), plugin, { mode: 0o666 });
+    await (await import("node:fs/promises")).chmod(join(stateDirectory, "loose.mjs"), 0o666);
+    await writeFile(join(stateDirectory, "config.json"), JSON.stringify({ version: 1, plugins: [{ point: "storage", name: "custom", module: "./loose.mjs" }] }), { mode: 0o600 });
+    await expect(startLocalRuntime({ stateDirectory, cwd: root + "-elsewhere", environment: {}, workerImage: "w", docker: new FakeDocker(), version: "1" })).rejects.toThrow(/could not be loaded/);
+    // A repository's own .rovara folder is not a state folder.
+    const repo = join(root, "repo");
+    await mkdir(join(repo, ".rovara"), { recursive: true, mode: 0o755 });
+    await expect(startLocalRuntime({ stateDirectory: join(repo, ".rovara"), cwd: repo, environment: {}, workerImage: "w", docker: new FakeDocker(), version: "1" })).rejects.toThrow(/inside the folder you are in/);
+  });
+
   it("refuses a config module that is not inside the state folder or is a built-in", async () => {
     await expect(launch({ config: { version: 1, plugins: [{ point: "storage", name: "custom", module: "../escape.mjs" }] } })).rejects.toThrow(/plug-in config is not valid/);
     await expect(launch({ config: { version: 1, plugins: [{ point: "storage", name: "custom", module: "child_process" }] } })).rejects.toThrow(/plug-in config is not valid/);

@@ -7,13 +7,12 @@ import { join } from "node:path";
 
 /** A token outlives one delivery attempt and nothing more (the same lifetime Cloud's dispatcher uses). */
 export const INVOKE_TOKEN_LIFETIME_SECONDS = 60;
-export const INVOKE_SESSION_GENERATION = 1;
 
 export interface InvokeSigner {
   /** The base64 DER SubjectPublicKeyInfo the worker accepts for `AGENTX_INVOKE_PUBLIC_KEY`. */
   publicKey(): string;
-  /** `AgentX-Invoke <token>` for this invocation, valid for one delivery. */
-  authorization(invocation: WorkerInvocation, nowMs: number): string;
+  /** `AgentX-Invoke <token>` for this invocation and this machine generation, valid for one delivery. */
+  authorization(invocation: WorkerInvocation, nowMs: number, generation: number): string;
 }
 
 export function createInvokeSigner(privateKey: KeyObject): InvokeSigner {
@@ -21,10 +20,10 @@ export function createInvokeSigner(privateKey: KeyObject): InvokeSigner {
   const publicKey = createPublicKey(privateKey).export({ format: "der", type: "spki" }).toString("base64");
   return {
     publicKey: () => publicKey,
-    authorization(invocation, nowMs) {
+    authorization(invocation, nowMs, generation) {
       const claims: WorkerInvokeTokenClaims = {
         workspaceId: invocation.workspaceId,
-        generation: INVOKE_SESSION_GENERATION,
+        generation,
         operationId: invocation.operationId,
         fence: invocation.fence,
         expiresAt: Math.floor(nowMs / 1_000) + INVOKE_TOKEN_LIFETIME_SECONDS,

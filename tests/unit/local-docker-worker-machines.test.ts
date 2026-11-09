@@ -17,15 +17,15 @@ afterEach(async () => {
   while (cleanup.length > 0) await rm(cleanup.pop()!, { recursive: true, force: true });
 });
 
-async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: number | null } = {}) {
-  const stateDirectory = await mkdtemp(join(tmpdir(), "rovara-l4-"));
+async function build(options: { docker?: FakeDocker; maxConcurrentMachines?: number | null; stateDirectory?: string; controlPlaneUrl?: string; signer?: ReturnType<typeof createEphemeralInvokeSigner> } = {}) {
+  const stateDirectory = options.stateDirectory ?? (await mkdtemp(join(tmpdir(), "rovara-l4-")));
   cleanup.push(stateDirectory);
   const docker = options.docker ?? new FakeDocker();
   const machines = new DockerWorkerMachines({
     image: "worker:test",
     stateDirectory,
-    controlPlaneUrl: "http://host.docker.internal:1234",
-    signer: createEphemeralInvokeSigner(),
+    controlPlaneUrl: options.controlPlaneUrl ?? "http://host.docker.internal:1234",
+    signer: options.signer ?? createEphemeralInvokeSigner(),
     docker,
     fetch: docker.fetch,
     ...(options.maxConcurrentMachines === undefined ? {} : { maxConcurrentMachines: options.maxConcurrentMachines }),
@@ -194,5 +194,108 @@ describe("local docker worker machines", () => {
     expect(await machines.stopAll()).toBe(1);
     expect(docker.containers.get(machineId)!.status).toBe("exited");
     expect(readdirSync(join(stateDirectory, "workspaces"))).toContain(machineId.slice("rovara-worker-".length));
+  });
+
+  it("re-creates a stopped worker whose broker address changed, with a new session generation, and keeps its workspace", async () => {
+    const docker = new FakeDocker();
+    const signer = createEphemeralInvokeSigner(); // the key is kept in the state folder, so a restart has the same one
+    const first = await build({ docker, signer, controlPlaneUrl: "http://host.docker.internal:1111" });
+    const { machineId } = await first.machines.start({ machineKey: "ws-port", companyId: COMPANY });
+    const before = docker.containers.get(machineId)!;
+    const generation = before.labels["rovara.local.generation"];
+    await first.machines.stop(machineId);
+    const folder = join(first.stateDirectory, "workspaces", machineId.slice("rovara-worker-".length));
+    expect(existsSync(folder)).toBe(true);
+
+    // `rovara up` restarted on another port.
+    const second = await build({ docker, signer, stateDirectory: first.stateDirectory, controlPlaneUrl: "http://host.docker.internal:2222" });
+    const again = await second.machines.start({ machineKey: "ws-port", companyId: COMPANY });
+    expect(again.machineId).toBe(machineId);
+    const after = docker.containers.get(machineId)!;
+    expect(after).not.toBe(before);
+    expect(after.environment.AGENTX_CONTROL_PLANE_URL).toBe("http://host.docker.internal:2222");
+    expect(after.labels["rovara.local.generation"]).not.toBe(generation);
+    expect(existsSync(folder)).toBe(true);
+    // Unchanged address: the same container is woken, not replaced.
+    await second.machines.stop(machineId);
+    const third = await build({ docker, signer, stateDirectory: first.stateDirectory, controlPlaneUrl: "http://host.docker.internal:2222" });
+    await third.machines.start({ machineKey: "ws-port", companyId: COMPANY });
+    expect(docker.containers.get(machineId)).toBe(after);
+  });
+
+  it("refuses a token for an earlier container of the same machine (a new generation)", async () => {
+    const docker = new FakeDocker();
+    const signer = createEphemeralInvokeSigner();
+    const stateDirectory = await mkdtemp(join(tmpdir(), "rovara-l4-"));
+    cleanup.push(stateDirectory);
+    const make = (url: string) => new DockerWorkerMachines({ image: "worker:test", stateDirectory, controlPlaneUrl: url, signer, docker, fetch: docker.fetch });
+    const old = make("http://a");
+    const { machineId } = await old.start({ machineKey: "ws-gen", companyId: COMPANY });
+    const job = invocationFor(workspaceIdFor(COMPANY, "ws-gen"), randomUUID());
+    const token = signer.authorization(job, Date.now(), Number(docker.containers.get(machineId)!.labels["rovara.local.generation"]));
+    await make("http://b").start({ machineKey: "ws-gen", companyId: COMPANY });
+    // The replacement worker verifies against its own generation.
+    const response = await docker.fetch(`http://127.0.0.1:${docker.containers.get(machineId)!.hostPort}/invocations`, { method: "POST", headers: { authorization: token }, body: JSON.stringify(job) });
+    expect(response.status).toBe(401);
+  });
+
+  it("only counts and stops the workers of its own state folder", async () => {
+    const docker = new FakeDocker();
+    const one = await build({ docker, maxConcurrentMachines: 1 });
+    const two = await build({ docker, maxConcurrentMachines: 1 });
+    const a = await one.machines.start({ machineKey: "same", companyId: COMPANY });
+    const b = await two.machines.start({ machineKey: "same", companyId: COMPANY });
+    expect(a.machineId).not.toBe(b.machineId);
+    expect(await one.machines.stopAll()).toBe(1);
+    expect(docker.containers.get(a.machineId)!.status).toBe("exited");
+    expect(docker.containers.get(b.machineId)!.status).toBe("running");
+  });
+
+  it("refuses environment names that change how the worker loads code or reaches Docker, and labels that claim another machine's name", async () => {
+    const { machines, docker } = await build();
+    for (const name of ["NODE_OPTIONS", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "DOCKER_HOST", "PATH", "HOME"]) {
+      await expect(machines.start({ machineKey: "ws-deny", companyId: COMPANY, environment: { [name]: "x" } })).rejects.toMatchObject({ code: "rejected" });
+    }
+    const { machineId } = await machines.start({ machineKey: "ws-label", companyId: COMPANY, labels: { "agentx.workspace": "x", "rovara.local.state": "y", team: "blue" } });
+    const create = docker.calls.find((call) => call[0] === "create")!.join(" ");
+    expect(create).not.toContain("agentx.workspace=x");
+    expect(create).not.toContain("rovara.local.state=y");
+    expect(docker.containers.get(machineId)!.labels.team).toBe("blue");
+  });
+
+  it("reports an out-of-memory kill as unhealthy, and a container stuck in created as unhealthy after the grace time", async () => {
+    const docker = new FakeDocker();
+    let now = Date.now();
+    const stateDirectory = await mkdtemp(join(tmpdir(), "rovara-l4-"));
+    cleanup.push(stateDirectory);
+    const machines = new DockerWorkerMachines({ image: "worker:test", stateDirectory, controlPlaneUrl: "x", signer: createEphemeralInvokeSigner(), docker, fetch: docker.fetch, now: () => now, startupGraceMs: 1_000 });
+    const { machineId } = await machines.start({ machineKey: "oom", companyId: COMPANY });
+    const container = docker.containers.get(machineId)!;
+    container.status = "exited";
+    container.exitCode = 137;
+    container.oomKilled = true;
+    expect(await machines.health(machineId)).toMatchObject({ state: "unhealthy", detail: "the worker ran out of memory" });
+    container.oomKilled = false;
+    container.status = "created";
+    container.createdAt = now;
+    expect((await machines.health(machineId)).state).toBe("starting");
+    now += 5_000;
+    expect((await machines.health(machineId)).state).toBe("unhealthy");
+  });
+
+  it("keeps the workspace folder when a task sandbox cannot be removed, and does not put Docker's words in health detail", async () => {
+    const { machines, docker, stateDirectory } = await build();
+    const { machineId } = await machines.start({ machineKey: "ws-sandbox", companyId: COMPANY });
+    const folder = join(stateDirectory, "workspaces", machineId.slice("rovara-worker-".length));
+    const { createHash } = await import("node:crypto");
+    const key = createHash("sha256").update(folder).digest("hex").slice(0, 16);
+    docker.containers.set("abcdef012345", { name: "abcdef012345", args: [], labels: { "agentx.workspace": key }, environment: {}, status: "running", exitCode: 0, oomKilled: false, createdAt: 0, startedAt: 0, hostPort: 0, accepted: new Set() });
+    docker.failSandboxRemoval = true;
+    await expect(machines.terminate(machineId)).rejects.toMatchObject({ code: "unavailable" });
+    expect(existsSync(folder)).toBe(true);
+    docker.failSandboxRemoval = false;
+    await machines.terminate(machineId);
+    expect(existsSync(folder)).toBe(false);
+    expect(docker.containers.has("abcdef012345")).toBe(false);
   });
 });

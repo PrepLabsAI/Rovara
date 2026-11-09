@@ -7,6 +7,7 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, link, lstat, mkdir, open, rename, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const STATE_DIRECTORY_NAME = ".rovara";
@@ -31,18 +32,44 @@ export function defaultStateDirectory(home: string): string {
 }
 
 /**
- * Makes the state folder (mode 0700) or checks the one that is there: a real folder (not a link), owned by this user, that no one
- * else can write to. Returns the folder's real path.
+ * Makes a private folder (mode 0700) or checks the one that is there: a real folder (not a link), owned by this user, that no
+ * one else can enter or write (mode 0700 or tighter). Returns the folder's real path.
  */
-export async function ensureStateDirectory(path: string): Promise<string> {
+export async function ensurePrivateDirectory(path: string): Promise<string> {
   const target = resolve(path);
   await mkdir(target, { recursive: true, mode: 0o700 });
   const details = await lstat(target);
   if (details.isSymbolicLink() || !details.isDirectory()) throw new LocalStateError(`${target} must be a plain folder, not a link`);
   const uid = currentUid();
   if (hasModes && uid !== undefined && details.uid !== uid) throw new LocalStateError(`${target} must belong to you`);
-  if (hasModes && (details.mode & 0o022) !== 0) throw new LocalStateError(`${target} must not be writable by other users (chmod 700 ${target})`);
+  if (hasModes && (details.mode & 0o077) !== 0) throw new LocalStateError(`${target} must be private to you (chmod 700 ${target})`);
   return target;
+}
+
+/**
+ * The state folder: private, and not inside the folder the owner is standing in or inside any git work tree below the home folder.
+ * A repository can carry a folder with a config in it, and a config can run code; naming one by `--state-dir` must not be enough.
+ */
+export async function ensureStateDirectory(path: string, options: { cwd: string; home?: string }): Promise<string> {
+  const target = resolve(path);
+  await assertStateDirectoryLocation(target, options);
+  return ensurePrivateDirectory(target);
+}
+
+/** Where the state folder may be (see `ensureStateDirectory`); makes nothing. */
+export async function assertStateDirectoryLocation(target: string, options: { cwd: string; home?: string }): Promise<void> {
+  const cwd = resolve(options.cwd);
+  if (target === resolve(defaultStateDirectory(options.home ?? homedir()))) return;
+  if (isInside(cwd, target) || target === cwd) {
+    throw new LocalStateError(`the state folder ${target} lies inside the folder you are in; it can hold a config that runs code, so keep it in ${defaultStateDirectory(options.home ?? homedir())} (never in a repository)`);
+  }
+  const home = resolve(options.home ?? homedir());
+  for (let folder = target; ; folder = dirname(folder)) {
+    if (folder === home || dirname(folder) === folder) break;
+    if (await lstat(join(folder, ".git")).then(() => true, () => false)) {
+      throw new LocalStateError(`the state folder ${target} lies inside a git work tree (${folder}); keep it in ${defaultStateDirectory(home)}`);
+    }
+  }
 }
 
 export interface OwnerFile {
@@ -126,13 +153,17 @@ export function resolveConfigLocation(input: { stateDirectory: string; configPat
   const path = input.configPath === undefined ? join(state, CONFIG_FILE_NAME) : resolve(input.cwd, input.configPath);
   const isDefault = input.configPath === undefined;
   const insideState = isInside(state, path);
+  // Tasks write into the workspaces; nothing there is the owner's.
+  if (isInside(join(state, WORKSPACES_DIRECTORY_NAME), path)) {
+    throw new LocalStateError(`the plug-in config ${path} lies inside a task workspace; a config can run code, so keep it in ${state}`);
+  }
   if (!insideState && isInside(resolve(input.cwd), path)) {
     throw new LocalStateError(`the plug-in config ${path} lies inside the folder you are in; a config can run code, so keep it in ${state} (never in a repository)`);
   }
   return { path, isDefault };
 }
 
-function isInside(parent: string, child: string): boolean {
+export function isInside(parent: string, child: string): boolean {
   const difference = relative(parent, child);
   return difference !== "" && !difference.startsWith("..") && !isAbsolute(difference) && !difference.startsWith(`..${sep}`);
 }

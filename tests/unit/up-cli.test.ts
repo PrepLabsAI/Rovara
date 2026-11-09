@@ -109,12 +109,18 @@ describe("rovara up --check", () => {
     const gh = vi.fn(async () => "gho_from_cli");
     const state = await mkdtemp(join(tmpdir(), "rovara-l4-cli-"));
     cleanup.push(() => rm(state, { recursive: true, force: true }));
-    const { resolveGithubAccess, createLocalModelKeyStore } = await import("../../packages/broker/src/local/index.js");
-    const keys = createLocalModelKeyStore(state, {});
-    expect((await resolveGithubAccess({ companyId: "c", keys, environment: { GH_TOKEN: "from-env" }, gh }))?.source).toBe("environment");
+    const { resolveGithubAccess, createLocalGithubKeyStore } = await import("../../packages/broker/src/local/index.js");
+    const keyFile = createLocalGithubKeyStore(state);
+    expect((await resolveGithubAccess({ companyId: "c", keyFile, environment: { GH_TOKEN: "from-env" }, gh }))?.source).toBe("environment");
     await writeFile(join(state, "keys.json"), '{"github":"from-file"}', { mode: 0o600 });
-    expect((await resolveGithubAccess({ companyId: "c", keys, environment: { GH_TOKEN: "from-env" }, gh }))?.source).toBe("key-store");
+    expect((await resolveGithubAccess({ companyId: "c", keyFile, environment: { GH_TOKEN: "from-env" }, gh }))?.source).toBe("key-store");
     expect(gh).not.toHaveBeenCalled();
+    // The CLI is asked for github.com's token by name, so GH_HOST cannot send another server's token to api.github.com.
+    await rm(join(state, "keys.json"));
+    await resolveGithubAccess({ companyId: "c", keyFile, environment: {}, gh });
+    expect(gh).toHaveBeenCalledWith(["auth", "token", "--hostname", "github.com"]);
+    // The environment's GITHUB_API_KEY (the model-key store's name for provider github) does not count.
+    expect((await resolveGithubAccess({ companyId: "c", keyFile, environment: { GITHUB_API_KEY: "x" }, gh: async () => undefined }))).toBeUndefined();
   });
 
   it("says when the port is taken", async () => {

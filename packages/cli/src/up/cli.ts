@@ -71,7 +71,7 @@ export function registerUpCommand(program: Command, context: UpCommandContext): 
       const port = parsePort(options.port);
       const docker = context.docker ?? createDockerRunner(environment);
       const checkServices = (verifyGithub: boolean): UpCheckServices => ({
-        docker, environment, stateDirectory, configPath: options.config, workerImage, port, fetch: context.fetch, verifyGithub, ...context.checkServices,
+        docker, environment, stateDirectory, configPath: options.config, workerImage, port, fetch: context.fetch, verifyGithub, cwd: context.cwd ?? process.cwd(), home: context.home ?? homedir(), ...context.checkServices,
       });
 
       if (options.check === true) {
