@@ -53,7 +53,9 @@ export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: 
     }
     if (applied.applied) {
       await deps.store.update({ key: taskIndexKey(task.developerId, task.createdAt, task.taskId), ops: [change.set("status", "CLOSED"), change.set("updatedAt", now)], condition: when.present() });
-      await stopMachine(deps, workspace?.machine?.machineId, [workspace?.machineReservationId, task.admissionReservationId]);
+      // The workspace is read again once it is closed: a dispatch may have recorded a machine after the first read, and nothing records one on a closed workspace.
+      const closed = await readWorkspace(deps, task.workspaceId);
+      await stopMachines(deps, [workspace?.machine?.machineId, closed?.machine?.machineId], [workspace?.machineReservationId, closed?.machineReservationId, task.admissionReservationId]);
     }
     const fresh = await readTask(deps, taskId);
     if (fresh === undefined) throw agentXError("TASK_NOT_FOUND", "no such task");
@@ -69,13 +71,14 @@ export async function closeTask(deps: TaskFlowDeps, caller: TaskCaller, taskId: 
  * does not keep an allowance held. A failure leaves a machine the adapter's own idle rules reap; it never reopens the task. (`Admission.settle` takes
  * tokens and cost, not machine time, so the reservations are released; the machine time actually used is a port gap.)
  */
-async function stopMachine(deps: TaskFlowDeps, machineId: string | undefined, reservationIds: ReadonlyArray<string | undefined>): Promise<void> {
-  if (machineId !== undefined) {
+async function stopMachines(deps: TaskFlowDeps, machineIds: ReadonlyArray<string | undefined>, reservationIds: ReadonlyArray<string | undefined>): Promise<void> {
+  for (const machineId of new Set(machineIds)) {
+    if (machineId === undefined) continue;
     try {
       await deps.machines.terminate(machineId);
     } catch (error) {
       log(deps, { event: "task_flow.terminate_machine_failed", error: error instanceof Error ? error.name : "unknown" });
     }
   }
-  for (const reservationId of reservationIds) await releaseAdmission(deps, reservationId);
+  for (const reservationId of new Set(reservationIds)) await releaseAdmission(deps, reservationId);
 }

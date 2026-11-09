@@ -305,7 +305,7 @@ The pure transitions stay in `@agentx/contracts` (`task-workflow-node.ts`); this
   the outcome; object storage has no port yet).
 - **Gaps the flow states rather than hides:** no sweep reaps an operation nobody holds or a closed workspace that still has a machine; no watchdog ends a step whose worker
   died (a waiting dispatch row is given up on after an hour, a running step is not); `Admission.settle` has no machine-time unit, so a closed task's reservations are
-  released; a task charged in Cloud's older form (a `tasks` set) closes without freeing a slot it has no marker for.
+  released; a plain task (no workflow) whose first run `checkStep` refuses stays "starting" with nothing retrying it; a task charged in Cloud's older form (a `tasks` set) closes without freeing a slot it has no marker for.
 - **Not in this lane:** plan decisions and approval (L6b), sessions, cost, notifications, merge, proof, branch sync, CI fix, the callback endpoints, the
   Cloud close operation (discard unpublished work, pull-request checks), the stuck-step watchdog, test environments and saved environments.
 

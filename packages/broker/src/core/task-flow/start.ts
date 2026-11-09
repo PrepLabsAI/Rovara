@@ -189,10 +189,11 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskCaller, value: u
       await deps.outbox.relay({ companyId: deps.companyId, ids: [prepare.operation.id] }).catch((error: unknown) => log(deps, { event: "task_flow.relay_failed", error: error instanceof Error ? error.message : "unknown" }));
       return { task: await taskViewOf(deps, taskItem), duplicate: false };
     }
-    // Not committed: this call's own allowance goes back (another call's has a key of its own).
-    await releaseAdmission(deps, admitted.reservationId);
+    // Not committed: this call's own allowance goes back (another call's has a key of its own), unless our own charge is found in place, which means the
+    // transaction committed after all and the task holds the allowance.
     const failed = result.failed;
     const conflict = chargeConflict(failed, 0);
+    if (conflict !== "already_charged") await releaseAdmission(deps, admitted.reservationId);
     // This task's own charge is there: the transaction committed and only its answer was lost. Or the same request, sent again, committed first.
     const concurrent = conflict === "already_charged" || failed.includes(idempotencyIndex(items)) ? await earlier() : undefined;
     if (concurrent !== undefined) return returning(concurrent);

@@ -87,7 +87,8 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     return "dropped";
   }
   // Already ended, or a cancel is in flight: nothing to deliver.
-  if (isTerminalStatus(operation.status) || operation.status === "CANCEL_REQUESTED") {
+  // A redelivered message for a job the worker already reports running is a repeat: the worker has it.
+  if (isTerminalStatus(operation.status) || operation.status === "CANCEL_REQUESTED" || operation.status === "RUNNING") {
     await queue.ack(message.receiptHandle);
     return "dropped";
   }
@@ -137,7 +138,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     const health = await deps.machines.health(handle.machineId);
     if (health.state === "terminated") {
       // The machine is gone for good (reaped): forget it; the next try starts another, admitted on its own.
-      await forgetMachine(deps, workspace.id, workspace.machineReservationId ?? reservationId);
+      await forgetMachine(deps, workspace.id, handle.machineId, workspace.machineReservationId ?? reservationId);
       return retryLater(0);
     }
     if (health.state !== "ready" && health.state !== "busy") return retryLater(); // starting, stopping, stopped (the start above wakes it) or unhealthy
@@ -153,8 +154,10 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     await queue.ack(message.receiptHandle);
     return "delivered";
   } catch (error) {
-    // Only a machine that never started gives its allowance back; one that did keeps it (the same key asks again on the next try).
-    if (startedMachineId === undefined) await releaseAdmission(deps, reservationId);
+    // A try that will be repeated keeps its allowance (the same key asks again and gets the same one); a machine that did start keeps it too.
+    // It goes back only when no machine is going to be started on it: the job is given up on, or the fault is not the adapter's to retry.
+    const repeats = error instanceof MachineError && (error.code === "not_ready" || error.code === "unavailable" || error.code === "not_found");
+    if (startedMachineId === undefined && !repeats) await releaseAdmission(deps, reservationId);
     if (error instanceof MachineError) {
       switch (error.code) {
         case "not_ready":
@@ -162,7 +165,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
           return retryLater();
         case "not_found":
           // The machine is gone: forget it, and the next try starts another.
-          await forgetMachine(deps, workspace.id, workspace.machineReservationId ?? reservationId);
+          await forgetMachine(deps, workspace.id, workspace.machine?.machineId, workspace.machineReservationId ?? reservationId);
           return retryLater(0);
         case "unauthorized":
         case "rejected":
@@ -183,6 +186,12 @@ async function abandon(deps: TaskFlowDeps, queue: Queue, message: ReceivedMessag
   if (closed) {
     if (machineId !== undefined) await deps.machines.terminate(machineId).catch((error: unknown) => log(deps, { event: "task_flow.terminate_orphan_failed", error: error instanceof Error ? error.name : "unknown" }));
     await releaseAdmission(deps, reservationId);
+  }
+  // The worker may have taken the job and reported it running between our read and the claim: it is theirs, not ours to end.
+  const fresh = await readOperation(deps, operation.workspaceId, operation.id);
+  if (!closed && fresh !== undefined && fresh.status === "RUNNING") {
+    await queue.ack(message.receiptHandle);
+    return "dropped";
   }
   if (!(await endOperation(deps, operation, "INTERRUPTED", "the workspace no longer waits for this job"))) {
     await queue.changeVisibility(message.receiptHandle, retryDelay(message.receiveCount));
@@ -236,9 +245,11 @@ async function rememberMachine(deps: TaskFlowDeps, workspace: WorkspaceRecord, h
 }
 
 /** The machine is gone: the workspace forgets it, and the allowance taken for it goes back (the next machine is admitted on its own). */
-async function forgetMachine(deps: TaskFlowDeps, workspaceId: string, reservationId: string | undefined): Promise<void> {
-  await deps.store.update({ key: workspaceKey(workspaceId), ops: [change.remove("machine"), change.remove("machineReservationId")], condition: when.exists("machine") });
-  await releaseAdmission(deps, reservationId);
+async function forgetMachine(deps: TaskFlowDeps, workspaceId: string, machineId: string | undefined, reservationId: string | undefined): Promise<void> {
+  if (machineId === undefined) return;
+  // Only the machine this handler saw is forgotten: a concurrent delivery may have recorded another since.
+  const forgotten = await deps.store.update({ key: workspaceKey(workspaceId), ops: [change.remove("machine"), change.remove("machineReservationId")], condition: when.eq(["machine", "machineId"], machineId) });
+  if (forgotten.applied) await releaseAdmission(deps, reservationId);
 }
 
 /**

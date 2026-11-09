@@ -105,8 +105,8 @@ describe("the workspace limit under a race", () => {
     await h.registerProject();
     await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "late" })).rejects.toMatchObject({ code: "WORKSPACE_LIMIT" });
     expect((await h.flow.list(h.owner)).tasks).toHaveLength(1);
-    // Its own reservation (the first one asked about) went back.
-    expect(admission.released.length).toBeGreaterThanOrEqual(1);
+    // Exactly its own reservation (the first one asked about) went back; the start that took the slot keeps its allowance.
+    expect(admission.released).toEqual([`res:${admission.asked[0]!}`]);
   });
 });
 
@@ -340,5 +340,76 @@ describe("a machine the adapter replaced", () => {
     expect(view.operations[0]).toMatchObject({ status: "FAILED" });
     expect(view.failure?.message).toContain("No machine time left.");
     expect(h.grants).toEqual([]);
+  });
+});
+
+describe("redelivery and close, once more", () => {
+  it("treats a redelivered message for a job the worker already runs as a repeat, and leaves the job alone", async () => {
+    const h = createHarness({ machines: { startingChecks: 0 } });
+    await h.registerProject();
+    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
+    await h.flow.dispatchOnce();
+    const workspace = await workspaceOf(h, started.task.workspaceId);
+    const [prepare] = await operationsOf(h, workspace.id);
+    await h.store.update({ key: operationKey(workspace.id, prepare!.id), ops: [{ op: "set", path: ["status"], value: "RUNNING" }] });
+    const queue = await h.queues.queue("task-dispatch");
+    await queue.enqueue({ body: { v: 1, workspaceId: workspace.id, operationId: prepare!.id } });
+    expect(await h.flow.dispatchOnce()).toMatchObject({ dropped: 1, failed: 0 });
+    expect((await operationsOf(h, workspace.id))[0]!.status).toBe("RUNNING");
+    expect((await workspaceOf(h, workspace.id)).status).toBe("PREPARING");
+  });
+
+  it("does not end a job the worker reported running between the dispatcher's read and its claim", async () => {
+    const h = createHarness({ machines: { startingChecks: 0 } });
+    await h.registerProject();
+    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
+    const realHealth = h.machines.health.bind(h.machines);
+    h.machines.health = async (machineId) => {
+      const [prepare] = await operationsOf(h, started.task.workspaceId);
+      await h.store.update({ key: operationKey(started.task.workspaceId, prepare!.id), ops: [{ op: "set", path: ["status"], value: "RUNNING" }] });
+      return realHealth(machineId);
+    };
+    expect(await h.flow.dispatchOnce()).toMatchObject({ dropped: 1, delivered: 0, failed: 0 });
+    expect((await operationsOf(h, started.task.workspaceId))[0]!.status).toBe("RUNNING");
+    expect(h.grants).toEqual([]);
+  });
+
+  it("stops a machine that a dispatch recorded between the close's two reads", async () => {
+    const h = createHarness({ machines: { startingChecks: 0 } });
+    await h.registerProject();
+    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
+    const realGet = h.store.get.bind(h.store);
+    let armed = true;
+    h.store.get = async (key) => {
+      // The close has read the workspace (no machine yet) and now reads the operation: the dispatch runs in between, whole.
+      if (armed && key.sk.startsWith("OPERATION#")) {
+        armed = false;
+        await h.flow.dispatchOnce();
+      }
+      return realGet(key);
+    };
+    await h.flow.close(h.owner, started.task.taskId);
+    h.store.get = realGet;
+    const workspace = await workspaceOf(h, started.task.workspaceId);
+    expect(workspace.status).toBe("CLOSED");
+    expect(workspace.machine).toBeDefined();
+    expect((await h.machines.health(workspace.machine!.machineId)).state).toBe("terminated");
+  });
+
+  it("does not ack a message whose operation it could not end: the message comes back and the operation is ended then", async () => {
+    const h = createHarness({ machines: { startingChecks: 0 } });
+    await h.registerProject();
+    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x" });
+    // The workspace moved on (a newer fence), so the job is no longer wanted; but the store refuses every write for a while.
+    await h.store.update({ key: workspaceKey(started.task.workspaceId), ops: [{ op: "set", path: ["fence"], value: 9 }] });
+    const realTransact = h.store.transact.bind(h.store);
+    h.store.transact = async () => ({ applied: false, reason: "condition_failed", failed: [0] });
+    expect(await h.flow.dispatchOnce()).toMatchObject({ retried: 1, failed: 0 });
+    expect((await operationsOf(h, started.task.workspaceId))[0]!.status).toBe("ACCEPTED");
+    h.store.transact = realTransact;
+    h.clock.advance(70);
+    // With the store back, the next delivery ends it (the fence on the result is the operation's own).
+    expect(await h.flow.dispatchOnce()).toMatchObject({ failed: 1 });
+    expect((await operationsOf(h, started.task.workspaceId))[0]!.status).toBe("INTERRUPTED");
   });
 });
