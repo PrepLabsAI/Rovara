@@ -34,7 +34,7 @@ export interface BrokerResponse {
 }
 
 export function createBrokerHandler(dependencies: {
-  authenticator: JwtAuthenticator;
+  authenticator: Pick<JwtAuthenticator, "authenticate">;
   memberships: readonly ProjectMembership[];
   registry: InMemoryRegistry;
   operations: OperationStore;

@@ -11,6 +11,11 @@ export interface WorkerMachinesUnderTest {
   /** Gives the machine time to change state (the fake does nothing; a real adapter waits). */
   settle?: () => Promise<void>;
   dispose?: () => Promise<void>;
+  /**
+   * True for an adapter whose real worker may finish (or refuse) the test's job before `health` is asked, so a busy count of at
+   * least one cannot be expected. The fake keeps a job until `finish`; a real worker does not.
+   */
+  jobsMayFinishAtOnce?: boolean;
 }
 export interface WorkerMachinesHarness {
   create(): Promise<WorkerMachinesUnderTest>;
@@ -67,7 +72,9 @@ export function runWorkerMachinesConformance(name: string, harness: WorkerMachin
       expect(await under.machines.deliver(machineId, under.invocation(OP1))).toEqual({ duplicate: false });
       expect(await under.machines.deliver(machineId, under.invocation(OP1))).toEqual({ duplicate: true });
       expect(await under.machines.deliver(machineId, under.invocation(OP2))).toEqual({ duplicate: false });
-      expect((await under.machines.health(machineId)).activeOperations).toBeGreaterThanOrEqual(1);
+      const busy = (await under.machines.health(machineId)).activeOperations;
+      if (under.jobsMayFinishAtOnce === true) expect(busy).toBeGreaterThanOrEqual(0);
+      else expect(busy).toBeGreaterThanOrEqual(1);
       await under.machines.terminate(machineId);
     }));
 
