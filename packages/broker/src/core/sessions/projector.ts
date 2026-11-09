@@ -1,7 +1,7 @@
 // The projector (lane L6b, inventory B6): keeps summaries current by listening to the task's changes. In the hosted product it reads the table's stream; here it is a consumer of the document store's change
 // feed (the port's replacement for the stream readers). It works out which sessions a batch touches and refreshes each once; a refresh recomputes from the source records, so a stale, repeated or out-of-order
 // batch only means looking again. The session sweep (sweep.ts) catches whatever a batch missed.
-import type { DocumentChange, DocumentStore, OrgId, SessionId } from "@agentx/contracts";
+import type { DocumentChange, OrgId, SessionId } from "@agentx/contracts";
 import { refreshSessionSummary, type SummaryDependencies } from "./summary.js";
 
 export const SESSION_PROJECTOR_CONSUMER = "session-projector";
@@ -21,7 +21,7 @@ export function sessionTargetsOf(changes: readonly DocumentChange[]): SessionTar
     for (const document of [change.after, change.before]) {
       const orgId = document?.["orgId"];
       const sessionId = document?.["sessionId"];
-      if (typeof orgId === "string" && typeof sessionId === "string") targets.set(`${orgId}\u0000${sessionId}`, { orgId: orgId as OrgId, sessionId: sessionId as SessionId });
+      if (typeof orgId === "string" && typeof sessionId === "string") targets.set(`${orgId}\u0000${sessionId}`, { orgId: orgId, sessionId: sessionId });
     }
   }
   return [...targets.values()].slice(0, PER_BATCH_MAX);
@@ -50,7 +50,7 @@ export async function projectChanges(deps: SummaryDependencies, changes: readonl
 
 /** Subscribes the projector to the store's change feed. A store without one answers `undefined`: the sweep alone keeps summaries current. */
 export async function startSessionProjector(deps: SummaryDependencies): Promise<{ stop(): Promise<void> } | undefined> {
-  const feed = (deps.store as DocumentStore).changes;
+  const feed = (deps.store).changes;
   if (feed === undefined) return undefined;
   return feed.subscribe(SESSION_PROJECTOR_CONSUMER, async (changes) => { await projectChanges(deps, changes); });
 }

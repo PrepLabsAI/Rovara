@@ -87,7 +87,7 @@ export function workflowDocumentHandler<C extends ProvingCaller>(gate: DecisionG
     const result = await gate.decide({
       companyId: caller.orgId, kind: WORKFLOW_DOCUMENT_KIND, subjectId: taskId, requestId: input.requestId, outcome,
       seen: { revision: input.item.binding?.revision ?? now.revision, artifactDigest }, credentials: caller.credentials,
-      ...(input.reason === undefined && plan?.note === undefined ? {} : { reason: input.reason ?? plan?.note! }), details,
+      ...((input.reason ?? plan?.note) === undefined ? {} : { reason: (input.reason ?? plan?.note) as string }), details,
     });
     if (result.status === "refused") return { kind: "refused", reason: CARD_REFUSAL_OF_GATE[result.reason] };
     return { kind: "done" };

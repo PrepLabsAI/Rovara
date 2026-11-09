@@ -1,5 +1,6 @@
 // Lane L6b: the approval gate. Approvals are authority, so each way to get one wrongly has a test: a forged proof, the wrong person, a stale revision, a replayed proof or request, a lost race,
 // a request of another company, an expired request. The gate is built on W0's fakes (the memory document store, Code's default approvers).
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {

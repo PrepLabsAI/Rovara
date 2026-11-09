@@ -1,4 +1,5 @@
 // Lane L6b: a card's Approve reaches the approval gate with the proof the surface collected, and only a decided gate answer is reported as approved. The card routes, the performer and the gate are the real ones.
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { DecisionCardsViewSchema, IMPLICIT_COMPANY_ID, createWorkflowSnapshot, submitWorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";

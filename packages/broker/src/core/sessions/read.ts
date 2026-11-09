@@ -4,7 +4,7 @@ import {
   SESSION_EVENTS_PAGE_MAX, SessionEventSchema, agentSessionKey, hideEmailAddresses, mySessionsKey, sessionTaskStatus, taskStatusNext, taskStatusText,
   type AgentSessionRecord, type DocumentStore, type OrgId, type SessionEvent, type SessionEventPage, type SessionId, type TaskStatus,
 } from "@agentx/contracts";
-import { SessionStore, sessionFromDocument } from "./store.js";
+import { sessionFromDocument } from "./store.js";
 
 export interface SessionSnapshot {
   sessionId: string;
@@ -57,7 +57,7 @@ export async function listSessions(
   for (let reads = 0; reads < 20 && found.length < limit; reads += 1) {
     const page = await store.query({ pk, descending: true, limit: Math.min(limit * 2, 100), ...(cursor === undefined ? {} : { cursor }) });
     const ids = page.items.flatMap((item) => (typeof item["sessionId"] === "string" ? [item["sessionId"]] : []));
-    const documents = ids.length === 0 ? [] : await store.getMany(ids.map((sessionId) => agentSessionKey(orgId, sessionId as SessionId, "META")));
+    const documents = ids.length === 0 ? [] : await store.getMany(ids.map((sessionId) => agentSessionKey(orgId, sessionId, "META")));
     for (const document of documents) {
       const session = document === undefined || document["orgId"] !== orgId ? undefined : sessionFromDocument(document);
       if (session === undefined || session.owner.developerId !== developerId) continue;
@@ -92,7 +92,7 @@ function parseCursor(after: string | undefined): { at: string; sk: string } | un
   const match = CURSOR.exec(after);
   const ms = match === null ? Number.NaN : Date.parse(match[1]!);
   if (match === null || Number.isNaN(ms) || new Date(ms).toISOString() !== match[1]) throw new Error("after: is not a cursor this log gave");
-  return { at: match[1]!, sk: `${SK_PREFIX}${after}` };
+  return { at: match[1], sk: `${SK_PREFIX}${after}` };
 }
 
 function eventOf(item: Record<string, unknown>, orgId: string, sessionId: string, nowSeconds: number): SessionEvent | undefined {

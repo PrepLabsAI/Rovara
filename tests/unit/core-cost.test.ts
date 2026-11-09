@@ -1,4 +1,5 @@
 // Lane L6b: the cost split. The estimate (from the cost of earlier runs), the actual figure (tokens times a price table, through the Metering seam), and the run-cost record that feeds the next estimate.
+ 
 import { describe, expect, it } from "vitest";
 import { DEFAULT_RUN_ESTIMATE_USD, MAX_RUN_LIMIT_USD, runCostKey, type MeterEntry, type Metering, type OrgId, type PriceTable } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";

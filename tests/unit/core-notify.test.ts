@@ -1,7 +1,8 @@
 // Lane L6b: notifications, channel only. A session that moves into a state someone must act on is queued for them; the sweep batches what is pending into one event per target and sends it through the
 // channel adapters the registry holds. The adapters here are fakes; no provider is named.
+ 
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, NOTIFY_BATCH_MINUTES, type ChannelEvent, type ConversationRef, type OrgId, type SessionId } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, NOTIFY_BATCH_MINUTES, type ChannelEvent, type ConversationRef, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
@@ -15,7 +16,7 @@ const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OWNER = localOwnerPrincipal();
 const OWNER_ID = developerIdOf(OWNER);
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
-const SESSION = taskSessionId(TASK) as SessionId;
+const SESSION = taskSessionId(TASK);
 const T0 = "2026-11-09T10:00:00.000Z";
 const clock = { ms: Date.parse("2026-11-09T10:05:00.000Z") };
 const CONVERSATION: ConversationRef = { channel: "examplechat", tenant: "team1", space: "room1", thread: "main" };
@@ -29,7 +30,7 @@ async function world() {
     store, facts: { read: async () => state.facts }, cost: { costUsd: async () => 0 }, now: () => new Date(clock.ms), log: () => undefined,
     onChange: [async (change) => { await queueAttention({ store, now: () => new Date(clock.ms), log: (entry) => logs.push(entry) }, change); }],
   };
-  await store.transact(createTaskSessionItems({ orgId: ORG, sessionId: SESSION, taskId: TASK, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: "Add retry", owner: OWNER, origin: "app" as never, payer: { kind: "member", developerId: OWNER_ID } as never, now: T0 }));
+  await store.transact(createTaskSessionItems({ orgId: ORG, sessionId: SESSION, taskId: TASK, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: "Add retry", owner: OWNER, origin: "app", payer: { kind: "member", developerId: OWNER_ID } as never, now: T0 }));
   const registry = createAdapterRegistry();
   const adapter = new FakeChannelAdapter();
   registry.register("channel", "examplechat", adapter);

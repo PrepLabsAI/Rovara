@@ -71,7 +71,7 @@ export class SessionStore {
   /** The session a task belongs to: the one its record names. Undefined for a task of another company, a task with no session, and a session whose subject isn't this task. */
   async getForTask(orgId: OrgId, task: SessionTaskRef): Promise<AgentSessionRecord | undefined> {
     if (task.orgId !== orgId || task.sessionId === undefined) return undefined;
-    const session = await this.get(orgId, task.sessionId as SessionId);
+    const session = await this.get(orgId, task.sessionId);
     return session?.subject.kind === "task" && session.subject.taskId === task.taskId ? session : undefined;
   }
 

@@ -147,7 +147,7 @@ export function approvalProofMarkerKey(companyId: string, proofKey: string): Doc
 }
 
 function recordOf(document: StoredDocument): ApprovalRecord | undefined {
-  const text = (name: string) => (typeof document[name] === "string" ? document[name] as string : undefined);
+  const text = (name: string) => (typeof document[name] === "string" ? document[name] : undefined);
   const requestId = text("requestId"), kind = text("kind"), subjectId = text("subjectId"), outcome = text("outcome"), artifactDigest = text("artifactDigest"), risk = text("risk"), decidedAt = text("decidedAt");
   const revision = document["revision"];
   const approvers = document["approvers"];

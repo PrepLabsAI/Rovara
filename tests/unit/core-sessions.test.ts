@@ -1,8 +1,9 @@
 // Lane L6b: sessions. A session wraps a task and shows where it stands: created with the task, kept current from the task's facts and the cost ledger, stopped, retried and told through the task flow's control
 // host, listed and read. The sources are fakes at the seams (the task flow's facts, the cost, the control host).
+/* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { describe, expect, it } from "vitest";
 import {
-  IMPLICIT_COMPANY_ID, agentSessionKey, openAgentSessionKey, sessionTaskStatus, type AgentSessionRecord, type AuditSink, type DocumentChange, type OrgId, type Principal, type SessionId, type TransactItem,
+  IMPLICIT_COMPANY_ID, agentSessionKey, openAgentSessionKey, sessionTaskStatus, type AgentSessionRecord, type AuditSink, type DocumentChange, type OrgId, type Principal, type SessionId,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -16,7 +17,7 @@ const OWNER = localOwnerPrincipal();
 const OWNER_ID = developerIdOf(OWNER);
 const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const TASK2 = "11111111-2222-4333-8444-555555555555";
-const SESSION = taskSessionId(TASK) as SessionId;
+const SESSION = taskSessionId(TASK);
 const T0 = "2026-11-09T10:00:00.000Z";
 const clock = { now: new Date("2026-11-09T10:05:00.000Z") };
 
@@ -35,7 +36,7 @@ function world(initial: Partial<SessionTaskFacts> | undefined = {}) {
   const create = async (taskId = TASK, project = "web") => {
     const items = createTaskSessionItems({
       orgId: ORG, sessionId: taskSessionId(taskId), taskId, project, agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: "Add retry", owner: OWNER,
-      origin: "app" as never, payer: { kind: "member", developerId: OWNER_ID } as never, now: T0,
+      origin: "app", payer: { kind: "member", developerId: OWNER_ID } as never, now: T0,
     });
     return store.transact(items);
   };
@@ -63,9 +64,9 @@ describe("a task session is created with its task", () => {
     expect(taskSessionId(TASK)).not.toBe(taskSessionId(TASK2));
     const { store } = world();
     const fake = ["sk", "ant", "x".repeat(40)].join("-");
-    const items = createTaskSessionItems({ orgId: ORG, sessionId: taskSessionId(TASK2), taskId: TASK2, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: `Fix ${fake}`, owner: OWNER, origin: "app" as never, payer: { kind: "member", developerId: OWNER_ID } as never, now: T0 });
+    const items = createTaskSessionItems({ orgId: ORG, sessionId: taskSessionId(TASK2), taskId: TASK2, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: `Fix ${fake}`, owner: OWNER, origin: "app", payer: { kind: "member", developerId: OWNER_ID } as never, now: T0 });
     await store.transact(items);
-    expect(JSON.stringify((await store.query({ pk: agentSessionKey(ORG, taskSessionId(TASK2) as SessionId, "META").pk })).items)).not.toContain(fake);
+    expect(JSON.stringify((await store.query({ pk: agentSessionKey(ORG, taskSessionId(TASK2), "META").pk })).items)).not.toContain(fake);
   });
 });
 
@@ -158,8 +159,8 @@ describe("refreshing a session", () => {
     expect(await refreshSessionSummary(w.deps, ORG, SESSION)).toBe("unchanged");
     w.state.facts = undefined;
     expect(await refreshSessionSummary(w.deps, ORG, SESSION)).toBe("unchanged");
-    expect(await refreshSessionSummary(w.deps, ORG, "ses_nonexistent00000000" as SessionId)).toBe("unchanged");
-    expect(await refreshSessionSummary(w.deps, "org_11111111111111111111" as OrgId, SESSION)).toBe("unchanged");
+    expect(await refreshSessionSummary(w.deps, ORG, "ses_nonexistent00000000")).toBe("unchanged");
+    expect(await refreshSessionSummary(w.deps, "org_11111111111111111111", SESSION)).toBe("unchanged");
     expect((await get(w.store)).summaryRevision).toBe(1);
   });
 
@@ -173,7 +174,7 @@ describe("refreshing a session", () => {
 
 describe("the projector and the sweep", () => {
   it("a change to a task that names a session targets that session once, and nothing else does", () => {
-    const change = (pk: string, after?: Record<string, unknown>): DocumentChange => ({ sequence: "1", kind: "modify", cause: "write", key: { pk, sk: "META" }, ...(after === undefined ? {} : { after: { pk, sk: "META", ...after } as never }) });
+    const change = (pk: string, after?: Record<string, unknown>): DocumentChange => ({ sequence: "1", kind: "modify", cause: "write", key: { pk, sk: "META" }, ...(after === undefined ? {} : { after: { pk, sk: "META", ...after } }) });
     const targets = sessionTargetsOf([
       change(`DEVTASK#${TASK}`, { orgId: ORG, sessionId: SESSION }), change(`DEVTASK#${TASK}`, { orgId: ORG, sessionId: SESSION }),
       change("OTHER#1", { orgId: ORG, sessionId: "ses_x" }), change(`DEVTASK#other`, {}), change(`DEVTASK#t3`, { orgId: 5, sessionId: SESSION }),
@@ -194,7 +195,7 @@ describe("the projector and the sweep", () => {
   it("the sweep refreshes every open session, tells the after-sweep hook, and stops at its deadline", async () => {
     const w = world();
     await w.create();
-    await w.store.transact(createTaskSessionItems({ orgId: ORG, sessionId: taskSessionId(TASK2), taskId: TASK2, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: "Second", owner: OWNER, origin: "app" as never, payer: { kind: "member", developerId: OWNER_ID } as never, now: T0 }));
+    await w.store.transact(createTaskSessionItems({ orgId: ORG, sessionId: taskSessionId(TASK2), taskId: TASK2, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: "Second", owner: OWNER, origin: "app", payer: { kind: "member", developerId: OWNER_ID } as never, now: T0 }));
     let after = 0;
     const result = await sweepOpenSessions({ ...w.deps, afterSweep: async () => { after += 1; } });
     expect(result).toMatchObject({ visited: 2, complete: true });
@@ -223,7 +224,7 @@ describe("stop, retry and tell", () => {
 
   it("the owner stops a session: the task flow cancels, the event and the request are recorded, and a repeat writes nothing", async () => {
     const audits: string[] = [];
-    const audit: AuditSink = { stage: (event) => { audits.push(event.action); return [{ kind: "put", item: { pk: `AUDIT#${event.eventId}`, sk: "E" } } as TransactItem]; }, async record() {} };
+    const audit: AuditSink = { stage: (event) => { audits.push(event.action); return [{ kind: "put", item: { pk: `AUDIT#${event.eventId}`, sk: "E" } }]; }, async record() {} };
     const w = controlled({}, undefined, audit);
     await w.create();
     const first = await w.control.stop(OWNER, ORG, SESSION, { requestId: REQ(1) });
@@ -246,7 +247,7 @@ describe("stop, retry and tell", () => {
     expect(await w.control.stop(stranger, ORG, SESSION, { requestId: REQ(1) })).toMatchObject({ status: "refused", reason: "not_found" });
     expect(await w.control.retry(guest, ORG, SESSION, { requestId: REQ(2) })).toMatchObject({ reason: "not_found" });
     expect(await w.control.tell(guest, ORG, SESSION, { requestId: REQ(3), text: "hi" })).toMatchObject({ reason: "not_found" });
-    expect(await w.control.stop(OWNER, ORG, "ses_nonexistent00000000" as SessionId, { requestId: REQ(4) })).toMatchObject({ reason: "not_found" });
+    expect(await w.control.stop(OWNER, ORG, "ses_nonexistent00000000", { requestId: REQ(4) })).toMatchObject({ reason: "not_found" });
     expect(w.calls).toEqual([]);
   });
 
@@ -323,7 +324,7 @@ describe("reading sessions", () => {
     await w.create();
     await refreshSessionSummary(w.deps, ORG, SESSION);
     const second = taskSessionId(TASK2);
-    await w.store.transact(createTaskSessionItems({ orgId: ORG, sessionId: second, taskId: TASK2, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: "Second", owner: OWNER, origin: "app" as never, payer: { kind: "member", developerId: OWNER_ID } as never, now: "2026-11-09T10:01:00.000Z" }));
+    await w.store.transact(createTaskSessionItems({ orgId: ORG, sessionId: second, taskId: TASK2, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: "Second", owner: OWNER, origin: "app", payer: { kind: "member", developerId: OWNER_ID } as never, now: "2026-11-09T10:01:00.000Z" }));
     const all = await listSessions(w.store, ORG, OWNER_ID);
     expect(all.sessions.map((session) => session.title)).toEqual(["Second", "Add retry"]);
     const needs = await listSessions(w.store, ORG, OWNER_ID, { filter: "needs_me" });
@@ -356,9 +357,9 @@ describe("reading sessions", () => {
   it("a session of another company reads as absent", async () => {
     const w = world();
     await w.create();
-    expect(await new SessionStore(w.store).get("org_11111111111111111111" as OrgId, SESSION)).toBeUndefined();
+    expect(await new SessionStore(w.store).get("org_11111111111111111111", SESSION)).toBeUndefined();
     expect(await new SessionStore(w.store).getForTask(ORG, { taskId: TASK, orgId: ORG, sessionId: SESSION })).toBeDefined();
     expect(await new SessionStore(w.store).getForTask(ORG, { taskId: "another", orgId: ORG, sessionId: SESSION })).toBeUndefined();
-    expect(await new SessionStore(w.store).getForTask(ORG, { taskId: TASK, orgId: "org_11111111111111111111" as OrgId, sessionId: SESSION })).toBeUndefined();
+    expect(await new SessionStore(w.store).getForTask(ORG, { taskId: TASK, orgId: "org_11111111111111111111", sessionId: SESSION })).toBeUndefined();
   });
 });

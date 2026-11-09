@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   ConversationRefSchema, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, change, conversationSubject, hideEmailAddresses, sessionTaskStatus, taskStatusText, when,
-  type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type ConversationRef, type DocumentStore, type OrgId, type RegistryView, type SessionSummary, type StoredDocument,
+  type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type DocumentStore, type OrgId, type RegistryView, type SessionSummary, type StoredDocument,
 } from "@agentx/contracts";
 import type { SessionChange } from "../sessions/summary.js";
 import { SessionStore } from "../sessions/store.js";
@@ -82,7 +82,7 @@ export async function writeNotifyPrefs(deps: { store: Pick<DocumentStore, "updat
   const unique = [...new Map(parsed.targets.map((target) => [targetKey(target), target] as const)).values()];
   await deps.store.update({
     key: prefsKey(orgId, developerId),
-    ops: [change.setIfAbsent("entityType", "NOTIFY_PREFS"), change.set("orgId", orgId), change.set("developerId", developerId), change.set("targets", JSON.parse(JSON.stringify(unique))), change.set("muted", parsed.muted === true), change.set("updatedAt", deps.now().toISOString())],
+    ops: [change.setIfAbsent("entityType", "NOTIFY_PREFS"), change.set("orgId", orgId), change.set("developerId", developerId), change.set("targets", JSON.parse(JSON.stringify(unique)) as never), change.set("muted", parsed.muted === true), change.set("updatedAt", deps.now().toISOString())],
   });
   return { targets: unique, muted: parsed.muted === true };
 }
@@ -174,12 +174,12 @@ interface PendingRow { key: { pk: string; sk: string }; orgId: OrgId; developerI
 function pendingRowOf(item: StoredDocument, nowSeconds: number): PendingRow | undefined {
   const { orgId, developerId, sessionId, kind, at, sk } = item;
   if (typeof orgId !== "string" || typeof developerId !== "string" || typeof sessionId !== "string" || typeof at !== "string" || typeof sk !== "string") return undefined;
-  if (!["needs_you", "paused", "ready", "failed", "done"].includes(String(kind)) || sk !== `${orgId}#${developerId}#${sessionId}#${String(kind)}`) return undefined;
+  if (typeof kind !== "string" || !["needs_you", "paused", "ready", "failed", "done"].includes(kind) || sk !== `${orgId}#${developerId}#${sessionId}#${kind}`) return undefined;
   // A row past its expiry is not delivered (the store deletes expired items late).
   const expires = item[INDEX_EXPIRY_ATTRIBUTE];
   if (typeof expires === "number" && expires <= nowSeconds) return undefined;
   const done = new Set(Array.isArray(item["doneTargets"]) ? item["doneTargets"].filter((entry): entry is string => typeof entry === "string") : []);
-  return { key: { pk: PENDING_PK, sk }, orgId: orgId as OrgId, developerId, sessionId, kind: kind as AttentionKind, at, done };
+  return { key: { pk: PENDING_PK, sk }, orgId: orgId, developerId, sessionId, kind: kind as AttentionKind, at, done };
 }
 
 /** One person's marker: when it last sent anything, and per target how many tries failed in a row and when it may try again. */
@@ -245,7 +245,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     for (const row of rows) {
       const earlier = current.find((entry) => entry.row.sessionId === row.sessionId);
       if (earlier !== undefined) { current.push({ row, line: earlier.line }); continue; }
-      const session = await sessions.get(orgId, row.sessionId as never);
+      const session = await sessions.get(orgId, row.sessionId);
       const access = session === undefined ? undefined : await (deps.access ?? (async (_org, person, found) => (found.owner.developerId === person ? { owner: true } : undefined)))(orgId, developerId, session).catch(() => undefined);
       const kind = session === undefined ? undefined : attentionKindOf(session.summary);
       // Still current (a later change of state supersedes the row), never "needs you" for an ended session, and still theirs to read: anything else is dropped without a word.
