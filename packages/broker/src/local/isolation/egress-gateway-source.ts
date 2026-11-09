@@ -86,6 +86,13 @@ function publicAddress(ip) {
   return true;
 }
 
+// Linux delivers a packet addressed to ANY of this container's addresses whichever interface it arrived on, so a process on the sandbox
+// network that can route through the gateway (it would need NET_ADMIN, which a sandbox does not have) could talk to a service bound to
+// the gateway's worker-network or external address. Every service therefore answers only peers on the network it was opened for.
+function peerIn(address, cidr) {
+  return typeof address === "string" && inCidr(address.replace(/^::ffff:/, ""), cidr);
+}
+
 // Where the interfaces are: a role per network, by the subnet the broker read from Docker.
 function localAddresses() {
   const found = { worker: [], sandbox: [], external: [] };
@@ -147,15 +154,17 @@ function answerFor(message, localIp) {
   header.writeUInt16BE(0, 10);
   return Buffer.concat([header, echoed, body]);
 }
-function startNameServer(ip) {
+function startNameServer(ip, cidr) {
   const udp = dgram.createSocket("udp4");
   udp.on("message", function (message, remote) {
+    if (!peerIn(remote.address, cidr)) return;
     const reply = answerFor(message, ip);
     if (reply !== undefined) udp.send(reply, remote.port, remote.address);
   });
   udp.on("error", function (error) { log("dns_error", { reason: error.code }); });
   udp.bind(53, ip);
   const tcp = net.createServer(function (socket) {
+    if (!peerIn(socket.remoteAddress, cidr)) return socket.destroy();
     let held = Buffer.alloc(0);
     socket.setTimeout(10000, function () { socket.destroy(); });
     socket.on("error", function () {});
@@ -261,8 +270,9 @@ function serverNameOf(buffer) {
   return { error: "no_name" };
 }
 
-function startTlsForwarder(ip) {
+function startTlsForwarder(ip, cidr) {
   const server = net.createServer(function (client) {
+    if (!peerIn(client.remoteAddress, cidr)) return client.destroy();
     if (open >= LIMITS.maxConnections) return client.destroy();
     open += 1;
     client.on("close", function () { open -= 1; });
@@ -305,7 +315,7 @@ function startTlsForwarder(ip) {
 }
 
 // Port 80: every request is read and judged on its own, so a connection kept open cannot change its Host after the first.
-function startPlainForwarder(ip) {
+function startPlainForwarder(ip, cidr) {
   const server = http.createServer({ maxHeaderSize: 16384 }, function (request, response) {
     const refuse = function (status, reason, host) {
       stats.webRefused += 1;
@@ -313,6 +323,7 @@ function startPlainForwarder(ip) {
       response.writeHead(status, { "content-type": "text/plain", connection: "close" });
       response.end("not allowed\n");
     };
+    if (!peerIn(request.socket.remoteAddress, cidr)) return request.socket.destroy();
     const hosts = request.headersDistinct && request.headersDistinct.host;
     if (!hosts || hosts.length !== 1) return refuse(400, "bad_host");
     const host = hosts[0].toLowerCase().replace(/:80$/, "").replace(/\.$/, "");
@@ -348,6 +359,7 @@ function startPlainForwarder(ip) {
 const CALLBACK_PATH = /^\/v1\/internal\/(workspaces|project-setups)\/([A-Za-z0-9-]{1,64})\/operations\/([A-Za-z0-9._-]{1,128})\/([a-z0-9][a-z0-9\/_-]{0,120})$/;
 const HOP = ["connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade", "host", "content-length"];
 function relayCallback(request, response) {
+  if (!peerIn(request.socket.remoteAddress, config.nets.worker)) return request.socket.destroy();
   const refuse = function (status, reason) {
     log("callback_refused", { reason: reason });
     response.writeHead(status, { "content-type": "application/json", connection: "close" });
@@ -400,6 +412,7 @@ function startCallbackRelay(ip) {
 // ---- the published port: the broker reaches the worker through here
 function startIngress(ip) {
   const server = net.createServer(function (client) {
+    if (!peerIn(client.remoteAddress, config.nets.external)) return client.destroy();
     client.on("error", function () {});
     dns.promises.lookup(config.ingress.target, { family: 4 }).then(function (found) {
       if (!inCidr(found.address, config.nets.worker)) return client.destroy();
@@ -419,8 +432,8 @@ function main() {
     process.stderr.write("egress gateway: the three networks are not all attached\n");
     process.exit(2);
   }
-  addresses.worker.forEach(function (ip) { startNameServer(ip); startTlsForwarder(ip); startPlainForwarder(ip); startCallbackRelay(ip); });
-  addresses.sandbox.forEach(function (ip) { startNameServer(ip); startTlsForwarder(ip); startPlainForwarder(ip); });
+  addresses.worker.forEach(function (ip) { startNameServer(ip, config.nets.worker); startTlsForwarder(ip, config.nets.worker); startPlainForwarder(ip, config.nets.worker); startCallbackRelay(ip); });
+  addresses.sandbox.forEach(function (ip) { startNameServer(ip, config.nets.sandbox); startTlsForwarder(ip, config.nets.sandbox); startPlainForwarder(ip, config.nets.sandbox); });
   addresses.external.forEach(function (ip) { startIngress(ip); });
   process.on("uncaughtException", function (error) { log("error", { reason: String(error && error.code) }); });
   process.on("SIGTERM", function () { process.exit(0); });
@@ -428,7 +441,7 @@ function main() {
 }
 
 if (process.env.ROVARA_GW_LIBRARY === "1") {
-  module.exports = { hostAllowed: hostAllowed, validName: validName, publicAddress: publicAddress, serverNameOf: serverNameOf, answerFor: answerFor, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
+  module.exports = { hostAllowed: hostAllowed, validName: validName, publicAddress: publicAddress, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
 } else {
   main();
 }

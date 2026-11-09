@@ -72,14 +72,14 @@ export async function ensureNetworks(run: Run, names: IsolationNames, labels: re
   const labelArgs = labels.flatMap((label) => ["--label", label]);
   const one = async (name: string, inner: boolean): Promise<NetworkInfo> => {
     const inspect = async (): Promise<{ ok: boolean; subnet: string }> => {
-      const found = await run(["network", "inspect", "--format", "{{.Driver}}|{{.Internal}}|{{index .Options \"com.docker.network.bridge.inhibit_ipv4\"}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}", name]);
+      const found = await run(["network", "inspect", "--format", "{{.Driver}}|{{.Internal}}|{{index .Options \"com.docker.network.bridge.inhibit_ipv4\"}}|{{.EnableIPv6}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}", name]);
       if (found.exitCode !== 0) {
         if (missing(found.stderr)) return { ok: false, subnet: "" };
         throw new MachineError("unavailable", `Docker did not answer: ${reason(found.stderr)}`);
       }
-      const [driver = "", internal = "", inhibit = "", subnets = ""] = found.stdout.trim().split("|");
+      const [driver = "", internal = "", inhibit = "", ipv6 = "", subnets = ""] = found.stdout.trim().split("|");
       const subnet = subnets.trim().split(" ").find((entry) => /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(entry)) ?? "";
-      const good = driver === "bridge" && subnet !== "" && (inner ? internal === "true" && inhibit === "true" : internal === "false");
+      const good = driver === "bridge" && subnet !== "" && ipv6 === "false" && (inner ? internal === "true" && inhibit === "true" : internal === "false");
       return { ok: good, subnet };
     };
     let state = await inspect();
@@ -88,7 +88,7 @@ export async function ensureNetworks(run: Run, names: IsolationNames, labels: re
       const removed = await run(["network", "rm", name]);
       if (removed.exitCode !== 0 && !missing(removed.stderr)) throw new MachineError("unavailable", `the network ${name} is not as Rovara makes it and could not be removed: ${reason(removed.stderr)}`);
     }
-    const created = await run(["network", "create", "--driver", "bridge", ...(inner ? ["--internal", "-o", INHIBIT_OPTION] : []), ...labelArgs, name]);
+    const created = await run(["network", "create", "--driver", "bridge", "--ipv6=false", ...(inner ? ["--internal", "-o", INHIBIT_OPTION] : []), ...labelArgs, name]);
     if (created.exitCode !== 0 && !/already exists/i.test(created.stderr)) {
       const hint = /pool|overlap/i.test(created.stderr) ? " (Docker has run out of network address ranges; remove unused networks with `docker network prune`)" : /inhibit|unknown|option/i.test(created.stderr) ? " (Docker 23 or newer is needed)" : "";
       throw new MachineError("unavailable", `Docker could not create the network ${name}: ${reason(created.stderr)}${hint}`);
@@ -116,7 +116,7 @@ export interface GatewayInput extends HelperCommon {
   user: string;
 }
 
-const hardening = ["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--pids-limit", "512", "--memory", "512m"];
+const hardening = ["--sysctl", "net.ipv4.ip_forward=0", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--pids-limit", "512", "--memory", "512m"];
 
 export function gatewayConfig(input: GatewayInput): Record<string, unknown> {
   const targets: Array<Record<string, unknown>> = [];

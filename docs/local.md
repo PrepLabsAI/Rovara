@@ -130,19 +130,26 @@ Task code is a repository's code, so a local worker is built as if it were hosti
   anyone's bucket, `github.com` includes anyone's repository, and a CDN can host a different site on the same address as an allowed one.
 - **The socket guard** (`isolation/docker-socket-guard-source.ts`, one per machine) is the only container that holds the socket. It lets
   the worker create, start, stop, kill, restart, inspect, read the logs of, run commands in (as the sandbox user, never privileged) and
-  remove its own sandboxes, and inspect its own image and sandbox network. A sandbox is created only from a body the guard rebuilds:
-  the worker's image, user 1000, the workspace as the only mount (plus tmpfs masks inside it), the sandbox network and name server,
-  all capabilities dropped, no-new-privileges, no privileged mode, no host namespace, device, port, link, added host, sysctl or other
-  setting it does not list, and its own labels; "own" is a label the guard puts on every container it creates, which the worker cannot
-  set or remove. Everything else is refused: other containers (yours included), images, pulls, builds, volumes, networks, events,
-  info, prune, copy. So a project's devcontainer, test services and the setup run (which need those) do not work locally yet.
+  remove its own sandboxes, and inspect its own image and sandbox network. It never forwards what the worker sent: it checks every
+  field and builds the body it passes on from nothing, under Docker's exact field names (Docker's JSON decoder ignores case and lets
+  a later key win, so a name that is not exactly one the guard knows is refused). A sandbox is the worker's image, user 1000, the
+  workspace as the only mount (plus tmpfs masks inside it, never executable), the sandbox network and name server, with
+  `CapDrop: ["ALL"]`, no-new-privileges, no privileged mode and a process and memory limit forced on it (4096 and 4 GiB when the
+  worker names none), and the guard's own labels; "own" is a label the guard puts on every container it creates, which the worker
+  cannot set or remove. Host namespaces, devices, ports, links, added hosts, sysctls and every other setting are refused. A command's
+  input and output travel over an upgraded connection; the guard reads the start body itself, sends the daemon a request of its own
+  making and passes bytes on only after the daemon has answered `101`, so nothing a worker pipelines behind a start ever reaches the
+  daemon. Creates are made one at a time, so the limit of 16 sandboxes holds. Everything else is refused: other containers (yours
+  included), images, pulls, builds, volumes, networks, events, info, prune, copy. So a project's devcontainer, test services and the
+  setup run (which need those) do not work locally yet.
 - **The worker never sees the socket**, so `~/.rovara`, `~/.ssh` and the rest of your home folder are not one `docker run -v` away. The
   worker's `sweepWorkspaceContainers` (which removes every other container before a push) also finds no socket and skips; with the raw
   socket on a daemon you share with your own containers it would have removed all of them.
 
 What is still reachable, on purpose or not: the internet by allowed name (above); on Linux the gateway, which has an ordinary bridge to
 reach the internet, sits on a bridge whose gateway address is the host, so a gateway bug could reach host services bound to a wildcard
-address (the gateway is about 400 lines, runs as an unprivileged user with no capability, a read-only root and a 512 MiB limit);
+address (the gateway is about 450 lines, runs as an unprivileged user with no capability, a read-only root, IP forwarding off and a 512 MiB limit, and
+each of its services answers only peers of the one network it was opened for);
 the Docker daemon itself acts on the guard's requests, so a daemon bug is still a bug; and anything an allowed site serves.
 
 #### The callback listener

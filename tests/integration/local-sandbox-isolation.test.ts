@@ -7,6 +7,7 @@
 // to reach the owner's loopback services, the broker, another worker, the local network, the cloud metadata address and the Docker
 // socket. Every container, network and folder it makes is removed at the end.
 import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, networkInterfaces } from "node:os";
@@ -219,6 +220,12 @@ describe.skipIf(!enabled)("a local worker and its sandboxes are walled off (real
     });
   }
 
+  it("keeps IP forwarding off in the gateway and answers only the network each of its services was opened for", async () => {
+    expect((await docker(["exec", a.names.gateway, "cat", "/proc/sys/net/ipv4/ip_forward"])).out.trim()).toBe("0");
+    const inspect = await docker(["inspect", "--format", "{{.HostConfig.CapDrop}} {{.HostConfig.ReadonlyRootfs}} {{.Config.User}} {{.HostConfig.Memory}}", a.names.gateway]);
+    expect(inspect.out.trim()).toBe("[ALL] true 1000:1000 536870912");
+  });
+
   // ---- other workers
 
   it("keeps one worker's sandbox away from another worker, its gateway and its sandbox", async () => {
@@ -407,6 +414,53 @@ describe.skipIf(!enabled)("a local worker and its sandboxes are walled off (real
       expect(info.out.trim()).toMatch(new RegExp(`^${a.names.sandboxNet} \\[\\d+\\.\\d+\\.\\d+\\.\\d+\\] false \\[ALL\\]$`));
       expect((await asWorker("rm", "--force", "agentx-task-second")).code).toBe(0);
       expect((await asWorker("ps", "--all", "--quiet", "--filter", "name=agentx-task-second")).out.trim()).toBe("");
+    });
+
+    // The two ways a worker got the whole Docker API through an earlier version of the guard (review round 1), run from inside the worker
+    // with a script of its own, as a compromised worker would.
+    const inWorkerScript = (script: string, ...args: string[]): Promise<Result> => docker(["exec", "-i", a.name, "node", "-e", script, ...args]);
+
+    it("does not let a request pipelined behind an upgraded exec start reach the daemon", async () => {
+      const script = String.raw`
+        const http = require('http'), net = require('net');
+        const [sandbox] = process.argv.slice(1);
+        const call = (method, path, body) => new Promise((resolve, reject) => {
+          const req = http.request({ host: 'rovara-sock', port: 2375, method, path, headers: body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {} }, (res) => { let t = ''; res.on('data', (c) => t += c); res.on('end', () => resolve({ status: res.statusCode, text: t })); });
+          req.on('error', reject); req.end(body);
+        });
+        (async () => {
+          const made = await call('POST', '/containers/' + sandbox + '/exec', JSON.stringify({ AttachStdout: true, Cmd: ['id'] }));
+          const id = JSON.parse(made.text).Id;
+          const body = '{"Detach":true}';
+          const smuggled = 'GET /containers/json?all=1 HTTP/1.1\r\nHost: x\r\n\r\n';
+          const socket = net.connect({ host: 'rovara-sock', port: 2375 });
+          let out = '';
+          socket.on('data', (c) => out += c);
+          socket.on('error', () => {});
+          socket.write('POST /exec/' + id + '/start HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: tcp\r\nContent-Type: application/json\r\nContent-Length: ' + body.length + '\r\n\r\n' + body + smuggled);
+          setTimeout(() => { console.log(JSON.stringify({ head: out.split('\r\n')[0], leaked: /rovara-(worker|sock|gw)-/.test(out) })); process.exit(0); }, 2500);
+        })();`;
+      const result = await inWorkerScript(script, a.sandbox);
+      const seen = JSON.parse(result.out.trim().split("\n").pop()!) as { head: string; leaked: boolean };
+      expect(seen.head).toMatch(/^HTTP\/1\.1 400 /);
+      expect(seen.leaked).toBe(false);
+    });
+
+    it("builds the sandbox from the names it knows, so a lower-case key cannot undo the capability drop or the limits", async () => {
+      const script = `
+        const http = require('http');
+        const [image, workspace, key, network] = process.argv.slice(1);
+        const body = JSON.stringify({ User: '1000:1000', Image: image, Cmd: ['sleep', 'infinity'], Labels: { 'agentx.task': 'x', 'agentx.workspace': key },
+          HostConfig: { Binds: [workspace + ':' + workspace], NetworkMode: network, CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges'], PidsLimit: 5, Dns: [], capdrop: [], securityopt: [], pidslimit: 0, networkmode: '', dns: [] } });
+        const req = http.request({ host: 'rovara-sock', port: 2375, method: 'POST', path: '/containers/create?name=agentx-task-zero', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (res) => { let t = ''; res.on('data', (c) => t += c); res.on('end', () => { console.log(res.statusCode); process.exit(0); }); });
+        req.end(body);`;
+      const key = createHash("sha256").update(a.workspace).digest("hex").slice(0, 16);
+      const result = await inWorkerScript(script, IMAGE!, a.workspace, key, a.names.sandboxNet);
+      expect(result.out.trim()).toBe("403");
+      expect((await docker(["ps", "--all", "--quiet", "--filter", "name=agentx-task-zero"])).out.trim()).toBe("");
+      // And a sandbox that is made carries what the guard forced.
+      const info = await docker(["inspect", "--format", "{{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{.HostConfig.Privileged}} {{.HostConfig.PidsLimit}}", a.sandbox]);
+      expect(info.out.trim()).toBe("[ALL] [no-new-privileges] false 4096");
     });
 
     it("cannot be reached by the sandbox at all", async () => {

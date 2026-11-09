@@ -173,7 +173,7 @@ export class FakeDocker implements DockerRunner {
     if (verb === "inspect") {
       const network = this.networks.get(rest[rest.length - 1]!);
       if (network === undefined) return fail("Error response from daemon: network not found");
-      return { exitCode: 0, stdout: `bridge|${network.internal}|${network.options["com.docker.network.bridge.inhibit_ipv4"] ?? ""}|${network.subnet} \n`, stderr: "" };
+      return { exitCode: 0, stdout: `bridge|${network.internal}|${network.options["com.docker.network.bridge.inhibit_ipv4"] ?? ""}|false|${network.subnet} \n`, stderr: "" };
     }
     if (verb === "rm") {
       const name = rest[rest.length - 1]!;
