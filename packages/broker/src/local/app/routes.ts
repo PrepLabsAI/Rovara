@@ -11,6 +11,7 @@ import { loadOwnedTask, taskViewOf } from "../../core/task-flow/reads.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
+import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
 import { createSessionControlHost } from "./host.js";
 import { listProjects, registerProject } from "./projects.js";
 import { retryBlockedStep } from "./retry.js";
@@ -95,12 +96,13 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
           const digest = workflow === undefined ? undefined : waitingDocumentDigest(workflow);
           const artifact = workflow?.artifacts.filter((candidate) => candidate.type === currentDocumentType(workflow)).at(-1);
           if (workflow === undefined || artifact === undefined || digest === undefined) throw agentXError("NOT_FOUND", "this task has no plan yet");
-          const bytes = await deps.blobs.get(artifact.objectKey, 200_000);
+          const read = await readVerifiedText(deps.blobs, artifact, 200_000);
+          if ("changed" in read) throw agentXError("CHANGE_STALE", DOCUMENT_CHANGED);
           const type = artifact.type === "requirements" || artifact.type === "design" || artifact.type === "plan" ? artifact.type : "plan";
           const versions = workflow.artifacts.filter((candidate) => candidate.type === artifact.type).map((candidate) => candidate.version);
           return json(200, { plan: {
             taskId, document: type, version: artifact.version, sha256: artifact.sha256, approved: workflow.decisions.some((decision) => decision.decision === "APPROVE" && decision.artifactDigest === artifact.sha256),
-            current: true, versions, content: { markdown: bytes === undefined ? "" : new TextDecoder().decode(bytes) }, summary: { lines: [], decisions: [] },
+            current: true, versions, content: { markdown: "text" in read ? read.text : "" }, summary: { lines: [], decisions: [] },
           } });
         }
         if (action === "close" && request.method === "POST") {

@@ -14,6 +14,7 @@ import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { listTasks, readTask } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { iso } from "../../core/task-flow/support.js";
+import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
 import { stepOf } from "./facts.js";
 
 const PLAN_READ_MAX_BYTES = 200_000;
@@ -52,8 +53,8 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
     return task !== undefined && task.companyId === deps.companyId ? task : undefined;
   };
   const markdownOf = async (artifact: WorkflowArtifact): Promise<string> => {
-    const bytes = await deps.blobs.get(artifact.objectKey, PLAN_READ_MAX_BYTES);
-    return bytes === undefined ? "This document is no longer kept." : new TextDecoder().decode(bytes);
+    const read = await readVerifiedText(deps.blobs, artifact, PLAN_READ_MAX_BYTES);
+    return "text" in read ? read.text : "changed" in read ? DOCUMENT_CHANGED : "This document is no longer kept.";
   };
   const commentsOf = async (taskId: string): Promise<CommentView[]> => {
     const items = await queryAll(deps.flow.store, { pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "PAGE_COMMENT#" }, limit: COMMENTS_MAX });

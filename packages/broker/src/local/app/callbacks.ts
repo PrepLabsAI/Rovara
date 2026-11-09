@@ -20,6 +20,7 @@ import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../.
 import { recordOperationResult } from "../../core/task-flow/results.js";
 import { iso } from "../../core/task-flow/support.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
+import { readVerifiedText } from "./documents.js";
 import type { RepositoryCredential, RepositoryGrantService } from "../../repository-access.js";
 
 const ROUTE = /^\/v1\/internal\/workspaces\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/([a-z-]+)$/u;
@@ -55,6 +56,13 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
   return operation;
 }
 
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
+export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
+
+/**
+ * A worker's artifact, kept once. The first save of a name by an operation fixes its bytes: the same bytes again are the same artifact (a retried post), other bytes are refused. So what
+ * the workflow's digest names cannot be rewritten by a later post, even though the worker's capability is still good.
+ */
 async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ artifactId: string }> {
   const { name, mediaType, content } = body;
   if (typeof name !== "string" || !ARTIFACT_NAME.test(name) || typeof mediaType !== "string" || mediaType.length > 120 || typeof content !== "string") {
@@ -65,10 +73,21 @@ async function recordArtifact(deps: CallbackDeps, operation: OperationRecord, bo
   const id = randomUUID();
   const objectKey = artifactObjectKey(operation.workspaceId, operation.id, name);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
-  await deps.blobs.put(objectKey, bytes, { contentType: mediaType, metadata: { sha256, name }, retention: "evidence-std" });
-  // The latest artifact of a name wins: a worker that saves the same file twice (a plan written again) leaves the second.
-  await deps.flow.store.put({ item: { ...artifactKey(operation.workspaceId, operation.id, name), entityType: "ARTIFACT", id, workspaceId: operation.workspaceId, operationId: operation.id, name, mediaType, objectKey, sha256, bytes: bytes.byteLength, createdAt: iso(deps.flow) } });
-  return { artifactId: id };
+  const key = artifactKey(operation.workspaceId, operation.id, name);
+  // The row is the claim on the name (written only if absent); the bytes follow it.
+  const claimed = await deps.flow.store.put({
+    item: { ...key, entityType: "ARTIFACT", id, workspaceId: operation.workspaceId, operationId: operation.id, name, mediaType, objectKey, sha256, bytes: bytes.byteLength, createdAt: iso(deps.flow) },
+    condition: when.absent(),
+  });
+  let artifactId = id;
+  if (!claimed.applied) {
+    const earlier = await deps.flow.store.get(key);
+    if (earlier === undefined || earlier["sha256"] !== sha256 || typeof earlier["id"] !== "string") throw agentXError("CALLBACK_FORBIDDEN", "this artifact was already saved and cannot be replaced");
+    artifactId = earlier["id"];
+  }
+  // A repeat of the same bytes (or a crash between the row and the bytes) leaves the object in place or puts the same bytes back.
+  if ((await deps.blobs.stat(objectKey)) === undefined) await deps.blobs.put(objectKey, bytes, { contentType: mediaType, metadata: { sha256, name }, retention: "evidence-std" });
+  return { artifactId };
 }
 
 async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body: Record<string, unknown>): Promise<{ accepted: number }> {
@@ -93,9 +112,9 @@ async function recordEvents(deps: CallbackDeps, operation: OperationRecord, body
 async function readArtifactText(deps: CallbackDeps, operation: OperationRecord, name: string, maxBytes: number): Promise<{ text: string; artifact: { id: string; objectKey: string; createdAt: string; sha256: string } } | undefined> {
   const found = await deps.flow.store.get(artifactKey(operation.workspaceId, operation.id, name));
   if (found === undefined || typeof found["objectKey"] !== "string" || typeof found["id"] !== "string" || typeof found["createdAt"] !== "string" || typeof found["sha256"] !== "string") return undefined;
-  const bytes = await deps.blobs.get(found["objectKey"], maxBytes);
-  if (bytes === undefined) return undefined;
-  return { text: new TextDecoder().decode(bytes), artifact: { id: found["id"], objectKey: found["objectKey"], createdAt: found["createdAt"], sha256: found["sha256"] } };
+  const read = await readVerifiedText(deps.blobs, { objectKey: found["objectKey"], sha256: found["sha256"] }, maxBytes);
+  if (!("text" in read)) return undefined;
+  return { text: read.text, artifact: { id: found["id"], objectKey: found["objectKey"], createdAt: found["createdAt"], sha256: found["sha256"] } };
 }
 
 /**
@@ -165,6 +184,8 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
+      // Cloud's rule: once an operation has ended, only a repeat of its result is taken. Late output could rewrite what the workflow already read.
+      if (action !== "result" && TERMINAL_STATUSES.has(operation.status)) throw agentXError("CALLBACK_FORBIDDEN", TERMINAL_OUTPUT_REFUSAL);
       const body = bodyOf(request);
       if (action === "events") return json(200, await recordEvents(deps, operation, body));
       if (action === "artifacts") return json(200, await recordArtifact(deps, operation, body));

@@ -1,6 +1,7 @@
 // Lane L9-wire: the task as the clients read it (`DeveloperTaskView`, which the MCP tools and the CLI parse), over the task flow's own smaller view (L6a's `TaskView`). Only what the records
 // hold is filled; the optional parts (events, summary, proof, evidence, testing, run limits) are left out until their lanes are wired.
 import type { DeveloperTaskListItem } from "@agentx/contracts";
+import { readVerifiedText } from "./documents.js";
 import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import { waitingDocumentDigest } from "../../core/decisions/workflow-subject.js";
 import type { TaskView } from "../../core/task-flow/reads.js";
@@ -15,8 +16,9 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
   if (workflow !== undefined && workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
     const digest = waitingDocumentDigest(workflow);
     const artifact = workflow.artifacts.filter((candidate) => candidate.sha256 === digest).at(-1);
-    const bytes = artifact === undefined ? undefined : await blobs.get(artifact.objectKey, PLAN_CONTENT_MAX_BYTES);
-    if (bytes !== undefined) planContent = new TextDecoder().decode(bytes);
+    // Only bytes that match the digest the approval binds are handed to a client.
+    const read = artifact === undefined ? undefined : await readVerifiedText(blobs, artifact, PLAN_CONTENT_MAX_BYTES);
+    if (read !== undefined && "text" in read) planContent = read.text;
   }
   return JSON.parse(JSON.stringify({
     taskId: task.taskId, title: task.title, project: task.project, status: view.status, startingRevision: task.startingRevision, client: task.client, shared: false,

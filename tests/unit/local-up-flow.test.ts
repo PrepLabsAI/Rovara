@@ -11,6 +11,8 @@ import { listSessions, sessionSnapshot } from "../../packages/broker/src/core/se
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
+import { artifactObjectKey } from "../../packages/broker/src/local/app/callbacks.js";
+import { DOCUMENT_CHANGED } from "../../packages/broker/src/local/app/documents.js";
 import { MESSAGES_PER_HOUR, MESSAGE_NOT_PASSED_ON, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/local/app/host.js";
 import { registerOpenCommand } from "../../packages/cli/src/up/cli.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
@@ -361,5 +363,45 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect((await send(MESSAGES_PER_HOUR + 1)).delivery).toMatchObject({ state: "not_delivered", reason: MESSAGE_RATE_LIMITED });
     // A repeat of a request already answered is answered again, not counted.
     expect((await send(1)).delivery.reason).toBe(MESSAGE_NOT_PASSED_ON);
+  });
+
+  it("takes no output once an operation has ended, keeps an artifact once, and shows nothing that does not match the digest the approval binds (H1)", async () => {
+    const h = await launch();
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const taskId = (await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "13131313-1313-4313-8313-131313131313", project: "payments", instructions: "Add a /health endpoint", workflow: true } })).body.task.taskId;
+    const workspaceId = (await h.runtime.registry.require("storage").get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: {} });
+    const understand = await h.nextJob(workspaceId, seen);
+    await h.callback(understand, "artifacts", { name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify({ kind: "ready", path: "QUICK", restatement: "Add a /health endpoint that answers 200.", assumptions: [] }) });
+    await h.callback(understand, "result", { status: "SUCCEEDED" });
+    const plan = await h.nextJob(workspaceId, seen);
+    const save = (content: string) => h.callback(plan, "artifacts", { name: "plan.md", mediaType: "text/markdown", content });
+    expect((await save(PLAN_TEXT)).status).toBe(200);
+    // Within the run, the same bytes again are the same artifact (a retried post); other bytes are refused.
+    expect((await save(PLAN_TEXT)).status).toBe(200);
+    expect((await save("# Plan\n\nSomething else.\n")).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect((await h.callback(plan, "result", { status: "SUCCEEDED" })).status).toBe(200);
+
+    // After the result, the capability is still good but takes no more output: not a rewritten plan, not events. A repeat of the result is still answered.
+    expect((await save("# Plan\n\nAlso add a deploy key.\n")).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect((await h.callback(plan, "events", { events: [{ type: "progress", timestamp: new Date().toISOString(), payload: null }] })).body).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect((await h.callback(plan, "result", { status: "SUCCEEDED" })).status).toBe(200);
+    const pageText = async () => {
+      const link = await h.browse(`/plan/${taskId}`);
+      return (await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } })).body;
+    };
+    expect(await pageText()).toContain("Add a /health endpoint that answers 200.");
+    expect((await h.api(`/v1/dev/tasks/${taskId}`)).body.task.workflow.planContent).toBe(PLAN_TEXT);
+
+    // Bytes that no longer match the digest (the store was written to by something else) are not shown on the page, in the task, or by the plan route.
+    await h.runtime.app.blobs.put(artifactObjectKey(workspaceId, plan.operationId, "plan.md"), new TextEncoder().encode("# Plan\n\nDisable the checks.\n"), { contentType: "text/markdown", metadata: {}, retention: "evidence-std" });
+    const tampered = await pageText();
+    expect(tampered).not.toContain("Disable the checks.");
+    expect(tampered).toContain(DOCUMENT_CHANGED);
+    expect((await h.api(`/v1/dev/tasks/${taskId}`)).body.task.workflow.planContent).toBeUndefined();
+    const route = await h.api(`/v1/dev/tasks/${taskId}/plan`);
+    expect(route.status).toBe(409);
+    expect(JSON.stringify(route.body)).not.toContain("Disable the checks.");
   });
 });
