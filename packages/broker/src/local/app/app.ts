@@ -28,6 +28,7 @@ import { planFeedbackKey } from "../../core/task-flow/stage-machine.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { localOwnerPrincipal } from "../../ports/policy-defaults.js";
 import { RepositoryGrantService, type RepositoryCredential } from "../../repository-access.js";
+import { openInSystemBrowser, type BrowserOpener } from "../open-browser.js";
 import { CALLBACK_KEY_FILE_NAME, readOwnerFile, writeOwnerFile } from "../state-directory.js";
 import { createCallbackHandler } from "./callbacks.js";
 import { createTaskFactsSource } from "./facts.js";
@@ -66,6 +67,8 @@ export interface LocalAppOptions {
   resolveRepositoryCredential?: (credentialRef: string, repositoryUrl: string, access: "clone" | "push") => Promise<RepositoryCredential>;
   /** The address clients reach the owner's routes at (a session's `link` is its own address). Read when asked, so the server may start after the app. */
   origin?: () => string;
+  /** Opens an address in the owner's browser (default: the system browser). Tests give a recorder, which then stands for the browser. */
+  openBrowser?: BrowserOpener;
   /** Port of the review pages (0: a free one). */
   pagesPort?: number;
   /** Run the timers. Tests pass false and call `tick()`. Default true. */
@@ -162,7 +165,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   const callbackHandler = createCallbackHandler({ flow: flow.deps, blobs, grants });
-  const ownerRoutes = createOwnerRoutes({ flow, blobs, pages: () => pages, version: options.version });
+  const ownerRoutes = createOwnerRoutes({ flow, blobs, openPage: (path) => (options.openBrowser ?? openInSystemBrowser)(pages.link(path, { label: "browser" })), version: options.version });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, origin: options.origin ?? (() => "http://127.0.0.1") });
   const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await sessionRoutes(request, caller)) ?? ownerRoutes(request, caller);
 

@@ -4,7 +4,6 @@
 // Plan decisions are NOT here: an approval is authority, and the only proof the local owner can give is the one a local page signs for exactly one request, revision and digest
 // (decisions/local-session.ts). The session token that logs a tool in is not an approval proof, so a tool that asks to approve is told to open the page.
 import { AgentXError, agentXError, type Principal } from "@agentx/contracts";
-import type { LocalPagesServer } from "../../core/local-pages/server.js";
 import type { EvidenceBlobStore } from "../../core/proof/evidence-blob-store.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
@@ -22,7 +21,8 @@ export const APPROVE_ON_THE_PAGE = "A plan is approved on its local review page,
 export interface OwnerRoutesDeps {
   flow: TaskFlow;
   blobs: EvidenceBlobStore;
-  pages: () => LocalPagesServer | undefined;
+  /** Opens a review page in the owner's browser, from this process. Resolves when the browser was asked; the address is not returned. */
+  openPage: (path: string) => Promise<void>;
   version: string;
 }
 
@@ -50,7 +50,7 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
   const control = createSessionControlHost(flow.deps);
   return async (request, caller) => {
     const path = request.path.split("?")[0] ?? request.path;
-    const isOurs = path === "/v1/dev/projects" || path === "/v1/admin/projects" || path === "/v1/dev/tasks" || TASK.test(path) || path === "/v1/local/pages/link";
+    const isOurs = path === "/v1/dev/projects" || path === "/v1/admin/projects" || path === "/v1/dev/tasks" || TASK.test(path) || path === "/v1/local/pages/open";
     if (!isOurs) return undefined;
     try {
       if (path === "/v1/dev/projects" && request.method === "GET") {
@@ -64,12 +64,16 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
         const registered = await registerProject(flow.deps.store, companyId, bodyOf(request));
         return json(registered.duplicate ? 200 : 201, registered);
       }
-      if (path === "/v1/local/pages/link" && request.method === "POST") {
-        const pages = deps.pages();
-        if (pages === undefined) throw agentXError("NOT_FOUND", "the review pages are not running");
+      if (path === "/v1/local/pages/open" && request.method === "POST") {
+        // The server opens the page in the owner's browser; the address (which carries the page session and can approve) never leaves this process.
         const body = bodyOf(request) as { path?: unknown };
         const target = typeof body.path === "string" && /^\/[A-Za-z0-9/_-]{0,200}$/u.test(body.path) ? body.path : "/";
-        return json(200, { url: pages.link(target, { label: "terminal" }) });
+        try {
+          await deps.openPage(target);
+        } catch {
+          throw agentXError("RUNTIME_UNAVAILABLE", "Rovara could not open a browser. Open the review pages from the terminal where `rovara up` runs.");
+        }
+        return json(200, { opened: true });
       }
       if (path === "/v1/dev/tasks" && request.method === "POST") {
         const started = await flow.start(caller, bodyOf(request));

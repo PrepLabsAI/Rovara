@@ -10,3 +10,4 @@ export * from "./state-directory.js";
 export * from "./this-machine-worker-machines.js";
 export * from "./isolation/allow-list.js";
 export * from "./isolation/stack.js";
+export * from "./open-browser.js";

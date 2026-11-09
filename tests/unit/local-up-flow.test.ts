@@ -38,17 +38,31 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string } = 
   const stateDirectory = join(root, "state");
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const machines = new FakeWorkerMachines({ startingChecks: 0, features: ["task.workflowMode"] });
+  /** The addresses the server asked the browser to open: the only place a page address goes. */
+  const opened: string[] = [];
   const runtime: LocalRuntime = await startLocalRuntime({
-    stateDirectory, cwd: join(root, "project"), environment: {}, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false, ...(extra.storage === undefined ? {} : { storage: extra.storage }),
+    stateDirectory, cwd: join(root, "project"), environment: {}, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false, openBrowser: async (url) => { opened.push(url); }, ...(extra.storage === undefined ? {} : { storage: extra.storage }),
   });
   cleanup.push(() => runtime.stop());
   const token = (await readFile(runtime.sessionTokenPath, "utf8")).trim();
+  /** Every answer body an API-token route gave, as text: none may hold a page address. */
+  const bodies: string[] = [];
   const api = async (path: string, init: { method?: string; body?: unknown } = {}) => {
     const response = await fetch(`${runtime.url}${path}`, {
       method: init.method ?? "GET", headers: { authorization: `Bearer ${token}`, ...(init.body === undefined ? {} : { "content-type": "application/json" }) },
       ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
     });
-    return { status: response.status, body: (await response.json()) as ApiBody };
+    const text = await response.text();
+    bodies.push(text);
+    return { status: response.status, body: JSON.parse(text) as ApiBody };
+  };
+  /** The owner's "open in browser": the server opens the page, and the address reaches only the browser (here, the recorder). */
+  const browse = async (path: string): Promise<URL> => {
+    const before = opened.length;
+    const answer = await api("/v1/local/pages/open", { method: "POST", body: { path } });
+    expect(answer.status).toBe(200);
+    expect(opened.length).toBe(before + 1);
+    return new URL(opened.at(-1)!);
   };
   /** A worker's callback, through the callback listener exactly as the worker's gateway relays it. */
   const callback = (invocation: WorkerInvocation, action: string, body: unknown) => new Promise<{ status: number; body: CallbackBody }>((resolve, reject) => {
@@ -76,7 +90,7 @@ async function launch(extra: { storage?: "sqlite" | "memory"; root?: string } = 
     }
     throw new Error("the flow did not hand a job to the worker");
   };
-  return { root, stateDirectory, runtime, machines, token, api, callback, nextJob };
+  return { root, stateDirectory, runtime, machines, token, api, bodies, opened, browse, callback, nextJob };
 }
 
 /** Registers the project, starts a task and answers its preparation, Understand and Plan, so it waits for the owner's approval. */
@@ -164,9 +178,8 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect(refused.status).toBe(403);
     expect(JSON.stringify(refused.body)).toContain("rovara open");
 
-    // 4. The owner opens the page from their terminal and approves there.
-    const link = (await h.api("/v1/local/pages/link", { method: "POST", body: { path: `/plan/${task.taskId}` } })).body.url;
-    const pages = new URL(link);
+    // 4. The owner opens the page (the server opens their browser) and approves there.
+    const pages = await h.browse(`/plan/${task.taskId}`);
     const host = pages.host;
     const page = await raw(h.runtime.pagesUrl, { path: pages.pathname, headers: { host } });
     expect(page.status).toBe(200);
@@ -177,13 +190,19 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect(post.headers["location"]).toContain("n=approved");
     const approved = (await h.api(`/v1/dev/tasks/${task.taskId}`)).body.task;
     expect(approved.workflow.stage).toBe("IMPLEMENT");
+    // C1: no answer an API-token route gave, in the whole journey, held a page address or a page session.
+    expect(h.bodies.length).toBeGreaterThan(5);
+    for (const body of h.bodies) expect(body).not.toMatch(/\/s\/[A-Za-z0-9_-]{43}/);
+    expect(h.bodies.join("")).not.toContain(pages.pathname.split("/")[2]!);
+    // The retired route that returned an address is gone.
+    expect((await h.api("/v1/local/pages/link", { method: "POST", body: { path: "/" } })).status).toBe(404);
     expect(approved.workflow.decisions.at(-1)).toMatchObject({ decision: "APPROVE" });
   });
 
   it("sends a plan back with the owner's words, and the next plan is asked for with them", async () => {
     const h = await launch();
     const { taskId, workspaceId, seen } = await toPlanReview(h);
-    const link = new URL((await h.api("/v1/local/pages/link", { method: "POST", body: { path: `/plan/${taskId}` } })).body.url);
+    const link = await h.browse(`/plan/${taskId}`);
     const page = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
     const form = formOf(page.body, "/decide");
     const sent = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody({ ...form.fields, decision: "changes", note: "Also log the request id." }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
@@ -271,7 +290,7 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect((await h.api("/v1/app/sessions/ses_00000000000000000000")).status).toBe(404);
   });
 
-  it("`rovara open` prints the page address from the running process, and says so when nothing is running", async () => {
+  it("`rovara open` has the running process open the browser and prints no address, and says so when nothing is running", async () => {
     const h = await launch();
     const { taskId } = await toPlanReview(h);
     const printed: string[] = [];
@@ -281,7 +300,9 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
       await program.parseAsync(["node", "rovara", "open", "--state-dir", stateDir, ...args]);
     };
     await run(h.stateDirectory, taskId);
-    const link = new URL(printed.join("").trim());
+    expect(printed.join("")).toBe("Opened in your browser.\n");
+    expect(printed.join("")).not.toMatch(/\/s\//);
+    const link = new URL(h.opened.at(-1)!);
     const page = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
     expect(page.status).toBe(200);
     expect(page.body).toContain("Add a /health endpoint that answers 200.");

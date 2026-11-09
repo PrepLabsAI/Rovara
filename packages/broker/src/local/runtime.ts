@@ -28,6 +28,7 @@ import { MemoryQueueService } from "../ports/memory-queue.js";
 import { SqliteDocumentStore, SqliteQueueService } from "@agentx/local-adapters";
 import type { WorkerMachines } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../core/task-flow/flow.js";
+import type { BrowserOpener } from "./open-browser.js";
 import { createLocalApp, type LocalApp, type ModelProxyEndpoint } from "./app/app.js";
 import { configurationAnswer } from "./app/routes.js";
 import { LocalPageSessions } from "../core/local-pages/guard.js";
@@ -128,6 +129,8 @@ export interface LocalRuntimeOptions {
   registerAdapters?: (registry: AdapterRegistry) => void;
   /** TODO(L9a): the local model proxy's address (lane K1). Absent: workers have no model access yet. */
   modelProxyEndpoint?: ModelProxyEndpoint;
+  /** Opens a review page in the owner's browser (default: the system browser). A test gives a recorder, which stands for the browser. */
+  openBrowser?: BrowserOpener;
   /** How `gh` is run to find the owner's GitHub token (tests give a stub, so a real login on the machine is never used). */
   gh?: GhRunner;
   /** The fetch the Docker adapter uses to reach its workers (tests give the simulated Docker's). */
@@ -147,9 +150,9 @@ export interface LocalRuntime {
   readonly sessionTokenPath: string;
   /** The local review pages' sessions: pass them to `createLocalPagesServer({ sessions })` so the proofs the pages sign are the ones the approvers accept. */
   readonly pageSessions: LocalPageSessions;
-  /** The review pages' address: `http://127.0.0.1:<port>` (the page links themselves carry a session token and come from `POST /v1/local/pages/link`). */
+  /** The review pages' address: `http://127.0.0.1:<port>` (a page link carries a session that can approve: it stays in this process and reaches a browser only through `POST /v1/local/pages/open`). */
   readonly pagesUrl: string;
-  /** The address of a review page in the owner's session (the token is in it: for the owner's terminal only). */
+  /** The address of a review page in the owner's session. It can approve: for the code that embeds the runtime, never to be sent to a client, a file or a log. */
   pageLink(path?: string): string;
   /** The wired task flow, sessions, decisions and pages (lane L9-wire). */
   readonly app: LocalApp;
@@ -262,6 +265,7 @@ export async function startLocalRuntime(options: LocalRuntimeOptions): Promise<L
   const serverUrl = { current: "http://127.0.0.1" };
   const app = await createLocalApp({
     origin: () => serverUrl.current,
+    ...(options.openBrowser === undefined ? {} : { openBrowser: options.openBrowser }),
     ...(options.modelProxyEndpoint === undefined ? {} : { modelProxyEndpoint: options.modelProxyEndpoint }),
     registry, stateDirectory, pageSessions, version: options.version, ...(config.companyId === undefined ? {} : { companyId: config.companyId }),
     machinesName: options.machines === undefined ? DOCKER_ADAPTER_NAME : INJECTED_ADAPTER_NAME,
