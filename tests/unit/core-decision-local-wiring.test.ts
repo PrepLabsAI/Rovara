@@ -40,7 +40,7 @@ async function world(options: { wired?: boolean } = {}) {
   const actions = createDecisionActions({ gate, companyId: COMPANY });
   const minted = sessions.mint({ label: "owner" });
   const owner = { id: minted.session.id, token: minted.token };
-  const offer = (taskId: string, requestId = randomUUID(), revision?: number): ApprovalOffer => ({ requestId, revision: revision ?? waiting(taskId).revision, artifactDigest: waitingDocumentDigest(waiting(taskId))!, kind: "plan" });
+  const offer = (taskId: string, requestId: string = randomUUID(), revision?: number): ApprovalOffer => ({ requestId, revision: revision ?? waiting(taskId).revision, artifactDigest: waitingDocumentDigest(waiting(taskId))!, kind: "plan" });
   const proofFor = (approval: ApprovalOffer, token?: string) => ({
     proofId: randomUUID(), method: LOCAL_SESSION_METHOD, requestId: approval.requestId, revision: approval.revision, artifactDigest: approval.artifactDigest,
     token: token ?? sessions.issueProof(owner.id, { requestId: approval.requestId, revision: approval.revision, artifactDigest: approval.artifactDigest }),

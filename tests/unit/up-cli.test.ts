@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { LocalRuntime } from "../../packages/broker/src/local/runtime.js";
+import type { LocalRuntime } from "@agentx/broker/local";
 import { executeCli } from "../../packages/cli/src/main.js";
 import type { UpCommandContext } from "../../packages/cli/src/up/cli.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
@@ -153,6 +153,7 @@ describe("rovara up", () => {
       config: { version: 1, plugins: [] } as never,
       configPath: "/state/config.json",
       sessionTokenPath: "/state/session-token",
+      pageSessions: {} as LocalRuntime["pageSessions"],
       wiring: () => ({ storage: ["memory"] }),
       stopped: false,
       async stop() { value.stopped = true; },

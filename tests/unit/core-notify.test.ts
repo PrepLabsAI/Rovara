@@ -78,7 +78,7 @@ describe("queueing", () => {
     await w.move({});
     await w.move({ workflow: { stage: "MERGED", state: "COMPLETE" }, step: "Merged" });
     expect((await w.pending()).map((row) => row["kind"])).toEqual(["done"]);
-    const broken = await queueAttention({ store: { put: async () => { throw new Error("down"); } }, log: () => undefined }, { ...({} as never), session: { subject: { kind: "task" } }, summary: { status: "needs_person", display: undefined }, previous: {} } as never);
+    const broken = await queueAttention({ store: { put: async () => { throw new Error("down"); } }, log: () => undefined }, { session: { subject: { kind: "task" } }, summary: { status: "needs_person", display: undefined }, previous: {} } as never);
     expect(broken).toBe(0);
   });
 });
